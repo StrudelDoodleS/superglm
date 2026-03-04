@@ -23,10 +23,10 @@ class Spline:
     Parameters
     ----------
     n_knots : int
-        Number of interior knots. 15-20 is recommended. Because the
-        second-difference penalty controls smoothness, adding more knots
-        does not cause overfitting — it just gives the smoother more
-        flexibility to capture the true shape.
+        Number of interior knots. 10 is a good default balancing
+        flexibility and refit stability. The second-difference penalty
+        controls smoothness, so more knots won't overfit — but fewer
+        knots reduce curve drift between refitting periods.
     degree : int
         B-spline polynomial degree. 3 (cubic, default) gives C2 smooth
         curves and is the standard choice. 1 (linear) and 2 (quadratic)
@@ -40,7 +40,7 @@ class Spline:
 
     def __init__(
         self,
-        n_knots: int = 15,
+        n_knots: int = 10,
         degree: int = 3,
         knot_strategy: str = "quantile",
         penalty: str = "ssp",
@@ -67,24 +67,36 @@ class Spline:
         else:
             interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
 
-        self._knots = np.concatenate([
-            np.repeat(self._lo - pad, self.degree + 1),
-            interior,
-            np.repeat(self._hi + pad, self.degree + 1),
-        ])
+        self._knots = np.concatenate(
+            [
+                np.repeat(self._lo - pad, self.degree + 1),
+                interior,
+                np.repeat(self._hi + pad, self.degree + 1),
+            ]
+        )
         self._n_basis = len(self._knots) - self.degree - 1
 
         x_clip = np.clip(x, self._knots[0], self._knots[-1])
-        B = BSpl.design_matrix(x_clip, self._knots, self.degree).toarray()
+        B = BSpl.design_matrix(x_clip, self._knots, self.degree).tocsr()
 
         D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
         omega = D2.T @ D2
 
         return GroupInfo(
-            columns=B, n_cols=self._n_basis,
+            columns=B,
+            n_cols=self._n_basis,
             penalty_matrix=omega,
             reparametrize=(self.penalty == "ssp"),
         )
+
+    def transform(self, x: NDArray) -> NDArray:
+        """Build design matrix using knots learned during build()."""
+        x = np.asarray(x, dtype=np.float64).ravel()
+        x_clip = np.clip(x, self._knots[0], self._knots[-1])
+        B = BSpl.design_matrix(x_clip, self._knots, self.degree).toarray()
+        if self._R_inv is not None:
+            B = B @ self._R_inv
+        return B
 
     def set_reparametrisation(self, R_inv: NDArray) -> None:
         self._R_inv = R_inv
@@ -99,13 +111,6 @@ class Spline:
             "x": x_grid,
             "log_relativity": log_rels,
             "relativity": np.exp(log_rels),
-            "knots_interior": self._knots[self.degree + 1:-(self.degree + 1)],
+            "knots_interior": self._knots[self.degree + 1 : -(self.degree + 1)],
             "coefficients_original": beta_orig,
         }
-
-    def evaluate(self, x: NDArray, beta: NDArray) -> NDArray:
-        beta_orig = self._R_inv @ beta if self._R_inv is not None else beta
-        x = np.asarray(x, dtype=np.float64).ravel()
-        x_clip = np.clip(x, self._knots[0], self._knots[-1])
-        B = BSpl.design_matrix(x_clip, self._knots, self.degree).toarray()
-        return B @ beta_orig

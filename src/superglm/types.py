@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
+import scipy.sparse as sp
 from numpy.typing import NDArray
 
 
@@ -19,7 +20,8 @@ from numpy.typing import NDArray
 class FeatureSpec(Protocol):
     """Protocol for feature specifications.
 
-    build()       -> columns + metadata for the solver
+    build()       -> fit-time: learn parameters and return columns + metadata
+    transform()   -> predict-time: apply stored parameters to new data
     reconstruct() -> turn fitted coefficients back into interpretable output
     """
 
@@ -27,7 +29,9 @@ class FeatureSpec(Protocol):
         self,
         x: NDArray[np.floating],
         exposure: NDArray[np.floating] | None = None,
-    ) -> "GroupInfo": ...
+    ) -> GroupInfo: ...
+
+    def transform(self, x: NDArray[np.floating]) -> NDArray[np.floating]: ...
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]: ...
 
@@ -42,15 +46,21 @@ class GroupInfo:
     or a single numeric feature.
     """
 
-    columns: NDArray[np.floating]         # (n, p_g) design sub-matrix
-    n_cols: int                           # p_g — group size
-    penalty_matrix: NDArray | None = None # (p_g, p_g) for SSP, else None
-    reparametrize: bool = False           # whether to apply SSP transform
+    columns: NDArray[np.floating] | sp.spmatrix  # (n, p_g) design sub-matrix
+    n_cols: int  # p_g — group size
+    penalty_matrix: NDArray | None = None  # (p_g, p_g) for SSP, else None
+    reparametrize: bool = False  # whether to apply SSP transform
 
     def __post_init__(self):
-        assert self.columns.shape[1] == self.n_cols
-        if self.penalty_matrix is not None:
-            assert self.penalty_matrix.shape == (self.n_cols, self.n_cols)
+        if self.columns.shape[1] != self.n_cols:
+            raise ValueError(f"columns has {self.columns.shape[1]} cols but n_cols={self.n_cols}")
+        if self.penalty_matrix is not None and self.penalty_matrix.shape != (
+            self.n_cols,
+            self.n_cols,
+        ):
+            raise ValueError(
+                f"penalty_matrix shape {self.penalty_matrix.shape} != ({self.n_cols}, {self.n_cols})"
+            )
 
 
 # ── Group bookkeeping for the solver ────────────────────────────

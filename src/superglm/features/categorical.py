@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm.types import GroupInfo
@@ -60,12 +61,26 @@ class Categorical:
 
         self._non_base = [lev for lev in self._levels if lev != self._base_level]
 
-        # One-hot encode (excluding base)
-        columns = np.column_stack(
-            [(x == lev).astype(np.float64) for lev in self._non_base]
-        )
+        # One-hot encode (excluding base) — sparse CSR
+        n = len(x)
+        n_levels = len(self._non_base)
+        rows = []
+        cols = []
+        for j, lev in enumerate(self._non_base):
+            mask = np.where(x == lev)[0]
+            rows.append(mask)
+            cols.append(np.full(len(mask), j))
+        rows = np.concatenate(rows)
+        cols = np.concatenate(cols)
+        data = np.ones(len(rows), dtype=np.float64)
+        columns = sp.csr_matrix((data, (rows, cols)), shape=(n, n_levels))
 
         return GroupInfo(columns=columns, n_cols=len(self._non_base))
+
+    def transform(self, x: NDArray) -> NDArray:
+        """One-hot encode using levels learned during build()."""
+        x = np.asarray(x).ravel()
+        return np.column_stack([(x == lev).astype(np.float64) for lev in self._non_base])
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
         """Coefficients -> relativity table."""

@@ -60,7 +60,9 @@ class Flavor(Protocol):
     """
 
     def adjust_weights(
-        self, groups: list[GroupSlice], beta_init: NDArray,
+        self,
+        groups: list[GroupSlice],
+        beta_init: NDArray,
     ) -> list[GroupSlice]:
         """Return new GroupSlice list with modified weights."""
         ...

@@ -11,6 +11,7 @@ import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm.distributions import Distribution
+from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, GroupMatrix
 from superglm.penalties.base import Penalty
 from superglm.types import GroupSlice
 
@@ -29,7 +30,8 @@ class PIRLSResult:
 
 
 def _compute_group_hessians(
-    X: NDArray, W: NDArray, groups: list[GroupSlice],
+    gms: list[GroupMatrix],
+    W: NDArray,
 ) -> tuple[list[float], list[NDArray]]:
     """Per-group Lipschitz constants and regularised Cholesky factors.
 
@@ -40,12 +42,10 @@ def _compute_group_hessians(
     For typical group sizes (p_g <= 20) this is trivially cheap.
     Total cost is O(n * p) across all groups.
     """
-    sqrtW = np.sqrt(W)
     L_groups: list[float] = []
     chol_groups: list[NDArray] = []
-    for g in groups:
-        Xg_w = X[:, g.sl] * sqrtW[:, None]
-        gram = Xg_w.T @ Xg_w
+    for gm in gms:
+        gram = gm.gram(W)
         L_g = max(float(np.linalg.eigvalsh(gram)[-1]), 1e-12)
         L_groups.append(L_g)
         # Regularise: SSP reparametrisation can leave near-singular or
@@ -100,7 +100,7 @@ class _AndersonAccelerator:
 
 
 def _fit_pirls_inner(
-    X: NDArray,
+    dm: DesignMatrix,
     y: NDArray,
     weights: NDArray,
     family: Distribution,
@@ -108,18 +108,24 @@ def _fit_pirls_inner(
     penalty: Penalty,
     offset: NDArray,
     beta_init: NDArray | None = None,
+    intercept_init: float | None = None,
     max_iter_outer: int = 100,
     max_iter_inner: int = 5,
     tol: float = 1e-6,
     anderson_memory: int = 0,
 ) -> PIRLSResult:
     """Single-pass PIRLS fit with proximal Newton BCD inner solver."""
-    n, p = X.shape
+    n, p = dm.shape
     beta = beta_init.copy() if beta_init is not None else np.zeros(p)
 
     # Initialize intercept
-    y_safe = np.where(y > 0, y, 0.1)
-    intercept = np.log(np.average(y_safe, weights=weights))
+    if intercept_init is not None:
+        intercept = intercept_init
+    else:
+        y_safe = np.where(y > 0, y, 0.1)
+        intercept = np.log(np.average(y_safe, weights=weights))
+
+    gms = dm.group_matrices
 
     t_total = time.perf_counter()
     t_lipschitz_total = 0.0
@@ -131,7 +137,7 @@ def _fit_pirls_inner(
         t_outer_start = time.perf_counter()
 
         # Current predictions
-        eta = X @ beta + intercept + offset
+        eta = dm.matvec(beta) + intercept + offset
         eta = np.clip(eta, -20, 20)
         mu = np.exp(eta)
 
@@ -143,11 +149,11 @@ def _fit_pirls_inner(
 
         # Per-group Hessians and Lipschitz constants
         t0 = time.perf_counter()
-        L_groups, chol_groups = _compute_group_hessians(X, W, groups)
+        L_groups, chol_groups = _compute_group_hessians(gms, W)
         t_lipschitz_total += time.perf_counter() - t0
 
         # Initialize residual
-        r = z - X @ beta - intercept - offset
+        r = z - dm.matvec(beta) - intercept - offset
 
         # Optional Anderson acceleration
         aa = _AndersonAccelerator(p, anderson_memory) if anderson_memory > 0 else None
@@ -157,7 +163,7 @@ def _fit_pirls_inner(
         for inner in range(max_iter_inner):
             # Periodic residual refresh to avoid float drift
             if inner > 0 and inner % 5 == 0:
-                r = z - X @ beta - intercept - offset
+                r = z - dm.matvec(beta) - intercept - offset
 
             beta_before = beta.copy()
 
@@ -167,14 +173,14 @@ def _fit_pirls_inner(
             r -= delta_int
 
             # BCD cycle over groups (Newton step + prox)
-            for g, L_g, chol_g in zip(groups, L_groups, chol_groups):
-                Xg = X[:, g.sl]
+            for gm, g, L_g, chol_g in zip(gms, groups, L_groups, chol_groups):
                 bg_old = beta[g.sl].copy()
 
-                grad_g = -Xg.T @ (W * r)
+                grad_g = -gm.rmatvec(W * r)
                 # Newton direction via Cholesky solve: H_g^{-1} grad_g
                 newton_dir = scipy.linalg.cho_solve(
-                    (chol_g, True), grad_g,
+                    (chol_g, True),
+                    grad_g,
                 )
                 step_g = 1.0 / L_g
                 bg_cand = bg_old - newton_dir
@@ -182,7 +188,7 @@ def _fit_pirls_inner(
 
                 d = bg_new - bg_old
                 if np.any(d != 0):
-                    r -= Xg @ d
+                    r -= gm.matvec(d)
                     beta[g.sl] = bg_new
 
             # Optional Anderson acceleration
@@ -191,10 +197,12 @@ def _fit_pirls_inner(
                 if beta_acc is not None:
                     for g, L_g in zip(groups, L_groups):
                         beta_acc[g.sl] = penalty.prox_group(
-                            beta_acc[g.sl], g, 1.0 / L_g,
+                            beta_acc[g.sl],
+                            g,
+                            1.0 / L_g,
                         )
                     beta = beta_acc
-                    r = z - X @ beta - intercept - offset
+                    r = z - dm.matvec(beta) - intercept - offset
 
             # Check inner convergence
             change = np.max(np.abs(beta - beta_before))
@@ -206,14 +214,14 @@ def _fit_pirls_inner(
         t_inner_total += time.perf_counter() - t_inner_start
 
         # Deviance for outer convergence
-        eta_new = np.clip(X @ beta + intercept + offset, -20, 20)
+        eta_new = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
         mu_new = np.exp(eta_new)
         dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
 
         t_outer_elapsed = time.perf_counter() - t_outer_start
         logger.info(
             f"  outer={outer + 1:3d}  bcd_cycles={inner_iters:4d}  "
-            f"dev={dev:12.1f}  delta={abs(dev - dev_prev)/(abs(dev_prev)+1):10.2e}  "
+            f"dev={dev:12.1f}  delta={abs(dev - dev_prev) / (abs(dev_prev) + 1):10.2e}  "
             f"time={t_outer_elapsed:.3f}s"
         )
 
@@ -227,8 +235,7 @@ def _fit_pirls_inner(
         f"{t_elapsed:.2f}s total"
     )
     logger.info(
-        f"  Breakdown: group_lipschitz={t_lipschitz_total:.2f}s  "
-        f"bcd_cycles={t_inner_total:.2f}s"
+        f"  Breakdown: group_lipschitz={t_lipschitz_total:.2f}s  bcd_cycles={t_inner_total:.2f}s"
     )
 
     # Effective df: Breheny & Huang (2009) formula for group lasso.
@@ -245,14 +252,25 @@ def _fit_pirls_inner(
     phi = dev / max(n - p_eff, 1)
 
     return PIRLSResult(
-        beta=beta, intercept=intercept, n_iter=outer + 1,
-        deviance=dev, converged=(outer + 1 < max_iter_outer),
-        phi=phi, effective_df=p_eff,
+        beta=beta,
+        intercept=intercept,
+        n_iter=outer + 1,
+        deviance=dev,
+        converged=(outer + 1 < max_iter_outer),
+        phi=phi,
+        effective_df=p_eff,
     )
 
 
+def _wrap_dense_X(X: NDArray, groups: list[GroupSlice]) -> DesignMatrix:
+    """Wrap a dense NDArray into a DesignMatrix for backward compatibility."""
+    n, p = X.shape
+    gms = [DenseGroupMatrix(X[:, g.sl]) for g in groups]
+    return DesignMatrix(gms, n, p)
+
+
 def fit_pirls(
-    X: NDArray,
+    X: NDArray | DesignMatrix,
     y: NDArray,
     weights: NDArray,
     family: Distribution,
@@ -260,6 +278,7 @@ def fit_pirls(
     penalty: Penalty,
     offset: NDArray | None = None,
     beta_init: NDArray | None = None,
+    intercept_init: float | None = None,
     max_iter_outer: int = 100,
     max_iter_inner: int = 5,
     tol: float = 1e-6,
@@ -270,27 +289,52 @@ def fit_pirls(
     If the penalty has a flavor (e.g. Adaptive), a two-stage fit is performed:
     1. Fit with uniform weights → beta_init
     2. Flavor adjusts group weights based on beta_init
-    3. Refit with adjusted weights (warm started)
+    3. Refit with adjusted weights (warm started from stage 1)
     """
-    n = X.shape[0]
+    if isinstance(X, DesignMatrix):
+        dm = X
+        n = dm.n
+    else:
+        dm = _wrap_dense_X(X, groups)
+        n = X.shape[0]
+
     if offset is None:
         offset = np.zeros(n)
 
     # Stage 1: initial fit
     result = _fit_pirls_inner(
-        X, y, weights, family, groups, penalty,
-        offset, beta_init, max_iter_outer, max_iter_inner, tol,
+        dm,
+        y,
+        weights,
+        family,
+        groups,
+        penalty,
+        offset,
+        beta_init,
+        intercept_init,
+        max_iter_outer,
+        max_iter_inner,
+        tol,
         anderson_memory,
     )
 
-    # Stage 2: if flavor, adjust weights and refit
+    # Stage 2: if flavor, adjust weights and refit (warm-start both beta and intercept)
     if penalty.flavor is not None:
         adjusted_groups = penalty.flavor.adjust_weights(groups, result.beta)
         result = _fit_pirls_inner(
-            X, y, weights, family, adjusted_groups, penalty,
-            offset, beta_init=result.beta,
-            max_iter_outer=max_iter_outer, max_iter_inner=max_iter_inner,
-            tol=tol, anderson_memory=anderson_memory,
+            dm,
+            y,
+            weights,
+            family,
+            adjusted_groups,
+            penalty,
+            offset,
+            beta_init=result.beta,
+            intercept_init=result.intercept,
+            max_iter_outer=max_iter_outer,
+            max_iter_inner=max_iter_inner,
+            tol=tol,
+            anderson_memory=anderson_memory,
         )
 
     return result

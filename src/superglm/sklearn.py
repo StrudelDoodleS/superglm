@@ -10,21 +10,8 @@ from numpy.typing import NDArray
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
 
-from superglm.features.categorical import Categorical
-from superglm.features.numeric import Numeric
-from superglm.features.spline import Spline
 from superglm.model import SuperGLM
 from superglm.penalties.base import Penalty
-from superglm.penalties.group_lasso import GroupLasso
-from superglm.penalties.ridge import Ridge
-from superglm.penalties.sparse_group_lasso import SparseGroupLasso
-
-
-_PENALTY_SHORTCUTS = {
-    "group_lasso": GroupLasso,
-    "sparse_group_lasso": SparseGroupLasso,
-    "ridge": Ridge,
-}
 
 
 class SuperGLMRegressor(BaseEstimator, RegressorMixin):
@@ -56,22 +43,15 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
     n_knots : int or list of int
         Number of interior knots for spline features. If int, applied to all
         spline features. If list, must match length of ``spline_features``.
-        15-20 is a safe default — knots are penalised via P-spline
-        (Eilers & Marx), so more knots gives the penalty more to work with
-        without overfitting.
     degree : int
-        B-spline polynomial degree. Default 3 (cubic) gives C2 smooth curves.
-        1 (linear) and 2 (quadratic) are fine. >3 is not advised.
+        B-spline polynomial degree. Default 3 (cubic).
     categorical_base : str
-        Base level strategy for categoricals: "most_exposed" picks the level
-        with highest total sample_weight (falls back to most frequent if no
-        weights), "first" picks alphabetically first.
+        Base level strategy for categoricals: "most_exposed" or "first".
     standardize_numeric : bool
         Whether to center and scale numeric features before fitting.
     offset : str, list of str, or None
-        Column name(s) in X to use as offset (fixed term in the linear
-        predictor, not penalised). Multiple columns are summed. Offset
-        columns are excluded from features.
+        Column name(s) in X to use as offset. Multiple columns are summed.
+        Offset columns are excluded from features.
     """
 
     def __init__(
@@ -82,7 +62,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         lambda1: float | None = None,
         lambda2: float = 0.1,
         spline_features: list[str] | None = None,
-        n_knots: int | list[int] = 15,
+        n_knots: int | list[int] = 10,
         degree: int = 3,
         categorical_base: str = "most_exposed",
         standardize_numeric: bool = True,
@@ -100,60 +80,34 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         self.standardize_numeric = standardize_numeric
         self.offset = offset
 
-    def _resolve_penalty(self) -> Penalty:
-        """Convert string shorthand to penalty object, or validate object."""
-        if isinstance(self.penalty, str):
-            if self.penalty not in _PENALTY_SHORTCUTS:
-                raise ValueError(
-                    f"Unknown penalty '{self.penalty}'. "
-                    f"Use one of {list(_PENALTY_SHORTCUTS)} or pass a Penalty object."
-                )
-            return _PENALTY_SHORTCUTS[self.penalty](lambda1=self.lambda1)
-        return self.penalty
-
-    def fit(self, X: pd.DataFrame, y: NDArray, sample_weight: NDArray | None = None) -> SuperGLMRegressor:
+    def fit(
+        self, X: pd.DataFrame, y: NDArray, sample_weight: NDArray | None = None
+    ) -> SuperGLMRegressor:
         X = pd.DataFrame(X).copy()
         y = np.asarray(y, dtype=np.float64)
 
-        # Extract offset columns
+        # Extract offset columns before passing to SuperGLM
         offset_array = self._extract_offset(X)
-
-        # Resolve per-feature n_knots
-        spline_cols = self.spline_features or []
-        knots_map = self._resolve_knots(spline_cols)
-
-        # Resolve penalty
-        penalty_obj = self._resolve_penalty()
-
-        # Build core model
-        self._model = SuperGLM(
-            family=self.family,
-            penalty=penalty_obj,
-            lambda2=self.lambda2,
-            tweedie_p=self.tweedie_p,
-        )
-
-        # Auto-detect and register features
-        self._feature_types: dict[str, str] = {}
         feature_cols = [c for c in X.columns if c not in self._offset_cols]
 
-        for col in feature_cols:
-            if col in spline_cols:
-                self._model.add_feature(col, Spline(
-                    n_knots=knots_map[col], degree=self.degree, penalty="ssp",
-                ))
-                self._feature_types[col] = f"Spline(n_knots={knots_map[col]}, degree={self.degree})"
-            elif X[col].dtype.kind in ("O", "U") or isinstance(X[col].dtype, pd.CategoricalDtype):
-                base = self.categorical_base
-                if base == "most_exposed" and sample_weight is None:
-                    base = "first"
-                self._model.add_feature(col, Categorical(base=base))
-                self._feature_types[col] = f"Categorical(base={base})"
-            else:
-                self._model.add_feature(col, Numeric(standardize=self.standardize_numeric))
-                self._feature_types[col] = f"Numeric(standardize={self.standardize_numeric})"
+        # Adjust categorical base when no weights
+        cat_base = self.categorical_base
+        if cat_base == "most_exposed" and sample_weight is None:
+            cat_base = "first"
 
-        self._print_feature_summary()
+        # Build core model — delegates all feature config
+        self._model = SuperGLM(
+            family=self.family,
+            penalty=self.penalty,
+            lambda1=self.lambda1,
+            lambda2=self.lambda2,
+            tweedie_p=self.tweedie_p,
+            splines=self.spline_features or [],
+            n_knots=self.n_knots,
+            degree=self.degree,
+            categorical_base=cat_base,
+            standardize_numeric=self.standardize_numeric,
+        )
 
         self._model.fit(X[feature_cols], y, exposure=sample_weight, offset=offset_array)
 
@@ -162,6 +116,19 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         self.feature_names_in_ = np.array(feature_cols)
         self.intercept_ = self._model.result.intercept
         self.coef_ = self._model.result.beta
+
+        # Expose feature types for backward compat with tests
+        self._feature_types = {}
+        for name in self._model._feature_order:
+            spec = self._model._specs[name]
+            cls = type(spec).__name__
+            if cls == "Spline":
+                self._feature_types[name] = f"Spline(n_knots={spec.n_knots}, degree={spec.degree})"
+            elif cls == "Categorical":
+                self._feature_types[name] = f"Categorical(base={spec.base})"
+            else:
+                self._feature_types[name] = f"Numeric(standardize={spec.standardize})"
+
         return self
 
     def predict(self, X: pd.DataFrame) -> NDArray:
@@ -201,20 +168,3 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         for c in cols:
             offset_array += np.asarray(X[c], dtype=np.float64)
         return offset_array
-
-    def _resolve_knots(self, spline_cols: list[str]) -> dict[str, int]:
-        if not spline_cols:
-            return {}
-        if isinstance(self.n_knots, int):
-            return {col: self.n_knots for col in spline_cols}
-        if len(self.n_knots) != len(spline_cols):
-            raise ValueError(
-                f"n_knots has length {len(self.n_knots)} but spline_features "
-                f"has length {len(spline_cols)}. Must match or pass a single int."
-            )
-        return dict(zip(spline_cols, self.n_knots))
-
-    def _print_feature_summary(self) -> None:
-        print("SuperGLM features:")
-        for col, desc in self._feature_types.items():
-            print(f"  {col:<20s} → {desc}")

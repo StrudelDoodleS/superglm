@@ -66,7 +66,8 @@ class TestCategorical:
 
     def test_dummy_row_sums(self):
         info = Categorical(base="first").build(np.array(["A", "B", "C"] * 10))
-        assert np.all((info.columns.sum(axis=1) == 0) | (info.columns.sum(axis=1) == 1))
+        sums = np.asarray(info.columns.sum(axis=1)).ravel()
+        assert np.all((sums == 0) | (sums == 1))
 
     def test_base_relativity_one(self):
         spec = Categorical(base="first")
@@ -77,11 +78,12 @@ class TestCategorical:
 class TestSpline:
     def test_partition_of_unity(self):
         info = Spline(n_knots=10).build(np.linspace(0, 100, 500))
-        np.testing.assert_allclose(info.columns.sum(axis=1), 1.0, atol=1e-10)
+        np.testing.assert_allclose(np.asarray(info.columns.sum(axis=1)).ravel(), 1.0, atol=1e-10)
 
     def test_nonnegative(self):
         info = Spline(n_knots=10).build(np.linspace(0, 100, 500))
-        assert np.all(info.columns >= -1e-15)
+        cols = info.columns.toarray() if hasattr(info.columns, 'toarray') else info.columns
+        assert np.all(cols >= -1e-15)
 
     def test_n_basis(self):
         for nk in [5, 10, 20]:
@@ -142,21 +144,25 @@ class TestBCDSolver:
 
     def test_group_lipschitz_positive(self):
         from superglm.solvers.pirls import _compute_group_hessians
+        from superglm.group_matrix import DenseGroupMatrix
         rng = np.random.default_rng(42)
         X = rng.standard_normal((100, 10))
         W = np.ones(100)
         groups = [GroupSlice("a", 0, 5, 1.0), GroupSlice("b", 5, 10, 1.0)]
-        L_groups, chol_groups = _compute_group_hessians(X, W, groups)
+        gms = [DenseGroupMatrix(X[:, g.sl]) for g in groups]
+        L_groups, chol_groups = _compute_group_hessians(gms, W)
         assert all(L > 0 for L in L_groups)
         assert len(chol_groups) == 2
 
     def test_group_lipschitz_le_global(self):
         from superglm.solvers.pirls import _compute_group_hessians
+        from superglm.group_matrix import DenseGroupMatrix
         rng = np.random.default_rng(42)
         X = rng.standard_normal((100, 10))
         W = np.ones(100)
         groups = [GroupSlice("a", 0, 5, 1.0), GroupSlice("b", 5, 10, 1.0)]
-        L_groups, _ = _compute_group_hessians(X, W, groups)
+        gms = [DenseGroupMatrix(X[:, g.sl]) for g in groups]
+        L_groups, _ = _compute_group_hessians(gms, W)
         L_global = float(np.linalg.eigvalsh(X.T @ X)[-1])
         for L_g in L_groups:
             assert L_g <= L_global + 1e-10

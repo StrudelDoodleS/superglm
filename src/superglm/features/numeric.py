@@ -40,6 +40,13 @@ class Numeric:
             col = x.reshape(-1, 1)
         return GroupInfo(columns=col, n_cols=1)
 
+    def transform(self, x: NDArray) -> NDArray:
+        """Standardize using mean/std learned during build()."""
+        x = np.asarray(x, dtype=np.float64).ravel()
+        if self.standardize:
+            return ((x - self._mean) / self._std).reshape(-1, 1)
+        return x.reshape(-1, 1)
+
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
         b = float(beta[0])
         if self.standardize:
