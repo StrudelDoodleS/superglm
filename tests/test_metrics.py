@@ -229,6 +229,7 @@ class TestActiveGroups:
 
 class TestSummary:
     def test_summary_keys(self, metrics_obj):
+        """Dict-like access still works via __contains__/__getitem__."""
         s = metrics_obj.summary()
         assert "information_criteria" in s
         assert "deviance" in s
@@ -238,9 +239,136 @@ class TestSummary:
 
     def test_summary_values_finite(self, metrics_obj):
         s = metrics_obj.summary()
-        for section in s.values():
+        for key, section in s.items():
+            if key == "standard_errors":
+                continue  # tested separately
             for v in section.values():
                 assert np.isfinite(v), f"Non-finite value in summary: {v}"
+
+    def test_summary_returns_model_summary(self, metrics_obj):
+        """summary() returns a ModelSummary object."""
+        from superglm.summary import ModelSummary
+
+        s = metrics_obj.summary()
+        assert isinstance(s, ModelSummary)
+
+    def test_summary_to_dict(self, metrics_obj):
+        """to_dict() returns the raw dict."""
+        s = metrics_obj.summary()
+        d = s.to_dict()
+        assert isinstance(d, dict)
+        assert "fit" in d
+
+    def test_summary_str_contains_title(self, metrics_obj):
+        """ASCII output contains 'SuperGLM Results'."""
+        text = str(metrics_obj.summary())
+        assert "SuperGLM Results" in text
+
+    def test_summary_str_contains_family(self, metrics_obj):
+        """ASCII output shows family name."""
+        text = str(metrics_obj.summary())
+        assert "Poisson" in text
+
+    def test_summary_str_contains_intercept(self, metrics_obj):
+        """ASCII output has an Intercept row."""
+        text = str(metrics_obj.summary())
+        assert "Intercept" in text
+
+    def test_summary_str_contains_features(self, metrics_obj):
+        """ASCII output lists fitted features."""
+        text = str(metrics_obj.summary())
+        assert "x1" in text
+        assert "x2" in text
+
+    def test_summary_html_output(self, metrics_obj):
+        """_repr_html_ produces valid-looking HTML."""
+        html = metrics_obj.summary()._repr_html_()
+        assert "<table" in html
+        assert "SuperGLM Results" in html
+        assert "</table>" in html
+
+    def test_summary_repr_is_str(self, metrics_obj):
+        """repr() returns the same as str()."""
+        s = metrics_obj.summary()
+        assert repr(s) == str(s)
+
+    def test_summary_significance_stars(self, metrics_obj):
+        """ASCII output contains significance stars and legend."""
+        text = str(metrics_obj.summary())
+        assert "***" in text
+        assert "Signif. codes:" in text
+
+    def test_summary_consistent_width(self, metrics_obj):
+        """Header separator and coef separator should be the same width."""
+        text = str(metrics_obj.summary())
+        eq_lines = [line for line in text.split("\n") if set(line) == {"="}]
+        assert len(eq_lines) >= 2
+        assert len(eq_lines[0]) == len(eq_lines[1])
+
+
+class TestSummaryMixedFeatures:
+    """Test summary with numeric, categorical, and spline features together."""
+
+    @pytest.fixture
+    def mixed_model(self):
+        from superglm.features.categorical import Categorical
+
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = rng.standard_normal(n)
+        region = rng.choice(["A", "B", "C"], n)
+        age = rng.uniform(0, 10, n)
+        mu = np.exp(
+            0.3 * x1
+            + np.where(region == "B", 0.5, np.where(region == "C", -0.3, 0))
+            + 0.05 * age
+        )
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1, "region": region, "age": age})
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.001,
+            features={
+                "x1": Numeric(),
+                "region": Categorical(),
+                "age": Spline(n_knots=8, penalty="ssp"),
+            },
+        )
+        model.fit(X, y)
+        return model, X, y
+
+    def test_mixed_summary_str(self, mixed_model):
+        """Summary with all feature types produces valid output."""
+        model, X, y = mixed_model
+        m = model.metrics(X, y)
+        text = str(m.summary())
+        # Numeric feature
+        assert "x1" in text
+        # Categorical levels
+        assert "region[" in text
+        # Spline per-coefficient rows
+        assert "spline" in text
+        assert "Wald chi2" in text
+
+    def test_mixed_summary_html(self, mixed_model):
+        """HTML summary with all feature types."""
+        model, X, y = mixed_model
+        html = model.metrics(X, y).summary()._repr_html_()
+        assert "x1" in html
+        assert "region[" in html
+        assert "spline" in html
+
+    def test_intercept_se_positive(self, mixed_model):
+        """Intercept SE should be positive."""
+        model, X, y = mixed_model
+        m = model.metrics(X, y)
+        assert m.intercept_se > 0
+
+    def test_intercept_se_reasonable(self, mixed_model):
+        """Intercept SE should be much smaller than 1 for n=500."""
+        model, X, y = mixed_model
+        m = model.metrics(X, y)
+        assert m.intercept_se < 1.0
 
 
 # ── Integration: spline model ────────────────────────────────────
@@ -291,3 +419,260 @@ class TestConvenienceAccessor:
         model, X, y, w = fitted_poisson
         m = model.metrics(X, y, exposure=w)
         assert isinstance(m, ModelMetrics)
+
+
+# ── Coefficient standard errors ──────────────────────────────────
+
+
+class TestCoefficientSE:
+    def test_se_keys_match_groups(self, metrics_obj):
+        """SE dicts should have one entry per group."""
+        se = metrics_obj.coefficient_se
+        assert set(se.keys()) == {"x1", "x2"}
+
+    def test_se_positive_for_active_groups(self, metrics_obj):
+        """Active groups should have strictly positive SEs."""
+        for name, se_arr in metrics_obj.coefficient_se.items():
+            assert np.all(se_arr > 0), f"SE for {name} should be positive"
+
+    def test_se_raw_positive(self, metrics_obj):
+        """Raw SEs should also be positive for active groups."""
+        for name, se_arr in metrics_obj.coefficient_se_raw.items():
+            assert np.all(se_arr > 0), f"Raw SE for {name} should be positive"
+
+    def test_se_raw_vs_corrected_poisson(self, metrics_obj):
+        """For Poisson, corrected SE = sqrt(phi) * raw SE."""
+        phi = metrics_obj.phi
+        for name in metrics_obj.coefficient_se:
+            se_corr = metrics_obj.coefficient_se[name]
+            se_raw = metrics_obj.coefficient_se_raw[name]
+            np.testing.assert_allclose(se_corr, np.sqrt(phi) * se_raw, rtol=1e-10)
+
+    def test_se_reasonable_magnitude(self, fitted_poisson):
+        """SEs should be much smaller than coefficients for well-determined params."""
+        model, X, y, w = fitted_poisson
+        m = model.metrics(X, y, exposure=w)
+        for name in ["x1", "x2"]:
+            se = m.coefficient_se[name][0]
+            coef = abs(model.result.beta[
+                next(g for g in model._groups if g.name == name).sl
+            ][0])
+            # SE should be < coefficient for n=500 with reasonable signal
+            assert se < coef * 5, f"SE too large relative to coef for {name}"
+
+    def test_inactive_group_gets_zero_se(self):
+        """A zeroed-out group should have SE=0."""
+        rng = np.random.default_rng(99)
+        n = 200
+        x1 = rng.standard_normal(n)
+        x2 = rng.standard_normal(n)  # irrelevant feature
+        y = rng.poisson(np.exp(0.5 * x1)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.5,  # high penalty to zero out x2
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        model.fit(X, y)
+        m = model.metrics(X, y)
+        se = m.coefficient_se
+
+        # x2 might be zeroed out with high lambda
+        for name, se_arr in se.items():
+            g = next(g for g in model._groups if g.name == name)
+            coef_norm = np.linalg.norm(model.result.beta[g.sl])
+            if coef_norm < 1e-12:
+                np.testing.assert_array_equal(se_arr, 0.0)
+
+    def test_summary_includes_standard_errors(self, metrics_obj):
+        """Summary should include standard_errors section."""
+        s = metrics_obj.summary()
+        assert "standard_errors" in s
+        assert "coefficient_se" in s["standard_errors"]
+        assert "coefficient_se_raw" in s["standard_errors"]
+
+
+class TestFeatureSE:
+    def test_numeric_feature_se(self, fitted_poisson):
+        """feature_se for numeric returns a scalar SE."""
+        model, X, y, w = fitted_poisson
+        m = model.metrics(X, y, exposure=w)
+        result = m.feature_se("x1")
+        assert "se_coef" in result
+        assert result["se_coef"] > 0
+
+    def test_spline_feature_se(self):
+        """feature_se for spline returns grid-aligned SEs."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 10, n)
+        y = rng.poisson(np.exp(0.1 * x)).astype(float)
+        X = pd.DataFrame({"x": x})
+        w = np.ones(n)
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.01,
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+        model.fit(X, y, exposure=w)
+        m = model.metrics(X, y, exposure=w)
+
+        result = m.feature_se("x", n_points=100)
+        assert "x" in result
+        assert "se_log_relativity" in result
+        assert len(result["x"]) == 100
+        assert len(result["se_log_relativity"]) == 100
+        assert np.all(result["se_log_relativity"] >= 0)
+        assert np.any(result["se_log_relativity"] > 0)
+
+    def test_categorical_feature_se(self):
+        """feature_se for categorical returns per-level SEs."""
+        from superglm.features.categorical import Categorical
+
+        rng = np.random.default_rng(42)
+        n = 500
+        region = rng.choice(["A", "B", "C", "D"], n)
+        mu = np.where(region == "A", 1.0, np.where(region == "B", 1.5, 2.0))
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"region": region})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.001,
+            features={"region": Categorical()},
+        )
+        model.fit(X, y)
+        m = model.metrics(X, y)
+
+        result = m.feature_se("region")
+        assert "levels" in result
+        assert "se_log_relativity" in result
+        # Non-base levels should have positive SEs
+        assert np.any(result["se_log_relativity"] > 0)
+
+
+class TestRelativitiesWithSE:
+    def test_without_se_no_extra_column(self, fitted_poisson):
+        """Default relativities() has no SE column."""
+        model, X, y, w = fitted_poisson
+        rels = model.relativities(with_se=False)
+        for name, df in rels.items():
+            assert "se_log_relativity" not in df.columns
+
+    def test_with_se_adds_column(self, fitted_poisson):
+        """relativities(with_se=True) adds se_log_relativity column."""
+        model, X, y, w = fitted_poisson
+        rels = model.relativities(with_se=True)
+        for name, df in rels.items():
+            assert "se_log_relativity" in df.columns
+            assert np.all(np.isfinite(df["se_log_relativity"]))
+
+    def test_spline_relativities_with_se(self):
+        """SE column works for spline features in relativities()."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 10, n)
+        y = rng.poisson(np.exp(0.1 * x)).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.01,
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+        model.fit(X, y)
+        rels = model.relativities(with_se=True)
+        df = rels["x"]
+        assert "se_log_relativity" in df.columns
+        assert len(df) == 200  # default n_points from reconstruct
+        assert np.all(df["se_log_relativity"] >= 0)
+
+    def test_categorical_relativities_with_se(self):
+        """SE column works for categorical features."""
+        from superglm.features.categorical import Categorical
+
+        rng = np.random.default_rng(42)
+        n = 500
+        region = rng.choice(["A", "B", "C"], n)
+        mu = np.where(region == "A", 1.0, 2.0)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"region": region})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.001,
+            features={"region": Categorical()},
+        )
+        model.fit(X, y)
+        rels = model.relativities(with_se=True)
+        df = rels["region"]
+        assert "se_log_relativity" in df.columns
+        # Base level should have SE=0
+        base_idx = df["level"] == model._specs["region"]._base_level
+        assert df.loc[base_idx, "se_log_relativity"].iloc[0] == 0.0
+
+    def test_wood_bayesian_covariance_multi_spline(self):
+        """Wood's Bayesian covariance produces finite positive SEs for multi-spline models."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = rng.uniform(0, 10, n)
+        x2 = rng.uniform(0, 5, n)
+        mu = np.exp(0.1 * x1 - 0.2 * x2)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.001,
+            features={
+                "x1": Spline(n_knots=8, penalty="ssp"),
+                "x2": Spline(n_knots=6, penalty="ssp"),
+            },
+        )
+        model.fit(X, y)
+        m = model.metrics(X, y)
+
+        # Active groups should have finite, positive SEs
+        beta = model.result.beta
+        for name, se_arr in m.coefficient_se.items():
+            g = next(g for g in model._groups if g.name == name)
+            if np.linalg.norm(beta[g.sl]) > 1e-12:
+                assert np.all(np.isfinite(se_arr)), f"Non-finite SE for {name}"
+                assert np.all(se_arr > 0), f"Zero SE for active group {name}"
+
+        # Feature-level curve SEs should be finite and positive
+        for name in ["x1", "x2"]:
+            fse = m.feature_se(name)
+            assert np.all(np.isfinite(fse["se_log_relativity"]))
+            assert np.any(fse["se_log_relativity"] > 0)
+
+        # Wald chi2 tests should be finite
+        text = str(m.summary())
+        assert "Wald" in text
+        assert np.isfinite(m.aic)
+
+    def test_gamma_se_differs_from_raw(self):
+        """For Gamma, phi != 1 so coefficient_se != coefficient_se_raw."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(1, 5, n)
+        mu = np.exp(0.3 * x)
+        y = rng.gamma(shape=2.0, scale=mu / 2.0)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="gamma",
+            lambda1=0.001,
+            features={"x": Numeric()},
+        )
+        model.fit(X, y)
+        m = model.metrics(X, y)
+
+        se_corr = m.coefficient_se["x"][0]
+        se_raw = m.coefficient_se_raw["x"][0]
+        # phi != 1 for Gamma, so they should differ
+        assert se_corr != se_raw
+        # Corrected = sqrt(phi) * raw
+        np.testing.assert_allclose(se_corr, np.sqrt(m.phi) * se_raw, rtol=1e-10)

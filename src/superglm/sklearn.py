@@ -58,6 +58,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         self,
         family: str = "poisson",
         tweedie_p: float | None = None,
+        nb_theta: float | str | None = None,
         penalty: str | Penalty = "group_lasso",
         lambda1: float | None = None,
         lambda2: float = 0.1,
@@ -70,6 +71,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
     ):
         self.family = family
         self.tweedie_p = tweedie_p
+        self.nb_theta = nb_theta
         self.penalty = penalty
         self.lambda1 = lambda1
         self.lambda2 = lambda2
@@ -102,6 +104,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
             lambda1=self.lambda1,
             lambda2=self.lambda2,
             tweedie_p=self.tweedie_p,
+            nb_theta=self.nb_theta,
             splines=self.spline_features or [],
             n_knots=self.n_knots,
             degree=self.degree,

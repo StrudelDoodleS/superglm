@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any
 
 import numpy as np
@@ -12,6 +13,7 @@ import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm.distributions import Distribution, resolve_distribution
+from superglm.links import Link, LogLink, resolve_link
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
@@ -51,10 +53,13 @@ class SuperGLM:
     def __init__(
         self,
         family: str | Distribution = "poisson",
+        link: str | Link | None = None,
         penalty: Penalty | str | None = None,
         lambda1: float | None = None,
         lambda2: float = 0.1,
         tweedie_p: float | None = None,
+        # Feature configuration
+        nb_theta: float | str | None = None,
         # Feature configuration
         features: dict[str, FeatureSpec] | None = None,
         splines: list[str] | None = None,
@@ -69,9 +74,11 @@ class SuperGLM:
                 "Use 'features' for explicit specs or 'splines' for auto-detect."
             )
         self.family = family
+        self.link = link
         self.penalty = self._resolve_penalty(penalty, lambda1)
         self.lambda2 = lambda2
         self.tweedie_p = tweedie_p
+        self.nb_theta = nb_theta
         self._splines = splines
         self._n_knots = n_knots
         self._degree = degree
@@ -82,8 +89,10 @@ class SuperGLM:
         self._feature_order: list[str] = []
         self._groups: list[GroupSlice] = []
         self._distribution: Distribution | None = None
+        self._link: Link | None = None
         self._result: PIRLSResult | None = None
         self._dm: DesignMatrix | None = None
+        self._fit_weights: NDArray | None = None
 
         # Register explicit features dict
         if features is not None:
@@ -172,7 +181,11 @@ class SuperGLM:
         exposure = np.ones(n) if exposure is None else np.asarray(exposure, dtype=np.float64)
         if offset is not None:
             offset = np.asarray(offset, dtype=np.float64)
-        self._distribution = resolve_distribution(self.family, tweedie_p=self.tweedie_p)
+        resolved_nb_theta = self.nb_theta if isinstance(self.nb_theta, (int, float)) else None
+        self._distribution = resolve_distribution(
+            self.family, tweedie_p=self.tweedie_p, nb_theta=resolved_nb_theta
+        )
+        self._link = resolve_link(self.link, self._distribution)
 
         group_matrices: list[GroupMatrix] = []
         col_offset = 0
@@ -218,19 +231,74 @@ class SuperGLM:
         exposure: NDArray | None = None,
         offset: NDArray | None = None,
     ) -> SuperGLM:
+        """Fit the model to data.
+
+        Parameters
+        ----------
+        X : DataFrame
+            Feature matrix with columns matching registered features.
+        y : array-like
+            Response variable.
+        exposure : array-like, optional
+            **Frequency weights** (prior weights), typically policy exposure
+            in insurance applications. Defaults to 1 for all observations.
+
+            Exposure is a frequency weight: it represents the amount of risk
+            observed, not observation precision. A policy with exposure=0.5
+            (6 months on risk) contributes half as much information as one with
+            exposure=1.0 (12 months). The standard assumption is that the
+            expected response scales linearly with exposure:
+            ``E[Y_i] = exposure_i * lambda_i``.
+
+            For Poisson and Gamma models this only affects dispersion and
+            standard errors. For Negative Binomial and Tweedie, exposure
+            enters the profile likelihood for theta/p estimation, so the
+            distinction between frequency and variance weights matters.
+
+            Do **not** pass variance weights (e.g. credibility weights,
+            inverse-variance weights) via this parameter — those require a
+            different variance scaling that is not implemented.
+
+            References: De Jong & Heller (2008) §5.4, §6.1; Ohlsson &
+            Johansson (2010) Ch. 2; CAS Monograph No. 5 (Goldburd et al.,
+            2016); Renshaw (1994) ASTIN Bulletin 24(2).
+        offset : array-like, optional
+            Offset added to the linear predictor. For count models with
+            exposure, use ``offset=np.log(exposure)`` so that the model
+            estimates a rate rather than a raw count.
+
+        Returns
+        -------
+        SuperGLM
+            The fitted model (self).
+        """
         if self._splines is not None and not self._specs:
             self._auto_detect_features(X, exposure)
+
+        # Auto-estimate NB theta if requested
+        if self.nb_theta == "auto":
+            from superglm.nb_profile import estimate_nb_theta
+
+            result = estimate_nb_theta(self, X, y, exposure=exposure, offset=offset)
+            self.nb_theta = result.theta_hat
+            logger.info(f"NB theta estimated: {result.theta_hat:.4f}")
+
         y, exposure, offset = self._build_design_matrix(X, y, exposure, offset)
+        self._fit_weights = exposure  # store for covariance computation
 
         # Auto-calibrate lambda1 if not set
         if self.penalty.lambda1 is None:
             self.penalty.lambda1 = self._compute_lambda_max(y, exposure) * 0.1
+
+        # Invalidate cached covariance from previous fit
+        self.__dict__.pop("_coef_covariance", None)
 
         self._result = fit_pirls(
             X=self._dm,
             y=y,
             weights=exposure,
             family=self._distribution,
+            link=self._link,
             groups=self._groups,
             penalty=self.penalty,
             offset=offset,
@@ -253,6 +321,8 @@ class SuperGLM:
         Warm-starts each lambda from the previous solution.
         """
         y, exposure, offset = self._build_design_matrix(X, y, exposure, offset)
+        self._fit_weights = exposure
+        self.__dict__.pop("_coef_covariance", None)
         lambda_max = self._compute_lambda_max(y, exposure)
 
         if lambda_seq is None:
@@ -282,6 +352,7 @@ class SuperGLM:
                 y=y,
                 weights=exposure,
                 family=self._distribution,
+                link=self._link,
                 groups=self._groups,
                 penalty=self.penalty,
                 offset=offset,
@@ -368,6 +439,47 @@ class SuperGLM:
         g = next(g for g in self._groups if g.name == name)
         return self._specs[name].reconstruct(res.beta[g.sl])
 
+    @cached_property
+    def _coef_covariance(self) -> tuple[NDArray, list[GroupSlice]]:
+        """Phi-scaled covariance matrix for active coefficients.
+
+        Returns (Cov_active, active_groups) where:
+        - Cov_active: (p_active, p_active) = phi * (X'WX)^{-1}
+        - active_groups: list of GroupSlice re-indexed to Cov_active columns
+        """
+        res = self.result
+        beta = res.beta
+        eta = np.clip(self._dm.matvec(beta) + res.intercept, -20, 20)
+        mu = self._link.inverse(eta)
+        V = self._distribution.variance(mu)
+        dmu_deta = self._link.deriv_inverse(eta)
+        weights = self._fit_weights
+        W = weights * dmu_deta**2 / np.maximum(V, 1e-10)
+
+        # Build active design and compute XtWX_inv
+        active_cols = []
+        active_groups = []
+        col = 0
+        for gm, g in zip(self._dm.group_matrices, self._groups):
+            if np.linalg.norm(beta[g.sl]) > 1e-12:
+                arr = gm.toarray()
+                active_cols.append(arr)
+                p_g = arr.shape[1]
+                active_groups.append(
+                    GroupSlice(name=g.name, start=col, end=col + p_g, weight=g.weight)
+                )
+                col += p_g
+
+        if not active_cols:
+            return np.empty((0, 0)), []
+
+        X_a = np.hstack(active_cols)
+        XtWX = X_a.T @ (X_a * W[:, None])
+        XtWX[np.diag_indices_from(XtWX)] += 1e-8
+        XtWX_inv = np.linalg.inv(XtWX)
+
+        return res.phi * XtWX_inv, active_groups
+
     def estimate_p(
         self,
         X: pd.DataFrame,
@@ -393,6 +505,31 @@ class SuperGLM:
         self.fit(X, y, exposure=exposure, offset=offset)
         return result
 
+    def estimate_theta(
+        self,
+        X: pd.DataFrame,
+        y: NDArray,
+        exposure: NDArray | None = None,
+        offset: NDArray | None = None,
+        **kwargs,
+    ):
+        """Estimate NB theta via profile likelihood, refit, and return result.
+
+        Thin wrapper around :func:`superglm.nb_profile.estimate_nb_theta`.
+        After estimation, sets ``self.nb_theta`` to the optimised value and
+        refits the model.
+
+        Returns
+        -------
+        NBProfileResult
+        """
+        from superglm.nb_profile import estimate_nb_theta
+
+        result = estimate_nb_theta(self, X, y, exposure=exposure, offset=offset, **kwargs)
+        self.nb_theta = result.theta_hat
+        self.fit(X, y, exposure=exposure, offset=offset)
+        return result
+
     def metrics(self, X: pd.DataFrame, y, exposure=None, offset=None):
         """Compute comprehensive diagnostics for the fitted model.
 
@@ -403,8 +540,14 @@ class SuperGLM:
 
         return ModelMetrics(self, X, y, exposure, offset)
 
-    def relativities(self) -> dict[str, pd.DataFrame]:
+    def relativities(self, with_se: bool = False) -> dict[str, pd.DataFrame]:
         """Extract plot-ready relativity DataFrames for all features.
+
+        Parameters
+        ----------
+        with_se : bool
+            If True, add an ``se_log_relativity`` column to each DataFrame.
+            Uses phi-scaled (quasi-likelihood) covariance.
 
         Returns dict keyed by feature name. Each DataFrame has columns
         ``relativity`` and ``log_relativity`` plus a type-specific index column:
@@ -413,35 +556,116 @@ class SuperGLM:
         - Categorical (has ``levels``): ``level``, ``relativity``, ``log_relativity``
         - Numeric (has ``relativity_per_unit``): ``label``, ``relativity``, ``log_relativity``
         """
+        from superglm.features.categorical import Categorical
+        from superglm.features.numeric import Numeric
+        from superglm.features.spline import Spline
+
+        # Pre-compute covariance if SEs requested
+        if with_se:
+            Cov_active, active_groups = self._coef_covariance
+
         result: dict[str, pd.DataFrame] = {}
         for name in self._feature_order:
             raw = self.reconstruct_feature(name)
             if "x" in raw:
                 # Spline or Polynomial
-                result[name] = pd.DataFrame({
+                df = pd.DataFrame({
                     "x": raw["x"],
                     "relativity": raw["relativity"],
                     "log_relativity": raw["log_relativity"],
                 })
+                if with_se:
+                    df["se_log_relativity"] = self._feature_se_from_cov(
+                        name, Cov_active, active_groups, n_points=len(raw["x"])
+                    )
+                result[name] = df
             elif "levels" in raw:
                 # Categorical
                 levels = raw["levels"]
                 rels = raw["relativities"]
                 log_rels = raw["log_relativities"]
-                result[name] = pd.DataFrame({
+                df = pd.DataFrame({
                     "level": levels,
                     "relativity": [rels[lv] for lv in levels],
                     "log_relativity": [log_rels[lv] for lv in levels],
                 })
+                if with_se:
+                    df["se_log_relativity"] = self._feature_se_from_cov(
+                        name, Cov_active, active_groups
+                    )
+                result[name] = df
             elif "relativity_per_unit" in raw:
                 # Numeric
                 rel = raw["relativity_per_unit"]
-                result[name] = pd.DataFrame({
+                df = pd.DataFrame({
                     "label": ["per_unit"],
                     "relativity": [rel],
                     "log_relativity": [np.log(rel)],
                 })
+                if with_se:
+                    df["se_log_relativity"] = self._feature_se_from_cov(
+                        name, Cov_active, active_groups
+                    )
+                result[name] = df
         return result
+
+    def _feature_se_from_cov(
+        self,
+        name: str,
+        Cov_active: NDArray,
+        active_groups: list[GroupSlice],
+        n_points: int = 200,
+    ) -> NDArray:
+        """Compute feature-level SEs from the precomputed covariance matrix."""
+        from superglm.features.categorical import Categorical
+        from superglm.features.numeric import Numeric
+        from superglm.features.spline import Spline
+
+        beta = self.result.beta
+        g = next(g for g in self._groups if g.name == name)
+        spec = self._specs[name]
+
+        # Inactive group: zeros
+        if np.linalg.norm(beta[g.sl]) < 1e-12:
+            if isinstance(spec, Spline):
+                return np.zeros(n_points)
+            elif isinstance(spec, Categorical):
+                return np.zeros(len(spec._levels))
+            else:
+                return np.zeros(1)
+
+        ag = next(ag for ag in active_groups if ag.name == name)
+        Cov_g = Cov_active[ag.sl, ag.sl]
+
+        if isinstance(spec, Spline):
+            from scipy.interpolate import BSpline as BSpl
+
+            x_grid = np.linspace(spec._lo, spec._hi, n_points)
+            x_clip = np.clip(x_grid, spec._knots[0], spec._knots[-1])
+            B_grid = BSpl.design_matrix(x_clip, spec._knots, spec.degree).toarray()
+            M = B_grid @ spec._R_inv if spec._R_inv is not None else B_grid
+            Q = M @ Cov_g
+            return np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
+
+        elif isinstance(spec, Categorical):
+            # Base level gets SE=0, non-base levels from diagonal
+            se_nonbase = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
+            # Build full SE array aligned with spec._levels
+            se_all = np.zeros(len(spec._levels))
+            for i, lev in enumerate(spec._levels):
+                if lev != spec._base_level:
+                    idx = spec._non_base.index(lev)
+                    se_all[i] = se_nonbase[idx]
+            return se_all
+
+        elif isinstance(spec, Numeric):
+            se_transformed = np.sqrt(max(Cov_g[0, 0], 0.0))
+            if spec.standardize:
+                return np.array([se_transformed / spec._std])
+            return np.array([se_transformed])
+
+        else:
+            return np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
 
     def plot_relativities(
         self,
@@ -482,4 +706,4 @@ class SuperGLM:
         eta = np.hstack(blocks) @ self.result.beta + self.result.intercept
         if offset is not None:
             eta = eta + np.asarray(offset, dtype=np.float64)
-        return np.exp(eta)
+        return self._link.inverse(eta)

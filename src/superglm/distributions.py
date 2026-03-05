@@ -17,6 +17,11 @@ from scipy.special import gammaln
 class Distribution(Protocol):
     """Protocol for exponential dispersion family distributions."""
 
+    @property
+    def default_link(self) -> str:
+        """Name of the canonical/default link function."""
+        ...
+
     def variance(self, mu: NDArray) -> NDArray:
         """V(mu) — variance as a function of the mean."""
         ...
@@ -32,6 +37,10 @@ class Distribution(Protocol):
 
 class Poisson:
     """Poisson distribution. V(mu) = mu."""
+
+    @property
+    def default_link(self) -> str:
+        return "log"
 
     def variance(self, mu: NDArray) -> NDArray:
         return mu.copy()
@@ -51,6 +60,10 @@ class Poisson:
 class Gamma:
     """Gamma distribution. V(mu) = mu^2."""
 
+    @property
+    def default_link(self) -> str:
+        return "log"
+
     def variance(self, mu: NDArray) -> NDArray:
         return mu**2
 
@@ -63,6 +76,46 @@ class Gamma:
         return float(np.sum(weights * (
             k * np.log(k * y / mu) - k * y / mu - np.log(y) - gammaln(k)
         )))
+
+
+class NegativeBinomial:
+    """Negative Binomial (NB2). V(mu) = mu + mu^2/theta.
+
+    Parameters
+    ----------
+    theta : float
+        Overdispersion parameter (>0). Larger theta = less overdispersion.
+        As theta -> inf, approaches Poisson.
+    """
+
+    def __init__(self, theta: float):
+        if theta <= 0:
+            raise ValueError(f"NB theta must be > 0, got {theta}")
+        self.theta = theta
+
+    @property
+    def default_link(self) -> str:
+        return "log"
+
+    def variance(self, mu: NDArray) -> NDArray:
+        return mu + mu**2 / self.theta
+
+    def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
+        theta = self.theta
+        d = np.where(
+            y > 0,
+            2 * (y * np.log(np.maximum(y, 1e-300) / mu)
+                 - (y + theta) * np.log((y + theta) / (mu + theta))),
+            2 * theta * np.log(theta / (mu + theta)),
+        )
+        return d
+
+    def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
+        theta = self.theta
+        ll = (gammaln(y + theta) - gammaln(theta) - gammaln(y + 1)
+              + theta * np.log(theta / (mu + theta))
+              + y * np.log(mu / (mu + theta)))
+        return float(np.sum(weights * ll))
 
 
 class Tweedie:
@@ -79,6 +132,10 @@ class Tweedie:
         if not 1 < p < 2:
             raise ValueError(f"Tweedie p must be in (1, 2), got {p}")
         self.p = p
+
+    @property
+    def default_link(self) -> str:
+        return "log"
 
     def variance(self, mu: NDArray) -> NDArray:
         return np.power(mu, self.p)
@@ -105,7 +162,9 @@ DISTRIBUTION_SHORTCUTS: dict[str, type] = {
 
 
 def resolve_distribution(
-    family: str | Distribution, tweedie_p: float | None = None
+    family: str | Distribution,
+    tweedie_p: float | None = None,
+    nb_theta: float | None = None,
 ) -> Distribution:
     """Convert string shorthand to distribution object, or pass through."""
     if not isinstance(family, str):
@@ -116,6 +175,11 @@ def resolve_distribution(
         if tweedie_p is None:
             raise ValueError("Tweedie distribution requires tweedie_p=")
         return Tweedie(p=tweedie_p)
+    if family == "negative_binomial":
+        if nb_theta is None:
+            raise ValueError("NB distribution requires nb_theta=")
+        return NegativeBinomial(theta=nb_theta)
     raise ValueError(
-        f"Unknown distribution '{family}'. Use 'poisson', 'gamma', 'tweedie', or pass a Distribution object."
+        f"Unknown distribution '{family}'. Use 'poisson', 'gamma', 'tweedie', "
+        f"'negative_binomial', or pass a Distribution object."
     )

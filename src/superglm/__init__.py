@@ -34,19 +34,22 @@ sklearn-compatible API:
 """
 
 from superglm.discretize import DiscretizationResult, discretization_impact
-from superglm.distributions import Gamma, Poisson, Tweedie
+from superglm.distributions import Gamma, NegativeBinomial, Poisson, Tweedie
+from superglm.links import LogLink
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import Spline
 from superglm.metrics import ModelMetrics
 from superglm.model import PathResult, SuperGLM
+from superglm.summary import ModelSummary
 from superglm.plotting import plot_relativities
 from superglm.penalties.flavors import Adaptive
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.sklearn import SuperGLMRegressor
+from superglm.nb_profile import NBProfileResult, estimate_nb_theta
 from superglm.tweedie_profile import (
     TweedieProfileResult,
     estimate_phi,
@@ -61,10 +64,13 @@ __all__ = [
     "DiscretizationResult",
     "discretization_impact",
     "ModelMetrics",
+    "ModelSummary",
     "SuperGLMRegressor",
     "Poisson",
     "Gamma",
+    "NegativeBinomial",
     "Tweedie",
+    "LogLink",
     "Spline",
     "Categorical",
     "Numeric",
@@ -74,6 +80,8 @@ __all__ = [
     "Ridge",
     "Adaptive",
     "plot_relativities",
+    "NBProfileResult",
+    "estimate_nb_theta",
     "estimate_tweedie_p",
     "TweedieProfileResult",
     "tweedie_logpdf",

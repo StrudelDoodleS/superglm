@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 
 from superglm.distributions import Distribution
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, GroupMatrix
+from superglm.links import Link
 from superglm.penalties.base import Penalty
 from superglm.types import GroupSlice
 
@@ -104,6 +105,7 @@ def _fit_pirls_inner(
     y: NDArray,
     weights: NDArray,
     family: Distribution,
+    link: Link,
     groups: list[GroupSlice],
     penalty: Penalty,
     offset: NDArray,
@@ -123,7 +125,7 @@ def _fit_pirls_inner(
         intercept = intercept_init
     else:
         y_safe = np.where(y > 0, y, 0.1)
-        intercept = np.log(np.average(y_safe, weights=weights))
+        intercept = float(link.link(np.atleast_1d(np.average(y_safe, weights=weights)))[0])
 
     gms = dm.group_matrices
 
@@ -139,13 +141,14 @@ def _fit_pirls_inner(
         # Current predictions
         eta = dm.matvec(beta) + intercept + offset
         eta = np.clip(eta, -20, 20)
-        mu = np.exp(eta)
+        mu = link.inverse(eta)
 
-        # Working weights and response (PIRLS for log link)
+        # Working weights and response (PIRLS)
         V = family.variance(mu)
         V = np.maximum(V, 1e-10)
-        W = weights * mu**2 / V
-        z = eta + (y - mu) / mu
+        dmu_deta = link.deriv_inverse(eta)
+        W = weights * dmu_deta**2 / V
+        z = eta + (y - mu) / dmu_deta
 
         # Per-group Hessians and Lipschitz constants
         t0 = time.perf_counter()
@@ -215,7 +218,7 @@ def _fit_pirls_inner(
 
         # Deviance for outer convergence
         eta_new = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
-        mu_new = np.exp(eta_new)
+        mu_new = link.inverse(eta_new)
         dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
 
         t_outer_elapsed = time.perf_counter() - t_outer_start
@@ -274,6 +277,7 @@ def fit_pirls(
     y: NDArray,
     weights: NDArray,
     family: Distribution,
+    link: Link,
     groups: list[GroupSlice],
     penalty: Penalty,
     offset: NDArray | None = None,
@@ -307,6 +311,7 @@ def fit_pirls(
         y,
         weights,
         family,
+        link,
         groups,
         penalty,
         offset,
@@ -326,6 +331,7 @@ def fit_pirls(
             y,
             weights,
             family,
+            link,
             adjusted_groups,
             penalty,
             offset,

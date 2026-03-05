@@ -199,7 +199,7 @@ def discretization_impact(
         blocks.append(spec.transform(x_col))
 
     eta_orig = np.hstack(blocks) @ beta + intercept
-    original_predictions = np.exp(eta_orig)
+    original_predictions = model._link.inverse(eta_orig)
 
     # For each target feature, compute the delta (binned - smooth)
     tables: dict[str, pd.DataFrame] = {}
@@ -255,7 +255,7 @@ def discretization_impact(
 
     # Discretized predictions
     eta_disc = eta_orig + total_delta
-    predictions = np.exp(eta_disc)
+    predictions = model._link.inverse(eta_disc)
 
     # Compute metrics
     dist = model._distribution

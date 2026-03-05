@@ -180,7 +180,8 @@ class TestBCDSolver:
             GroupSlice("a", 0, 2, np.sqrt(2)),
             GroupSlice("b", 2, 5, np.sqrt(3)),
         ]
-        result = fit_pirls(X, y, weights, Poisson(), groups, GroupLasso(lambda1=0.01))
+        from superglm.links import LogLink
+        result = fit_pirls(X, y, weights, Poisson(), LogLink(), groups, GroupLasso(lambda1=0.01))
         assert result.converged
 
     def test_bcd_few_inner_iters(self):
@@ -192,8 +193,9 @@ class TestBCDSolver:
         y = rng.poisson(np.exp(X @ [0.5, -0.3, 0.1])).astype(float)
         y = np.maximum(y, 0.01)
         groups = [GroupSlice("a", 0, 2, np.sqrt(2)), GroupSlice("b", 2, 3, 1.0)]
+        from superglm.links import LogLink
         result = fit_pirls(
-            X, y, np.ones(n), Poisson(), groups, GroupLasso(lambda1=0.01),
+            X, y, np.ones(n), Poisson(), LogLink(), groups, GroupLasso(lambda1=0.01),
         )
         # Should converge with reasonable outer iters (not maxing out at 50)
         assert result.n_iter < 50

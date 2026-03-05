@@ -1,9 +1,8 @@
 """Tweedie profile likelihood — estimate p from data.
 
 For p ∈ (1, 2), the Tweedie distribution is a compound Poisson-Gamma.
-Given a configured SuperGLM, this module refits at each candidate p,
-estimates phi via Pearson, scores with the exact Tweedie log-likelihood
-(using scipy.special.wright_bessel), and optimises with bounded Brent.
+Given a configured SuperGLM, this module builds the design matrix once,
+then loops Brent iterations calling fit_pirls directly with warm starts.
 
 References
 ----------
@@ -14,13 +13,14 @@ References
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import minimize_scalar
 from scipy.special import wright_bessel
+
+from superglm.solvers.pirls import fit_pirls
 
 # ---------------------------------------------------------------------------
 # Compound Poisson-Gamma simulation
@@ -262,8 +262,8 @@ def estimate_tweedie_p(
 ) -> TweedieProfileResult:
     """Estimate the Tweedie power parameter via profile likelihood.
 
-    For each candidate p: deep-copy the model, set tweedie_p, fit,
-    predict, estimate phi, and score with the exact Tweedie log-likelihood.
+    Builds the design matrix once, then for each candidate p calls
+    fit_pirls directly with warm starts from the previous solution.
     Optimised via bounded Brent (scipy minimize_scalar).
 
     Parameters
@@ -276,9 +276,11 @@ def estimate_tweedie_p(
     y : array-like
         Response variable.
     exposure : array-like, optional
-        Observation weights / exposure.
+        Frequency weights (exposure). Must be frequency weights, not
+        variance weights — phi estimation and the profile likelihood
+        for p assume frequency weight scaling.
     offset : array-like, optional
-        Offset term.
+        Offset added to the linear predictor.
     p_bounds : tuple
         Bounds for p search, default (1.05, 1.95).
     xatol : float
@@ -303,31 +305,78 @@ def estimate_tweedie_p(
     y = np.asarray(y, dtype=np.float64)
     w = np.ones(len(y)) if exposure is None else np.asarray(exposure, dtype=np.float64)
 
+    # --- One-time setup: build design matrix and calibrate lambda ---
+    if model._splines is not None and not model._specs:
+        model._auto_detect_features(X, exposure)
+
+    # Set a temporary p so _build_design_matrix can resolve the distribution.
+    # The design matrix itself doesn't depend on p at all.
+    saved_p = model.tweedie_p
+    model.tweedie_p = 1.5  # midpoint, any valid value works
+    y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, exposure, offset)
+    model.tweedie_p = saved_p
+
+    # Calibrate lambda1 once if not already set
+    if model.penalty.lambda1 is None:
+        model.penalty.lambda1 = model._compute_lambda_max(y_arr, w_arr) * 0.1
+
+    # Ensure offset is an array for eta computation
+    if offset_arr is None:
+        offset_arr = np.zeros(len(y_arr))
+
+    dm = model._dm
+    groups = model._groups
+    link = model._link
+    penalty = model.penalty
+
+    # Warm-start state (updated across Brent evaluations)
+    warm_beta = None
+    warm_intercept = None
+    # Track the last PIRLS result for final phi estimation
+    last_p_eval = None
+    last_mu = None
+
     cache: dict[float, float] = {}
     n_evals = 0
 
     def objective(p: float) -> float:
-        nonlocal n_evals
+        nonlocal n_evals, warm_beta, warm_intercept, last_p_eval, last_mu
         key = round(p, 6)
         if key in cache:
             return cache[key]
 
-        m = copy.deepcopy(model)
-        m.tweedie_p = p
-        m.fit(X, y, exposure=exposure, offset=offset)
-        mu = m.predict(X, offset=offset)
-        mu = np.maximum(mu, 1e-10)
+        dist = Tweedie(p)
+        result = fit_pirls(
+            X=dm,
+            y=y_arr,
+            weights=w_arr,
+            family=dist,
+            link=link,
+            groups=groups,
+            penalty=penalty,
+            offset=offset_arr,
+            beta_init=warm_beta,
+            intercept_init=warm_intercept,
+        )
 
-        phi = estimate_phi(y, mu, p, weights=w)
-        phi = max(phi, 1e-10)
+        eta = np.clip(dm.matvec(result.beta) + result.intercept + offset_arr, -20, 20)
+        mu = np.maximum(link.inverse(eta), 1e-10)
 
-        ll = tweedie_logpdf(y, mu, phi, p, weights=w)
-        nll = -np.sum(w * ll) / np.sum(w)
+        phi = max(estimate_phi(y_arr, mu, p, weights=w_arr), 1e-10)
+
+        ll = tweedie_logpdf(y_arr, mu, phi, p, weights=w_arr)
+        nll = -np.sum(w_arr * ll) / np.sum(w_arr)
+
+        # Update warm starts for next evaluation
+        warm_beta = result.beta
+        warm_intercept = result.intercept
+        last_p_eval = p
+        last_mu = mu
 
         cache[key] = nll
         n_evals += 1
         if verbose:
-            print(f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}")
+            print(f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  pirls_iters={result.n_iter}")
         return nll
 
     result = minimize_scalar(
@@ -340,12 +389,21 @@ def estimate_tweedie_p(
     p_hat = round(result.x, 6)
     nll = result.fun
 
-    # Final fit at p_hat to get phi
-    m_final = copy.deepcopy(model)
-    m_final.tweedie_p = p_hat
-    m_final.fit(X, y, exposure=exposure, offset=offset)
-    mu_final = np.maximum(m_final.predict(X, offset=offset), 1e-10)
-    phi_hat = max(estimate_phi(y, mu_final, p_hat, weights=w), 1e-10)
+    # Get phi at p_hat. If the last evaluation was at p_hat, reuse mu;
+    # otherwise do one final (warm-started) fit.
+    if last_p_eval is not None and round(last_p_eval, 6) == p_hat:
+        mu_final = last_mu
+    else:
+        dist = Tweedie(p_hat)
+        final_result = fit_pirls(
+            X=dm, y=y_arr, weights=w_arr, family=dist, link=link,
+            groups=groups, penalty=penalty, offset=offset_arr,
+            beta_init=warm_beta, intercept_init=warm_intercept,
+        )
+        eta = np.clip(dm.matvec(final_result.beta) + final_result.intercept + offset_arr, -20, 20)
+        mu_final = np.maximum(link.inverse(eta), 1e-10)
+
+    phi_hat = max(estimate_phi(y_arr, mu_final, p_hat, weights=w_arr), 1e-10)
 
     return TweedieProfileResult(
         p_hat=p_hat,

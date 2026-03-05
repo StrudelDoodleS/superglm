@@ -5,6 +5,7 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
 dist/
 build/
 
@@ -18,3 +19,8 @@ build/
 
 # Data
 data/
+
+# Other
+.claude/
+.ruff_cahce/
+scratch/

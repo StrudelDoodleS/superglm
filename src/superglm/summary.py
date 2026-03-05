@@ -1,0 +1,422 @@
+"""Formatted model summary with ASCII and HTML output (statsmodels-style)."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+from scipy.stats import norm
+
+
+@dataclass
+class _CoefRow:
+    """One row of the coefficient table."""
+
+    name: str
+    group: str = ""  # feature group name for separator logic
+    coef: float | None = None
+    se: float | None = None
+    z: float | None = None
+    p: float | None = None
+    ci_low: float | None = None
+    ci_high: float | None = None
+    # Spline summary row (group-level Wald test)
+    is_spline: bool = False
+    n_params: int = 0
+    active: bool = False
+    group_norm: float = 0.0
+    wald_chi2: float | None = None
+    wald_p: float | None = None
+    curve_se_min: float | None = None
+    curve_se_max: float | None = None
+
+
+def _compute_coef_stats(
+    coef: float,
+    se: float,
+    alpha: float = 0.05,
+) -> tuple[float, float, float, float]:
+    """Compute z-value, p-value, and confidence interval."""
+    if se <= 0:
+        return np.nan, np.nan, np.nan, np.nan
+    z = coef / se
+    p = 2.0 * (1.0 - norm.cdf(abs(z)))
+    q = norm.ppf(1.0 - alpha / 2.0)
+    return z, p, coef - q * se, coef + q * se
+
+
+def _camel_to_spaced(name: str) -> str:
+    """Convert CamelCase to spaced: 'GroupLasso' -> 'Group Lasso'."""
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
+
+
+_SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
+
+
+def _sig_stars(p: float | None) -> str:
+    """R-style significance stars for a p-value."""
+    if p is None or np.isnan(p):
+        return ""
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    if p < 0.1:
+        return "."
+    return ""
+
+
+class ModelSummary:
+    """Formatted model summary with ASCII and HTML output.
+
+    Returned by ``ModelMetrics.summary()``. Supports:
+
+    - ``print(summary)`` — ASCII table for terminals
+    - Jupyter ``_repr_html_`` — HTML table for notebooks
+    - ``summary['fit']`` — dict access (backward compat)
+    - ``'fit' in summary`` — membership test (backward compat)
+    - ``summary.to_dict()`` — full dict
+    """
+
+    def __init__(
+        self,
+        data: dict[str, Any],
+        model_info: dict[str, Any],
+        coef_rows: list[_CoefRow],
+        alpha: float = 0.05,
+    ):
+        self._data = data
+        self._info = model_info
+        self._coef_rows = coef_rows
+        self._alpha = alpha
+
+    # ── Backward-compat dict interface ────────────────────────────
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the raw summary dict (backward compatibility)."""
+        return self._data
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+    def items(self):
+        return self._data.items()
+
+    # ── Helpers ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _fmt_scalar(v: Any) -> str:
+        if isinstance(v, bool):
+            return str(v)
+        if isinstance(v, int):
+            return str(v)
+        if isinstance(v, float):
+            if abs(v) >= 1000:
+                return f"{v:.1f}"
+            if abs(v) >= 10:
+                return f"{v:.2f}"
+            if abs(v) >= 1:
+                return f"{v:.3f}"
+            return f"{v:.4f}"
+        return str(v)
+
+    # ── ASCII output ──────────────────────────────────────────────
+
+    def __str__(self) -> str:
+        lines: list[str] = []
+        info = self._info
+        half = self._alpha / 2.0
+        _fmt = self._fmt_scalar
+
+        # Compute table width from coefficient columns
+        #   name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4)
+        name_w = max(len(r.name) for r in self._coef_rows) if self._coef_rows else 10
+        name_w = max(name_w, 10)
+        table_w = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4
+
+        sep = "=" * table_w
+        thin_sep = "-" * table_w
+
+        lines.append(f"{'SuperGLM Results':^{table_w}}")
+        lines.append(sep)
+
+        # Header key-value pairs (two columns stretching to table_w)
+        left_w = (table_w - 2) // 2
+        right_w = table_w - 2 - left_w
+        val_l = left_w - 20
+        val_r = right_w - 20
+
+        def _header_row(k1: str, v1: str, k2: str, v2: str) -> str:
+            left = f"{k1 + ':':<20s}{v1:>{val_l}s}"
+            right = f"{k2 + ':':<20s}{v2:>{val_r}s}"
+            return f"{left}  {right}"
+
+        rows = [
+            ("Family", info["family"], "No. Observations", str(info["n_obs"])),
+            ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
+            ("Penalty", info["penalty"], "Lambda1", _fmt(info["lambda1"])),
+            ("Scale (phi)", _fmt(info["phi"]), "Deviance", _fmt(info["deviance"])),
+            ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
+            ("Converged", str(info["converged"]), "Iterations", str(info["n_iter"])),
+        ]
+        for k1, v1, k2, v2 in rows:
+            lines.append(_header_row(k1, v1, k2, v2))
+        lines.append(sep)
+
+        # Coefficient table header
+        hdr = (
+            f"{'':>{name_w}s}"
+            f"{'coef':>10s}"
+            f"{'std err':>10s}"
+            f"{'z':>6s}  "
+            f"{'P>|z|':>8s}"
+            f"{'[' + f'{half:.3f}':>9s}"
+            f"{f'{1 - half:.3f}' + ']':>9s}"
+            f"{'':>4s}"
+        )
+        lines.append(hdr)
+        lines.append(thin_sep)
+
+        # Coefficient rows with group separators
+        prev_group = None
+        for row in self._coef_rows:
+            # Emit group separator when the group changes
+            if row.group and row.group != prev_group:
+                label = f" {row.group} "
+                pad = table_w - len(label)
+                left = pad // 2
+                right = pad - left
+                lines.append(f"{'-' * left}{label}{'-' * right}")
+            prev_group = row.group
+
+            if row.is_spline:
+                if row.active and row.wald_chi2 is not None:
+                    p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "<0.001"
+                    stars = _sig_stars(row.wald_p)
+                    se_str = ""
+                    if row.curve_se_min is not None:
+                        se_str = f", curve SE: {row.curve_se_min:.2f}-{row.curve_se_max:.2f}"
+                    spline_text = (
+                        f"[spline, {row.n_params} params, "
+                        f"Wald chi2({row.n_params})={row.wald_chi2:.1f}, "
+                        f"p={p_str}{se_str}]"
+                    )
+                    lines.append(
+                        f"{row.name:<{name_w}s}  {spline_text}"
+                        f" {stars:<3s}"
+                    )
+                else:
+                    spline_text = (
+                        f"[spline, {row.n_params} params, inactive]"
+                    )
+                    lines.append(f"{row.name:<{name_w}s}  {spline_text}")
+            elif row.coef is not None and row.se is not None and row.se > 0:
+                stars = _sig_stars(row.p)
+                # Adaptive z format: use fewer decimals for large values
+                if abs(row.z) >= 100:
+                    z_str = f"{row.z:>8.1f}"
+                else:
+                    z_str = f"{row.z:>8.3f}"
+                lines.append(
+                    f"{row.name:<{name_w}s}"
+                    f"{row.coef:>10.4f}"
+                    f"{row.se:>10.4f}"
+                    f"{z_str}"
+                    f"{row.p:>8.3f}"
+                    f"{row.ci_low:>9.3f}"
+                    f"{row.ci_high:>9.3f}"
+                    f" {stars:<3s}"
+                )
+            else:
+                # Inactive or zero SE
+                coef_str = f"{row.coef:>10.4f}" if row.coef is not None else f"{'---':>10s}"
+                lines.append(
+                    f"{row.name:<{name_w}s}"
+                    f"{coef_str}"
+                    f"{'---':>10s}"
+                    f"{'---':>8s}"
+                    f"{'---':>8s}"
+                    f"{'---':>9s}"
+                    f"{'---':>9s}"
+                    f"{'':>4s}"
+                )
+
+        lines.append(sep)
+        lines.append(_SIG_LEGEND)
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
+    # ── HTML output ───────────────────────────────────────────────
+
+    def _repr_html_(self) -> str:
+        info = self._info
+        half = self._alpha / 2.0
+        _fmt = self._fmt_scalar
+        ncols = 8  # name + coef + se + z + p + ci_lo + ci_hi + sig
+
+        css = (
+            "border-collapse:collapse;font-family:monospace;font-size:13px;"
+            "margin:8px 0;"
+        )
+        cell = "padding:3px 8px;text-align:right;border:none;"
+        cell_l = "padding:3px 8px;text-align:left;border:none;"
+        hdr_cell = "padding:3px 8px;text-align:right;font-weight:bold;border:none;"
+        hdr_cell_l = "padding:3px 8px;text-align:left;font-weight:bold;border:none;"
+        sep_style = "border-bottom:1px solid #999;"
+        label_style = "padding:3px 8px;text-align:left;font-weight:bold;color:#555;border:none;"
+        sig_cell = "padding:3px 4px;text-align:left;border:none;"
+
+        parts: list[str] = []
+        parts.append(f'<table style="{css}">')
+
+        # Title
+        parts.append(
+            f'<tr><td colspan="{ncols}" style="text-align:center;font-weight:bold;'
+            f'padding:8px;font-size:15px;border-bottom:2px solid #333;">'
+            f"SuperGLM Results</td></tr>"
+        )
+
+        # Header rows
+        header_rows = [
+            ("Family", info["family"], "No. Observations", str(info["n_obs"])),
+            ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
+            ("Penalty", info["penalty"], "Lambda1", _fmt(info["lambda1"])),
+            ("Scale (phi)", _fmt(info["phi"]), "Deviance", _fmt(info["deviance"])),
+            ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
+            ("Converged", str(info["converged"]), "Iterations", str(info["n_iter"])),
+        ]
+        for k1, v1, k2, v2 in header_rows:
+            parts.append(
+                f"<tr>"
+                f'<td style="{label_style}">{k1}:</td>'
+                f'<td style="{cell}">{v1}</td>'
+                f'<td style="{cell}"></td>'
+                f'<td style="{label_style}">{k2}:</td>'
+                f'<td colspan="{ncols - 4}" style="{cell}">{v2}</td>'
+                f"</tr>"
+            )
+
+        # Separator
+        parts.append(
+            f'<tr><td colspan="{ncols}" style="{sep_style}"></td></tr>'
+        )
+
+        # Coefficient table header
+        col_names = [
+            "",
+            "coef",
+            "std err",
+            "z",
+            "P>|z|",
+            f"[{half:.3f}",
+            f"{1 - half:.3f}]",
+            "",
+        ]
+        parts.append("<tr>")
+        parts.append(f'<td style="{hdr_cell_l}">{col_names[0]}</td>')
+        for cn in col_names[1:-1]:
+            parts.append(f'<td style="{hdr_cell}">{cn}</td>')
+        parts.append(f'<td style="{hdr_cell_l}">{col_names[-1]}</td>')
+        parts.append("</tr>")
+        parts.append(
+            f'<tr><td colspan="{ncols}" style="{sep_style}"></td></tr>'
+        )
+
+        # Coefficient rows with group separators
+        group_sep_style = (
+            "padding:2px 8px;text-align:left;font-weight:bold;color:#555;"
+            "border-top:1px solid #bbb;border-bottom:none;font-size:12px;"
+        )
+        prev_group = None
+        for row in self._coef_rows:
+            if row.group and row.group != prev_group:
+                parts.append(
+                    f'<tr><td colspan="{ncols}" style="{group_sep_style}">'
+                    f"{row.group}</td></tr>"
+                )
+            prev_group = row.group
+
+            if row.is_spline:
+                if row.active and row.wald_chi2 is not None:
+                    p_str = (
+                        f"{row.wald_p:.3f}"
+                        if row.wald_p >= 0.001
+                        else "&lt;0.001"
+                    )
+                    stars = _sig_stars(row.wald_p)
+                    se_str = ""
+                    if row.curve_se_min is not None:
+                        se_str = (
+                            f", curve SE: {row.curve_se_min:.2f}"
+                            f"&ndash;{row.curve_se_max:.2f}"
+                        )
+                    text = (
+                        f"[spline, {row.n_params} params, "
+                        f"Wald &chi;&sup2;({row.n_params})={row.wald_chi2:.1f}, "
+                        f"p={p_str}{se_str}]"
+                    )
+                    parts.append(
+                        f"<tr>"
+                        f'<td style="{cell_l}">{row.name}</td>'
+                        f'<td colspan="{ncols - 2}" style="{cell_l};color:#666;'
+                        f'font-style:italic;">{text}</td>'
+                        f'<td style="{sig_cell}">{stars}</td>'
+                        f"</tr>"
+                    )
+                else:
+                    text = f"[spline, {row.n_params} params, inactive]"
+                    parts.append(
+                        f"<tr>"
+                        f'<td style="{cell_l}">{row.name}</td>'
+                        f'<td colspan="{ncols - 1}" style="{cell_l};color:#666;'
+                        f'font-style:italic;">{text}</td></tr>'
+                    )
+            elif row.coef is not None and row.se is not None and row.se > 0:
+                stars = _sig_stars(row.p)
+                parts.append(
+                    f"<tr>"
+                    f'<td style="{cell_l}">{row.name}</td>'
+                    f'<td style="{cell}">{row.coef:.4f}</td>'
+                    f'<td style="{cell}">{row.se:.4f}</td>'
+                    f'<td style="{cell}">{row.z:.3f}</td>'
+                    f'<td style="{cell}">{row.p:.3f}</td>'
+                    f'<td style="{cell}">{row.ci_low:.3f}</td>'
+                    f'<td style="{cell}">{row.ci_high:.3f}</td>'
+                    f'<td style="{sig_cell}">{stars}</td>'
+                    f"</tr>"
+                )
+            else:
+                coef_str = f"{row.coef:.4f}" if row.coef is not None else "---"
+                parts.append(
+                    f"<tr>"
+                    f'<td style="{cell_l}">{row.name}</td>'
+                    f'<td style="{cell}">{coef_str}</td>'
+                    f'<td style="{cell}">---</td>'
+                    f'<td style="{cell}">---</td>'
+                    f'<td style="{cell}">---</td>'
+                    f'<td style="{cell}">---</td>'
+                    f'<td style="{cell}">---</td>'
+                    f'<td style="{sig_cell}"></td>'
+                    f"</tr>"
+                )
+
+        # Bottom border + legend
+        parts.append(
+            f'<tr><td colspan="{ncols}" style="border-bottom:2px solid #333;">'
+            f"</td></tr>"
+        )
+        parts.append(
+            f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+            f'color:#666;border:none;">{_SIG_LEGEND}</td></tr>'
+        )
+        parts.append("</table>")
+        return "\n".join(parts)
