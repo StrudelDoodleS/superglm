@@ -14,10 +14,10 @@ from superglm.tweedie_profile import (
     tweedie_logpdf,
 )
 
-
 # =====================================================================
 # TestGenerateTweedieCPG
 # =====================================================================
+
 
 class TestGenerateTweedieCPG:
     def test_mean_matches_mu(self):
@@ -62,6 +62,7 @@ class TestGenerateTweedieCPG:
 # =====================================================================
 # TestTweedieLogpdf
 # =====================================================================
+
 
 class TestTweedieLogpdf:
     def test_zero_obs_point_mass(self):
@@ -119,6 +120,7 @@ class TestTweedieLogpdf:
 # TestEstimatePhi
 # =====================================================================
 
+
 class TestEstimatePhi:
     def test_phi_recovery(self):
         rng = np.random.default_rng(42)
@@ -139,6 +141,7 @@ class TestEstimatePhi:
 # TestProfileLikelihood
 # =====================================================================
 
+
 def _make_intercept_model(p=1.6, lambda1=0.0):
     """Create a minimal intercept-only Tweedie model."""
     m = SuperGLM(family="tweedie", penalty=GroupLasso(lambda1=lambda1))
@@ -147,10 +150,11 @@ def _make_intercept_model(p=1.6, lambda1=0.0):
 
 def _make_model_with_covariates(lambda1=0.0):
     """Create a Tweedie model with numeric covariates."""
-    m = SuperGLM(family="tweedie", penalty=GroupLasso(lambda1=lambda1))
-    m.add_feature("x1", Numeric())
-    m.add_feature("x2", Numeric())
-    return m
+    return SuperGLM(
+        family="tweedie",
+        penalty=GroupLasso(lambda1=lambda1),
+        features={"x1": Numeric(), "x2": Numeric()},
+    )
 
 
 class TestProfileLikelihood:
@@ -164,8 +168,11 @@ class TestProfileLikelihood:
         y = generate_tweedie_cpg(n, mu=10.0, phi=3.0, p=p_true, rng=rng)
         X = pd.DataFrame({"dummy": np.ones(n)})
 
-        model = SuperGLM(family="tweedie", penalty=GroupLasso(lambda1=0.0))
-        model.add_feature("dummy", Numeric(standardize=False))
+        model = SuperGLM(
+            family="tweedie",
+            penalty=GroupLasso(lambda1=0.0),
+            features={"dummy": Numeric(standardize=False)},
+        )
 
         result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
         assert isinstance(result, TweedieProfileResult)
@@ -209,12 +216,19 @@ class TestProfileLikelihood:
         exposure_scaled = exposure  # exposure is unitless
 
         X = pd.DataFrame({"x1": x1})
-        model = SuperGLM(family="tweedie", penalty=GroupLasso(lambda1=0.0))
-        model.add_feature("x1", Numeric())
+        model = SuperGLM(
+            family="tweedie",
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x1": Numeric()},
+        )
 
         result = estimate_tweedie_p(
-            model, X, y_scaled, exposure=exposure_scaled,
-            offset=np.log(exposure), p_bounds=(1.2, 1.95),
+            model,
+            X,
+            y_scaled,
+            exposure=exposure_scaled,
+            offset=np.log(exposure),
+            p_bounds=(1.2, 1.95),
         )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
 
@@ -222,8 +236,9 @@ class TestProfileLikelihood:
         """Raises ValueError if family is not tweedie."""
         import pandas as pd
 
-        model = SuperGLM(family="poisson", penalty=GroupLasso(lambda1=0.0))
-        model.add_feature("x", Numeric())
+        model = SuperGLM(
+            family="poisson", penalty=GroupLasso(lambda1=0.0), features={"x": Numeric()}
+        )
         X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
         y = np.array([1.0, 2.0, 3.0])
         with pytest.raises(ValueError, match="tweedie"):
@@ -238,8 +253,11 @@ class TestProfileLikelihood:
         y = generate_tweedie_cpg(n, mu=10.0, phi=3.0, p=1.6, rng=rng)
         X = pd.DataFrame({"dummy": np.ones(n)})
 
-        model = SuperGLM(family="tweedie", penalty=GroupLasso(lambda1=0.0))
-        model.add_feature("dummy", Numeric(standardize=False))
+        model = SuperGLM(
+            family="tweedie",
+            penalty=GroupLasso(lambda1=0.0),
+            features={"dummy": Numeric(standardize=False)},
+        )
 
         result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
         assert len(result.cache) >= 3
@@ -248,6 +266,7 @@ class TestProfileLikelihood:
 # =====================================================================
 # TestNumericalStability
 # =====================================================================
+
 
 class TestNumericalStability:
     def test_all_zero_response(self):

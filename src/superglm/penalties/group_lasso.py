@@ -31,6 +31,8 @@ class GroupLasso:
 
     def prox_group(self, bg: NDArray, group: GroupSlice, step: float) -> NDArray:
         """Block soft-thresholding for a single group."""
+        if not group.penalized:
+            return bg
         norm_g = np.linalg.norm(bg)
         thr = step * self.lambda1 * group.weight
         if norm_g <= thr:
@@ -48,5 +50,6 @@ class GroupLasso:
         """Penalty value: lambda1 * sum_g(w_g * ||beta_g||_2)."""
         val = 0.0
         for g in groups:
-            val += g.weight * np.linalg.norm(beta[g.sl])
+            if g.penalized:
+                val += g.weight * np.linalg.norm(beta[g.sl])
         return self.lambda1 * val

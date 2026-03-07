@@ -14,6 +14,7 @@ References
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -87,7 +88,7 @@ def tweedie_logpdf(
     p: float,
     *,
     weights: NDArray | None = None,
-    t_arg_limit: float = 50.0,
+    t_arg_limit: float = 1e4,
 ) -> NDArray:
     """Exact Tweedie log-density with saddlepoint fallback.
 
@@ -242,6 +243,130 @@ class TweedieProfileResult:
     converged: bool
     cache: dict[float, float] = field(default_factory=dict)
 
+    # Stored to enable .ci()
+    _objective: Any = field(default=None, repr=False)
+    _w_sum: float = field(default=0.0, repr=False)
+
+    def ci(self, alpha: float = 0.05) -> tuple[float, float]:
+        """Profile likelihood confidence interval for Tweedie p.
+
+        Requires that the result was produced by ``estimate_tweedie_p``.
+        Each CI endpoint evaluation requires a PIRLS refit.
+        """
+        if self._objective is None:
+            raise RuntimeError(
+                "Profile CI requires the objective function. Use "
+                "estimate_tweedie_p() to produce this result."
+            )
+        return profile_ci_p(self._objective, self.p_hat, self.nll, self._w_sum, alpha=alpha)
+
+    def profile_plot(
+        self,
+        *,
+        alpha: float = 0.05,
+        n_points: int = 50,
+        ax=None,
+    ):
+        """Profile deviance plot for Tweedie power parameter p.
+
+        Evaluates the profile objective on a grid. Each grid point that
+        is not already cached requires a PIRLS refit.
+
+        Parameters
+        ----------
+        alpha : float
+            Significance level for CI (default 0.05).
+        n_points : int
+            Number of grid points for the curve.
+        ax : matplotlib Axes, optional
+            Axes to plot on. If None, creates a new figure.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        if self._objective is None:
+            raise RuntimeError(
+                "Profile plot requires the objective function. Use "
+                "estimate_tweedie_p() to produce this result."
+            )
+
+        import matplotlib.pyplot as plt
+        from scipy.stats import chi2
+
+        # Snapshot original Brent evaluation points before CI/grid pollute cache
+        orig_cache = dict(self.cache)
+
+        ci_lo, ci_hi = self.ci(alpha=alpha)
+
+        # Grid must cover CI and all cached Brent points
+        margin = 0.2 * (ci_hi - ci_lo)
+        grid_lo = max(1.01, ci_lo - margin)
+        grid_hi = min(1.99, ci_hi + margin)
+        if orig_cache:
+            grid_lo = min(grid_lo, min(orig_cache.keys()) - 0.005)
+            grid_hi = max(grid_hi, max(orig_cache.keys()) + 0.005)
+            grid_lo = max(1.01, grid_lo)
+            grid_hi = min(1.99, grid_hi)
+        p_grid = np.linspace(grid_lo, grid_hi, n_points)
+
+        nll_values = np.array([self._objective(p) for p in p_grid])
+        deviance = 2.0 * self._w_sum * (nll_values - self.nll)
+
+        cutoff = chi2.ppf(1.0 - alpha, 1)
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6, 4))
+        else:
+            fig = ax.get_figure()
+
+        ax.plot(p_grid, deviance, color="steelblue", linewidth=1.5)
+
+        # Mark original Brent evaluation points (not grid/CI evals)
+        if orig_cache:
+            cache_ps = np.array(sorted(orig_cache.keys()))
+            cache_dev = 2.0 * self._w_sum * (np.array([orig_cache[p] for p in cache_ps]) - self.nll)
+            ax.scatter(
+                cache_ps,
+                cache_dev,
+                color="darkorange",
+                s=35,
+                zorder=5,
+                edgecolors="white",
+                linewidths=0.5,
+                label=f"Brent evals ({len(cache_ps)})",
+            )
+
+        ax.axhline(
+            cutoff,
+            linestyle="--",
+            color="grey",
+            linewidth=0.8,
+            label=f"{100 * (1 - alpha):.0f}% cutoff",
+        )
+        ax.axvline(
+            self.p_hat,
+            linestyle=":",
+            color="black",
+            linewidth=0.8,
+            label=f"MLE = {self.p_hat:.3f}",
+        )
+        ax.fill_betweenx(
+            [0, cutoff],
+            ci_lo,
+            ci_hi,
+            alpha=0.10,
+            color="firebrick",
+            label=f"{100 * (1 - alpha):.0f}% CI: [{ci_lo:.3f}, {ci_hi:.3f}]",
+        )
+
+        ax.set_xlabel("p")
+        ax.set_ylabel("Profile deviance")
+        ax.set_title("Tweedie p profile likelihood")
+        ax.set_ylim(bottom=0)
+        ax.legend(fontsize=8, loc="upper right")
+        return fig
+
 
 # ---------------------------------------------------------------------------
 # Profile likelihood optimiser
@@ -303,7 +428,6 @@ def estimate_tweedie_p(
         raise ValueError(f"estimate_tweedie_p requires family='tweedie', got {family!r}")
 
     y = np.asarray(y, dtype=np.float64)
-    w = np.ones(len(y)) if exposure is None else np.asarray(exposure, dtype=np.float64)
 
     # --- One-time setup: build design matrix and calibrate lambda ---
     if model._splines is not None and not model._specs:
@@ -396,9 +520,16 @@ def estimate_tweedie_p(
     else:
         dist = Tweedie(p_hat)
         final_result = fit_pirls(
-            X=dm, y=y_arr, weights=w_arr, family=dist, link=link,
-            groups=groups, penalty=penalty, offset=offset_arr,
-            beta_init=warm_beta, intercept_init=warm_intercept,
+            X=dm,
+            y=y_arr,
+            weights=w_arr,
+            family=dist,
+            link=link,
+            groups=groups,
+            penalty=penalty,
+            offset=offset_arr,
+            beta_init=warm_beta,
+            intercept_init=warm_intercept,
         )
         eta = np.clip(dm.matvec(final_result.beta) + final_result.intercept + offset_arr, -20, 20)
         mu_final = np.maximum(link.inverse(eta), 1e-10)
@@ -412,4 +543,66 @@ def estimate_tweedie_p(
         n_evaluations=n_evals,
         converged=result.success if hasattr(result, "success") else True,
         cache=cache,
+        _objective=objective,
+        _w_sum=float(np.sum(w_arr)),
     )
+
+
+def profile_ci_p(
+    objective,
+    p_hat: float,
+    nll_hat: float,
+    w_sum: float,
+    *,
+    alpha: float = 0.05,
+    p_range: tuple[float, float] = (1.02, 1.98),
+) -> tuple[float, float]:
+    """Profile likelihood confidence interval for Tweedie power p.
+
+    Each evaluation calls ``objective(p)`` which refits the GLM via PIRLS.
+    The objective returns mean NLL = ``-sum(w*ll)/sum(w)``, so the LRT
+    statistic is ``2 * w_sum * (mean_nll(p) - mean_nll(p_hat))``.
+
+    Parameters
+    ----------
+    objective : callable
+        Profile objective ``p -> mean_nll``.
+    p_hat : float
+        MLE of p.
+    nll_hat : float
+        Mean NLL at p_hat.
+    w_sum : float
+        Sum of weights (converts mean NLL to total for LRT).
+    alpha : float
+        Significance level.
+    p_range : tuple
+        Search range for CI endpoints.
+
+    Returns
+    -------
+    (ci_lower, ci_upper) : tuple of float
+    """
+    from scipy.optimize import brentq
+    from scipy.stats import chi2
+
+    cutoff = chi2.ppf(1.0 - alpha, 1)
+
+    def g(p: float) -> float:
+        nll = objective(p)
+        return 2.0 * w_sum * (nll - nll_hat) - cutoff
+
+    # Lower bound
+    lo = p_range[0]
+    try:
+        ci_lower = brentq(g, lo, p_hat, xtol=1e-3)
+    except ValueError:
+        ci_lower = lo
+
+    # Upper bound
+    hi = p_range[1]
+    try:
+        ci_upper = brentq(g, p_hat, hi, xtol=1e-3)
+    except ValueError:
+        ci_upper = hi
+
+    return (ci_lower, ci_upper)

@@ -42,14 +42,25 @@ class Adaptive:
         self,
         groups: list[GroupSlice],
         beta_init: NDArray,
+        group_matrices: list | None = None,
     ) -> list[GroupSlice]:
         """Return new GroupSlice list with adaptive weights.
 
-        new_weight_g = sqrt(p_g) / (||beta_init_g|| + eps)^expon
+        When ``group_matrices`` is provided, uses fitted-value norms
+        ``||X_g beta_g|| / sqrt(n)`` (RMS contribution to eta) instead
+        of raw coefficient norms. This is scale-invariant across groups
+        with different reparametrizations (e.g. SSP splines).
+
+        Without ``group_matrices``, falls back to coefficient norms:
+        ``new_weight_g = sqrt(p_g) / (||beta_init_g|| + eps)^expon``
         """
         new_groups = []
-        for g in groups:
-            norm_g = np.linalg.norm(beta_init[g.sl])
+        for i, g in enumerate(groups):
+            if group_matrices is not None:
+                fitted = group_matrices[i].matvec(beta_init[g.sl])
+                norm_g = np.linalg.norm(fitted) / np.sqrt(len(fitted))
+            else:
+                norm_g = np.linalg.norm(beta_init[g.sl])
             adaptive_w = np.sqrt(g.size) / (norm_g + self.eps) ** self.expon
             new_g = copy.copy(g)
             new_g.weight = adaptive_w

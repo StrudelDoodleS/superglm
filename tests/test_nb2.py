@@ -3,19 +3,18 @@
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.special import gammaln
 from scipy.stats import nbinom
 
-from superglm import SuperGLM, NegativeBinomial, SuperGLMRegressor
+from superglm import NegativeBinomial, SuperGLM, SuperGLMRegressor
 from superglm.distributions import resolve_distribution
 from superglm.features.numeric import Numeric
 from superglm.nb_profile import NBProfileResult, estimate_nb_theta
 from superglm.penalties.group_lasso import GroupLasso
 
-
 # =====================================================================
 # Helpers
 # =====================================================================
+
 
 def _generate_nb2(n, mu, theta, rng=None):
     """Simulate NB2(mu, theta) using scipy's nbinom."""
@@ -29,6 +28,7 @@ def _generate_nb2(n, mu, theta, rng=None):
 # =====================================================================
 # TestNB2Distribution
 # =====================================================================
+
 
 class TestNB2VarianceFunction:
     def test_basic(self):
@@ -123,27 +123,28 @@ class TestNB2PoissonLimit:
         X = pd.DataFrame({"x": x})
 
         # Poisson fit
-        m_pois = SuperGLM(family="poisson", penalty=GroupLasso(lambda1=0.0))
-        m_pois.add_feature("x", Numeric())
+        m_pois = SuperGLM(
+            family="poisson", penalty=GroupLasso(lambda1=0.0), features={"x": Numeric()}
+        )
         m_pois.fit(X, y)
 
         # NB2 with large theta
         m_nb = SuperGLM(
-            family="negative_binomial", nb_theta=1e6,
+            family="negative_binomial",
+            nb_theta=1e6,
             penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
         )
-        m_nb.add_feature("x", Numeric())
         m_nb.fit(X, y)
 
-        np.testing.assert_allclose(
-            m_nb.result.intercept, m_pois.result.intercept, atol=0.05
-        )
+        np.testing.assert_allclose(m_nb.result.intercept, m_pois.result.intercept, atol=0.05)
         np.testing.assert_allclose(m_nb.result.beta, m_pois.result.beta, atol=0.05)
 
 
 # =====================================================================
 # TestNB2Fitting
 # =====================================================================
+
 
 class TestNB2FixedThetaFit:
     def test_convergence(self):
@@ -157,10 +158,11 @@ class TestNB2FixedThetaFit:
         X = pd.DataFrame({"x": x})
 
         model = SuperGLM(
-            family="negative_binomial", nb_theta=theta,
+            family="negative_binomial",
+            nb_theta=theta,
             penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
         )
-        model.add_feature("x", Numeric())
         model.fit(X, y)
 
         assert model.result.converged
@@ -176,10 +178,11 @@ class TestNB2FixedThetaFit:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="negative_binomial", nb_theta=theta,
+            family="negative_binomial",
+            nb_theta=theta,
             penalty=GroupLasso(lambda1=0.0),
+            features={"dummy": Numeric(standardize=False)},
         )
-        model.add_feature("dummy", Numeric(standardize=False))
         model.fit(X, y)
 
         pred = model.predict(X)
@@ -189,6 +192,7 @@ class TestNB2FixedThetaFit:
 # =====================================================================
 # TestNB2Profile
 # =====================================================================
+
 
 class TestNB2ProfileTheta:
     def test_recovers_theta(self):
@@ -202,13 +206,17 @@ class TestNB2ProfileTheta:
         X = pd.DataFrame({"x": x})
 
         model = SuperGLM(
-            family="negative_binomial", nb_theta=1.0,  # initial guess
+            family="negative_binomial",
+            nb_theta=1.0,  # initial guess
             penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
         )
-        model.add_feature("x", Numeric())
 
         result = estimate_nb_theta(
-            model, X, y, theta_bounds=(0.5, 20.0),
+            model,
+            X,
+            y,
+            theta_bounds=(0.5, 20.0),
         )
         assert isinstance(result, NBProfileResult)
         np.testing.assert_allclose(result.theta_hat, theta_true, atol=2.0)
@@ -220,18 +228,20 @@ class TestNB2ProfileTheta:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="negative_binomial", nb_theta=1.0,
+            family="negative_binomial",
+            nb_theta=1.0,
             penalty=GroupLasso(lambda1=0.0),
+            features={"dummy": Numeric(standardize=False)},
         )
-        model.add_feature("dummy", Numeric(standardize=False))
 
         result = estimate_nb_theta(model, X, y, theta_bounds=(0.5, 15.0))
         assert len(result.cache) >= 1  # alternating alg converges in few iters
         assert result.n_evaluations >= 1
 
     def test_family_must_be_nb(self):
-        model = SuperGLM(family="poisson", penalty=GroupLasso(lambda1=0.0))
-        model.add_feature("x", Numeric())
+        model = SuperGLM(
+            family="poisson", penalty=GroupLasso(lambda1=0.0), features={"x": Numeric()}
+        )
         X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
         y = np.array([1.0, 2.0, 3.0])
         with pytest.raises(ValueError, match="negative_binomial"):
@@ -248,10 +258,11 @@ class TestNB2AutoTheta:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="negative_binomial", nb_theta="auto",
+            family="negative_binomial",
+            nb_theta="auto",
             penalty=GroupLasso(lambda1=0.0),
+            features={"dummy": Numeric(standardize=False)},
         )
-        model.add_feature("dummy", Numeric(standardize=False))
         model.fit(X, y)
 
         # After fit, nb_theta should be a float
@@ -264,6 +275,7 @@ class TestNB2AutoTheta:
 # TestNB2QuantileResiduals
 # =====================================================================
 
+
 class TestNB2QuantileResiduals:
     def test_approx_normal(self):
         """Quantile residuals should be ~N(0,1) for well-specified NB2."""
@@ -275,10 +287,11 @@ class TestNB2QuantileResiduals:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="negative_binomial", nb_theta=theta,
+            family="negative_binomial",
+            nb_theta=theta,
             penalty=GroupLasso(lambda1=0.0),
+            features={"dummy": Numeric(standardize=False)},
         )
-        model.add_feature("dummy", Numeric(standardize=False))
         model.fit(X, y)
 
         metrics = model.metrics(X, y)
@@ -293,6 +306,7 @@ class TestNB2QuantileResiduals:
 # TestNB2MetricsSummary
 # =====================================================================
 
+
 class TestNB2MetricsSummary:
     def test_summary_works(self):
         rng = np.random.default_rng(42)
@@ -301,10 +315,11 @@ class TestNB2MetricsSummary:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="negative_binomial", nb_theta=3.0,
+            family="negative_binomial",
+            nb_theta=3.0,
             penalty=GroupLasso(lambda1=0.0),
+            features={"dummy": Numeric(standardize=False)},
         )
-        model.add_feature("dummy", Numeric(standardize=False))
         model.fit(X, y)
 
         metrics = model.metrics(X, y)
@@ -317,6 +332,7 @@ class TestNB2MetricsSummary:
 # TestNB2Sklearn
 # =====================================================================
 
+
 class TestNB2Sklearn:
     def test_fit_predict(self):
         rng = np.random.default_rng(42)
@@ -327,7 +343,8 @@ class TestNB2Sklearn:
         X = pd.DataFrame({"x": x})
 
         reg = SuperGLMRegressor(
-            family="negative_binomial", nb_theta=5.0,
+            family="negative_binomial",
+            nb_theta=5.0,
             lambda1=0.0,
         )
         reg.fit(X, y)
@@ -340,6 +357,7 @@ class TestNB2Sklearn:
 # =====================================================================
 # TestNB2Validation
 # =====================================================================
+
 
 class TestNB2InvalidTheta:
     def test_zero(self):

@@ -33,23 +33,36 @@ sklearn-compatible API:
     model.fit(X, y, sample_weight=exposure)
 """
 
+from superglm.cv import CVResult
+from superglm.davies import psum_chisq, satterthwaite
 from superglm.discretize import DiscretizationResult, discretization_impact
 from superglm.distributions import Gamma, NegativeBinomial, Poisson, Tweedie
-from superglm.links import LogLink
 from superglm.features.categorical import Categorical
+from superglm.features.interaction import (
+    CategoricalInteraction,
+    NumericCategorical,
+    NumericInteraction,
+    PolynomialCategorical,
+    PolynomialInteraction,
+    SplineCategorical,
+    TensorInteraction,
+)
 from superglm.features.numeric import Numeric
 from superglm.features.polynomial import Polynomial
-from superglm.features.spline import Spline
+from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
+from superglm.links import LogLink
 from superglm.metrics import ModelMetrics
 from superglm.model import PathResult, SuperGLM
-from superglm.summary import ModelSummary
-from superglm.plotting import plot_relativities
+from superglm.nb_profile import NBProfileResult, estimate_nb_theta
 from superglm.penalties.flavors import Adaptive
+from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
+from superglm.plotting import plot_interaction, plot_relativities
+from superglm.reml import REMLResult
 from superglm.sklearn import SuperGLMRegressor
-from superglm.nb_profile import NBProfileResult, estimate_nb_theta
+from superglm.summary import ModelSummary
 from superglm.tweedie_profile import (
     TweedieProfileResult,
     estimate_phi,
@@ -57,10 +70,12 @@ from superglm.tweedie_profile import (
     generate_tweedie_cpg,
     tweedie_logpdf,
 )
+from superglm.wood_pvalue import wood_test_smooth
 
 __all__ = [
     "SuperGLM",
     "PathResult",
+    "CVResult",
     "DiscretizationResult",
     "discretization_impact",
     "ModelMetrics",
@@ -72,20 +87,35 @@ __all__ = [
     "Tweedie",
     "LogLink",
     "Spline",
+    "NaturalSpline",
+    "CubicRegressionSpline",
     "Categorical",
     "Numeric",
     "Polynomial",
+    "SplineCategorical",
+    "PolynomialCategorical",
+    "NumericCategorical",
+    "CategoricalInteraction",
+    "NumericInteraction",
+    "PolynomialInteraction",
+    "TensorInteraction",
+    "GroupElasticNet",
     "GroupLasso",
     "SparseGroupLasso",
     "Ridge",
     "Adaptive",
+    "plot_interaction",
     "plot_relativities",
     "NBProfileResult",
+    "REMLResult",
     "estimate_nb_theta",
     "estimate_tweedie_p",
     "TweedieProfileResult",
     "tweedie_logpdf",
     "estimate_phi",
     "generate_tweedie_cpg",
+    "psum_chisq",
+    "satterthwaite",
+    "wood_test_smooth",
 ]
 __version__ = "0.1.0"

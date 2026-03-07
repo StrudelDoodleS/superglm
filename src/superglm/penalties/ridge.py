@@ -27,12 +27,22 @@ class Ridge:
 
     def prox_group(self, bg: NDArray, group: GroupSlice, step: float) -> NDArray:
         """Closed-form proximal operator for a single group."""
+        if not group.penalized:
+            return bg
         return bg / (1.0 + step * self.lambda1)
 
     def prox(self, beta: NDArray, groups: list[GroupSlice], step: float) -> NDArray:
         """Closed-form proximal operator: beta / (1 + step * lambda1)."""
-        return beta / (1.0 + step * self.lambda1)
+        beta = beta.copy()
+        for g in groups:
+            if g.penalized:
+                beta[g.sl] = beta[g.sl] / (1.0 + step * self.lambda1)
+        return beta
 
     def eval(self, beta: NDArray, groups: list[GroupSlice]) -> float:
         """Penalty value: lambda1 * ||beta||_2^2 / 2."""
-        return self.lambda1 * np.dot(beta, beta) / 2.0
+        val = 0.0
+        for g in groups:
+            if g.penalized:
+                val += np.dot(beta[g.sl], beta[g.sl])
+        return self.lambda1 * val / 2.0

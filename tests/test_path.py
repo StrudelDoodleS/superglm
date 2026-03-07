@@ -4,7 +4,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM, GroupLasso, Poisson, Spline, Categorical, Numeric, PathResult
+from superglm import (
+    Categorical,
+    GroupElasticNet,
+    GroupLasso,
+    Numeric,
+    PathResult,
+    Poisson,
+    Spline,
+    SuperGLM,
+)
 
 
 @pytest.fixture
@@ -23,11 +32,15 @@ def poisson_data():
 
 
 def _make_model(lambda1=None):
-    m = SuperGLM(family=Poisson(), penalty=GroupLasso(lambda1=lambda1))
-    m.add_feature("x1", Spline(n_knots=8, penalty="ssp"))
-    m.add_feature("x2", Categorical())
-    m.add_feature("x3", Numeric())
-    return m
+    return SuperGLM(
+        family=Poisson(),
+        penalty=GroupLasso(lambda1=lambda1),
+        features={
+            "x1": Spline(n_knots=8, penalty="ssp"),
+            "x2": Categorical(),
+            "x3": Numeric(),
+        },
+    )
 
 
 class TestPathResult:
@@ -55,8 +68,7 @@ class TestPathResult:
         # Coefficient norms should generally increase as lambda decreases
         norms = np.array([np.linalg.norm(c) for c in result.coef_path])
         assert norms[-1] >= norms[0], (
-            f"Norm at lambda_min ({norms[-1]:.4f}) should be >= "
-            f"norm at lambda_max ({norms[0]:.4f})"
+            f"Norm at lambda_min ({norms[-1]:.4f}) should be >= norm at lambda_max ({norms[0]:.4f})"
         )
 
     def test_lambda_min_nonzero(self, poisson_data):
@@ -124,3 +136,27 @@ class TestPathResult:
         preds = m.predict(df)
         assert preds.shape == (len(y),)
         assert np.all(preds > 0)
+
+    def test_group_elastic_net_path(self, poisson_data):
+        """GroupElasticNet works with warm-started reg path."""
+        df, y, w = poisson_data
+        m = SuperGLM(
+            family=Poisson(),
+            penalty=GroupElasticNet(alpha=0.7),
+            features={
+                "x1": Spline(n_knots=8, penalty="ssp"),
+                "x2": Categorical(),
+                "x3": Numeric(),
+            },
+        )
+
+        result = m.fit_path(df, y, exposure=w, n_lambda=15, lambda_ratio=1e-2)
+
+        assert isinstance(result, PathResult)
+        assert result.lambda_seq.shape == (15,)
+        # Norms should increase as lambda decreases
+        norms = np.array([np.linalg.norm(c) for c in result.coef_path])
+        assert norms[-1] >= norms[0]
+        # Warm-started iterations should average fewer than cold-start
+        avg_warm = result.n_iter_path[1:].mean()
+        assert avg_warm <= result.n_iter_path[0]

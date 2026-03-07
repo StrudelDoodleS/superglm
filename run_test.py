@@ -1,9 +1,10 @@
 import numpy as np
 import pandas as pd
-from superglm.model import SuperGLM
-from superglm.features.numeric import Numeric
+
 from superglm.features.categorical import Categorical
+from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
+from superglm.model import SuperGLM
 from superglm.penalties.group_lasso import GroupLasso
 
 rng = np.random.default_rng(42)
@@ -11,15 +12,23 @@ n = 3000
 driver_age = rng.uniform(18, 85, n)
 region = rng.choice(["Paris", "Lyon", "Rural"], n, p=[0.3, 0.3, 0.4])
 density = rng.normal(5, 2, n)
-true_log_mu = -2.0 + 0.01 * (driver_age - 50)**2 / 100 + (region == "Paris") * 0.3 + 0.05 * density
+true_log_mu = (
+    -2.0 + 0.01 * (driver_age - 50) ** 2 / 100 + (region == "Paris") * 0.3 + 0.05 * density
+)
 exposure = rng.uniform(0.3, 1.0, n)
 y = rng.poisson(np.exp(true_log_mu) * exposure).astype(float)
 X = pd.DataFrame({"driver_age": driver_age, "region": region, "density": density})
 
-model = SuperGLM(family="poisson", penalty=GroupLasso(lambda1=0.01), lambda2=0.1)
-model.add_feature("driver_age", Spline(n_knots=10, penalty="ssp"))
-model.add_feature("region", Categorical(base="most_exposed"))
-model.add_feature("density", Numeric())
+model = SuperGLM(
+    family="poisson",
+    penalty=GroupLasso(lambda1=0.01),
+    lambda2=0.1,
+    features={
+        "driver_age": Spline(n_knots=10, penalty="ssp"),
+        "region": Categorical(base="most_exposed"),
+        "density": Numeric(),
+    },
+)
 model.fit(X, y, exposure=exposure)
 
 print(f"Converged: {model.result.converged} in {model.result.n_iter} iter")

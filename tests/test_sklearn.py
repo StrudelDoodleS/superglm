@@ -73,7 +73,9 @@ class TestNKnots:
     def test_list_per_feature(self, sample_data):
         X, y, _ = sample_data
         model = SuperGLMRegressor(
-            spline_features=["age", "density"], n_knots=[10, 20], lambda1=0.01,
+            spline_features=["age", "density"],
+            n_knots=[10, 20],
+            lambda1=0.01,
         )
         model.fit(X, y)
         assert "n_knots=10" in model._feature_types["age"]
@@ -94,7 +96,10 @@ class TestOffset:
         X = X.copy()
         X["log_exp"] = np.log(exposure)
         model = SuperGLMRegressor(
-            spline_features=["age"], n_knots=10, offset="log_exp", lambda1=0.01,
+            spline_features=["age"],
+            n_knots=10,
+            offset="log_exp",
+            lambda1=0.01,
         )
         model.fit(X, y)
         assert "log_exp" not in model._feature_types
@@ -108,7 +113,10 @@ class TestOffset:
         X["off1"] = np.log(exposure) * 0.5
         X["off2"] = np.log(exposure) * 0.5
         model = SuperGLMRegressor(
-            spline_features=["age"], n_knots=10, offset=["off1", "off2"], lambda1=0.01,
+            spline_features=["age"],
+            n_knots=10,
+            offset=["off1", "off2"],
+            lambda1=0.01,
         )
         model.fit(X, y)
         assert "off1" not in model._feature_types

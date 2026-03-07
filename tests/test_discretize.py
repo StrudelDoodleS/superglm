@@ -5,12 +5,12 @@ import pandas as pd
 import pytest
 
 from superglm import (
-    SuperGLM,
-    Spline,
     Categorical,
+    DiscretizationResult,
     Numeric,
     Polynomial,
-    DiscretizationResult,
+    Spline,
+    SuperGLM,
     discretization_impact,
 )
 from superglm.distributions import Poisson
@@ -29,18 +29,25 @@ def fitted_model():
     eta = 0.02 * (x_spline - 40) ** 2 / 400 - 0.3 * (x_cat == "B") + 0.1 * x_num
     y = rng.poisson(np.exp(eta)).astype(float)
     exposure = rng.uniform(0.5, 2.0, n)
-    df = pd.DataFrame({
-        "age": x_spline,
-        "region": x_cat,
-        "score": x_num,
-        "density": x_poly,
-    })
+    df = pd.DataFrame(
+        {
+            "age": x_spline,
+            "region": x_cat,
+            "score": x_num,
+            "density": x_poly,
+        }
+    )
 
-    m = SuperGLM(family=Poisson(), penalty=GroupLasso(lambda1=0.01))
-    m.add_feature("age", Spline(n_knots=10, penalty="ssp"))
-    m.add_feature("region", Categorical())
-    m.add_feature("score", Numeric())
-    m.add_feature("density", Polynomial(degree=3))
+    m = SuperGLM(
+        family=Poisson(),
+        penalty=GroupLasso(lambda1=0.01),
+        features={
+            "age": Spline(n_knots=10, penalty="ssp"),
+            "region": Categorical(),
+            "score": Numeric(),
+            "density": Polynomial(degree=3),
+        },
+    )
     m.fit(df, y, exposure=exposure)
     return m, df, y, exposure
 
@@ -108,7 +115,7 @@ class TestBinCoverage:
                 # Each bin_from should equal the previous bin_to
                 for i in range(1, len(table)):
                     assert table["bin_to"].iloc[i - 1] == table["bin_from"].iloc[i], (
-                        f"Gap between bins {i-1} and {i} for {name}"
+                        f"Gap between bins {i - 1} and {i} for {name}"
                     )
 
     def test_all_observations_assigned(self, fitted_model):
@@ -159,7 +166,9 @@ class TestMetrics:
     def test_deviance_change_consistent(self, fitted_model):
         m, df, y, w = fitted_model
         result = m.discretization_impact(df, y, exposure=w)
-        expected_change = result.metrics["deviance_discretized"] - result.metrics["deviance_original"]
+        expected_change = (
+            result.metrics["deviance_discretized"] - result.metrics["deviance_original"]
+        )
         assert abs(result.metrics["deviance_change"] - expected_change) < 1e-10
 
     def test_high_correlation(self, fitted_model):
@@ -203,8 +212,9 @@ class TestBinStrategy:
         for name, table in result.tables.items():
             widths = (table["bin_to"] - table["bin_from"]).values
             # All bins should have the same width
-            np.testing.assert_allclose(widths, widths[0], rtol=1e-10,
-                err_msg=f"Unequal bin widths for {name}")
+            np.testing.assert_allclose(
+                widths, widths[0], rtol=1e-10, err_msg=f"Unequal bin widths for {name}"
+            )
 
     def test_uniform_produces_result(self, fitted_model):
         m, df, y, w = fitted_model
@@ -214,9 +224,7 @@ class TestBinStrategy:
 
     def test_winsorized_structure(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(
-            df, y, exposure=w, n_bins=10, bin_strategy="winsorized"
-        )
+        result = m.discretization_impact(df, y, exposure=w, n_bins=10, bin_strategy="winsorized")
         for name, table in result.tables.items():
             x_vals = df[name].values
             # First bin starts at data min, last ends at data max
@@ -231,9 +239,7 @@ class TestBinStrategy:
 
     def test_winsorized_produces_result(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(
-            df, y, exposure=w, n_bins=10, bin_strategy="winsorized"
-        )
+        result = m.discretization_impact(df, y, exposure=w, n_bins=10, bin_strategy="winsorized")
         assert isinstance(result, DiscretizationResult)
 
     def test_invalid_strategy_raises(self, fitted_model):
@@ -253,13 +259,9 @@ class TestBinStrategy:
         m, df, y, w = fitted_model
         n = len(df)
         for strategy in ["exposure_quantile", "uniform", "winsorized"]:
-            result = m.discretization_impact(
-                df, y, exposure=w, n_bins=10, bin_strategy=strategy
-            )
+            result = m.discretization_impact(df, y, exposure=w, n_bins=10, bin_strategy=strategy)
             for name, table in result.tables.items():
-                assert table["n_obs"].sum() == n, (
-                    f"strategy={strategy}, {name}: n_obs sum != {n}"
-                )
+                assert table["n_obs"].sum() == n, f"strategy={strategy}, {name}: n_obs sum != {n}"
 
 
 class TestDefaultExposure:

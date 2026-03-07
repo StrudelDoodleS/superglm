@@ -38,6 +38,8 @@ class SparseGroupLasso:
 
     def prox_group(self, bg: NDArray, group: GroupSlice, step: float) -> NDArray:
         """L1 soft-threshold then group L2 prox for a single group."""
+        if not group.penalized:
+            return bg
         lam = step * self.lambda1
 
         # Elementwise L1 soft-threshold
@@ -61,7 +63,9 @@ class SparseGroupLasso:
     def eval(self, beta: NDArray, groups: list[GroupSlice]) -> float:
         """Penalty value."""
         grp_val = 0.0
+        l1_val = 0.0
         for g in groups:
-            grp_val += g.weight * np.linalg.norm(beta[g.sl])
-        l1_val = np.sum(np.abs(beta))
+            if g.penalized:
+                grp_val += g.weight * np.linalg.norm(beta[g.sl])
+                l1_val += np.sum(np.abs(beta[g.sl]))
         return self.lambda1 * ((1.0 - self.alpha) * grp_val + self.alpha * l1_val)

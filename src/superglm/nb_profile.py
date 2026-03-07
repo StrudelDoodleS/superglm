@@ -36,6 +36,132 @@ class NBProfileResult:
     converged: bool
     cache: dict[float, float] = field(default_factory=dict)
 
+    # Set after estimation to enable .ci()
+    _y: NDArray | None = field(default=None, repr=False)
+    _mu: NDArray | None = field(default=None, repr=False)
+    _weights: NDArray | None = field(default=None, repr=False)
+
+    def ci(self, alpha: float = 0.05) -> tuple[float, float]:
+        """Profile likelihood confidence interval for theta.
+
+        Requires that the result was produced by ``estimate_nb_theta``.
+        """
+        if self._y is None or self._mu is None or self._weights is None:
+            raise RuntimeError(
+                "Profile CI requires fitted mu. Use estimate_nb_theta() to produce this result."
+            )
+        return profile_ci_theta(self._y, self._mu, self._weights, self.theta_hat, alpha=alpha)
+
+    def profile_plot(
+        self,
+        *,
+        alpha: float = 0.05,
+        n_points: int = 100,
+        ax=None,
+    ):
+        """Profile deviance plot for NB2 theta.
+
+        Shows the profile deviance curve with the MLE, confidence interval
+        bounds, and chi-squared cutoff. Cheap — each evaluation is O(n)
+        with no refitting.
+
+        Parameters
+        ----------
+        alpha : float
+            Significance level for CI (default 0.05).
+        n_points : int
+            Number of grid points for the curve.
+        ax : matplotlib Axes, optional
+            Axes to plot on. If None, creates a new figure.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        if self._y is None or self._mu is None or self._weights is None:
+            raise RuntimeError(
+                "Profile plot requires fitted mu. Use estimate_nb_theta() to produce this result."
+            )
+
+        import matplotlib.pyplot as plt
+        from scipy.stats import chi2
+
+        ci_lo, ci_hi = self.ci(alpha=alpha)
+
+        # Grid extends beyond CI for visual context
+        margin = 0.3 * (ci_hi - ci_lo)
+        grid_lo = max(0.01, ci_lo - margin)
+        grid_hi = ci_hi + margin
+        theta_grid = np.linspace(grid_lo, grid_hi, n_points)
+
+        w_sum = float(np.sum(self._weights))
+        nll_hat = _nb2_nll(self._y, self._mu, self._weights, self.theta_hat)
+        deviance = np.array(
+            [
+                2.0 * w_sum * (_nb2_nll(self._y, self._mu, self._weights, t) - nll_hat)
+                for t in theta_grid
+            ]
+        )
+
+        cutoff = chi2.ppf(1.0 - alpha, 1)
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6, 4))
+        else:
+            fig = ax.get_figure()
+
+        ax.plot(theta_grid, deviance, color="steelblue", linewidth=1.5)
+
+        # Mark cached iteration points (re-evaluated on the fixed-mu profile)
+        if self.cache:
+            cache_thetas = np.array(sorted(self.cache.keys()))
+            cache_dev = np.array(
+                [
+                    2.0 * w_sum * (_nb2_nll(self._y, self._mu, self._weights, t) - nll_hat)
+                    for t in cache_thetas
+                ]
+            )
+            ax.scatter(
+                cache_thetas,
+                cache_dev,
+                color="darkorange",
+                s=35,
+                zorder=5,
+                edgecolors="white",
+                linewidths=0.5,
+                label=f"Iterations ({len(cache_thetas)})",
+            )
+
+        ax.axhline(
+            cutoff,
+            linestyle="--",
+            color="grey",
+            linewidth=0.8,
+            label=f"{100 * (1 - alpha):.0f}% cutoff",
+        )
+        ax.axvline(
+            self.theta_hat,
+            linestyle=":",
+            color="black",
+            linewidth=0.8,
+            label=f"MLE = {self.theta_hat:.3f}",
+        )
+        ax.fill_betweenx(
+            [0, cutoff],
+            ci_lo,
+            ci_hi,
+            alpha=0.10,
+            color="firebrick",
+            label=f"{100 * (1 - alpha):.0f}% CI: [{ci_lo:.3f}, {ci_hi:.3f}]",
+        )
+
+        ax.set_xlabel(r"$\theta$")
+        ax.set_ylabel("Profile deviance")
+        ax.set_title(r"NB2 $\theta$ profile likelihood")
+        ax.set_ylim(bottom=0)
+        ax.legend(fontsize=8, loc="upper right")
+        return fig
+
 
 def _theta_ml(
     y: NDArray,
@@ -57,17 +183,28 @@ def _theta_ml(
     """
     for _ in range(max_iter):
         # Score: dℓ/dθ
-        score = np.sum(weights * (
-            digamma(y + theta) - digamma(theta)
-            + np.log(theta) + 1.0 - np.log(theta + mu)
-            - (y + theta) / (mu + theta)
-        ))
+        score = np.sum(
+            weights
+            * (
+                digamma(y + theta)
+                - digamma(theta)
+                + np.log(theta)
+                + 1.0
+                - np.log(theta + mu)
+                - (y + theta) / (mu + theta)
+            )
+        )
         # Information: -d²ℓ/dθ²
-        info = np.sum(weights * (
-            -polygamma(1, y + theta) + polygamma(1, theta)
-            - 1.0 / theta + 2.0 / (mu + theta)
-            - (y + theta) / (mu + theta) ** 2
-        ))
+        info = np.sum(
+            weights
+            * (
+                -polygamma(1, y + theta)
+                + polygamma(1, theta)
+                - 1.0 / theta
+                + 2.0 / (mu + theta)
+                - (y + theta) / (mu + theta) ** 2
+            )
+        )
         if abs(info) < 1e-20:
             break
         delta = score / info
@@ -79,9 +216,7 @@ def _theta_ml(
     return theta
 
 
-def _nb2_nll(
-    y: NDArray, mu: NDArray, weights: NDArray, theta: float
-) -> float:
+def _nb2_nll(y: NDArray, mu: NDArray, weights: NDArray, theta: float) -> float:
     """Weighted mean negative NB2 log-likelihood."""
     ll = (
         gammaln(y + theta)
@@ -149,9 +284,7 @@ def estimate_nb_theta(
         family, NegativeBinomial
     )
     if not is_nb:
-        raise ValueError(
-            f"estimate_nb_theta requires family='negative_binomial', got {family!r}"
-        )
+        raise ValueError(f"estimate_nb_theta requires family='negative_binomial', got {family!r}")
 
     y = np.asarray(y, dtype=np.float64)
 
@@ -201,7 +334,8 @@ def estimate_nb_theta(
 
         eta = np.clip(
             dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
-            -20, 20,
+            -20,
+            20,
         )
         mu = np.maximum(link.inverse(eta), 1e-10)
         warm_beta = pirls_result.beta
@@ -234,4 +368,68 @@ def estimate_nb_theta(
         n_evaluations=iteration + 1,
         converged=converged,
         cache=cache,
+        _y=y_arr,
+        _mu=mu,
+        _weights=w_arr,
     )
+
+
+def profile_ci_theta(
+    y: NDArray,
+    mu: NDArray,
+    weights: NDArray,
+    theta_hat: float,
+    *,
+    alpha: float = 0.05,
+    theta_range: tuple[float, float] = (0.01, 500.0),
+) -> tuple[float, float]:
+    """Profile likelihood confidence interval for NB2 theta.
+
+    Given fitted mu (held fixed), evaluates the NB2 profile log-likelihood
+    at different theta values and inverts the LRT at the chi-squared cutoff.
+    This is O(n) per evaluation with no matrix operations or refitting.
+
+    Parameters
+    ----------
+    y : array
+        Response (counts).
+    mu : array
+        Fitted means from the GLM.
+    weights : array
+        Frequency weights.
+    theta_hat : float
+        MLE of theta.
+    alpha : float
+        Significance level (default 0.05 for 95% CI).
+    theta_range : tuple
+        Search range for the CI endpoints.
+
+    Returns
+    -------
+    (ci_lower, ci_upper) : tuple of float
+    """
+    from scipy.optimize import brentq
+    from scipy.stats import chi2
+
+    w_sum = float(np.sum(weights))
+    nll_hat = _nb2_nll(y, mu, weights, theta_hat)
+    cutoff = chi2.ppf(1.0 - alpha, 1)
+
+    def objective(theta: float) -> float:
+        return 2.0 * w_sum * (_nb2_nll(y, mu, weights, theta) - nll_hat) - cutoff
+
+    # Find lower bound
+    lo = theta_range[0]
+    try:
+        ci_lower = brentq(objective, lo, theta_hat, xtol=1e-4)
+    except ValueError:
+        ci_lower = lo
+
+    # Find upper bound
+    hi = theta_range[1]
+    try:
+        ci_upper = brentq(objective, theta_hat, hi, xtol=1e-4)
+    except ValueError:
+        ci_upper = hi
+
+    return (ci_lower, ci_upper)

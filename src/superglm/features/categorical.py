@@ -15,6 +15,38 @@ from numpy.typing import NDArray
 from superglm.types import GroupInfo
 
 
+def _validate_categorical_levels(x: NDArray, known_levels: set, *, context: str = "") -> None:
+    """Raise ValueError if x contains levels not seen during fit.
+
+    Parameters
+    ----------
+    x : array-like
+        Categorical values to validate.
+    known_levels : set
+        Levels seen during build() / fit().
+    context : str, optional
+        Feature name for error message context.
+    """
+    # Check for missing values before np.unique — np.unique raises TypeError
+    # on mixed object arrays like ["B", np.nan].
+    if any(v is None or (isinstance(v, float) and np.isnan(v)) for v in x):
+        msg = "Categorical column contains missing values (NaN or None)."
+        if context:
+            msg = f"[{context}] {msg}"
+        raise ValueError(msg)
+
+    observed = set(np.unique(x).tolist())
+    unseen = observed - known_levels
+    if unseen:
+        msg = (
+            f"Encountered unseen categorical levels at predict time: {sorted(unseen)}. "
+            f"All levels must be among those seen during fit: {sorted(known_levels)}."
+        )
+        if context:
+            msg = f"[{context}] {msg}"
+        raise ValueError(msg)
+
+
 class Categorical:
     """One-hot encoded categorical feature.
 
@@ -80,6 +112,7 @@ class Categorical:
     def transform(self, x: NDArray) -> NDArray:
         """One-hot encode using levels learned during build()."""
         x = np.asarray(x).ravel()
+        _validate_categorical_levels(x, set(self._levels))
         return np.column_stack([(x == lev).astype(np.float64) for lev in self._non_base])
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:

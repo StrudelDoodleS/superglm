@@ -4,7 +4,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM, GroupLasso, SparseGroupLasso, Ridge, Spline, Categorical, Numeric
+from superglm import (
+    Categorical,
+    GroupElasticNet,
+    GroupLasso,
+    Numeric,
+    Ridge,
+    SparseGroupLasso,
+    Spline,
+    SuperGLM,
+)
 
 
 @pytest.fixture
@@ -49,20 +58,6 @@ class TestFeaturesDict:
         )
         assert list(model._specs.keys()) == ["a", "b"]
         assert model._feature_order == ["a", "b"]
-
-    def test_add_feature_extends_dict(self, sample_data):
-        X, y, exposure = sample_data
-        model = SuperGLM(
-            penalty="group_lasso",
-            lambda1=0.01,
-            features={
-                "age": Spline(n_knots=10, penalty="ssp"),
-                "region": Categorical(base="first"),
-            },
-        )
-        model.add_feature("density", Numeric())
-        model.fit(X, y, exposure=exposure)
-        assert "density" in model._specs
 
 
 class TestSplinesAutoDetect:
@@ -161,6 +156,12 @@ class TestPenaltyResolution:
         model = SuperGLM(penalty="ridge", lambda1=0.05)
         assert isinstance(model.penalty, Ridge)
 
+    def test_string_group_elastic_net(self):
+        model = SuperGLM(penalty="group_elastic_net", lambda1=0.05)
+        assert isinstance(model.penalty, GroupElasticNet)
+        assert model.penalty.lambda1 == 0.05
+        assert model.penalty.alpha == 0.5
+
     def test_none_defaults_to_group_lasso(self):
         model = SuperGLM(penalty=None)
         assert isinstance(model.penalty, GroupLasso)
@@ -189,23 +190,3 @@ class TestPenaltyResolution:
         model.fit(X, y, exposure=exposure)
         assert model.penalty.lambda1 is not None
         assert model.penalty.lambda1 > 0
-
-
-class TestBackwardCompat:
-    """Ensure legacy add_feature() usage still works."""
-
-    def test_add_feature_only(self, sample_data):
-        X, y, exposure = sample_data
-        model = SuperGLM(penalty=GroupLasso(lambda1=0.01))
-        model.add_feature("age", Spline(n_knots=10, penalty="ssp"))
-        model.add_feature("region", Categorical(base="first"))
-        model.add_feature("density", Numeric())
-        model.fit(X, y, exposure=exposure)
-        preds = model.predict(X)
-        assert preds.shape == (len(X),)
-
-    def test_duplicate_feature_raises(self):
-        model = SuperGLM()
-        model.add_feature("x", Numeric())
-        with pytest.raises(ValueError, match="Feature already added"):
-            model.add_feature("x", Numeric())

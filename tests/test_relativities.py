@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM, Spline, Categorical, Numeric, plot_relativities
+from superglm import Categorical, Numeric, Spline, SuperGLM, plot_relativities
 
 
 @pytest.fixture
@@ -60,9 +60,7 @@ class TestRelativities:
 
     def test_spline_exp_log_consistency(self, fitted_model):
         df = fitted_model.relativities()["age"]
-        np.testing.assert_allclose(
-            np.exp(df["log_relativity"]), df["relativity"], rtol=1e-10
-        )
+        np.testing.assert_allclose(np.exp(df["log_relativity"]), df["relativity"], rtol=1e-10)
 
     def test_categorical_base_level_is_one(self, fitted_model):
         df = fitted_model.relativities()["region"]
@@ -76,6 +74,7 @@ class TestRelativities:
 class TestPlotRelativities:
     def test_returns_figure(self, fitted_model):
         import matplotlib
+
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
@@ -84,6 +83,7 @@ class TestPlotRelativities:
 
     def test_standalone_function(self, fitted_model):
         import matplotlib
+
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
@@ -93,6 +93,7 @@ class TestPlotRelativities:
 
     def test_ncols_parameter(self, fitted_model):
         import matplotlib
+
         matplotlib.use("Agg")
 
         fig = fitted_model.plot_relativities(ncols=3)
@@ -101,6 +102,7 @@ class TestPlotRelativities:
 
     def test_figsize_parameter(self, fitted_model):
         import matplotlib
+
         matplotlib.use("Agg")
 
         fig = fitted_model.plot_relativities(figsize=(12, 8))
@@ -110,6 +112,7 @@ class TestPlotRelativities:
 
     def test_with_exposure(self, sample_data, fitted_model):
         import matplotlib
+
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
@@ -122,6 +125,7 @@ class TestPlotRelativities:
 
     def test_standalone_with_exposure(self, sample_data, fitted_model):
         import matplotlib
+
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
@@ -132,8 +136,53 @@ class TestPlotRelativities:
 
     def test_empty_dict(self):
         import matplotlib
+
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
         fig = plot_relativities({})
         assert isinstance(fig, Figure)
+
+    def test_plot_with_ci(self, fitted_model):
+        import matplotlib
+        import matplotlib.collections as mcoll
+
+        matplotlib.use("Agg")
+
+        fig = fitted_model.plot_relativities()
+        # Spline subplot should have a PolyCollection from fill_between
+        has_poly = any(
+            isinstance(child, mcoll.PolyCollection)
+            for ax in fig.get_axes()
+            for child in ax.get_children()
+        )
+        assert has_poly, "Expected a PolyCollection (CI band) on a spline subplot"
+
+    def test_plot_ci_disabled(self, fitted_model):
+        import matplotlib
+        import matplotlib.collections as mcoll
+
+        matplotlib.use("Agg")
+
+        fig = fitted_model.plot_relativities(with_ci=False)
+        has_poly = any(
+            isinstance(child, mcoll.PolyCollection)
+            for ax in fig.get_axes()
+            for child in ax.get_children()
+        )
+        assert not has_poly, "No PolyCollection expected when with_ci=False"
+
+    def test_plot_ci_categorical_errorbars(self, fitted_model):
+        import matplotlib
+        import matplotlib.collections as mcoll
+
+        matplotlib.use("Agg")
+
+        fig = fitted_model.plot_relativities()
+        # Categorical subplot should have a LineCollection from errorbar
+        has_linecoll = any(
+            isinstance(child, mcoll.LineCollection)
+            for ax in fig.get_axes()
+            for child in ax.get_children()
+        )
+        assert has_linecoll, "Expected a LineCollection (error bars) on a categorical subplot"

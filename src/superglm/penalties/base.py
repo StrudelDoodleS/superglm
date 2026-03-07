@@ -63,6 +63,17 @@ class Flavor(Protocol):
         self,
         groups: list[GroupSlice],
         beta_init: NDArray,
+        group_matrices: list | None = None,
     ) -> list[GroupSlice]:
-        """Return new GroupSlice list with modified weights."""
+        """Return new GroupSlice list with modified weights.
+
+        Parameters
+        ----------
+        groups : list of GroupSlice
+        beta_init : (p,) coefficient vector from initial fit.
+        group_matrices : list of GroupMatrix, optional
+            Per-group design matrices. When provided, implementations can
+            compute fitted-value norms ``||X_g beta_g||`` instead of raw
+            coefficient norms, giving scale-invariant adaptive weights.
+        """
         ...

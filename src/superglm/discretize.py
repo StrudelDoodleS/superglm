@@ -43,9 +43,7 @@ class DiscretizationResult:
     metrics: dict[str, float]
 
 
-def _exposure_weighted_quantile_edges(
-    x: NDArray, exposure: NDArray, n_bins: int
-) -> NDArray:
+def _exposure_weighted_quantile_edges(x: NDArray, exposure: NDArray, n_bins: int) -> NDArray:
     """Compute bin edges so each bin has roughly equal total exposure."""
     order = np.argsort(x)
     x_sorted = x[order]
@@ -71,9 +69,7 @@ def _uniform_edges(x: NDArray, n_bins: int) -> NDArray:
     return np.linspace(x.min(), x.max(), n_bins + 1)
 
 
-def _winsorized_edges(
-    x: NDArray, exposure: NDArray, n_bins: int
-) -> NDArray:
+def _winsorized_edges(x: NDArray, exposure: NDArray, n_bins: int) -> NDArray:
     """Exposure-quantile binning on [p5, p95] interior, with tail bins."""
     if n_bins < 3:
         # Not enough bins for tail+interior+tail, fall back to exposure quantile
@@ -99,9 +95,7 @@ def _winsorized_edges(
     return edges
 
 
-def _compute_edges(
-    x: NDArray, exposure: NDArray, n_bins: int, strategy: str
-) -> NDArray:
+def _compute_edges(x: NDArray, exposure: NDArray, n_bins: int, strategy: str) -> NDArray:
     """Dispatch to the appropriate binning strategy."""
     if strategy == "exposure_quantile":
         return _exposure_weighted_quantile_edges(x, exposure, n_bins)
@@ -119,9 +113,9 @@ def _compute_edges(
 def _is_continuous_feature(model: SuperGLM, name: str) -> bool:
     """Check if a feature is a spline or polynomial (has 'x' in reconstruct)."""
     from superglm.features.polynomial import Polynomial
-    from superglm.features.spline import Spline
+    from superglm.features.spline import _SplineBase
 
-    return isinstance(model._specs[name], (Spline, Polynomial))
+    return isinstance(model._specs[name], _SplineBase | Polynomial)
 
 
 def discretization_impact(
@@ -186,8 +180,7 @@ def discretization_impact(
         target_features = features
     else:
         target_features = [
-            name for name in model._feature_order
-            if _is_continuous_feature(model, name)
+            name for name in model._feature_order if _is_continuous_feature(model, name)
         ]
 
     # Build per-feature design matrices and log-relativities
@@ -239,14 +232,16 @@ def discretization_impact(
         # Build rating table
         table_rows = []
         for b in range(actual_n_bins):
-            table_rows.append({
-                "bin_from": edges[b],
-                "bin_to": edges[b + 1],
-                "relativity": np.exp(bin_log_rel[b]),
-                "log_relativity": bin_log_rel[b],
-                "n_obs": bin_n_obs[b],
-                "exposure": bin_exposure[b],
-            })
+            table_rows.append(
+                {
+                    "bin_from": edges[b],
+                    "bin_to": edges[b + 1],
+                    "relativity": np.exp(bin_log_rel[b]),
+                    "log_relativity": bin_log_rel[b],
+                    "n_obs": bin_n_obs[b],
+                    "exposure": bin_exposure[b],
+                }
+            )
         tables[name] = pd.DataFrame(table_rows)
 
         # Per-observation delta: replace smooth with bin mean

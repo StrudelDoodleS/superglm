@@ -75,8 +75,7 @@ def resolve_link(link: str | Link | None, family: Distribution) -> Link:
     if isinstance(link, str):
         if link not in _LINK_SHORTCUTS:
             raise ValueError(
-                f"Unknown link '{link}'. Use one of {list(_LINK_SHORTCUTS)} "
-                "or pass a Link object."
+                f"Unknown link '{link}'. Use one of {list(_LINK_SHORTCUTS)} or pass a Link object."
             )
         return _LINK_SHORTCUTS[link]()
     raise TypeError(f"Expected str, Link, or None, got {type(link)}")

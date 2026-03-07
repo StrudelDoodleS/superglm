@@ -6,11 +6,11 @@ import pytest
 from scipy.special import gammaln
 from scipy.stats import poisson
 
-from superglm import SuperGLM, ModelMetrics
-from superglm.distributions import Poisson, Gamma
+from superglm import ModelMetrics, SuperGLM
+from superglm.distributions import Gamma, Poisson, Tweedie
+from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
-
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -80,9 +80,7 @@ class TestLogLikelihood:
         w = np.ones(3)
         phi = 0.5
         k = 1.0 / phi
-        expected = float(np.sum(
-            k * np.log(k * y / mu) - k * y / mu - np.log(y) - gammaln(k)
-        ))
+        expected = float(np.sum(k * np.log(k * y / mu) - k * y / mu - np.log(y) - gammaln(k)))
         ll = Gamma().log_likelihood(y, mu, w, phi=phi)
         np.testing.assert_allclose(ll, expected, rtol=1e-10)
 
@@ -103,8 +101,7 @@ class TestInformationCriteria:
     def test_bic_formula(self, metrics_obj):
         """BIC = -2*LL + log(n)*edf."""
         expected = (
-            -2.0 * metrics_obj.log_likelihood
-            + np.log(metrics_obj.n_obs) * metrics_obj.effective_df
+            -2.0 * metrics_obj.log_likelihood + np.log(metrics_obj.n_obs) * metrics_obj.effective_df
         )
         np.testing.assert_allclose(metrics_obj.bic, expected)
 
@@ -125,6 +122,48 @@ class TestInformationCriteria:
     def test_ebic_gamma_zero_equals_bic(self, metrics_obj):
         """EBIC(gamma=0) == BIC."""
         np.testing.assert_allclose(metrics_obj.ebic(gamma=0.0), metrics_obj.bic, atol=1e-10)
+
+
+# ── Null model ────────────────────────────────────────────────────
+
+
+class TestNullModel:
+    def test_null_mu_equals_weighted_mean(self):
+        """_null_mu should be the weighted mean of y, not a zero-replaced mean."""
+        rng = np.random.default_rng(42)
+        n = 1000
+        x = rng.standard_normal(n)
+        # Sparse Poisson: many zeros
+        eta = -1.5 + 0.3 * x
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(family="poisson", lambda1=0, features={"x": Numeric()})
+        model.fit(X, y)
+        m = model.metrics(X, y)
+
+        expected_null_mu = np.average(y, weights=np.ones(n))
+        np.testing.assert_allclose(m._null_mu[0], expected_null_mu, rtol=1e-6)
+
+    def test_null_mu_with_offset(self):
+        """_null_mu with offset should satisfy the score equation, not ignore offset."""
+        rng = np.random.default_rng(55)
+        n = 500
+        x = rng.standard_normal(n)
+        offset = rng.standard_normal(n) * 0.5
+        eta = 0.3 + 0.2 * x + offset
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(family="poisson", lambda1=0, features={"x": Numeric()})
+        model.fit(X, y, offset=offset)
+        m = model.metrics(X, y, offset=offset)
+
+        # Null mu should NOT be constant when offset is present
+        assert m._null_mu.std() > 0.01
+        # Score equation: sum(w*(y - mu)) should be near zero at the MLE
+        score = np.sum(y - m._null_mu)
+        assert abs(score) < 1.0
 
 
 # ── Deviance ──────────────────────────────────────────────────────
@@ -176,6 +215,56 @@ class TestResiduals:
         r = metrics_obj.residuals("quantile")
         assert abs(np.mean(r)) < 0.3
         assert 0.5 < np.std(r) < 1.5
+
+    def test_quantile_residuals_gamma(self):
+        """Quantile residuals for Gamma should be approximately N(0,1)."""
+        rng = np.random.default_rng(42)
+        n = 1000
+        x = rng.standard_normal(n)
+        mu = np.exp(1.0 + 0.3 * x)
+        shape = 5.0  # phi = 1/shape = 0.2
+        y = rng.gamma(shape, scale=mu / shape, size=n)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="gamma",
+            lambda1=0.001,
+            features={"x": Numeric()},
+        )
+        model.fit(X, y)
+        m = model.metrics(X, y)
+        r = m.residuals("quantile")
+
+        assert r.shape == (n,)
+        assert abs(np.mean(r)) < 0.15
+        assert 0.7 < np.std(r) < 1.3
+
+    def test_quantile_residuals_tweedie(self):
+        """Quantile residuals for Tweedie should be approximately standard normal."""
+        from superglm.tweedie_profile import generate_tweedie_cpg
+
+        rng = np.random.default_rng(42)
+        n = 2000
+        x = rng.standard_normal(n)
+        mu = np.exp(1.0 + 0.3 * x)
+        y = generate_tweedie_cpg(n, mu, phi=1.0, p=1.5, rng=rng)
+        y = np.maximum(y, 0.0)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            lambda1=0.001,
+            features={"x": Numeric()},
+        )
+        model.fit(X, y)
+        m = model.metrics(X, y)
+        qr = m.residuals("quantile")
+
+        assert qr.shape == (n,)
+        assert np.all(np.isfinite(qr))
+        # Well-specified model: quantile residuals should be ~N(0,1)
+        assert abs(np.mean(qr)) < 0.15
+        assert abs(np.std(qr) - 1.0) < 0.15
 
 
 # ── Leverage ──────────────────────────────────────────────────────
@@ -319,9 +408,7 @@ class TestSummaryMixedFeatures:
         region = rng.choice(["A", "B", "C"], n)
         age = rng.uniform(0, 10, n)
         mu = np.exp(
-            0.3 * x1
-            + np.where(region == "B", 0.5, np.where(region == "C", -0.3, 0))
-            + 0.05 * age
+            0.3 * x1 + np.where(region == "B", 0.5, np.where(region == "C", -0.3, 0)) + 0.05 * age
         )
         y = rng.poisson(mu).astype(float)
         X = pd.DataFrame({"x1": x1, "region": region, "age": age})
@@ -348,7 +435,7 @@ class TestSummaryMixedFeatures:
         assert "region[" in text
         # Spline per-coefficient rows
         assert "spline" in text
-        assert "Wald chi2" in text
+        assert "chi2(" in text
 
     def test_mixed_summary_html(self, mixed_model):
         """HTML summary with all feature types."""
@@ -454,9 +541,7 @@ class TestCoefficientSE:
         m = model.metrics(X, y, exposure=w)
         for name in ["x1", "x2"]:
             se = m.coefficient_se[name][0]
-            coef = abs(model.result.beta[
-                next(g for g in model._groups if g.name == name).sl
-            ][0])
+            coef = abs(model.result.beta[next(g for g in model._groups if g.name == name).sl][0])
             # SE should be < coefficient for n=500 with reasonable signal
             assert se < coef * 5, f"SE too large relative to coef for {name}"
 
@@ -650,7 +735,7 @@ class TestRelativitiesWithSE:
 
         # Wald chi2 tests should be finite
         text = str(m.summary())
-        assert "Wald" in text
+        assert "chi2(" in text
         assert np.isfinite(m.aic)
 
     def test_gamma_se_differs_from_raw(self):
@@ -676,3 +761,252 @@ class TestRelativitiesWithSE:
         assert se_corr != se_raw
         # Corrected = sqrt(phi) * raw
         np.testing.assert_allclose(se_corr, np.sqrt(m.phi) * se_raw, rtol=1e-10)
+
+
+# ── Offset SE consistency (model-level vs metrics-level) ───────
+
+
+class TestOffsetSEConsistency:
+    """Model-level SEs (relativities) must match metrics-level SEs when offset is present."""
+
+    def test_spline_se_agrees_with_offset(self):
+        rng = np.random.default_rng(99)
+        n = 1000
+        x = rng.uniform(0, 1, n)
+        offset = rng.standard_normal(n) * 0.3
+        eta = 0.5 + np.sin(2 * np.pi * x) * 0.4 + offset
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0,
+            features={"x": Spline(n_knots=8)},
+        )
+        model.fit(X, y, offset=offset)
+
+        # Model-level SE (from _coef_covariance via relativities)
+        rels = model.relativities(with_se=True)
+        model_se = rels["x"]["se_log_relativity"].values
+
+        # Metrics-level SE (from _active_info via feature_se)
+        m = model.metrics(X, y, offset=offset)
+        fse = m.feature_se("x")
+        metrics_se = fse["se_log_relativity"]
+
+        # Both paths should agree (they compute the same Bayesian covariance)
+        np.testing.assert_allclose(model_se, metrics_se, rtol=0.05)
+
+    def test_categorical_se_agrees_with_offset(self):
+        rng = np.random.default_rng(77)
+        n = 1000
+        groups = rng.choice(["A", "B", "C", "D"], n)
+        offset = rng.standard_normal(n) * 0.5
+        effects = {"A": 0.0, "B": 0.3, "C": -0.2, "D": 0.5}
+        eta = np.array([effects[g] for g in groups]) + offset
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"g": groups})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0,
+            features={"g": Categorical()},
+        )
+        model.fit(X, y, offset=offset)
+
+        rels = model.relativities(with_se=True)
+        # relativities includes base level (SE=0); filter to non-base
+        rel_df = rels["g"]
+        non_base = rel_df[rel_df["se_log_relativity"] > 0]
+        model_se = non_base["se_log_relativity"].values
+
+        m = model.metrics(X, y, offset=offset)
+        fse = m.feature_se("g")
+        metrics_se = fse["se_log_relativity"]
+
+        np.testing.assert_allclose(model_se, metrics_se, rtol=0.05)
+
+
+# ── Coverage gap tests ──────────────────────────────────────────
+
+
+class TestNBProfileSummary:
+    """NB2 profile result appears in ASCII and HTML summary."""
+
+    def test_nb_profile_summary(self):
+        from superglm.distributions import NegativeBinomial
+
+        rng = np.random.default_rng(42)
+        n = 1000
+        true_theta = 5.0
+        x = rng.standard_normal(n)
+        mu = np.exp(0.5 + 0.3 * x)
+        p_nb = true_theta / (mu + true_theta)
+        y = rng.negative_binomial(true_theta, p_nb).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            lambda1=0.001,
+            features={"x": Numeric()},
+        )
+        model.estimate_theta(X, y)
+        m = model.metrics(X, y)
+        text = str(m.summary())
+        assert "Theta" in text
+        assert "[" in text  # CI brackets
+        html = m.summary()._repr_html_()
+        assert "Theta" in html
+
+
+class TestTweedieProfileSummary:
+    """Tweedie p profile result appears in ASCII and HTML summary."""
+
+    def test_tweedie_profile_summary(self):
+        from superglm.tweedie_profile import generate_tweedie_cpg
+
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 5, n)
+        mu = np.exp(1.0 + 0.2 * x)
+        y = generate_tweedie_cpg(n, mu, phi=1.0, p=1.5, rng=rng)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="tweedie",
+            tweedie_p=1.5,
+            lambda1=0.0,
+            features={"x": Numeric()},
+        )
+        model.estimate_p(X, y, p_bounds=(1.1, 1.9))
+        m = model.metrics(X, y)
+        text = str(m.summary())
+        assert "Tweedie p" in text
+        html = m.summary()._repr_html_()
+        assert "Tweedie p" in html
+
+
+class TestInactiveSummaryRendering:
+    """Inactive spline and coefficient rendering in summary."""
+
+    def test_inactive_spline_summary_rendering(self):
+        rng = np.random.default_rng(42)
+        n = 300
+        x = rng.uniform(0, 10, n)
+        y = rng.poisson(1.0, n).astype(float)  # pure noise
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            lambda1=1e6,
+            features={"x": Spline(n_knots=8)},
+        )
+        model.fit(X, y)
+        m = model.metrics(X, y)
+        text = str(m.summary())
+        assert "inactive" in text
+        html = m.summary()._repr_html_()
+        assert "inactive" in html
+        fse = m.feature_se("x")
+        assert np.all(fse["se_log_relativity"] == 0)
+
+    def test_inactive_coef_summary_rendering(self):
+        rng = np.random.default_rng(42)
+        n = 300
+        x1 = rng.uniform(0, 5, n)
+        x2 = rng.uniform(0, 5, n)  # noise feature
+        y = rng.poisson(np.exp(0.5 + 0.3 * x1)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        model = SuperGLM(
+            family="poisson",
+            lambda1=10.0,
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        model.fit(X, y)
+        m = model.metrics(X, y)
+        text = str(m.summary())
+        html = m.summary()._repr_html_()
+        # At least one feature should show "---" (inactive coef)
+        assert "---" in text or "inactive" in text
+        assert "---" in html or "inactive" in html
+
+
+class TestPolynomialCategoricalSummary:
+    """PolynomialCategorical interaction Wald test in summary."""
+
+    def test_polynomial_categorical_summary(self):
+        from superglm.features.polynomial import Polynomial
+
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 5, n)
+        cat = rng.choice(["A", "B", "C"], n)
+        eta = 0.5 + 0.1 * x + 0.3 * (cat == "B")
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x": x, "cat": cat})
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.0,
+            features={"x": Polynomial(degree=2), "cat": Categorical()},
+            interactions=[("x", "cat")],
+        )
+        model.fit(X, y)
+        m = model.metrics(X, y)
+        text = str(m.summary())
+        assert "x:cat" in text
+        html = m.summary()._repr_html_()
+        assert "x:cat" in html
+
+
+class TestAICcEdgeCase:
+    """AICc with near-saturated model."""
+
+    def test_aicc_saturated_model(self):
+        """AICc returns inf when effective_df >= n - 1."""
+        rng = np.random.default_rng(42)
+        n = 50
+        x = rng.uniform(0, 10, n)
+        y = rng.poisson(np.exp(0.5 + 0.1 * x)).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.0,
+            features={"x": Numeric()},
+        )
+        model.fit(X, y)
+        m = model.metrics(X, y)
+        # Patch effective_df to force the denom <= 0 branch
+        original_edf = m._result.effective_df
+        m._result.effective_df = float(n)  # n - edf - 1 = -1 <= 0
+        assert m.aicc == np.inf
+        m._result.effective_df = original_edf  # restore
+
+
+class TestSummaryHelpers:
+    """Edge cases in summary helper functions."""
+
+    def test_summary_helpers_edge_cases(self):
+        from superglm.summary import _compute_coef_stats, _sig_stars
+
+        z, p, lo, hi = _compute_coef_stats(1.0, 0.0)
+        assert all(np.isnan(v) for v in (z, p, lo, hi))
+        assert _sig_stars(None) == ""
+        assert _sig_stars(np.nan) == ""
+
+
+class TestNumericUnstandardizedSE:
+    """feature_se with standardize=False Numeric."""
+
+    def test_numeric_unstandardized_se(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 5, n)
+        y = rng.poisson(np.exp(0.5 + 0.2 * x)).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.0,
+            features={"x": Numeric(standardize=False)},
+        )
+        model.fit(X, y)
+        m = model.metrics(X, y)
+        fse = m.feature_se("x")
+        assert "se_coef" in fse
+        assert fse["se_coef"] > 0

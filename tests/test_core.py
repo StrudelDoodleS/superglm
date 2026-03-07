@@ -4,11 +4,11 @@ import numpy as np
 import pytest
 
 from superglm.distributions import Gamma, Poisson, Tweedie
-from superglm.types import GroupSlice
-from superglm.features.numeric import Numeric
 from superglm.features.categorical import Categorical
-from superglm.features.spline import Spline
+from superglm.features.numeric import Numeric
+from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline, _SplineBase
 from superglm.penalties.group_lasso import GroupLasso
+from superglm.types import GroupSlice
 
 
 class TestDistributions:
@@ -82,7 +82,7 @@ class TestSpline:
 
     def test_nonnegative(self):
         info = Spline(n_knots=10).build(np.linspace(0, 100, 500))
-        cols = info.columns.toarray() if hasattr(info.columns, 'toarray') else info.columns
+        cols = info.columns.toarray() if hasattr(info.columns, "toarray") else info.columns
         assert np.all(cols >= -1e-15)
 
     def test_n_basis(self):
@@ -97,6 +97,185 @@ class TestSpline:
     def test_ssp_flag(self):
         assert Spline(penalty="ssp").build(np.linspace(0, 1, 50)).reparametrize is True
         assert Spline(penalty="none").build(np.linspace(0, 1, 50)).reparametrize is False
+
+
+class TestNaturalSpline:
+    """Tests for NaturalSpline boundary constraints."""
+
+    def test_natural_n_basis(self):
+        """K-2 columns (e.g., 12 for n_knots=10)."""
+        info = NaturalSpline(n_knots=10).build(np.linspace(0, 1, 200))
+        assert info.n_cols == 10 + 4 - 2  # K - 2
+
+    def test_natural_penalty_psd(self):
+        """Projected penalty is positive semi-definite."""
+        info = NaturalSpline(n_knots=10).build(np.linspace(0, 1, 200))
+        eigvals = np.linalg.eigvalsh(info.penalty_matrix)
+        assert np.all(eigvals >= -1e-10)
+
+    def test_natural_zero_second_deriv_at_boundaries(self):
+        """f''(lo) ~ 0 and f''(hi) ~ 0 for any coefficient in the constrained space."""
+        from scipy.interpolate import BSpline as BSpl
+
+        sp = NaturalSpline(n_knots=10)
+        sp.build(np.linspace(0, 100, 500))
+        Z = sp._Z
+        rng = np.random.default_rng(42)
+        for _ in range(10):
+            alpha = rng.standard_normal(Z.shape[1])
+            beta_orig = Z @ alpha  # (K,) in original B-spline space
+            spl = BSpl(sp._knots, beta_orig, sp.degree)
+            np.testing.assert_allclose(spl(sp._lo, nu=2), 0.0, atol=1e-10)
+            np.testing.assert_allclose(spl(sp._hi, nu=2), 0.0, atol=1e-10)
+
+    def test_natural_penalty_null_space_1d(self):
+        """omega_nat has rank K-3 and 1D null space (constant only)."""
+        info = NaturalSpline(n_knots=10).build(np.linspace(0, 1, 200))
+        eigvals = np.linalg.eigvalsh(info.penalty_matrix)
+        n_null = np.sum(eigvals < 1e-10)
+        assert n_null == 1  # constant only; linear absorbed by natural constraints
+
+    def test_natural_projection_shape(self):
+        """GroupInfo.projection is (K, K-2)."""
+        sp = NaturalSpline(n_knots=10)
+        info = sp.build(np.linspace(0, 1, 200))
+        K = sp._n_basis
+        assert info.projection is not None
+        assert info.projection.shape == (K, K - 2)
+
+
+class TestSplineBaseHierarchy:
+    """Tests for _SplineBase class hierarchy and knot features."""
+
+    def test_spline_base_not_directly_usable(self):
+        """_SplineBase._build_penalty raises NotImplementedError."""
+        base = _SplineBase(n_knots=5)
+        with pytest.raises(NotImplementedError):
+            base.build(np.linspace(0, 1, 100))
+
+    def test_isinstance_base(self):
+        """Both Spline and NaturalSpline are instances of _SplineBase."""
+        assert isinstance(Spline(n_knots=5), _SplineBase)
+        assert isinstance(NaturalSpline(n_knots=5), _SplineBase)
+
+    def test_explicit_knots(self):
+        """Spline(knots=[...]) places those exact interior knots."""
+        knots = np.array([20.0, 40.0, 60.0, 80.0])
+        sp = Spline(knots=knots)
+        sp.build(np.linspace(0, 100, 500))
+        interior = sp._knots[sp.degree + 1 : -(sp.degree + 1)]
+        np.testing.assert_array_equal(interior, knots)
+        assert sp.n_knots == 4
+
+    def test_explicit_knots_frozen_on_refit(self):
+        """Same knots used regardless of data distribution."""
+        knots = np.array([20.0, 40.0, 60.0, 80.0])
+        sp = Spline(knots=knots)
+        # Fit on uniform data
+        sp.build(np.linspace(0, 100, 500))
+        interior1 = sp._knots[sp.degree + 1 : -(sp.degree + 1)].copy()
+        # Refit on skewed data
+        sp.build(np.concatenate([np.linspace(0, 10, 400), np.linspace(90, 100, 100)]))
+        interior2 = sp._knots[sp.degree + 1 : -(sp.degree + 1)]
+        np.testing.assert_array_equal(interior1, interior2)
+
+    def test_explicit_knots_natural_spline(self):
+        """NaturalSpline also accepts explicit knots."""
+        knots = np.array([25.0, 50.0, 75.0])
+        sp = NaturalSpline(knots=knots)
+        info = sp.build(np.linspace(0, 100, 300))
+        interior = sp._knots[sp.degree + 1 : -(sp.degree + 1)]
+        np.testing.assert_array_equal(interior, knots)
+        # NaturalSpline with 3 interior knots: K = 3+3+1 = 7, K-2 = 5
+        assert info.n_cols == sp._n_basis - 2
+
+    def test_uniform_default(self):
+        """Spline() uses uniform strategy by default."""
+        sp = Spline(n_knots=5)
+        assert sp.knot_strategy == "uniform"
+        sp.build(np.linspace(0, 100, 500))
+        interior = sp._knots[sp.degree + 1 : -(sp.degree + 1)]
+        expected = np.linspace(0, 100, 7)[1:-1]
+        np.testing.assert_allclose(interior, expected, atol=1e-10)
+
+    def test_invalid_knots_raises(self):
+        """Empty knots array raises ValueError."""
+        with pytest.raises(ValueError, match="non-empty"):
+            Spline(knots=np.array([]))
+
+
+class TestCubicRegressionSpline:
+    """Tests for CubicRegressionSpline (integrated f'' squared penalty + natural constraints)."""
+
+    def test_cr_n_basis(self):
+        """K-2 columns after natural boundary constraints."""
+        sp = CubicRegressionSpline(n_knots=10)
+        info = sp.build(np.linspace(0, 1, 200))
+        assert info.n_cols == 10 + 4 - 2  # K - 2
+
+    def test_cr_penalty_psd(self):
+        """Integrated penalty is positive semi-definite."""
+        info = CubicRegressionSpline(n_knots=10).build(np.linspace(0, 1, 200))
+        eigvals = np.linalg.eigvalsh(info.penalty_matrix)
+        assert np.all(eigvals >= -1e-10)
+
+    def test_cr_natural_boundary(self):
+        """f''(lo) = f''(hi) = 0 for random coefficients in the constrained space."""
+        from scipy.interpolate import BSpline as BSpl
+
+        sp = CubicRegressionSpline(n_knots=10)
+        sp.build(np.linspace(0, 100, 500))
+        Z = sp._Z
+        rng = np.random.default_rng(42)
+        for _ in range(10):
+            alpha = rng.standard_normal(Z.shape[1])
+            beta_orig = Z @ alpha
+            spl = BSpl(sp._knots, beta_orig, sp.degree)
+            np.testing.assert_allclose(spl(sp._lo, nu=2), 0.0, atol=1e-10)
+            np.testing.assert_allclose(spl(sp._hi, nu=2), 0.0, atol=1e-10)
+
+    def test_cr_penalty_null_space_2d(self):
+        """Projected penalty has 2D null space (constant + linear).
+
+        Unlike D2'D2 where the linear-in-index direction doesn't survive
+        natural constraints (because coefficients (0,1,...,K-1) don't
+        represent a truly linear function with clamped knots), the
+        integrated f''² null space IS the set of truly affine functions,
+        which all satisfy f''(boundary) = 0 by definition.
+        """
+        info = CubicRegressionSpline(n_knots=10).build(np.linspace(0, 1, 200))
+        eigvals = np.linalg.eigvalsh(info.penalty_matrix)
+        n_null = np.sum(eigvals < 1e-10)
+        assert n_null == 2
+
+    def test_cr_penalty_differs_from_pspline(self):
+        """Integrated penalty != discrete D2'D2 (after projection)."""
+        x = np.linspace(0, 1, 200)
+        cr = CubicRegressionSpline(n_knots=10)
+        ns = NaturalSpline(n_knots=10)
+        cr_info = cr.build(x)
+        ns_info = ns.build(x)
+        # Same shape but different values
+        assert cr_info.penalty_matrix.shape == ns_info.penalty_matrix.shape
+        assert not np.allclose(cr_info.penalty_matrix, ns_info.penalty_matrix)
+
+    def test_cr_isinstance_base(self):
+        """CubicRegressionSpline is an instance of _SplineBase."""
+        assert isinstance(CubicRegressionSpline(n_knots=5), _SplineBase)
+
+    def test_cr_degree_always_3(self):
+        """.degree == 3 regardless."""
+        assert CubicRegressionSpline(n_knots=5).degree == 3
+        assert CubicRegressionSpline(n_knots=20).degree == 3
+
+    def test_cr_explicit_knots(self):
+        """knots param works."""
+        knots = np.array([20.0, 40.0, 60.0, 80.0])
+        sp = CubicRegressionSpline(knots=knots)
+        sp.build(np.linspace(0, 100, 500))
+        interior = sp._knots[sp.degree + 1 : -(sp.degree + 1)]
+        np.testing.assert_array_equal(interior, knots)
+        assert sp.n_knots == 4
 
 
 class TestProximal:
@@ -122,9 +301,7 @@ class TestProximal:
         groups = [GroupSlice("g", 0, 3, weight=1.0)]
         beta = np.array([3.0, 4.0, 0.0])
         r = self._prox(beta, groups, lambda1=1.0)
-        np.testing.assert_allclose(
-            beta / np.linalg.norm(beta), r / np.linalg.norm(r), atol=1e-10
-        )
+        np.testing.assert_allclose(beta / np.linalg.norm(beta), r / np.linalg.norm(r), atol=1e-10)
 
     def test_groups_independent(self):
         groups = [GroupSlice("s", 0, 2, 1.0), GroupSlice("b", 2, 4, 1.0)]
@@ -143,8 +320,9 @@ class TestBCDSolver:
     """Tests for the block coordinate descent inner solver."""
 
     def test_group_lipschitz_positive(self):
-        from superglm.solvers.pirls import _compute_group_hessians
         from superglm.group_matrix import DenseGroupMatrix
+        from superglm.solvers.pirls import _compute_group_hessians
+
         rng = np.random.default_rng(42)
         X = rng.standard_normal((100, 10))
         W = np.ones(100)
@@ -155,8 +333,9 @@ class TestBCDSolver:
         assert len(chol_groups) == 2
 
     def test_group_lipschitz_le_global(self):
-        from superglm.solvers.pirls import _compute_group_hessians
         from superglm.group_matrix import DenseGroupMatrix
+        from superglm.solvers.pirls import _compute_group_hessians
+
         rng = np.random.default_rng(42)
         X = rng.standard_normal((100, 10))
         W = np.ones(100)
@@ -169,6 +348,7 @@ class TestBCDSolver:
 
     def test_bcd_converges(self):
         from superglm.solvers.pirls import fit_pirls
+
         rng = np.random.default_rng(42)
         n, p = 200, 5
         X = rng.standard_normal((n, p))
@@ -181,12 +361,14 @@ class TestBCDSolver:
             GroupSlice("b", 2, 5, np.sqrt(3)),
         ]
         from superglm.links import LogLink
+
         result = fit_pirls(X, y, weights, Poisson(), LogLink(), groups, GroupLasso(lambda1=0.01))
         assert result.converged
 
     def test_bcd_few_inner_iters(self):
         """BCD should converge in far fewer than 50 inner iterations."""
         from superglm.solvers.pirls import fit_pirls
+
         rng = np.random.default_rng(42)
         n = 200
         X = rng.standard_normal((n, 3))
@@ -194,8 +376,198 @@ class TestBCDSolver:
         y = np.maximum(y, 0.01)
         groups = [GroupSlice("a", 0, 2, np.sqrt(2)), GroupSlice("b", 2, 3, 1.0)]
         from superglm.links import LogLink
+
         result = fit_pirls(
-            X, y, np.ones(n), Poisson(), LogLink(), groups, GroupLasso(lambda1=0.01),
+            X,
+            y,
+            np.ones(n),
+            Poisson(),
+            LogLink(),
+            groups,
+            GroupLasso(lambda1=0.01),
         )
         # Should converge with reasonable outer iters (not maxing out at 50)
         assert result.n_iter < 50
+
+
+class TestAndersonAcceleration:
+    """Tests for Anderson acceleration in the PIRLS solver."""
+
+    @pytest.fixture
+    def poisson_problem(self):
+        from superglm.links import LogLink
+
+        rng = np.random.default_rng(42)
+        n, p = 300, 8
+        X = rng.standard_normal((n, p))
+        beta_true = np.array([1.0, 0.5, 0.0, 0.0, -0.3, 0.0, 0.0, 0.2])
+        y = rng.poisson(np.exp(X @ beta_true)).astype(float)
+        y = np.maximum(y, 0.01)
+        weights = np.ones(n)
+        groups = [
+            GroupSlice("a", 0, 3, np.sqrt(3)),
+            GroupSlice("b", 3, 5, np.sqrt(2)),
+            GroupSlice("c", 5, 8, np.sqrt(3)),
+        ]
+        return X, y, weights, groups, Poisson(), LogLink()
+
+    def test_anderson_converges(self, poisson_problem):
+        """Anderson acceleration should converge to a solution."""
+        from superglm.solvers.pirls import fit_pirls
+
+        X, y, w, groups, family, link = poisson_problem
+        result = fit_pirls(
+            X,
+            y,
+            w,
+            family,
+            link,
+            groups,
+            GroupLasso(lambda1=0.05),
+            anderson_memory=5,
+        )
+        assert result.converged
+
+    def test_anderson_matches_baseline(self, poisson_problem):
+        """Anderson and non-Anderson should converge to the same solution."""
+        from superglm.solvers.pirls import fit_pirls
+
+        X, y, w, groups, family, link = poisson_problem
+        pen_args = dict(lambda1=0.05)
+
+        baseline = fit_pirls(
+            X,
+            y,
+            w,
+            family,
+            link,
+            groups,
+            GroupLasso(**pen_args),
+        )
+        anderson = fit_pirls(
+            X,
+            y,
+            w,
+            family,
+            link,
+            groups,
+            GroupLasso(**pen_args),
+            anderson_memory=5,
+        )
+        # Same solution (deviance should match closely)
+        assert anderson.deviance == pytest.approx(baseline.deviance, rel=1e-4)
+        np.testing.assert_allclose(anderson.beta, baseline.beta, atol=1e-3)
+
+    def test_anderson_memory_sizes(self, poisson_problem):
+        """Different memory sizes should all converge."""
+        from superglm.solvers.pirls import fit_pirls
+
+        X, y, w, groups, family, link = poisson_problem
+        for m in [1, 3, 5, 10]:
+            result = fit_pirls(
+                X,
+                y,
+                w,
+                family,
+                link,
+                groups,
+                GroupLasso(lambda1=0.05),
+                anderson_memory=m,
+            )
+            assert result.converged, f"anderson_memory={m} did not converge"
+
+
+class TestActiveSet:
+    """Tests for active-set BCD optimization."""
+
+    @pytest.fixture
+    def sparse_problem(self):
+        """Problem where many groups should be zeroed (high lambda)."""
+        from superglm.links import LogLink
+
+        rng = np.random.default_rng(42)
+        n = 300
+        X = rng.standard_normal((n, 10))
+        # Only first group matters
+        y = rng.poisson(np.exp(0.5 * X[:, 0])).astype(float)
+        y = np.maximum(y, 0.01)
+        weights = np.ones(n)
+        groups = [
+            GroupSlice("a", 0, 2, np.sqrt(2)),
+            GroupSlice("b", 2, 4, np.sqrt(2)),
+            GroupSlice("c", 4, 6, np.sqrt(2)),
+            GroupSlice("d", 6, 8, np.sqrt(2)),
+            GroupSlice("e", 8, 10, np.sqrt(2)),
+        ]
+        return X, y, weights, groups, Poisson(), LogLink()
+
+    def test_active_set_converges(self, sparse_problem):
+        from superglm.solvers.pirls import fit_pirls
+
+        X, y, w, groups, family, link = sparse_problem
+        result = fit_pirls(
+            X,
+            y,
+            w,
+            family,
+            link,
+            groups,
+            GroupLasso(lambda1=0.1),
+            active_set=True,
+        )
+        assert result.converged
+
+    def test_active_set_matches_baseline(self, sparse_problem):
+        """Active-set should produce the same solution as baseline."""
+        from superglm.solvers.pirls import fit_pirls
+
+        X, y, w, groups, family, link = sparse_problem
+        baseline = fit_pirls(
+            X,
+            y,
+            w,
+            family,
+            link,
+            groups,
+            GroupLasso(lambda1=0.1),
+        )
+        active = fit_pirls(
+            X,
+            y,
+            w,
+            family,
+            link,
+            groups,
+            GroupLasso(lambda1=0.1),
+            active_set=True,
+        )
+        assert active.deviance == pytest.approx(baseline.deviance, rel=1e-4)
+        np.testing.assert_allclose(active.beta, baseline.beta, atol=1e-3)
+
+    def test_active_set_with_anderson(self, sparse_problem):
+        """Active-set + Anderson should converge and match baseline."""
+        from superglm.solvers.pirls import fit_pirls
+
+        X, y, w, groups, family, link = sparse_problem
+        baseline = fit_pirls(
+            X,
+            y,
+            w,
+            family,
+            link,
+            groups,
+            GroupLasso(lambda1=0.1),
+        )
+        combined = fit_pirls(
+            X,
+            y,
+            w,
+            family,
+            link,
+            groups,
+            GroupLasso(lambda1=0.1),
+            anderson_memory=5,
+            active_set=True,
+        )
+        assert combined.converged
+        assert combined.deviance == pytest.approx(baseline.deviance, rel=1e-4)

@@ -1,9 +1,10 @@
 """Per-group matrix wrappers for sparse/dense BCD operations.
 
-Three wrapper types with the same interface:
+Four wrapper types with the same interface:
 - DenseGroupMatrix: numeric features (single column) or dense fallback
 - SparseGroupMatrix: categoricals, non-SSP splines
 - SparseSSPGroupMatrix: SSP splines (factored: sparse B + dense R_inv)
+- DiscretizedSSPGroupMatrix: discretized SSP splines (binned B_unique + index)
 
 DesignMatrix holds the list and provides full-matrix matvec/rmatvec.
 """
@@ -61,6 +62,9 @@ class DenseGroupMatrix:
     def toarray(self) -> NDArray:
         return self.M
 
+    def row_subset(self, idx: NDArray) -> DenseGroupMatrix:
+        return DenseGroupMatrix(self.M[idx])
+
 
 class SparseGroupMatrix:
     """Sparse CSR group matrix wrapper."""
@@ -85,6 +89,9 @@ class SparseGroupMatrix:
     def toarray(self) -> NDArray:
         return self.M.toarray()
 
+    def row_subset(self, idx: NDArray) -> SparseGroupMatrix:
+        return SparseGroupMatrix(self.M[idx])
+
 
 class SparseSSPGroupMatrix:
     """Factored SSP group matrix: stores sparse B + dense R_inv separately.
@@ -92,7 +99,17 @@ class SparseSSPGroupMatrix:
     Effective matrix is B @ R_inv, but we never form it explicitly.
     """
 
-    __slots__ = ("B", "_data", "_indices", "_indptr", "_p_b", "R_inv", "shape")
+    __slots__ = (
+        "B",
+        "_data",
+        "_indices",
+        "_indptr",
+        "_p_b",
+        "R_inv",
+        "shape",
+        "omega",
+        "projection",
+    )
 
     def __init__(self, B_csr: sp.spmatrix, R_inv: NDArray):
         self.B = sp.csr_matrix(B_csr)
@@ -102,6 +119,8 @@ class SparseSSPGroupMatrix:
         self._p_b = self.B.shape[1]
         self.R_inv = np.asarray(R_inv)
         self.shape = (self.B.shape[0], self.R_inv.shape[1])
+        self.omega = None  # (K, K) B-spline-space penalty, set externally
+        self.projection = None  # (K, n_sub) projection matrix, set externally
 
     def matvec(self, v: NDArray) -> NDArray:
         # B @ (R_inv @ v): tiny dense first, then sparse matvec
@@ -119,8 +138,133 @@ class SparseSSPGroupMatrix:
     def toarray(self) -> NDArray:
         return np.asarray(self.B @ self.R_inv)
 
+    def row_subset(self, idx: NDArray) -> SparseSSPGroupMatrix:
+        sub = SparseSSPGroupMatrix(self.B[idx], self.R_inv)
+        sub.omega = self.omega
+        sub.projection = self.projection
+        return sub
 
-GroupMatrix = DenseGroupMatrix | SparseGroupMatrix | SparseSSPGroupMatrix
+
+def _discretize_column(x: NDArray, n_bins: int = 256) -> tuple[NDArray, NDArray]:
+    """Bin a continuous variable into n_bins equal-width bins.
+
+    Returns (bin_centers, bin_idx) where bin_idx[i] is the bin index for x[i].
+    """
+    lo, hi = float(x.min()), float(x.max())
+    if lo == hi:
+        return np.array([lo]), np.zeros(len(x), dtype=np.intp)
+    edges = np.linspace(lo, hi, n_bins + 1)
+    bin_idx = np.clip(np.searchsorted(edges, x, side="right") - 1, 0, n_bins - 1)
+    bin_centers = 0.5 * (edges[:-1] + edges[1:])
+    return bin_centers, bin_idx
+
+
+class DiscretizedSSPGroupMatrix:
+    """Discretized SSP group matrix: stores dense B_unique + bin index.
+
+    Instead of a sparse (n, K) basis matrix, stores a dense (n_bins, K) matrix
+    evaluated at bin centers plus an (n,) index array mapping observations to bins.
+    All operations aggregate weights by bin first, reducing O(n) matrix work
+    to O(n_bins) + O(n) scatter/gather.
+    """
+
+    __slots__ = (
+        "B_unique",
+        "R_inv",
+        "bin_idx",
+        "n_bins",
+        "shape",
+        "omega",
+        "projection",
+    )
+
+    def __init__(self, B_unique: NDArray, R_inv: NDArray, bin_idx: NDArray):
+        self.B_unique = np.asarray(B_unique)  # (n_bins, K)
+        self.R_inv = np.asarray(R_inv)  # (K, p_g)
+        self.bin_idx = np.asarray(bin_idx, dtype=np.intp)  # (n,)
+        self.n_bins = self.B_unique.shape[0]
+        self.shape = (len(bin_idx), self.R_inv.shape[1])
+        self.omega = None  # (K, K) B-spline-space penalty, set externally
+        self.projection = None  # (K, n_sub) projection matrix, set externally
+
+    def matvec(self, v: NDArray) -> NDArray:
+        # B_unique @ (R_inv @ v) is (n_bins,), scatter to (n,)
+        vals = self.B_unique @ (self.R_inv @ v)
+        return vals[self.bin_idx]
+
+    def rmatvec(self, w: NDArray) -> NDArray:
+        # Aggregate w by bin, then dense rmatvec
+        w_agg = np.bincount(self.bin_idx, weights=w, minlength=self.n_bins)
+        return self.R_inv.T @ (self.B_unique.T @ w_agg)
+
+    def gram(self, W: NDArray) -> NDArray:
+        # Aggregate W by bin, then dense gram, then sandwich with R_inv
+        W_agg = np.bincount(self.bin_idx, weights=W, minlength=self.n_bins)
+        BtWB = self.B_unique.T @ (self.B_unique * W_agg[:, None])
+        return self.R_inv.T @ BtWB @ self.R_inv
+
+    def toarray(self) -> NDArray:
+        return (self.B_unique @ self.R_inv)[self.bin_idx]
+
+    def row_subset(self, idx: NDArray) -> DiscretizedSSPGroupMatrix:
+        sub = DiscretizedSSPGroupMatrix(self.B_unique, self.R_inv, self.bin_idx[idx])
+        sub.omega = self.omega
+        sub.projection = self.projection
+        return sub
+
+
+GroupMatrix = (
+    DenseGroupMatrix | SparseGroupMatrix | SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix
+)
+
+
+def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
+    """Compute X_i.T @ diag(W) @ X_j efficiently.
+
+    For two DiscretizedSSPGroupMatrix, uses a 2D weight histogram to avoid
+    materializing either (n, p) matrix. Otherwise falls back to materializing
+    the smaller group and using rmatvec on the larger.
+    """
+    if isinstance(gm_i, DiscretizedSSPGroupMatrix) and isinstance(gm_j, DiscretizedSSPGroupMatrix):
+        # 2D histogram: bin weights by (bin_i, bin_j) jointly
+        joint_idx = gm_i.bin_idx * gm_j.n_bins + gm_j.bin_idx
+        W_2d = np.bincount(joint_idx, weights=W, minlength=gm_i.n_bins * gm_j.n_bins).reshape(
+            gm_i.n_bins, gm_j.n_bins
+        )
+        BtWB = gm_i.B_unique.T @ W_2d @ gm_j.B_unique
+        return gm_i.R_inv.T @ BtWB @ gm_j.R_inv
+    else:
+        # Fall back: materialize group j, use rmatvec of group i per column
+        X_j = gm_j.toarray()
+        WX_j = W[:, None] * X_j
+        return np.column_stack([gm_i.rmatvec(WX_j[:, k]) for k in range(WX_j.shape[1])])
+
+
+def _block_xtwx(gms: list[GroupMatrix], groups: list, W: NDArray) -> NDArray:
+    """Compute X.T @ diag(W) @ X block-by-block.
+
+    Uses gm.gram(W) for diagonal blocks (O(n_bins) for discretized groups)
+    and _cross_gram for off-diagonal blocks (2D histogram for disc-disc pairs).
+    Avoids materializing the full (n, p_total) matrix.
+    """
+    p_total = sum(g.end - g.start for g in groups)
+    XtWX = np.zeros((p_total, p_total))
+
+    for i, (gm_i, g_i) in enumerate(zip(gms, groups)):
+        sl_i = slice(g_i.start, g_i.end)
+        # Diagonal block
+        XtWX[sl_i, sl_i] = gm_i.gram(W)
+
+        # Cross blocks with subsequent groups
+        for j in range(i + 1, len(gms)):
+            gm_j = gms[j]
+            g_j = groups[j]
+            sl_j = slice(g_j.start, g_j.end)
+            cross = _cross_gram(gm_i, gm_j, W)
+            XtWX[sl_i, sl_j] = cross
+            XtWX[sl_j, sl_i] = cross.T
+
+    return XtWX
 
 
 class DesignMatrix:
@@ -155,3 +299,11 @@ class DesignMatrix:
     def toarray(self) -> NDArray:
         """Concatenate per-group arrays into full (n, p) dense matrix."""
         return np.hstack([gm.toarray() for gm in self.group_matrices])
+
+    def row_subset(self, idx: NDArray) -> DesignMatrix:
+        """Return a new DesignMatrix with only the rows at idx."""
+        return DesignMatrix(
+            [gm.row_subset(idx) for gm in self.group_matrices],
+            len(idx),
+            self.p,
+        )

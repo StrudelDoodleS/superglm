@@ -73,9 +73,9 @@ class Gamma:
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Gamma log-likelihood. Shape k = 1/phi."""
         k = 1.0 / phi
-        return float(np.sum(weights * (
-            k * np.log(k * y / mu) - k * y / mu - np.log(y) - gammaln(k)
-        )))
+        return float(
+            np.sum(weights * (k * np.log(k * y / mu) - k * y / mu - np.log(y) - gammaln(k)))
+        )
 
 
 class NegativeBinomial:
@@ -104,17 +104,24 @@ class NegativeBinomial:
         theta = self.theta
         d = np.where(
             y > 0,
-            2 * (y * np.log(np.maximum(y, 1e-300) / mu)
-                 - (y + theta) * np.log((y + theta) / (mu + theta))),
+            2
+            * (
+                y * np.log(np.maximum(y, 1e-300) / mu)
+                - (y + theta) * np.log((y + theta) / (mu + theta))
+            ),
             2 * theta * np.log(theta / (mu + theta)),
         )
         return d
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         theta = self.theta
-        ll = (gammaln(y + theta) - gammaln(theta) - gammaln(y + 1)
-              + theta * np.log(theta / (mu + theta))
-              + y * np.log(mu / (mu + theta)))
+        ll = (
+            gammaln(y + theta)
+            - gammaln(theta)
+            - gammaln(y + 1)
+            + theta * np.log(theta / (mu + theta))
+            + y * np.log(mu / (mu + theta))
+        )
         return float(np.sum(weights * ll))
 
 

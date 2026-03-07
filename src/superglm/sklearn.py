@@ -121,13 +121,17 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         self.coef_ = self._model.result.beta
 
         # Expose feature types for backward compat with tests
+        from superglm.features.spline import _SplineBase
+
         self._feature_types = {}
         for name in self._model._feature_order:
             spec = self._model._specs[name]
-            cls = type(spec).__name__
-            if cls == "Spline":
-                self._feature_types[name] = f"Spline(n_knots={spec.n_knots}, degree={spec.degree})"
-            elif cls == "Categorical":
+            if isinstance(spec, _SplineBase):
+                cls_name = type(spec).__name__
+                self._feature_types[name] = (
+                    f"{cls_name}(n_knots={spec.n_knots}, degree={spec.degree})"
+                )
+            elif type(spec).__name__ == "Categorical":
                 self._feature_types[name] = f"Categorical(base={spec.base})"
             else:
                 self._feature_types[name] = f"Numeric(standardize={spec.standardize})"

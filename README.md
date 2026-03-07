@@ -1,19 +1,22 @@
 # SuperGLM
 
-Penalised GLMs for insurance pricing. Group lasso variable selection, P-splines with SSP reparametrisation, Poisson/Gamma/Tweedie families.
+[![CI](https://github.com/StrudelDoodleS/superglm/actions/workflows/ci.yml/badge.svg)](https://github.com/StrudelDoodleS/superglm/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/github/StrudelDoodleS/superglm/graph/badge.svg?token=2HO71TA2ZY)](https://codecov.io/github/StrudelDoodleS/superglm)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/StrudelDoodleS/superglm/actions/workflows/ci.yml)
+
+Penalised GLMs for insurance pricing. Group lasso variable selection, P-splines with SSP reparametrisation, Poisson/Gamma/NB2/Tweedie families, interactions, and statsmodels-style model summaries.
 
 ## Installation
 
 ```bash
-pip install superglm
+pip install git+https://github.com/StrudelDoodleS/superglm.git
 ```
 
 With optional dependencies:
 
 ```bash
-pip install superglm[sklearn]       # sklearn-compatible wrapper
-pip install superglm[interactions]  # InterpretML for interaction detection
-pip install superglm[all]           # everything
+pip install "superglm[sklearn] @ git+https://github.com/StrudelDoodleS/superglm.git"
+pip install "superglm[all] @ git+https://github.com/StrudelDoodleS/superglm.git"
 ```
 
 ## Quick start
@@ -54,25 +57,28 @@ model = SuperGLM(
 model.fit(df, y, exposure=weights)
 ```
 
-**Manual mode** — the original `add_feature()` API still works:
-
-```python
-from superglm import SuperGLM, Poisson, Spline, Categorical, Numeric, GroupLasso
-
-model = SuperGLM(family=Poisson(), penalty=GroupLasso(lambda1=0.01))
-model.add_feature("DrivAge", Spline(n_knots=10, penalty="ssp"))
-model.add_feature("Area", Categorical(base="most_exposed"))
-model.add_feature("LogDensity", Numeric())
-model.fit(df, y, exposure=weights)
-```
-
 ## Feature types
 
 **Spline** — P-spline basis with optional SSP reparametrisation. Group lasso selects or removes the entire smooth function as a unit.
 
 ```python
-Spline(n_knots=10, penalty="ssp")   # SSP reparametrised (recommended)
-Spline(n_knots=10, penalty="none")  # raw B-spline basis
+Spline(n_knots=10, penalty="ssp")          # SSP reparametrised (recommended)
+Spline(n_knots=10, penalty="none")         # raw B-spline basis
+Spline(n_knots=10, select=True)            # mgcv double penalty: spline-vs-linear selection
+```
+
+`select=True` decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped.
+
+**NaturalSpline** — P-spline with natural boundary constraints (f''=0 at both ends). Forces the curve to be linear beyond the boundary knots, preventing tail explosions.
+
+```python
+NaturalSpline(n_knots=10)                  # linear tails (recommended for extrapolation)
+```
+
+**CubicRegressionSpline** — Equivalent to mgcv's `bs="cr"`. Uses the integrated wiggliness penalty (integral of f'' squared) instead of the discrete second-difference penalty. Natural boundary constraints are mandatory.
+
+```python
+CubicRegressionSpline(n_knots=10)          # mgcv cr basis equivalent
 ```
 
 **Polynomial** — Orthogonal polynomial (Legendre basis). Very stable across refits — ideal for features with simple monotone or quadratic shapes.
@@ -97,13 +103,38 @@ Numeric()                       # standardised (default)
 Numeric(standardize=False)      # raw scale
 ```
 
+## Interactions
+
+Interactions between features are specified via the `interactions` parameter. The interaction type is auto-detected from the parent feature specs.
+
+```python
+model = SuperGLM(
+    features={"age": Spline(n_knots=10), "region": Categorical()},
+    interactions=[("age", "region")],
+    lambda1=0.01,
+)
+model.fit(df, y, exposure=weights)
+```
+
+Auto-detected interaction types:
+
+| Parent types | Interaction class | Groups |
+|---|---|---|
+| Spline + Categorical | `SplineCategorical` | One spline group per non-base level |
+| Polynomial + Categorical | `PolynomialCategorical` | One polynomial group per non-base level |
+| Numeric + Categorical | `NumericCategorical` | Single group with per-level slopes |
+| Categorical + Categorical | `CategoricalInteraction` | Single group with cross-level indicators |
+| Numeric + Numeric | `NumericInteraction` | Single group (product term) |
+| Polynomial + Polynomial | `PolynomialInteraction` | Single group (tensor product) |
+
 ## Penalties
 
 ```python
-from superglm import GroupLasso, SparseGroupLasso, Ridge, Adaptive
+from superglm import GroupLasso, SparseGroupLasso, GroupElasticNet, Ridge, Adaptive
 
 GroupLasso(lambda1=0.01)                          # group L2 — select/remove entire groups
 SparseGroupLasso(lambda1=0.01, alpha=0.5)         # group L2 + elementwise L1
+GroupElasticNet(lambda1=0.01, alpha=0.5)           # group lasso + ridge shrinkage
 Ridge(lambda1=0.01)                               # L2 shrinkage, no selection
 GroupLasso(lambda1=0.01, flavor=Adaptive())        # adaptive group lasso (two-stage)
 ```
@@ -117,10 +148,14 @@ Fit a sequence of models from high to low regularisation with warm starts:
 ```python
 from superglm import PathResult
 
-model = SuperGLM(family=Poisson(), penalty=GroupLasso())
-model.add_feature("DrivAge", Spline(n_knots=10, penalty="ssp"))
-model.add_feature("Area", Categorical(base="most_exposed"))
-
+model = SuperGLM(
+    family=Poisson(),
+    penalty=GroupLasso(),
+    features={
+        "DrivAge": Spline(n_knots=10, penalty="ssp"),
+        "Area": Categorical(base="most_exposed"),
+    },
+)
 result = model.fit_path(df, y, exposure=weights, n_lambda=50, lambda_ratio=1e-3)
 
 result.lambda_seq       # (50,) decreasing lambda values
@@ -140,13 +175,21 @@ After `fit_path`, `model.predict()` uses the last (least-regularised) fit.
 ## Inspecting results
 
 ```python
-# Model summary
-model.summary()
-# {'DrivAge': {'active': True, 'group_norm': 0.42, 'n_params': 17},
-#  'Area':    {'active': False, 'group_norm': 0.0, 'n_params': 5},
-#  '_model':  {'deviance': 62424.4, 'intercept': -2.31, ...}}
+# Statsmodels-style summary table with SEs, p-values, and smooth tests
+m = model.metrics(df, y, exposure=weights)
+print(m.summary())
 
-# Reconstruct a spline curve for plotting
+# Relativity DataFrames with 95% CI
+rels = model.relativities(with_se=True)
+
+# Plot all curves with CI bands and exposure histogram
+model.plot_relativities(df, exposure=weights)
+
+# Or use the standalone function
+from superglm import plot_relativities
+plot_relativities(rels, X=df, exposure=weights)
+
+# Manual curve access
 curve = model.reconstruct_feature("DrivAge")
 plt.plot(curve["x"], curve["relativity"])
 ```
@@ -169,6 +212,22 @@ result = model.estimate_p(df, y, exposure=weights, p_range=(1.1, 1.9))
 print(result.p_hat)  # estimated Tweedie power
 ```
 
+## Negative binomial (NB2) support
+
+For overdispersed count data where the Poisson variance assumption is too restrictive:
+
+```python
+from superglm import NegativeBinomial, estimate_nb_theta
+
+# Fixed theta
+model = SuperGLM(family=NegativeBinomial(theta=1.0), penalty=GroupLasso(lambda1=0.01))
+model.fit(df, y, exposure=weights)
+
+# Profile estimate theta (MASS-style alternating GLM fit + Newton update)
+result = estimate_nb_theta(model, df, y, exposure=weights)
+print(result.theta)  # estimated dispersion
+```
+
 ## sklearn interface
 
 ```python
@@ -183,7 +242,6 @@ model = SuperGLMRegressor(
 )
 model.fit(df, y, sample_weight=weights)
 model.predict(df)
-model.summary()
 ```
 
 Feature types are auto-detected: object/category columns become `Categorical`, columns in `spline_features` become `Spline`, everything else becomes `Numeric`.
@@ -193,6 +251,7 @@ Feature types are auto-detected: object/category columns become `Categorical`, c
 | Family | Variance function | Use case |
 |--------|------------------|----------|
 | `Poisson()` | V(mu) = mu | Claim frequency |
+| `NegativeBinomial(theta=1.0)` | V(mu) = mu + mu^2/theta | Overdispersed frequency |
 | `Gamma()` | V(mu) = mu^2 | Claim severity |
 | `Tweedie(p=1.5)` | V(mu) = mu^p | Pure premium (frequency x severity) |
 

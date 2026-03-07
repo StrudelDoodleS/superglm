@@ -29,7 +29,7 @@ class FeatureSpec(Protocol):
         self,
         x: NDArray[np.floating],
         exposure: NDArray[np.floating] | None = None,
-    ) -> GroupInfo: ...
+    ) -> GroupInfo | list[GroupInfo]: ...
 
     def transform(self, x: NDArray[np.floating]) -> NDArray[np.floating]: ...
 
@@ -46,13 +46,31 @@ class GroupInfo:
     or a single numeric feature.
     """
 
-    columns: NDArray[np.floating] | sp.spmatrix  # (n, p_g) design sub-matrix
+    columns: NDArray[np.floating] | sp.spmatrix | None  # (n, p_g) design sub-matrix
     n_cols: int  # p_g — group size
     penalty_matrix: NDArray | None = None  # (p_g, p_g) for SSP, else None
     reparametrize: bool = False  # whether to apply SSP transform
+    penalized: bool = True  # whether this group is subject to the penalty
+    # select=True subgroup support (mgcv double penalty)
+    subgroup_name: str | None = None  # "linear" or "spline"
+    projection: NDArray | None = None  # (K, n_cols) projection from B-spline basis
 
     def __post_init__(self):
-        if self.columns.shape[1] != self.n_cols:
+        if self.columns is None:
+            # Discretized path: columns not needed, skip shape validation
+            pass
+        elif self.projection is not None:
+            # select=True subgroup: columns is the full B-spline basis, projection maps to subspace
+            if self.projection.shape[1] != self.n_cols:
+                raise ValueError(
+                    f"projection has {self.projection.shape[1]} cols but n_cols={self.n_cols}"
+                )
+            if self.projection.shape[0] != self.columns.shape[1]:
+                raise ValueError(
+                    f"projection has {self.projection.shape[0]} rows but "
+                    f"columns has {self.columns.shape[1]} cols"
+                )
+        elif self.columns.shape[1] != self.n_cols:
             raise ValueError(f"columns has {self.columns.shape[1]} cols but n_cols={self.n_cols}")
         if self.penalty_matrix is not None and self.penalty_matrix.shape != (
             self.n_cols,
@@ -72,6 +90,13 @@ class GroupSlice:
     start: int
     end: int
     weight: float = 1.0  # sqrt(p_g) by default, or adaptive weight
+    penalized: bool = True  # whether this group is subject to the penalty
+    feature_name: str = ""  # parent feature name, defaults to name
+    subgroup_type: str | None = None  # "linear", "spline", or None
+
+    def __post_init__(self):
+        if not self.feature_name:
+            self.feature_name = self.name
 
     @property
     def size(self) -> int:

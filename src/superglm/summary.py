@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -29,8 +29,10 @@ class _CoefRow:
     group_norm: float = 0.0
     wald_chi2: float | None = None
     wald_p: float | None = None
+    ref_df: float | None = None
     curve_se_min: float | None = None
     curve_se_max: float | None = None
+    subgroup_type: str | None = None  # "linear", "spline", or None
 
 
 def _compute_coef_stats(
@@ -53,6 +55,11 @@ def _camel_to_spaced(name: str) -> str:
 
 
 _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
+_WALD_NOTE = (
+    "Note: smooth p-values use Wood (2013) Bayesian test.\n"
+    "Parametric p-values are Wald approximations.\n"
+    "For borderline significance, use a likelihood ratio test."
+)
 
 
 def _sig_stars(p: float | None) -> str:
@@ -166,6 +173,19 @@ class ModelSummary:
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
             ("Converged", str(info["converged"]), "Iterations", str(info["n_iter"])),
         ]
+
+        # NB theta profile row
+        if "nb_theta" in info:
+            ci = info["nb_theta_ci"]
+            theta_str = f"{info['nb_theta']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+            rows.append(("Theta", theta_str, "Method", info["nb_theta_method"]))
+
+        # Tweedie p profile row
+        if "tweedie_p" in info:
+            ci = info["tweedie_p_ci"]
+            p_str = f"{info['tweedie_p']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+            rows.append(("Tweedie p", p_str, "Method", info["tweedie_p_method"]))
+
         for k1, v1, k2, v2 in rows:
             lines.append(_header_row(k1, v1, k2, v2))
         lines.append(sep)
@@ -197,25 +217,32 @@ class ModelSummary:
             prev_group = row.group
 
             if row.is_spline:
-                if row.active and row.wald_chi2 is not None:
+                has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
+                if has_test:
                     p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "<0.001"
                     stars = _sig_stars(row.wald_p)
                     se_str = ""
-                    if row.curve_se_min is not None:
+                    if row.curve_se_min is not None and not np.isnan(row.curve_se_min):
                         se_str = f", curve SE: {row.curve_se_min:.2f}-{row.curve_se_max:.2f}"
+                    # Show fractional ref_df from Wood (2013) test
+                    if row.ref_df is not None:
+                        df_str = f"{row.ref_df:.1f}"
+                    else:
+                        df_str = str(row.n_params)
+                    kind = "linear" if row.subgroup_type == "linear" else "spline"
                     spline_text = (
-                        f"[spline, {row.n_params} params, "
-                        f"Wald chi2({row.n_params})={row.wald_chi2:.1f}, "
+                        f"[{kind}, {row.n_params} params, "
+                        f"chi2({df_str})={row.wald_chi2:.1f}, "
                         f"p={p_str}{se_str}]"
                     )
-                    lines.append(
-                        f"{row.name:<{name_w}s}  {spline_text}"
-                        f" {stars:<3s}"
-                    )
+                    lines.append(f"{row.name:<{name_w}s}  {spline_text} {stars:<3s}")
+                elif row.active:
+                    kind = "linear" if row.subgroup_type == "linear" else "spline"
+                    spline_text = f"[{kind}, {row.n_params} params, active]"
+                    lines.append(f"{row.name:<{name_w}s}  {spline_text}")
                 else:
-                    spline_text = (
-                        f"[spline, {row.n_params} params, inactive]"
-                    )
+                    kind = "linear" if row.subgroup_type == "linear" else "spline"
+                    spline_text = f"[{kind}, {row.n_params} params, inactive]"
                     lines.append(f"{row.name:<{name_w}s}  {spline_text}")
             elif row.coef is not None and row.se is not None and row.se > 0:
                 stars = _sig_stars(row.p)
@@ -250,6 +277,7 @@ class ModelSummary:
 
         lines.append(sep)
         lines.append(_SIG_LEGEND)
+        lines.append(_WALD_NOTE)
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -263,10 +291,7 @@ class ModelSummary:
         _fmt = self._fmt_scalar
         ncols = 8  # name + coef + se + z + p + ci_lo + ci_hi + sig
 
-        css = (
-            "border-collapse:collapse;font-family:monospace;font-size:13px;"
-            "margin:8px 0;"
-        )
+        css = "border-collapse:collapse;font-family:monospace;font-size:13px;margin:8px 0;"
         cell = "padding:3px 8px;text-align:right;border:none;"
         cell_l = "padding:3px 8px;text-align:left;border:none;"
         hdr_cell = "padding:3px 8px;text-align:right;font-weight:bold;border:none;"
@@ -294,6 +319,18 @@ class ModelSummary:
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
             ("Converged", str(info["converged"]), "Iterations", str(info["n_iter"])),
         ]
+
+        # NB theta profile row
+        if "nb_theta" in info:
+            ci = info["nb_theta_ci"]
+            theta_str = f"{info['nb_theta']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+            header_rows.append(("Theta", theta_str, "Method", info["nb_theta_method"]))
+
+        # Tweedie p profile row
+        if "tweedie_p" in info:
+            ci = info["tweedie_p_ci"]
+            p_str = f"{info['tweedie_p']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+            header_rows.append(("Tweedie p", p_str, "Method", info["tweedie_p_method"]))
         for k1, v1, k2, v2 in header_rows:
             parts.append(
                 f"<tr>"
@@ -306,9 +343,7 @@ class ModelSummary:
             )
 
         # Separator
-        parts.append(
-            f'<tr><td colspan="{ncols}" style="{sep_style}"></td></tr>'
-        )
+        parts.append(f'<tr><td colspan="{ncols}" style="{sep_style}"></td></tr>')
 
         # Coefficient table header
         col_names = [
@@ -327,9 +362,7 @@ class ModelSummary:
             parts.append(f'<td style="{hdr_cell}">{cn}</td>')
         parts.append(f'<td style="{hdr_cell_l}">{col_names[-1]}</td>')
         parts.append("</tr>")
-        parts.append(
-            f'<tr><td colspan="{ncols}" style="{sep_style}"></td></tr>'
-        )
+        parts.append(f'<tr><td colspan="{ncols}" style="{sep_style}"></td></tr>')
 
         # Coefficient rows with group separators
         group_sep_style = (
@@ -340,28 +373,26 @@ class ModelSummary:
         for row in self._coef_rows:
             if row.group and row.group != prev_group:
                 parts.append(
-                    f'<tr><td colspan="{ncols}" style="{group_sep_style}">'
-                    f"{row.group}</td></tr>"
+                    f'<tr><td colspan="{ncols}" style="{group_sep_style}">{row.group}</td></tr>'
                 )
             prev_group = row.group
 
             if row.is_spline:
-                if row.active and row.wald_chi2 is not None:
-                    p_str = (
-                        f"{row.wald_p:.3f}"
-                        if row.wald_p >= 0.001
-                        else "&lt;0.001"
-                    )
+                has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
+                kind = "linear" if row.subgroup_type == "linear" else "spline"
+                if has_test:
+                    p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "&lt;0.001"
                     stars = _sig_stars(row.wald_p)
                     se_str = ""
-                    if row.curve_se_min is not None:
-                        se_str = (
-                            f", curve SE: {row.curve_se_min:.2f}"
-                            f"&ndash;{row.curve_se_max:.2f}"
-                        )
+                    if row.curve_se_min is not None and not np.isnan(row.curve_se_min):
+                        se_str = f", curve SE: {row.curve_se_min:.2f}&ndash;{row.curve_se_max:.2f}"
+                    if row.ref_df is not None:
+                        df_str = f"{row.ref_df:.1f}"
+                    else:
+                        df_str = str(row.n_params)
                     text = (
-                        f"[spline, {row.n_params} params, "
-                        f"Wald &chi;&sup2;({row.n_params})={row.wald_chi2:.1f}, "
+                        f"[{kind}, {row.n_params} params, "
+                        f"&chi;&sup2;({df_str})={row.wald_chi2:.1f}, "
                         f"p={p_str}{se_str}]"
                     )
                     parts.append(
@@ -372,8 +403,16 @@ class ModelSummary:
                         f'<td style="{sig_cell}">{stars}</td>'
                         f"</tr>"
                     )
+                elif row.active:
+                    text = f"[{kind}, {row.n_params} params, active]"
+                    parts.append(
+                        f"<tr>"
+                        f'<td style="{cell_l}">{row.name}</td>'
+                        f'<td colspan="{ncols - 1}" style="{cell_l};color:#666;'
+                        f'font-style:italic;">{text}</td></tr>'
+                    )
                 else:
-                    text = f"[spline, {row.n_params} params, inactive]"
+                    text = f"[{kind}, {row.n_params} params, inactive]"
                     parts.append(
                         f"<tr>"
                         f'<td style="{cell_l}">{row.name}</td>'
@@ -410,13 +449,15 @@ class ModelSummary:
                 )
 
         # Bottom border + legend
-        parts.append(
-            f'<tr><td colspan="{ncols}" style="border-bottom:2px solid #333;">'
-            f"</td></tr>"
-        )
+        parts.append(f'<tr><td colspan="{ncols}" style="border-bottom:2px solid #333;"></td></tr>')
         parts.append(
             f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
             f'color:#666;border:none;">{_SIG_LEGEND}</td></tr>'
+        )
+        wald_html = _WALD_NOTE.replace("\n", "<br>")
+        parts.append(
+            f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+            f'color:#888;font-style:italic;border:none;">{wald_html}</td></tr>'
         )
         parts.append("</table>")
         return "\n".join(parts)

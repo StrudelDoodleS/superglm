@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM, Polynomial
+from superglm import Polynomial, SuperGLM
 from superglm.features.polynomial import Polynomial as PolynomialDirect
 
 
