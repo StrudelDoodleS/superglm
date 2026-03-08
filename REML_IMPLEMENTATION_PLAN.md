@@ -29,12 +29,76 @@ The current REML objective is **mathematically wrong** for Gamma, NB2, and Tweed
 
 ## Table of Contents
 
-1. [Phase 1: Assessment of the Existing Codebase](#phase-1-assessment-of-the-existing-codebase)
-2. [Phase 2: Gap Analysis](#phase-2-gap-analysis)
-3. [Phase 3: Implementation Plan](#phase-3-implementation-plan)
-4. [Appendix: mgcv Optimizer Reference](#appendix-mgcv-optimizer-reference)
+1. [Post-PR #2 Priorities](#post-pr-2-priorities)
+2. [Phase 1: Assessment of the Existing Codebase](#phase-1-assessment-of-the-existing-codebase)
+3. [Phase 2: Gap Analysis](#phase-2-gap-analysis)
+4. [Phase 3: Implementation Plan](#phase-3-implementation-plan)
+5. [Appendix: mgcv Optimizer Reference](#appendix-mgcv-optimizer-reference)
 
 ---
+
+## Post-PR #2 Priorities
+
+With the direct `lambda1=0` REML path in much better shape after PR #2, the next major items should shift from Newton cleanup to the remaining gaps versus `mgcv`.
+
+**Scope note:** This section is a roadmap, not a single-PR scope. These items should be split into several focused follow-up PRs. The recommended next PR is a benchmarking / profiling PR, not a combined implementation of everything below.
+
+### 1. `lambda1 > 0` REML / fREML path
+
+Implement EFS / generalized Fellner-Schall for the BCD active-set path. Do not keep forcing exact Newton through the non-smooth group-lasso path; the right analogue there is a stable monotone update under active-set changes.
+
+### 2. Real large-n fREML / `bam`-style speed path
+
+Build the speed story around `discrete=True`, reuse of sufficient statistics, and performance iteration / simultaneous beta-lambda updates. This is the highest-value practical gap if fit time matters.
+
+### 3. Broaden `mgcv` parity
+
+Add committed parity cases for:
+- `NB2`
+- `Tweedie`
+- `select=True`
+- tensor/interactions
+- split null/range smooths
+
+Also add direct prediction parity, not just deviance / EDF / scale parity.
+
+### 4. Benchmarking and profiling harness
+
+Maintain a reproducible benchmark comparing:
+- `SuperGLM fit_reml(discrete=False)`
+- `SuperGLM fit_reml(discrete=True)`
+- `mgcv::gam(method="REML")`
+- `mgcv::bam(method="fREML", discrete=TRUE)`
+
+Report at least wall time, outer iterations, inner PIRLS iterations (if available), EDF, deviance, and scale on shared datasets with fixed thread counts.
+
+### Suggested PR sequencing
+
+1. PR #3: benchmarking / profiling harness only
+2. PR #4: `lambda1 > 0` REML / EFS path
+3. PR #5: large-`n` fREML / `bam`-style speed path
+4. PR #6: broaden `mgcv` parity
+5. PR #7: numerical / inference polish
+6. PR #8: refactor `model.py` after behavior stabilizes
+
+### 5. Numerical and inference polish
+
+Add edge correction / near-boundary lambda handling and improve smoothing-parameter uncertainty support in inference, including a clearer conditional vs unconditional covariance story.
+
+### 6. Refactor after optimization work stabilizes
+
+Once the current REML / fREML behavior is settled, split the large `model.py` file by responsibility:
+- REML optimizer internals
+- inference / covariance / summary helpers
+- plotting and reporting helpers
+
+### Non-goals for now
+
+Do not prioritize:
+- more quasi-Newton variants
+- raw lambda matching as the primary success metric
+
+Prefer deviance, EDF, scale, prediction parity, convergence behavior, and benchmarked runtime.
 
 ## Phase 1: Assessment of the Existing Codebase
 
