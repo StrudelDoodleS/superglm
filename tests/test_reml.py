@@ -682,6 +682,169 @@ class TestREMLFiniteDifference:
                     f"fd={fd_hess[i, j]:.6f}, rel_err={rel_err:.4f}"
                 )
 
+    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    def test_total_gradient_matches_outer_fd(self, family):
+        """Total gradient (partial + W correction) vs outer FD of objective.
+
+        The outer FD re-solves PIRLS at perturbed ρ, so β̂ and W change.
+        The total gradient should match the FD of f(ρ) = V(β̂(ρ), ρ) better
+        than the partial gradient.
+
+        For Gamma/log, dW/dη=0 so partial = total and both match equally.
+        For Poisson/log, the W correction should reduce the discrepancy.
+        """
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        (
+            m,
+            y,
+            exposure,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model(family)
+
+        # Partial gradient (fixed W)
+        grad_partial = m._reml_direct_gradient(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            phi_hat=phi_hat,
+        )
+
+        # W correction
+        w_corr = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            exposure,
+            offset_arr,
+        )
+        if w_corr is not None:
+            grad_total = grad_partial + w_corr[0]
+        else:
+            grad_total = grad_partial.copy()
+
+        # Outer FD: re-solve PIRLS, evaluate V(ρ±ε), central difference
+        eps = 1e-5
+        group_names = [g.name for _, g in reml_groups]
+        fd_grad = np.zeros(len(reml_groups))
+
+        for i, name in enumerate(group_names):
+            rho_base = np.log(lambdas[name])
+            objs = {}
+            for sign in [+1, -1]:
+                lam_pert = lambdas.copy()
+                lam_pert[name] = np.exp(rho_base + sign * eps)
+                r_pert, _, xtwx_pert = fit_irls_direct(
+                    X=m._dm,
+                    y=y,
+                    weights=exposure,
+                    family=m._distribution,
+                    link=m._link,
+                    groups=m._groups,
+                    lambda2=lam_pert,
+                    offset=offset_arr,
+                    beta_init=pirls_result.beta,
+                    intercept_init=pirls_result.intercept,
+                    return_xtwx=True,
+                )
+                objs[sign] = m._reml_laml_objective(
+                    y,
+                    r_pert,
+                    lam_pert,
+                    exposure,
+                    offset_arr,
+                    XtWX=xtwx_pert,
+                    penalty_caches=penalty_caches,
+                )
+            fd_grad[i] = (objs[1] - objs[-1]) / (2 * eps)
+
+        # Total gradient should be at least as close to outer FD as partial
+        err_total = np.abs(grad_total - fd_grad)
+        err_partial = np.abs(grad_partial - fd_grad)
+
+        # For Gamma/log, W correction is zero → same error
+        # For Poisson/log, total gradient should be closer or equal
+        for i in range(len(reml_groups)):
+            assert err_total[i] <= err_partial[i] + 1e-8, (
+                f"{family} group {group_names[i]}: total gradient error "
+                f"({err_total[i]:.6f}) should not exceed partial error "
+                f"({err_partial[i]:.6f})"
+            )
+
+    def test_w_correction_zero_for_gamma_log(self):
+        """Gamma with log link has dW/dη=0, so W correction must vanish."""
+        (
+            m,
+            y,
+            exposure,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model("gamma")
+
+        result = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            exposure,
+            offset_arr,
+        )
+        assert result is None, "Gamma/log should have zero W correction"
+
+    def test_w_correction_nonzero_for_poisson_log(self):
+        """Poisson with log link has dW/dη=W, so W correction must be nonzero."""
+        (
+            m,
+            y,
+            exposure,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model("poisson")
+
+        result = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            exposure,
+            offset_arr,
+        )
+        assert result is not None, "Poisson/log should have nonzero W correction"
+        grad_correction, dH_extra = result
+        assert np.any(np.abs(grad_correction) > 1e-6)
+        assert len(dH_extra) == len(reml_groups)
+
 
 # ── REML convergence ─────────────────────────────────────────────
 

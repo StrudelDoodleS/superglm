@@ -35,6 +35,10 @@ class Link(Protocol):
         """d_mu/d_eta — derivative of inverse link w.r.t. eta."""
         ...
 
+    def deriv2_inverse(self, eta: NDArray) -> NDArray:
+        """d²μ/dη² — second derivative of inverse link w.r.t. eta."""
+        ...
+
 
 class LogLink:
     """Log link: eta = log(mu), mu = exp(eta)."""
@@ -49,6 +53,9 @@ class LogLink:
         return 1.0 / mu
 
     def deriv_inverse(self, eta: NDArray) -> NDArray:
+        return np.exp(eta)
+
+    def deriv2_inverse(self, eta: NDArray) -> NDArray:
         return np.exp(eta)
 
 

@@ -1180,6 +1180,93 @@ class SuperGLM:
                 new_gms.append(gm)
         return DesignMatrix(new_gms, self._dm.n, self._dm.p)
 
+    def _compute_dW_deta(self, mu: NDArray, eta: NDArray, exposure: NDArray) -> NDArray:
+        """Derivative of IRLS weights w.r.t. the linear predictor.
+
+        W_i = exposure_i · (dμ/dη)² / V(μ)
+
+        dW_i/dη = exposure_i · (dμ/dη / V(μ)) · [2(d²μ/dη²) − (dμ/dη)² V'(μ)/V(μ)]
+
+        For log link: dW/dη = W·(2 − μV'(μ)/V(μ)).
+        Poisson/log: dW/dη = W. Gamma/log: dW/dη = 0 identically.
+        """
+        g1 = self._link.deriv_inverse(eta)  # dμ/dη
+        g2 = self._link.deriv2_inverse(eta)  # d²μ/dη²
+        V = np.maximum(self._distribution.variance(mu), 1e-10)
+        Vp = self._distribution.variance_derivative(mu)
+        return exposure * (g1 / V) * (2.0 * g2 - g1**2 * Vp / V)
+
+    def _reml_w_correction(
+        self,
+        pirls_result: PIRLSResult,
+        XtWX_S_inv: NDArray,
+        lambdas: dict[str, float],
+        reml_groups: list[tuple[int, GroupSlice]],
+        penalty_caches: dict | None,
+        exposure: NDArray,
+        offset_arr: NDArray,
+    ) -> tuple[NDArray, dict[int, NDArray]] | None:
+        """W(ρ) correction for exact REML derivatives.
+
+        Computes the contribution from d(X'WX)/dρ_j = X'diag(dW/dρ_j)X
+        which the fixed-W Laplace approximation drops.
+
+        Returns (grad_correction, dH_extra) or None if the correction vanishes
+        (e.g. Gamma with log link where dW/dη = 0 identically).
+        """
+        eta = np.clip(
+            self._dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
+            -20,
+            20,
+        )
+        mu = np.clip(self._link.inverse(eta), 1e-7, 1e7)
+        dW_deta = self._compute_dW_deta(mu, eta, exposure)
+
+        if np.max(np.abs(dW_deta)) < 1e-12:
+            return None  # No correction (e.g. Gamma/log)
+
+        p = XtWX_S_inv.shape[0]
+        m = len(reml_groups)
+        grad_correction = np.zeros(m)
+        dH_extra: dict[int, NDArray] = {}
+        X_dense: NDArray | None = None  # lazy-materialized for C_j computation
+
+        for i, (idx, g) in enumerate(reml_groups):
+            if penalty_caches is not None:
+                omega_ssp = penalty_caches[g.name].omega_ssp
+            else:
+                gm = self._dm.group_matrices[idx]
+                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+            lam = lambdas[g.name]
+            beta_g = pirls_result.beta[g.sl]
+
+            # S_j β̂ (p-vector, nonzero only in g.sl block)
+            s_beta = np.zeros(p)
+            s_beta[g.sl] = lam * (omega_ssp @ beta_g)
+
+            # dβ̂/dρ_j = -H⁻¹ S_j β̂  (IFT)
+            dbeta_j = -(XtWX_S_inv @ s_beta)
+
+            # dη/dρ_j = X dβ̂/dρ_j
+            deta_j = self._dm.matvec(dbeta_j)
+
+            # a_j = (dW/dη) ⊙ dη_j  — weights change per observation
+            a_j = dW_deta * deta_j
+
+            # C_j = X'diag(a_j)X — the dW contribution to dH/dρ_j
+            # Computed directly (not via _block_xtwx which uses sqrt(W) for
+            # some group types and can't handle negative a_j weights).
+            if X_dense is None:
+                X_dense = np.column_stack([gm.toarray() for gm in self._dm.group_matrices])
+            C_j = X_dense.T @ (a_j[:, None] * X_dense)
+
+            # Gradient correction: ½ tr(H⁻¹ C_j)
+            grad_correction[i] = 0.5 * float(np.sum(XtWX_S_inv * C_j))
+
+            dH_extra[i] = C_j
+
+        return grad_correction, dH_extra
+
     def _reml_laml_objective(
         self,
         y: NDArray,
@@ -1262,7 +1349,11 @@ class SuperGLM:
         penalty_ranks: dict[str, float],
         phi_hat: float = 1.0,
     ) -> NDArray:
-        """Gradient of the LAML objective with respect to log-lambdas.
+        """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W).
+
+        This is the partial derivative holding IRLS weights W fixed.  The
+        total gradient includes an additional W(ρ) correction term
+        ½tr(H⁻¹ C_j) computed by ``_reml_w_correction``.
 
         For estimated-scale families, the quadratic term β'S_jβ is scaled
         by 1/φ̂ (profiled scale), while the trace term is unaffected since
@@ -1293,38 +1384,51 @@ class SuperGLM:
         pirls_result: object | None = None,
         n_obs: int = 0,
         phi_hat: float = 1.0,
+        dH_extra: dict[int, NDArray] | None = None,
     ) -> NDArray:
-        """Approximate outer Hessian of the REML criterion w.r.t. log-lambdas.
+        """Outer Hessian of the REML criterion w.r.t. log-lambdas.
 
         Differentiates through β̂(ρ) via the IFT (dβ̂/dρ_k = -H⁻¹ S_k β̂)
-        but holds the IRLS working weights W fixed at their converged values.
-        This matches mgcv's Laplace-approximate outer Newton approach; the
-        remaining discrepancy vs full numerical re-solve is from dW/dρ terms
-        that are O(‖dβ̂‖²) and typically small.
+        and includes the W(ρ) correction via dH_extra when provided.
+
+        When ``dH_extra`` is not None, the trace product uses the exact
+        dH_j/dρ_j = S_j + C_j (where C_j = X'diag(dW/dρ_j)X) instead of
+        the fixed-W approximation dH_j ≈ S_j.  Second-order d²W/dρ² terms
+        are still dropped.
 
         Known scale:
-            H_{jk} = δ_{jk}(g_j + ½r_j) - ½tr(H⁻¹S_j H⁻¹S_k)
+            H_{jk} = δ_{jk}(g_j^∂ + ½r_j) - ½tr(H⁻¹ dH_j H⁻¹ dH_k)
                      - (S_jβ̂)'H⁻¹(S_kβ̂)
 
         Estimated scale (profiled φ̂):
-            H_{jk} = δ_{jk}(g_j + ½r_j) - ½tr(H⁻¹S_j H⁻¹S_k)
+            H_{jk} = δ_{jk}(g_j^∂ + ½r_j) - ½tr(H⁻¹ dH_j H⁻¹ dH_k)
                      - (1/φ̂)(S_jβ̂)'H⁻¹(S_kβ̂) - ½(n-M_p)q_jq_k/(D+PQ)²
+
+        where g_j^∂ is the partial gradient (at fixed W), passed as
+        ``gradient``.  The diagonal uses the partial gradient because the
+        d(log|S|)/dρ diagonal contribution only involves dS_j/dρ_j = S_j.
 
         Parameters
         ----------
+        gradient : (m,) array
+            The *partial* gradient (at fixed W), not the total gradient.
         pirls_result : PIRLSResult, optional
             Needed for IFT and estimated-scale corrections.
         n_obs : int, optional
             Number of observations. Needed for estimated-scale correction.
         phi_hat : float
             Profiled scale parameter (1.0 for known-scale families).
+        dH_extra : dict, optional
+            W(ρ) correction matrices {group_index: C_j (p×p)}, from
+            ``_reml_w_correction``.  When provided, the trace product
+            uses H⁻¹(S_j + C_j) instead of H⁻¹ S_j.
         """
         m = len(reml_groups)
         p = XtWX_S_inv.shape[0]
         hess = np.zeros((m, m))
 
-        # Form full p×p products H⁻¹ S_j (S_j is block-diagonal, mostly zero)
-        full_HSj: dict[int, NDArray] = {}
+        # Form full p×p products H⁻¹ dH_j where dH_j = S_j + C_j
+        full_HdHj: dict[int, NDArray] = {}
         quad_per_group: list[float] = []  # q_j = β̂'S_j β̂ for scale correction
         s_beta_list: list[NDArray] = []  # S_j β̂ vectors for IFT correction
         for i, (idx, g) in enumerate(reml_groups):
@@ -1336,7 +1440,12 @@ class SuperGLM:
             lam = lambdas[g.name]
             F = np.zeros((p, p))
             F[:, g.sl] = XtWX_S_inv[:, g.sl] @ (lam * omega_ssp)
-            full_HSj[i] = F
+
+            # Add W(ρ) correction: H⁻¹ C_j
+            if dH_extra is not None and i in dH_extra:
+                F = F + XtWX_S_inv @ dH_extra[i]
+
+            full_HdHj[i] = F
 
             # S_j β̂ vector and quadratic form for IFT / scale corrections
             if pirls_result is not None:
@@ -1351,16 +1460,15 @@ class SuperGLM:
 
         for i in range(m):
             for j in range(i, m):
-                # -½ tr(H⁻¹S_i · H⁻¹S_j)
-                h = -0.5 * float(np.sum(full_HSj[i] * full_HSj[j].T))
+                # -½ tr(H⁻¹ dH_i · H⁻¹ dH_j)
+                h = -0.5 * float(np.sum(full_HdHj[i] * full_HdHj[j].T))
                 hess[i, j] = h
                 hess[j, i] = h
-            # δ_{jj}(grad_j + ½r_j)
+            # δ_{jj}(g_j^∂ + ½r_j) — uses partial gradient (at fixed W)
             name_i = reml_groups[i][1].name
             hess[i, i] += gradient[i] + 0.5 * penalty_ranks[name_i]
 
         # IFT correction: -(1/φ̂)(S_jβ̂)'H⁻¹(S_kβ̂) from dβ̂/dρ = -H⁻¹ S_k β̂
-        # This is the implicit derivative of β̂ w.r.t. log-lambda (envelope theorem).
         if pirls_result is not None:
             inv_phi = 1.0 / max(phi_hat, 1e-10)
             S_beta = np.column_stack(s_beta_list)  # p × m
@@ -1394,9 +1502,14 @@ class SuperGLM:
     ):
         """Optimize the direct REML objective via damped Newton (Wood 2011).
 
-        Uses analytic gradient and approximate outer Hessian (IFT through
-        β̂, W held fixed), PD-projected Newton step, step-halving line
+        Uses exact gradient and outer Hessian (IFT through β̂ + first-order
+        dW/dρ correction), PD-projected Newton step, step-halving line
         search, and steepest descent fallback.
+
+        The W(ρ) correction accounts for d(X'WX)/dρ_j = X'diag(dW/dρ_j)X
+        in both gradient and Hessian.  For Gamma with log link, dW/dη = 0
+        identically (W = exposure, constant), so the correction vanishes.
+        For Poisson with log link, dW/dη = W, giving a material correction.
         """
         from superglm.reml import REMLResult
 
@@ -1524,8 +1637,8 @@ class SuperGLM:
                 phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
             inv_phi = 1.0 / max(phi_hat, 1e-10)
 
-            # === Exact gradient ===
-            grad = self._reml_direct_gradient(
+            # === Gradient: partial (fixed W) + W(ρ) correction ===
+            grad_partial = self._reml_direct_gradient(
                 pirls_result,
                 XtWX_S_inv,
                 cand_lambdas,
@@ -1533,6 +1646,23 @@ class SuperGLM:
                 penalty_ranks,
                 phi_hat=phi_hat,
             )
+
+            # W(ρ) correction: accounts for d(X'WX)/dρ_j = X'diag(dW/dρ_j)X
+            w_corr = self._reml_w_correction(
+                pirls_result,
+                XtWX_S_inv,
+                cand_lambdas,
+                reml_groups,
+                penalty_caches,
+                exposure,
+                offset_arr,
+            )
+            if w_corr is not None:
+                grad_w_correction, dH_extra = w_corr
+                grad = grad_partial + grad_w_correction
+            else:
+                grad = grad_partial.copy()
+                dH_extra = None
 
             # Track best
             if obj < best_obj:
@@ -1588,17 +1718,18 @@ class SuperGLM:
                     rho[i] = np.clip(np.log(max(lam_new, 1e-6)), log_lo, log_hi)
                 continue
 
-            # === Phase 2: Newton with approximate outer Hessian ===
+            # === Phase 2: Newton with exact outer Hessian ===
             hess = self._reml_direct_hessian(
                 XtWX_S_inv,
                 cand_lambdas,
                 reml_groups,
-                grad,
+                grad_partial,  # partial gradient for diagonal term
                 penalty_ranks,
                 penalty_caches=penalty_caches,
                 pirls_result=pirls_result,
                 n_obs=len(y),
                 phi_hat=phi_hat,
+                dH_extra=dH_extra,
             )
 
             # PD-projected Newton step (with SD fallback)

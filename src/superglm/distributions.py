@@ -31,6 +31,10 @@ class Distribution(Protocol):
         """V(mu) — variance as a function of the mean."""
         ...
 
+    def variance_derivative(self, mu: NDArray) -> NDArray:
+        """V'(mu) — derivative of variance function w.r.t. mu."""
+        ...
+
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Per-observation unit deviance d(y, mu)."""
         ...
@@ -53,6 +57,9 @@ class Poisson:
 
     def variance(self, mu: NDArray) -> NDArray:
         return mu.copy()
+
+    def variance_derivative(self, mu: NDArray) -> NDArray:
+        return np.ones_like(mu)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         d = np.zeros_like(y, dtype=float)
@@ -79,6 +86,9 @@ class Gamma:
 
     def variance(self, mu: NDArray) -> NDArray:
         return mu**2
+
+    def variance_derivative(self, mu: NDArray) -> NDArray:
+        return 2.0 * mu
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         return 2 * (-np.log(y / mu) + (y - mu) / mu)
@@ -116,6 +126,9 @@ class NegativeBinomial:
 
     def variance(self, mu: NDArray) -> NDArray:
         return mu + mu**2 / self.theta
+
+    def variance_derivative(self, mu: NDArray) -> NDArray:
+        return 1.0 + 2.0 * mu / self.theta
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         theta = self.theta
@@ -167,6 +180,9 @@ class Tweedie:
 
     def variance(self, mu: NDArray) -> NDArray:
         return np.power(mu, self.p)
+
+    def variance_derivative(self, mu: NDArray) -> NDArray:
+        return self.p * np.power(mu, self.p - 1)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         p = self.p
