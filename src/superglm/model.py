@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import NDArray
+from scipy.optimize import minimize
 
 from superglm.distributions import Distribution, resolve_distribution
 from superglm.group_matrix import (
@@ -25,6 +26,7 @@ from superglm.group_matrix import (
     GroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
+    _block_xtwx,
     _discretize_column,
 )
 from superglm.links import Link, resolve_link
@@ -33,7 +35,11 @@ from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
-from superglm.solvers.irls_direct import _invert_xtwx_plus_penalty, fit_irls_direct
+from superglm.solvers.irls_direct import (
+    _build_penalty_matrix,
+    _invert_xtwx_plus_penalty,
+    fit_irls_direct,
+)
 from superglm.solvers.pirls import PIRLSResult, fit_pirls
 from superglm.types import FeatureSpec, GroupInfo, GroupSlice
 
@@ -85,7 +91,7 @@ class SuperGLM:
         active_set: bool = False,
         # Discretization
         discrete: bool = False,
-        n_bins: int = 256,
+        n_bins: int | dict[str, int] = 256,
     ):
         if features is not None and splines is not None:
             raise ValueError(
@@ -396,16 +402,16 @@ class SuperGLM:
                 # Lightweight path: place knots and build penalty without O(n) basis.
                 # Returns constraint-projected penalty for NaturalSpline/CRS.
                 omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(x_col)
-                n_bins_feat = spec.n_bins if spec.n_bins is not None else self._n_bins
+                n_bins_feat = self._resolve_discrete_n_bins(name, spec)
                 bin_centers, bin_idx = _discretize_column(x_col, n_bins_feat)
                 bin_centers_clip = np.clip(bin_centers, spec._knots[0], spec._knots[-1])
                 B_unique = BSpl.design_matrix(bin_centers_clip, spec._knots, spec.degree).toarray()
                 exposure_agg = np.bincount(bin_idx, weights=exposure, minlength=len(bin_centers))
 
                 # Build infos without the full B matrix
-                from superglm.features.spline import Spline
-
-                if isinstance(spec, Spline) and spec.select:
+                if getattr(spec, "supports_linear_split", False) and getattr(
+                    spec, "split_linear", False
+                ):
                     n_null = 1
                     n_range = spec._U_range.shape[1]
                     infos = [
@@ -446,7 +452,7 @@ class SuperGLM:
 
             for info in infos:
                 if info.projection is not None:
-                    # select=True subgroup: shared B with projected subspace
+                    # split_linear=True subgroup: shared B with projected subspace
                     P = info.projection
 
                     if info.reparametrize and info.penalty_matrix is not None:
@@ -539,60 +545,174 @@ class SuperGLM:
             p1, p2 = ispec.parent_names
             x1 = np.asarray(X[p1])
             x2 = np.asarray(X[p2])
-            result = ispec.build(x1, x2, self._specs, exposure=exposure)
+            use_discrete_tensor = self._should_discretize_tensor_interaction(ispec)
+            B_unique_inter = None
+            bin_idx_inter = None
+            exposure_agg_inter = None
+            if use_discrete_tensor:
+                n_bins1 = self._resolve_discrete_n_bins(p1, self._specs[p1])
+                n_bins2 = self._resolve_discrete_n_bins(p2, self._specs[p2])
+                result, B_unique_inter, bin_idx_inter = ispec.build_discrete(
+                    x1,
+                    x2,
+                    self._specs,
+                    (n_bins1, n_bins2),
+                    exposure=exposure,
+                )
+                exposure_agg_inter = np.bincount(
+                    bin_idx_inter,
+                    weights=exposure,
+                    minlength=B_unique_inter.shape[0],
+                )
+            else:
+                result = ispec.build(x1, x2, self._specs, exposure=exposure)
 
             if isinstance(result, list):
-                # Per-level groups (SplineCategorical, PolynomialCategorical)
-                r_inv_dict: dict[str, NDArray] = {}
-                for level, info in zip(ispec._non_base, result):
-                    if info.reparametrize and info.penalty_matrix is not None:
-                        R_inv = self._compute_R_inv(info.columns, info.penalty_matrix, exposure)
-                        r_inv_dict[level] = R_inv
-                        n_cols = R_inv.shape[1]
-                        if sp.issparse(info.columns):
-                            gm = SparseSSPGroupMatrix(info.columns, R_inv)
-                            gm.omega = info.penalty_matrix
-                        else:
-                            gm = DenseGroupMatrix(info.columns @ R_inv)
-                    else:
-                        n_cols = info.n_cols
-                        if sp.issparse(info.columns):
-                            gm = SparseGroupMatrix(info.columns)
-                        else:
-                            gm = DenseGroupMatrix(info.columns)
+                has_subgroups = any(
+                    info.subgroup_name is not None or info.projection is not None for info in result
+                )
+                if has_subgroups:
+                    r_inv_parts: list[NDArray] = []
+                    for info in result:
+                        if info.projection is not None:
+                            P = info.projection
+                            if info.reparametrize and info.penalty_matrix is not None:
+                                B_for_rinv = B_unique_inter if use_discrete_tensor else info.columns
+                                exp_for_rinv = (
+                                    exposure_agg_inter if use_discrete_tensor else exposure
+                                )
+                                R_inv_local = self._compute_projected_R_inv(
+                                    B_for_rinv, P, info.penalty_matrix, exp_for_rinv
+                                )
+                                R_inv_combined = P @ R_inv_local
+                            else:
+                                R_inv_combined = P
+                            r_inv_parts.append(R_inv_combined)
 
-                    group_matrices.append(gm)
-                    self._groups.append(
-                        GroupSlice(
-                            name=f"{iname}[{level}]",
-                            start=col_offset,
-                            end=col_offset + n_cols,
-                            weight=np.sqrt(n_cols),
-                            penalized=True,
-                            feature_name=iname,
+                            if use_discrete_tensor:
+                                gm = DiscretizedSSPGroupMatrix(
+                                    B_unique_inter, R_inv_combined, bin_idx_inter
+                                )
+                                if info.penalty_matrix is not None:
+                                    gm.omega = P @ info.penalty_matrix @ P.T
+                                gm.projection = P
+                            elif sp.issparse(info.columns):
+                                gm = SparseSSPGroupMatrix(info.columns, R_inv_combined)
+                                if info.penalty_matrix is not None:
+                                    gm.omega = P @ info.penalty_matrix @ P.T
+                                gm.projection = P
+                            else:
+                                gm = DenseGroupMatrix(info.columns @ R_inv_combined)
+                            n_cols = R_inv_combined.shape[1]
+                        elif info.reparametrize and info.penalty_matrix is not None:
+                            B_for_rinv = B_unique_inter if use_discrete_tensor else info.columns
+                            exp_for_rinv = exposure_agg_inter if use_discrete_tensor else exposure
+                            R_inv = self._compute_R_inv(
+                                B_for_rinv, info.penalty_matrix, exp_for_rinv
+                            )
+                            r_inv_parts.append(R_inv)
+                            n_cols = R_inv.shape[1]
+                            if use_discrete_tensor:
+                                gm = DiscretizedSSPGroupMatrix(B_unique_inter, R_inv, bin_idx_inter)
+                                gm.omega = info.penalty_matrix
+                            elif sp.issparse(info.columns):
+                                gm = SparseSSPGroupMatrix(info.columns, R_inv)
+                                gm.omega = info.penalty_matrix
+                            else:
+                                gm = DenseGroupMatrix(info.columns @ R_inv)
+                        else:
+                            n_cols = info.n_cols
+                            if use_discrete_tensor:
+                                gm = DiscretizedSSPGroupMatrix(
+                                    B_unique_inter,
+                                    np.eye(info.n_cols, dtype=np.float64),
+                                    bin_idx_inter,
+                                )
+                            elif sp.issparse(info.columns):
+                                gm = SparseGroupMatrix(info.columns)
+                            else:
+                                gm = DenseGroupMatrix(info.columns)
+
+                        group_matrices.append(gm)
+                        subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
+                        self._groups.append(
+                            GroupSlice(
+                                name=f"{iname}{subgroup_suffix}",
+                                start=col_offset,
+                                end=col_offset + n_cols,
+                                weight=np.sqrt(n_cols),
+                                penalized=info.penalized,
+                                feature_name=iname,
+                                subgroup_type=info.subgroup_name,
+                            )
                         )
-                    )
-                    col_offset += n_cols
+                        col_offset += n_cols
 
-                if r_inv_dict and hasattr(ispec, "set_reparametrisation"):
-                    ispec.set_reparametrisation(r_inv_dict)
+                    if r_inv_parts and hasattr(ispec, "set_reparametrisation"):
+                        ispec.set_reparametrisation(np.hstack(r_inv_parts))
+                else:
+                    # Per-level groups (SplineCategorical, PolynomialCategorical)
+                    r_inv_dict: dict[str, NDArray] = {}
+                    for level, info in zip(ispec._non_base, result):
+                        if info.reparametrize and info.penalty_matrix is not None:
+                            R_inv = self._compute_R_inv(info.columns, info.penalty_matrix, exposure)
+                            r_inv_dict[level] = R_inv
+                            n_cols = R_inv.shape[1]
+                            if sp.issparse(info.columns):
+                                gm = SparseSSPGroupMatrix(info.columns, R_inv)
+                                gm.omega = info.penalty_matrix
+                            else:
+                                gm = DenseGroupMatrix(info.columns @ R_inv)
+                        else:
+                            n_cols = info.n_cols
+                            if sp.issparse(info.columns):
+                                gm = SparseGroupMatrix(info.columns)
+                            else:
+                                gm = DenseGroupMatrix(info.columns)
+
+                        group_matrices.append(gm)
+                        self._groups.append(
+                            GroupSlice(
+                                name=f"{iname}[{level}]",
+                                start=col_offset,
+                                end=col_offset + n_cols,
+                                weight=np.sqrt(n_cols),
+                                penalized=True,
+                                feature_name=iname,
+                            )
+                        )
+                        col_offset += n_cols
+
+                    if r_inv_dict and hasattr(ispec, "set_reparametrisation"):
+                        ispec.set_reparametrisation(r_inv_dict)
             else:
                 # Single group (CategoricalInteraction, NumericCategorical,
                 # NumericInteraction, PolynomialInteraction, TensorInteraction)
                 info = result
                 if info.reparametrize and info.penalty_matrix is not None:
-                    R_inv = self._compute_R_inv(info.columns, info.penalty_matrix, exposure)
+                    B_for_rinv = B_unique_inter if use_discrete_tensor else info.columns
+                    exp_for_rinv = exposure_agg_inter if use_discrete_tensor else exposure
+                    R_inv = self._compute_R_inv(B_for_rinv, info.penalty_matrix, exp_for_rinv)
                     if hasattr(ispec, "set_reparametrisation"):
                         ispec.set_reparametrisation(R_inv)
                     n_cols = R_inv.shape[1]
-                    if sp.issparse(info.columns):
+                    if use_discrete_tensor:
+                        gm = DiscretizedSSPGroupMatrix(B_unique_inter, R_inv, bin_idx_inter)
+                        gm.omega = info.penalty_matrix
+                    elif sp.issparse(info.columns):
                         gm = SparseSSPGroupMatrix(info.columns, R_inv)
                         gm.omega = info.penalty_matrix
                     else:
                         gm = DenseGroupMatrix(info.columns @ R_inv)
                 else:
                     n_cols = info.n_cols
-                    if sp.issparse(info.columns):
+                    if use_discrete_tensor:
+                        gm = DiscretizedSSPGroupMatrix(
+                            B_unique_inter,
+                            np.eye(info.n_cols, dtype=np.float64),
+                            bin_idx_inter,
+                        )
+                    elif sp.issparse(info.columns):
                         gm = SparseGroupMatrix(info.columns)
                     else:
                         gm = DenseGroupMatrix(info.columns)
@@ -929,6 +1049,34 @@ class SuperGLM:
             return spec.discrete
         return self._discrete
 
+    def _should_discretize_tensor_interaction(self, ispec: Any) -> bool:
+        """Check if a tensor interaction should use fit-time discretization."""
+        from superglm.features.interaction import TensorInteraction
+
+        if not isinstance(ispec, TensorInteraction):
+            return False
+        p1, p2 = ispec.parent_names
+        return self._should_discretize(self._specs[p1]) and self._should_discretize(self._specs[p2])
+
+    def _resolve_discrete_n_bins(self, name: str, spec: FeatureSpec) -> int:
+        """Resolve the requested bin count for a discretized feature.
+
+        Feature-level ``spec.n_bins`` takes priority. Otherwise the model-level
+        ``n_bins`` may be a single int or a per-feature dict with a fallback of
+        256 for unspecified features.
+        """
+        n_bins = getattr(spec, "n_bins", None)
+        if n_bins is None:
+            if isinstance(self._n_bins, dict):
+                n_bins = self._n_bins.get(name, 256)
+            else:
+                n_bins = self._n_bins
+
+        n_bins = int(n_bins)
+        if n_bins < 1:
+            raise ValueError(f"n_bins for feature '{name}' must be >= 1, got {n_bins}")
+        return n_bins
+
     def _compute_R_inv(self, B, omega, exposure, lambda2_override=None):
         """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv."""
         lam2 = lambda2_override if lambda2_override is not None else self.lambda2
@@ -944,7 +1092,7 @@ class SuperGLM:
         return np.linalg.inv(R)
 
     def _compute_projected_R_inv(self, B, projection, penalty_sub, exposure, lambda2_override=None):
-        """Compute SSP R_inv within a projected subspace (select=True range space)."""
+        """Compute SSP R_inv within a projected subspace (linear-split range space)."""
         lam2 = lambda2_override if lambda2_override is not None else self.lambda2
         if isinstance(lam2, dict):
             lam2 = 1.0  # dict lambda2 resolved per-group at fit time; use 1.0 for initial basis
@@ -1033,6 +1181,533 @@ class SuperGLM:
                 new_gms.append(gm)
         return DesignMatrix(new_gms, self._dm.n, self._dm.p)
 
+    def _reml_laml_objective(
+        self,
+        y: NDArray,
+        result: PIRLSResult,
+        lambdas: dict[str, float],
+        exposure: NDArray,
+        offset_arr: NDArray,
+        XtWX: NDArray | None = None,
+        penalty_caches: dict | None = None,
+    ) -> float:
+        """Laplace REML/LAML objective up to additive constants.
+
+        Minimizing this objective over log-lambdas is the direct analogue of
+        mgcv's outer REML optimization.  Handles both known-scale families
+        (Poisson, NB2 where φ=1) and estimated-scale families (Gamma, Tweedie)
+        via φ-profiled REML (Wood 2017, §6.2.2):
+
+            Known scale (φ=1):
+                V_R = -ℓ + ½β̂'Sβ̂ + ½log|H| - ½log|S|₊
+
+            Estimated scale (φ̂ profiled):
+                V_R = (1/φ̂)[-ℓ + ½β̂'Sβ̂] + ½log|H| - ½log|S|₊
+                      + ((n - p_eff)/2)·log(φ̂)
+
+        where φ̂ = (dev + β̂'Sβ̂) / (n - M_p) with M_p = Σ rank(Ω_j).
+        """
+        eta = np.clip(self._dm.matvec(result.beta) + result.intercept + offset_arr, -20, 20)
+        mu = np.clip(self._link.inverse(eta), 1e-7, 1e7)
+        if XtWX is None:
+            V = self._distribution.variance(mu)
+            dmu_deta = self._link.deriv_inverse(eta)
+            W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
+            XtWX = _block_xtwx(self._dm.group_matrices, self._groups, W)
+
+        p = XtWX.shape[0]
+        S = _build_penalty_matrix(self._dm.group_matrices, self._groups, lambdas, p)
+        penalty_quad = float(result.beta @ S @ result.beta)
+
+        # log|S|₊: use cached eigenstructure if available, otherwise compute
+        if penalty_caches is not None:
+            from superglm.reml import cached_logdet_s_plus
+
+            logdet_s = cached_logdet_s_plus(lambdas, penalty_caches)
+        else:
+            eigvals_s = np.linalg.eigvalsh(S)
+            thresh_s = 1e-10 * max(eigvals_s.max(), 1e-12)
+            pos_s = eigvals_s[eigvals_s > thresh_s]
+            logdet_s = float(np.sum(np.log(pos_s))) if pos_s.size else 0.0
+
+        # log|H| = log|X'WX + S|
+        M = XtWX + S
+        eigvals_m = np.linalg.eigvalsh(M)
+        thresh_m = 1e-10 * max(eigvals_m.max(), 1e-12)
+        pos_m = eigvals_m[eigvals_m > thresh_m]
+        logdet_m = float(np.sum(np.log(pos_m))) if pos_m.size else 0.0
+
+        nll = -self._distribution.log_likelihood(y, mu, exposure, phi=result.phi)
+
+        # φ-profiled REML for estimated-scale families (Gamma, Tweedie)
+        scale_known = getattr(self._distribution, "scale_known", True)
+        if not scale_known:
+            n = len(y)
+            # M_p = total penalty rank (sum of ranks across penalized groups)
+            if penalty_caches is not None:
+                M_p = sum(c.rank for c in penalty_caches.values())
+            else:
+                M_p = float(len(pos_s))  # fallback: rank of S
+            phi_hat = (result.deviance + penalty_quad) / max(n - M_p, 1.0)
+            phi_hat = max(phi_hat, 1e-10)
+            p_eff = result.effective_df
+            scale_term = 0.5 * (n - p_eff) * np.log(phi_hat)
+            return float(
+                nll / phi_hat
+                + 0.5 * penalty_quad / phi_hat
+                + 0.5 * (logdet_m - logdet_s)
+                + scale_term
+            )
+
+        return float(nll + 0.5 * (penalty_quad + logdet_m - logdet_s))
+
+    def _reml_direct_gradient(
+        self,
+        result: PIRLSResult,
+        XtWX_S_inv: NDArray,
+        lambdas: dict[str, float],
+        reml_groups: list[tuple[int, GroupSlice]],
+        penalty_ranks: dict[str, float],
+        phi_hat: float = 1.0,
+    ) -> NDArray:
+        """Gradient of the LAML objective with respect to log-lambdas.
+
+        For estimated-scale families, the quadratic term β'S_jβ is scaled
+        by 1/φ̂ (profiled scale), while the trace term is unaffected since
+        H_φ⁻¹ S_j/φ = H⁻¹ S_j (the φ cancels).
+        """
+        grad = np.zeros(len(reml_groups), dtype=np.float64)
+        inv_phi = 1.0 / max(phi_hat, 1e-10)
+        for i, (idx, g) in enumerate(reml_groups):
+            gm = self._dm.group_matrices[idx]
+            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+            beta_g = result.beta[g.sl]
+            quad = float(beta_g @ omega_ssp @ beta_g)
+            H_inv_jj = XtWX_S_inv[g.sl, g.sl]
+            trace_term = float(np.trace(H_inv_jj @ omega_ssp))
+            lam = float(lambdas[g.name])
+            # For estimated scale: quad scaled by 1/φ̂, trace unscaled
+            grad[i] = 0.5 * (lam * (inv_phi * quad + trace_term) - penalty_ranks[g.name])
+        return grad
+
+    def _optimize_direct_reml(
+        self,
+        y: NDArray,
+        exposure: NDArray,
+        offset_arr: NDArray,
+        reml_groups: list[tuple[int, GroupSlice]],
+        penalty_ranks: dict[str, float],
+        lambdas: dict[str, float],
+        *,
+        max_reml_iter: int,
+        reml_tol: float,
+        verbose: bool,
+        penalty_caches: dict | None = None,
+    ):
+        """Optimize the direct REML objective over log-lambdas."""
+        from superglm.reml import REMLResult
+
+        scale_known = getattr(self._distribution, "scale_known", True)
+
+        group_names = [g.name for _, g in reml_groups]
+        log_bounds = [(np.log(1e-6), np.log(1e6)) for _ in group_names]
+        log_lam0 = np.array([np.log(lambdas[name]) for name in group_names], dtype=np.float64)
+        lambda_history: list[dict[str, float]] = [lambdas.copy()]
+
+        base_dm = self._dm
+        state_beta: NDArray | None = None
+        state_intercept: float | None = None
+        eval_cache: dict[tuple[float, ...], dict[str, object]] = {}
+        best_key: tuple[float, ...] | None = None
+        last_key: tuple[float, ...] | None = None
+
+        def _eval(log_lam_vec: NDArray) -> dict[str, object]:
+            nonlocal state_beta, state_intercept, best_key, last_key
+
+            clipped = np.clip(log_lam_vec, log_bounds[0][0], log_bounds[0][1])
+            key = tuple(np.round(clipped, 10))
+            if key in eval_cache:
+                last_key = key
+                return eval_cache[key]
+
+            cand_lambdas = lambdas.copy()
+            for name, val in zip(group_names, np.exp(clipped), strict=False):
+                cand_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
+
+            self._dm = base_dm
+            pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
+                X=self._dm,
+                y=y,
+                weights=exposure,
+                family=self._distribution,
+                link=self._link,
+                groups=self._groups,
+                lambda2=cand_lambdas,
+                offset=offset_arr,
+                beta_init=state_beta,
+                intercept_init=state_intercept,
+                return_xtwx=True,
+            )
+
+            objective = self._reml_laml_objective(
+                y,
+                pirls_result,
+                cand_lambdas,
+                exposure,
+                offset_arr,
+                XtWX=XtWX,
+                penalty_caches=penalty_caches,
+            )
+
+            # Compute profiled φ̂ for estimated-scale gradient
+            phi_hat = 1.0
+            if not scale_known and penalty_caches is not None:
+                n = len(y)
+                p_dim = XtWX.shape[0]
+                S_eval = _build_penalty_matrix(
+                    self._dm.group_matrices, self._groups, cand_lambdas, p_dim
+                )
+                pq = float(pirls_result.beta @ S_eval @ pirls_result.beta)
+                M_p = sum(c.rank for c in penalty_caches.values())
+                phi_hat = max((pirls_result.deviance + pq) / max(n - M_p, 1.0), 1e-10)
+
+            gradient = self._reml_direct_gradient(
+                pirls_result,
+                XtWX_S_inv,
+                cand_lambdas,
+                reml_groups,
+                penalty_ranks,
+                phi_hat=phi_hat,
+            )
+
+            record = {
+                "objective": float(objective),
+                "gradient": gradient,
+                "lambdas": cand_lambdas.copy(),
+                "pirls_result": pirls_result,
+            }
+            eval_cache[key] = record
+            state_beta = pirls_result.beta.copy()
+            state_intercept = float(pirls_result.intercept)
+            lambda_history.append(cand_lambdas.copy())
+            last_key = key
+
+            if best_key is None or record["objective"] < eval_cache[best_key]["objective"]:
+                best_key = key
+
+            return record
+
+        def _fun(log_lam_vec: NDArray) -> float:
+            return float(_eval(log_lam_vec)["objective"])
+
+        def _jac(log_lam_vec: NDArray) -> NDArray:
+            return np.asarray(_eval(log_lam_vec)["gradient"], dtype=np.float64)
+
+        opt = minimize(
+            _fun,
+            log_lam0,
+            method="L-BFGS-B",
+            jac=_jac,
+            bounds=log_bounds,
+            options={
+                "maxiter": max_reml_iter,
+                "gtol": max(reml_tol, 5e-3),
+                "ftol": 1e-12,
+                "maxls": 20,
+            },
+        )
+
+        if opt.x is not None:
+            _eval(np.asarray(opt.x, dtype=np.float64))
+        if best_key is None and last_key is not None:
+            best_key = last_key
+        if best_key is None:
+            raise RuntimeError("Direct REML optimizer did not evaluate any candidates")
+
+        best = eval_cache[best_key]
+        self._dm = base_dm
+        grad_norm = float(np.max(np.abs(best["gradient"])))
+        converged = bool(opt.success) or grad_norm <= max(reml_tol, 5e-3)
+
+        if verbose:
+            lam_str = ", ".join(f"{name}={best['lambdas'][name]:.4g}" for name in group_names)
+            print(
+                f"  REML outer optimizer={opt.status} nit={getattr(opt, 'nit', 0)} "
+                f"grad_max={grad_norm:.6f} lambdas=[{lam_str}]"
+            )
+
+        return REMLResult(
+            lambdas=best["lambdas"],
+            pirls_result=best["pirls_result"],
+            n_reml_iter=int(getattr(opt, "nit", len(lambda_history) - 1)),
+            converged=converged,
+            lambda_history=lambda_history,
+            objective=float(best["objective"]),
+        )
+
+    def _run_reml_once(
+        self,
+        y: NDArray,
+        exposure: NDArray,
+        offset_arr: NDArray,
+        reml_groups: list[tuple[int, GroupSlice]],
+        penalty_ranks: dict[str, float],
+        lambdas: dict[str, float],
+        *,
+        max_reml_iter: int,
+        reml_tol: float,
+        verbose: bool,
+        use_direct: bool,
+        penalty_caches: dict | None = None,
+    ):
+        """Run a single REML fixed-point outer loop from a chosen initial lambda scale."""
+        from superglm.metrics import _penalised_xtwx_inv_gram
+        from superglm.reml import REMLResult, _map_beta_between_bases
+
+        scale_known = getattr(self._distribution, "scale_known", True)
+
+        if use_direct:
+            reml_update_names = [g.name for _, g in reml_groups]
+        else:
+            reml_update_names = [g.name for _, g in reml_groups if penalty_ranks[g.name] > 1]
+
+        warm_beta = None
+        warm_intercept = None
+        lambda_history: list[dict[str, float]] = [lambdas.copy()]
+        converged = False
+        n_reml_iter = 0
+        aa_prev_log_x: NDArray | None = None
+        aa_prev_log_gx: NDArray | None = None
+        cheap_iter = False
+        cached_direct_xtwx: NDArray | None = None
+        last_pirls_iters = 0
+        direct_has_scalar_groups = any(penalty_ranks[g.name] <= 1 for _, g in reml_groups)
+        direct_cheap_threshold = 0.01 if direct_has_scalar_groups else 0.2
+        bcd_cheap_threshold = 0.01
+
+        for reml_iter in range(max_reml_iter):
+            n_reml_iter = reml_iter + 1
+
+            if use_direct and not cheap_iter:
+                pirls_result, XtWX_S_inv_full, XtWX_full = fit_irls_direct(
+                    X=self._dm,
+                    y=y,
+                    weights=exposure,
+                    family=self._distribution,
+                    link=self._link,
+                    groups=self._groups,
+                    lambda2=lambdas,
+                    offset=offset_arr,
+                    beta_init=warm_beta,
+                    intercept_init=warm_intercept,
+                    return_xtwx=True,
+                )
+                beta = pirls_result.beta
+                intercept = pirls_result.intercept
+                last_pirls_iters = pirls_result.n_iter
+                cached_direct_xtwx = XtWX_full
+
+                eta = np.clip(self._dm.matvec(beta) + intercept + offset_arr, -20, 20)
+                mu = np.clip(self._link.inverse(eta), 1e-7, 1e7)
+                V = self._distribution.variance(mu)
+                dmu_deta = self._link.deriv_inverse(eta)
+                W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
+
+                active_groups = list(self._groups)
+                XtWX_S_inv = XtWX_S_inv_full
+            elif not use_direct and not cheap_iter:
+                pirls_result = fit_pirls(
+                    X=self._dm,
+                    y=y,
+                    weights=exposure,
+                    family=self._distribution,
+                    link=self._link,
+                    groups=self._groups,
+                    penalty=self.penalty,
+                    offset=offset_arr,
+                    beta_init=warm_beta,
+                    intercept_init=warm_intercept,
+                    anderson_memory=self._anderson_memory,
+                    active_set=self._active_set,
+                    lambda2=lambdas,
+                )
+                beta = pirls_result.beta
+                intercept = pirls_result.intercept
+                last_pirls_iters = pirls_result.n_iter
+
+                eta = np.clip(self._dm.matvec(beta) + intercept + offset_arr, -20, 20)
+                mu = np.clip(self._link.inverse(eta), 1e-7, 1e7)
+                V = self._distribution.variance(mu)
+                dmu_deta = self._link.deriv_inverse(eta)
+                W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
+
+            if use_direct and cheap_iter:
+                if cached_direct_xtwx is None:
+                    raise RuntimeError("REML cheap iteration missing cached direct XtWX")
+                XtWX_S_inv = _invert_xtwx_plus_penalty(
+                    cached_direct_xtwx, self._dm.group_matrices, self._groups, lambdas
+                )
+                active_groups = list(self._groups)
+            elif not use_direct:
+                XtWX_S_inv, active_groups = _penalised_xtwx_inv_gram(
+                    beta, W, self._dm.group_matrices, self._groups, lambdas
+                )
+
+            # Compute profiled φ̂ for estimated-scale fixed-point update
+            inv_phi = 1.0
+            if not scale_known and penalty_caches is not None:
+                p_dim = self._dm.p
+                S_fp = _build_penalty_matrix(self._dm.group_matrices, self._groups, lambdas, p_dim)
+                pq = float(beta @ S_fp @ beta)
+                M_p = sum(c.rank for c in penalty_caches.values())
+                phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
+                inv_phi = 1.0 / phi_hat
+
+            lambdas_new = lambdas.copy()
+            for idx, g in reml_groups:
+                if not use_direct and penalty_ranks[g.name] <= 1:
+                    continue
+
+                gm = self._dm.group_matrices[idx]
+                beta_g = beta[g.sl]
+                if np.linalg.norm(beta_g) < 1e-12:
+                    continue
+
+                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+                quad = float(beta_g @ omega_ssp @ beta_g)
+
+                ag = next((a for a in active_groups if a.name == g.name), None)
+                if ag is None:
+                    continue
+
+                H_inv_jj = XtWX_S_inv[ag.sl, ag.sl]
+                trace_term = float(np.trace(H_inv_jj @ omega_ssp))
+
+                r_j = penalty_ranks[g.name]
+                # For estimated scale: quad scaled by 1/φ̂, trace unscaled
+                denom = inv_phi * quad + trace_term
+                lam_new = r_j / denom if denom > 1e-12 else lambdas[g.name]
+                lambdas_new[g.name] = float(np.clip(lam_new, 1e-6, 1e6))
+
+            if aa_prev_log_x is not None and len(reml_update_names) > 0:
+                log_x = np.array([np.log(lambdas[n]) for n in reml_update_names])
+                log_gx = np.array([np.log(lambdas_new[n]) for n in reml_update_names])
+                f_curr = log_gx - log_x
+                f_prev = aa_prev_log_gx - aa_prev_log_x
+                df = f_curr - f_prev
+                df_sq = float(np.dot(df, df))
+                if df_sq > 1e-20:
+                    theta = float(-np.dot(f_curr, df) / df_sq)
+                    theta = max(-0.5, min(theta, 2.0))
+                    log_acc = (1.0 + theta) * log_gx - theta * aa_prev_log_gx
+                    for i, name in enumerate(reml_update_names):
+                        lambdas_new[name] = float(np.clip(np.exp(log_acc[i]), 1e-6, 1e6))
+
+            if len(reml_update_names) > 0:
+                aa_prev_log_x = np.array([np.log(lambdas[n]) for n in reml_update_names])
+                aa_prev_log_gx = np.array([np.log(lambdas_new[n]) for n in reml_update_names])
+
+            if use_direct:
+                changes = [
+                    abs(np.log(lambdas_new[g.name]) - np.log(lambdas[g.name]))
+                    for _, g in reml_groups
+                    if lambdas[g.name] > 0 and lambdas_new[g.name] > 0
+                ]
+            else:
+                changes = [
+                    abs(np.log(lambdas_new[g.name]) - np.log(lambdas[g.name]))
+                    for _, g in reml_groups
+                    if lambdas[g.name] > 0 and lambdas_new[g.name] > 0 and penalty_ranks[g.name] > 1
+                ]
+                if not changes:
+                    changes = [
+                        abs(np.log(lambdas_new[g.name]) - np.log(lambdas[g.name]))
+                        for _, g in reml_groups
+                        if lambdas[g.name] > 0 and lambdas_new[g.name] > 0
+                    ]
+            max_change = max(changes) if changes else 0.0
+
+            if verbose:
+                lam_str = ", ".join(f"{g.name}={lambdas_new[g.name]:.4g}" for _, g in reml_groups)
+                mode = "cheap" if cheap_iter else f"pirls={last_pirls_iters}"
+                print(
+                    f"  REML iter={n_reml_iter}  max_change={max_change:.6f}  "
+                    f"({mode})  lambdas=[{lam_str}]"
+                )
+
+            lambda_history.append(lambdas_new.copy())
+
+            if max_change < reml_tol:
+                converged = True
+                lambdas = lambdas_new
+                break
+
+            if use_direct:
+                warm_beta = beta
+                warm_intercept = intercept
+                cheap_iter = max_change <= direct_cheap_threshold
+            elif max_change > bcd_cheap_threshold:
+                old_gms = self._dm.group_matrices
+                self._dm = self._rebuild_design_matrix_with_lambdas(lambdas_new, exposure)
+                warm_beta = _map_beta_between_bases(
+                    beta, old_gms, self._dm.group_matrices, self._groups
+                )
+                warm_intercept = intercept
+                cheap_iter = False
+            else:
+                cheap_iter = True
+
+            lambdas = lambdas_new
+
+        if cheap_iter and converged and not use_direct:
+            self._dm = self._rebuild_design_matrix_with_lambdas(lambdas, exposure)
+
+        if use_direct:
+            final_result, _ = fit_irls_direct(
+                X=self._dm,
+                y=y,
+                weights=exposure,
+                family=self._distribution,
+                link=self._link,
+                groups=self._groups,
+                lambda2=lambdas,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+            )
+        else:
+            final_result = fit_pirls(
+                X=self._dm,
+                y=y,
+                weights=exposure,
+                family=self._distribution,
+                link=self._link,
+                groups=self._groups,
+                penalty=self.penalty,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+                anderson_memory=self._anderson_memory,
+                active_set=self._active_set,
+                lambda2=lambdas,
+            )
+
+        return REMLResult(
+            lambdas=lambdas,
+            pirls_result=final_result,
+            n_reml_iter=n_reml_iter,
+            converged=converged,
+            lambda_history=lambda_history,
+            objective=self._reml_laml_objective(
+                y,
+                final_result,
+                lambdas,
+                exposure,
+                offset_arr,
+                penalty_caches=penalty_caches,
+            ),
+        )
+
     def fit_reml(
         self,
         X: pd.DataFrame,
@@ -1047,10 +1722,10 @@ class SuperGLM:
     ) -> SuperGLM:
         """Fit with REML estimation of per-term smoothing parameters.
 
-        REML adds an outer loop around the existing PIRLS solver:
-        fix lambda_j → warm-start PIRLS → compute H^{-1} → update lambda_j
-        via the Wood (2011) fixed-point formula. Typically 3-6 outer
-        iterations.
+        When ``lambda1=0``, the exact/direct path optimizes a Laplace
+        approximate REML objective over log-lambdas. When group selection is
+        also active, REML falls back to the existing Wood (2011) fixed-point
+        outer loop around PIRLS.
 
         REML coexists with group lasso: REML controls within-group
         smoothness (per-term lambda_j), group lasso controls between-group
@@ -1080,9 +1755,6 @@ class SuperGLM:
         SuperGLM
             The fitted model (self).
         """
-        from superglm.metrics import _penalised_xtwx_inv_gram
-        from superglm.reml import REMLResult, _map_beta_between_bases
-
         if self._splines is not None and not self._specs:
             self._auto_detect_features(X, exposure)
 
@@ -1136,300 +1808,49 @@ class SuperGLM:
         lam_init = lambda2_init if lambda2_init is not None else self.lambda2
         lambdas = {g.name: lam_init for _, g in reml_groups}
 
-        # Compute penalty ranks (rank of R_inv.T @ omega @ R_inv)
-        penalty_ranks: dict[str, float] = {}
-        for idx, g in reml_groups:
-            gm = self._dm.group_matrices[idx]
-            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-            eigvals = np.linalg.eigvalsh(omega_ssp)
-            penalty_ranks[g.name] = float(np.sum(eigvals > 1e-8 * max(eigvals.max(), 1e-12)))
+        # Build penalty caches (eigenstructure computed once, reused across iterations)
+        from superglm.reml import build_penalty_caches
+
+        penalty_caches = build_penalty_caches(self._dm.group_matrices, self._groups, reml_groups)
+        penalty_ranks = {name: cache.rank for name, cache in penalty_caches.items()}
 
         # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed)
-        _use_direct = self.penalty.lambda1 is not None and self.penalty.lambda1 == 0
-
-        # Names of groups eligible for REML lambda updates.
-        # Direct solver: estimate ALL lambdas (no BCD aliasing → 1-col groups are fine).
-        # BCD solver: skip 1-col groups (weakly identified, causes drift).
-        if _use_direct:
-            _reml_update_names = [g.name for _, g in reml_groups]
-        else:
-            _reml_update_names = [g.name for _, g in reml_groups if penalty_ranks[g.name] > 1]
-
-        # REML outer loop
-        warm_beta = None
-        warm_intercept = None
-        lambda_history: list[dict[str, float]] = [lambdas.copy()]
-        converged = False
-        n_reml_iter = 0
         offset_arr = offset if offset is not None else np.zeros(len(y))
-        _aa_prev_log_x: NDArray | None = None  # Anderson(1) state
-        _aa_prev_log_gx: NDArray | None = None
-        _cheap_iter = False  # True → skip PIRLS/DM rebuild, only update lambdas
-        _cached_direct_xtwx: NDArray | None = None
-        _last_pirls_iters = 0
-        # Direct REML can switch to cheap updates earlier when all updated groups
-        # are genuine multi-parameter smooths. Models with 1-column subgroups
-        # (notably select=True linear pieces) are more sensitive, so keep the
-        # conservative threshold there.
-        _direct_has_scalar_groups = any(penalty_ranks[g.name] <= 1 for _, g in reml_groups)
-        _direct_cheap_threshold = 0.01 if _direct_has_scalar_groups else 0.2
-        _bcd_cheap_threshold = 0.01
+        use_direct = self.penalty.lambda1 is not None and self.penalty.lambda1 == 0
 
-        for reml_iter in range(max_reml_iter):
-            n_reml_iter = reml_iter + 1
-
-            if _use_direct and not _cheap_iter:
-                # Direct IRLS path: solver returns XtWX_S_inv directly
-                pirls_result, XtWX_S_inv_full, XtWX_full = fit_irls_direct(
-                    X=self._dm,
-                    y=y,
-                    weights=exposure,
-                    family=self._distribution,
-                    link=self._link,
-                    groups=self._groups,
-                    lambda2=lambdas,
-                    offset=offset_arr,
-                    beta_init=warm_beta,
-                    intercept_init=warm_intercept,
-                    return_xtwx=True,
-                )
-                beta = pirls_result.beta
-                intercept = pirls_result.intercept
-                _last_pirls_iters = pirls_result.n_iter
-                _cached_direct_xtwx = XtWX_full
-
-                # Compute working weights for potential cheap iterations
-                eta = np.clip(self._dm.matvec(beta) + intercept + offset_arr, -20, 20)
-                mu = np.clip(self._link.inverse(eta), 1e-7, 1e7)
-                V = self._distribution.variance(mu)
-                dmu_deta = self._link.deriv_inverse(eta)
-                W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
-
-                # Build active_groups mapping (all groups, re-indexed to full beta)
-                # For the direct solver, all groups are "active" (no L1 zeroing)
-                active_groups = list(self._groups)
-                XtWX_S_inv = XtWX_S_inv_full
-            elif not _use_direct and not _cheap_iter:
-                # 1. Run PIRLS with current lambdas (warm-started)
-                pirls_result = fit_pirls(
-                    X=self._dm,
-                    y=y,
-                    weights=exposure,
-                    family=self._distribution,
-                    link=self._link,
-                    groups=self._groups,
-                    penalty=self.penalty,
-                    offset=offset_arr,
-                    beta_init=warm_beta,
-                    intercept_init=warm_intercept,
-                    anderson_memory=self._anderson_memory,
-                    active_set=self._active_set,
-                    lambda2=lambdas,
-                )
-                beta = pirls_result.beta
-                intercept = pirls_result.intercept
-                _last_pirls_iters = pirls_result.n_iter
-
-                # 2. Compute working weights
-                eta = np.clip(self._dm.matvec(beta) + intercept + offset_arr, -20, 20)
-                mu = np.clip(self._link.inverse(eta), 1e-7, 1e7)
-                V = self._distribution.variance(mu)
-                dmu_deta = self._link.deriv_inverse(eta)
-                W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
-            # else (_cheap_iter): reuse beta, W from previous full iteration
-
-            if _use_direct and _cheap_iter:
-                if _cached_direct_xtwx is None:
-                    raise RuntimeError("REML cheap iteration missing cached direct XtWX")
-                XtWX_S_inv = _invert_xtwx_plus_penalty(
-                    _cached_direct_xtwx, self._dm.group_matrices, self._groups, lambdas
-                )
-                active_groups = list(self._groups)
-            elif not _use_direct:
-                # Compute H^{-1} = (X'WX + S)^{-1} via gram-based fast path.
-                # For cheap iterations: uses old beta/W but new lambdas.
-                # For BCD full iterations: separate computation needed.
-                XtWX_S_inv, active_groups = _penalised_xtwx_inv_gram(
-                    beta, W, self._dm.group_matrices, self._groups, lambdas
-                )
-
-            # 4. Fixed-point update per REML-eligible group
-            lambdas_new = lambdas.copy()
-            for idx, g in reml_groups:
-                # BCD path: skip 1-column groups (weakly identified, causes drift).
-                # Direct path: estimate all lambdas (no BCD aliasing).
-                if not _use_direct and penalty_ranks[g.name] <= 1:
-                    continue
-
-                gm = self._dm.group_matrices[idx]
-                beta_g = beta[g.sl]
-
-                # Skip zeroed groups
-                if np.linalg.norm(beta_g) < 1e-12:
-                    continue
-
-                # Omega_ssp = R_inv.T @ omega @ R_inv (unscaled by lambda)
-                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-
-                # Quadratic form: beta' @ Omega_ssp @ beta
-                quad = float(beta_g @ omega_ssp @ beta_g)
-
-                # Trace term: tr(H^{-1}[j,j] @ Omega_ssp)
-                ag = None
-                for a in active_groups:
-                    if a.name == g.name:
-                        ag = a
-                        break
-                if ag is None:
-                    continue
-
-                H_inv_jj = XtWX_S_inv[ag.sl, ag.sl]
-                trace_term = float(np.trace(H_inv_jj @ omega_ssp))
-
-                # Fixed-point: lambda_j = r_j / (beta'Omega beta + tr(H^{-1} Omega))
-                r_j = penalty_ranks[g.name]
-                denom = quad + trace_term
-                if denom > 1e-12:
-                    lam_new = r_j / denom
-                else:
-                    lam_new = lambdas[g.name]
-
-                # Clamp to reasonable range
-                lambdas_new[g.name] = float(np.clip(lam_new, 1e-6, 1e6))
-
-            # 4b. Anderson(1) acceleration on log-lambda scale.
-            # Accelerates linearly converging fixed-point iterations.
-            if _aa_prev_log_x is not None and len(_reml_update_names) > 0:
-                log_x = np.array([np.log(lambdas[n]) for n in _reml_update_names])
-                log_gx = np.array([np.log(lambdas_new[n]) for n in _reml_update_names])
-                f_curr = log_gx - log_x
-                f_prev = _aa_prev_log_gx - _aa_prev_log_x
-                df = f_curr - f_prev
-                df_sq = float(np.dot(df, df))
-                if df_sq > 1e-20:
-                    theta = float(-np.dot(f_curr, df) / df_sq)
-                    theta = max(-0.5, min(theta, 2.0))  # stability guard
-                    log_acc = (1.0 + theta) * log_gx - theta * _aa_prev_log_gx
-                    for i, n in enumerate(_reml_update_names):
-                        lambdas_new[n] = float(np.clip(np.exp(log_acc[i]), 1e-6, 1e6))
-
-            if len(_reml_update_names) > 0:
-                _aa_prev_log_x = np.array([np.log(lambdas[n]) for n in _reml_update_names])
-                _aa_prev_log_gx = np.array([np.log(lambdas_new[n]) for n in _reml_update_names])
-
-            # 5. Check convergence.
-            # BCD path: only check multi-parameter smooth terms (1-col groups
-            #   converge slowly due to weak identification and don't affect fit).
-            # Direct path: check all groups (no aliasing → all converge properly).
-            if _use_direct:
-                changes = [
-                    abs(np.log(lambdas_new[g.name]) - np.log(lambdas[g.name]))
-                    for _, g in reml_groups
-                    if lambdas[g.name] > 0 and lambdas_new[g.name] > 0
-                ]
-            else:
-                changes = [
-                    abs(np.log(lambdas_new[g.name]) - np.log(lambdas[g.name]))
-                    for idx, g in reml_groups
-                    if lambdas[g.name] > 0 and lambdas_new[g.name] > 0 and penalty_ranks[g.name] > 1
-                ]
-                if not changes:
-                    # All groups are 1-column — fall back to full check
-                    changes = [
-                        abs(np.log(lambdas_new[g.name]) - np.log(lambdas[g.name]))
-                        for _, g in reml_groups
-                        if lambdas[g.name] > 0 and lambdas_new[g.name] > 0
-                    ]
-            max_change = max(changes) if changes else 0.0
-
-            if verbose:
-                lam_str = ", ".join(f"{g.name}={lambdas_new[g.name]:.4g}" for _, g in reml_groups)
-                mode = "cheap" if _cheap_iter else f"pirls={_last_pirls_iters}"
-                print(
-                    f"  REML iter={n_reml_iter}  max_change={max_change:.6f}  "
-                    f"({mode})  lambdas=[{lam_str}]"
-                )
-
-            lambda_history.append(lambdas_new.copy())
-
-            if max_change < reml_tol:
-                converged = True
-                lambdas = lambdas_new
-                break
-
-            # 6. Decide: full rebuild or cheap iteration next time.
-            # For the direct solver (lambda1=0), the spline basis can stay fixed:
-            # lambda_j only rescales the quadratic penalty, and rebuilding the
-            # SSP reparametrisation changes coordinates without changing the
-            # fitted objective. Keeping the basis fixed avoids an O(nK) pass
-            # through every smooth at each outer REML step.
-            #
-            # For the BCD path (lambda1>0), we still rebuild because the sparse
-            # penalty acts on the transformed coefficients and is not invariant
-            # to a basis change in the same way.
-            if _use_direct:
-                warm_beta = beta
-                warm_intercept = intercept
-                _cheap_iter = max_change <= _direct_cheap_threshold
-            elif max_change > _bcd_cheap_threshold:
-                old_gms = self._dm.group_matrices
-                self._dm = self._rebuild_design_matrix_with_lambdas(lambdas_new, exposure)
-                warm_beta = _map_beta_between_bases(
-                    beta, old_gms, self._dm.group_matrices, self._groups
-                )
-                warm_intercept = intercept
-                _cheap_iter = False
-            else:
-                _cheap_iter = True
-
-            lambdas = lambdas_new
-
-        # If the BCD path ended on cheap iterations, rebuild DM with final lambdas.
-        # The direct solver keeps a fixed basis throughout REML, so there is
-        # nothing to rebuild at convergence.
-        if _cheap_iter and converged and not _use_direct:
-            self._dm = self._rebuild_design_matrix_with_lambdas(lambdas, exposure)
-
-        # Final fit with converged lambdas
-        if _use_direct:
-            self._result, _ = fit_irls_direct(
-                X=self._dm,
-                y=y,
-                weights=exposure,
-                family=self._distribution,
-                link=self._link,
-                groups=self._groups,
-                lambda2=lambdas,
-                offset=offset_arr,
-                beta_init=warm_beta,
-                intercept_init=warm_intercept,
+        if use_direct:
+            best = self._optimize_direct_reml(
+                y,
+                exposure,
+                offset_arr,
+                reml_groups,
+                penalty_ranks,
+                lambdas,
+                max_reml_iter=max_reml_iter,
+                reml_tol=reml_tol,
+                verbose=verbose,
+                penalty_caches=penalty_caches,
             )
         else:
-            self._result = fit_pirls(
-                X=self._dm,
-                y=y,
-                weights=exposure,
-                family=self._distribution,
-                link=self._link,
-                groups=self._groups,
-                penalty=self.penalty,
-                offset=offset_arr,
-                beta_init=warm_beta,
-                intercept_init=warm_intercept,
-                anderson_memory=self._anderson_memory,
-                active_set=self._active_set,
-                lambda2=lambdas,
+            best = self._run_reml_once(
+                y,
+                exposure,
+                offset_arr,
+                reml_groups,
+                penalty_ranks,
+                lambdas,
+                max_reml_iter=max_reml_iter,
+                reml_tol=reml_tol,
+                verbose=verbose,
+                use_direct=False,
+                penalty_caches=penalty_caches,
             )
-
-        # Store REML results
-        self._reml_lambdas = lambdas
-        self._reml_result = REMLResult(
-            lambdas=lambdas,
-            pirls_result=self._result,
-            n_reml_iter=n_reml_iter,
-            converged=converged,
-            lambda_history=lambda_history,
-        )
+        self._result = best.pirls_result
+        self._reml_lambdas = best.lambdas
+        self._reml_result = best
+        lambdas = best.lambdas
+        n_reml_iter = best.n_reml_iter
+        converged = best.converged
 
         # Update spec R_inv for predict/reconstruct
         for idx, g in reml_groups:
@@ -1460,16 +1881,26 @@ class SuperGLM:
             if not updated:
                 continue
             if len(feature_groups) > 1:
-                # Per-level (SplineCategorical): gather dict
-                r_inv_dict = {}
-                for fg in feature_groups:
-                    fg_idx = next(i for i, gg in enumerate(self._groups) if gg.name == fg.name)
-                    fg_gm = self._dm.group_matrices[fg_idx]
-                    if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
-                        level = fg.name.split("[")[1].rstrip("]") if "[" in fg.name else fg.name
-                        r_inv_dict[level] = fg_gm.R_inv
-                if r_inv_dict:
-                    ispec.set_reparametrisation(r_inv_dict)
+                if any(fg.subgroup_type is not None for fg in feature_groups):
+                    r_inv_parts = []
+                    for fg in feature_groups:
+                        fg_idx = next(i for i, gg in enumerate(self._groups) if gg.name == fg.name)
+                        fg_gm = self._dm.group_matrices[fg_idx]
+                        if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+                            r_inv_parts.append(fg_gm.R_inv)
+                    if r_inv_parts:
+                        ispec.set_reparametrisation(np.hstack(r_inv_parts))
+                else:
+                    # Per-level (SplineCategorical): gather dict
+                    r_inv_dict = {}
+                    for fg in feature_groups:
+                        fg_idx = next(i for i, gg in enumerate(self._groups) if gg.name == fg.name)
+                        fg_gm = self._dm.group_matrices[fg_idx]
+                        if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+                            level = fg.name.split("[")[1].rstrip("]") if "[" in fg.name else fg.name
+                            r_inv_dict[level] = fg_gm.R_inv
+                    if r_inv_dict:
+                        ispec.set_reparametrisation(r_inv_dict)
             else:
                 # Single group (TensorInteraction)
                 fg = feature_groups[0]
@@ -1509,7 +1940,7 @@ class SuperGLM:
         return out
 
     def _feature_groups(self, name: str) -> list[GroupSlice]:
-        """Get all groups belonging to a feature (1 for normal, 2 for select=True splines)."""
+        """Get all groups belonging to a feature (1 normally, 2 for split-linear splines)."""
         return [g for g in self._groups if g.feature_name == name]
 
     def reconstruct_feature(self, name: str) -> dict[str, Any]:
@@ -1992,7 +2423,7 @@ class SuperGLM:
             B_grid = BSpl.design_matrix(x_clip, spec._knots, spec.degree).toarray()
             M = B_grid @ spec._R_inv if spec._R_inv is not None else B_grid
 
-            # For select=True: only use columns for active subgroups
+            # For split_linear=True: only use columns for active subgroups
             active_cols = np.concatenate(
                 [
                     np.arange(g.start, g.end) - groups[0].start
@@ -2092,7 +2523,7 @@ class SuperGLM:
         B_grid = BSpl.design_matrix(x_clip, spec._knots, spec.degree).toarray()
         M = B_grid @ spec._R_inv if spec._R_inv is not None else B_grid
 
-        # For select=True: only use columns for active subgroups
+        # For split_linear=True: only use columns for active subgroups
         active_cols = np.concatenate(
             [
                 np.arange(g.start, g.end) - groups[0].start
