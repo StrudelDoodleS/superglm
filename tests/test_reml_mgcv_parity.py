@@ -24,7 +24,7 @@ import pytest
 from superglm.features.spline import Spline
 from superglm.model import SuperGLM
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "scratch", "r_experiments")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 # ── mgcv reference values (from reml_parity_reference.R) ────────────
 # R 4.5.2, mgcv 1.9-3, bs="bs" k=10 m=c(3,2), method="REML"

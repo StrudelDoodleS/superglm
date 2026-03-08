@@ -660,9 +660,25 @@ class TestREMLFiniteDifference:
 
             fd_hess[:, j] = (grad_plus - grad_minus) / (2 * eps)
 
-        # Looser tolerance than inner FD due to Laplace approximation error
-        # (W changes when β̂ changes, but analytic Hessian treats W as fixed)
-        np.testing.assert_allclose(hess, fd_hess, rtol=0.05, atol=0.5)
+        # Check diagonal and off-diagonal separately for tighter regression bounds.
+        # Diagonal: rtol=5% is tight enough; atol=0.1 catches absolute drift.
+        # Off-diagonal: relative to diagonal scale (small cross-terms need
+        # scale-aware tolerance, not a blanket atol=0.5 that hides regressions).
+        diag_analytic = np.diag(hess)
+        diag_fd = np.diag(fd_hess)
+        np.testing.assert_allclose(diag_analytic, diag_fd, rtol=0.05, atol=0.1)
+
+        for i in range(m_groups):
+            for j in range(m_groups):
+                if i == j:
+                    continue
+                abs_err = abs(hess[i, j] - fd_hess[i, j])
+                scale = max(abs(fd_hess[i, j]), abs(diag_fd.mean()), 1e-6)
+                rel_err = abs_err / scale
+                assert rel_err < 0.15, (
+                    f"{family} Hessian[{i},{j}]: analytic={hess[i, j]:.6f}, "
+                    f"fd={fd_hess[i, j]:.6f}, rel_err={rel_err:.4f}"
+                )
 
 
 # ── REML convergence ─────────────────────────────────────────────

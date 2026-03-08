@@ -1,7 +1,14 @@
-"""Verify the IFT Hessian correction against full outer finite differences."""
+"""Verify the IFT Hessian correction against full outer finite differences.
+
+The analytic Hessian includes the IFT correction (dβ̂/dρ = -H⁻¹ S β̂)
+but holds IRLS working weights W fixed (Laplace approximation).  FD
+re-solves PIRLS at perturbed λ, so W changes too.  Tolerances account
+for both the fixed-W approximation and higher-order IFT terms.
+"""
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from superglm.features.spline import CubicRegressionSpline
 from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
@@ -86,7 +93,7 @@ def _setup(family, seed=42):
     )
 
 
-def full_outer_fd_hessian(
+def _full_outer_fd_hessian(
     m,
     y,
     exposure,
@@ -140,8 +147,12 @@ def full_outer_fd_hessian(
     return fd_hess
 
 
-if __name__ == "__main__":
-    for family in ["poisson", "gamma"]:
+class TestIFTHessian:
+    """Analytic Hessian (with IFT correction) vs full outer finite differences."""
+
+    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    def test_hessian_diagonal_matches_fd(self, family):
+        """Diagonal elements should match FD within 5% relative error."""
         (
             m,
             y,
@@ -179,7 +190,7 @@ if __name__ == "__main__":
             phi_hat=phi_hat,
         )
 
-        fd_hess = full_outer_fd_hessian(
+        fd_hess = _full_outer_fd_hessian(
             m,
             y,
             exposure,
@@ -192,13 +203,72 @@ if __name__ == "__main__":
             n,
         )
 
-        diff = np.abs(hess - fd_hess)
-        rel_err = diff / (np.abs(fd_hess) + 1e-10)
-        print(f"{family}:")
-        print(f"  max abs diff = {diff.max():.4f}")
-        print(f"  max rel err  = {rel_err.max():.4f}")
-        print(f"  Analytic diag: {np.diag(hess)}")
-        print(f"  FD diag:       {np.diag(fd_hess)}")
-        print(f"  Analytic:\n{hess}")
-        print(f"  FD:\n{fd_hess}")
-        print()
+        diag_analytic = np.diag(hess)
+        diag_fd = np.diag(fd_hess)
+        np.testing.assert_allclose(diag_analytic, diag_fd, rtol=0.05, atol=0.1)
+
+    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    def test_hessian_off_diagonal_matches_fd(self, family):
+        """Off-diagonal elements should match FD within reasonable tolerance."""
+        (
+            m,
+            y,
+            exposure,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+            M_p,
+        ) = _setup(family)
+
+        grad = m._reml_direct_gradient(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            phi_hat=phi_hat,
+        )
+        hess = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+        )
+
+        fd_hess = _full_outer_fd_hessian(
+            m,
+            y,
+            exposure,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            pirls_result,
+            M_p,
+            n,
+        )
+
+        m_groups = len(reml_groups)
+        for i in range(m_groups):
+            for j in range(m_groups):
+                if i == j:
+                    continue
+                abs_err = abs(hess[i, j] - fd_hess[i, j])
+                scale = max(abs(fd_hess[i, j]), abs(np.diag(fd_hess).mean()), 1e-6)
+                rel_err = abs_err / scale
+                assert rel_err < 0.15, (
+                    f"{family} Hessian[{i},{j}]: analytic={hess[i, j]:.6f}, "
+                    f"fd={fd_hess[i, j]:.6f}, rel_err={rel_err:.4f}"
+                )
