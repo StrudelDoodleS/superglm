@@ -157,6 +157,16 @@ def main():
         print("── Smoothing parameter comparison ──")
         print_lambda_comparison(sg_results, mgcv_results)
 
+    # Print notes on comparability
+    print("── Notes ──")
+    print("  Synthetic: SuperGLM exact vs mgcv gam(REML) — direct comparison")
+    print("             (same cr basis, same k, same data)")
+    print("  MTPL2:     SuperGLM exact vs mgcv bam(fREML, weights) — closest comparison")
+    print("             Both use rate response + exposure weights, matched basis sizes.")
+    print("             bam(fREML, offset) uses integer counts + log-offset (different model).")
+    print("             gam(REML, 200k) is a subsample — not directly comparable on time/deviance.")
+    print()
+
     # Print summary
     print("── Summary ──")
     if sg_results:

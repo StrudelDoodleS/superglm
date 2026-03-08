@@ -33,8 +33,8 @@ results <- list()
 extract_results <- function(fit, elapsed, name, n, family_name, method) {
   sm <- summary(fit)
   edf_smooth <- if (!is.null(sm$s.table)) sum(sm$s.table[, "edf"]) else 0
-  # Total edf = smooth edf + parametric terms (intercept + categoricals)
-  total_edf <- sum(fit$edf) + 1  # +1 for intercept
+  # fit$edf already includes the intercept — do not add 1
+  total_edf <- sum(fit$edf)
 
   # Extract smoothing parameters
   sp_list <- as.list(fit$sp)
@@ -168,6 +168,8 @@ if (!skip_mtpl2) {
     results <- c(results, list(r_bam))
 
     # mgcv::bam with fREML, weights-based (rate response + exposure weights)
+    # This is the apples-to-apples comparison with SuperGLM, which also uses
+    # rate response + exposure weights (not integer counts + offset).
     label <- "mtpl2_poisson_bam_freml_weights"
     cat(sprintf("  Running %s (n=%d)...", label, n))
     flush.console()

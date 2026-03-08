@@ -198,6 +198,11 @@ def run_mtpl2_benchmarks():
         export_df.to_csv(r_csv, index=False)
         print(f"  Exported {r_csv}")
 
+    # Basis size matching with mgcv:
+    # mgcv bs="cr" k=K gives K basis functions (K-1 after identifiability).
+    # SuperGLM CRS n_knots=N gives N+4 B-splines, N+2 after natural constraints
+    # (intercept handled separately). To match mgcv k=20: n_knots=18 → 20 cols.
+    # k=15: n_knots=13 → 15 cols.
     results = []
     for discrete in [False, True]:
         label = f"mtpl2_poisson_{'disc' if discrete else 'exact'}"
@@ -208,9 +213,9 @@ def run_mtpl2_benchmarks():
             y=y_freq,
             exposure=exposure,
             features={
-                "DrivAge": CubicRegressionSpline(n_knots=15),
-                "VehAge": CubicRegressionSpline(n_knots=10),
-                "BonusMalus": CubicRegressionSpline(n_knots=10),
+                "DrivAge": CubicRegressionSpline(n_knots=18),  # matches mgcv k=20
+                "VehAge": CubicRegressionSpline(n_knots=13),  # matches mgcv k=15
+                "BonusMalus": CubicRegressionSpline(n_knots=13),  # matches mgcv k=15
                 "Area": Categorical(base="most_exposed"),
             },
             family="poisson",
