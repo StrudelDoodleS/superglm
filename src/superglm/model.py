@@ -830,6 +830,20 @@ class SuperGLM:
                 active_set=self._active_set,
                 lambda2=self.lambda2,
             )
+
+        # Fix phi for known-scale families (Poisson): phi is always 1.0.
+        # Solvers compute Pearson phi = dev/(n-edf) generically.
+        scale_known = getattr(self._distribution, "scale_known", True)
+        if scale_known and self._result.phi != 1.0:
+            self._result = PIRLSResult(
+                beta=self._result.beta,
+                intercept=self._result.intercept,
+                n_iter=self._result.n_iter,
+                deviance=self._result.deviance,
+                converged=self._result.converged,
+                phi=1.0,
+                effective_df=self._result.effective_df,
+            )
         return self
 
     def fit_path(
@@ -2244,10 +2258,21 @@ class SuperGLM:
         n_reml_iter = best.n_reml_iter
         converged = best.converged
 
-        # Fix phi for estimated-scale families: use REML profiled φ̂ instead
-        # of the raw PIRLS phi = dev/(n-edf) which doesn't include the penalty.
+        # Fix phi: known-scale families (Poisson) get phi=1.0;
+        # estimated-scale families get REML profiled φ̂ instead of the raw
+        # PIRLS phi = dev/(n-edf) which doesn't include the penalty.
         scale_known = getattr(self._distribution, "scale_known", True)
-        if not scale_known:
+        if scale_known:
+            self._result = PIRLSResult(
+                beta=best.pirls_result.beta,
+                intercept=best.pirls_result.intercept,
+                n_iter=best.pirls_result.n_iter,
+                deviance=best.pirls_result.deviance,
+                converged=best.pirls_result.converged,
+                phi=1.0,
+                effective_df=best.pirls_result.effective_df,
+            )
+        else:
             p_dim = self._dm.p
             S_final = _build_penalty_matrix(self._dm.group_matrices, self._groups, lambdas, p_dim)
             pq_final = float(best.pirls_result.beta @ S_final @ best.pirls_result.beta)
