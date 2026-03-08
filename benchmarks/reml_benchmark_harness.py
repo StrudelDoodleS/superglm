@@ -120,6 +120,12 @@ def run_one(
                 "n_pirls_iter": model.result.n_iter,
                 "lambdas": {k: float(v) for k, v in model._reml_lambdas.items()},
             }
+            # Capture phase-level profile if available
+            profile = getattr(model, "_reml_profile", None)
+            if profile:
+                result_info["profile"] = {
+                    k: round(v, 4) if isinstance(v, float) else v for k, v in profile.items()
+                }
 
     return {
         "name": name,
@@ -253,6 +259,43 @@ def main():
     if not args.no_mtpl2:
         print("\n── MTPL2 benchmarks ──")
         all_results.extend(run_mtpl2_benchmarks())
+
+    # Print phase-level profiles
+    profiled = [r for r in all_results if "profile" in r]
+    if profiled:
+        print("\n── Phase-level profiles ──")
+        for r in profiled:
+            p = r["profile"]
+            total = p.get("total_s", r["wall_time_s"])
+            print(f"\n  {r['name']} (total={total:.2f}s)")
+            print(f"    {'Phase':<30s} {'Time':>8s} {'%':>6s}")
+            print(f"    {'-' * 48}")
+
+            phases = [
+                ("DM build", p.get("dm_build_s", 0)),
+                ("IRLS total", p.get("irls_total_s", 0)),
+                ("  working quantities", p.get("irls_working_s", 0)),
+                ("  gram assembly (X'WX)", p.get("irls_gram_s", 0)),
+                ("  solve (eigh)", p.get("irls_solve_s", 0)),
+                ("  deviance check", p.get("irls_deviance_s", 0)),
+                ("  finalize (inv+edf)", p.get("irls_finalize_s", 0)),
+                ("REML objective", p.get("reml_objective_s", 0)),
+                ("REML gradient", p.get("reml_gradient_s", 0)),
+                ("REML W(rho) correction", p.get("reml_w_correction_s", 0)),
+                ("REML Hessian + Newton", p.get("reml_hessian_newton_s", 0)),
+                ("REML line search", p.get("reml_linesearch_s", 0)),
+                ("REML FP update", p.get("reml_fp_update_s", 0)),
+            ]
+            for label, t in phases:
+                pct = 100 * t / total if total > 0 else 0
+                print(f"    {label:<30s} {t:>7.2f}s {pct:>5.1f}%")
+
+            # Counters
+            print(f"    {'─' * 48}")
+            print(f"    REML outer iters:    {p.get('reml_n_outer_iter', '?')}")
+            print(f"    IRLS calls:          {p.get('irls_calls', '?')}")
+            print(f"    Total IRLS iters:    {p.get('irls_iters', '?')}")
+            print(f"    Line search fits:    {p.get('reml_n_linesearch_fits', '?')}")
 
     # Write results
     out_path = os.path.join(RESULTS_DIR, "superglm_results.json")

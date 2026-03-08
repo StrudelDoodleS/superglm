@@ -1530,6 +1530,7 @@ class SuperGLM:
         reml_tol: float,
         verbose: bool,
         penalty_caches: dict | None = None,
+        profile: dict | None = None,
     ):
         """Optimize the direct REML objective via damped Newton (Wood 2011).
 
@@ -1564,12 +1565,25 @@ class SuperGLM:
         n_iter = 0
         n_warmup = 3  # fixed-point iterations after bootstrap
 
+        import time as _time
+
+        _t_reml_start = _time.perf_counter()
+        _t_pirls = 0.0
+        _t_objective = 0.0
+        _t_gradient = 0.0
+        _t_hessian = 0.0
+        _t_w_correction = 0.0
+        _t_linesearch = 0.0
+        _t_fp_update = 0.0
+        _n_linesearch_fits = 0
+
         # === Bootstrap: one FP step from minimal penalty ===
         # Fit PIRLS with λ_min so that β is not suppressed for any group.
         # The resulting FP update gives data-driven initial lambdas that are
         # independent of the user's lambda2_init, ensuring start-invariant
         # convergence.
         boot_lambdas = {name: 1e-4 for name in lambdas}
+        _t0 = _time.perf_counter()
         boot_result, boot_inv, boot_xtwx = fit_irls_direct(
             X=self._dm,
             y=y,
@@ -1580,7 +1594,9 @@ class SuperGLM:
             lambda2=boot_lambdas,
             offset=offset_arr,
             return_xtwx=True,
+            profile=profile,
         )
+        _t_pirls += _time.perf_counter() - _t0
         warm_beta = boot_result.beta.copy()
         warm_intercept = float(boot_result.intercept)
 
@@ -1630,6 +1646,7 @@ class SuperGLM:
                 cand_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
 
             # === Converge PIRLS for this λ ===
+            _t0 = _time.perf_counter()
             pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
                 X=self._dm,
                 y=y,
@@ -1642,11 +1659,14 @@ class SuperGLM:
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
                 return_xtwx=True,
+                profile=profile,
             )
+            _t_pirls += _time.perf_counter() - _t0
             warm_beta = pirls_result.beta.copy()
             warm_intercept = float(pirls_result.intercept)
 
             # === REML objective ===
+            _t0 = _time.perf_counter()
             obj = self._reml_laml_objective(
                 y,
                 pirls_result,
@@ -1668,8 +1688,10 @@ class SuperGLM:
                 M_p = sum(c.rank for c in penalty_caches.values())
                 phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
             inv_phi = 1.0 / max(phi_hat, 1e-10)
+            _t_objective += _time.perf_counter() - _t0
 
             # === Gradient: partial (fixed W) + W(ρ) correction ===
+            _t0 = _time.perf_counter()
             grad_partial = self._reml_direct_gradient(
                 pirls_result,
                 XtWX_S_inv,
@@ -1678,17 +1700,25 @@ class SuperGLM:
                 penalty_ranks,
                 phi_hat=phi_hat,
             )
+            _t_gradient += _time.perf_counter() - _t0
 
             # W(ρ) correction: accounts for d(X'WX)/dρ_j = X'diag(dW/dρ_j)X
-            w_corr = self._reml_w_correction(
-                pirls_result,
-                XtWX_S_inv,
-                cand_lambdas,
-                reml_groups,
-                penalty_caches,
-                exposure,
-                offset_arr,
-            )
+            # Skip during FP warmup (correction only affects Newton direction)
+            # and on discrete path (already approximate, matches mgcv bam behavior)
+            _t0 = _time.perf_counter()
+            if outer >= n_warmup and not self._discrete:
+                w_corr = self._reml_w_correction(
+                    pirls_result,
+                    XtWX_S_inv,
+                    cand_lambdas,
+                    reml_groups,
+                    penalty_caches,
+                    exposure,
+                    offset_arr,
+                )
+            else:
+                w_corr = None
+            _t_w_correction += _time.perf_counter() - _t0
             if w_corr is not None:
                 grad_w_correction, dH_extra = w_corr
                 grad = grad_partial + grad_w_correction
@@ -1734,6 +1764,7 @@ class SuperGLM:
 
             # === Phase 1: Fixed-point warm-up ===
             if outer < n_warmup:
+                _t0 = _time.perf_counter()
                 for i, (idx, g) in enumerate(reml_groups):
                     gm = self._dm.group_matrices[idx]
                     if penalty_caches is not None:
@@ -1748,9 +1779,11 @@ class SuperGLM:
                     denom = inv_phi * quad + trace_term
                     lam_new = r_j / denom if denom > 1e-12 else cand_lambdas[g.name]
                     rho[i] = np.clip(np.log(max(lam_new, 1e-6)), log_lo, log_hi)
+                _t_fp_update += _time.perf_counter() - _t0
                 continue
 
             # === Phase 2: Newton with exact outer Hessian ===
+            _t0 = _time.perf_counter()
             hess = self._reml_direct_hessian(
                 XtWX_S_inv,
                 cand_lambdas,
@@ -1776,8 +1809,10 @@ class SuperGLM:
                 hess_pd = (eigvecs_h * eigvals_pd) @ eigvecs_h.T
                 delta = -np.linalg.solve(hess_pd, grad)
                 delta = np.clip(delta, -max_newton_step, max_newton_step)
+            _t_hessian += _time.perf_counter() - _t0
 
             # === Step-halving line search with Armijo condition ===
+            _t0 = _time.perf_counter()
             step = 1.0
             armijo_c = 1e-4
             descent = float(grad @ delta)
@@ -1788,6 +1823,7 @@ class SuperGLM:
                 for name, val in zip(group_names, np.exp(rho_trial), strict=False):
                     trial_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
 
+                _n_linesearch_fits += 1
                 trial_result, trial_inv, trial_xtwx = fit_irls_direct(
                     X=self._dm,
                     y=y,
@@ -1800,6 +1836,7 @@ class SuperGLM:
                     beta_init=warm_beta,
                     intercept_init=warm_intercept,
                     return_xtwx=True,
+                    profile=profile,
                 )
 
                 trial_obj = self._reml_laml_objective(
@@ -1820,6 +1857,7 @@ class SuperGLM:
                     accepted = True
                     break
                 step *= 0.5
+            _t_linesearch += _time.perf_counter() - _t0
 
             if not accepted:
                 # Line search failed — accept tiny steepest descent step
@@ -1834,6 +1872,19 @@ class SuperGLM:
 
         grad_norm = float(np.max(np.abs(best_grad))) if best_grad is not None else np.inf
         converged = converged or grad_norm <= grad_tol
+
+        # Populate profile with outer-loop phase timing
+        if profile is not None:
+            profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
+            profile["reml_pirls_s"] = _t_pirls
+            profile["reml_objective_s"] = _t_objective
+            profile["reml_gradient_s"] = _t_gradient
+            profile["reml_w_correction_s"] = _t_w_correction
+            profile["reml_hessian_newton_s"] = _t_hessian
+            profile["reml_linesearch_s"] = _t_linesearch
+            profile["reml_fp_update_s"] = _t_fp_update
+            profile["reml_n_linesearch_fits"] = _n_linesearch_fits
+            profile["reml_n_outer_iter"] = n_iter
 
         return REMLResult(
             lambdas=best_lambdas,
@@ -2173,7 +2224,15 @@ class SuperGLM:
             self._nb_profile_result = nb_result
             logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
 
+        import time as _time
+
+        _t_total_start = _time.perf_counter()
+        _profile: dict = {}
+
+        _t0 = _time.perf_counter()
         y, exposure, offset = self._build_design_matrix(X, y, exposure, offset)
+        _profile["dm_build_s"] = _time.perf_counter() - _t0
+
         self._fit_weights = exposure
         self._fit_offset = offset
         self.__dict__.pop("_coef_covariance", None)
@@ -2236,6 +2295,7 @@ class SuperGLM:
                 reml_tol=reml_tol,
                 verbose=verbose,
                 penalty_caches=penalty_caches,
+                profile=_profile,
             )
         else:
             best = self._run_reml_once(
@@ -2263,30 +2323,25 @@ class SuperGLM:
         # PIRLS phi = dev/(n-edf) which doesn't include the penalty.
         scale_known = getattr(self._distribution, "scale_known", True)
         if scale_known:
-            self._result = PIRLSResult(
-                beta=best.pirls_result.beta,
-                intercept=best.pirls_result.intercept,
-                n_iter=best.pirls_result.n_iter,
-                deviance=best.pirls_result.deviance,
-                converged=best.pirls_result.converged,
-                phi=1.0,
-                effective_df=best.pirls_result.effective_df,
-            )
+            phi_fixed = 1.0
         else:
             p_dim = self._dm.p
             S_final = _build_penalty_matrix(self._dm.group_matrices, self._groups, lambdas, p_dim)
             pq_final = float(best.pirls_result.beta @ S_final @ best.pirls_result.beta)
             M_p = sum(penalty_ranks[g.name] for _, g in reml_groups)
-            phi_reml = (best.pirls_result.deviance + pq_final) / max(len(y) - M_p, 1.0)
-            self._result = PIRLSResult(
-                beta=best.pirls_result.beta,
-                intercept=best.pirls_result.intercept,
-                n_iter=best.pirls_result.n_iter,
-                deviance=best.pirls_result.deviance,
-                converged=best.pirls_result.converged,
-                phi=max(phi_reml, 1e-10),
-                effective_df=best.pirls_result.effective_df,
-            )
+            phi_fixed = max((best.pirls_result.deviance + pq_final) / max(len(y) - M_p, 1.0), 1e-10)
+
+        corrected = PIRLSResult(
+            beta=best.pirls_result.beta,
+            intercept=best.pirls_result.intercept,
+            n_iter=best.pirls_result.n_iter,
+            deviance=best.pirls_result.deviance,
+            converged=best.pirls_result.converged,
+            phi=phi_fixed,
+            effective_df=best.pirls_result.effective_df,
+        )
+        self._result = corrected
+        self._reml_result.pirls_result = corrected
 
         # Update spec R_inv for predict/reconstruct
         for idx, g in reml_groups:
@@ -2344,6 +2399,11 @@ class SuperGLM:
                 fg_gm = self._dm.group_matrices[fg_idx]
                 if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
                     ispec.set_reparametrisation(fg_gm.R_inv)
+
+        _profile["total_s"] = _time.perf_counter() - _t_total_start
+        _profile["n_reml_iter"] = n_reml_iter
+        _profile["converged"] = converged
+        self._reml_profile = _profile
 
         logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")
         return self
