@@ -1534,15 +1534,24 @@ class SuperGLM:
     ):
         """Optimize the direct REML objective via damped Newton (Wood 2011).
 
-        Uses gradient and outer Hessian with first-order W(ρ) correction
-        (IFT through β̂ + dW/dρ), PD-projected Newton step, step-halving
-        line search, and steepest descent fallback.
+        Two algorithm variants depending on ``self._discrete``:
 
-        The W(ρ) correction accounts for d(X'WX)/dρ_j = X'diag(dW/dρ_j)X
-        in the gradient (exact to first order) and Hessian (first-order;
-        second-order d²W/dρ² terms are dropped).  For Gamma with log link,
-        dW/dη = 0 identically so the correction vanishes.  For Poisson with
-        log link, dW/dη = W, giving a material correction.
+        **Exact path** (``discrete=False``):
+            W(ρ)-corrected direct REML.  The gradient and Hessian include
+            first-order d(X'WX)/dρ_j = X'diag(dW/dρ_j)X corrections via
+            the IFT (dβ̂/dρ = -H⁻¹ S β̂).  The correction is computed on
+            Newton iterations (outer >= n_warmup) and skipped during the
+            initial fixed-point warmup where it does not affect the step.
+
+        **Discrete path** (``discrete=True``):
+            Approximate fREML-style REML without the W(ρ) correction.
+            Since discretization already introduces O(n_bins) approximation
+            in the sufficient statistics, the expensive per-term gram
+            recomputation for dW/dρ is not justified.  This matches the
+            approach used by mgcv::bam(fREML, discrete=TRUE).
+
+        Both paths use PD-projected Newton steps, step-halving line search
+        with Armijo condition, and steepest descent fallback.
         """
         from superglm.reml import REMLResult
 
@@ -1812,60 +1821,67 @@ class SuperGLM:
             _t_hessian += _time.perf_counter() - _t0
 
             # === Step-halving line search with Armijo condition ===
+            # On the discrete path, skip the line search entirely: the Newton
+            # step is accepted at step=1.0 without a trial IRLS refit.  The
+            # next outer iteration will refit IRLS with the new lambdas anyway.
+            # This avoids redundant data passes through the discrete path.
             _t0 = _time.perf_counter()
-            step = 1.0
-            armijo_c = 1e-4
-            descent = float(grad @ delta)
-            accepted = False
-            for ls in range(8):  # max 8 halvings
-                rho_trial = np.clip(rho_clipped + step * delta, log_lo, log_hi)
-                trial_lambdas = lambdas.copy()
-                for name, val in zip(group_names, np.exp(rho_trial), strict=False):
-                    trial_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
+            if self._discrete:
+                rho = np.clip(rho_clipped + delta, log_lo, log_hi)
+            else:
+                step = 1.0
+                armijo_c = 1e-4
+                descent = float(grad @ delta)
+                accepted = False
+                for ls in range(8):  # max 8 halvings
+                    rho_trial = np.clip(rho_clipped + step * delta, log_lo, log_hi)
+                    trial_lambdas = lambdas.copy()
+                    for name, val in zip(group_names, np.exp(rho_trial), strict=False):
+                        trial_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
 
-                _n_linesearch_fits += 1
-                trial_result, trial_inv, trial_xtwx = fit_irls_direct(
-                    X=self._dm,
-                    y=y,
-                    weights=exposure,
-                    family=self._distribution,
-                    link=self._link,
-                    groups=self._groups,
-                    lambda2=trial_lambdas,
-                    offset=offset_arr,
-                    beta_init=warm_beta,
-                    intercept_init=warm_intercept,
-                    return_xtwx=True,
-                    profile=profile,
-                )
+                    _n_linesearch_fits += 1
+                    trial_result, trial_inv, trial_xtwx = fit_irls_direct(
+                        X=self._dm,
+                        y=y,
+                        weights=exposure,
+                        family=self._distribution,
+                        link=self._link,
+                        groups=self._groups,
+                        lambda2=trial_lambdas,
+                        offset=offset_arr,
+                        beta_init=warm_beta,
+                        intercept_init=warm_intercept,
+                        return_xtwx=True,
+                        profile=profile,
+                    )
 
-                trial_obj = self._reml_laml_objective(
-                    y,
-                    trial_result,
-                    trial_lambdas,
-                    exposure,
-                    offset_arr,
-                    XtWX=trial_xtwx,
-                    penalty_caches=penalty_caches,
-                )
+                    trial_obj = self._reml_laml_objective(
+                        y,
+                        trial_result,
+                        trial_lambdas,
+                        exposure,
+                        offset_arr,
+                        XtWX=trial_xtwx,
+                        penalty_caches=penalty_caches,
+                    )
 
-                # Armijo sufficient decrease
-                if trial_obj <= obj + armijo_c * step * descent:
-                    rho = rho_trial
-                    warm_beta = trial_result.beta.copy()
-                    warm_intercept = float(trial_result.intercept)
-                    accepted = True
-                    break
-                step *= 0.5
+                    # Armijo sufficient decrease
+                    if trial_obj <= obj + armijo_c * step * descent:
+                        rho = rho_trial
+                        warm_beta = trial_result.beta.copy()
+                        warm_intercept = float(trial_result.intercept)
+                        accepted = True
+                        break
+                    step *= 0.5
+
+                if not accepted:
+                    # Line search failed — accept tiny steepest descent step
+                    rho = np.clip(
+                        rho_clipped - 0.1 * grad / max(np.linalg.norm(grad), 1e-8),
+                        log_lo,
+                        log_hi,
+                    )
             _t_linesearch += _time.perf_counter() - _t0
-
-            if not accepted:
-                # Line search failed — accept tiny steepest descent step
-                rho = np.clip(
-                    rho_clipped - 0.1 * grad / max(np.linalg.norm(grad), 1e-8),
-                    log_lo,
-                    log_hi,
-                )
 
         if best_pirls is None:
             raise RuntimeError("Direct REML Newton did not evaluate any candidates")

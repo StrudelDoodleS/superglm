@@ -31,7 +31,7 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     GroupMatrix,
     SparseSSPGroupMatrix,
-    _block_xtwx,
+    _block_xtwx_rhs,
 )
 from superglm.links import Link
 from superglm.solvers.pirls import PIRLSResult
@@ -248,9 +248,11 @@ def fit_irls_direct(
         # No full (n, p) matrix materialisation needed.
         _t0 = time.perf_counter()
         z_off = z - offset
+        Wz = W * z_off
         sum_W = float(np.sum(W))
-        XtW1 = dm.rmatvec(W)  # (p,) = X.T @ W
-        XtWX = _block_xtwx(gms, groups, W)  # (p, p)
+
+        # Combined gram + rmatvec: shares O(n) bincount for discretized groups
+        XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz)
 
         # Build augmented system (p+1, p+1)
         M_aug = np.empty((p + 1, p + 1))
@@ -260,10 +262,9 @@ def fit_irls_direct(
         M_aug[1:, 1:] = XtWX + S
 
         # RHS: X_aug' W (z - offset)
-        Wz = W * z_off
         rhs = np.empty(p + 1)
         rhs[0] = float(np.sum(Wz))
-        rhs[1:] = dm.rmatvec(Wz)  # (p,) = X.T @ (W * (z - offset))
+        rhs[1:] = XtWz
         _t_gram += time.perf_counter() - _t0
 
         # Solve augmented system via eigh (tighter threshold for intercept+beta system)

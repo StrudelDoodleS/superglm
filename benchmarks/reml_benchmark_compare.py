@@ -137,8 +137,8 @@ def main():
 
     if not sg_results and not mgcv_results:
         print("\nNo results found. Run the harness scripts first:")
-        print("  uv run python scratch/benchmarks/reml_benchmark_harness.py")
-        print("  Rscript scratch/benchmarks/reml_benchmark_harness.R")
+        print("  uv run python benchmarks/reml_benchmark_harness.py")
+        print("  Rscript benchmarks/reml_benchmark_harness.R")
         sys.exit(1)
 
     # Print individual tables
