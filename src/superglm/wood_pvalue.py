@@ -93,11 +93,12 @@ def _fractional_rank_maps(
     rank_floor: int,
     frac: float,
     working_dim: int,
+    requested_rank: float,
 ) -> tuple[NDArray, NDArray, NDArray, float]:
     """Maps for the fractional-rank interpolation in Wood (2013)."""
     if working_dim == 1:
         vec = evecs[:, :1] * math.sqrt(1.0 / evals[0])
-        return vec, vec.copy(), np.array([1.0], dtype=np.float64), 1.0
+        return vec, vec.copy(), np.array([1.0], dtype=np.float64), float(requested_rank)
 
     base = evecs[:, :working_dim].copy()
     if rank_floor > 1:
@@ -220,9 +221,9 @@ def wood_test_smooth(
     if working_dim == 0:
         return 0.0, 1.0, 0.0
 
-    if frac > 0.0 and rank_floor > 0:
+    if frac > 0.0:
         pos_map, neg_map, weights, ref_df = _fractional_rank_maps(
-            evecs, evals, rank_floor, frac, working_dim
+            evecs, evals, rank_floor, frac, working_dim, target_rank
         )
     else:
         pos_map, neg_map, ref_df = _identity_rank_maps(

@@ -1060,7 +1060,7 @@ class TestNoOverhead:
 
 class TestTensorInteractionBuild:
     def test_build_shape(self):
-        """GroupInfo columns have shape (n, k1*k2)."""
+        """GroupInfo columns have shape (n, (k1-1)*(k2-1))."""
         s1 = Spline(n_knots=5)
         s2 = Spline(n_knots=5)
         rng = np.random.default_rng(42)
@@ -1072,12 +1072,13 @@ class TestTensorInteractionBuild:
         ti = TensorInteraction("a", "b", n_knots=(5, 5))
         info = ti.build(x1, x2, {"a": s1, "b": s2})
 
-        # k = n_knots + degree + 1 = 5 + 3 + 1 = 9 per margin
-        assert info.columns.shape == (500, 9 * 9)
-        assert info.n_cols == 81
+        # k = n_knots + degree + 1 = 5 + 3 + 1 = 9 per margin.
+        # ti-style centering removes the constant direction from each margin.
+        assert info.columns.shape == (500, 8 * 8)
+        assert info.n_cols == 64
 
-    def test_penalty_full_rank(self):
-        """ti-style penalty must be full-rank (no null space)."""
+    def test_penalty_leaves_only_bilinear_null_space(self):
+        """ti-style penalty excludes lower-order pieces but keeps x1*x2 unpenalized."""
         s1 = Spline(n_knots=5)
         s2 = Spline(n_knots=5)
         x1 = np.linspace(0, 100, 300)
@@ -1089,7 +1090,7 @@ class TestTensorInteractionBuild:
         info = ti.build(x1, x2, {"a": s1, "b": s2})
 
         eigvals = np.linalg.eigvalsh(info.penalty_matrix)
-        assert np.all(eigvals > 1e-10), "ti penalty must be full-rank"
+        assert np.sum(eigvals < 1e-10) == 1, "ti penalty should only leave x1*x2 unpenalized"
 
     def test_kronecker_values(self):
         """T[i,:] = B1[i,:] ⊗ B2[i,:] for random rows."""
@@ -1105,13 +1106,13 @@ class TestTensorInteractionBuild:
         info = ti.build(x1, x2, {"a": s1, "b": s2})
         T = info.columns.toarray()
 
-        # Verify Kronecker structure for a few rows
+        # Verify Kronecker structure for a few rows using the centered marginals.
         from scipy.interpolate import BSpline as BSpl
 
         x1_clip = np.clip(x1, ti._knots1[0], ti._knots1[-1])
         x2_clip = np.clip(x2, ti._knots2[0], ti._knots2[-1])
-        B1 = BSpl.design_matrix(x1_clip, ti._knots1, ti._degree).toarray()
-        B2 = BSpl.design_matrix(x2_clip, ti._knots2, ti._degree).toarray()
+        B1 = BSpl.design_matrix(x1_clip, ti._knots1, ti._degree).toarray() @ ti._P1
+        B2 = BSpl.design_matrix(x2_clip, ti._knots2, ti._degree).toarray() @ ti._P2
 
         for i in [0, 50, 150]:
             expected = np.kron(B1[i], B2[i])
@@ -1147,8 +1148,26 @@ class TestTensorInteractionBuild:
 
         ti = TensorInteraction("a", "b", n_knots=(3, 4))
         info = ti.build(x1, x2, {"a": s1, "b": s2})
-        # k1 = 3+3+1 = 7, k2 = 4+3+1 = 8
-        assert info.n_cols == 7 * 8
+        # k1 = 3+3+1 = 7, k2 = 4+3+1 = 8, then drop one constant direction per margin.
+        assert info.n_cols == 6 * 7
+
+    def test_decompose_returns_bilinear_and_wiggly_groups(self):
+        s1 = Spline(n_knots=5)
+        s2 = Spline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b", n_knots=(5, 5), decompose=True)
+        infos = ti.build(x1, x2, {"a": s1, "b": s2})
+
+        assert isinstance(infos, list)
+        assert [info.subgroup_name for info in infos] == ["bilinear", "wiggly"]
+        assert infos[0].n_cols == 1
+        assert infos[1].n_cols == (8 * 8 - 1)
+        assert infos[0].projection is not None
+        assert infos[1].projection is not None
 
     def test_reconstruct_2d(self):
         """Reconstruct returns 2D surface grid."""
@@ -1240,10 +1259,11 @@ class TestTensorInteractionModel:
 
     def test_auto_dispatch_with_kwargs(self):
         model = SuperGLM(features={"a": Spline(n_knots=5), "b": Spline(n_knots=5)})
-        model._add_interaction("a", "b", n_knots=(3, 4))
+        model._add_interaction("a", "b", n_knots=(3, 4), decompose=True)
         ispec = model._interaction_specs["a:b"]
         assert isinstance(ispec, TensorInteraction)
         assert ispec._n_knots == (3, 4)
+        assert ispec._decompose is True
 
     def test_relativities_skips_2d(self, interaction_data):
         """2D tensor interaction doesn't appear in relativities() (like PolynomialInteraction)."""
@@ -1269,3 +1289,32 @@ class TestTensorInteractionModel:
         pred = model.predict(X)
         assert pred.shape == (len(y),)
         assert np.all(pred > 0)
+
+    def test_decomposed_fit_predict_roundtrip(self, interaction_data):
+        X, y, exposure = interaction_data
+        model = SuperGLM(
+            features={"age": Spline(n_knots=10), "bm": Spline(n_knots=5)},
+            lambda1=0.1,
+        )
+        model._add_interaction("age", "bm", decompose=True)
+        model.fit(X, y, exposure=exposure)
+        pred = model.predict(X)
+        assert pred.shape == (len(y),)
+        assert np.all(pred > 0)
+        names = [g.name for g in model._groups if g.feature_name == "age:bm"]
+        assert names == ["age:bm:bilinear", "age:bm:wiggly"]
+        raw = model.reconstruct_feature("age:bm")
+        assert raw["log_relativity"].ndim == 2
+
+    def test_decomposed_fit_reml_updates_both_subgroups(self, interaction_data):
+        X, y, exposure = interaction_data
+        model = SuperGLM(
+            features={"age": Spline(n_knots=10), "bm": Spline(n_knots=5)},
+            lambda1=0.0,
+        )
+        model._add_interaction("age", "bm", decompose=True)
+        model.fit_reml(X, y, exposure=exposure, max_reml_iter=3)
+        names = [g.name for g in model._groups if g.feature_name == "age:bm"]
+        assert names == ["age:bm:bilinear", "age:bm:wiggly"]
+        assert "age:bm:bilinear" in model._reml_lambdas
+        assert "age:bm:wiggly" in model._reml_lambdas

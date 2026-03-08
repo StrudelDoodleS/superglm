@@ -16,7 +16,6 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import NDArray
-from scipy.optimize import minimize
 
 from superglm.distributions import Distribution, resolve_distribution
 from superglm.group_matrix import (
@@ -1237,28 +1236,21 @@ class SuperGLM:
         pos_m = eigvals_m[eigvals_m > thresh_m]
         logdet_m = float(np.sum(np.log(pos_m))) if pos_m.size else 0.0
 
-        nll = -self._distribution.log_likelihood(y, mu, exposure, phi=result.phi)
-
         # φ-profiled REML for estimated-scale families (Gamma, Tweedie)
+        # V = ½log|H| - ½log|S|₊ + ½(n-M_p)·log(D + β̂'Sβ̂)
+        # The (D+PQ)/(2φ̂) term collapses to (n-M_p)/2 under profiling (constant).
         scale_known = getattr(self._distribution, "scale_known", True)
         if not scale_known:
             n = len(y)
-            # M_p = total penalty rank (sum of ranks across penalized groups)
             if penalty_caches is not None:
                 M_p = sum(c.rank for c in penalty_caches.values())
             else:
                 M_p = float(len(pos_s))  # fallback: rank of S
-            phi_hat = (result.deviance + penalty_quad) / max(n - M_p, 1.0)
-            phi_hat = max(phi_hat, 1e-10)
-            p_eff = result.effective_df
-            scale_term = 0.5 * (n - p_eff) * np.log(phi_hat)
-            return float(
-                nll / phi_hat
-                + 0.5 * penalty_quad / phi_hat
-                + 0.5 * (logdet_m - logdet_s)
-                + scale_term
-            )
+            d_plus_pq = max(result.deviance + penalty_quad, 1e-300)
+            scale_term = 0.5 * max(n - M_p, 1.0) * np.log(d_plus_pq)
+            return float(0.5 * (logdet_m - logdet_s) + scale_term)
 
+        nll = -self._distribution.log_likelihood(y, mu, exposure, phi=1.0)
         return float(nll + 0.5 * (penalty_quad + logdet_m - logdet_s))
 
     def _reml_direct_gradient(
@@ -1290,6 +1282,102 @@ class SuperGLM:
             grad[i] = 0.5 * (lam * (inv_phi * quad + trace_term) - penalty_ranks[g.name])
         return grad
 
+    def _reml_direct_hessian(
+        self,
+        XtWX_S_inv: NDArray,
+        lambdas: dict[str, float],
+        reml_groups: list[tuple[int, GroupSlice]],
+        gradient: NDArray,
+        penalty_ranks: dict[str, float],
+        penalty_caches: dict | None = None,
+        pirls_result: object | None = None,
+        n_obs: int = 0,
+        phi_hat: float = 1.0,
+    ) -> NDArray:
+        """Approximate outer Hessian of the REML criterion w.r.t. log-lambdas.
+
+        Differentiates through β̂(ρ) via the IFT (dβ̂/dρ_k = -H⁻¹ S_k β̂)
+        but holds the IRLS working weights W fixed at their converged values.
+        This matches mgcv's Laplace-approximate outer Newton approach; the
+        remaining discrepancy vs full numerical re-solve is from dW/dρ terms
+        that are O(‖dβ̂‖²) and typically small.
+
+        Known scale:
+            H_{jk} = δ_{jk}(g_j + ½r_j) - ½tr(H⁻¹S_j H⁻¹S_k)
+                     - (S_jβ̂)'H⁻¹(S_kβ̂)
+
+        Estimated scale (profiled φ̂):
+            H_{jk} = δ_{jk}(g_j + ½r_j) - ½tr(H⁻¹S_j H⁻¹S_k)
+                     - (1/φ̂)(S_jβ̂)'H⁻¹(S_kβ̂) - ½(n-M_p)q_jq_k/(D+PQ)²
+
+        Parameters
+        ----------
+        pirls_result : PIRLSResult, optional
+            Needed for IFT and estimated-scale corrections.
+        n_obs : int, optional
+            Number of observations. Needed for estimated-scale correction.
+        phi_hat : float
+            Profiled scale parameter (1.0 for known-scale families).
+        """
+        m = len(reml_groups)
+        p = XtWX_S_inv.shape[0]
+        hess = np.zeros((m, m))
+
+        # Form full p×p products H⁻¹ S_j (S_j is block-diagonal, mostly zero)
+        full_HSj: dict[int, NDArray] = {}
+        quad_per_group: list[float] = []  # q_j = β̂'S_j β̂ for scale correction
+        s_beta_list: list[NDArray] = []  # S_j β̂ vectors for IFT correction
+        for i, (idx, g) in enumerate(reml_groups):
+            if penalty_caches is not None:
+                omega_ssp = penalty_caches[g.name].omega_ssp
+            else:
+                gm = self._dm.group_matrices[idx]
+                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+            lam = lambdas[g.name]
+            F = np.zeros((p, p))
+            F[:, g.sl] = XtWX_S_inv[:, g.sl] @ (lam * omega_ssp)
+            full_HSj[i] = F
+
+            # S_j β̂ vector and quadratic form for IFT / scale corrections
+            if pirls_result is not None:
+                beta_g = pirls_result.beta[g.sl]
+                quad_per_group.append(lam * float(beta_g @ omega_ssp @ beta_g))
+                v = np.zeros(p)
+                v[g.sl] = lam * (omega_ssp @ beta_g)
+                s_beta_list.append(v)
+            else:
+                quad_per_group.append(0.0)
+                s_beta_list.append(np.zeros(p))
+
+        for i in range(m):
+            for j in range(i, m):
+                # -½ tr(H⁻¹S_i · H⁻¹S_j)
+                h = -0.5 * float(np.sum(full_HSj[i] * full_HSj[j].T))
+                hess[i, j] = h
+                hess[j, i] = h
+            # δ_{jj}(grad_j + ½r_j)
+            name_i = reml_groups[i][1].name
+            hess[i, i] += gradient[i] + 0.5 * penalty_ranks[name_i]
+
+        # IFT correction: -(1/φ̂)(S_jβ̂)'H⁻¹(S_kβ̂) from dβ̂/dρ = -H⁻¹ S_k β̂
+        # This is the implicit derivative of β̂ w.r.t. log-lambda (envelope theorem).
+        if pirls_result is not None:
+            inv_phi = 1.0 / max(phi_hat, 1e-10)
+            S_beta = np.column_stack(s_beta_list)  # p × m
+            HinvSbeta = XtWX_S_inv @ S_beta  # p × m
+            hess -= inv_phi * (S_beta.T @ HinvSbeta)  # m × m
+
+        # Rank-1 correction for estimated-scale families (profiled φ̂)
+        scale_known = getattr(self._distribution, "scale_known", True)
+        if not scale_known and pirls_result is not None and n_obs > 0:
+            M_p = sum(penalty_ranks[g.name] for _, g in reml_groups)
+            pq_total = sum(quad_per_group)
+            d_plus_pq = max(pirls_result.deviance + pq_total, 1e-300)
+            q = np.array(quad_per_group)
+            hess -= 0.5 * max(n_obs - M_p, 1.0) * np.outer(q, q) / d_plus_pq**2
+
+        return hess
+
     def _optimize_direct_reml(
         self,
         y: NDArray,
@@ -1304,37 +1392,99 @@ class SuperGLM:
         verbose: bool,
         penalty_caches: dict | None = None,
     ):
-        """Optimize the direct REML objective over log-lambdas."""
+        """Optimize the direct REML objective via damped Newton (Wood 2011).
+
+        Uses analytic gradient and approximate outer Hessian (IFT through
+        β̂, W held fixed), PD-projected Newton step, step-halving line
+        search, and steepest descent fallback.
+        """
         from superglm.reml import REMLResult
 
         scale_known = getattr(self._distribution, "scale_known", True)
-
         group_names = [g.name for _, g in reml_groups]
-        log_bounds = [(np.log(1e-6), np.log(1e6)) for _ in group_names]
-        log_lam0 = np.array([np.log(lambdas[name]) for name in group_names], dtype=np.float64)
+        m = len(group_names)
+        log_lo, log_hi = np.log(1e-6), np.log(1e6)
+        max_newton_step = 5.0  # mgcv maxNstep=5
+
         lambda_history: list[dict[str, float]] = [lambdas.copy()]
+        warm_beta: NDArray | None = None
+        warm_intercept: float | None = None
+        grad_tol = max(reml_tol, 1e-6)
 
-        base_dm = self._dm
-        state_beta: NDArray | None = None
-        state_intercept: float | None = None
-        eval_cache: dict[tuple[float, ...], dict[str, object]] = {}
-        best_key: tuple[float, ...] | None = None
-        last_key: tuple[float, ...] | None = None
+        best_obj = np.inf
+        best_lambdas = lambdas.copy()
+        best_pirls = None
+        best_grad: NDArray | None = None
+        converged = False
+        n_iter = 0
+        n_warmup = 3  # fixed-point iterations after bootstrap
 
-        def _eval(log_lam_vec: NDArray) -> dict[str, object]:
-            nonlocal state_beta, state_intercept, best_key, last_key
+        # === Bootstrap: one FP step from minimal penalty ===
+        # Fit PIRLS with λ_min so that β is not suppressed for any group.
+        # The resulting FP update gives data-driven initial lambdas that are
+        # independent of the user's lambda2_init, ensuring start-invariant
+        # convergence.
+        boot_lambdas = {name: 1e-4 for name in lambdas}
+        boot_result, boot_inv, boot_xtwx = fit_irls_direct(
+            X=self._dm,
+            y=y,
+            weights=exposure,
+            family=self._distribution,
+            link=self._link,
+            groups=self._groups,
+            lambda2=boot_lambdas,
+            offset=offset_arr,
+            return_xtwx=True,
+        )
+        warm_beta = boot_result.beta.copy()
+        warm_intercept = float(boot_result.intercept)
 
-            clipped = np.clip(log_lam_vec, log_bounds[0][0], log_bounds[0][1])
-            key = tuple(np.round(clipped, 10))
-            if key in eval_cache:
-                last_key = key
-                return eval_cache[key]
+        # Compute profiled φ̂ for the bootstrap fit
+        boot_phi = 1.0
+        if not scale_known and penalty_caches is not None:
+            p_dim = boot_xtwx.shape[0]
+            S_boot = _build_penalty_matrix(
+                self._dm.group_matrices, self._groups, boot_lambdas, p_dim
+            )
+            pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
+            M_p = sum(c.rank for c in penalty_caches.values())
+            boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
+        boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
 
+        rho = np.zeros(m, dtype=np.float64)
+        for i, (idx, g) in enumerate(reml_groups):
+            gm = self._dm.group_matrices[idx]
+            if penalty_caches is not None:
+                omega_ssp = penalty_caches[g.name].omega_ssp
+            else:
+                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+            beta_g = boot_result.beta[g.sl]
+            quad = float(beta_g @ omega_ssp @ beta_g)
+            H_inv_jj = boot_inv[g.sl, g.sl]
+            trace_term = float(np.trace(H_inv_jj @ omega_ssp))
+            r_j = penalty_ranks[g.name]
+            denom = boot_inv_phi * quad + trace_term
+            lam_fp = r_j / denom if denom > 1e-12 else 1.0
+            rho[i] = np.clip(np.log(max(lam_fp, 1e-6)), log_lo, log_hi)
+
+        rho_prev = rho.copy()
+
+        if verbose:
+            boot_lam_str = ", ".join(
+                f"{name}={np.exp(rho[i]):.4g}" for i, name in enumerate(group_names)
+            )
+            print(f"  REML bootstrap: lambdas=[{boot_lam_str}]")
+
+        for outer in range(max_reml_iter):
+            n_iter = outer + 1
+            rho_clipped = np.clip(rho, log_lo, log_hi)
+
+            # Build candidate lambdas from current rho
             cand_lambdas = lambdas.copy()
-            for name, val in zip(group_names, np.exp(clipped), strict=False):
+            for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
                 cand_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
 
-            self._dm = base_dm
+            # === Converge PIRLS for this λ ===
             pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
                 X=self._dm,
                 y=y,
@@ -1344,12 +1494,15 @@ class SuperGLM:
                 groups=self._groups,
                 lambda2=cand_lambdas,
                 offset=offset_arr,
-                beta_init=state_beta,
-                intercept_init=state_intercept,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
                 return_xtwx=True,
             )
+            warm_beta = pirls_result.beta.copy()
+            warm_intercept = float(pirls_result.intercept)
 
-            objective = self._reml_laml_objective(
+            # === REML objective ===
+            obj = self._reml_laml_objective(
                 y,
                 pirls_result,
                 cand_lambdas,
@@ -1359,19 +1512,20 @@ class SuperGLM:
                 penalty_caches=penalty_caches,
             )
 
-            # Compute profiled φ̂ for estimated-scale gradient
+            # Compute profiled φ̂ for estimated-scale derivatives
             phi_hat = 1.0
             if not scale_known and penalty_caches is not None:
-                n = len(y)
                 p_dim = XtWX.shape[0]
                 S_eval = _build_penalty_matrix(
                     self._dm.group_matrices, self._groups, cand_lambdas, p_dim
                 )
                 pq = float(pirls_result.beta @ S_eval @ pirls_result.beta)
                 M_p = sum(c.rank for c in penalty_caches.values())
-                phi_hat = max((pirls_result.deviance + pq) / max(n - M_p, 1.0), 1e-10)
+                phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
+            inv_phi = 1.0 / max(phi_hat, 1e-10)
 
-            gradient = self._reml_direct_gradient(
+            # === Exact gradient ===
+            grad = self._reml_direct_gradient(
                 pirls_result,
                 XtWX_S_inv,
                 cand_lambdas,
@@ -1380,69 +1534,151 @@ class SuperGLM:
                 phi_hat=phi_hat,
             )
 
-            record = {
-                "objective": float(objective),
-                "gradient": gradient,
-                "lambdas": cand_lambdas.copy(),
-                "pirls_result": pirls_result,
-            }
-            eval_cache[key] = record
-            state_beta = pirls_result.beta.copy()
-            state_intercept = float(pirls_result.intercept)
+            # Track best
+            if obj < best_obj:
+                best_obj = obj
+                best_lambdas = cand_lambdas.copy()
+                best_pirls = pirls_result
+                best_grad = grad.copy()
+
             lambda_history.append(cand_lambdas.copy())
-            last_key = key
 
-            if best_key is None or record["objective"] < eval_cache[best_key]["objective"]:
-                best_key = key
+            # === Convergence check ===
+            # Projected gradient: zero out components at boundary pushing outward
+            proj_grad = grad.copy()
+            for i in range(m):
+                if rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
+                    proj_grad[i] = 0.0  # at upper bound, wants higher λ
+                elif rho_clipped[i] <= log_lo + 0.01 and grad[i] > 0:
+                    proj_grad[i] = 0.0  # at lower bound, wants lower λ
+            proj_grad_norm = float(np.max(np.abs(proj_grad)))
+            rho_change = float(np.max(np.abs(rho_clipped - rho_prev)))
 
-            return record
+            if verbose:
+                phase = "FP" if outer < n_warmup else "Newton"
+                lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
+                print(
+                    f"  REML {phase} iter={n_iter}  obj={obj:.4f}  "
+                    f"|∇|={proj_grad_norm:.6f}  Δρ={rho_change:.4f}  "
+                    f"lambdas=[{lam_str}]"
+                )
 
-        def _fun(log_lam_vec: NDArray) -> float:
-            return float(_eval(log_lam_vec)["objective"])
+            rho_prev = rho_clipped.copy()
 
-        def _jac(log_lam_vec: NDArray) -> NDArray:
-            return np.asarray(_eval(log_lam_vec)["gradient"], dtype=np.float64)
+            # Converge when projected gradient is small
+            if outer >= n_warmup and proj_grad_norm < max(reml_tol, 5e-3):
+                converged = True
+                break
 
-        opt = minimize(
-            _fun,
-            log_lam0,
-            method="L-BFGS-B",
-            jac=_jac,
-            bounds=log_bounds,
-            options={
-                "maxiter": max_reml_iter,
-                "gtol": max(reml_tol, 5e-3),
-                "ftol": 1e-12,
-                "maxls": 20,
-            },
-        )
+            # === Phase 1: Fixed-point warm-up ===
+            if outer < n_warmup:
+                for i, (idx, g) in enumerate(reml_groups):
+                    gm = self._dm.group_matrices[idx]
+                    if penalty_caches is not None:
+                        omega_ssp = penalty_caches[g.name].omega_ssp
+                    else:
+                        omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+                    beta_g = pirls_result.beta[g.sl]
+                    quad = float(beta_g @ omega_ssp @ beta_g)
+                    H_inv_jj = XtWX_S_inv[g.sl, g.sl]
+                    trace_term = float(np.trace(H_inv_jj @ omega_ssp))
+                    r_j = penalty_ranks[g.name]
+                    denom = inv_phi * quad + trace_term
+                    lam_new = r_j / denom if denom > 1e-12 else cand_lambdas[g.name]
+                    rho[i] = np.clip(np.log(max(lam_new, 1e-6)), log_lo, log_hi)
+                continue
 
-        if opt.x is not None:
-            _eval(np.asarray(opt.x, dtype=np.float64))
-        if best_key is None and last_key is not None:
-            best_key = last_key
-        if best_key is None:
-            raise RuntimeError("Direct REML optimizer did not evaluate any candidates")
-
-        best = eval_cache[best_key]
-        self._dm = base_dm
-        grad_norm = float(np.max(np.abs(best["gradient"])))
-        converged = bool(opt.success) or grad_norm <= max(reml_tol, 5e-3)
-
-        if verbose:
-            lam_str = ", ".join(f"{name}={best['lambdas'][name]:.4g}" for name in group_names)
-            print(
-                f"  REML outer optimizer={opt.status} nit={getattr(opt, 'nit', 0)} "
-                f"grad_max={grad_norm:.6f} lambdas=[{lam_str}]"
+            # === Phase 2: Newton with approximate outer Hessian ===
+            hess = self._reml_direct_hessian(
+                XtWX_S_inv,
+                cand_lambdas,
+                reml_groups,
+                grad,
+                penalty_ranks,
+                penalty_caches=penalty_caches,
+                pirls_result=pirls_result,
+                n_obs=len(y),
+                phi_hat=phi_hat,
             )
 
+            # PD-projected Newton step (with SD fallback)
+            eigvals_h, eigvecs_h = np.linalg.eigh(hess)
+            max_eig = max(eigvals_h.max(), 1e-12)
+            eigvals_pd = np.maximum(eigvals_h, 1e-6 * max_eig)
+
+            if eigvals_h.min() < -0.1 * max_eig:
+                step_scale = min(1.0, max_newton_step / max(np.linalg.norm(grad), 1e-8))
+                delta = -grad * step_scale
+            else:
+                hess_pd = (eigvecs_h * eigvals_pd) @ eigvecs_h.T
+                delta = -np.linalg.solve(hess_pd, grad)
+                delta = np.clip(delta, -max_newton_step, max_newton_step)
+
+            # === Step-halving line search with Armijo condition ===
+            step = 1.0
+            armijo_c = 1e-4
+            descent = float(grad @ delta)
+            accepted = False
+            for ls in range(8):  # max 8 halvings
+                rho_trial = np.clip(rho_clipped + step * delta, log_lo, log_hi)
+                trial_lambdas = lambdas.copy()
+                for name, val in zip(group_names, np.exp(rho_trial), strict=False):
+                    trial_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
+
+                trial_result, trial_inv, trial_xtwx = fit_irls_direct(
+                    X=self._dm,
+                    y=y,
+                    weights=exposure,
+                    family=self._distribution,
+                    link=self._link,
+                    groups=self._groups,
+                    lambda2=trial_lambdas,
+                    offset=offset_arr,
+                    beta_init=warm_beta,
+                    intercept_init=warm_intercept,
+                    return_xtwx=True,
+                )
+
+                trial_obj = self._reml_laml_objective(
+                    y,
+                    trial_result,
+                    trial_lambdas,
+                    exposure,
+                    offset_arr,
+                    XtWX=trial_xtwx,
+                    penalty_caches=penalty_caches,
+                )
+
+                # Armijo sufficient decrease
+                if trial_obj <= obj + armijo_c * step * descent:
+                    rho = rho_trial
+                    warm_beta = trial_result.beta.copy()
+                    warm_intercept = float(trial_result.intercept)
+                    accepted = True
+                    break
+                step *= 0.5
+
+            if not accepted:
+                # Line search failed — accept tiny steepest descent step
+                rho = np.clip(
+                    rho_clipped - 0.1 * grad / max(np.linalg.norm(grad), 1e-8),
+                    log_lo,
+                    log_hi,
+                )
+
+        if best_pirls is None:
+            raise RuntimeError("Direct REML Newton did not evaluate any candidates")
+
+        grad_norm = float(np.max(np.abs(best_grad))) if best_grad is not None else np.inf
+        converged = converged or grad_norm <= grad_tol
+
         return REMLResult(
-            lambdas=best["lambdas"],
-            pirls_result=best["pirls_result"],
-            n_reml_iter=int(getattr(opt, "nit", len(lambda_history) - 1)),
+            lambdas=best_lambdas,
+            pirls_result=best_pirls,
+            n_reml_iter=n_iter,
             converged=converged,
             lambda_history=lambda_history,
-            objective=float(best["objective"]),
+            objective=float(best_obj),
         )
 
     def _run_reml_once(
@@ -1692,6 +1928,13 @@ class SuperGLM:
                 lambda2=lambdas,
             )
 
+        # For the BCD path, penalty_caches may be stale after basis rebuild
+        # (R_inv changes but caches still hold old omega_ssp). Recompute from
+        # scratch for the final objective — this is called only once.
+        # NOTE: This is a narrow fix for the final objective only.  If future
+        # code reuses penalty_caches after _rebuild_design_matrix_with_lambdas
+        # on the BCD path, caches must be rebuilt there too.
+        final_caches = penalty_caches if use_direct else None
         return REMLResult(
             lambdas=lambdas,
             pirls_result=final_result,
@@ -1704,7 +1947,7 @@ class SuperGLM:
                 lambdas,
                 exposure,
                 offset_arr,
-                penalty_caches=penalty_caches,
+                penalty_caches=final_caches,
             ),
         )
 
@@ -1851,6 +2094,25 @@ class SuperGLM:
         lambdas = best.lambdas
         n_reml_iter = best.n_reml_iter
         converged = best.converged
+
+        # Fix phi for estimated-scale families: use REML profiled φ̂ instead
+        # of the raw PIRLS phi = dev/(n-edf) which doesn't include the penalty.
+        scale_known = getattr(self._distribution, "scale_known", True)
+        if not scale_known:
+            p_dim = self._dm.p
+            S_final = _build_penalty_matrix(self._dm.group_matrices, self._groups, lambdas, p_dim)
+            pq_final = float(best.pirls_result.beta @ S_final @ best.pirls_result.beta)
+            M_p = sum(penalty_ranks[g.name] for _, g in reml_groups)
+            phi_reml = (best.pirls_result.deviance + pq_final) / max(len(y) - M_p, 1.0)
+            self._result = PIRLSResult(
+                beta=best.pirls_result.beta,
+                intercept=best.pirls_result.intercept,
+                n_iter=best.pirls_result.n_iter,
+                deviance=best.pirls_result.deviance,
+                converged=best.pirls_result.converged,
+                phi=max(phi_reml, 1e-10),
+                effective_df=best.pirls_result.effective_df,
+            )
 
         # Update spec R_inv for predict/reconstruct
         for idx, g in reml_groups:

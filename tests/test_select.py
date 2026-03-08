@@ -1,4 +1,4 @@
-"""Tests for mgcv-style spline decomposition (select=True, double penalty)."""
+"""Tests for mgcv-style spline decomposition (split_linear=True, double penalty)."""
 
 import numpy as np
 import pandas as pd
@@ -30,14 +30,14 @@ def simple_data():
 
 class TestSelectBuild:
     def test_select_creates_two_group_infos(self):
-        """Spline(select=True).build() returns a list of 2 GroupInfos."""
-        sp = Spline(n_knots=10, select=True)
+        """Spline(split_linear=True).build() returns a list of 2 GroupInfos."""
+        sp = Spline(n_knots=10, split_linear=True)
         result = sp.build(np.linspace(0, 1, 100))
         assert isinstance(result, list)
         assert len(result) == 2
 
     def test_select_subgroup_names(self):
-        sp = Spline(n_knots=10, select=True)
+        sp = Spline(n_knots=10, split_linear=True)
         result = sp.build(np.linspace(0, 1, 100))
         assert result[0].subgroup_name == "linear"
         assert result[1].subgroup_name == "spline"
@@ -45,19 +45,19 @@ class TestSelectBuild:
     def test_select_null_space_size(self):
         """Null space is 1 (linear only, constant removed for identifiability)."""
         for nk in [5, 10, 20]:
-            sp = Spline(n_knots=nk, select=True)
+            sp = Spline(n_knots=nk, split_linear=True)
             result = sp.build(np.linspace(0, 1, 200))
             assert result[0].n_cols == 1, f"null space should be 1 for n_knots={nk}"
 
     def test_select_range_space_size(self):
-        sp = Spline(n_knots=10, select=True)
+        sp = Spline(n_knots=10, split_linear=True)
         result = sp.build(np.linspace(0, 1, 100))
         n_basis = sp._n_basis
         assert result[1].n_cols == n_basis - 2
 
     def test_select_projections_orthogonal(self):
         """U_null and U_range should have orthonormal columns."""
-        sp = Spline(n_knots=10, select=True)
+        sp = Spline(n_knots=10, split_linear=True)
         sp.build(np.linspace(0, 1, 100))
         U_null = sp._U_null  # (K, 1)
         U_range = sp._U_range  # (K, K-2)
@@ -70,7 +70,7 @@ class TestSelectBuild:
 
     def test_select_null_space_centered(self):
         """Null-space linear component should be orthogonal to the constant."""
-        sp = Spline(n_knots=10, select=True)
+        sp = Spline(n_knots=10, split_linear=True)
         sp.build(np.linspace(0, 1, 100))
         # B-splines have partition of unity, so ones vector is the constant
         ones = np.ones(sp._n_basis)
@@ -79,7 +79,7 @@ class TestSelectBuild:
 
     def test_select_range_penalty_diagonal(self):
         """Range-space penalty should be diagonal with the nonzero eigenvalues."""
-        sp = Spline(n_knots=10, select=True)
+        sp = Spline(n_knots=10, split_linear=True)
         result = sp.build(np.linspace(0, 1, 100))
         omega_range = result[1].penalty_matrix
         assert omega_range is not None
@@ -90,14 +90,14 @@ class TestSelectBuild:
         assert np.all(np.diag(omega_range) > 0)
 
 
-class TestSelectNoSelectBackwardCompat:
-    def test_default_select_false(self):
-        """Default Spline has select=False."""
+class TestSplitLinearDefaults:
+    def test_default_split_linear_false(self):
+        """Default Spline has split_linear=False."""
         sp = Spline(n_knots=10)
-        assert sp.select is False
+        assert sp.split_linear is False
 
     def test_no_select_returns_single_group_info(self):
-        sp = Spline(n_knots=10, select=False)
+        sp = Spline(n_knots=10, split_linear=False)
         result = sp.build(np.linspace(0, 1, 100))
         assert not isinstance(result, list)
 
@@ -107,13 +107,13 @@ class TestSelectNoSelectBackwardCompat:
 
 class TestSelectModel:
     def test_select_creates_two_groups(self, simple_data):
-        """Model with select=True spline creates 2 groups per feature."""
+        """Model with split_linear=True spline creates 2 groups per feature."""
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
             features={
-                "signal": Spline(n_knots=10, select=True),
-                "noise": Spline(n_knots=10, select=True),
+                "signal": Spline(n_knots=10, split_linear=True),
+                "noise": Spline(n_knots=10, split_linear=True),
             },
             lambda2=1.0,
         )
@@ -130,7 +130,7 @@ class TestSelectModel:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
         )
         m.fit(X, y, exposure=exposure)
@@ -141,7 +141,7 @@ class TestSelectModel:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
         )
         m.fit(X, y, exposure=exposure)
@@ -151,11 +151,11 @@ class TestSelectModel:
         assert groups[1].name == "signal:spline"
 
     def test_select_predict_matches_no_select(self, simple_data):
-        """Predictions with select=True should be close to select=False."""
+        """Predictions with split_linear=True should be close to split_linear=False."""
         X, y, exposure = simple_data
         m1 = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=False)},
+            features={"signal": Spline(n_knots=10, split_linear=False)},
             lambda2=1.0,
             lambda1=0.01,
         )
@@ -164,7 +164,7 @@ class TestSelectModel:
 
         m2 = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
             lambda1=0.01,
         )
@@ -178,7 +178,7 @@ class TestSelectModel:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
         )
         m.fit(X, y, exposure=exposure)
@@ -191,7 +191,7 @@ class TestSelectModel:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
         )
         m.fit(X, y, exposure=exposure)
@@ -203,7 +203,7 @@ class TestSelectModel:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
         )
         m.fit(X, y, exposure=exposure)
@@ -218,7 +218,7 @@ class TestSelectSparsity:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
             lambda1=50.0,
         )
@@ -240,7 +240,7 @@ class TestSelectSparsity:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
             lambda1=1e6,
         )
@@ -253,11 +253,11 @@ class TestSelectSparsity:
 
 class TestSelectPath:
     def test_fit_path(self, simple_data):
-        """Regularization path with select=True should work."""
+        """Regularization path with split_linear=True should work."""
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
         )
         path = m.fit_path(X, y, exposure=exposure, n_lambda=10)
@@ -270,14 +270,14 @@ class TestSelectPath:
 
 
 class TestSelectCovariance:
-    """3A. Covariance with select=True (active info path)."""
+    """3A. Covariance with split_linear=True (active info path)."""
 
     def test_active_info_sizes(self, simple_data):
         """_active_info produces correctly-sized covariance and active_groups."""
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
             lambda1=0.1,
         )
@@ -295,7 +295,7 @@ class TestSelectCovariance:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
             lambda1=0.1,
         )
@@ -312,7 +312,7 @@ class TestSelectCovariance:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
         )
         m.fit(X, y, exposure=exposure)
@@ -323,21 +323,23 @@ class TestSelectCovariance:
 
 
 class TestSelectAdaptive:
-    """3B. Adaptive + select combination."""
+    """3B. Adaptive + split-linear combination."""
 
     def test_adaptive_select_finite_weights(self, simple_data):
-        """Adaptive(expon=2) with select=True produces finite weights."""
+        """Adaptive(expon=2) with split_linear=True produces finite weights."""
         X, y, exposure = simple_data
         pen = GroupLasso(lambda1=1.0, flavor=Adaptive(expon=2))
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             penalty=pen,
             lambda2=1.0,
         )
         m.fit(X, y, exposure=exposure)
         # Adaptive weights are applied during fit — must converge with valid result
-        assert m.result.converged, f"Adaptive select failed to converge in {m.result.n_iter} iters"
+        assert m.result.converged, (
+            f"Adaptive split-linear fit failed to converge in {m.result.n_iter} iters"
+        )
         assert np.isfinite(m.result.deviance)
         assert m.result.deviance > 0
         # All coefficients must be finite
@@ -353,8 +355,8 @@ class TestSelectAdaptive:
         m = SuperGLM(
             family="poisson",
             features={
-                "signal": Spline(n_knots=10, select=True),
-                "noise": Spline(n_knots=10, select=True),
+                "signal": Spline(n_knots=10, split_linear=True),
+                "noise": Spline(n_knots=10, split_linear=True),
             },
             penalty=pen,
             lambda2=1.0,
@@ -373,8 +375,8 @@ class TestSelectEffectiveDf:
         m = SuperGLM(
             family="poisson",
             features={
-                "signal": Spline(n_knots=10, select=True),
-                "noise": Spline(n_knots=10, select=True),
+                "signal": Spline(n_knots=10, split_linear=True),
+                "noise": Spline(n_knots=10, split_linear=True),
             },
             lambda2=1.0,
             lambda1=1e6,
@@ -393,7 +395,7 @@ class TestSelectLambdaMax:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
             lambda1=1.0,  # set to prevent auto-calibration
         )
@@ -414,7 +416,7 @@ class TestSelectSummaryOutput:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
             lambda1=1e6,
         )
@@ -433,7 +435,7 @@ class TestSelectSummaryOutput:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
             lambda1=1e6,
         )
@@ -446,10 +448,10 @@ class TestSelectSummaryOutput:
 
 
 class TestSelectFeatureSE:
-    """3F. feature_se with select=True subgroups."""
+    """3F. feature_se with split_linear=True subgroups."""
 
     def test_feature_se_reml_select_nonlinear_dgp(self):
-        """feature_se works with REML select=True when both subgroups are active.
+        """feature_se works with REML split_linear=True when both subgroups are active.
 
         Uses fit_reml() with lambda1=0 (direct solver, no BCD aliasing).
         On a purely nonlinear DGP, REML drives the linear subgroup's lambda
@@ -468,7 +470,7 @@ class TestSelectFeatureSE:
 
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda1=0.0,
         )
         m.fit_reml(X, y, exposure=exposure, max_reml_iter=20)
@@ -503,7 +505,7 @@ class TestSelectFeatureSE:
 
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
             lambda1=1e6,  # extreme penalty → both subgroups zeroed
         )
@@ -524,7 +526,7 @@ class TestSelectFeatureSE:
         X, y, exposure = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(n_knots=10, split_linear=True)},
             lambda2=1.0,
             lambda1=0.1,
         )

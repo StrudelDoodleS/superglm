@@ -24,6 +24,24 @@ def poisson_data():
     return X, y
 
 
+@pytest.fixture
+def tensor_interaction_data():
+    """Poisson data with two spline parents and a nonlinear interaction."""
+    rng = np.random.default_rng(123)
+    n = 2500
+    age = rng.uniform(18, 80, n)
+    bm = rng.uniform(15, 45, n)
+    log_mu = (
+        -0.8
+        + 0.18 * np.sin(age / 8.5)
+        - 0.12 * np.cos(bm / 5.0)
+        + 0.20 * np.sin(age / 11.0) * np.cos(bm / 6.0)
+    )
+    y = rng.poisson(np.exp(log_mu)).astype(float)
+    X = pd.DataFrame({"age": age, "bm": bm})
+    return X, y
+
+
 class TestDiscretizedFit:
     def test_coefficients_close_to_exact(self, poisson_data):
         """Discretized coefficients should be close to exact."""
@@ -176,7 +194,7 @@ class TestDiscretizedFit:
 
 class TestDiscretizedSelect:
     def test_select_true_discrete(self):
-        """select=True + discrete=True should work and give same sparsity pattern."""
+        """split_linear=True + discrete=True should work and give same sparsity pattern."""
         rng = np.random.default_rng(42)
         n = 1000
         x_signal = rng.uniform(0, 10, n)
@@ -189,8 +207,8 @@ class TestDiscretizedSelect:
             family="poisson",
             lambda1=0.05,
             features={
-                "signal": Spline(n_knots=10, penalty="ssp", select=True),
-                "noise": Spline(n_knots=10, penalty="ssp", select=True),
+                "signal": Spline(n_knots=10, penalty="ssp", split_linear=True),
+                "noise": Spline(n_knots=10, penalty="ssp", split_linear=True),
             },
         )
         model_exact.fit(X, y)
@@ -200,8 +218,8 @@ class TestDiscretizedSelect:
             lambda1=0.05,
             discrete=True,
             features={
-                "signal": Spline(n_knots=10, penalty="ssp", select=True),
-                "noise": Spline(n_knots=10, penalty="ssp", select=True),
+                "signal": Spline(n_knots=10, penalty="ssp", split_linear=True),
+                "noise": Spline(n_knots=10, penalty="ssp", split_linear=True),
             },
         )
         model_disc.fit(X, y)
@@ -324,7 +342,7 @@ class TestDiscretizedREML:
         assert hasattr(model, "_reml_lambdas")
 
     def test_freml_select_true(self):
-        """select=True + discrete=True + REML should converge and select correctly."""
+        """split_linear=True + discrete=True + REML should converge and select correctly."""
         rng = np.random.default_rng(42)
         n = 1000
         x_signal = rng.uniform(0, 10, n)
@@ -338,8 +356,8 @@ class TestDiscretizedREML:
             lambda1=0,
             discrete=True,
             features={
-                "signal": Spline(n_knots=10, penalty="ssp", select=True),
-                "noise": Spline(n_knots=10, penalty="ssp", select=True),
+                "signal": Spline(n_knots=10, penalty="ssp", split_linear=True),
+                "noise": Spline(n_knots=10, penalty="ssp", split_linear=True),
             },
         )
         model.fit_reml(X, y)
@@ -492,6 +510,33 @@ class TestModelLevelNBins:
         assert isinstance(gm, DiscretizedSSPGroupMatrix)
         assert gm.n_bins == 64
 
+    def test_model_n_bins_dict_propagates(self):
+        """Model-level n_bins dict should apply per feature."""
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 10, n)
+        x2 = rng.uniform(-2, 3, n)
+        y = rng.poisson(1.0, n).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.01,
+            discrete=True,
+            n_bins={"x1": 64, "x2": 32},
+            features={
+                "x1": Spline(n_knots=10, penalty="ssp"),
+                "x2": Spline(n_knots=8, penalty="ssp"),
+            },
+        )
+        model.fit(X, y)
+
+        gm1, gm2 = model._dm.group_matrices[:2]
+        assert isinstance(gm1, DiscretizedSSPGroupMatrix)
+        assert isinstance(gm2, DiscretizedSSPGroupMatrix)
+        assert gm1.n_bins == 64
+        assert gm2.n_bins == 32
+
     def test_feature_n_bins_overrides_model(self):
         """Feature-level n_bins should override model-level."""
         rng = np.random.default_rng(42)
@@ -532,3 +577,174 @@ class TestModelLevelNBins:
         gm = model._dm.group_matrices[0]
         assert isinstance(gm, DiscretizedSSPGroupMatrix)
         assert gm.n_bins == 256
+
+
+class TestLowUniqueCompression:
+    def test_low_unique_values_use_exact_support(self):
+        """If unique support is smaller than n_bins, discrete fit should be exact."""
+        rng = np.random.default_rng(42)
+        n = 1500
+        age = rng.integers(18, 81, size=n).astype(float)
+        mu = np.exp(-1.0 + 0.03 * (age - 45) + 0.18 * np.sin(age / 7.0))
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"age": age})
+
+        model_exact = SuperGLM(
+            family="poisson",
+            lambda1=0,
+            features={"age": Spline(n_knots=10, penalty="ssp")},
+        )
+        model_exact.fit(X, y)
+
+        model_disc = SuperGLM(
+            family="poisson",
+            lambda1=0,
+            discrete=True,
+            n_bins=256,
+            features={"age": Spline(n_knots=10, penalty="ssp")},
+        )
+        model_disc.fit(X, y)
+
+        gm = model_disc._dm.group_matrices[0]
+        assert isinstance(gm, DiscretizedSSPGroupMatrix)
+        assert gm.n_bins == len(np.unique(age))
+        np.testing.assert_allclose(
+            model_disc.predict(X), model_exact.predict(X), rtol=1e-8, atol=1e-10
+        )
+
+
+class TestDiscretizedTensorInteraction:
+    def test_tensor_interaction_predictions_close_to_exact(self, tensor_interaction_data):
+        """Discrete tensor interaction should stay close to the exact fit."""
+        X, y = tensor_interaction_data
+
+        model_exact = SuperGLM(
+            family="poisson",
+            lambda1=0.0,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model_exact.fit(X, y)
+
+        model_disc = SuperGLM(
+            family="poisson",
+            lambda1=0.0,
+            discrete=True,
+            n_bins={"age": 64, "bm": 48},
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model_disc.fit(X, y)
+
+        pred_exact = model_exact.predict(X)
+        pred_disc = model_disc.predict(X)
+        mean_rel = np.mean(np.abs(pred_exact - pred_disc) / (pred_exact + 1e-10))
+        rel_dev = abs(model_exact.result.deviance - model_disc.result.deviance) / (
+            abs(model_exact.result.deviance) + 1e-10
+        )
+        assert mean_rel < 0.03, f"Mean relative prediction difference {mean_rel:.4f} too large"
+        assert rel_dev < 0.002, f"Relative deviance difference {rel_dev:.6f} too large"
+
+    def test_tensor_interaction_uses_discretized_group_matrix(self, tensor_interaction_data):
+        """Discrete tensor interaction should reuse DiscretizedSSPGroupMatrix."""
+        X, y = tensor_interaction_data
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.0,
+            discrete=True,
+            n_bins={"age": 32, "bm": 24},
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit(X, y)
+
+        gm_age, gm_bm, gm_inter = model._dm.group_matrices[:3]
+        assert isinstance(gm_age, DiscretizedSSPGroupMatrix)
+        assert isinstance(gm_bm, DiscretizedSSPGroupMatrix)
+        assert isinstance(gm_inter, DiscretizedSSPGroupMatrix)
+        assert gm_age.n_bins == 32
+        assert gm_bm.n_bins == 24
+        assert gm_inter.n_bins <= 32 * 24
+
+    def test_tensor_interaction_low_unique_support_is_exact(self):
+        """Low-unique margins should compress the tensor support exactly."""
+        ages = np.arange(18, 30, dtype=np.float64)
+        bms = np.arange(20, 28, dtype=np.float64)
+        grid = np.array(np.meshgrid(ages, bms)).reshape(2, -1).T
+        X = pd.DataFrame(
+            {
+                "age": np.repeat(grid[:, 0], 6),
+                "bm": np.repeat(grid[:, 1], 6),
+            }
+        )
+        age = X["age"].to_numpy()
+        bm = X["bm"].to_numpy()
+        log_mu = -1.1 + 0.04 * (age - 23) - 0.06 * (bm - 24) + 0.01 * (age - 23) * (bm - 24)
+        rng = np.random.default_rng(321)
+        y = rng.poisson(np.exp(log_mu)).astype(float)
+
+        model_exact = SuperGLM(
+            family="poisson",
+            lambda1=0.0,
+            features={
+                "age": Spline(n_knots=6, penalty="ssp"),
+                "bm": Spline(n_knots=5, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model_exact.fit(X, y)
+
+        model_disc = SuperGLM(
+            family="poisson",
+            lambda1=0.0,
+            discrete=True,
+            n_bins={"age": 256, "bm": 256},
+            features={
+                "age": Spline(n_knots=6, penalty="ssp"),
+                "bm": Spline(n_knots=5, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model_disc.fit(X, y)
+
+        gm_inter = model_disc._dm.group_matrices[2]
+        assert isinstance(gm_inter, DiscretizedSSPGroupMatrix)
+        assert gm_inter.n_bins == len(ages) * len(bms)
+        np.testing.assert_allclose(
+            model_disc.predict(X), model_exact.predict(X), rtol=1e-8, atol=1e-10
+        )
+
+    def test_decomposed_tensor_interaction_discrete_smoke(self, tensor_interaction_data):
+        """Decomposed discrete tensors should fit without huge disc-disc histograms."""
+        X, y = tensor_interaction_data
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.0,
+            discrete=True,
+            n_bins={"age": 48, "bm": 36},
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+        )
+        model._add_interaction("age", "bm", decompose=True)
+        model.fit(X, y)
+
+        interaction_gms = model._dm.group_matrices[2:4]
+        assert len(interaction_gms) == 2
+        assert all(isinstance(gm, DiscretizedSSPGroupMatrix) for gm in interaction_gms)
+        assert [g.name for g in model._groups if g.feature_name == "age:bm"] == [
+            "age:bm:bilinear",
+            "age:bm:wiggly",
+        ]
