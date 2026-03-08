@@ -1456,3 +1456,74 @@ class TestREMLMetrics:
         # Only compare if both have the same active groups (they should)
         if cov_reml.shape == cov_global.shape:
             assert not np.allclose(cov_reml, cov_global, atol=1e-6)
+
+
+class TestREMLDiscreteRobustness:
+    """Regression tests for discrete REML convergence under adverse starts."""
+
+    def test_discrete_large_lambda2_init_converges(self):
+        """Discrete REML must converge even with lambda2_init=1e5.
+
+        Regression test for a robustness issue where skipping the line search
+        entirely on the discrete path caused divergence with poor initial
+        smoothing parameters.
+        """
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.5 * x2
+        mu = np.exp(eta)
+        y = rng.poisson(mu).astype(float)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+        w = np.ones(n)
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0,
+            features={
+                "x1": CubicRegressionSpline(n_knots=8),
+                "x2": CubicRegressionSpline(n_knots=8),
+            },
+            discrete=True,
+        )
+        model.fit_reml(df, y, exposure=w, max_reml_iter=50, lambda2_init=1e5)
+
+        assert model._reml_result.converged
+        assert model._reml_result.n_reml_iter <= 30
+
+    def test_discrete_vs_exact_agreement(self):
+        """Discrete and exact REML should agree on deviance and EDF."""
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.5 * x2
+        mu = np.exp(eta)
+        y = rng.poisson(mu).astype(float)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+        w = np.ones(n)
+
+        features = {
+            "x1": CubicRegressionSpline(n_knots=8),
+            "x2": CubicRegressionSpline(n_knots=8),
+        }
+
+        exact = SuperGLM(family="poisson", lambda1=0, features=features, discrete=False)
+        exact.fit_reml(df, y, exposure=w, max_reml_iter=30)
+
+        disc = SuperGLM(family="poisson", lambda1=0, features=features, discrete=True)
+        disc.fit_reml(df, y, exposure=w, max_reml_iter=30)
+
+        assert exact._reml_result.converged
+        assert disc._reml_result.converged
+
+        # Deviance should agree within 0.1%
+        dev_exact = exact.result.deviance
+        dev_disc = disc.result.deviance
+        assert abs(dev_exact - dev_disc) / abs(dev_exact) < 1e-3
+
+        # EDF should agree within 0.5
+        edf_exact = exact.result.effective_df
+        edf_disc = disc.result.effective_df
+        assert abs(edf_exact - edf_disc) < 0.5
