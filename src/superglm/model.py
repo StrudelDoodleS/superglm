@@ -26,6 +26,7 @@ from superglm.group_matrix import (
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
     _block_xtwx,
+    _block_xtwx_signed,
     _discretize_column,
 )
 from superglm.links import Link, resolve_link
@@ -1206,10 +1207,12 @@ class SuperGLM:
         exposure: NDArray,
         offset_arr: NDArray,
     ) -> tuple[NDArray, dict[int, NDArray]] | None:
-        """W(ρ) correction for exact REML derivatives.
+        """First-order W(ρ) correction for REML derivatives.
 
         Computes the contribution from d(X'WX)/dρ_j = X'diag(dW/dρ_j)X
-        which the fixed-W Laplace approximation drops.
+        which the fixed-W Laplace approximation drops.  The gradient
+        correction is exact to first order; the Hessian C_j matrices are
+        first-order (d²W/dρ² terms are dropped).
 
         Returns (grad_correction, dH_extra) or None if the correction vanishes
         (e.g. Gamma with log link where dW/dη = 0 identically).
@@ -1229,13 +1232,14 @@ class SuperGLM:
         m = len(reml_groups)
         grad_correction = np.zeros(m)
         dH_extra: dict[int, NDArray] = {}
-        X_dense: NDArray | None = None  # lazy-materialized for C_j computation
+
+        gms = self._dm.group_matrices
 
         for i, (idx, g) in enumerate(reml_groups):
             if penalty_caches is not None:
                 omega_ssp = penalty_caches[g.name].omega_ssp
             else:
-                gm = self._dm.group_matrices[idx]
+                gm = gms[idx]
                 omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
             lam = lambdas[g.name]
             beta_g = pirls_result.beta[g.sl]
@@ -1254,11 +1258,10 @@ class SuperGLM:
             a_j = dW_deta * deta_j
 
             # C_j = X'diag(a_j)X — the dW contribution to dH/dρ_j
-            # Computed directly (not via _block_xtwx which uses sqrt(W) for
-            # some group types and can't handle negative a_j weights).
-            if X_dense is None:
-                X_dense = np.column_stack([gm.toarray() for gm in self._dm.group_matrices])
-            C_j = X_dense.T @ (a_j[:, None] * X_dense)
+            # Uses _block_xtwx_signed which handles negative weights via
+            # _gram_any_sign (SSP/Discretized use native gram, Dense/Sparse
+            # use explicit W[:, None]*X fallback).
+            C_j = _block_xtwx_signed(gms, self._groups, a_j)
 
             # Gradient correction: ½ tr(H⁻¹ C_j)
             grad_correction[i] = 0.5 * float(np.sum(XtWX_S_inv * C_j))
@@ -1389,12 +1392,14 @@ class SuperGLM:
         """Outer Hessian of the REML criterion w.r.t. log-lambdas.
 
         Differentiates through β̂(ρ) via the IFT (dβ̂/dρ_k = -H⁻¹ S_k β̂)
-        and includes the W(ρ) correction via dH_extra when provided.
+        and includes the first-order W(ρ) correction via dH_extra when
+        provided.
 
-        When ``dH_extra`` is not None, the trace product uses the exact
+        When ``dH_extra`` is not None, the trace product uses the first-order
         dH_j/dρ_j = S_j + C_j (where C_j = X'diag(dW/dρ_j)X) instead of
         the fixed-W approximation dH_j ≈ S_j.  Second-order d²W/dρ² terms
-        are still dropped.
+        are dropped, so this is approximate for families where dW/dη is
+        large (e.g. NB2, Tweedie).
 
         Known scale:
             H_{jk} = δ_{jk}(g_j^∂ + ½r_j) - ½tr(H⁻¹ dH_j H⁻¹ dH_k)
@@ -1502,14 +1507,15 @@ class SuperGLM:
     ):
         """Optimize the direct REML objective via damped Newton (Wood 2011).
 
-        Uses exact gradient and outer Hessian (IFT through β̂ + first-order
-        dW/dρ correction), PD-projected Newton step, step-halving line
-        search, and steepest descent fallback.
+        Uses gradient and outer Hessian with first-order W(ρ) correction
+        (IFT through β̂ + dW/dρ), PD-projected Newton step, step-halving
+        line search, and steepest descent fallback.
 
         The W(ρ) correction accounts for d(X'WX)/dρ_j = X'diag(dW/dρ_j)X
-        in both gradient and Hessian.  For Gamma with log link, dW/dη = 0
-        identically (W = exposure, constant), so the correction vanishes.
-        For Poisson with log link, dW/dη = W, giving a material correction.
+        in the gradient (exact to first order) and Hessian (first-order;
+        second-order d²W/dρ² terms are dropped).  For Gamma with log link,
+        dW/dη = 0 identically so the correction vanishes.  For Poisson with
+        log link, dW/dη = W, giving a material correction.
         """
         from superglm.reml import REMLResult
 

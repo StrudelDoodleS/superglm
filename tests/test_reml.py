@@ -845,6 +845,171 @@ class TestREMLFiniteDifference:
         assert np.any(np.abs(grad_correction) > 1e-6)
         assert len(dH_extra) == len(reml_groups)
 
+    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    def test_total_hessian_matches_fd(self, family):
+        """Hessian with dH_extra vs FD of total gradient (partial + W correction).
+
+        Finite-differences the total gradient (including W correction) by
+        re-solving PIRLS at perturbed ρ and recomputing both the partial
+        gradient and W correction at each perturbation.  The analytic Hessian
+        with dH_extra should match better than without (for Poisson; for
+        Gamma the correction is zero so both are equivalent).
+        """
+        from superglm.solvers.irls_direct import (
+            _build_penalty_matrix,
+            fit_irls_direct,
+        )
+
+        (
+            m,
+            y,
+            exposure,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model(family)
+
+        # Compute partial gradient + W correction at base point
+        grad_partial = m._reml_direct_gradient(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            phi_hat=phi_hat,
+        )
+        w_corr = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            exposure,
+            offset_arr,
+        )
+        dH_extra = w_corr[1] if w_corr is not None else None
+
+        # Analytic Hessian WITH dH_extra
+        hess_with = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad_partial,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+            dH_extra=dH_extra,
+        )
+
+        # Analytic Hessian WITHOUT dH_extra (for comparison)
+        hess_without = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad_partial,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+            dH_extra=None,
+        )
+
+        # FD of total gradient: re-solve PIRLS at perturbed ρ, recompute
+        # both partial gradient and W correction
+        eps = 1e-4
+        group_names = [g.name for _, g in reml_groups]
+        p_dim = XtWX.shape[0]
+        M_p = sum(c.rank for c in penalty_caches.values())
+        m_groups = len(reml_groups)
+        fd_hess = np.zeros((m_groups, m_groups))
+
+        for j in range(m_groups):
+            rho_base = np.log(lambdas[group_names[j]])
+            for sign in [+1, -1]:
+                lam_pert = lambdas.copy()
+                lam_pert[group_names[j]] = np.exp(rho_base + sign * eps)
+
+                result_pert, inv_pert, xtwx_pert = fit_irls_direct(
+                    X=m._dm,
+                    y=y,
+                    weights=exposure,
+                    family=m._distribution,
+                    link=m._link,
+                    groups=m._groups,
+                    lambda2=lam_pert,
+                    offset=offset_arr,
+                    beta_init=pirls_result.beta,
+                    intercept_init=pirls_result.intercept,
+                    return_xtwx=True,
+                )
+
+                phi_pert = 1.0
+                if not getattr(m._distribution, "scale_known", True):
+                    S_pert = _build_penalty_matrix(m._dm.group_matrices, m._groups, lam_pert, p_dim)
+                    pq_pert = float(result_pert.beta @ S_pert @ result_pert.beta)
+                    phi_pert = max((result_pert.deviance + pq_pert) / max(n - M_p, 1.0), 1e-10)
+
+                # Total gradient = partial + W correction
+                grad_pert = m._reml_direct_gradient(
+                    result_pert,
+                    inv_pert,
+                    lam_pert,
+                    reml_groups,
+                    penalty_ranks,
+                    phi_hat=phi_pert,
+                )
+                w_corr_pert = m._reml_w_correction(
+                    result_pert,
+                    inv_pert,
+                    lam_pert,
+                    reml_groups,
+                    penalty_caches,
+                    exposure,
+                    offset_arr,
+                )
+                if w_corr_pert is not None:
+                    grad_pert = grad_pert + w_corr_pert[0]
+
+                if sign == 1:
+                    grad_plus = grad_pert
+                else:
+                    grad_minus = grad_pert
+
+            fd_hess[:, j] = (grad_plus - grad_minus) / (2 * eps)
+
+        # Hessian with dH_extra should match FD at least as well as without
+        diag_fd = np.diag(fd_hess)
+        err_with = np.abs(np.diag(hess_with) - diag_fd)
+        err_without = np.abs(np.diag(hess_without) - diag_fd)
+
+        # For Poisson: with correction should be better or equal
+        # For Gamma: correction is zero, so both should be equivalent
+        for i in range(m_groups):
+            assert err_with[i] <= err_without[i] + 1e-4, (
+                f"{family} Hessian[{i},{i}]: with dH_extra err={err_with[i]:.6f} "
+                f"exceeds without err={err_without[i]:.6f}"
+            )
+
+        # Both should be reasonably close to FD (within 15% relative)
+        for i in range(m_groups):
+            for j in range(m_groups):
+                scale = max(abs(fd_hess[i, j]), abs(diag_fd.mean()), 1e-6)
+                rel_err = abs(hess_with[i, j] - fd_hess[i, j]) / scale
+                assert rel_err < 0.15, (
+                    f"{family} total Hessian[{i},{j}]: analytic={hess_with[i, j]:.6f}, "
+                    f"fd={fd_hess[i, j]:.6f}, rel_err={rel_err:.4f}"
+                )
+
 
 # ── REML convergence ─────────────────────────────────────────────
 
