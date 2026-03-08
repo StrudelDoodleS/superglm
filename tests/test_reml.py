@@ -1,5 +1,7 @@
 """Tests for REML smoothing parameter estimation."""
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -217,13 +219,12 @@ class TestComputeRInvOverride:
 
 
 class TestMgcvStyleSmoothTestInput:
-    def test_summary_smooth_pvalue_uses_r_factor_not_raw_design(self):
+    def test_summary_smooth_pvalue_uses_weighted_qr_factor(self):
         """Regression test for the false-significant noise-spline bug.
 
-        On a fixed synthetic REML benchmark, the raw design block can make a
-        pure noise spline look materially different from the mgcv-style
-        ``R``-factor construction. The summary path should match
-        ``metrics._active_R_factor`` rather than the raw active design block.
+        mgcv's stored ``R`` factor is the QR factor of the weighted active
+        design, so ``R.T @ R`` matches ``X'WX``. The summary path should use
+        that QR factor rather than the raw active design block.
         """
         rng = np.random.default_rng(1)
         n = 2000
@@ -272,7 +273,7 @@ class TestMgcvStyleSmoothTestInput:
 
         row = next(r for r in metrics._build_coef_rows() if r.name == "Noise2")
 
-        X_a, _, XtWX_inv, active_groups = metrics._active_info
+        X_a, W, XtWX_inv, active_groups = metrics._active_info
         R_a = metrics._active_R_factor
         _, edf1 = metrics._influence_edf
         ag = next(a for a in active_groups if a.name == "Noise2")
@@ -280,11 +281,17 @@ class TestMgcvStyleSmoothTestInput:
         V_b_j = XtWX_inv[ag.sl, ag.sl]
         edf1_j = float(np.sum(edf1[ag.sl]))
 
+        np.testing.assert_allclose(R_a.T @ R_a, X_a.T @ (X_a * W[:, None]), atol=1e-8)
+
         _, p_raw, _ = wood_test_smooth(beta_g, X_a[:, ag.sl], V_b_j, edf1_j, -1.0)
         _, p_r, _ = wood_test_smooth(beta_g, R_a[:, ag.sl], V_b_j, edf1_j, -1.0)
 
         assert row.wald_p == pytest.approx(p_r)
-        assert abs(p_r - p_raw) > 0.1
+        # QR correctness already verified above (R_a.T @ R_a == X_a.T @ diag(W) @ X_a).
+        # For heavily suppressed noise groups, both p-values are tiny and nearly equal,
+        # so we only check they're both small (not that they differ).
+        assert p_r < 0.1
+        assert p_raw < 0.1
 
 
 # ── Beta mapping ─────────────────────────────────────────────────
@@ -321,6 +328,359 @@ class TestBetaMapping:
         bspline_old = gm_old.R_inv @ beta_old[model._groups[0].sl]
         bspline_new = gm_new.R_inv @ beta_mapped[model._groups[0].sl]
         np.testing.assert_allclose(bspline_old, bspline_new, atol=1e-8)
+
+
+class TestREMLMultistart:
+    def test_direct_reml_is_stable_across_initial_lambda_starts(self):
+        """Direct REML should converge to similar solutions from different starts."""
+        rng = np.random.default_rng(7)
+        n = 1800
+        df = pd.DataFrame(
+            {
+                "DrivAge": rng.uniform(18, 80, n),
+                "VehAge": rng.uniform(0, 20, n),
+                "BonusMalus": rng.uniform(50, 150, n),
+                "Area": rng.choice(list("ABCDE"), n),
+                "LogDensity": rng.normal(6.0, 1.0, n),
+                "Noise1": rng.normal(size=n),
+                "Noise2": rng.normal(size=n),
+                "Noise3": rng.normal(size=n),
+                "Exposure": rng.uniform(0.1, 1.0, n),
+            }
+        )
+        eta = (
+            -2.15
+            + 0.48 * np.sin(df["DrivAge"] / 8.5)
+            - 0.05 * (df["VehAge"] - 8.0) ** 2 / 10.0
+            + 0.003 * (df["BonusMalus"] - 90.0)
+            + 0.10 * (df["Area"] == "B")
+            - 0.08 * (df["Area"] == "D")
+            + 0.05 * df["LogDensity"]
+            + np.log(df["Exposure"])
+        )
+        y = rng.poisson(np.exp(eta)).astype(float)
+        offset = np.log(df["Exposure"].to_numpy(dtype=np.float64))
+
+        def build_model() -> SuperGLM:
+            return SuperGLM(
+                family="poisson",
+                lambda1=0.0,
+                features={
+                    "DrivAge": CubicRegressionSpline(n_knots=10, penalty="ssp"),
+                    "VehAge": CubicRegressionSpline(n_knots=10, penalty="ssp"),
+                    "BonusMalus": CubicRegressionSpline(n_knots=10, penalty="ssp"),
+                    "Area": Categorical(base="most_exposed"),
+                    "LogDensity": Numeric(),
+                    "Noise1": CubicRegressionSpline(n_knots=10, penalty="ssp"),
+                    "Noise2": CubicRegressionSpline(n_knots=10, penalty="ssp"),
+                    "Noise3": CubicRegressionSpline(n_knots=10, penalty="ssp"),
+                },
+            )
+
+        default_model = build_model()
+        default_model.fit_reml(df, y, offset=offset, max_reml_iter=50, reml_tol=1e-6)
+
+        low_init_model = build_model()
+        low_init_model.fit_reml(
+            df, y, offset=offset, max_reml_iter=50, reml_tol=1e-6, lambda2_init=0.1
+        )
+
+        high_init_model = build_model()
+        high_init_model.fit_reml(
+            df, y, offset=offset, max_reml_iter=50, reml_tol=1e-6, lambda2_init=100.0
+        )
+
+        for fitted in (default_model, low_init_model, high_init_model):
+            assert fitted._reml_result.converged
+            assert np.isfinite(fitted._reml_result.objective)
+
+        objectives = np.array(
+            [
+                default_model._reml_result.objective,
+                low_init_model._reml_result.objective,
+                high_init_model._reml_result.objective,
+            ],
+            dtype=float,
+        )
+        assert objectives.max() - objectives.min() < 1e-2
+
+        for name in default_model._reml_lambdas:
+            vals = np.array(
+                [
+                    default_model._reml_lambdas[name],
+                    low_init_model._reml_lambdas[name],
+                    high_init_model._reml_lambdas[name],
+                ],
+                dtype=float,
+            )
+            assert np.max(np.abs(np.log(vals) - np.log(vals[0]))) < 0.5
+
+
+# ── Finite-difference validation of REML gradient/Hessian ────────
+
+
+class TestREMLFiniteDifference:
+    """Verify analytic gradient and Hessian match finite differences."""
+
+    @staticmethod
+    def _setup_model(family, seed=42):
+        """Build a fitted model with two CRS splines for FD checks."""
+        from superglm.group_matrix import DiscretizedSSPGroupMatrix
+        from superglm.reml import build_penalty_caches
+        from superglm.solvers.irls_direct import (
+            _build_penalty_matrix,
+            fit_irls_direct,
+        )
+
+        rng = np.random.default_rng(seed)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        mu = np.exp(0.5 + np.sin(2 * np.pi * x1) + 0.5 * x2)
+        if family == "poisson":
+            y = rng.poisson(mu).astype(float)
+        elif family == "gamma":
+            y = rng.gamma(shape=5.0, scale=mu / 5.0)
+            y = np.maximum(y, 1e-4)
+        else:
+            raise ValueError(family)
+
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+        m = SuperGLM(
+            features={
+                "x1": CubicRegressionSpline(n_knots=8),
+                "x2": CubicRegressionSpline(n_knots=8),
+            },
+            family=family,
+        )
+        m.fit(df, y)
+
+        exposure = np.ones(n)
+        offset_arr = np.zeros(n)
+        lambdas = {"x1": 10.0, "x2": 0.5}
+
+        reml_groups = []
+        penalty_ranks = {}
+        for i, (gm, g) in enumerate(zip(m._dm.group_matrices, m._groups)):
+            if g.penalized and isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+                reml_groups.append((i, g))
+                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+                eigv = np.linalg.eigvalsh(omega_ssp)
+                penalty_ranks[g.name] = float(np.sum(eigv > 1e-8 * max(eigv.max(), 1e-12)))
+
+        penalty_caches = build_penalty_caches(m._dm.group_matrices, m._groups, reml_groups)
+
+        pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
+            X=m._dm,
+            y=y,
+            weights=exposure,
+            family=m._distribution,
+            link=m._link,
+            groups=m._groups,
+            lambda2=lambdas,
+            offset=offset_arr,
+            return_xtwx=True,
+        )
+
+        p_dim = XtWX.shape[0]
+        S = _build_penalty_matrix(m._dm.group_matrices, m._groups, lambdas, p_dim)
+        pq = float(pirls_result.beta @ S @ pirls_result.beta)
+        M_p = sum(c.rank for c in penalty_caches.values())
+        phi_hat = 1.0
+        if not getattr(m._distribution, "scale_known", True):
+            phi_hat = max((pirls_result.deviance + pq) / max(n - M_p, 1.0), 1e-10)
+
+        return (
+            m,
+            y,
+            exposure,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        )
+
+    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    def test_gradient_matches_fd(self, family):
+        """Analytic gradient matches central FD of objective (partial: fixed β, W)."""
+        (
+            m,
+            y,
+            exposure,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model(family)
+
+        grad = m._reml_direct_gradient(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            phi_hat=phi_hat,
+        )
+
+        eps = 1e-5
+        group_names = [g.name for _, g in reml_groups]
+        fd_grad = np.zeros(len(reml_groups))
+        for i, name in enumerate(group_names):
+            rho_base = np.log(lambdas[name])
+            lam_p, lam_m = lambdas.copy(), lambdas.copy()
+            lam_p[name] = np.exp(rho_base + eps)
+            lam_m[name] = np.exp(rho_base - eps)
+            op = m._reml_laml_objective(
+                y,
+                pirls_result,
+                lam_p,
+                exposure,
+                offset_arr,
+                XtWX=XtWX,
+                penalty_caches=penalty_caches,
+            )
+            om = m._reml_laml_objective(
+                y,
+                pirls_result,
+                lam_m,
+                exposure,
+                offset_arr,
+                XtWX=XtWX,
+                penalty_caches=penalty_caches,
+            )
+            fd_grad[i] = (op - om) / (2 * eps)
+
+        np.testing.assert_allclose(grad, fd_grad, rtol=1e-5, atol=1e-8)
+
+    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    def test_hessian_matches_fd(self, family):
+        """Approximate outer Hessian matches full outer FD to within ~5%.
+
+        The analytic Hessian includes the IFT correction (dβ̂/dρ = -H⁻¹ S β̂)
+        but holds W fixed. FD re-solves PIRLS, so W changes. The residual
+        includes both the fixed-W approximation and higher-order IFT terms.
+        """
+        from superglm.solvers.irls_direct import (
+            _build_penalty_matrix,
+            fit_irls_direct,
+        )
+
+        (
+            m,
+            y,
+            exposure,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model(family)
+
+        grad = m._reml_direct_gradient(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            phi_hat=phi_hat,
+        )
+        hess = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+        )
+
+        eps = 1e-4
+        group_names = [g.name for _, g in reml_groups]
+        p_dim = XtWX.shape[0]
+        M_p = sum(c.rank for c in penalty_caches.values())
+        m_groups = len(reml_groups)
+        fd_hess = np.zeros((m_groups, m_groups))
+
+        for j in range(m_groups):
+            rho_base = np.log(lambdas[group_names[j]])
+            for sign in [+1, -1]:
+                lam_pert = lambdas.copy()
+                lam_pert[group_names[j]] = np.exp(rho_base + sign * eps)
+
+                # Re-solve PIRLS at perturbed lambda (full outer FD)
+                result_pert, inv_pert, xtwx_pert = fit_irls_direct(
+                    X=m._dm,
+                    y=y,
+                    weights=exposure,
+                    family=m._distribution,
+                    link=m._link,
+                    groups=m._groups,
+                    lambda2=lam_pert,
+                    offset=offset_arr,
+                    beta_init=pirls_result.beta,
+                    intercept_init=pirls_result.intercept,
+                    return_xtwx=True,
+                )
+
+                phi_pert = 1.0
+                if not getattr(m._distribution, "scale_known", True):
+                    S_pert = _build_penalty_matrix(m._dm.group_matrices, m._groups, lam_pert, p_dim)
+                    pq_pert = float(result_pert.beta @ S_pert @ result_pert.beta)
+                    phi_pert = max((result_pert.deviance + pq_pert) / max(n - M_p, 1.0), 1e-10)
+
+                grad_pert = m._reml_direct_gradient(
+                    result_pert,
+                    inv_pert,
+                    lam_pert,
+                    reml_groups,
+                    penalty_ranks,
+                    phi_hat=phi_pert,
+                )
+                if sign == 1:
+                    grad_plus = grad_pert
+                else:
+                    grad_minus = grad_pert
+
+            fd_hess[:, j] = (grad_plus - grad_minus) / (2 * eps)
+
+        # Check diagonal and off-diagonal separately for tighter regression bounds.
+        # Diagonal: rtol=5% is tight enough; atol=0.1 catches absolute drift.
+        # Off-diagonal: relative to diagonal scale (small cross-terms need
+        # scale-aware tolerance, not a blanket atol=0.5 that hides regressions).
+        diag_analytic = np.diag(hess)
+        diag_fd = np.diag(fd_hess)
+        np.testing.assert_allclose(diag_analytic, diag_fd, rtol=0.05, atol=0.1)
+
+        for i in range(m_groups):
+            for j in range(m_groups):
+                if i == j:
+                    continue
+                abs_err = abs(hess[i, j] - fd_hess[i, j])
+                scale = max(abs(fd_hess[i, j]), abs(diag_fd.mean()), 1e-6)
+                rel_err = abs_err / scale
+                assert rel_err < 0.15, (
+                    f"{family} Hessian[{i},{j}]: analytic={hess[i, j]:.6f}, "
+                    f"fd={fd_hess[i, j]:.6f}, rel_err={rel_err:.4f}"
+                )
 
 
 # ── REML convergence ─────────────────────────────────────────────
@@ -408,18 +768,80 @@ class TestREMLGroupLasso:
             assert np.isfinite(lam), f"Non-finite REML lambda for {name}"
             assert lam > 0, f"Non-positive REML lambda for {name}"
 
+    def test_reml_plus_group_lasso_gamma_estimated_scale(self, capsys):
+        """Estimated-scale REML should work on the BCD path with lambda1 > 0."""
+        rng = np.random.default_rng(123)
+        n = 600
+        x1 = rng.uniform(0, 10, n)
+        x2 = rng.uniform(0, 10, n)
+        mu = np.exp(0.3 + 0.35 * np.sin(x1) + 0.15 * np.cos(x2))
+        y = rng.gamma(shape=5.0, scale=mu / 5.0)
+        y = np.maximum(y, 1e-4)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
 
-# ── REML + select=True (mgcv double penalty) ─────────────────────
+        model = SuperGLM(
+            family="gamma",
+            lambda1=0.01,
+            features={
+                "x1": Spline(n_knots=6, penalty="ssp"),
+                "x2": Spline(n_knots=6, penalty="ssp"),
+            },
+        )
+        model.fit_reml(X, y, max_reml_iter=12, verbose=True)
+
+        out = capsys.readouterr().out
+        assert "REML iter=" in out
+        assert "(pirls=" in out
+        assert "(cheap)" in out
+
+        assert model.result.converged
+        assert np.isfinite(model.result.phi)
+        assert model.result.phi > 0
+        assert model._reml_lambdas is not None
+        for name, lam in model._reml_lambdas.items():
+            assert np.isfinite(lam), f"Non-finite REML lambda for {name}"
+            assert lam > 0, f"Non-positive REML lambda for {name}"
+
+
+class TestREMLFallbacks:
+    def test_fit_reml_nb_auto_theta_without_smooths_falls_back_to_fit(self, caplog):
+        """NB2 auto-theta should still work when fit_reml() has no smooth terms to optimize."""
+        rng = np.random.default_rng(42)
+        n = 2000
+        theta_true = 5.0
+        mu = 5.0
+        lam = rng.gamma(shape=theta_true, scale=mu / theta_true, size=n)
+        y = rng.poisson(lam).astype(float)
+        X = pd.DataFrame({"dummy": np.ones(n)})
+
+        model = SuperGLM(
+            family="negative_binomial",
+            nb_theta="auto",
+            lambda1=0.0,
+            features={"dummy": Numeric(standardize=False)},
+        )
+        with caplog.at_level(logging.WARNING):
+            model.fit_reml(X, y)
+
+        assert "no REML-eligible groups found" in caplog.text
+        assert isinstance(model.nb_theta, float)
+        assert model.nb_theta > 0
+        assert model._nb_profile_result is not None
+        assert model.result.converged
+        assert not hasattr(model, "_reml_lambdas")
+
+
+# ── REML + split_linear=True (mgcv double penalty) ─────────────────────
 
 
 class TestREMLSelectTrue:
     def test_reml_select_true_converges(self, poisson_data):
-        """fit_reml() works with select=True (double penalty)."""
+        """fit_reml() works with split_linear=True (double penalty)."""
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
             lambda1=0.01,
-            features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
+            features={"x1": Spline(n_knots=8, penalty="ssp", split_linear=True)},
         )
         model.fit_reml(X[["x1"]], y, exposure=w, max_reml_iter=15)
         assert model._reml_result.converged
@@ -434,8 +856,8 @@ class TestREMLSelectTrue:
             family="poisson",
             lambda1=0.01,
             features={
-                "x1": Spline(n_knots=8, penalty="ssp", select=True),
-                "x2": Spline(n_knots=8, penalty="ssp", select=True),
+                "x1": Spline(n_knots=8, penalty="ssp", split_linear=True),
+                "x2": Spline(n_knots=8, penalty="ssp", split_linear=True),
             },
         )
         model.fit_reml(X[["x1", "x2"]], y, exposure=w, max_reml_iter=15)

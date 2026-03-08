@@ -89,7 +89,7 @@ def _penalised_xtwx_inv(
     p_a = X_a.shape[1]
 
     # Build sqrt(S) factor: L such that L'L = S (block-diagonal penalty)
-    # Unpenalized groups (e.g. select=True null-space) get no penalty contribution.
+    # Unpenalized groups (e.g. split_linear=True null-space) get no penalty contribution.
     S_rows = np.zeros((p_a, p_a))
     for gm_orig, ag, gname in zip(active_gms, active_groups_out, active_group_names):
         if isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix) and ag.penalized:
@@ -501,45 +501,17 @@ class ModelMetrics:
         """Upper-triangular factor used by mgcv-style smooth tests.
 
         ``mgcv::summary.gam`` feeds ``testStat`` the relevant columns of the
-        model's ``R`` factor rather than the raw ``n x p_g`` design block. The
-        distinction matters once smoothing is active: using the raw design block
-        can materially overstate smooth significance for weak/noisy terms.
+        weighted design QR factor rather than the raw ``n x p_g`` design block.
+        For a fitted active design ``X_a`` with working weights ``W``, mgcv's
+        stored ``R`` satisfies ``R.T @ R = X_a.T @ diag(W) @ X_a``. The Wood
+        test should therefore operate on columns of this weighted QR factor,
+        not on the raw design and not on an augmented ``[X; sqrt(S)]`` system.
         """
-        beta = self._result.beta
         X_a, W, _, active_groups = self._active_info
-        p_a = X_a.shape[1]
-        if p_a == 0:
+        if X_a.shape[1] == 0:
             return np.empty((0, 0))
 
-        lam2 = getattr(self._model, "_reml_lambdas", None) or self._model.lambda2
-        active_gms = [
-            gm
-            for gm, g in zip(self._dm.group_matrices, self._groups)
-            if np.linalg.norm(beta[g.sl]) > 1e-12
-        ]
-
-        # sqrt(S) factor: blockwise eigendecomposition keeps semidefinite
-        # spline penalties numerically stable inside the augmented QR.
-        S_rows = np.zeros((p_a, p_a))
-        for gm, ag in zip(active_gms, active_groups):
-            if not isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
-                continue
-            if not ag.penalized or gm.omega is None:
-                continue
-
-            if isinstance(lam2, dict):
-                lam_g = lam2.get(ag.name, 0.0)
-            else:
-                lam_g = lam2
-
-            S_g = lam_g * gm.R_inv.T @ gm.omega @ gm.R_inv
-            eigvals_g, eigvecs_g = np.linalg.eigh(S_g)
-            eigvals_g = np.maximum(eigvals_g, 0.0)
-            L_g = np.sqrt(eigvals_g)[:, None] * eigvecs_g.T
-            S_rows[ag.sl, ag.sl] = L_g
-
-        A = np.vstack([X_a * np.sqrt(W)[:, None], S_rows])
-        _, R = np.linalg.qr(A, mode="reduced")
+        _, R = np.linalg.qr(X_a * np.sqrt(W)[:, None], mode="reduced")
         return R
 
     @cached_property
@@ -710,7 +682,7 @@ class ModelMetrics:
         Parameters
         ----------
         name : str
-            Feature name (e.g. "DrivAge"). For select=True splines with multiple
+            Feature name (e.g. "DrivAge"). For split_linear=True splines with multiple
             subgroups, all subgroups are gathered automatically.
         """
         from superglm.features.categorical import Categorical

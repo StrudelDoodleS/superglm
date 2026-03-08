@@ -18,6 +18,11 @@ class Distribution(Protocol):
     """Protocol for exponential dispersion family distributions."""
 
     @property
+    def scale_known(self) -> bool:
+        """Whether the dispersion parameter φ is known (True) or estimated (False)."""
+        ...
+
+    @property
     def default_link(self) -> str:
         """Name of the canonical/default link function."""
         ...
@@ -37,6 +42,10 @@ class Distribution(Protocol):
 
 class Poisson:
     """Poisson distribution. V(mu) = mu."""
+
+    @property
+    def scale_known(self) -> bool:
+        return True
 
     @property
     def default_link(self) -> str:
@@ -59,6 +68,10 @@ class Poisson:
 
 class Gamma:
     """Gamma distribution. V(mu) = mu^2."""
+
+    @property
+    def scale_known(self) -> bool:
+        return False
 
     @property
     def default_link(self) -> str:
@@ -92,6 +105,10 @@ class NegativeBinomial:
         if theta <= 0:
             raise ValueError(f"NB theta must be > 0, got {theta}")
         self.theta = theta
+
+    @property
+    def scale_known(self) -> bool:
+        return True  # NB2 variance V(mu) = mu + mu²/θ captures overdispersion; φ=1
 
     @property
     def default_link(self) -> str:
@@ -139,6 +156,10 @@ class Tweedie:
         if not 1 < p < 2:
             raise ValueError(f"Tweedie p must be in (1, 2), got {p}")
         self.p = p
+
+    @property
+    def scale_known(self) -> bool:
+        return False
 
     @property
     def default_link(self) -> str:

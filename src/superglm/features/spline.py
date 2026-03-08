@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import scipy.sparse as sp
 from numpy.typing import ArrayLike, NDArray
 from scipy.interpolate import BSpline as BSpl
 
@@ -52,6 +53,11 @@ class _SplineBase:
         Number of bins for discretization. Only used when
         ``discrete=True``. If None (default), defers to the model-level
         ``n_bins`` setting (which defaults to 256).
+    extrapolation : {"clip", "extend", "error"}
+        Prediction-time behavior outside the training range. ``"clip"``
+        (default) freezes the spline at the boundary value. ``"extend"``
+        evaluates the spline basis outside the training range using its
+        native continuation. ``"error"`` raises on out-of-range values.
     """
 
     def __init__(
@@ -63,6 +69,7 @@ class _SplineBase:
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
+        extrapolation: str = "clip",
     ):
         if knots is not None:
             knots = np.asarray(knots, dtype=np.float64).ravel()
@@ -79,6 +86,11 @@ class _SplineBase:
         self.penalty = penalty
         self.discrete = discrete
         self.n_bins = n_bins
+        if extrapolation not in {"clip", "extend", "error"}:
+            raise ValueError(
+                f"extrapolation must be one of ('clip', 'extend', 'error'), got {extrapolation!r}"
+            )
+        self.extrapolation = extrapolation
 
         # State set during build()
         self._knots: NDArray = np.array([])
@@ -86,11 +98,86 @@ class _SplineBase:
         self._lo: float = 0.0
         self._hi: float = 1.0
         self._R_inv: NDArray | None = None
+        self._basis_lo: NDArray | None = None
+        self._basis_hi: NDArray | None = None
+        self._basis_d1_lo: NDArray | None = None
+        self._basis_d1_hi: NDArray | None = None
+
+    def _prepare_eval_points(self, x: NDArray) -> tuple[NDArray, bool]:
+        """Apply the configured extrapolation policy for basis evaluation."""
+        x = np.asarray(x, dtype=np.float64).ravel()
+        if self.extrapolation == "clip":
+            return np.clip(x, self._lo, self._hi), False
+        if self.extrapolation == "extend":
+            return x, True
+
+        # extrapolation == "error"
+        scale = max(1.0, abs(self._lo), abs(self._hi), abs(self._hi - self._lo))
+        tol = 1e-12 * scale
+        lo_mask = x < (self._lo - tol)
+        hi_mask = x > (self._hi + tol)
+        if np.any(lo_mask) or np.any(hi_mask):
+            raise ValueError(
+                f"Spline received values outside training range "
+                f"[{self._lo:.6g}, {self._hi:.6g}] with extrapolation='error'."
+            )
+        return x, False
+
+    def _basis_matrix(self, x: NDArray):
+        """Evaluate the raw B-spline basis under the extrapolation policy."""
+        x_eval, extrapolate = self._prepare_eval_points(x)
+        return BSpl.design_matrix(x_eval, self._knots, self.degree, extrapolate=extrapolate)
+
+    def _basis_value_and_slope_at(self, x0: float) -> tuple[NDArray, NDArray]:
+        """Return the raw basis row and its first derivative at ``x0``."""
+        basis = BSpl.design_matrix(
+            np.array([x0], dtype=np.float64), self._knots, self.degree, extrapolate=False
+        ).toarray()[0]
+        slope = np.zeros(self._n_basis)
+        for j in range(self._n_basis):
+            c = np.zeros(self._n_basis)
+            c[j] = 1.0
+            slope[j] = BSpl(self._knots, c, self.degree)(x0, nu=1)
+        return basis, slope
+
+    def _boundary_linear_rows(self) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+        """Cache basis value/slope rows for linear continuation at the boundaries."""
+        if self._basis_lo is None or self._basis_d1_lo is None:
+            self._basis_lo, self._basis_d1_lo = self._basis_value_and_slope_at(self._lo)
+        if self._basis_hi is None or self._basis_d1_hi is None:
+            self._basis_hi, self._basis_d1_hi = self._basis_value_and_slope_at(self._hi)
+        return self._basis_lo, self._basis_d1_lo, self._basis_hi, self._basis_d1_hi
+
+    def _linear_tail_basis_matrix(self, x: NDArray):
+        """Evaluate the raw basis with explicit linear continuation outside the fit range."""
+        x = np.asarray(x, dtype=np.float64).ravel()
+        lo_mask = x < self._lo
+        hi_mask = x > self._hi
+        mid_mask = ~(lo_mask | hi_mask)
+
+        rows = np.zeros((len(x), self._n_basis))
+        if np.any(mid_mask):
+            rows[mid_mask] = BSpl.design_matrix(
+                x[mid_mask], self._knots, self.degree, extrapolate=False
+            ).toarray()
+
+        if np.any(lo_mask) or np.any(hi_mask):
+            basis_lo, slope_lo, basis_hi, slope_hi = self._boundary_linear_rows()
+            if np.any(lo_mask):
+                rows[lo_mask] = basis_lo + (x[lo_mask, None] - self._lo) * slope_lo
+            if np.any(hi_mask):
+                rows[hi_mask] = basis_hi + (x[hi_mask, None] - self._hi) * slope_hi
+
+        return sp.csr_matrix(rows)
 
     def _place_knots(self, x: NDArray) -> None:
         """Place interior knots and build the full knot vector."""
         self._lo, self._hi = float(x.min()), float(x.max())
         pad = (self._hi - self._lo) * 1e-6
+        self._basis_lo = None
+        self._basis_hi = None
+        self._basis_d1_lo = None
+        self._basis_d1_hi = None
 
         if self._explicit_knots is not None:
             interior = self._explicit_knots
@@ -113,12 +200,54 @@ class _SplineBase:
         """Return (K, K) penalty matrix. Subclasses must implement."""
         raise NotImplementedError
 
+    @property
+    def absorbs_intercept(self) -> bool:
+        """Whether the smooth should absorb the intercept-like direction."""
+        return False
+
+    @property
+    def supports_linear_split(self) -> bool:
+        """Whether this spline can split linear and wiggly subspaces."""
+        return False
+
     def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
         """Apply boundary constraints. Returns (B, omega, n_cols, projection).
 
         Default: no constraints (identity).
         """
         return B, omega, self._n_basis, None
+
+    def _apply_identifiability(
+        self, x: NDArray, omega: NDArray, projection: NDArray | None
+    ) -> tuple[NDArray, int, NDArray | None]:
+        """Optionally remove the intercept-confounded smooth direction.
+
+        mgcv-style smooth terms are constrained to sum to zero over the fit
+        data so the model intercept carries the constant part. For CR splines
+        this removes one null-space direction after the natural constraints.
+        """
+        if not self.absorbs_intercept:
+            return omega, omega.shape[0], projection
+
+        n_cols = omega.shape[0]
+        if n_cols <= 1:
+            return omega, n_cols, projection
+
+        x = np.asarray(x, dtype=np.float64).ravel()
+        support, counts = np.unique(x, return_counts=True)
+        basis = self._basis_matrix(support).toarray()
+        if projection is not None:
+            basis = basis @ projection
+
+        constraint = counts.astype(np.float64) @ basis
+        if np.linalg.norm(constraint) < 1e-12:
+            return omega, n_cols, projection
+
+        q, _ = np.linalg.qr(constraint.reshape(-1, 1), mode="complete")
+        z = q[:, 1:]
+        omega_ident = z.T @ omega @ z
+        projection_ident = z if projection is None else projection @ z
+        return omega_ident, omega_ident.shape[0], projection_ident
 
     def _natural_constraint_null_space(self) -> NDArray:
         """Compute (K, K-2) null space of the natural boundary constraints.
@@ -147,10 +276,10 @@ class _SplineBase:
         """Build B-spline basis and penalty matrix."""
         x = np.asarray(x, dtype=np.float64).ravel()
         self._place_knots(x)
-        x_clip = np.clip(x, self._knots[0], self._knots[-1])
-        B = BSpl.design_matrix(x_clip, self._knots, self.degree).tocsr()
+        B = self._basis_matrix(x).tocsr()
         omega = self._build_penalty()
         B, omega, n_cols, projection = self._apply_constraints(B, omega)
+        omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
         return GroupInfo(
             columns=B,
             n_cols=n_cols,
@@ -176,13 +305,12 @@ class _SplineBase:
         self._place_knots(x)
         omega = self._build_penalty()
         _, omega, n_cols, projection = self._apply_constraints(None, omega)
+        omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
         return omega, n_cols, projection
 
     def transform(self, x: NDArray) -> NDArray:
         """Build design matrix using knots learned during build()."""
-        x = np.asarray(x, dtype=np.float64).ravel()
-        x_clip = np.clip(x, self._knots[0], self._knots[-1])
-        B = BSpl.design_matrix(x_clip, self._knots, self.degree).toarray()
+        B = self._basis_matrix(x).toarray()
         if self._R_inv is not None:
             B = B @ self._R_inv
         return B
@@ -193,8 +321,7 @@ class _SplineBase:
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
         beta_orig = self._R_inv @ beta if self._R_inv is not None else beta
         x_grid = np.linspace(self._lo, self._hi, n_points)
-        x_clip = np.clip(x_grid, self._knots[0], self._knots[-1])
-        B_grid = BSpl.design_matrix(x_clip, self._knots, self.degree).toarray()
+        B_grid = self._basis_matrix(x_grid).toarray()
         log_rels = B_grid @ beta_orig
         return {
             "x": x_grid,
@@ -218,7 +345,7 @@ class Spline(_SplineBase):
         "uniform" (default) or "quantile".
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
-    select : bool
+    split_linear : bool
         If True, decompose the spline into null-space (linear) and
         range-space (wiggly) subgroups for mgcv-style three-way
         selection: nonlinear -> linear -> dropped.
@@ -240,29 +367,44 @@ class Spline(_SplineBase):
         degree: int = 3,
         knot_strategy: str = "uniform",
         penalty: str = "ssp",
-        select: bool = False,
+        split_linear: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
+        extrapolation: str = "clip",
     ):
-        super().__init__(n_knots, degree, knot_strategy, penalty, knots, discrete, n_bins)
-        self.select = select
+        super().__init__(
+            n_knots,
+            degree,
+            knot_strategy,
+            penalty,
+            knots,
+            discrete,
+            n_bins,
+            extrapolation,
+        )
+        self.split_linear = split_linear
         self._U_null: NDArray | None = None
         self._U_range: NDArray | None = None
+        self._omega_range: NDArray | None = None
+
+    @property
+    def supports_linear_split(self) -> bool:
+        return True
 
     def _build_penalty(self) -> NDArray:
         D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
         return D2.T @ D2
 
     def build_knots_and_penalty(self, x: NDArray) -> tuple[NDArray, int, NDArray | None]:
-        """Place knots and return penalty + eigendecompose for select=True."""
+        """Place knots and return penalty + eigendecompose for linear-split terms."""
         omega, n_cols, projection = super().build_knots_and_penalty(x)
-        if self.select:
+        if self.split_linear:
             self._eigendecompose_penalty(omega)
         return omega, n_cols, projection
 
     def _eigendecompose_penalty(self, omega: NDArray) -> None:
-        """Eigendecompose omega into null/range spaces for select=True."""
+        """Eigendecompose omega into null/range spaces for linear splitting."""
         eigvals, eigvecs = np.linalg.eigh(omega)
         null_mask = eigvals < 1e-10
         n_null_eig = int(np.sum(null_mask))
@@ -282,14 +424,13 @@ class Spline(_SplineBase):
         self._U_null = u[:, :1]
 
     def build(self, x: NDArray, exposure: NDArray | None = None) -> GroupInfo | list[GroupInfo]:
-        if not self.select:
+        if not self.split_linear:
             return super().build(x, exposure)
 
-        # select=True path: eigendecompose, return [linear, spline] GroupInfos
+        # split_linear=True path: eigendecompose, return [linear, spline] GroupInfos
         x = np.asarray(x, dtype=np.float64).ravel()
         self._place_knots(x)
-        x_clip = np.clip(x, self._knots[0], self._knots[-1])
-        B = BSpl.design_matrix(x_clip, self._knots, self.degree).tocsr()
+        B = self._basis_matrix(x).tocsr()
         omega = self._build_penalty()
 
         eigvals, eigvecs = np.linalg.eigh(omega)
@@ -345,9 +486,12 @@ class NaturalSpline(_SplineBase):
     """Natural P-spline: f''=0 at boundaries, linear tails.
 
     Applies natural boundary constraints: f''(boundary) = 0 at both
-    ends. This forces the fitted curve to be linear beyond the boundary
-    knots, preventing the tail explosions common with unconstrained
-    B-splines. Equivalent to R's ``splines::ns()`` or mgcv's ``cr``
+    ends. The underlying basis therefore has linear tails beyond the
+    boundary knots, preventing the tail explosions common with
+    unconstrained B-splines. Prediction behavior outside the training
+    range is then controlled by ``extrapolation``: ``"clip"``
+    (default) freezes at the boundary, while ``"extend"`` exposes the
+    linear tails. Equivalent to R's ``splines::ns()`` or mgcv's ``cr``
     basis.
 
     Parameters
@@ -373,13 +517,28 @@ class NaturalSpline(_SplineBase):
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
+        extrapolation: str = "clip",
     ):
-        super().__init__(n_knots, degree, knot_strategy, penalty, knots, discrete, n_bins)
+        super().__init__(
+            n_knots,
+            degree,
+            knot_strategy,
+            penalty,
+            knots,
+            discrete,
+            n_bins,
+            extrapolation,
+        )
         self._Z: NDArray | None = None
 
     def _build_penalty(self) -> NDArray:
         D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
         return D2.T @ D2
+
+    def _basis_matrix(self, x: NDArray):
+        if self.extrapolation != "extend" or self.degree < 3:
+            return super()._basis_matrix(x)
+        return self._linear_tail_basis_matrix(x)
 
     def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
         if self.degree < 3:
@@ -395,6 +554,8 @@ class CubicRegressionSpline(_SplineBase):
 
     Equivalent to mgcv's ``s(x, bs="cr")``. Always cubic (degree=3).
     Natural boundary constraints (f''=0 at boundaries) are mandatory.
+    The basis has linear tails, but default prediction still clips at
+    the training boundary unless ``extrapolation="extend"`` is used.
 
     The penalty matrix is the wiggliness penalty: omega_ij = int B_i''(x) B_j''(x) dx,
     computed via Gauss-Legendre quadrature over each knot interval.
@@ -419,6 +580,7 @@ class CubicRegressionSpline(_SplineBase):
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
+        extrapolation: str = "clip",
     ):
         super().__init__(
             n_knots,
@@ -428,8 +590,14 @@ class CubicRegressionSpline(_SplineBase):
             knots=knots,
             discrete=discrete,
             n_bins=n_bins,
+            extrapolation=extrapolation,
         )
         self._Z: NDArray | None = None
+
+    @property
+    def absorbs_intercept(self) -> bool:
+        """Match mgcv's identified CR smooth by removing the constant direction."""
+        return True
 
     def _build_penalty(self) -> NDArray:
         """Integrated f'' squared penalty: omega_ij = int B_i''(x) B_j''(x) dx.
@@ -460,6 +628,11 @@ class CubicRegressionSpline(_SplineBase):
             omega += D2_q.T @ (D2_q * w_q[:, None])
 
         return omega
+
+    def _basis_matrix(self, x: NDArray):
+        if self.extrapolation != "extend":
+            return super()._basis_matrix(x)
+        return self._linear_tail_basis_matrix(x)
 
     def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
         """Natural boundary constraints: f''(lo) = f''(hi) = 0."""
