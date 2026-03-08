@@ -203,8 +203,8 @@ class TestMgcvParity:
         lam_x2 = m._reml_lambdas["x2"]
         assert lam_x2 > 1000, f"x2 lambda should be very large, got {lam_x2:.2f}"
 
-    def test_poisson_predictions_correlate(self):
-        """Predicted mu from SuperGLM should correlate > 0.99 with mgcv."""
+    def test_poisson_predictions_sane(self):
+        """Predicted mu should be positive and correlate with observed counts."""
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_poisson.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
@@ -216,10 +216,7 @@ class TestMgcvParity:
 
         mu_hat = m.predict(df)
 
-        # Compare against saturated model — both should predict similar means
-        # Since we can't get mgcv predictions directly, verify internal
-        # consistency: mu should be positive and predictions should correlate
-        # highly with y (Pearson r > 0.5 for Poisson count data)
+        # Sanity check: mu positive and reasonably correlated with y
         assert np.all(mu_hat > 0)
         r = np.corrcoef(y, mu_hat)[0, 1]
         assert r > 0.5, f"Prediction-response correlation {r:.3f} too low"
