@@ -145,6 +145,7 @@ def fit_irls_direct(
     tol: float = 1e-6,
     return_xtwx: bool = False,
     profile: dict | None = None,
+    cache_out: dict | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -315,6 +316,16 @@ def fit_irls_direct(
         profile["irls_total_s"] = profile.get("irls_total_s", 0.0) + t_elapsed
         profile["irls_calls"] = profile.get("irls_calls", 0) + 1
         profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
+
+    # Cache final-iteration RHS quantities for the cached-W fREML optimizer.
+    # These allow re-solving the augmented system with a new penalty matrix S
+    # without any data passes (O(p³) instead of O(n·K²) per group).
+    if cache_out is not None:
+        cache_out["XtWX"] = XtWX
+        cache_out["XtWz"] = XtWz
+        cache_out["XtW1"] = XtW1
+        cache_out["sum_W"] = sum_W
+        cache_out["sum_Wz"] = float(np.sum(Wz))
 
     # Compute (X'WX + S)^{-1} directly (NOT from augmented system, which gives
     # the Schur complement that accounts for intercept estimation — wrong for REML).

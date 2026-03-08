@@ -38,6 +38,7 @@ from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.solvers.irls_direct import (
     _build_penalty_matrix,
     _invert_xtwx_plus_penalty,
+    _safe_decompose_H,
     fit_irls_direct,
 )
 from superglm.solvers.pirls import PIRLSResult, fit_pirls
@@ -1553,6 +1554,22 @@ class SuperGLM:
         Both paths use PD-projected Newton steps, step-halving line search
         with Armijo condition, and steepest descent fallback.
         """
+        # Discrete path: use cached-W fREML optimizer (fewer data passes)
+        if self._discrete:
+            return self._optimize_discrete_reml_cached_w(
+                y,
+                exposure,
+                offset_arr,
+                reml_groups,
+                penalty_ranks,
+                lambdas,
+                max_reml_iter=max_reml_iter,
+                reml_tol=reml_tol,
+                verbose=verbose,
+                penalty_caches=penalty_caches,
+                profile=profile,
+            )
+
         from superglm.reml import REMLResult
 
         scale_known = getattr(self._distribution, "scale_known", True)
@@ -1903,6 +1920,363 @@ class SuperGLM:
             lambdas=best_lambdas,
             pirls_result=best_pirls,
             n_reml_iter=n_iter,
+            converged=converged,
+            lambda_history=lambda_history,
+            objective=float(best_obj),
+        )
+
+    def _optimize_discrete_reml_cached_w(
+        self,
+        y: NDArray,
+        exposure: NDArray,
+        offset_arr: NDArray,
+        reml_groups: list[tuple[int, GroupSlice]],
+        penalty_ranks: dict[str, float],
+        lambdas: dict[str, float],
+        *,
+        max_reml_iter: int,
+        reml_tol: float,
+        verbose: bool,
+        penalty_caches: dict | None = None,
+        profile: dict | None = None,
+    ):
+        """Cached-W fREML optimizer for the discrete path.
+
+        Matches the mgcv::bam(fREML, discrete=TRUE) approach: fit IRLS
+        once to get X'WX and X'Wz, then run multiple analytical REML
+        updates re-solving the p×p system with new penalty S — no data
+        passes through n observations.  Only refit IRLS when the IRLS
+        weights W need updating (typically 2-3 times total).
+
+        Each analytical iteration is O(p³) ≈ O(60³) = negligible,
+        compared to O(n·K²) per data-pass iteration on 678k rows.
+        """
+        import time as _time
+
+        import scipy.linalg
+
+        from superglm.reml import REMLResult
+
+        scale_known = getattr(self._distribution, "scale_known", True)
+        group_names = [g.name for _, g in reml_groups]
+        m = len(group_names)
+        log_lo, log_hi = np.log(1e-6), np.log(1e6)
+        p = self._dm.p
+
+        lambda_history: list[dict[str, float]] = [lambdas.copy()]
+        warm_beta: NDArray | None = None
+        warm_intercept: float | None = None
+        grad_tol = max(reml_tol, 5e-3)
+
+        best_obj = np.inf
+        best_lambdas = lambdas.copy()
+        best_pirls = None
+        converged = False
+
+        _t_reml_start = _time.perf_counter()
+        _t_pirls = 0.0
+        _t_objective = 0.0
+        _t_fp_update = 0.0
+        _n_w_updates = 0
+        _n_analytical_iters = 0
+
+        # === Bootstrap: one FP step from minimal penalty ===
+        boot_lambdas = {name: 1e-4 for name in lambdas}
+        _t0 = _time.perf_counter()
+        cache: dict = {}
+        boot_result, boot_inv, boot_xtwx = fit_irls_direct(
+            X=self._dm,
+            y=y,
+            weights=exposure,
+            family=self._distribution,
+            link=self._link,
+            groups=self._groups,
+            lambda2=boot_lambdas,
+            offset=offset_arr,
+            return_xtwx=True,
+            profile=profile,
+            cache_out=cache,
+        )
+        _t_pirls += _time.perf_counter() - _t0
+        warm_beta = boot_result.beta.copy()
+        warm_intercept = float(boot_result.intercept)
+
+        # Compute profiled φ̂ for the bootstrap fit
+        boot_phi = 1.0
+        if not scale_known and penalty_caches is not None:
+            S_boot = _build_penalty_matrix(self._dm.group_matrices, self._groups, boot_lambdas, p)
+            pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
+            M_p = sum(c.rank for c in penalty_caches.values())
+            boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
+        boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
+
+        # FP update from bootstrap → data-driven initial lambdas
+        rho = np.zeros(m, dtype=np.float64)
+        for i, (idx, g) in enumerate(reml_groups):
+            gm = self._dm.group_matrices[idx]
+            if penalty_caches is not None:
+                omega_ssp = penalty_caches[g.name].omega_ssp
+            else:
+                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+            beta_g = boot_result.beta[g.sl]
+            quad = float(beta_g @ omega_ssp @ beta_g)
+            H_inv_jj = boot_inv[g.sl, g.sl]
+            trace_term = float(np.trace(H_inv_jj @ omega_ssp))
+            r_j = penalty_ranks[g.name]
+            denom = boot_inv_phi * quad + trace_term
+            lam_fp = r_j / denom if denom > 1e-12 else 1.0
+            rho[i] = np.clip(np.log(max(lam_fp, 1e-6)), log_lo, log_hi)
+
+        if verbose:
+            boot_lam_str = ", ".join(
+                f"{name}={np.exp(rho[i]):.4g}" for i, name in enumerate(group_names)
+            )
+            print(f"  REML bootstrap: lambdas=[{boot_lam_str}]")
+
+        # === Outer W-update loop ===
+        # Each iteration: one IRLS call (data passes) + many analytical
+        # lambda updates using cached X'WX (no data passes).
+        for w_iter in range(max_reml_iter):
+            _n_w_updates += 1
+            rho_at_w_start = rho.copy()
+
+            # Build candidate lambdas from current rho
+            rho_clipped = np.clip(rho, log_lo, log_hi)
+            cand_lambdas = lambdas.copy()
+            for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
+                cand_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
+
+            # === Fit IRLS to convergence (data passes) ===
+            _t0 = _time.perf_counter()
+            cache = {}
+            pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
+                X=self._dm,
+                y=y,
+                weights=exposure,
+                family=self._distribution,
+                link=self._link,
+                groups=self._groups,
+                lambda2=cand_lambdas,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+                return_xtwx=True,
+                profile=profile,
+                cache_out=cache,
+            )
+            _t_pirls += _time.perf_counter() - _t0
+            warm_beta = pirls_result.beta.copy()
+            warm_intercept = float(pirls_result.intercept)
+
+            # Cached RHS quantities for analytical updates
+            c_XtWz = cache["XtWz"]
+            c_XtW1 = cache["XtW1"]
+            c_sum_W = cache["sum_W"]
+            c_sum_Wz = cache["sum_Wz"]
+
+            # === REML objective (needs matvec for deviance) ===
+            _t0 = _time.perf_counter()
+            obj = self._reml_laml_objective(
+                y,
+                pirls_result,
+                cand_lambdas,
+                exposure,
+                offset_arr,
+                XtWX=XtWX,
+                penalty_caches=penalty_caches,
+            )
+
+            # Profiled φ̂ for estimated-scale derivatives
+            phi_hat = 1.0
+            if not scale_known and penalty_caches is not None:
+                S_eval = _build_penalty_matrix(
+                    self._dm.group_matrices, self._groups, cand_lambdas, p
+                )
+                pq = float(pirls_result.beta @ S_eval @ pirls_result.beta)
+                M_p = sum(c.rank for c in penalty_caches.values())
+                phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
+            inv_phi = 1.0 / max(phi_hat, 1e-10)
+            _t_objective += _time.perf_counter() - _t0
+
+            if obj < best_obj:
+                best_obj = obj
+                best_lambdas = cand_lambdas.copy()
+                best_pirls = pirls_result
+            lambda_history.append(cand_lambdas.copy())
+
+            # Gradient for convergence check
+            grad = self._reml_direct_gradient(
+                pirls_result,
+                XtWX_S_inv,
+                cand_lambdas,
+                reml_groups,
+                penalty_ranks,
+                phi_hat=phi_hat,
+            )
+            proj_grad = grad.copy()
+            for i in range(m):
+                if rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
+                    proj_grad[i] = 0.0
+                elif rho_clipped[i] <= log_lo + 0.01 and grad[i] > 0:
+                    proj_grad[i] = 0.0
+            proj_grad_norm = float(np.max(np.abs(proj_grad)))
+
+            if verbose:
+                lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
+                print(
+                    f"  REML W-update {_n_w_updates}  obj={obj:.4f}  "
+                    f"|∇|={proj_grad_norm:.6f}  [{lam_str}]"
+                )
+
+            # Check convergence at W-update points
+            if _n_w_updates >= 2 and proj_grad_norm < grad_tol:
+                converged = True
+                break
+
+            # === Inner analytical REML loop (no data passes) ===
+            # Re-solve the p×p system with new S, update lambdas via FP.
+            _t0 = _time.perf_counter()
+            beta_cur = pirls_result.beta.copy()
+
+            for _inner in range(30):
+                _n_analytical_iters += 1
+
+                # Build S for current lambdas
+                rho_clipped = np.clip(rho, log_lo, log_hi)
+                inner_lambdas = lambdas.copy()
+                for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
+                    inner_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
+
+                S_new = _build_penalty_matrix(
+                    self._dm.group_matrices, self._groups, inner_lambdas, p
+                )
+
+                # Solve augmented system with cached RHS (O(p³), no data pass)
+                M_aug = np.empty((p + 1, p + 1))
+                M_aug[0, 0] = c_sum_W
+                M_aug[0, 1:] = c_XtW1
+                M_aug[1:, 0] = c_XtW1
+                M_aug[1:, 1:] = XtWX + S_new
+
+                rhs = np.empty(p + 1)
+                rhs[0] = c_sum_Wz
+                rhs[1:] = c_XtWz
+
+                try:
+                    L = scipy.linalg.cholesky(M_aug, lower=True, check_finite=False)
+                    beta_aug = scipy.linalg.cho_solve((L, True), rhs)
+                except np.linalg.LinAlgError:
+                    eigvals, eigvecs = np.linalg.eigh(M_aug)
+                    threshold = 1e-10 * max(eigvals.max(), 1e-12)
+                    with np.errstate(divide="ignore"):
+                        inv_eig = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
+                    beta_aug = (eigvecs * inv_eig[None, :]) @ eigvecs.T @ rhs
+
+                beta_cur = beta_aug[1:]
+
+                # Compute (X'WX + S_new)^{-1} for trace terms
+                H_inv, _, _ = _safe_decompose_H(XtWX + S_new)
+
+                # FP update of lambdas
+                rho_prev = rho.copy()
+                for i, (idx, g) in enumerate(reml_groups):
+                    gm = self._dm.group_matrices[idx]
+                    if penalty_caches is not None:
+                        omega_ssp = penalty_caches[g.name].omega_ssp
+                    else:
+                        omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+                    beta_g = beta_cur[g.sl]
+                    quad = float(beta_g @ omega_ssp @ beta_g)
+                    H_inv_jj = H_inv[g.sl, g.sl]
+                    trace_term = float(np.trace(H_inv_jj @ omega_ssp))
+                    r_j = penalty_ranks[g.name]
+                    denom = inv_phi * quad + trace_term
+                    lam_new = r_j / denom if denom > 1e-12 else inner_lambdas[g.name]
+                    rho[i] = np.clip(np.log(max(lam_new, 1e-6)), log_lo, log_hi)
+
+                # Check inner convergence (log-lambda change)
+                rho_change = float(np.max(np.abs(rho - rho_prev)))
+                if rho_change < 0.01:
+                    break
+
+            _t_fp_update += _time.perf_counter() - _t0
+
+            # Warm-start for next IRLS call from analytical solution
+            warm_beta = beta_cur
+            warm_intercept = float(beta_aug[0])
+
+            # Check outer convergence (lambdas stable across W-update)
+            rho_outer_change = float(np.max(np.abs(rho - rho_at_w_start)))
+            if verbose:
+                print(
+                    f"    → inner FP: {_inner + 1} iters, "
+                    f"Δρ_inner={rho_change:.4f}, Δρ_outer={rho_outer_change:.4f}"
+                )
+            if _n_w_updates >= 2 and rho_outer_change < 0.02:
+                converged = True
+                break
+
+        # === Final IRLS with converged lambdas for accurate result ===
+        if not converged or best_pirls is None:
+            # Need one more IRLS to get accurate deviance/edf
+            rho_clipped = np.clip(rho, log_lo, log_hi)
+            final_lambdas = lambdas.copy()
+            for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
+                final_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
+            _t0 = _time.perf_counter()
+            final_result, final_inv, final_xtwx = fit_irls_direct(
+                X=self._dm,
+                y=y,
+                weights=exposure,
+                family=self._distribution,
+                link=self._link,
+                groups=self._groups,
+                lambda2=final_lambdas,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+                return_xtwx=True,
+                profile=profile,
+            )
+            _t_pirls += _time.perf_counter() - _t0
+            _t0 = _time.perf_counter()
+            final_obj = self._reml_laml_objective(
+                y,
+                final_result,
+                final_lambdas,
+                exposure,
+                offset_arr,
+                XtWX=final_xtwx,
+                penalty_caches=penalty_caches,
+            )
+            _t_objective += _time.perf_counter() - _t0
+            if final_obj < best_obj:
+                best_obj = final_obj
+                best_lambdas = final_lambdas.copy()
+                best_pirls = final_result
+            lambda_history.append(final_lambdas.copy())
+
+        if best_pirls is None:
+            raise RuntimeError("Discrete REML cached-W did not evaluate any candidates")
+
+        # Populate profile
+        if profile is not None:
+            profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
+            profile["reml_pirls_s"] = _t_pirls
+            profile["reml_objective_s"] = _t_objective
+            profile["reml_gradient_s"] = 0.0
+            profile["reml_w_correction_s"] = 0.0
+            profile["reml_hessian_newton_s"] = 0.0
+            profile["reml_linesearch_s"] = 0.0
+            profile["reml_fp_update_s"] = _t_fp_update
+            profile["reml_n_linesearch_fits"] = 0
+            profile["reml_n_outer_iter"] = _n_w_updates
+            profile["reml_n_analytical_iters"] = _n_analytical_iters
+
+        return REMLResult(
+            lambdas=best_lambdas,
+            pirls_result=best_pirls,
+            n_reml_iter=_n_w_updates,
             converged=converged,
             lambda_history=lambda_history,
             objective=float(best_obj),
