@@ -15,7 +15,14 @@ from scipy.special import gammaln
 
 @runtime_checkable
 class Distribution(Protocol):
-    """Protocol for exponential dispersion family distributions."""
+    """Protocol for exponential dispersion family distributions.
+
+    Required: scale_known, default_link, variance, deviance_unit,
+    log_likelihood.
+
+    Optional: variance_derivative (V'(μ), used by REML W(ρ) correction;
+    if absent, the correction is skipped for custom distribution objects).
+    """
 
     @property
     def scale_known(self) -> bool:
@@ -54,6 +61,9 @@ class Poisson:
     def variance(self, mu: NDArray) -> NDArray:
         return mu.copy()
 
+    def variance_derivative(self, mu: NDArray) -> NDArray:
+        return np.ones_like(mu)
+
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         d = np.zeros_like(y, dtype=float)
         pos = y > 0
@@ -79,6 +89,9 @@ class Gamma:
 
     def variance(self, mu: NDArray) -> NDArray:
         return mu**2
+
+    def variance_derivative(self, mu: NDArray) -> NDArray:
+        return 2.0 * mu
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         return 2 * (-np.log(y / mu) + (y - mu) / mu)
@@ -116,6 +129,9 @@ class NegativeBinomial:
 
     def variance(self, mu: NDArray) -> NDArray:
         return mu + mu**2 / self.theta
+
+    def variance_derivative(self, mu: NDArray) -> NDArray:
+        return 1.0 + 2.0 * mu / self.theta
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         theta = self.theta
@@ -167,6 +183,9 @@ class Tweedie:
 
     def variance(self, mu: NDArray) -> NDArray:
         return np.power(mu, self.p)
+
+    def variance_derivative(self, mu: NDArray) -> NDArray:
+        return self.p * np.power(mu, self.p - 1)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         p = self.p

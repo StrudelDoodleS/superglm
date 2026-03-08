@@ -17,7 +17,16 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class Link(Protocol):
-    """Protocol for GLM link functions."""
+    """Protocol for GLM link functions.
+
+    Required methods (must be present for isinstance check):
+        link, inverse, deriv, deriv_inverse
+
+    Optional methods (detected at runtime via hasattr):
+        deriv2_inverse — d²μ/dη², used by REML W(ρ) correction.
+        If absent, the W(ρ) correction is skipped and REML falls back
+        to the fixed-W Laplace approximation.
+    """
 
     def link(self, mu: NDArray) -> NDArray:
         """mu -> eta (forward link)."""
@@ -49,6 +58,9 @@ class LogLink:
         return 1.0 / mu
 
     def deriv_inverse(self, eta: NDArray) -> NDArray:
+        return np.exp(eta)
+
+    def deriv2_inverse(self, eta: NDArray) -> NDArray:
         return np.exp(eta)
 
 
