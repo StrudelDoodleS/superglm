@@ -1181,7 +1181,7 @@ class SuperGLM:
                 new_gms.append(gm)
         return DesignMatrix(new_gms, self._dm.n, self._dm.p)
 
-    def _compute_dW_deta(self, mu: NDArray, eta: NDArray, exposure: NDArray) -> NDArray:
+    def _compute_dW_deta(self, mu: NDArray, eta: NDArray, exposure: NDArray) -> NDArray | None:
         """Derivative of IRLS weights w.r.t. the linear predictor.
 
         W_i = exposure_i · (dμ/dη)² / V(μ)
@@ -1190,7 +1190,15 @@ class SuperGLM:
 
         For log link: dW/dη = W·(2 − μV'(μ)/V(μ)).
         Poisson/log: dW/dη = W. Gamma/log: dW/dη = 0 identically.
+
+        Returns None if the link or distribution does not provide the
+        required second-order methods (deriv2_inverse, variance_derivative),
+        which skips the W(ρ) correction for custom objects.
         """
+        if not hasattr(self._link, "deriv2_inverse") or not hasattr(
+            self._distribution, "variance_derivative"
+        ):
+            return None
         g1 = self._link.deriv_inverse(eta)  # dμ/dη
         g2 = self._link.deriv2_inverse(eta)  # d²μ/dη²
         V = np.maximum(self._distribution.variance(mu), 1e-10)
@@ -1215,7 +1223,8 @@ class SuperGLM:
         first-order (d²W/dρ² terms are dropped).
 
         Returns (grad_correction, dH_extra) or None if the correction vanishes
-        (e.g. Gamma with log link where dW/dη = 0 identically).
+        (e.g. Gamma with log link where dW/dη = 0 identically) or if the
+        link/distribution does not provide the required second-order methods.
         """
         eta = np.clip(
             self._dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
@@ -1224,6 +1233,9 @@ class SuperGLM:
         )
         mu = np.clip(self._link.inverse(eta), 1e-7, 1e7)
         dW_deta = self._compute_dW_deta(mu, eta, exposure)
+
+        if dW_deta is None:
+            return None  # Custom link/distribution without second-order methods
 
         if np.max(np.abs(dW_deta)) < 1e-12:
             return None  # No correction (e.g. Gamma/log)

@@ -17,7 +17,12 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class Link(Protocol):
-    """Protocol for GLM link functions."""
+    """Protocol for GLM link functions.
+
+    Required: link, inverse, deriv, deriv_inverse.
+    Optional: deriv2_inverse (used by REML W(ρ) correction; if absent,
+    the correction is skipped for custom link objects).
+    """
 
     def link(self, mu: NDArray) -> NDArray:
         """mu -> eta (forward link)."""
@@ -33,10 +38,6 @@ class Link(Protocol):
 
     def deriv_inverse(self, eta: NDArray) -> NDArray:
         """d_mu/d_eta — derivative of inverse link w.r.t. eta."""
-        ...
-
-    def deriv2_inverse(self, eta: NDArray) -> NDArray:
-        """d²μ/dη² — second derivative of inverse link w.r.t. eta."""
         ...
 
 
