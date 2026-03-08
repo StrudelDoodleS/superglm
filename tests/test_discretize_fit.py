@@ -365,6 +365,25 @@ class TestDiscretizedREML:
         assert model.result.converged
         assert hasattr(model, "_reml_lambdas")
 
+    def test_fit_reml_rejects_nonpositive_n_bins(self):
+        """fit_reml() should validate per-feature n_bins before discretizing."""
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 10, n)
+        y = rng.poisson(np.exp(0.5 + 0.2 * np.sin(x))).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0,
+            discrete=True,
+            n_bins={"x": 0},
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+
+        with pytest.raises(ValueError, match="n_bins for feature 'x' must be >= 1"):
+            model.fit_reml(X, y)
+
 
 class TestDiscretizedIRLSDirect:
     def test_irls_direct_discrete(self):

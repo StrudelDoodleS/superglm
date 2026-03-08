@@ -1,5 +1,7 @@
 """Tests for REML smoothing parameter estimation."""
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -765,6 +767,68 @@ class TestREMLGroupLasso:
         for name, lam in model._reml_lambdas.items():
             assert np.isfinite(lam), f"Non-finite REML lambda for {name}"
             assert lam > 0, f"Non-positive REML lambda for {name}"
+
+    def test_reml_plus_group_lasso_gamma_estimated_scale(self, capsys):
+        """Estimated-scale REML should work on the BCD path with lambda1 > 0."""
+        rng = np.random.default_rng(123)
+        n = 600
+        x1 = rng.uniform(0, 10, n)
+        x2 = rng.uniform(0, 10, n)
+        mu = np.exp(0.3 + 0.35 * np.sin(x1) + 0.15 * np.cos(x2))
+        y = rng.gamma(shape=5.0, scale=mu / 5.0)
+        y = np.maximum(y, 1e-4)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="gamma",
+            lambda1=0.01,
+            features={
+                "x1": Spline(n_knots=6, penalty="ssp"),
+                "x2": Spline(n_knots=6, penalty="ssp"),
+            },
+        )
+        model.fit_reml(X, y, max_reml_iter=12, verbose=True)
+
+        out = capsys.readouterr().out
+        assert "REML iter=" in out
+        assert "(pirls=" in out
+        assert "(cheap)" in out
+
+        assert model.result.converged
+        assert np.isfinite(model.result.phi)
+        assert model.result.phi > 0
+        assert model._reml_lambdas is not None
+        for name, lam in model._reml_lambdas.items():
+            assert np.isfinite(lam), f"Non-finite REML lambda for {name}"
+            assert lam > 0, f"Non-positive REML lambda for {name}"
+
+
+class TestREMLFallbacks:
+    def test_fit_reml_nb_auto_theta_without_smooths_falls_back_to_fit(self, caplog):
+        """NB2 auto-theta should still work when fit_reml() has no smooth terms to optimize."""
+        rng = np.random.default_rng(42)
+        n = 2000
+        theta_true = 5.0
+        mu = 5.0
+        lam = rng.gamma(shape=theta_true, scale=mu / theta_true, size=n)
+        y = rng.poisson(lam).astype(float)
+        X = pd.DataFrame({"dummy": np.ones(n)})
+
+        model = SuperGLM(
+            family="negative_binomial",
+            nb_theta="auto",
+            lambda1=0.0,
+            features={"dummy": Numeric(standardize=False)},
+        )
+        with caplog.at_level(logging.WARNING):
+            model.fit_reml(X, y)
+
+        assert "no REML-eligible groups found" in caplog.text
+        assert isinstance(model.nb_theta, float)
+        assert model.nb_theta > 0
+        assert model._nb_profile_result is not None
+        assert model.result.converged
+        assert not hasattr(model, "_reml_lambdas")
 
 
 # ── REML + split_linear=True (mgcv double penalty) ─────────────────────
