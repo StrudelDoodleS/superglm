@@ -75,7 +75,12 @@ class TestMgcvParity:
         )
 
     def test_poisson_edf(self):
-        """Effective df should be within ±2 of mgcv (different basis dimension)."""
+        """Effective df should be within ±2 of mgcv (different basis dimension).
+
+        SuperGLM uses 10 SSP columns per smooth (no identifiability constraint)
+        vs mgcv's 9 free columns (sum-to-zero).  This ~1 extra unpenalized
+        dimension per term accounts for most of the EDF difference.
+        """
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_poisson.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
@@ -147,7 +152,7 @@ class TestMgcvParity:
         )
 
     def test_gamma_edf(self):
-        """Gamma EDF within ±2 of mgcv."""
+        """Gamma EDF within ±2 of mgcv (different basis dimension)."""
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_gamma.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(

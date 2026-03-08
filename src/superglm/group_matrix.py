@@ -262,6 +262,19 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     return np.column_stack([gm_i.rmatvec(WX_j[:, k]) for k in range(WX_j.shape[1])])
 
 
+def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
+    """Compute X'diag(W)X for arbitrary-sign weights.
+
+    SSP and Discretized groups handle any-sign W natively (they never use
+    sqrt(W)).  Dense and Sparse groups use sqrt(W) internally, which fails
+    for negative W, so we fall back to explicit W[:, None] * X for those.
+    """
+    if isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+        return gm.gram(W)
+    X = gm.toarray()
+    return (W[:, None] * X).T @ X
+
+
 def _block_xtwx(gms: list[GroupMatrix], groups: list, W: NDArray) -> NDArray:
     """Compute X.T @ diag(W) @ X block-by-block.
 
@@ -278,6 +291,30 @@ def _block_xtwx(gms: list[GroupMatrix], groups: list, W: NDArray) -> NDArray:
         XtWX[sl_i, sl_i] = gm_i.gram(W)
 
         # Cross blocks with subsequent groups
+        for j in range(i + 1, len(gms)):
+            gm_j = gms[j]
+            g_j = groups[j]
+            sl_j = slice(g_j.start, g_j.end)
+            cross = _cross_gram(gm_i, gm_j, W)
+            XtWX[sl_i, sl_j] = cross
+            XtWX[sl_j, sl_i] = cross.T
+
+    return XtWX
+
+
+def _block_xtwx_signed(gms: list[GroupMatrix], groups: list, W: NDArray) -> NDArray:
+    """Like _block_xtwx but safe for arbitrary-sign weights.
+
+    Uses _gram_any_sign for diagonal blocks (avoids sqrt(W) in Dense/Sparse
+    groups) and _cross_gram for off-diagonals (already sign-safe).
+    """
+    p_total = sum(g.end - g.start for g in groups)
+    XtWX = np.zeros((p_total, p_total))
+
+    for i, (gm_i, g_i) in enumerate(zip(gms, groups)):
+        sl_i = slice(g_i.start, g_i.end)
+        XtWX[sl_i, sl_i] = _gram_any_sign(gm_i, W)
+
         for j in range(i + 1, len(gms)):
             gm_j = gms[j]
             g_j = groups[j]
