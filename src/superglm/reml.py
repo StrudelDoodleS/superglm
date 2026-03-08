@@ -1,10 +1,9 @@
 """REML smoothing parameter estimation.
 
-Estimates per-term smoothing parameters (lambda_j) from the data using
-a fixed-point iteration on the Restricted Maximum Likelihood (REML)
-criterion. Wraps the existing PIRLS solver: each REML iteration fixes
-lambda_j, warm-starts PIRLS, then updates lambda_j via the Wood (2011)
-fixed-point formula.
+Estimates per-term smoothing parameters (lambda_j) from the data. The
+direct ``lambda1=0`` path optimizes a Laplace-approximate REML/LAML
+criterion over log-lambdas, while the mixed penalized-selection path
+retains the Wood (2011) fixed-point update around PIRLS.
 
 Coexists with group lasso: REML controls within-group smoothness
 (per-term lambda_j), group lasso controls between-group selection
@@ -16,6 +15,8 @@ References
   likelihood estimation of semiparametric generalized linear models.
   JRSS-B 73(1), 3-36.
 - Wood (2017): Generalized Additive Models, 2nd ed., Ch 6.2.
+- Wood & Fasiolo (2017): A generalized Fellner-Schall method for smoothing
+  parameter optimization. Biometrics 73(4), 1071-1081.
 """
 
 from __future__ import annotations
@@ -29,6 +30,72 @@ from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatri
 
 
 @dataclass
+class PenaltyCache:
+    """Pre-computed per-group penalty eigenstructure for REML optimization.
+
+    Computed once at ``fit_reml()`` entry and reused across all Newton /
+    fixed-point iterations, avoiding redundant eigendecompositions of Ω.
+    """
+
+    omega_ssp: NDArray  # (p_g, p_g) = R_inv.T @ omega @ R_inv
+    log_det_omega_plus: float  # log|Ω|₊ (constant across lambda iterations)
+    rank: float  # rank(Ω) = r_j
+    eigvals_omega: NDArray  # positive eigenvalues of Ω_ssp
+
+
+def build_penalty_caches(
+    group_matrices: list,
+    groups: list,
+    reml_groups: list[tuple[int, object]],
+) -> dict[str, PenaltyCache]:
+    """Build PenaltyCache for each REML-eligible group.
+
+    Parameters
+    ----------
+    group_matrices : list of GroupMatrix
+    groups : list of GroupSlice
+    reml_groups : list of (group_index, GroupSlice) tuples
+
+    Returns
+    -------
+    dict mapping group name to PenaltyCache.
+    """
+    caches: dict[str, PenaltyCache] = {}
+    for idx, g in reml_groups:
+        gm = group_matrices[idx]
+        omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+        eigvals = np.linalg.eigvalsh(omega_ssp)
+        thresh = 1e-8 * max(eigvals.max(), 1e-12)
+        pos_eigvals = eigvals[eigvals > thresh]
+        rank = float(len(pos_eigvals))
+        log_det = float(np.sum(np.log(pos_eigvals))) if pos_eigvals.size else 0.0
+        caches[g.name] = PenaltyCache(
+            omega_ssp=omega_ssp,
+            log_det_omega_plus=log_det,
+            rank=rank,
+            eigvals_omega=pos_eigvals,
+        )
+    return caches
+
+
+def cached_logdet_s_plus(
+    lambdas: dict[str, float],
+    penalty_caches: dict[str, PenaltyCache],
+) -> float:
+    """Compute log|S|₊ from cached penalty eigenstructure.
+
+    Uses the identity: log|S|₊ = Σ_j (r_j · log(λ_j) + log|Ω_j|₊).
+    No eigendecomposition needed — only scalar arithmetic.
+    """
+    total = 0.0
+    for name, cache in penalty_caches.items():
+        lam = lambdas.get(name, 1.0)
+        if lam > 0 and cache.rank > 0:
+            total += cache.rank * np.log(lam) + cache.log_det_omega_plus
+    return total
+
+
+@dataclass
 class REMLResult:
     """Result of REML smoothing parameter estimation."""
 
@@ -37,6 +104,7 @@ class REMLResult:
     n_reml_iter: int
     converged: bool
     lambda_history: list[dict[str, float]] = field(default_factory=list)
+    objective: float | None = None
 
 
 def _map_beta_between_bases(
