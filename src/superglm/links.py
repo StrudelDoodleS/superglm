@@ -19,9 +19,13 @@ if TYPE_CHECKING:
 class Link(Protocol):
     """Protocol for GLM link functions.
 
-    Required: link, inverse, deriv, deriv_inverse.
-    Optional: deriv2_inverse (used by REML W(ρ) correction; if absent,
-    the correction is skipped for custom link objects).
+    Required methods (must be present for isinstance check):
+        link, inverse, deriv, deriv_inverse
+
+    Optional methods (detected at runtime via hasattr):
+        deriv2_inverse — d²μ/dη², used by REML W(ρ) correction.
+        If absent, the W(ρ) correction is skipped and REML falls back
+        to the fixed-W Laplace approximation.
     """
 
     def link(self, mu: NDArray) -> NDArray:

@@ -15,7 +15,14 @@ from scipy.special import gammaln
 
 @runtime_checkable
 class Distribution(Protocol):
-    """Protocol for exponential dispersion family distributions."""
+    """Protocol for exponential dispersion family distributions.
+
+    Required: scale_known, default_link, variance, deviance_unit,
+    log_likelihood.
+
+    Optional: variance_derivative (V'(μ), used by REML W(ρ) correction;
+    if absent, the correction is skipped for custom distribution objects).
+    """
 
     @property
     def scale_known(self) -> bool:
@@ -29,10 +36,6 @@ class Distribution(Protocol):
 
     def variance(self, mu: NDArray) -> NDArray:
         """V(mu) — variance as a function of the mean."""
-        ...
-
-    def variance_derivative(self, mu: NDArray) -> NDArray:
-        """V'(mu) — derivative of variance function w.r.t. mu."""
         ...
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:

@@ -1204,6 +1204,189 @@ class TestREMLBackwardCompat:
         assert spline_model.result is not None
         assert not hasattr(spline_model, "_reml_lambdas") or spline_model._reml_lambdas is None
 
+    def test_custom_link_without_deriv2_inverse(self):
+        """Old-style custom link without deriv2_inverse should work on fit_reml.
+
+        Regression test: deriv2_inverse was added to the Link protocol,
+        breaking isinstance() checks and the REML path for custom links.
+        Now it's optional — the W(ρ) correction is skipped gracefully.
+        """
+        from superglm.links import Link
+
+        class MinimalLogLink:
+            """Custom log link with only the 4 required methods."""
+
+            def link(self, mu):
+                return np.log(mu)
+
+            def inverse(self, eta):
+                return np.exp(eta)
+
+            def deriv(self, mu):
+                return 1.0 / mu
+
+            def deriv_inverse(self, eta):
+                return np.exp(eta)
+
+        custom_link = MinimalLogLink()
+        assert isinstance(custom_link, Link), "Minimal link should satisfy protocol"
+
+        rng = np.random.default_rng(99)
+        n = 300
+        x = rng.uniform(0, 1, n)
+        y = rng.poisson(np.exp(1 + np.sin(2 * np.pi * x))).astype(float)
+        df = pd.DataFrame({"x": x})
+        m = SuperGLM(
+            features={"x": CubicRegressionSpline(n_knots=6)},
+            family="poisson",
+            link=custom_link,
+            lambda1=0,
+        )
+        m.fit_reml(df, y, max_reml_iter=10)
+        assert m._reml_result.converged
+
+    def test_custom_distribution_without_variance_derivative(self):
+        """Old-style custom distribution without variance_derivative should work.
+
+        Regression test: variance_derivative was added to the Distribution
+        protocol, breaking isinstance() checks and the REML path for custom
+        distributions.  Now it's optional — the W(ρ) correction is skipped.
+        """
+        from superglm.distributions import Distribution
+
+        class MinimalPoisson:
+            """Custom Poisson with only the 5 required members."""
+
+            @property
+            def scale_known(self):
+                return True
+
+            @property
+            def default_link(self):
+                return "log"
+
+            def variance(self, mu):
+                return mu.copy()
+
+            def deviance_unit(self, y, mu):
+                d = np.zeros_like(y, dtype=float)
+                pos = y > 0
+                d[pos] = 2 * (y[pos] * np.log(y[pos] / mu[pos]) - (y[pos] - mu[pos]))
+                d[~pos] = 2 * mu[~pos]
+                return d
+
+            def log_likelihood(self, y, mu, weights, phi=1.0):
+                from scipy.special import gammaln
+
+                return float(
+                    np.sum(weights * (y * np.log(np.maximum(mu, 1e-300)) - mu - gammaln(y + 1)))
+                )
+
+        custom_dist = MinimalPoisson()
+        assert isinstance(custom_dist, Distribution), "Minimal dist should satisfy protocol"
+
+        rng = np.random.default_rng(99)
+        n = 300
+        x = rng.uniform(0, 1, n)
+        y = rng.poisson(np.exp(1 + np.sin(2 * np.pi * x))).astype(float)
+        df = pd.DataFrame({"x": x})
+        m = SuperGLM(
+            features={"x": CubicRegressionSpline(n_knots=6)},
+            family=custom_dist,
+            lambda1=0,
+        )
+        m.fit_reml(df, y, max_reml_iter=10)
+        assert m._reml_result.converged
+
+    def test_enhanced_custom_objects_get_w_correction(self):
+        """Custom objects WITH second-order methods should get the W(ρ) correction."""
+
+        class EnhancedLogLink:
+            def link(self, mu):
+                return np.log(mu)
+
+            def inverse(self, eta):
+                return np.exp(eta)
+
+            def deriv(self, mu):
+                return 1.0 / mu
+
+            def deriv_inverse(self, eta):
+                return np.exp(eta)
+
+            def deriv2_inverse(self, eta):
+                return np.exp(eta)
+
+        class EnhancedPoisson:
+            @property
+            def scale_known(self):
+                return True
+
+            @property
+            def default_link(self):
+                return "log"
+
+            def variance(self, mu):
+                return mu.copy()
+
+            def variance_derivative(self, mu):
+                return np.ones_like(mu)
+
+            def deviance_unit(self, y, mu):
+                d = np.zeros_like(y, dtype=float)
+                pos = y > 0
+                d[pos] = 2 * (y[pos] * np.log(y[pos] / mu[pos]) - (y[pos] - mu[pos]))
+                d[~pos] = 2 * mu[~pos]
+                return d
+
+            def log_likelihood(self, y, mu, weights, phi=1.0):
+                from scipy.special import gammaln
+
+                return float(
+                    np.sum(weights * (y * np.log(np.maximum(mu, 1e-300)) - mu - gammaln(y + 1)))
+                )
+
+        rng = np.random.default_rng(99)
+        n = 300
+        x = rng.uniform(0, 1, n)
+        y = rng.poisson(np.exp(1 + np.sin(2 * np.pi * x))).astype(float)
+        df = pd.DataFrame({"x": x})
+
+        # Enhanced objects should produce a non-None W correction
+        m = SuperGLM(
+            features={"x": CubicRegressionSpline(n_knots=6)},
+            family=EnhancedPoisson(),
+            link=EnhancedLogLink(),
+            lambda1=0,
+        )
+        m.fit_reml(df, y, max_reml_iter=10)
+        assert m._reml_result.converged
+
+        # Verify W correction was actually computed (not skipped)
+        from superglm.group_matrix import DiscretizedSSPGroupMatrix
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        lambdas = m._reml_lambdas
+        reml_groups = []
+        for i, (gm, g) in enumerate(zip(m._dm.group_matrices, m._groups)):
+            if g.penalized and isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+                reml_groups.append((i, g))
+        pirls_result, inv_beta, xtwx = fit_irls_direct(
+            X=m._dm,
+            y=y,
+            weights=np.ones(n),
+            family=m._distribution,
+            link=m._link,
+            groups=m._groups,
+            lambda2=lambdas,
+            offset=np.zeros(n),
+            return_xtwx=True,
+        )
+        corr = m._reml_w_correction(
+            pirls_result, inv_beta, lambdas, reml_groups, None, np.ones(n), np.zeros(n)
+        )
+        assert corr is not None, "Enhanced custom objects should get W correction"
+
 
 # ── Predict after REML ───────────────────────────────────────────
 
