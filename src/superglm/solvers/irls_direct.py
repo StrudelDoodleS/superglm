@@ -13,7 +13,7 @@ groups this reduces the O(n·p²) bottleneck to O(n_bins·K²) per group.
 This replaces BCD when lambda1=0 (no L1/group lasso penalty), which is
 the mgcv-style workflow where REML handles both smoothing and selection
 through the double penalty.  Without BCD, the 33-iteration aliasing from
-shared B matrices between select=True subgroups vanishes entirely.
+shared B matrices between split_linear=True subgroups vanishes entirely.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import logging
 import time
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm.distributions import Distribution
@@ -80,11 +81,53 @@ def _invert_xtwx_plus_penalty(
     p = XtWX.shape[0]
     S = _build_penalty_matrix(group_matrices, groups, lambda2, p)
     M_beta = XtWX + S
-    eigvals_b, eigvecs_b = np.linalg.eigh(M_beta)
-    threshold_b = 1e-6 * max(eigvals_b.max(), 1e-12)
+    H_inv, _, _ = _safe_decompose_H(M_beta)
+    return H_inv
+
+
+def _safe_decompose_H(H: NDArray) -> tuple[NDArray, float, bool]:
+    """Decompose H = X'WX + S, returning its inverse and log-determinant.
+
+    Attempts a fast, numerically stable Cholesky decomposition first.
+    Falls back to a thresholded eigendecomposition if H is rank-deficient
+    (e.g., due to collinear unpenalized categoricals or extreme IRLS weights).
+
+    Parameters
+    ----------
+    H : (p, p) ndarray
+        The matrix to invert (typically X'WX + S).
+
+    Returns
+    -------
+    H_inv : (p, p) ndarray
+        The inverse (or pseudo-inverse) of H.
+    log_det_H : float
+        log|H| (from Cholesky diagonal) or log|H|₊ (from positive eigenvalues).
+    cholesky_ok : bool
+        True if the Cholesky path succeeded.
+    """
+    p = H.shape[0]
+
+    # === Primary path: Fast Cholesky ===
+    try:
+        L = scipy.linalg.cholesky(H, lower=True, check_finite=False)
+        log_det_H = 2.0 * float(np.sum(np.log(np.diag(L))))
+        H_inv = scipy.linalg.cho_solve((L, True), np.eye(p))
+        return H_inv, log_det_H, True
+    except np.linalg.LinAlgError:
+        pass
+
+    # === Fallback: Thresholded Eigendecomposition ===
+    eigvals, eigvecs = np.linalg.eigh(H)
+    threshold = 1e-6 * max(eigvals.max(), 1e-12)
     with np.errstate(divide="ignore"):
-        inv_eigvals_b = np.where(eigvals_b > threshold_b, 1.0 / eigvals_b, 0.0)
-    return (eigvecs_b * inv_eigvals_b[None, :]) @ eigvecs_b.T
+        inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
+    H_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
+
+    pos_eigvals = eigvals[eigvals > threshold]
+    log_det_H = float(np.sum(np.log(pos_eigvals))) if pos_eigvals.size > 0 else 0.0
+
+    return H_inv, log_det_H, False
 
 
 def fit_irls_direct(
@@ -212,7 +255,7 @@ def fit_irls_direct(
         rhs[0] = float(np.sum(Wz))
         rhs[1:] = dm.rmatvec(Wz)  # (p,) = X.T @ (W * (z - offset))
 
-        # Solve via eigendecomposition (numerically stable for near-singular S)
+        # Solve augmented system via eigh (tighter threshold for intercept+beta system)
         eigvals, eigvecs = np.linalg.eigh(M_aug)
         threshold = 1e-10 * max(eigvals.max(), 1e-12)
         with np.errstate(divide="ignore"):

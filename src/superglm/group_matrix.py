@@ -146,10 +146,23 @@ class SparseSSPGroupMatrix:
 
 
 def _discretize_column(x: NDArray, n_bins: int = 256) -> tuple[NDArray, NDArray]:
-    """Bin a continuous variable into n_bins equal-width bins.
+    """Compress a continuous variable to exact support or equal-width bins.
 
-    Returns (bin_centers, bin_idx) where bin_idx[i] is the bin index for x[i].
+    If the observed support has ``<= n_bins`` unique values, this returns the
+    sorted unique values and an exact inverse index. Otherwise it falls back to
+    equal-width bin centers across the observed range.
+
+    Returns ``(bin_centers, bin_idx)`` where ``bin_idx[i]`` is the support/bin
+    index for ``x[i]``.
     """
+    x = np.asarray(x, dtype=np.float64).ravel()
+    if n_bins < 1:
+        raise ValueError(f"n_bins must be >= 1, got {n_bins}")
+
+    unique_vals, inverse = np.unique(x, return_inverse=True)
+    if len(unique_vals) <= n_bins:
+        return unique_vals.astype(np.float64), inverse.astype(np.intp)
+
     lo, hi = float(x.min()), float(x.max())
     if lo == hi:
         return np.array([lo]), np.zeros(len(x), dtype=np.intp)
@@ -217,6 +230,8 @@ GroupMatrix = (
     DenseGroupMatrix | SparseGroupMatrix | SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix
 )
 
+_MAX_DISC_DISC_HIST_CELLS = 5_000_000
+
 
 def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     """Compute X_i.T @ diag(W) @ X_j efficiently.
@@ -226,18 +241,25 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     the smaller group and using rmatvec on the larger.
     """
     if isinstance(gm_i, DiscretizedSSPGroupMatrix) and isinstance(gm_j, DiscretizedSSPGroupMatrix):
-        # 2D histogram: bin weights by (bin_i, bin_j) jointly
-        joint_idx = gm_i.bin_idx * gm_j.n_bins + gm_j.bin_idx
-        W_2d = np.bincount(joint_idx, weights=W, minlength=gm_i.n_bins * gm_j.n_bins).reshape(
-            gm_i.n_bins, gm_j.n_bins
-        )
-        BtWB = gm_i.B_unique.T @ W_2d @ gm_j.B_unique
-        return gm_i.R_inv.T @ BtWB @ gm_j.R_inv
-    else:
-        # Fall back: materialize group j, use rmatvec of group i per column
-        X_j = gm_j.toarray()
-        WX_j = W[:, None] * X_j
-        return np.column_stack([gm_i.rmatvec(WX_j[:, k]) for k in range(WX_j.shape[1])])
+        n_joint = gm_i.n_bins * gm_j.n_bins
+        if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
+            # 2D histogram: bin weights by (bin_i, bin_j) jointly
+            joint_idx = gm_i.bin_idx * gm_j.n_bins + gm_j.bin_idx
+            W_2d = np.bincount(joint_idx, weights=W, minlength=n_joint).reshape(
+                gm_i.n_bins, gm_j.n_bins
+            )
+            BtWB = gm_i.B_unique.T @ W_2d @ gm_j.B_unique
+            return gm_i.R_inv.T @ BtWB @ gm_j.R_inv
+
+    if gm_i.shape[1] <= gm_j.shape[1]:
+        X_i = gm_i.toarray()
+        WX_i = W[:, None] * X_i
+        return np.vstack([gm_j.rmatvec(WX_i[:, k]) for k in range(WX_i.shape[1])])
+
+    # Fall back: materialize group j, use rmatvec of group i per column
+    X_j = gm_j.toarray()
+    WX_j = W[:, None] * X_j
+    return np.column_stack([gm_i.rmatvec(WX_j[:, k]) for k in range(WX_j.shape[1])])
 
 
 def _block_xtwx(gms: list[GroupMatrix], groups: list, W: NDArray) -> NDArray:

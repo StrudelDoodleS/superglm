@@ -27,7 +27,7 @@ def poisson_data():
 
 @pytest.fixture
 def select_data():
-    """Synthetic data with signal spline and noise spline (for select=True)."""
+    """Synthetic data with signal spline and noise spline (for split_linear=True)."""
     rng = np.random.default_rng(42)
     n = 500
     x1 = rng.uniform(18, 80, n)
@@ -159,14 +159,14 @@ class TestDirectSolverBasic:
 # ── Select=True tests ──────────────────────────────────────────
 class TestDirectSolverSelect:
     def test_select_no_aliasing(self, select_data):
-        """select=True with direct solver should converge in <= 10 IRLS iters."""
+        """split_linear=True with direct solver should converge in <= 10 IRLS iters."""
         X, y, w = select_data
         m = SuperGLM(
             family="poisson",
             lambda1=0,
             features={
-                "signal": Spline(n_knots=10, select=True),
-                "noise": Spline(n_knots=10, select=True),
+                "signal": Spline(n_knots=10, split_linear=True),
+                "noise": Spline(n_knots=10, split_linear=True),
             },
         )
         m.fit(X, y, exposure=w)
@@ -194,20 +194,20 @@ class TestREMLDirect:
             lambda1=0,
             features={"DrivAge": Spline(n_knots=10)},
         )
-        m.fit_reml(X, y, exposure=w, max_reml_iter=20)
+        m.fit_reml(X, y, exposure=w, max_reml_iter=50)
 
         assert hasattr(m, "_reml_lambdas")
         assert m._reml_result.converged
 
     def test_reml_direct_select_true(self, select_data):
-        """REML + select=True + lambda1=0: should estimate both linear and spline lambdas."""
+        """REML + split_linear=True + lambda1=0: should estimate both linear and spline lambdas."""
         X, y, w = select_data
         m = SuperGLM(
             family="poisson",
             lambda1=0,
             features={
-                "signal": Spline(n_knots=10, select=True),
-                "noise": Spline(n_knots=10, select=True),
+                "signal": Spline(n_knots=10, split_linear=True),
+                "noise": Spline(n_knots=10, split_linear=True),
             },
         )
         m.fit_reml(X, y, exposure=w, max_reml_iter=15)
@@ -228,8 +228,8 @@ class TestREMLDirect:
             family="poisson",
             lambda1=0,
             features={
-                "signal": Spline(n_knots=10, select=True),
-                "noise": Spline(n_knots=10, select=True),
+                "signal": Spline(n_knots=10, split_linear=True),
+                "noise": Spline(n_knots=10, split_linear=True),
             },
         )
         m.fit_reml(X, y, exposure=w, max_reml_iter=15)

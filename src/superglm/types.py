@@ -51,7 +51,7 @@ class GroupInfo:
     penalty_matrix: NDArray | None = None  # (p_g, p_g) for SSP, else None
     reparametrize: bool = False  # whether to apply SSP transform
     penalized: bool = True  # whether this group is subject to the penalty
-    # select=True subgroup support (mgcv double penalty)
+    # split_linear=True subgroup support (mgcv-style double penalty)
     subgroup_name: str | None = None  # "linear" or "spline"
     projection: NDArray | None = None  # (K, n_cols) projection from B-spline basis
 
@@ -60,7 +60,7 @@ class GroupInfo:
             # Discretized path: columns not needed, skip shape validation
             pass
         elif self.projection is not None:
-            # select=True subgroup: columns is the full B-spline basis, projection maps to subspace
+            # split_linear=True subgroup: columns is the full B-spline basis, projection maps to subspace
             if self.projection.shape[1] != self.n_cols:
                 raise ValueError(
                     f"projection has {self.projection.shape[1]} cols but n_cols={self.n_cols}"

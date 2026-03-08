@@ -203,15 +203,62 @@ class TestSplineBaseHierarchy:
         with pytest.raises(ValueError, match="non-empty"):
             Spline(knots=np.array([]))
 
+    def test_invalid_extrapolation_raises(self):
+        """Unknown extrapolation policy should fail at construction time."""
+        with pytest.raises(ValueError, match="extrapolation must be one of"):
+            Spline(extrapolation="banana")
+
+
+class TestSplineExtrapolation:
+    @pytest.mark.parametrize("spec_cls", [Spline, NaturalSpline, CubicRegressionSpline])
+    def test_clip_freezes_at_boundary(self, spec_cls):
+        """Default clipping should reuse the boundary basis outside fit range."""
+        x_train = np.linspace(0.0, 1.0, 200)
+        spec = spec_cls(n_knots=8, extrapolation="clip")
+        spec.build(x_train)
+
+        below = spec.transform(np.array([-0.5]))
+        at_lo = spec.transform(np.array([0.0]))
+        above = spec.transform(np.array([1.5]))
+        at_hi = spec.transform(np.array([1.0]))
+
+        np.testing.assert_allclose(below, at_lo, atol=1e-12)
+        np.testing.assert_allclose(above, at_hi, atol=1e-12)
+
+    @pytest.mark.parametrize("spec_cls", [Spline, NaturalSpline, CubicRegressionSpline])
+    def test_error_mode_rejects_out_of_range(self, spec_cls):
+        """extrapolation='error' should fail on out-of-range prediction."""
+        x_train = np.linspace(0.0, 1.0, 200)
+        spec = spec_cls(n_knots=8, extrapolation="error")
+        spec.build(x_train)
+
+        with pytest.raises(ValueError, match="outside training range"):
+            spec.transform(np.array([-0.1, 0.4]))
+
+    @pytest.mark.parametrize("spec_cls", [NaturalSpline, CubicRegressionSpline])
+    def test_extend_exposes_tail_behavior(self, spec_cls):
+        """extend should not collapse to the boundary basis for constrained splines."""
+        x_train = np.linspace(0.0, 1.0, 200)
+        spec = spec_cls(n_knots=8, extrapolation="extend")
+        spec.build(x_train)
+
+        below = spec.transform(np.array([-0.5]))
+        at_lo = spec.transform(np.array([0.0]))
+        above = spec.transform(np.array([1.5]))
+        at_hi = spec.transform(np.array([1.0]))
+
+        assert not np.allclose(below, at_lo)
+        assert not np.allclose(above, at_hi)
+
 
 class TestCubicRegressionSpline:
     """Tests for CubicRegressionSpline (integrated f'' squared penalty + natural constraints)."""
 
     def test_cr_n_basis(self):
-        """K-2 columns after natural boundary constraints."""
+        """K-3 columns after natural constraints plus intercept absorption."""
         sp = CubicRegressionSpline(n_knots=10)
         info = sp.build(np.linspace(0, 1, 200))
-        assert info.n_cols == 10 + 4 - 2  # K - 2
+        assert info.n_cols == 10 + 4 - 3  # K - 2, then drop the constant direction
 
     def test_cr_penalty_psd(self):
         """Integrated penalty is positive semi-definite."""
@@ -234,30 +281,35 @@ class TestCubicRegressionSpline:
             np.testing.assert_allclose(spl(sp._lo, nu=2), 0.0, atol=1e-10)
             np.testing.assert_allclose(spl(sp._hi, nu=2), 0.0, atol=1e-10)
 
-    def test_cr_penalty_null_space_2d(self):
-        """Projected penalty has 2D null space (constant + linear).
-
-        Unlike D2'D2 where the linear-in-index direction doesn't survive
-        natural constraints (because coefficients (0,1,...,K-1) don't
-        represent a truly linear function with clamped knots), the
-        integrated f''² null space IS the set of truly affine functions,
-        which all satisfy f''(boundary) = 0 by definition.
-        """
+    def test_cr_penalty_null_space_1d(self):
+        """Identified CR penalty leaves only the linear null direction."""
         info = CubicRegressionSpline(n_knots=10).build(np.linspace(0, 1, 200))
         eigvals = np.linalg.eigvalsh(info.penalty_matrix)
         n_null = np.sum(eigvals < 1e-10)
-        assert n_null == 2
+        assert n_null == 1
 
     def test_cr_penalty_differs_from_pspline(self):
-        """Integrated penalty != discrete D2'D2 (after projection)."""
+        """Integrated penalty stays distinct from the natural-spline penalty."""
         x = np.linspace(0, 1, 200)
         cr = CubicRegressionSpline(n_knots=10)
         ns = NaturalSpline(n_knots=10)
         cr_info = cr.build(x)
         ns_info = ns.build(x)
-        # Same shape but different values
-        assert cr_info.penalty_matrix.shape == ns_info.penalty_matrix.shape
-        assert not np.allclose(cr_info.penalty_matrix, ns_info.penalty_matrix)
+        assert cr_info.penalty_matrix.shape[0] == ns_info.penalty_matrix.shape[0] - 1
+        assert not np.isclose(
+            np.trace(cr_info.penalty_matrix),
+            np.trace(ns_info.penalty_matrix),
+            atol=1e-6,
+        )
+
+    def test_cr_projection_avoids_intercept_duplication(self):
+        """The identified CR basis should be linearly independent of the intercept."""
+        x = np.linspace(0, 1, 200)
+        sp = CubicRegressionSpline(n_knots=10)
+        info = sp.build(x)
+        basis = info.columns.toarray() @ info.projection
+        assert np.linalg.matrix_rank(basis) == info.n_cols
+        assert np.linalg.matrix_rank(np.column_stack([np.ones(len(x)), basis])) == info.n_cols + 1
 
     def test_cr_isinstance_base(self):
         """CubicRegressionSpline is an instance of _SplineBase."""

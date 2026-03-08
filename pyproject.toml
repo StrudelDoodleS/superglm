@@ -78,6 +78,7 @@ known-first-party = ["superglm"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+norecursedirs = ["scratch"]
 markers = [
     "slow: marks tests that fit real models (deselect with '-m \"not slow\"')",
 ]
