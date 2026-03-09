@@ -2135,10 +2135,13 @@ class SuperGLM:
 
             # === Inner analytical REML loop (no data passes) ===
             # Re-solve the p×p system with new S, update lambdas via FP.
+            # _max_analytical_per_w: test hook for W-refresh frequency.
+            # Default 30. Set to 1 for "refresh every step" strategy.
             _t0 = _time.perf_counter()
             beta_cur = pirls_result.beta.copy()
+            _max_inner = getattr(self, "_max_analytical_per_w", 30)
 
-            for _inner in range(30):
+            for _inner in range(_max_inner):
                 _n_analytical_iters += 1
 
                 # Build S for current lambdas
