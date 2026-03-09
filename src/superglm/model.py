@@ -47,6 +47,7 @@ from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.reml_optimizer import (
     compute_dW_deta,
     optimize_direct_reml,
+    optimize_efs_reml,
     reml_direct_gradient,
     reml_direct_hessian,
     reml_laml_objective,
@@ -863,6 +864,44 @@ class SuperGLM:
             max_analytical_per_w=getattr(self, "_max_analytical_per_w", 30),
         )
 
+    def _optimize_efs_reml(
+        self,
+        y: NDArray,
+        exposure: NDArray,
+        offset_arr: NDArray,
+        reml_groups: list[tuple[int, GroupSlice]],
+        penalty_ranks: dict[str, float],
+        lambdas: dict[str, float],
+        *,
+        max_reml_iter: int,
+        reml_tol: float,
+        verbose: bool,
+        penalty_caches: dict | None = None,
+    ):
+        """EFS REML optimizer for the BCD path (lambda1 > 0)."""
+        result, dm = optimize_efs_reml(
+            self._dm,
+            self._distribution,
+            self._link,
+            self._groups,
+            self.penalty,
+            self._anderson_memory,
+            self._active_set,
+            y,
+            exposure,
+            offset_arr,
+            reml_groups,
+            penalty_ranks,
+            lambdas,
+            max_reml_iter=max_reml_iter,
+            reml_tol=reml_tol,
+            verbose=verbose,
+            penalty_caches=penalty_caches,
+            rebuild_dm=self._rebuild_design_matrix_with_lambdas,
+        )
+        self._dm = dm
+        return result
+
     def _run_reml_once(
         self,
         y: NDArray,
@@ -1036,7 +1075,7 @@ class SuperGLM:
                 profile=_profile,
             )
         else:
-            best = self._run_reml_once(
+            best = self._optimize_efs_reml(
                 y,
                 exposure,
                 offset_arr,
@@ -1046,7 +1085,6 @@ class SuperGLM:
                 max_reml_iter=max_reml_iter,
                 reml_tol=reml_tol,
                 verbose=verbose,
-                use_direct=False,
                 penalty_caches=penalty_caches,
             )
         self._result = best.pirls_result
