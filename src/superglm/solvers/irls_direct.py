@@ -31,7 +31,7 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     GroupMatrix,
     SparseSSPGroupMatrix,
-    _block_xtwx,
+    _block_xtwx_rhs,
 )
 from superglm.links import Link
 from superglm.solvers.pirls import PIRLSResult
@@ -144,6 +144,8 @@ def fit_irls_direct(
     max_iter: int = 100,
     tol: float = 1e-6,
     return_xtwx: bool = False,
+    profile: dict | None = None,
+    cache_out: dict | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -222,8 +224,15 @@ def fit_irls_direct(
     converged = False
     XtWX_beta = np.eye(p)  # will be overwritten
 
+    # Phase timing accumulators
+    _t_working = 0.0
+    _t_gram = 0.0
+    _t_solve = 0.0
+    _t_deviance = 0.0
+
     for it in range(max_iter):
         # Working quantities
+        _t0 = time.perf_counter()
         eta = dm.matvec(beta) + intercept + offset
         eta = np.clip(eta, -20, 20)
         mu = np.clip(link.inverse(eta), 1e-7, 1e7)
@@ -233,14 +242,18 @@ def fit_irls_direct(
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
         z = eta + (y - mu) / dmu_deta
+        _t_working += time.perf_counter() - _t0
 
         # Form augmented normal equations via gram-based operations.
         # M_aug = [[sum(W), X'W], [X'W, X'WX]] + S_aug
         # No full (n, p) matrix materialisation needed.
+        _t0 = time.perf_counter()
         z_off = z - offset
+        Wz = W * z_off
         sum_W = float(np.sum(W))
-        XtW1 = dm.rmatvec(W)  # (p,) = X.T @ W
-        XtWX = _block_xtwx(gms, groups, W)  # (p, p)
+
+        # Combined gram + rmatvec: shares O(n) bincount for discretized groups
+        XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz)
 
         # Build augmented system (p+1, p+1)
         M_aug = np.empty((p + 1, p + 1))
@@ -250,12 +263,13 @@ def fit_irls_direct(
         M_aug[1:, 1:] = XtWX + S
 
         # RHS: X_aug' W (z - offset)
-        Wz = W * z_off
         rhs = np.empty(p + 1)
         rhs[0] = float(np.sum(Wz))
-        rhs[1:] = dm.rmatvec(Wz)  # (p,) = X.T @ (W * (z - offset))
+        rhs[1:] = XtWz
+        _t_gram += time.perf_counter() - _t0
 
         # Solve augmented system via eigh (tighter threshold for intercept+beta system)
+        _t0 = time.perf_counter()
         eigvals, eigvecs = np.linalg.eigh(M_aug)
         threshold = 1e-10 * max(eigvals.max(), 1e-12)
         with np.errstate(divide="ignore"):
@@ -265,11 +279,14 @@ def fit_irls_direct(
         beta_aug = M_inv @ rhs  # (p+1,)
         intercept = float(beta_aug[0])
         beta = beta_aug[1:]
+        _t_solve += time.perf_counter() - _t0
 
         # Deviance convergence check
+        _t0 = time.perf_counter()
         eta_new = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
         mu_new = np.clip(link.inverse(eta_new), 1e-7, 1e7)
         dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
+        _t_deviance += time.perf_counter() - _t0
 
         logger.info(
             f"  irls_direct iter={it + 1:3d}  "
@@ -290,15 +307,41 @@ def fit_irls_direct(
     t_elapsed = time.perf_counter() - t_start
     logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
 
+    # Accumulate phase timing into the profile dict if provided
+    if profile is not None:
+        profile["irls_working_s"] = profile.get("irls_working_s", 0.0) + _t_working
+        profile["irls_gram_s"] = profile.get("irls_gram_s", 0.0) + _t_gram
+        profile["irls_solve_s"] = profile.get("irls_solve_s", 0.0) + _t_solve
+        profile["irls_deviance_s"] = profile.get("irls_deviance_s", 0.0) + _t_deviance
+        profile["irls_total_s"] = profile.get("irls_total_s", 0.0) + t_elapsed
+        profile["irls_calls"] = profile.get("irls_calls", 0) + 1
+        profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
+
+    # Cache final-iteration RHS quantities for the cached-W fREML optimizer.
+    # These allow re-solving the augmented system with a new penalty matrix S
+    # without any data passes (O(p³) instead of O(n·K²) per group).
+    if cache_out is not None:
+        cache_out["XtWX"] = XtWX
+        cache_out["XtWz"] = XtWz
+        cache_out["XtW1"] = XtW1
+        cache_out["sum_W"] = sum_W
+        cache_out["sum_Wz"] = float(np.sum(Wz))
+
     # Compute (X'WX + S)^{-1} directly (NOT from augmented system, which gives
     # the Schur complement that accounts for intercept estimation — wrong for REML).
-    # XtWX is already computed from the last iteration.
+    # XtWX is already computed from the last iteration. Reuse S from above.
+    _t0 = time.perf_counter()
     XtWX_beta = XtWX
-    XtWX_S_inv_beta = _invert_xtwx_plus_penalty(XtWX_beta, gms, groups, lambda2)
+    M_beta = XtWX_beta + S
+    H_inv, _, _ = _safe_decompose_H(M_beta)
+    XtWX_S_inv_beta = H_inv
 
     # Exact effective df: 1 (intercept) + trace((X'WX + S)^{-1} X'WX)
     F = XtWX_S_inv_beta @ XtWX_beta
     p_eff = 1.0 + float(np.trace(F))
+    if profile is not None:
+        _t_finalize = time.perf_counter() - _t0
+        profile["irls_finalize_s"] = profile.get("irls_finalize_s", 0.0) + _t_finalize
 
     phi = dev / max(n - p_eff, 1)
 

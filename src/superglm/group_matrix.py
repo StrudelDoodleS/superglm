@@ -216,6 +216,21 @@ class DiscretizedSSPGroupMatrix:
         BtWB = self.B_unique.T @ (self.B_unique * W_agg[:, None])
         return self.R_inv.T @ BtWB @ self.R_inv
 
+    def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+        """Compute gram(W), rmatvec(W), rmatvec(Wz) with shared bincount.
+
+        Returns (gram, XtW, XtWz) — avoids redundant O(n) bincount passes.
+        """
+        W_agg = np.bincount(self.bin_idx, weights=W, minlength=self.n_bins)
+        Wz_agg = np.bincount(self.bin_idx, weights=Wz, minlength=self.n_bins)
+        BtW_agg = self.B_unique.T @ W_agg  # (K,)
+        BtWz_agg = self.B_unique.T @ Wz_agg  # (K,)
+        BtWB = self.B_unique.T @ (self.B_unique * W_agg[:, None])  # (K, K)
+        gram = self.R_inv.T @ BtWB @ self.R_inv
+        xtw = self.R_inv.T @ BtW_agg
+        xtwz = self.R_inv.T @ BtWz_agg
+        return gram, xtw, xtwz
+
     def toarray(self) -> NDArray:
         return (self.B_unique @ self.R_inv)[self.bin_idx]
 
@@ -300,6 +315,45 @@ def _block_xtwx(gms: list[GroupMatrix], groups: list, W: NDArray) -> NDArray:
             XtWX[sl_j, sl_i] = cross.T
 
     return XtWX
+
+
+def _block_xtwx_rhs(
+    gms: list[GroupMatrix], groups: list, W: NDArray, Wz: NDArray
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Compute X'WX, X'W, and X'Wz in a single pass over the data.
+
+    For DiscretizedSSPGroupMatrix, shares the O(n) bincount between gram and
+    rmatvec operations.  Returns (XtWX, XtW1, XtWz) where XtW1 = X.T @ W
+    and XtWz = X.T @ Wz.
+    """
+    p_total = sum(g.end - g.start for g in groups)
+    XtWX = np.zeros((p_total, p_total))
+    XtW1 = np.zeros(p_total)
+    XtWz_out = np.zeros(p_total)
+
+    for i, (gm_i, g_i) in enumerate(zip(gms, groups)):
+        sl_i = slice(g_i.start, g_i.end)
+        # Diagonal block + rmatvecs via shared bincount
+        if isinstance(gm_i, DiscretizedSSPGroupMatrix):
+            gram_i, xtw_i, xtwz_i = gm_i.gram_rmatvec(W, Wz)
+            XtWX[sl_i, sl_i] = gram_i
+            XtW1[sl_i] = xtw_i
+            XtWz_out[sl_i] = xtwz_i
+        else:
+            XtWX[sl_i, sl_i] = gm_i.gram(W)
+            XtW1[sl_i] = gm_i.rmatvec(W)
+            XtWz_out[sl_i] = gm_i.rmatvec(Wz)
+
+        # Cross blocks with subsequent groups
+        for j in range(i + 1, len(gms)):
+            gm_j = gms[j]
+            g_j = groups[j]
+            sl_j = slice(g_j.start, g_j.end)
+            cross = _cross_gram(gm_i, gm_j, W)
+            XtWX[sl_i, sl_j] = cross
+            XtWX[sl_j, sl_i] = cross.T
+
+    return XtWX, XtW1, XtWz_out
 
 
 def _block_xtwx_signed(gms: list[GroupMatrix], groups: list, W: NDArray) -> NDArray:
