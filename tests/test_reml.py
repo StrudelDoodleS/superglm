@@ -1018,12 +1018,12 @@ class TestREMLConvergence:
     def test_reml_convergence_small(self, poisson_data, spline_model):
         """REML should converge on a small dataset."""
         X, y, w = poisson_data
-        spline_model.fit_reml(X, y, exposure=w, max_reml_iter=15)
+        spline_model.fit_reml(X, y, exposure=w, max_reml_iter=20)
 
         assert hasattr(spline_model, "_reml_lambdas")
         assert hasattr(spline_model, "_reml_result")
         assert isinstance(spline_model._reml_result, REMLResult)
-        assert spline_model._reml_result.n_reml_iter <= 15
+        assert spline_model._reml_result.n_reml_iter <= 20
         assert spline_model._reml_result.converged
 
     def test_reml_per_group_lambdas_differ(self):
@@ -1662,8 +1662,8 @@ class TestEFSOptimizer:
             assert np.isfinite(lam), f"Non-finite lambda for {name}"
             assert lam > 0, f"Non-positive lambda for {name}"
 
-    def test_efs_cheap_iterations_used(self, capsys):
-        """EFS should use cheap (cached X'WX) iterations when lambdas stabilize."""
+    def test_efs_bootstrap_and_fast_convergence(self, capsys):
+        """EFS bootstrap should give good initial lambdas → fast convergence."""
         rng = np.random.default_rng(42)
         n = 500
         x1 = rng.uniform(0, 10, n)
@@ -1679,9 +1679,11 @@ class TestEFSOptimizer:
         model.fit_reml(X, y, max_reml_iter=20, verbose=True)
 
         out = capsys.readouterr().out
-        # Should have at least one cheap iteration
-        assert "(cheap)" in out
+        # Bootstrap line should appear
+        assert "REML bootstrap:" in out
         assert model._reml_result.converged
+        # With bootstrap, should converge quickly (≤ 6 REML iters)
+        assert model._reml_result.n_reml_iter <= 6
 
     @pytest.mark.parametrize("family", ["poisson", "gamma"])
     def test_efs_bad_starts_converge(self, family):

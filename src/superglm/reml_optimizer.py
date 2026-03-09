@@ -1119,8 +1119,72 @@ def optimize_efs_reml(
     reml_update_names = [g.name for _, g in reml_groups]
     n = len(y)
 
-    warm_beta = None
-    warm_intercept = None
+    # ── Bootstrap: one PIRLS with minimal penalty → one EFS step ──
+    # Analogous to direct REML bootstrap (optimize_direct_reml lines 417-467).
+    # Gives data-informed initial lambdas regardless of lambda2_init.
+    boot_lambdas = {name: 1e-4 for name in lambdas}
+    boot_result = fit_pirls(
+        X=dm,
+        y=y,
+        weights=exposure,
+        family=distribution,
+        link=link,
+        groups=groups,
+        penalty=penalty,
+        offset=offset_arr,
+        anderson_memory=anderson_memory,
+        active_set=active_set,
+        lambda2=boot_lambdas,
+    )
+
+    # Compute W and X'WX from bootstrap fit
+    boot_eta = np.clip(dm.matvec(boot_result.beta) + boot_result.intercept + offset_arr, -20, 20)
+    boot_mu = np.clip(link.inverse(boot_eta), 1e-7, 1e7)
+    boot_V = distribution.variance(boot_mu)
+    boot_dmu = link.deriv_inverse(boot_eta)
+    boot_W = exposure * boot_dmu**2 / np.maximum(boot_V, 1e-10)
+    boot_xtwx = _block_xtwx(dm.group_matrices, groups, boot_W)
+
+    # Estimate phi for estimated-scale families
+    boot_inv_phi = 1.0
+    if not scale_known and penalty_caches is not None:
+        p_dim = boot_xtwx.shape[0]
+        S_boot = _build_penalty_matrix(dm.group_matrices, groups, boot_lambdas, p_dim)
+        pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
+        M_p = sum(c.rank for c in penalty_caches.values())
+        boot_phi = max((boot_result.deviance + pq_boot) / max(n - M_p, 1.0), 1e-10)
+        boot_inv_phi = 1.0 / boot_phi
+
+    # One EFS fixed-point step on bootstrap beta
+    S_boot = _build_penalty_matrix(dm.group_matrices, groups, boot_lambdas, dm.p)
+    H_boot = boot_xtwx + S_boot
+    H_boot_inv, _, _ = _safe_decompose_H(H_boot)
+
+    for _idx, g in reml_groups:
+        beta_g = boot_result.beta[g.sl]
+        if np.linalg.norm(beta_g) < 1e-12:
+            continue
+        omega_ssp = penalty_caches[g.name].omega_ssp
+        quad = float(beta_g @ omega_ssp @ beta_g)
+        trace_term = float(np.trace(H_boot_inv[g.sl, g.sl] @ omega_ssp))
+        r_j = penalty_ranks[g.name]
+        denom = boot_inv_phi * quad + trace_term
+        lam_fp = r_j / denom if denom > 1e-12 else 1.0
+        lambdas[g.name] = float(np.clip(lam_fp, 1e-6, 1e6))
+
+    # Rebuild DM with bootstrapped lambdas
+    old_gms = dm.group_matrices
+    dm = rebuild_dm(lambdas, exposure)
+    penalty_caches = build_penalty_caches(dm.group_matrices, groups, reml_groups)
+    penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
+    warm_beta = _map_beta_between_bases(boot_result.beta, old_gms, dm.group_matrices, groups)
+    warm_intercept = float(boot_result.intercept)
+
+    if verbose:
+        lam_str = ", ".join(f"{g.name}={lambdas[g.name]:.4g}" for _, g in reml_groups)
+        print(f"  REML bootstrap: lambdas=[{lam_str}]")
+
+    # ── Main EFS loop ─────────────────────────────────────────────
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
     converged = False
     n_reml_iter = 0
