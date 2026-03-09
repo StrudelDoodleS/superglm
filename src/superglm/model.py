@@ -14,20 +14,26 @@ if TYPE_CHECKING:
 
 import numpy as np
 import pandas as pd
-import scipy.sparse as sp
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution, resolve_distribution
+from superglm.distributions import Distribution
+from superglm.dm_builder import (
+    add_interaction,
+    auto_detect_features,
+    build_design_matrix,
+    compute_projected_R_inv,
+    compute_R_inv,
+    rebuild_design_matrix_with_lambdas,
+    resolve_discrete_n_bins,
+    should_discretize,
+    should_discretize_tensor_interaction,
+)
 from superglm.group_matrix import (
-    DenseGroupMatrix,
     DesignMatrix,
     DiscretizedSSPGroupMatrix,
-    GroupMatrix,
-    SparseGroupMatrix,
     SparseSSPGroupMatrix,
-    _discretize_column,
 )
-from superglm.links import Link, resolve_link
+from superglm.links import Link
 from superglm.penalties.base import Penalty
 from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
@@ -47,7 +53,7 @@ from superglm.solvers.irls_direct import (
     fit_irls_direct,
 )
 from superglm.solvers.pirls import PIRLSResult, fit_pirls
-from superglm.types import FeatureSpec, GroupInfo, GroupSlice
+from superglm.types import FeatureSpec, GroupSlice
 
 logger = logging.getLogger(__name__)
 
@@ -247,123 +253,31 @@ class SuperGLM:
 
     def _auto_detect_features(self, X: pd.DataFrame, exposure: NDArray | None) -> None:
         """Auto-detect feature types from DataFrame columns."""
-        from superglm.features.categorical import Categorical
-        from superglm.features.numeric import Numeric
-        from superglm.features.spline import Spline
-
         spline_cols = self._splines or []
         knots_map = self._resolve_knots(spline_cols)
-
-        lines = ["SuperGLM features:"]
-        for col in X.columns:
-            if col in spline_cols:
-                nk = knots_map[col]
-                spec = Spline(n_knots=nk, degree=self._degree, penalty="ssp")
-                self._specs[col] = spec
-                self._feature_order.append(col)
-                lines.append(f"  {col:<20s} → Spline(n_knots={nk}, degree={self._degree})")
-            elif X[col].dtype.kind in ("O", "U") or isinstance(X[col].dtype, pd.CategoricalDtype):
-                base = self._categorical_base
-                if base == "most_exposed" and exposure is None:
-                    base = "first"
-                spec = Categorical(base=base)
-                self._specs[col] = spec
-                self._feature_order.append(col)
-                lines.append(f"  {col:<20s} → Categorical(base={base})")
-            else:
-                spec = Numeric(standardize=self._standardize_numeric)
-                self._specs[col] = spec
-                self._feature_order.append(col)
-                lines.append(f"  {col:<20s} → Numeric(standardize={self._standardize_numeric})")
-        logger.info("\n".join(lines))
+        auto_detect_features(
+            X,
+            exposure,
+            spline_cols=spline_cols,
+            knots_map=knots_map,
+            degree=self._degree,
+            categorical_base=self._categorical_base,
+            standardize_numeric=self._standardize_numeric,
+            specs=self._specs,
+            feature_order=self._feature_order,
+        )
 
     def _add_interaction(self, feat1: str, feat2: str, name: str | None = None, **kwargs) -> None:
         """Register an interaction between two already-registered features."""
-        from superglm.features.categorical import Categorical
-        from superglm.features.interaction import (
-            CategoricalInteraction,
-            NumericCategorical,
-            NumericInteraction,
-            PolynomialCategorical,
-            PolynomialInteraction,
-            SplineCategorical,
-            TensorInteraction,
+        add_interaction(
+            feat1,
+            feat2,
+            specs=self._specs,
+            interaction_specs=self._interaction_specs,
+            interaction_order=self._interaction_order,
+            name=name,
+            **kwargs,
         )
-        from superglm.features.numeric import Numeric
-        from superglm.features.polynomial import Polynomial
-        from superglm.features.spline import _SplineBase
-
-        if feat1 not in self._specs:
-            raise ValueError(f"Parent feature not found: {feat1}")
-        if feat2 not in self._specs:
-            raise ValueError(f"Parent feature not found: {feat2}")
-
-        spec1 = self._specs[feat1]
-        spec2 = self._specs[feat2]
-
-        is_spline1 = isinstance(spec1, _SplineBase)
-        is_spline2 = isinstance(spec2, _SplineBase)
-        is_poly1 = isinstance(spec1, Polynomial)
-        is_poly2 = isinstance(spec2, Polynomial)
-        is_num1 = isinstance(spec1, Numeric)
-        is_num2 = isinstance(spec2, Numeric)
-        is_cat1 = isinstance(spec1, Categorical)
-        is_cat2 = isinstance(spec2, Categorical)
-
-        iname: str
-        ispec: Any
-
-        # Spline + Categorical → SplineCategorical (swap so spline is first)
-        if is_spline1 and is_cat2:
-            iname = name or f"{feat1}:{feat2}"
-            ispec = SplineCategorical(feat1, feat2)
-        elif is_cat1 and is_spline2:
-            iname = name or f"{feat2}:{feat1}"
-            ispec = SplineCategorical(feat2, feat1)
-        # Polynomial + Categorical → PolynomialCategorical
-        elif is_poly1 and is_cat2:
-            iname = name or f"{feat1}:{feat2}"
-            ispec = PolynomialCategorical(feat1, feat2)
-        elif is_cat1 and is_poly2:
-            iname = name or f"{feat2}:{feat1}"
-            ispec = PolynomialCategorical(feat2, feat1)
-        # Numeric + Categorical → NumericCategorical
-        elif is_num1 and is_cat2:
-            iname = name or f"{feat1}:{feat2}"
-            ispec = NumericCategorical(feat1, feat2)
-        elif is_cat1 and is_num2:
-            iname = name or f"{feat2}:{feat1}"
-            ispec = NumericCategorical(feat2, feat1)
-        # Categorical + Categorical → CategoricalInteraction
-        elif is_cat1 and is_cat2:
-            iname = name or f"{feat1}:{feat2}"
-            ispec = CategoricalInteraction(feat1, feat2)
-        # Numeric + Numeric → NumericInteraction
-        elif is_num1 and is_num2:
-            iname = name or f"{feat1}:{feat2}"
-            ispec = NumericInteraction(feat1, feat2)
-        # Polynomial + Polynomial → PolynomialInteraction
-        elif is_poly1 and is_poly2:
-            iname = name or f"{feat1}:{feat2}"
-            ispec = PolynomialInteraction(feat1, feat2)
-        # Spline + Spline → TensorInteraction
-        elif is_spline1 and is_spline2:
-            iname = name or f"{feat1}:{feat2}"
-            ispec = TensorInteraction(feat1, feat2, **kwargs)
-        else:
-            raise TypeError(
-                f"Cannot create interaction between {type(spec1).__name__} "
-                f"and {type(spec2).__name__}. Supported: Spline+Spline, "
-                f"Spline+Categorical, Polynomial+Categorical, "
-                f"Numeric+Categorical, Categorical+Categorical, "
-                f"Numeric+Numeric, Polynomial+Polynomial."
-            )
-
-        if iname in self._interaction_specs:
-            raise ValueError(f"Interaction already added: {iname}")
-
-        self._interaction_specs[iname] = ispec
-        self._interaction_order.append(iname)
 
     def _build_design_matrix(
         self,
@@ -374,370 +288,32 @@ class SuperGLM:
     ) -> tuple[NDArray, NDArray, NDArray | None]:
         """Build features, groups, design matrix.
 
-        Sets self._dm, self._groups, self._distribution.
+        Sets self._dm, self._groups, self._distribution, self._link.
         Returns (y, exposure, offset) as float64 arrays.
         """
-        y = np.asarray(y, dtype=np.float64)
-        n = len(y)
-        exposure = np.ones(n) if exposure is None else np.asarray(exposure, dtype=np.float64)
-        if offset is not None:
-            offset = np.asarray(offset, dtype=np.float64)
-        resolved_nb_theta = self.nb_theta if isinstance(self.nb_theta, int | float) else None
-        self._distribution = resolve_distribution(
-            self.family, tweedie_p=self.tweedie_p, nb_theta=resolved_nb_theta
+        result = build_design_matrix(
+            X,
+            y,
+            exposure,
+            offset,
+            family=self.family,
+            link_spec=self.link,
+            nb_theta=self.nb_theta,
+            tweedie_p=self.tweedie_p,
+            specs=self._specs,
+            feature_order=self._feature_order,
+            interaction_specs=self._interaction_specs,
+            interaction_order=self._interaction_order,
+            pending_interactions=self._pending_interactions,
+            model_discrete=self._discrete,
+            n_bins_config=self._n_bins,
+            lambda2=self.lambda2,
         )
-        self._link = resolve_link(self.link, self._distribution)
-
-        group_matrices: list[GroupMatrix] = []
-        col_offset = 0
-        self._groups = []
-
-        for name in self._feature_order:
-            spec = self._specs[name]
-            x_col = np.asarray(X[name])
-
-            # Check if this feature should use fit-time discretization
-            use_discrete = self._should_discretize(spec)
-            B_unique = None
-            bin_idx = None
-            exposure_agg = None
-
-            if use_discrete:
-                from scipy.interpolate import BSpline as BSpl
-
-                # Lightweight path: place knots and build penalty without O(n) basis.
-                # Returns constraint-projected penalty for NaturalSpline/CRS.
-                omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(x_col)
-                n_bins_feat = self._resolve_discrete_n_bins(name, spec)
-                bin_centers, bin_idx = _discretize_column(x_col, n_bins_feat)
-                bin_centers_clip = np.clip(bin_centers, spec._knots[0], spec._knots[-1])
-                B_unique = BSpl.design_matrix(bin_centers_clip, spec._knots, spec.degree).toarray()
-                exposure_agg = np.bincount(bin_idx, weights=exposure, minlength=len(bin_centers))
-
-                # Build infos without the full B matrix
-                if getattr(spec, "supports_linear_split", False) and getattr(
-                    spec, "split_linear", False
-                ):
-                    n_null = 1
-                    n_range = spec._U_range.shape[1]
-                    infos = [
-                        GroupInfo(
-                            columns=None,
-                            n_cols=n_null,
-                            penalty_matrix=np.eye(n_null),
-                            reparametrize=False,
-                            penalized=True,
-                            subgroup_name="linear",
-                            projection=spec._U_null,
-                        ),
-                        GroupInfo(
-                            columns=None,
-                            n_cols=n_range,
-                            penalty_matrix=spec._omega_range,
-                            reparametrize=True,
-                            subgroup_name="spline",
-                            projection=spec._U_range,
-                        ),
-                    ]
-                else:
-                    infos = [
-                        GroupInfo(
-                            columns=None,
-                            n_cols=n_cols_penalty,
-                            penalty_matrix=omega,
-                            reparametrize=(spec.penalty == "ssp"),
-                            projection=projection_penalty,
-                        )
-                    ]
-            else:
-                result = spec.build(x_col, exposure=exposure)
-                infos = result if isinstance(result, list) else [result]
-
-            # Collect per-subgroup R_inv columns to set combined R_inv on the spec
-            r_inv_parts: list[NDArray] = []
-
-            for info in infos:
-                if info.projection is not None:
-                    # split_linear=True subgroup: shared B with projected subspace
-                    P = info.projection
-
-                    if info.reparametrize and info.penalty_matrix is not None:
-                        # Range-space: compute R_inv in projected subspace
-                        B_for_rinv = B_unique if use_discrete else info.columns
-                        exp_for_rinv = exposure_agg if use_discrete else exposure
-                        R_inv_local = self._compute_projected_R_inv(
-                            B_for_rinv, P, info.penalty_matrix, exp_for_rinv
-                        )
-                        R_inv_combined = P @ R_inv_local  # (K, n_range)
-                    else:
-                        # Null-space: projection is the R_inv equivalent
-                        R_inv_combined = P  # (K, n_null)
-
-                    r_inv_parts.append(R_inv_combined)
-
-                    if use_discrete:
-                        gm: GroupMatrix = DiscretizedSSPGroupMatrix(
-                            B_unique, R_inv_combined, bin_idx
-                        )
-                        if info.penalty_matrix is not None:
-                            gm.omega = P @ info.penalty_matrix @ P.T
-                        gm.projection = P
-                    elif sp.issparse(info.columns):
-                        gm = SparseSSPGroupMatrix(info.columns, R_inv_combined)
-                        # Store full B-spline-space penalty for covariance/REML
-                        if info.penalty_matrix is not None:
-                            gm.omega = P @ info.penalty_matrix @ P.T
-                        gm.projection = P
-                    else:
-                        gm = DenseGroupMatrix(info.columns @ R_inv_combined)
-
-                elif info.reparametrize and info.penalty_matrix is not None:
-                    if use_discrete:
-                        R_inv = self._compute_R_inv(B_unique, info.penalty_matrix, exposure_agg)
-                        if hasattr(spec, "set_reparametrisation"):
-                            spec.set_reparametrisation(R_inv)
-                        gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
-                        gm.omega = info.penalty_matrix
-                    else:
-                        R_inv = self._compute_R_inv(
-                            info.columns,
-                            info.penalty_matrix,
-                            exposure,
-                        )
-                        if hasattr(spec, "set_reparametrisation"):
-                            spec.set_reparametrisation(R_inv)
-                        if sp.issparse(info.columns):
-                            gm = SparseSSPGroupMatrix(info.columns, R_inv)
-                            gm.omega = info.penalty_matrix
-                        else:
-                            gm = DenseGroupMatrix(info.columns @ R_inv)
-                elif sp.issparse(info.columns):
-                    gm = SparseGroupMatrix(info.columns)
-                else:
-                    gm = DenseGroupMatrix(info.columns)
-
-                group_matrices.append(gm)
-                subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
-                group_name = f"{name}{subgroup_suffix}"
-                weight = np.sqrt(info.n_cols)
-                self._groups.append(
-                    GroupSlice(
-                        name=group_name,
-                        start=col_offset,
-                        end=col_offset + info.n_cols,
-                        weight=weight,
-                        penalized=info.penalized,
-                        feature_name=name,
-                        subgroup_type=info.subgroup_name,
-                    )
-                )
-                col_offset += info.n_cols
-
-            # Set combined R_inv on spec for transform/reconstruct
-            if r_inv_parts and hasattr(spec, "set_reparametrisation"):
-                spec.set_reparametrisation(np.hstack(r_inv_parts))
-
-        # ── Interactions ──────────────────────────────────────────
-        # Resolve pending interactions from constructor
-        for pair in self._pending_interactions:
-            if f"{pair[0]}:{pair[1]}" not in self._interaction_specs and (
-                f"{pair[1]}:{pair[0]}" not in self._interaction_specs
-            ):
-                self._add_interaction(*pair)
-        self._pending_interactions = []
-
-        for iname in self._interaction_order:
-            ispec = self._interaction_specs[iname]
-            p1, p2 = ispec.parent_names
-            x1 = np.asarray(X[p1])
-            x2 = np.asarray(X[p2])
-            use_discrete_tensor = self._should_discretize_tensor_interaction(ispec)
-            B_unique_inter = None
-            bin_idx_inter = None
-            exposure_agg_inter = None
-            if use_discrete_tensor:
-                n_bins1 = self._resolve_discrete_n_bins(p1, self._specs[p1])
-                n_bins2 = self._resolve_discrete_n_bins(p2, self._specs[p2])
-                result, B_unique_inter, bin_idx_inter = ispec.build_discrete(
-                    x1,
-                    x2,
-                    self._specs,
-                    (n_bins1, n_bins2),
-                    exposure=exposure,
-                )
-                exposure_agg_inter = np.bincount(
-                    bin_idx_inter,
-                    weights=exposure,
-                    minlength=B_unique_inter.shape[0],
-                )
-            else:
-                result = ispec.build(x1, x2, self._specs, exposure=exposure)
-
-            if isinstance(result, list):
-                has_subgroups = any(
-                    info.subgroup_name is not None or info.projection is not None for info in result
-                )
-                if has_subgroups:
-                    r_inv_parts: list[NDArray] = []
-                    for info in result:
-                        if info.projection is not None:
-                            P = info.projection
-                            if info.reparametrize and info.penalty_matrix is not None:
-                                B_for_rinv = B_unique_inter if use_discrete_tensor else info.columns
-                                exp_for_rinv = (
-                                    exposure_agg_inter if use_discrete_tensor else exposure
-                                )
-                                R_inv_local = self._compute_projected_R_inv(
-                                    B_for_rinv, P, info.penalty_matrix, exp_for_rinv
-                                )
-                                R_inv_combined = P @ R_inv_local
-                            else:
-                                R_inv_combined = P
-                            r_inv_parts.append(R_inv_combined)
-
-                            if use_discrete_tensor:
-                                gm = DiscretizedSSPGroupMatrix(
-                                    B_unique_inter, R_inv_combined, bin_idx_inter
-                                )
-                                if info.penalty_matrix is not None:
-                                    gm.omega = P @ info.penalty_matrix @ P.T
-                                gm.projection = P
-                            elif sp.issparse(info.columns):
-                                gm = SparseSSPGroupMatrix(info.columns, R_inv_combined)
-                                if info.penalty_matrix is not None:
-                                    gm.omega = P @ info.penalty_matrix @ P.T
-                                gm.projection = P
-                            else:
-                                gm = DenseGroupMatrix(info.columns @ R_inv_combined)
-                            n_cols = R_inv_combined.shape[1]
-                        elif info.reparametrize and info.penalty_matrix is not None:
-                            B_for_rinv = B_unique_inter if use_discrete_tensor else info.columns
-                            exp_for_rinv = exposure_agg_inter if use_discrete_tensor else exposure
-                            R_inv = self._compute_R_inv(
-                                B_for_rinv, info.penalty_matrix, exp_for_rinv
-                            )
-                            r_inv_parts.append(R_inv)
-                            n_cols = R_inv.shape[1]
-                            if use_discrete_tensor:
-                                gm = DiscretizedSSPGroupMatrix(B_unique_inter, R_inv, bin_idx_inter)
-                                gm.omega = info.penalty_matrix
-                            elif sp.issparse(info.columns):
-                                gm = SparseSSPGroupMatrix(info.columns, R_inv)
-                                gm.omega = info.penalty_matrix
-                            else:
-                                gm = DenseGroupMatrix(info.columns @ R_inv)
-                        else:
-                            n_cols = info.n_cols
-                            if use_discrete_tensor:
-                                gm = DiscretizedSSPGroupMatrix(
-                                    B_unique_inter,
-                                    np.eye(info.n_cols, dtype=np.float64),
-                                    bin_idx_inter,
-                                )
-                            elif sp.issparse(info.columns):
-                                gm = SparseGroupMatrix(info.columns)
-                            else:
-                                gm = DenseGroupMatrix(info.columns)
-
-                        group_matrices.append(gm)
-                        subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
-                        self._groups.append(
-                            GroupSlice(
-                                name=f"{iname}{subgroup_suffix}",
-                                start=col_offset,
-                                end=col_offset + n_cols,
-                                weight=np.sqrt(n_cols),
-                                penalized=info.penalized,
-                                feature_name=iname,
-                                subgroup_type=info.subgroup_name,
-                            )
-                        )
-                        col_offset += n_cols
-
-                    if r_inv_parts and hasattr(ispec, "set_reparametrisation"):
-                        ispec.set_reparametrisation(np.hstack(r_inv_parts))
-                else:
-                    # Per-level groups (SplineCategorical, PolynomialCategorical)
-                    r_inv_dict: dict[str, NDArray] = {}
-                    for level, info in zip(ispec._non_base, result):
-                        if info.reparametrize and info.penalty_matrix is not None:
-                            R_inv = self._compute_R_inv(info.columns, info.penalty_matrix, exposure)
-                            r_inv_dict[level] = R_inv
-                            n_cols = R_inv.shape[1]
-                            if sp.issparse(info.columns):
-                                gm = SparseSSPGroupMatrix(info.columns, R_inv)
-                                gm.omega = info.penalty_matrix
-                            else:
-                                gm = DenseGroupMatrix(info.columns @ R_inv)
-                        else:
-                            n_cols = info.n_cols
-                            if sp.issparse(info.columns):
-                                gm = SparseGroupMatrix(info.columns)
-                            else:
-                                gm = DenseGroupMatrix(info.columns)
-
-                        group_matrices.append(gm)
-                        self._groups.append(
-                            GroupSlice(
-                                name=f"{iname}[{level}]",
-                                start=col_offset,
-                                end=col_offset + n_cols,
-                                weight=np.sqrt(n_cols),
-                                penalized=True,
-                                feature_name=iname,
-                            )
-                        )
-                        col_offset += n_cols
-
-                    if r_inv_dict and hasattr(ispec, "set_reparametrisation"):
-                        ispec.set_reparametrisation(r_inv_dict)
-            else:
-                # Single group (CategoricalInteraction, NumericCategorical,
-                # NumericInteraction, PolynomialInteraction, TensorInteraction)
-                info = result
-                if info.reparametrize and info.penalty_matrix is not None:
-                    B_for_rinv = B_unique_inter if use_discrete_tensor else info.columns
-                    exp_for_rinv = exposure_agg_inter if use_discrete_tensor else exposure
-                    R_inv = self._compute_R_inv(B_for_rinv, info.penalty_matrix, exp_for_rinv)
-                    if hasattr(ispec, "set_reparametrisation"):
-                        ispec.set_reparametrisation(R_inv)
-                    n_cols = R_inv.shape[1]
-                    if use_discrete_tensor:
-                        gm = DiscretizedSSPGroupMatrix(B_unique_inter, R_inv, bin_idx_inter)
-                        gm.omega = info.penalty_matrix
-                    elif sp.issparse(info.columns):
-                        gm = SparseSSPGroupMatrix(info.columns, R_inv)
-                        gm.omega = info.penalty_matrix
-                    else:
-                        gm = DenseGroupMatrix(info.columns @ R_inv)
-                else:
-                    n_cols = info.n_cols
-                    if use_discrete_tensor:
-                        gm = DiscretizedSSPGroupMatrix(
-                            B_unique_inter,
-                            np.eye(info.n_cols, dtype=np.float64),
-                            bin_idx_inter,
-                        )
-                    elif sp.issparse(info.columns):
-                        gm = SparseGroupMatrix(info.columns)
-                    else:
-                        gm = DenseGroupMatrix(info.columns)
-
-                group_matrices.append(gm)
-                self._groups.append(
-                    GroupSlice(
-                        name=iname,
-                        start=col_offset,
-                        end=col_offset + n_cols,
-                        weight=np.sqrt(n_cols),
-                        penalized=True,
-                        feature_name=iname,
-                    )
-                )
-                col_offset += n_cols
-
-        self._dm = DesignMatrix(group_matrices, n, col_offset)
-        return y, exposure, offset
+        self._distribution = result.distribution
+        self._link = result.link
+        self._groups = result.groups
+        self._dm = result.dm
+        return result.y, result.exposure, result.offset
 
     def fit(
         self,
@@ -1059,72 +635,25 @@ class SuperGLM:
 
     def _should_discretize(self, spec: FeatureSpec) -> bool:
         """Check if a feature spec should use fit-time discretization."""
-        from superglm.features.spline import _SplineBase
-
-        if not isinstance(spec, _SplineBase):
-            return False
-        if spec.penalty != "ssp":
-            return False
-        if spec.discrete is not None:
-            return spec.discrete
-        return self._discrete
+        return should_discretize(spec, self._discrete)
 
     def _should_discretize_tensor_interaction(self, ispec: Any) -> bool:
         """Check if a tensor interaction should use fit-time discretization."""
-        from superglm.features.interaction import TensorInteraction
-
-        if not isinstance(ispec, TensorInteraction):
-            return False
-        p1, p2 = ispec.parent_names
-        return self._should_discretize(self._specs[p1]) and self._should_discretize(self._specs[p2])
+        return should_discretize_tensor_interaction(ispec, self._specs, self._discrete)
 
     def _resolve_discrete_n_bins(self, name: str, spec: FeatureSpec) -> int:
-        """Resolve the requested bin count for a discretized feature.
-
-        Feature-level ``spec.n_bins`` takes priority. Otherwise the model-level
-        ``n_bins`` may be a single int or a per-feature dict with a fallback of
-        256 for unspecified features.
-        """
-        n_bins = getattr(spec, "n_bins", None)
-        if n_bins is None:
-            if isinstance(self._n_bins, dict):
-                n_bins = self._n_bins.get(name, 256)
-            else:
-                n_bins = self._n_bins
-
-        n_bins = int(n_bins)
-        if n_bins < 1:
-            raise ValueError(f"n_bins for feature '{name}' must be >= 1, got {n_bins}")
-        return n_bins
+        """Resolve the requested bin count for a discretized feature."""
+        return resolve_discrete_n_bins(name, spec, self._n_bins)
 
     def _compute_R_inv(self, B, omega, exposure, lambda2_override=None):
         """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv."""
         lam2 = lambda2_override if lambda2_override is not None else self.lambda2
-        if isinstance(lam2, dict):
-            lam2 = 1.0  # dict lambda2 resolved per-group at fit time; use 1.0 for initial basis
-        if sp.issparse(B):
-            # B.multiply(exposure[:, None]) is sparse-safe
-            G = np.asarray((B.multiply(exposure[:, None]).T @ B).todense()) / np.sum(exposure)
-        else:
-            G = (B * exposure[:, None]).T @ B / np.sum(exposure)
-        M = G + lam2 * omega + np.eye(omega.shape[0]) * 1e-8
-        R = np.linalg.cholesky(M).T
-        return np.linalg.inv(R)
+        return compute_R_inv(B, omega, exposure, lam2)
 
     def _compute_projected_R_inv(self, B, projection, penalty_sub, exposure, lambda2_override=None):
         """Compute SSP R_inv within a projected subspace (linear-split range space)."""
         lam2 = lambda2_override if lambda2_override is not None else self.lambda2
-        if isinstance(lam2, dict):
-            lam2 = 1.0  # dict lambda2 resolved per-group at fit time; use 1.0 for initial basis
-        if sp.issparse(B):
-            G_full = np.asarray((B.multiply(exposure[:, None]).T @ B).todense()) / np.sum(exposure)
-        else:
-            G_full = (B * exposure[:, None]).T @ B / np.sum(exposure)
-        G_sub = projection.T @ G_full @ projection
-        n_sub = penalty_sub.shape[0]
-        M_sub = G_sub + lam2 * penalty_sub + np.eye(n_sub) * 1e-8
-        R_sub = np.linalg.cholesky(M_sub).T
-        return np.linalg.inv(R_sub)
+        return compute_projected_R_inv(B, projection, penalty_sub, exposure, lam2)
 
     def _compute_lambda_max(self, y, weights):
         """Smallest lambda1 at which all groups are zeroed (null model).
@@ -1148,58 +677,10 @@ class SuperGLM:
     def _rebuild_design_matrix_with_lambdas(
         self, lambdas: dict[str, float], exposure: NDArray
     ) -> DesignMatrix:
-        """Rebuild design matrix with per-group smoothing lambdas.
-
-        Only recomputes R_inv for SSP groups whose lambda changed;
-        non-SSP groups are reused unchanged.
-        """
-        new_gms: list[GroupMatrix] = []
-        for gm, g in zip(self._dm.group_matrices, self._groups):
-            if isinstance(gm, SparseSSPGroupMatrix) and g.name in lambdas:
-                omega = gm.omega
-                if omega is None:
-                    new_gms.append(gm)
-                    continue
-                lam = lambdas[g.name]
-                if gm.projection is not None:
-                    P = gm.projection
-                    omega_proj = P.T @ omega @ P
-                    R_inv_local = self._compute_projected_R_inv(
-                        gm.B, P, omega_proj, exposure, lambda2_override=lam
-                    )
-                    R_inv_new = P @ R_inv_local
-                else:
-                    R_inv_new = self._compute_R_inv(gm.B, omega, exposure, lambda2_override=lam)
-                new_gm = SparseSSPGroupMatrix(gm.B, R_inv_new)
-                new_gm.omega = omega
-                new_gm.projection = gm.projection
-                new_gms.append(new_gm)
-            elif isinstance(gm, DiscretizedSSPGroupMatrix) and g.name in lambdas:
-                omega = gm.omega
-                if omega is None:
-                    new_gms.append(gm)
-                    continue
-                lam = lambdas[g.name]
-                # Aggregate exposure by bin for R_inv computation
-                exposure_agg = np.bincount(gm.bin_idx, weights=exposure, minlength=gm.n_bins)
-                if gm.projection is not None:
-                    P = gm.projection
-                    omega_proj = P.T @ omega @ P
-                    R_inv_local = self._compute_projected_R_inv(
-                        gm.B_unique, P, omega_proj, exposure_agg, lambda2_override=lam
-                    )
-                    R_inv_new = P @ R_inv_local
-                else:
-                    R_inv_new = self._compute_R_inv(
-                        gm.B_unique, omega, exposure_agg, lambda2_override=lam
-                    )
-                new_gm = DiscretizedSSPGroupMatrix(gm.B_unique, R_inv_new, gm.bin_idx)
-                new_gm.omega = omega
-                new_gm.projection = gm.projection
-                new_gms.append(new_gm)
-            else:
-                new_gms.append(gm)
-        return DesignMatrix(new_gms, self._dm.n, self._dm.p)
+        """Rebuild design matrix with per-group smoothing lambdas."""
+        return rebuild_design_matrix_with_lambdas(
+            self._dm, self._groups, lambdas, exposure, self.lambda2
+        )
 
     def _compute_dW_deta(self, mu: NDArray, eta: NDArray, exposure: NDArray) -> NDArray | None:
         """Derivative of IRLS weights w.r.t. the linear predictor."""
