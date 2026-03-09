@@ -1527,3 +1527,50 @@ class TestREMLDiscreteRobustness:
         edf_exact = exact.result.effective_df
         edf_disc = disc.result.effective_df
         assert abs(edf_exact - edf_disc) < 0.5
+
+    @pytest.mark.parametrize("family", ["gamma", "poisson"])
+    def test_discrete_cached_w_estimated_scale(self, family):
+        """Cached-W discrete path works for estimated-scale families (Gamma).
+
+        The cached-W fREML optimizer must correctly handle profiled phi
+        in the FP update (inv_phi scaling of the quadratic term).
+        """
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        if family == "gamma":
+            eta = 1.0 + np.sin(2 * np.pi * x1) + 0.5 * x2
+            mu = np.exp(eta)
+            y = rng.gamma(shape=5.0, scale=mu / 5.0)
+            y = np.maximum(y, 1e-4)
+        else:
+            eta = 0.5 + np.sin(2 * np.pi * x1) + 0.5 * x2
+            mu = np.exp(eta)
+            y = rng.poisson(mu).astype(float)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+        w = np.ones(n)
+
+        features = {
+            "x1": CubicRegressionSpline(n_knots=8),
+            "x2": CubicRegressionSpline(n_knots=8),
+        }
+
+        exact = SuperGLM(family=family, lambda1=0, features=features, discrete=False)
+        exact.fit_reml(df, y, exposure=w, max_reml_iter=30)
+
+        disc = SuperGLM(family=family, lambda1=0, features=features, discrete=True)
+        disc.fit_reml(df, y, exposure=w, max_reml_iter=30)
+
+        assert exact._reml_result.converged
+        assert disc._reml_result.converged
+
+        # Deviance within 0.5%
+        dev_exact = exact.result.deviance
+        dev_disc = disc.result.deviance
+        assert abs(dev_exact - dev_disc) / abs(dev_exact) < 5e-3
+
+        # EDF within 1.0 (Gamma can diverge slightly more due to phi profiling)
+        edf_exact = exact.result.effective_df
+        edf_disc = disc.result.effective_df
+        assert abs(edf_exact - edf_disc) < 1.0
