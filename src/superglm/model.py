@@ -33,6 +33,11 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
 )
+from superglm.inference import compute_coef_covariance, feature_se_from_cov
+from superglm.inference import drop1 as _drop1
+from superglm.inference import refit_unpenalised as _refit_unpenalised
+from superglm.inference import relativities as _relativities
+from superglm.inference import simultaneous_bands as _simultaneous_bands
 from superglm.links import Link
 from superglm.penalties.base import Penalty
 from superglm.penalties.group_elastic_net import GroupElasticNet
@@ -1184,30 +1189,18 @@ class SuperGLM:
 
     @cached_property
     def _coef_covariance(self) -> tuple[NDArray, list[GroupSlice]]:
-        """Phi-scaled Bayesian covariance for active coefficients.
-
-        Returns (Cov_active, active_groups) where:
-        - Cov_active: (p_active, p_active) = phi * (X'WX + S)^{-1}
-        - active_groups: list of GroupSlice re-indexed to Cov_active columns
-        """
-        from superglm.metrics import _penalised_xtwx_inv_gram
-
-        res = self.result
-        beta = res.beta
-        eta = self._dm.matvec(beta) + res.intercept
-        if self._fit_offset is not None:
-            eta = eta + self._fit_offset
-        eta = np.clip(eta, -20, 20)
-        mu = self._link.inverse(eta)
-        V = self._distribution.variance(mu)
-        dmu_deta = self._link.deriv_inverse(eta)
-        W = self._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
-
+        """Phi-scaled Bayesian covariance for active coefficients."""
         lam2 = getattr(self, "_reml_lambdas", None) or self.lambda2
-        XtWX_S_inv, active_groups = _penalised_xtwx_inv_gram(
-            beta, W, self._dm.group_matrices, self._groups, lam2
+        return compute_coef_covariance(
+            self._dm,
+            self._distribution,
+            self._link,
+            self._groups,
+            self.result,
+            self._fit_weights,
+            self._fit_offset,
+            lam2,
         )
-        return res.phi * XtWX_S_inv, active_groups
 
     def estimate_p(
         self,
@@ -1286,120 +1279,8 @@ class SuperGLM:
         *,
         test: str = "Chisq",
     ) -> pd.DataFrame:
-        """Drop-one deviance analysis for each feature.
-
-        For each feature, refits the model with that feature (and any
-        dependent interactions) removed, keeping the same penalty
-        configuration. Compares deviances via a chi-squared or F test
-        using effective degrees of freedom.
-
-        .. note::
-
-           This is an *approximate* deviance comparison, not a classical
-           likelihood ratio test. P-values use effective df (hat matrix
-           trace) rather than parametric df and should be treated as
-           approximate guides, not exact tests.
-
-           After ``fit_reml()``, reduced models inherit the full model's
-           smoothing parameters as fixed values — REML is **not**
-           re-run for each reduced model. This is computationally
-           practical and follows the spirit of ``mgcv::anova.gam``,
-           but means the comparison conditions on the full model's
-           smoothing selection.
-
-        Parameters
-        ----------
-        X : DataFrame
-            Feature matrix (same as used for fitting).
-        y : array-like
-            Response variable.
-        exposure : array-like, optional
-            Frequency weights.
-        offset : array-like, optional
-            Offset added to the linear predictor.
-        test : {"Chisq", "F"}
-            ``"Chisq"`` for known-scale families (Poisson).
-            ``"F"`` for estimated-scale families (Gamma, NB2, Tweedie).
-
-        Returns
-        -------
-        pd.DataFrame
-            Rows sorted by p-value with columns: feature, deviance_full,
-            deviance_reduced, delta_deviance, delta_df, statistic, p_value.
-        """
-        from scipy.stats import chi2
-        from scipy.stats import f as f_dist
-
-        if self._result is None:
-            raise RuntimeError("Model must be fitted before calling drop1().")
-
-        dev_full = self._result.deviance
-        edf_full = self._result.effective_df
-        n = len(y) if not hasattr(y, "__len__") else len(y)
-        phi = self._result.phi
-
-        rows = []
-        for name in self._feature_order:
-            # Identify dependent interactions
-            drop_set = {name}
-            for iname in self._interaction_order:
-                ispec = self._interaction_specs[iname]
-                p1, p2 = ispec.parent_names
-                if p1 == name or p2 == name:
-                    drop_set.add(iname)
-
-            remaining = [f for f in self._feature_order if f not in drop_set]
-
-            if not remaining:
-                # Intercept-only model: compute null deviance directly
-                y_arr = np.asarray(y, dtype=np.float64)
-                w = (
-                    np.ones(n, dtype=np.float64)
-                    if exposure is None
-                    else np.asarray(exposure, dtype=np.float64)
-                )
-                if offset is not None:
-                    # With offset: solve for intercept b0 such that
-                    # mu = link^{-1}(b0 + offset) minimises deviance.
-                    # Moment approximation: set b0 so mean(mu) ≈ mean(y).
-                    offset_arr = np.asarray(offset, dtype=np.float64)
-                    y_mean = np.average(y_arr, weights=w)
-                    b0 = self._link.link(max(y_mean, 1e-10)) - np.average(offset_arr, weights=w)
-                    null_mu = np.maximum(self._link.inverse(b0 + offset_arr), 1e-10)
-                else:
-                    null_mu = np.full(n, np.average(y_arr, weights=w))
-                dev_reduced = float(np.sum(w * self._distribution.deviance_unit(y_arr, null_mu)))
-                edf_reduced = 1.0  # intercept only
-            else:
-                reduced = self._clone_without_features(drop_set)
-                reduced.fit(X, y, exposure=exposure, offset=offset)
-                dev_reduced = reduced.result.deviance
-                edf_reduced = reduced.result.effective_df
-            delta_dev = dev_reduced - dev_full
-            delta_df = max(edf_full - edf_reduced, 1e-4)
-
-            if test == "F":
-                stat = (delta_dev / delta_df) / phi
-                resid_df = max(n - edf_full, 1.0)
-                p_value = float(f_dist.sf(stat, delta_df, resid_df))
-            else:
-                stat = delta_dev
-                p_value = float(chi2.sf(stat, delta_df))
-
-            rows.append(
-                {
-                    "feature": name,
-                    "deviance_full": dev_full,
-                    "deviance_reduced": dev_reduced,
-                    "delta_deviance": delta_dev,
-                    "delta_df": delta_df,
-                    "statistic": stat,
-                    "p_value": p_value,
-                }
-            )
-
-        df = pd.DataFrame(rows).sort_values("p_value").reset_index(drop=True)
-        return df
+        """Drop-one deviance analysis for each feature."""
+        return _drop1(self, X, y, exposure=exposure, offset=offset, test=test)
 
     def refit_unpenalised(
         self,
@@ -1410,200 +1291,28 @@ class SuperGLM:
         *,
         keep_smoothing: bool = True,
     ) -> SuperGLM:
-        """Refit the model with only the active features and no selection penalty.
-
-        After a penalized fit that selected features via group lasso, this
-        method refits with ``lambda1=0`` on only the active features, removing
-        the shrinkage bias from L1 selection.
-
-        When ``keep_smoothing=True``, the smoothing penalty (lambda2 or
-        REML-estimated lambdas) is inherited as fixed values — smoothing
-        parameters are **not** re-optimized via REML on the reduced model.
-
-        Parameters
-        ----------
-        X : DataFrame
-            Feature matrix.
-        y : array-like
-            Response variable.
-        exposure : array-like, optional
-            Frequency weights.
-        offset : array-like, optional
-            Offset added to the linear predictor.
-        keep_smoothing : bool
-            If True (default), keep the smoothing penalty (lambda2 or
-            REML-estimated lambdas). If False, set lambda2=0 for a
-            fully unpenalised refit.
-
-        Returns
-        -------
-        SuperGLM
-            A new fitted model with only the active features.
-        """
-        if self._result is None:
-            raise RuntimeError("Model must be fitted before calling refit_unpenalised().")
-
-        beta = self._result.beta
-
-        # Identify inactive features
-        inactive = set()
-        for name in self._feature_order:
-            groups = self._feature_groups(name)
-            if all(np.linalg.norm(beta[g.sl]) < 1e-12 for g in groups):
-                inactive.add(name)
-
-        # Also drop interactions whose parents are inactive
-        for iname in self._interaction_order:
-            ispec = self._interaction_specs[iname]
-            p1, p2 = ispec.parent_names
-            if p1 in inactive or p2 in inactive:
-                inactive.add(iname)
-
-        lam2: float | dict[str, float] | None
-        if not keep_smoothing:
-            lam2 = 0.0
-        else:
-            lam2 = ...  # sentinel: use original lambda2 / REML lambdas
-
-        new_model = self._clone_without_features(inactive, lambda1=0.0, lambda2=lam2)
-        new_model.fit(X, y, exposure=exposure, offset=offset)
-        return new_model
+        """Refit with only active features and no selection penalty."""
+        return _refit_unpenalised(
+            self,
+            X,
+            y,
+            exposure=exposure,
+            offset=offset,
+            keep_smoothing=keep_smoothing,
+        )
 
     def relativities(self, with_se: bool = False) -> dict[str, pd.DataFrame]:
-        """Extract plot-ready relativity DataFrames for all features.
-
-        Parameters
-        ----------
-        with_se : bool
-            If True, add an ``se_log_relativity`` column to each DataFrame.
-            Uses phi-scaled (quasi-likelihood) covariance.
-
-        Returns dict keyed by feature name. Each DataFrame has columns
-        ``relativity`` and ``log_relativity`` plus a type-specific index column:
-
-        - Spline / Polynomial (has ``x``): ``x``, ``relativity``, ``log_relativity``
-        - Categorical (has ``levels``): ``level``, ``relativity``, ``log_relativity``
-        - Numeric (has ``relativity_per_unit``): ``label``, ``relativity``, ``log_relativity``
-        """
-
-        # Pre-compute covariance if SEs requested
-        if with_se:
-            Cov_active, active_groups = self._coef_covariance
-
-        result: dict[str, pd.DataFrame] = {}
-        for name in self._feature_order:
-            raw = self.reconstruct_feature(name)
-            if "x" in raw:
-                # Spline or Polynomial
-                df = pd.DataFrame(
-                    {
-                        "x": raw["x"],
-                        "relativity": raw["relativity"],
-                        "log_relativity": raw["log_relativity"],
-                    }
-                )
-                if with_se:
-                    df["se_log_relativity"] = self._feature_se_from_cov(
-                        name, Cov_active, active_groups, n_points=len(raw["x"])
-                    )
-                result[name] = df
-            elif "levels" in raw:
-                # Categorical
-                levels = raw["levels"]
-                rels = raw["relativities"]
-                log_rels = raw["log_relativities"]
-                df = pd.DataFrame(
-                    {
-                        "level": levels,
-                        "relativity": [rels[lv] for lv in levels],
-                        "log_relativity": [log_rels[lv] for lv in levels],
-                    }
-                )
-                if with_se:
-                    df["se_log_relativity"] = self._feature_se_from_cov(
-                        name, Cov_active, active_groups
-                    )
-                result[name] = df
-            elif "relativity_per_unit" in raw:
-                # Numeric
-                rel = raw["relativity_per_unit"]
-                df = pd.DataFrame(
-                    {
-                        "label": ["per_unit"],
-                        "relativity": [rel],
-                        "log_relativity": [np.log(rel)],
-                    }
-                )
-                if with_se:
-                    df["se_log_relativity"] = self._feature_se_from_cov(
-                        name, Cov_active, active_groups
-                    )
-                result[name] = df
-
-        # Interaction relativities — dispatch on reconstruct dict keys
-        for iname in self._interaction_order:
-            raw = self.reconstruct_feature(iname)
-
-            if "per_level" in raw and "x" in raw:
-                # SplineCategorical / PolynomialCategorical: per-level curves
-                for level in raw["levels"]:
-                    level_data = raw["per_level"][level]
-                    key = f"{iname}[{level}]"
-                    df = pd.DataFrame(
-                        {
-                            "x": raw["x"],
-                            "relativity": level_data["relativity"],
-                            "log_relativity": level_data["log_relativity"],
-                        }
-                    )
-                    result[key] = df
-
-            elif "pairs" in raw:
-                # CategoricalInteraction: per-pair relativities
-                pairs_labels = [f"{l1}:{l2}" for l1, l2 in raw["pairs"]]
-                rels = raw["relativities"]
-                log_rels = raw["log_relativities"]
-                df = pd.DataFrame(
-                    {
-                        "level": pairs_labels,
-                        "relativity": [rels[k] for k in pairs_labels],
-                        "log_relativity": [log_rels[k] for k in pairs_labels],
-                    }
-                )
-                result[iname] = df
-
-            elif "relativities_per_unit" in raw:
-                # NumericCategorical: per-level slope relativities
-                levels = raw["levels"]
-                rels = raw["relativities_per_unit"]
-                log_rels = raw["log_relativities_per_unit"]
-                df = pd.DataFrame(
-                    {
-                        "level": levels,
-                        "relativity_per_unit": [rels[lv] for lv in levels],
-                        "log_relativity_per_unit": [log_rels[lv] for lv in levels],
-                    }
-                )
-                result[iname] = df
-
-            elif "relativity_per_unit_unit" in raw:
-                # NumericInteraction: single product coefficient
-                b_orig = raw["coef_original"]
-                df = pd.DataFrame(
-                    {
-                        "label": ["per_unit_unit"],
-                        "relativity": [raw["relativity_per_unit_unit"]],
-                        "log_relativity": [b_orig],
-                    }
-                )
-                result[iname] = df
-
-            elif "x1" in raw and "x2" in raw:
-                # PolynomialInteraction: 2D surface — store raw dict
-                # (doesn't fit 1D DataFrame; use reconstruct_feature() directly)
-                pass
-
-        return result
+        """Extract plot-ready relativity DataFrames for all features."""
+        return _relativities(
+            self._feature_order,
+            self._interaction_order,
+            self._specs,
+            self._interaction_specs,
+            self._groups,
+            self.result,
+            with_se=with_se,
+            covariance_fn=(lambda: self._coef_covariance) if with_se else None,
+        )
 
     def _feature_se_from_cov(
         self,
@@ -1613,75 +1322,16 @@ class SuperGLM:
         n_points: int = 200,
     ) -> NDArray:
         """Compute feature-level SEs from the precomputed covariance matrix."""
-        from superglm.features.categorical import Categorical
-        from superglm.features.numeric import Numeric
-        from superglm.features.spline import _SplineBase
-
-        beta = self.result.beta
-        groups = self._feature_groups(name)
-        spec = self._specs.get(name) or self._interaction_specs.get(name)
-
-        # Inactive feature: zeros (all subgroups zeroed)
-        beta_combined = np.concatenate([beta[g.sl] for g in groups])
-        if np.linalg.norm(beta_combined) < 1e-12:
-            if isinstance(spec, _SplineBase):
-                return np.zeros(n_points)
-            elif isinstance(spec, Categorical):
-                return np.zeros(len(spec._levels))
-            else:
-                return np.zeros(1)
-
-        # Gather covariance blocks from all active subgroups
-        active_subs = [ag for ag in active_groups if ag.feature_name == name]
-        if not active_subs:
-            if isinstance(spec, _SplineBase):
-                return np.zeros(n_points)
-            elif isinstance(spec, Categorical):
-                return np.zeros(len(spec._levels))
-            else:
-                return np.zeros(1)
-
-        indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
-        Cov_g = Cov_active[np.ix_(indices, indices)]
-
-        if isinstance(spec, _SplineBase):
-            from scipy.interpolate import BSpline as BSpl
-
-            x_grid = np.linspace(spec._lo, spec._hi, n_points)
-            x_clip = np.clip(x_grid, spec._knots[0], spec._knots[-1])
-            B_grid = BSpl.design_matrix(x_clip, spec._knots, spec.degree).toarray()
-            M = B_grid @ spec._R_inv if spec._R_inv is not None else B_grid
-
-            # For split_linear=True: only use columns for active subgroups
-            active_cols = np.concatenate(
-                [
-                    np.arange(g.start, g.end) - groups[0].start
-                    for g in groups
-                    if any(ag.feature_name == name and ag.name == g.name for ag in active_subs)
-                ]
-            )
-            M = M[:, active_cols]
-
-            Q = M @ Cov_g
-            return np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
-
-        elif isinstance(spec, Categorical):
-            se_nonbase = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
-            se_all = np.zeros(len(spec._levels))
-            for i, lev in enumerate(spec._levels):
-                if lev != spec._base_level:
-                    idx = spec._non_base.index(lev)
-                    se_all[i] = se_nonbase[idx]
-            return se_all
-
-        elif isinstance(spec, Numeric):
-            se_transformed = np.sqrt(max(Cov_g[0, 0], 0.0))
-            if spec.standardize:
-                return np.array([se_transformed / spec._std])
-            return np.array([se_transformed])
-
-        else:
-            return np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
+        return feature_se_from_cov(
+            name,
+            Cov_active,
+            active_groups,
+            self.result,
+            self._groups,
+            self._specs,
+            self._interaction_specs,
+            n_points=n_points,
+        )
 
     def simultaneous_bands(
         self,
@@ -1692,113 +1342,19 @@ class SuperGLM:
         n_points: int = 200,
         seed: int = 42,
     ) -> pd.DataFrame:
-        """Simultaneous confidence bands for a spline feature.
-
-        Uses the Wood (2006) simulation approach: draws from the posterior
-        ``MVN(0, Cov_g)``, computes the supremum of the standardised deviation
-        across the curve, and returns the ``(1-alpha)`` quantile as the critical
-        value for the simultaneous band.
-
-        Parameters
-        ----------
-        feature : str
-            Name of a spline feature.
-        alpha : float
-            Significance level (default 0.05 for 95% bands).
-        n_sim : int
-            Number of posterior simulations (default 10,000).
-        n_points : int
-            Grid size for evaluating the curve.
-        seed : int
-            Random seed for reproducibility.
-
-        Returns
-        -------
-        pd.DataFrame
-            Columns: ``x``, ``log_relativity``, ``relativity``, ``se``,
-            ``ci_lower_pointwise``, ``ci_upper_pointwise``,
-            ``ci_lower_simultaneous``, ``ci_upper_simultaneous``.
-        """
-        from scipy.interpolate import BSpline as BSpl
-        from scipy.stats import norm
-
-        from superglm.features.spline import _SplineBase
-
+        """Simultaneous confidence bands for a spline feature."""
         if self._result is None:
             raise RuntimeError("Model must be fitted before calling simultaneous_bands().")
-
-        spec = self._specs.get(feature)
-        if not isinstance(spec, _SplineBase):
-            raise TypeError(
-                f"simultaneous_bands() only supports spline features, "
-                f"got {type(spec).__name__} for '{feature}'."
-            )
-
-        # Get covariance and basis matrix (same logic as _feature_se_from_cov)
-        Cov_active, active_groups = self._coef_covariance
-        beta = self.result.beta
-        groups = self._feature_groups(feature)
-
-        active_subs = [ag for ag in active_groups if ag.feature_name == feature]
-        if not active_subs:
-            raise ValueError(f"Feature '{feature}' is inactive (all coefficients zeroed).")
-
-        indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
-        Cov_g = Cov_active[np.ix_(indices, indices)]
-
-        # Build basis evaluation matrix
-        x_grid = np.linspace(spec._lo, spec._hi, n_points)
-        x_clip = np.clip(x_grid, spec._knots[0], spec._knots[-1])
-        B_grid = BSpl.design_matrix(x_clip, spec._knots, spec.degree).toarray()
-        M = B_grid @ spec._R_inv if spec._R_inv is not None else B_grid
-
-        # For split_linear=True: only use columns for active subgroups
-        active_cols = np.concatenate(
-            [
-                np.arange(g.start, g.end) - groups[0].start
-                for g in groups
-                if any(ag.feature_name == feature and ag.name == g.name for ag in active_subs)
-            ]
-        )
-        M = M[:, active_cols]
-
-        # Pointwise SEs
-        Q = M @ Cov_g
-        se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
-
-        # Log-relativity on grid
-        beta_g = np.concatenate(
-            [
-                beta[g.sl]
-                for g in groups
-                if any(ag.feature_name == feature and ag.name == g.name for ag in active_subs)
-            ]
-        )
-        log_rel = M @ beta_g
-
-        # Simultaneous critical value via simulation (Wood 2006)
-        rng = np.random.default_rng(seed)
-        L = np.linalg.cholesky(Cov_g + 1e-12 * np.eye(Cov_g.shape[0]))
-        beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ L.T
-        f_sim = beta_sim @ M.T  # (n_sim, n_points)
-
-        se_safe = np.maximum(se, 1e-20)
-        T_sim = np.max(np.abs(f_sim) / se_safe[np.newaxis, :], axis=1)
-        c_sim = float(np.quantile(T_sim, 1.0 - alpha))
-
-        z = norm.ppf(1.0 - alpha / 2.0)
-
-        return pd.DataFrame(
-            {
-                "x": x_grid,
-                "log_relativity": log_rel,
-                "relativity": np.exp(log_rel),
-                "se": se,
-                "ci_lower_pointwise": np.exp(log_rel - z * se),
-                "ci_upper_pointwise": np.exp(log_rel + z * se),
-                "ci_lower_simultaneous": np.exp(log_rel - c_sim * se),
-                "ci_upper_simultaneous": np.exp(log_rel + c_sim * se),
-            }
+        return _simultaneous_bands(
+            feature,
+            result=self.result,
+            groups=self._groups,
+            specs=self._specs,
+            covariance_fn=lambda: self._coef_covariance,
+            alpha=alpha,
+            n_sim=n_sim,
+            n_points=n_points,
+            seed=seed,
         )
 
     def plot_relativities(
