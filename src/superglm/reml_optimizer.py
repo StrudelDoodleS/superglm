@@ -29,7 +29,12 @@ from superglm.group_matrix import (
     _block_xtwx,
     _block_xtwx_signed,
 )
-from superglm.reml import REMLResult, _map_beta_between_bases, cached_logdet_s_plus
+from superglm.reml import (
+    REMLResult,
+    _map_beta_between_bases,
+    build_penalty_caches,
+    cached_logdet_s_plus,
+)
 from superglm.solvers.irls_direct import (
     _build_penalty_matrix,
     _invert_xtwx_plus_penalty,
@@ -1069,7 +1074,247 @@ def optimize_discrete_reml_cached_w(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# BCD REML fixed-point optimizer
+# EFS REML optimizer (Wood & Fasiolo 2017)
+# ═══════════════════════════════════════════════════════════════════
+
+
+def optimize_efs_reml(
+    dm: DesignMatrix,
+    distribution: Any,
+    link: Any,
+    groups: list[GroupSlice],
+    penalty: Any,
+    anderson_memory: int,
+    active_set: bool,
+    y: NDArray,
+    exposure: NDArray,
+    offset_arr: NDArray,
+    reml_groups: list[tuple[int, GroupSlice]],
+    penalty_ranks: dict[str, float],
+    lambdas: dict[str, float],
+    *,
+    max_reml_iter: int,
+    reml_tol: float,
+    verbose: bool,
+    penalty_caches: dict | None = None,
+    rebuild_dm: Any = None,
+) -> tuple[REMLResult, DesignMatrix]:
+    """EFS (generalized Fellner-Schall) REML optimizer for the BCD path.
+
+    Implements Wood & Fasiolo (2017) fixed-point iteration with:
+    - X'WX caching for O(p³) cheap iterations (no data pass)
+    - Scalar group support (rank-1 penalties estimated, not skipped)
+    - Two-tier iteration: DM rebuild + full PIRLS / cheap re-inversion
+    - Anderson(1) acceleration on log-lambda scale
+
+    Used when lambda1 > 0 (group lasso + REML smoothing).
+
+    References
+    ----------
+    Wood & Fasiolo (2017). A generalized Fellner-Schall method for smoothing
+    parameter optimization with application to shape constrained regression.
+    Biometrics 73(4), 1071-1081.
+    """
+    scale_known = getattr(distribution, "scale_known", True)
+    reml_update_names = [g.name for _, g in reml_groups]
+    n = len(y)
+
+    warm_beta = None
+    warm_intercept = None
+    lambda_history: list[dict[str, float]] = [lambdas.copy()]
+    converged = False
+    n_reml_iter = 0
+    cheap_iter = False
+    cached_xtwx: NDArray | None = None
+    last_pirls_iters = 0
+
+    # Anderson(1) acceleration state
+    aa_prev_log_x: NDArray | None = None
+    aa_prev_log_gx: NDArray | None = None
+
+    # Threshold for cheap iterations (re-invert cached X'WX only, no data pass)
+    # R_inv depends on lambda, so DM must always be rebuilt when lambdas change
+    # significantly — there is no valid "PIRLS without DM rebuild" tier.
+    cheap_threshold = 0.01
+
+    for reml_iter in range(max_reml_iter):
+        n_reml_iter = reml_iter + 1
+
+        # ── Tier 1 & 2: Full PIRLS solve ──────────────────────────
+        if not cheap_iter:
+            pirls_result = fit_pirls(
+                X=dm,
+                y=y,
+                weights=exposure,
+                family=distribution,
+                link=link,
+                groups=groups,
+                penalty=penalty,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+                anderson_memory=anderson_memory,
+                active_set=active_set,
+                lambda2=lambdas,
+            )
+            beta = pirls_result.beta
+            intercept = pirls_result.intercept
+            last_pirls_iters = pirls_result.n_iter
+
+            # Compute IRLS weights and cache X'WX
+            eta = np.clip(dm.matvec(beta) + intercept + offset_arr, -20, 20)
+            mu = np.clip(link.inverse(eta), 1e-7, 1e7)
+            V = distribution.variance(mu)
+            dmu_deta = link.deriv_inverse(eta)
+            W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
+
+            cached_xtwx = _block_xtwx(dm.group_matrices, groups, W)
+
+        # ── Compute H⁻¹ = (X'WX + S)⁻¹ ──────────────────────────
+        p = dm.p
+        S = _build_penalty_matrix(dm.group_matrices, groups, lambdas, p)
+        H = cached_xtwx + S
+        H_inv, _, _ = _safe_decompose_H(H)
+
+        # ── Estimate phi for estimated-scale families ─────────────
+        inv_phi = 1.0
+        if not scale_known and penalty_caches is not None:
+            pq = float(beta @ S @ beta)
+            M_p = sum(c.rank for c in penalty_caches.values())
+            phi_hat = max((pirls_result.deviance + pq) / max(n - M_p, 1.0), 1e-10)
+            inv_phi = 1.0 / phi_hat
+
+        # ── EFS lambda update ─────────────────────────────────────
+        lambdas_new = lambdas.copy()
+        for _idx, g in reml_groups:
+            beta_g = beta[g.sl]
+
+            # Skip zeroed groups (L1 penalty killed them)
+            if np.linalg.norm(beta_g) < 1e-12:
+                continue
+
+            omega_ssp = penalty_caches[g.name].omega_ssp
+            quad = float(beta_g @ omega_ssp @ beta_g)
+            trace_term = float(np.trace(H_inv[g.sl, g.sl] @ omega_ssp))
+
+            r_j = penalty_ranks[g.name]
+            denom = inv_phi * quad + trace_term
+
+            if denom > 1e-12:
+                lam_new = r_j / denom
+            else:
+                lam_new = lambdas[g.name]
+
+            # Clamp log-lambda step to prevent wild jumps
+            log_step = np.log(max(lam_new, 1e-10)) - np.log(max(lambdas[g.name], 1e-10))
+            log_step = np.clip(log_step, -5.0, 5.0)
+            lam_new = lambdas[g.name] * np.exp(log_step)
+
+            lambdas_new[g.name] = float(np.clip(lam_new, 1e-6, 1e6))
+
+        # ── Anderson(1) acceleration on log-lambda ────────────────
+        if aa_prev_log_x is not None and len(reml_update_names) > 0:
+            log_x = np.array([np.log(lambdas[n_]) for n_ in reml_update_names])
+            log_gx = np.array([np.log(lambdas_new[n_]) for n_ in reml_update_names])
+            f_curr = log_gx - log_x
+            f_prev = aa_prev_log_gx - aa_prev_log_x
+            df = f_curr - f_prev
+            df_sq = float(np.dot(df, df))
+            if df_sq > 1e-20:
+                theta = float(-np.dot(f_curr, df) / df_sq)
+                theta = max(-0.5, min(theta, 2.0))
+                log_acc = (1.0 + theta) * log_gx - theta * aa_prev_log_gx
+                for i, name in enumerate(reml_update_names):
+                    lambdas_new[name] = float(np.clip(np.exp(log_acc[i]), 1e-6, 1e6))
+
+        if len(reml_update_names) > 0:
+            aa_prev_log_x = np.array([np.log(lambdas[n_]) for n_ in reml_update_names])
+            aa_prev_log_gx = np.array([np.log(lambdas_new[n_]) for n_ in reml_update_names])
+
+        # ── Convergence check ─────────────────────────────────────
+        changes = [
+            abs(np.log(lambdas_new[g.name]) - np.log(lambdas[g.name]))
+            for _, g in reml_groups
+            if lambdas[g.name] > 0 and lambdas_new[g.name] > 0
+        ]
+        max_change = max(changes) if changes else 0.0
+
+        if verbose:
+            lam_str = ", ".join(f"{g.name}={lambdas_new[g.name]:.4g}" for _, g in reml_groups)
+            mode = "cheap" if cheap_iter else f"pirls={last_pirls_iters}"
+            print(
+                f"  REML iter={n_reml_iter}  max_change={max_change:.6f}  "
+                f"({mode})  lambdas=[{lam_str}]"
+            )
+
+        lambda_history.append(lambdas_new.copy())
+
+        if max_change < reml_tol:
+            converged = True
+            lambdas = lambdas_new
+            break
+
+        # ── Decide next iteration tier ────────────────────────────
+        if max_change > cheap_threshold:
+            # Full: rebuild DM (R_inv depends on lambda) + PIRLS
+            old_gms = dm.group_matrices
+            dm = rebuild_dm(lambdas_new, exposure)
+            warm_beta = _map_beta_between_bases(beta, old_gms, dm.group_matrices, groups)
+            warm_intercept = intercept
+            # R_inv changed → recompute penalty caches (omega_ssp etc.)
+            penalty_caches = build_penalty_caches(dm.group_matrices, groups, reml_groups)
+            penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
+            cheap_iter = False
+        else:
+            # Cheap: re-invert cached X'WX + S only (O(p³), no data pass)
+            cheap_iter = True
+
+        lambdas = lambdas_new
+
+    # ── Final refit ───────────────────────────────────────────────
+    if cheap_iter and converged:
+        dm = rebuild_dm(lambdas, exposure)
+
+    final_result = fit_pirls(
+        X=dm,
+        y=y,
+        weights=exposure,
+        family=distribution,
+        link=link,
+        groups=groups,
+        penalty=penalty,
+        offset=offset_arr,
+        beta_init=warm_beta,
+        intercept_init=warm_intercept,
+        anderson_memory=anderson_memory,
+        active_set=active_set,
+        lambda2=lambdas,
+    )
+
+    reml_result = REMLResult(
+        lambdas=lambdas,
+        pirls_result=final_result,
+        n_reml_iter=n_reml_iter,
+        converged=converged,
+        lambda_history=lambda_history,
+        objective=reml_laml_objective(
+            dm,
+            distribution,
+            link,
+            groups,
+            y,
+            final_result,
+            lambdas,
+            exposure,
+            offset_arr,
+            penalty_caches=penalty_caches,
+        ),
+    )
+    return reml_result, dm
+
+
+# ═══════════════════════════════════════════════════════════════════
+# BCD REML fixed-point optimizer (legacy)
 # ═══════════════════════════════════════════════════════════════════
 
 

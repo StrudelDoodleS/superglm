@@ -1574,3 +1574,151 @@ class TestREMLDiscreteRobustness:
         edf_exact = exact.result.effective_df
         edf_disc = disc.result.effective_df
         assert abs(edf_exact - edf_disc) < 1.0
+
+
+# ── EFS optimizer tests ─────────────────────────────────────────────
+
+
+class TestEFSOptimizer:
+    """Tests specific to the EFS REML path (lambda1 > 0)."""
+
+    def test_efs_poisson_converges(self):
+        """EFS should converge for Poisson with group lasso."""
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 10, n)
+        x2 = rng.uniform(0, 10, n)
+        mu = np.exp(0.5 + 0.3 * np.sin(x1) + 0.2 * np.cos(x2))
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.01,
+            features={
+                "x1": Spline(n_knots=8, penalty="ssp"),
+                "x2": Spline(n_knots=8, penalty="ssp"),
+            },
+        )
+        model.fit_reml(X, y, max_reml_iter=20)
+
+        assert model._reml_result.converged
+        assert len(model._reml_lambdas) == 2
+        for name, lam in model._reml_lambdas.items():
+            assert np.isfinite(lam), f"Non-finite lambda for {name}"
+            assert lam > 0, f"Non-positive lambda for {name}"
+
+    def test_efs_gamma_estimated_scale(self, capsys):
+        """EFS should handle estimated-scale families (Gamma)."""
+        rng = np.random.default_rng(123)
+        n = 600
+        x1 = rng.uniform(0, 10, n)
+        x2 = rng.uniform(0, 10, n)
+        mu = np.exp(0.3 + 0.35 * np.sin(x1) + 0.15 * np.cos(x2))
+        y = rng.gamma(shape=5.0, scale=mu / 5.0)
+        y = np.maximum(y, 1e-4)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="gamma",
+            lambda1=0.01,
+            features={
+                "x1": Spline(n_knots=6, penalty="ssp"),
+                "x2": Spline(n_knots=6, penalty="ssp"),
+            },
+        )
+        model.fit_reml(X, y, max_reml_iter=12, verbose=True)
+
+        out = capsys.readouterr().out
+        assert "REML iter=" in out
+        assert "(pirls=" in out
+        assert "(cheap)" in out
+
+        assert model.result.converged
+        assert np.isfinite(model.result.phi)
+        assert model.result.phi > 0
+
+    def test_efs_scalar_groups_estimated(self):
+        """EFS should estimate lambdas for scalar (rank-1) groups via select=True."""
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 10, n)
+        mu = np.exp(0.5 + 0.4 * np.sin(x1))
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.01,
+            features={"x1": Spline(n_knots=8, penalty="ssp", split_linear=True)},
+        )
+        model.fit_reml(X, y, max_reml_iter=20)
+
+        assert model._reml_result.converged
+        # Both linear (rank 1) and spline subgroups should have lambdas
+        assert "x1:linear" in model._reml_lambdas
+        assert "x1:spline" in model._reml_lambdas
+        for name, lam in model._reml_lambdas.items():
+            assert np.isfinite(lam), f"Non-finite lambda for {name}"
+            assert lam > 0, f"Non-positive lambda for {name}"
+
+    def test_efs_cheap_iterations_used(self, capsys):
+        """EFS should use cheap (cached X'WX) iterations when lambdas stabilize."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = rng.uniform(0, 10, n)
+        mu = np.exp(0.5 + 0.3 * np.sin(x1))
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.01,
+            features={"x1": Spline(n_knots=6, penalty="ssp")},
+        )
+        model.fit_reml(X, y, max_reml_iter=20, verbose=True)
+
+        out = capsys.readouterr().out
+        # Should have at least one cheap iteration
+        assert "(cheap)" in out
+        assert model._reml_result.converged
+
+    def test_efs_agrees_with_direct_at_lambda1_zero(self):
+        """When lambda1=0, EFS and direct paths should give similar results.
+
+        This validates the EFS update formula produces correct REML estimates
+        by comparing against the Newton-based direct solver.
+        """
+        rng = np.random.default_rng(42)
+        n = 1000
+        x1 = rng.uniform(0, 10, n)
+        mu = np.exp(0.5 + 0.4 * np.sin(x1))
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1})
+
+        features = {"x1": Spline(n_knots=8, penalty="ssp")}
+
+        # Direct path (lambda1=0)
+        m_direct = SuperGLM(family="poisson", lambda1=0, features=features)
+        m_direct.fit_reml(X, y, max_reml_iter=20)
+
+        # EFS path (lambda1=tiny, to trigger BCD)
+        m_efs = SuperGLM(family="poisson", lambda1=1e-8, features=features)
+        m_efs.fit_reml(X, y, max_reml_iter=20)
+
+        assert m_direct._reml_result.converged
+        assert m_efs._reml_result.converged
+
+        # Deviance should agree closely
+        dev_rel = abs(m_direct.result.deviance - m_efs.result.deviance) / abs(
+            m_direct.result.deviance
+        )
+        assert dev_rel < 5e-3, f"Deviance rel diff {dev_rel:.6f}"
+
+        # REML lambdas should be in the same ballpark (EFS fixed-point vs
+        # Newton can settle at different points on a flat REML surface)
+        for name in m_direct._reml_lambdas:
+            lam_d = m_direct._reml_lambdas[name]
+            lam_e = m_efs._reml_lambdas[name]
+            log_diff = abs(np.log(lam_d) - np.log(lam_e))
+            assert log_diff < 2.5, f"{name} log-lambda diff {log_diff:.4f}"
