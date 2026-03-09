@@ -1683,6 +1683,87 @@ class TestEFSOptimizer:
         assert "(cheap)" in out
         assert model._reml_result.converged
 
+    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    def test_efs_bad_starts_converge(self, family):
+        """EFS should converge from adverse lambda2_init with enough iterations."""
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 10, n)
+        x2 = rng.uniform(0, 10, n)
+        if family == "poisson":
+            mu = np.exp(0.5 + 0.3 * np.sin(x1) + 0.2 * np.cos(x2))
+            y = rng.poisson(mu).astype(float)
+        else:
+            mu = np.exp(0.3 + 0.35 * np.sin(x1) + 0.15 * np.cos(x2))
+            y = rng.gamma(shape=5.0, scale=mu / 5.0)
+            y = np.maximum(y, 1e-4)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        features = {
+            "x1": Spline(n_knots=8, penalty="ssp"),
+            "x2": Spline(n_knots=8, penalty="ssp"),
+        }
+
+        # Baseline: default start
+        baseline = SuperGLM(family=family, lambda1=0.01, features=features)
+        baseline.fit_reml(X, y, max_reml_iter=30)
+        assert baseline._reml_result.converged
+
+        # Very small and very large lambda2_init
+        for init_val in [1e-6, 1e5]:
+            m = SuperGLM(family=family, lambda1=0.01, features=features)
+            m.fit_reml(X, y, max_reml_iter=30, lambda2_init=init_val)
+            assert m._reml_result.converged, f"{family} lambda2_init={init_val} did not converge"
+
+            # Deviance should agree with baseline
+            dev_rel = abs(m.result.deviance - baseline.result.deviance) / abs(
+                baseline.result.deviance
+            )
+            assert dev_rel < 1e-3, f"{family} init={init_val} deviance rel diff {dev_rel:.6f}"
+
+    def test_efs_objective_consistent_after_cheap_exit(self):
+        """REML objective should use fresh penalty caches after final DM rebuild."""
+        from superglm.reml import build_penalty_caches
+        from superglm.reml_optimizer import reml_laml_objective
+
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 10, n)
+        mu = np.exp(0.5 + 0.3 * np.sin(x1))
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.01,
+            features={"x1": Spline(n_knots=8, penalty="ssp")},
+        )
+        model.fit_reml(X, y, max_reml_iter=20)
+        assert model._reml_result.converged
+
+        # Recompute objective with fresh caches from scratch
+        reml_groups = [(i, g) for i, g in enumerate(model._groups) if g.penalized]
+        fresh_caches = build_penalty_caches(model._dm.group_matrices, model._groups, reml_groups)
+        fresh_obj = reml_laml_objective(
+            model._dm,
+            model._distribution,
+            model._link,
+            model._groups,
+            y,
+            model._reml_result.pirls_result,
+            model._reml_lambdas,
+            np.ones(n),
+            np.zeros(n),
+            penalty_caches=fresh_caches,
+        )
+
+        # Should match the stored objective closely
+        stored_obj = model._reml_result.objective
+        rel_diff = abs(stored_obj - fresh_obj) / abs(fresh_obj)
+        assert rel_diff < 1e-10, (
+            f"Objective mismatch: stored={stored_obj:.10f} fresh={fresh_obj:.10f} "
+            f"rel_diff={rel_diff:.2e}"
+        )
+
     def test_efs_agrees_with_direct_at_lambda1_zero(self):
         """When lambda1=0, EFS and direct paths should give similar results.
 

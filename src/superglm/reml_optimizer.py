@@ -1274,6 +1274,8 @@ def optimize_efs_reml(
     # ── Final refit ───────────────────────────────────────────────
     if cheap_iter and converged:
         dm = rebuild_dm(lambdas, exposure)
+        # R_inv changed → refresh caches for the objective computation
+        penalty_caches = build_penalty_caches(dm.group_matrices, groups, reml_groups)
 
     final_result = fit_pirls(
         X=dm,
