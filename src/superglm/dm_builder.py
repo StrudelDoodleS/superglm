@@ -183,6 +183,89 @@ def auto_detect_features(
     logger.info("\n".join(lines))
 
 
+def _spec_kind(spec: FeatureSpec) -> str:
+    """Classify a feature spec into one of the four canonical kinds."""
+    from superglm.features.categorical import Categorical
+    from superglm.features.numeric import Numeric
+    from superglm.features.polynomial import Polynomial
+    from superglm.features.spline import _SplineBase
+
+    if isinstance(spec, _SplineBase):
+        return "spline"
+    if isinstance(spec, Polynomial):
+        return "polynomial"
+    if isinstance(spec, Numeric):
+        return "numeric"
+    if isinstance(spec, Categorical):
+        return "categorical"
+    return type(spec).__name__
+
+
+# ── Interaction factories ─────────────────────────────────────────
+# Each returns (iname, ispec) given (feat1, feat2, name, **kwargs).
+# For asymmetric pairs the factory receives the canonical orientation
+# (e.g. spline first, categorical second).
+
+
+def _make_spline_categorical(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
+    from superglm.features.interaction import SplineCategorical
+
+    return name or f"{f1}:{f2}", SplineCategorical(f1, f2)
+
+
+def _make_polynomial_categorical(
+    f1: str, f2: str, *, name: str | None, **kw: Any
+) -> tuple[str, Any]:
+    from superglm.features.interaction import PolynomialCategorical
+
+    return name or f"{f1}:{f2}", PolynomialCategorical(f1, f2)
+
+
+def _make_numeric_categorical(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
+    from superglm.features.interaction import NumericCategorical
+
+    return name or f"{f1}:{f2}", NumericCategorical(f1, f2)
+
+
+def _make_categorical_interaction(
+    f1: str, f2: str, *, name: str | None, **kw: Any
+) -> tuple[str, Any]:
+    from superglm.features.interaction import CategoricalInteraction
+
+    return name or f"{f1}:{f2}", CategoricalInteraction(f1, f2)
+
+
+def _make_numeric_interaction(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
+    from superglm.features.interaction import NumericInteraction
+
+    return name or f"{f1}:{f2}", NumericInteraction(f1, f2)
+
+
+def _make_polynomial_interaction(
+    f1: str, f2: str, *, name: str | None, **kw: Any
+) -> tuple[str, Any]:
+    from superglm.features.interaction import PolynomialInteraction
+
+    return name or f"{f1}:{f2}", PolynomialInteraction(f1, f2)
+
+
+def _make_tensor_interaction(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
+    from superglm.features.interaction import TensorInteraction
+
+    return name or f"{f1}:{f2}", TensorInteraction(f1, f2, **kw)
+
+
+_INTERACTION_FACTORIES: dict[tuple[str, str], Any] = {
+    ("spline", "categorical"): _make_spline_categorical,
+    ("polynomial", "categorical"): _make_polynomial_categorical,
+    ("numeric", "categorical"): _make_numeric_categorical,
+    ("categorical", "categorical"): _make_categorical_interaction,
+    ("numeric", "numeric"): _make_numeric_interaction,
+    ("polynomial", "polynomial"): _make_polynomial_interaction,
+    ("spline", "spline"): _make_tensor_interaction,
+}
+
+
 def add_interaction(
     feat1: str,
     feat2: str,
@@ -196,85 +279,27 @@ def add_interaction(
 
     Mutates ``interaction_specs`` and ``interaction_order`` in place.
     """
-    from superglm.features.categorical import Categorical
-    from superglm.features.interaction import (
-        CategoricalInteraction,
-        NumericCategorical,
-        NumericInteraction,
-        PolynomialCategorical,
-        PolynomialInteraction,
-        SplineCategorical,
-        TensorInteraction,
-    )
-    from superglm.features.numeric import Numeric
-    from superglm.features.polynomial import Polynomial
-    from superglm.features.spline import _SplineBase
-
     if feat1 not in specs:
         raise ValueError(f"Parent feature not found: {feat1}")
     if feat2 not in specs:
         raise ValueError(f"Parent feature not found: {feat2}")
 
-    spec1 = specs[feat1]
-    spec2 = specs[feat2]
+    kind1 = _spec_kind(specs[feat1])
+    kind2 = _spec_kind(specs[feat2])
 
-    is_spline1 = isinstance(spec1, _SplineBase)
-    is_spline2 = isinstance(spec2, _SplineBase)
-    is_poly1 = isinstance(spec1, Polynomial)
-    is_poly2 = isinstance(spec2, Polynomial)
-    is_num1 = isinstance(spec1, Numeric)
-    is_num2 = isinstance(spec2, Numeric)
-    is_cat1 = isinstance(spec1, Categorical)
-    is_cat2 = isinstance(spec2, Categorical)
-
-    iname: str
-    ispec: Any
-
-    # Spline + Categorical → SplineCategorical (swap so spline is first)
-    if is_spline1 and is_cat2:
-        iname = name or f"{feat1}:{feat2}"
-        ispec = SplineCategorical(feat1, feat2)
-    elif is_cat1 and is_spline2:
-        iname = name or f"{feat2}:{feat1}"
-        ispec = SplineCategorical(feat2, feat1)
-    # Polynomial + Categorical → PolynomialCategorical
-    elif is_poly1 and is_cat2:
-        iname = name or f"{feat1}:{feat2}"
-        ispec = PolynomialCategorical(feat1, feat2)
-    elif is_cat1 and is_poly2:
-        iname = name or f"{feat2}:{feat1}"
-        ispec = PolynomialCategorical(feat2, feat1)
-    # Numeric + Categorical → NumericCategorical
-    elif is_num1 and is_cat2:
-        iname = name or f"{feat1}:{feat2}"
-        ispec = NumericCategorical(feat1, feat2)
-    elif is_cat1 and is_num2:
-        iname = name or f"{feat2}:{feat1}"
-        ispec = NumericCategorical(feat2, feat1)
-    # Categorical + Categorical → CategoricalInteraction
-    elif is_cat1 and is_cat2:
-        iname = name or f"{feat1}:{feat2}"
-        ispec = CategoricalInteraction(feat1, feat2)
-    # Numeric + Numeric → NumericInteraction
-    elif is_num1 and is_num2:
-        iname = name or f"{feat1}:{feat2}"
-        ispec = NumericInteraction(feat1, feat2)
-    # Polynomial + Polynomial → PolynomialInteraction
-    elif is_poly1 and is_poly2:
-        iname = name or f"{feat1}:{feat2}"
-        ispec = PolynomialInteraction(feat1, feat2)
-    # Spline + Spline → TensorInteraction
-    elif is_spline1 and is_spline2:
-        iname = name or f"{feat1}:{feat2}"
-        ispec = TensorInteraction(feat1, feat2, **kwargs)
+    factory = _INTERACTION_FACTORIES.get((kind1, kind2))
+    if factory is not None:
+        iname, ispec = factory(feat1, feat2, name=name, **kwargs)
     else:
-        raise TypeError(
-            f"Cannot create interaction between {type(spec1).__name__} "
-            f"and {type(spec2).__name__}. Supported: Spline+Spline, "
-            f"Spline+Categorical, Polynomial+Categorical, "
-            f"Numeric+Categorical, Categorical+Categorical, "
-            f"Numeric+Numeric, Polynomial+Polynomial."
-        )
+        # Try swapped orientation (asymmetric pairs like categorical+spline)
+        factory = _INTERACTION_FACTORIES.get((kind2, kind1))
+        if factory is not None:
+            iname, ispec = factory(feat2, feat1, name=name, **kwargs)
+        else:
+            raise TypeError(
+                f"Cannot create interaction between {kind1} "
+                f"and {kind2}. Supported: {', '.join('+'.join(k) for k in _INTERACTION_FACTORIES)}."
+            )
 
     if iname in interaction_specs:
         raise ValueError(f"Interaction already added: {iname}")
