@@ -47,9 +47,9 @@ model = SuperGLM(
     penalty="group_lasso",
     lambda1=0.01,
     features={
-        "DrivAge": Spline(n_knots=10, penalty="ssp"),
-        "VehAge": Spline(n_knots=10, penalty="ssp"),
-        "BonusMalus": Spline(n_knots=10, penalty="ssp"),
+        "DrivAge": Spline(kind="bs", k=14),
+        "VehAge": Spline(kind="cr", k=10),
+        "BonusMalus": Spline(kind="ns", k=10),
         "Area": Categorical(base="most_exposed"),
         "LogDensity": Numeric(),
     },
@@ -59,27 +59,26 @@ model.fit(df, y, exposure=weights)
 
 ## Feature types
 
-**Spline** — P-spline basis with optional SSP reparametrisation. Group lasso selects or removes the entire smooth function as a unit.
+### Splines
+
+`Spline(kind, k)` is the recommended API for creating spline features. `kind` selects the basis type, `k` sets the basis dimension (analogous to mgcv's `k`). You can also use `n_knots` (interior knot count) instead of `k`.
 
 ```python
-Spline(n_knots=10, penalty="ssp")          # SSP reparametrised (recommended)
-Spline(n_knots=10, penalty="none")         # raw B-spline basis
-Spline(n_knots=10, select=True)            # mgcv double penalty: spline-vs-linear selection
+Spline(kind="bs", k=14)                   # P-spline (default kind)
+Spline(kind="ns", k=10)                   # Natural spline (linear tails)
+Spline(kind="cr", k=10)                   # Cubic regression spline (mgcv bs="cr")
+Spline(kind="bs", k=14, split_linear=True) # mgcv double penalty: spline-vs-linear selection
 ```
 
-`select=True` decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped.
+| Kind | Basis | Penalty | Constraints |
+|------|-------|---------|-------------|
+| `"bs"` | B-spline | Second-difference | None |
+| `"ns"` | B-spline | Second-difference | f''=0 at boundaries (linear tails) |
+| `"cr"` | B-spline | Integrated f'' squared | Natural + identifiability |
 
-**NaturalSpline** — P-spline with natural boundary constraints (f''=0 at both ends). Forces the curve to be linear beyond the boundary knots, preventing tail explosions.
+`split_linear=True` (BS only) decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped.
 
-```python
-NaturalSpline(n_knots=10)                  # linear tails (recommended for extrapolation)
-```
-
-**CubicRegressionSpline** — Equivalent to mgcv's `bs="cr"`. Uses the integrated wiggliness penalty (integral of f'' squared) instead of the discrete second-difference penalty. Natural boundary constraints are mandatory.
-
-```python
-CubicRegressionSpline(n_knots=10)          # mgcv cr basis equivalent
-```
+The concrete classes `BasisSpline`, `NaturalSpline`, and `CubicRegressionSpline` are also available for direct use.
 
 **Polynomial** — Orthogonal polynomial (Legendre basis). Very stable across refits — ideal for features with simple monotone or quadratic shapes.
 
@@ -109,7 +108,7 @@ Interactions between features are specified via the `interactions` parameter. Th
 
 ```python
 model = SuperGLM(
-    features={"age": Spline(n_knots=10), "region": Categorical()},
+    features={"age": Spline(k=14), "region": Categorical()},
     interactions=[("age", "region")],
     lambda1=0.01,
 )
@@ -152,7 +151,7 @@ model = SuperGLM(
     family=Poisson(),
     penalty=GroupLasso(),
     features={
-        "DrivAge": Spline(n_knots=10, penalty="ssp"),
+        "DrivAge": Spline(k=14),
         "Area": Categorical(base="most_exposed"),
     },
 )
