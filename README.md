@@ -61,13 +61,15 @@ model.fit(df, y, sample_weight=exposure)
 
 Public examples use `sample_weight=`. In insurance settings this is interpreted as **exposure / frequency weight**, not inverse-variance weight. The older `exposure=` keyword is still accepted as a backward-compatible alias.
 
-For count models:
+Two common patterns for count models:
 
 ```python
-model.fit(df, claim_counts, sample_weight=exposure, offset=np.log(exposure))
-```
+# Raw count target: offset absorbs exposure, model estimates a rate
+model.fit(df, claim_counts, offset=np.log(exposure))
 
-For rate targets that are already divided by exposure, pass only `sample_weight=exposure`.
+# Rate target (count / exposure): weight by exposure for heteroscedasticity
+model.fit(df, claim_rate, sample_weight=exposure)
+```
 
 ## Fitting modes
 
