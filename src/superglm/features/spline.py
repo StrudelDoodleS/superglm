@@ -659,15 +659,24 @@ _KIND_MAP = {
 
 
 def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
-    """Convert public basis dimension ``k`` to interior knot count.
+    """Convert basis dimension ``k`` to interior knot count.
+
+    ``k`` is the number of columns in the built basis matrix — i.e. the
+    final column count after all constraints (natural boundary and
+    identifiability) have been applied.
+
+    For ``"bs"`` and ``"ns"`` this matches mgcv's ``k``.  For ``"cr"``
+    it is one **less** than mgcv's ``k`` because SuperGLM physically
+    removes the identifiability (sum-to-zero) direction, whereas mgcv
+    absorbs it via a constraint during fitting.
 
     Parameters
     ----------
     kind : str
         Spline kind: ``"bs"``, ``"ns"``, or ``"cr"``.
     k : int
-        Total basis dimension (number of columns before identifiability
-        constraints). Analogous to mgcv's ``k`` parameter.
+        Final built basis dimension (number of columns returned by
+        ``.build().n_cols``).
     degree : int
         B-spline polynomial degree (default 3, cubic).
 
@@ -738,13 +747,18 @@ def Spline(
         - ``"ns"`` — Natural P-spline (f''=0 at boundaries, linear tails).
           Equivalent to ``NaturalSpline``.
         - ``"cr"`` — Cubic regression spline (integrated f'' penalty +
-          natural constraints). Equivalent to mgcv's ``bs="cr"``.
-          Equivalent to ``CubicRegressionSpline``.
+          natural constraints + identifiability).
+          Equivalent to ``CubicRegressionSpline``.  Similar to mgcv's
+          ``bs="cr"`` but ``k`` here is the final built column count,
+          which is one less than mgcv's ``k`` (see below).
 
     k : int, optional
-        Total basis dimension, analogous to mgcv's ``k``. Internally
-        converted to ``n_knots`` via :func:`n_knots_from_k`. Cannot be
-        used together with ``n_knots``.
+        Final built basis dimension — the number of columns returned by
+        ``.build().n_cols``.  For ``"bs"`` and ``"ns"`` this matches
+        mgcv's ``k``.  For ``"cr"`` this is ``mgcv_k - 1`` because
+        SuperGLM physically removes the identifiability direction.
+        Internally converted to ``n_knots`` via :func:`n_knots_from_k`.
+        Cannot be used together with ``n_knots``.
     n_knots : int, optional
         Number of interior knots (lower-level parameter). Cannot be
         used together with ``k``. Defaults to 10 if neither ``k`` nor
