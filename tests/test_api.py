@@ -191,3 +191,69 @@ class TestPenaltyResolution:
         model.fit(X, y, exposure=exposure)
         assert model.penalty.lambda1 is not None
         assert model.penalty.lambda1 > 0
+
+
+class TestSampleWeightAlias:
+    def test_fit_accepts_sample_weight_alias(self, sample_data):
+        X, y, exposure = sample_data
+        model_exposure = SuperGLM(
+            penalty="group_lasso",
+            lambda1=0.01,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "region": Categorical(),
+                "density": Numeric(),
+            },
+        )
+        model_sample_weight = SuperGLM(
+            penalty="group_lasso",
+            lambda1=0.01,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "region": Categorical(),
+                "density": Numeric(),
+            },
+        )
+
+        model_exposure.fit(X, y, exposure=exposure)
+        model_sample_weight.fit(X, y, sample_weight=exposure)
+
+        np.testing.assert_allclose(
+            model_exposure.predict(X), model_sample_weight.predict(X), atol=1e-10
+        )
+        assert model_exposure.result.deviance == pytest.approx(model_sample_weight.result.deviance)
+
+    def test_fit_reml_accepts_sample_weight_alias(self, sample_data):
+        X, y, exposure = sample_data
+        features = {
+            "age": Spline(n_knots=10, penalty="ssp"),
+            "region": Categorical(),
+            "density": Numeric(),
+        }
+        model_exposure = SuperGLM(family="poisson", lambda1=0.0, features=features)
+        model_sample_weight = SuperGLM(family="poisson", lambda1=0.0, features=features)
+
+        model_exposure.fit_reml(X, y, exposure=exposure, max_reml_iter=10)
+        model_sample_weight.fit_reml(X, y, sample_weight=exposure, max_reml_iter=10)
+
+        np.testing.assert_allclose(
+            model_exposure.predict(X), model_sample_weight.predict(X), atol=1e-10
+        )
+        assert model_exposure.result.effective_df == pytest.approx(
+            model_sample_weight.result.effective_df
+        )
+
+    def test_passing_both_exposure_and_sample_weight_raises(self, sample_data):
+        X, y, exposure = sample_data
+        model = SuperGLM(
+            penalty="group_lasso",
+            lambda1=0.01,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "region": Categorical(),
+                "density": Numeric(),
+            },
+        )
+
+        with pytest.raises(TypeError, match="both 'exposure' and 'sample_weight'"):
+            model.fit(X, y, exposure=exposure, sample_weight=exposure)
