@@ -332,8 +332,13 @@ class _SplineBase:
         }
 
 
-class Spline(_SplineBase):
+class BasisSpline(_SplineBase):
     """P-spline: B-spline basis + second-difference penalty.
+
+    This is the concrete B-spline / P-spline implementation. For the
+    recommended public API, use :func:`Spline` which dispatches to
+    ``BasisSpline``, ``NaturalSpline``, or ``CubicRegressionSpline``
+    based on ``kind``.
 
     Parameters
     ----------
@@ -640,3 +645,204 @@ class CubicRegressionSpline(_SplineBase):
         self._Z = Z
         omega_nat = Z.T @ omega @ Z
         return B, omega_nat, self._n_basis - 2, Z
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Public Spline factory
+# ═══════════════════════════════════════════════════════════════════
+
+_KIND_MAP = {
+    "bs": BasisSpline,
+    "ns": NaturalSpline,
+    "cr": CubicRegressionSpline,
+}
+
+
+def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
+    """Convert public basis dimension ``k`` to interior knot count.
+
+    Parameters
+    ----------
+    kind : str
+        Spline kind: ``"bs"``, ``"ns"``, or ``"cr"``.
+    k : int
+        Total basis dimension (number of columns before identifiability
+        constraints). Analogous to mgcv's ``k`` parameter.
+    degree : int
+        B-spline polynomial degree (default 3, cubic).
+
+    Returns
+    -------
+    int
+        Number of interior knots for the chosen kind.
+
+    Mapping
+    -------
+    - ``"bs"``: ``n_knots = k - degree - 1``  (no constraints)
+    - ``"ns"``: ``n_knots = k - degree + 1``  (2 natural constraints remove 2 cols)
+    - ``"cr"``: ``n_knots = k - degree + 2``  (2 natural + 1 identifiability = 3 removed)
+    """
+    if kind not in _KIND_MAP:
+        raise ValueError(f"Unknown spline kind {kind!r}, expected one of {sorted(_KIND_MAP)}")
+
+    if kind == "bs":
+        n_knots = k - degree - 1
+        min_k = degree + 2  # need at least 1 interior knot
+    elif kind == "ns":
+        # n_basis = n_knots + degree + 1, then 2 natural constraints remove 2 cols
+        # → k = n_knots + degree - 1  →  n_knots = k - degree + 1
+        n_knots = k - degree + 1
+        min_k = degree  # need at least 1 interior knot → k >= degree
+    else:
+        # cr: n_basis = n_knots + degree + 1, then 2 natural constraints + 1
+        # identifiability (absorbs_intercept) remove 3 cols
+        # → k = n_knots + degree - 2  →  n_knots = k - degree + 2
+        n_knots = k - degree + 2
+        min_k = degree  # need at least 1 interior knot → k >= degree
+
+    if k < min_k:
+        raise ValueError(
+            f"k={k} is too small for kind={kind!r} with degree={degree}. Minimum k is {min_k}."
+        )
+
+    return n_knots
+
+
+def Spline(
+    kind: str = "bs",
+    *,
+    k: int | None = None,
+    n_knots: int | None = None,
+    degree: int = 3,
+    knot_strategy: str = "uniform",
+    penalty: str = "ssp",
+    split_linear: bool = False,
+    knots: ArrayLike | None = None,
+    discrete: bool | None = None,
+    n_bins: int | None = None,
+    extrapolation: str = "clip",
+) -> _SplineBase:
+    """Create a spline feature spec.
+
+    This is the recommended public API for creating spline features.
+    Dispatches to ``BasisSpline``, ``NaturalSpline``, or
+    ``CubicRegressionSpline`` based on ``kind``.
+
+    Parameters
+    ----------
+    kind : str
+        Spline type:
+
+        - ``"bs"`` — P-spline (B-spline basis + second-difference penalty).
+          Default. Equivalent to ``BasisSpline``.
+        - ``"ns"`` — Natural P-spline (f''=0 at boundaries, linear tails).
+          Equivalent to ``NaturalSpline``.
+        - ``"cr"`` — Cubic regression spline (integrated f'' penalty +
+          natural constraints). Equivalent to mgcv's ``bs="cr"``.
+          Equivalent to ``CubicRegressionSpline``.
+
+    k : int, optional
+        Total basis dimension, analogous to mgcv's ``k``. Internally
+        converted to ``n_knots`` via :func:`n_knots_from_k`. Cannot be
+        used together with ``n_knots``.
+    n_knots : int, optional
+        Number of interior knots (lower-level parameter). Cannot be
+        used together with ``k``. Defaults to 10 if neither ``k`` nor
+        ``n_knots`` is given.
+    degree : int
+        B-spline polynomial degree (default 3). Ignored for ``kind="cr"``
+        which is always cubic.
+    knot_strategy : str
+        ``"uniform"`` (default) or ``"quantile"``.
+    penalty : str
+        ``"ssp"`` enables SSP reparametrisation (default), ``"none"``
+        disables it.
+    split_linear : bool
+        If True, decompose into linear + wiggly subgroups for mgcv-style
+        double-penalty selection. Only supported for ``kind="bs"``.
+    knots : array-like, optional
+        Explicit interior knot positions. Overrides ``k`` / ``n_knots``.
+    discrete : bool, optional
+        Enable covariate discretization.
+    n_bins : int, optional
+        Number of discretization bins.
+    extrapolation : {"clip", "extend", "error"}
+        Prediction-time behavior outside the training range.
+
+        - ``"clip"`` (default): freeze at boundary value.
+        - ``"extend"``: evaluate basis outside training range. For
+          ``"ns"`` and ``"cr"`` this gives linear tails; for ``"bs"``
+          this uses the B-spline's native polynomial continuation.
+        - ``"error"``: raise on out-of-range values.
+
+    Returns
+    -------
+    _SplineBase
+        A concrete spline feature spec (``BasisSpline``,
+        ``NaturalSpline``, or ``CubicRegressionSpline``).
+
+    Examples
+    --------
+    >>> Spline(kind="bs", k=20)           # 20-column P-spline
+    >>> Spline(kind="cr", k=10)           # 10-column cubic regression spline
+    >>> Spline(kind="ns", n_knots=8)      # 8 interior knots, natural spline
+    >>> Spline(n_knots=10, penalty="ssp")  # backward-compatible, defaults to "bs"
+    """
+    if kind not in _KIND_MAP:
+        raise ValueError(f"Unknown spline kind {kind!r}, expected one of {sorted(_KIND_MAP)}")
+
+    if k is not None and n_knots is not None:
+        raise ValueError(
+            "Cannot specify both k and n_knots. Use k (public basis size) or n_knots (interior knots), not both."
+        )
+
+    if split_linear and kind != "bs":
+        raise ValueError(f"split_linear is only supported for kind='bs', got kind={kind!r}")
+
+    # Resolve n_knots
+    if k is not None:
+        if kind == "cr":
+            resolved_n_knots = n_knots_from_k(kind, k, degree=3)
+        else:
+            resolved_n_knots = n_knots_from_k(kind, k, degree)
+    elif n_knots is not None:
+        resolved_n_knots = n_knots
+    else:
+        resolved_n_knots = 10  # default
+
+    # Dispatch to concrete class
+    cls = _KIND_MAP[kind]
+
+    if kind == "bs":
+        return cls(
+            n_knots=resolved_n_knots,
+            degree=degree,
+            knot_strategy=knot_strategy,
+            penalty=penalty,
+            split_linear=split_linear,
+            knots=knots,
+            discrete=discrete,
+            n_bins=n_bins,
+            extrapolation=extrapolation,
+        )
+    elif kind == "cr":
+        return cls(
+            n_knots=resolved_n_knots,
+            knot_strategy=knot_strategy,
+            penalty=penalty,
+            knots=knots,
+            discrete=discrete,
+            n_bins=n_bins,
+            extrapolation=extrapolation,
+        )
+    else:  # "ns"
+        return cls(
+            n_knots=resolved_n_knots,
+            degree=degree,
+            knot_strategy=knot_strategy,
+            penalty=penalty,
+            knots=knots,
+            discrete=discrete,
+            n_bins=n_bins,
+            extrapolation=extrapolation,
+        )

@@ -16,7 +16,7 @@ Core API (explicit):
     model = SuperGLM(
         penalty="group_lasso", lambda1=0.01,
         features={
-            "driver_age": Spline(n_knots=10, penalty="ssp"),
+            "driver_age": Spline(kind="bs", k=14),
             "region": Categorical(base="most_exposed"),
             "density": Numeric(),
         },
@@ -49,7 +49,13 @@ from superglm.features.interaction import (
 )
 from superglm.features.numeric import Numeric
 from superglm.features.polynomial import Polynomial
-from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
+from superglm.features.spline import (
+    BasisSpline,
+    CubicRegressionSpline,
+    NaturalSpline,
+    Spline,
+    n_knots_from_k,
+)
 from superglm.links import LogLink
 from superglm.metrics import ModelMetrics
 from superglm.model import PathResult, SuperGLM
@@ -87,6 +93,7 @@ __all__ = [
     "Tweedie",
     "LogLink",
     "Spline",
+    "BasisSpline",
     "NaturalSpline",
     "CubicRegressionSpline",
     "Categorical",
@@ -117,5 +124,6 @@ __all__ = [
     "psum_chisq",
     "satterthwaite",
     "wood_test_smooth",
+    "n_knots_from_k",
 ]
 __version__ = "0.1.0"
