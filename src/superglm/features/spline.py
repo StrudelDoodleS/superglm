@@ -661,22 +661,19 @@ _KIND_MAP = {
 def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     """Convert basis dimension ``k`` to interior knot count.
 
-    ``k`` is the number of columns in the built basis matrix — i.e. the
-    final column count after all constraints (natural boundary and
-    identifiability) have been applied.
-
-    For ``"bs"`` and ``"ns"`` this matches mgcv's ``k``.  For ``"cr"``
-    it is one **less** than mgcv's ``k`` because SuperGLM physically
-    removes the identifiability (sum-to-zero) direction, whereas mgcv
-    absorbs it via a constraint during fitting.
+    ``k`` is the number of basis functions, matching mgcv's ``k``
+    parameter for all spline kinds.  For ``"bs"`` and ``"ns"``,
+    ``k`` equals the built column count.  For ``"cr"``, the built
+    column count is ``k - 1`` because SuperGLM physically removes
+    the identifiability (sum-to-zero) direction.
 
     Parameters
     ----------
     kind : str
         Spline kind: ``"bs"``, ``"ns"``, or ``"cr"``.
     k : int
-        Final built basis dimension (number of columns returned by
-        ``.build().n_cols``).
+        Basis dimension (number of basis functions). Matches mgcv's
+        ``k``.  For ``"cr"`` the built column count is ``k - 1``.
     degree : int
         B-spline polynomial degree (default 3, cubic).
 
@@ -688,8 +685,9 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     Mapping
     -------
     - ``"bs"``: ``n_knots = k - degree - 1``  (no constraints)
-    - ``"ns"``: ``n_knots = k - degree + 1``  (2 natural constraints remove 2 cols)
-    - ``"cr"``: ``n_knots = k - degree + 2``  (2 natural + 1 identifiability = 3 removed)
+    - ``"ns"``: ``n_knots = k - degree + 1``  (2 natural constraints)
+    - ``"cr"``: ``n_knots = k - degree + 1``  (2 natural constraints; identifiability
+      removes 1 more at build time, so ``build().n_cols == k - 1``)
     """
     if kind not in _KIND_MAP:
         raise ValueError(f"Unknown spline kind {kind!r}, expected one of {sorted(_KIND_MAP)}")
@@ -697,16 +695,12 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     if kind == "bs":
         n_knots = k - degree - 1
         min_k = degree + 2  # need at least 1 interior knot
-    elif kind == "ns":
-        # n_basis = n_knots + degree + 1, then 2 natural constraints remove 2 cols
-        # → k = n_knots + degree - 1  →  n_knots = k - degree + 1
-        n_knots = k - degree + 1
-        min_k = degree  # need at least 1 interior knot → k >= degree
     else:
-        # cr: n_basis = n_knots + degree + 1, then 2 natural constraints + 1
-        # identifiability (absorbs_intercept) remove 3 cols
-        # → k = n_knots + degree - 2  →  n_knots = k - degree + 2
-        n_knots = k - degree + 2
+        # ns and cr: n_basis = n_knots + degree + 1, natural constraints remove 2
+        # → pre-identifiability cols = n_knots + degree - 1 = k
+        # → n_knots = k - degree + 1
+        # For cr, absorbs_intercept removes 1 more → build().n_cols = k - 1
+        n_knots = k - degree + 1
         min_k = degree  # need at least 1 interior knot → k >= degree
 
     if k < min_k:
@@ -748,15 +742,15 @@ def Spline(
           Equivalent to ``NaturalSpline``.
         - ``"cr"`` — Cubic regression spline (integrated f'' penalty +
           natural constraints + identifiability).
-          Equivalent to ``CubicRegressionSpline``.  Similar to mgcv's
-          ``bs="cr"`` but ``k`` here is the final built column count,
-          which is one less than mgcv's ``k`` (see below).
+          Equivalent to ``CubicRegressionSpline`` / mgcv's ``bs="cr"``.
+          The built column count is ``k - 1`` because the identifiability
+          direction is physically removed.
 
     k : int, optional
-        Final built basis dimension — the number of columns returned by
-        ``.build().n_cols``.  For ``"bs"`` and ``"ns"`` this matches
-        mgcv's ``k``.  For ``"cr"`` this is ``mgcv_k - 1`` because
-        SuperGLM physically removes the identifiability direction.
+        Basis dimension (number of basis functions), matching mgcv's
+        ``k`` for all kinds.  For ``"bs"`` and ``"ns"`` this equals the
+        built column count.  For ``"cr"`` the built column count is
+        ``k - 1`` (identifiability constraint removes one direction).
         Internally converted to ``n_knots`` via :func:`n_knots_from_k`.
         Cannot be used together with ``n_knots``.
     n_knots : int, optional
@@ -798,7 +792,7 @@ def Spline(
     Examples
     --------
     >>> Spline(kind="bs", k=20)           # 20-column P-spline
-    >>> Spline(kind="cr", k=10)           # 10-column cubic regression spline
+    >>> Spline(kind="cr", k=10)           # 9-column cubic regression spline (k-1)
     >>> Spline(kind="ns", n_knots=8)      # 8 interior knots, natural spline
     >>> Spline(n_knots=10, penalty="ssp")  # backward-compatible, defaults to "bs"
     """

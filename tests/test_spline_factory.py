@@ -97,9 +97,9 @@ class TestKMapping:
         assert n_knots_from_k("ns", 20, degree=3) == 18  # 20 - 3 + 1 = 18
 
     def test_n_knots_from_k_cr(self):
-        # cr: n_knots = k - degree + 2 (2 natural + 1 identifiability = 3 removed)
-        assert n_knots_from_k("cr", 10, degree=3) == 9  # 10 - 3 + 2 = 9
-        assert n_knots_from_k("cr", 20, degree=3) == 19  # 20 - 3 + 2 = 19
+        # cr: same as ns (n_knots = k - degree + 1), mgcv-aligned
+        assert n_knots_from_k("cr", 10, degree=3) == 8  # 10 - 3 + 1 = 8
+        assert n_knots_from_k("cr", 20, degree=3) == 18  # 20 - 3 + 1 = 18
 
     def test_factory_with_k_bs(self):
         """Spline(kind='bs', k=14) should produce n_knots=10 for degree=3."""
@@ -115,7 +115,7 @@ class TestKMapping:
     def test_factory_with_k_cr(self):
         s = Spline(kind="cr", k=10)
         assert isinstance(s, CubicRegressionSpline)
-        assert s.n_knots == 9
+        assert s.n_knots == 8
 
     def test_k_produces_correct_ncols_bs(self):
         """For bs, k should equal the number of basis columns."""
@@ -134,12 +134,12 @@ class TestKMapping:
         assert info.n_cols == k
 
     def test_k_produces_correct_ncols_cr(self):
-        """For cr, k should equal the post-constraint column count."""
+        """For cr, built column count is k-1 (identifiability removes 1)."""
         k = 10
         s = Spline(kind="cr", k=k)
         x = np.linspace(0, 1, 100)
         info = s.build(x)
-        assert info.n_cols == k
+        assert info.n_cols == k - 1
 
 
 # ── Validation ───────────────────────────────────────────────────
