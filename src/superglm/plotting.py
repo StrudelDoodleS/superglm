@@ -50,6 +50,7 @@ def plot_relativities(
     *,
     X: pd.DataFrame | None = None,
     exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
     ncols: int = 2,
     figsize: tuple[float, float] | None = None,
     with_ci: bool = True,
@@ -65,7 +66,9 @@ def plot_relativities(
         distribution is shown on each subplot (filled area for continuous
         features, bars for categoricals).
     exposure : array-like, optional
-        Exposure weights corresponding to rows of *X*.
+        Backward-compatible alias for ``sample_weight``.
+    sample_weight : array-like, optional
+        Exposure/frequency weights corresponding to rows of *X*.
     ncols : int
         Number of subplot columns (default 2).
     figsize : tuple, optional
@@ -79,6 +82,14 @@ def plot_relativities(
     matplotlib.figure.Figure
     """
     import matplotlib.pyplot as plt
+
+    if exposure is not None and sample_weight is not None:
+        raise TypeError(
+            "plot_relativities() received both 'exposure' and 'sample_weight'. "
+            "Use only 'sample_weight'; 'exposure' is a backward-compatible alias."
+        )
+    if sample_weight is not None:
+        exposure = sample_weight
 
     names = list(relativities.keys())
     n = len(names)
