@@ -187,6 +187,21 @@ class SuperGLM:
             )
         return dict(zip(spline_cols, self._n_knots))
 
+    @staticmethod
+    def _resolve_sample_weight_alias(
+        exposure: NDArray | None,
+        sample_weight: NDArray | None,
+        *,
+        method_name: str,
+    ) -> NDArray | None:
+        """Resolve the public sample_weight alias for exposure/frequency weights."""
+        if exposure is not None and sample_weight is not None:
+            raise TypeError(
+                f"{method_name} received both 'exposure' and 'sample_weight'. "
+                "Use only 'sample_weight'; 'exposure' is a backward-compatible alias."
+            )
+        return sample_weight if sample_weight is not None else exposure
+
     def _clone_without_features(
         self,
         drop: set[str],
@@ -327,6 +342,8 @@ class SuperGLM:
         y: NDArray,
         exposure: NDArray | None = None,
         offset: NDArray | None = None,
+        *,
+        sample_weight: NDArray | None = None,
     ) -> SuperGLM:
         """Fit the model to data.
 
@@ -337,6 +354,8 @@ class SuperGLM:
         y : array-like
             Response variable.
         exposure : array-like, optional
+            Backward-compatible alias for ``sample_weight``.
+        sample_weight : array-like, optional
             **Frequency weights** (prior weights), typically policy exposure
             in insurance applications. Defaults to 1 for all observations.
 
@@ -369,6 +388,7 @@ class SuperGLM:
         SuperGLM
             The fitted model (self).
         """
+        exposure = self._resolve_sample_weight_alias(exposure, sample_weight, method_name="fit()")
         if self._splines is not None and not self._specs:
             self._auto_detect_features(X, exposure)
 
@@ -441,6 +461,7 @@ class SuperGLM:
         exposure: NDArray | None = None,
         offset: NDArray | None = None,
         *,
+        sample_weight: NDArray | None = None,
         n_lambda: int = 50,
         lambda_ratio: float = 1e-3,
         lambda_seq: NDArray | None = None,
@@ -449,6 +470,9 @@ class SuperGLM:
 
         Warm-starts each lambda from the previous solution.
         """
+        exposure = self._resolve_sample_weight_alias(
+            exposure, sample_weight, method_name="fit_path()"
+        )
         y, exposure, offset = self._build_design_matrix(X, y, exposure, offset)
         self._fit_weights = exposure
         self._fit_offset = offset
@@ -522,6 +546,7 @@ class SuperGLM:
         exposure: NDArray | None = None,
         offset: NDArray | None = None,
         *,
+        sample_weight: NDArray | None = None,
         n_folds: int = 5,
         n_lambda: int = 50,
         lambda_ratio: float = 1e-3,
@@ -569,6 +594,10 @@ class SuperGLM:
         CVResult
         """
         from superglm.cv import CVResult, _fit_cv_folds, _select_lambda
+
+        exposure = self._resolve_sample_weight_alias(
+            exposure, sample_weight, method_name="fit_cv()"
+        )
 
         if self._splines is not None and not self._specs:
             self._auto_detect_features(X, exposure)
@@ -949,6 +978,7 @@ class SuperGLM:
         exposure: NDArray | None = None,
         offset: NDArray | None = None,
         *,
+        sample_weight: NDArray | None = None,
         max_reml_iter: int = 20,
         reml_tol: float = 1e-4,
         lambda2_init: float | None = None,
@@ -972,7 +1002,9 @@ class SuperGLM:
         y : array-like
             Response variable.
         exposure : array-like, optional
-            Frequency weights.
+            Backward-compatible alias for ``sample_weight``.
+        sample_weight : array-like, optional
+            Frequency/exposure weights.
         offset : array-like, optional
             Offset term.
         max_reml_iter : int
@@ -989,6 +1021,9 @@ class SuperGLM:
         SuperGLM
             The fitted model (self).
         """
+        exposure = self._resolve_sample_weight_alias(
+            exposure, sample_weight, method_name="fit_reml()"
+        )
         if self._splines is not None and not self._specs:
             self._auto_detect_features(X, exposure)
 
@@ -1246,6 +1281,8 @@ class SuperGLM:
         y: NDArray,
         exposure: NDArray | None = None,
         offset: NDArray | None = None,
+        *,
+        sample_weight: NDArray | None = None,
         **kwargs,
     ):
         """Estimate Tweedie p via profile likelihood, refit, and return result.
@@ -1260,6 +1297,10 @@ class SuperGLM:
         """
         from superglm.tweedie_profile import estimate_tweedie_p
 
+        exposure = self._resolve_sample_weight_alias(
+            exposure, sample_weight, method_name="estimate_p()"
+        )
+
         result = estimate_tweedie_p(self, X, y, exposure=exposure, offset=offset, **kwargs)
         self.tweedie_p = result.p_hat
         self._tweedie_profile_result = result
@@ -1272,6 +1313,8 @@ class SuperGLM:
         y: NDArray,
         exposure: NDArray | None = None,
         offset: NDArray | None = None,
+        *,
+        sample_weight: NDArray | None = None,
         **kwargs,
     ):
         """Estimate NB theta via profile likelihood, refit, and return result.
@@ -1286,6 +1329,10 @@ class SuperGLM:
         """
         from superglm.nb_profile import estimate_nb_theta
 
+        exposure = self._resolve_sample_weight_alias(
+            exposure, sample_weight, method_name="estimate_theta()"
+        )
+
         result = estimate_nb_theta(self, X, y, exposure=exposure, offset=offset, **kwargs)
         self.nb_theta = result.theta_hat
         self._nb_profile_result = result
@@ -1298,6 +1345,8 @@ class SuperGLM:
         y: NDArray,
         exposure: NDArray | None = None,
         offset: NDArray | None = None,
+        *,
+        sample_weight: NDArray | None = None,
     ) -> ModelMetrics:
         """Compute comprehensive diagnostics for the fitted model.
 
@@ -1305,6 +1354,10 @@ class SuperGLM:
         leverage, Cook's distance, etc.
         """
         from superglm.metrics import ModelMetrics
+
+        exposure = self._resolve_sample_weight_alias(
+            exposure, sample_weight, method_name="metrics()"
+        )
 
         return ModelMetrics(self, X, y, exposure, offset)
 
@@ -1315,9 +1368,11 @@ class SuperGLM:
         exposure: NDArray | None = None,
         offset: NDArray | None = None,
         *,
+        sample_weight: NDArray | None = None,
         test: str = "Chisq",
     ) -> pd.DataFrame:
         """Drop-one deviance analysis for each feature."""
+        exposure = self._resolve_sample_weight_alias(exposure, sample_weight, method_name="drop1()")
         return _drop1(self, X, y, exposure=exposure, offset=offset, test=test)
 
     def refit_unpenalised(
@@ -1327,9 +1382,13 @@ class SuperGLM:
         exposure: NDArray | None = None,
         offset: NDArray | None = None,
         *,
+        sample_weight: NDArray | None = None,
         keep_smoothing: bool = True,
     ) -> SuperGLM:
         """Refit with only active features and no selection penalty."""
+        exposure = self._resolve_sample_weight_alias(
+            exposure, sample_weight, method_name="refit_unpenalised()"
+        )
         return _refit_unpenalised(
             self,
             X,
@@ -1400,6 +1459,8 @@ class SuperGLM:
         X: pd.DataFrame | None = None,
         exposure: NDArray | None = None,
         with_ci: bool = True,
+        *,
+        sample_weight: NDArray | None = None,
         **kwargs,
     ):
         """Plot relativity curves/bars for all features.
@@ -1417,6 +1478,10 @@ class SuperGLM:
             Forwarded to :func:`superglm.plotting.plot_relativities`.
         """
         from superglm.plotting import plot_relativities
+
+        exposure = self._resolve_sample_weight_alias(
+            exposure, sample_weight, method_name="plot_relativities()"
+        )
 
         return plot_relativities(
             self.relativities(with_se=with_ci),
@@ -1456,6 +1521,8 @@ class SuperGLM:
         X: pd.DataFrame,
         y: NDArray,
         exposure: NDArray | None = None,
+        *,
+        sample_weight: NDArray | None = None,
         **kwargs,
     ) -> DiscretizationResult:
         """Analyse the impact of discretizing spline/polynomial curves.
@@ -1463,6 +1530,10 @@ class SuperGLM:
         See :func:`superglm.discretize.discretization_impact` for full docs.
         """
         from superglm.discretize import discretization_impact
+
+        exposure = self._resolve_sample_weight_alias(
+            exposure, sample_weight, method_name="discretization_impact()"
+        )
 
         return discretization_impact(self, X, y, exposure, **kwargs)
 

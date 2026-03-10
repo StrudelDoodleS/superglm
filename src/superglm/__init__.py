@@ -8,7 +8,7 @@ Core API (auto-detect):
         penalty="group_lasso", lambda1=0.01,
         splines=["driver_age"],
     )
-    model.fit(X, y, exposure=w)
+    model.fit(X, y, sample_weight=exposure)
 
 Core API (explicit):
     from superglm import SuperGLM, Spline, Categorical, Numeric
@@ -21,7 +21,7 @@ Core API (explicit):
             "density": Numeric(),
         },
     )
-    model.fit(X, y, exposure=w)
+    model.fit(X, y, sample_weight=exposure)
 
 sklearn-compatible API:
     from superglm import SuperGLMRegressor

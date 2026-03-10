@@ -4,7 +4,7 @@
 [![codecov](https://codecov.io/github/StrudelDoodleS/superglm/graph/badge.svg?token=2HO71TA2ZY)](https://codecov.io/github/StrudelDoodleS/superglm)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/StrudelDoodleS/superglm/actions/workflows/ci.yml)
 
-Penalised GLMs for insurance pricing. Group lasso variable selection, P-splines with SSP reparametrisation, Poisson/Gamma/NB2/Tweedie families, interactions, and statsmodels-style model summaries.
+Penalised GLMs for insurance pricing. SuperGLM supports standard penalised fits, exact REML, large-`n` discrete/fREML-style REML, spline double-penalty shrinkage, group penalties, interactions, and statsmodels-style summaries for Poisson, Gamma, NB2, and Tweedie models.
 
 ## Installation
 
@@ -33,7 +33,7 @@ model = SuperGLM(
     splines=["DrivAge", "VehAge", "BonusMalus"],
     n_knots=10,
 )
-model.fit(df, y, exposure=weights)
+model.fit(df, y, sample_weight=exposure)
 predictions = model.predict(df)
 ```
 
@@ -54,8 +54,73 @@ model = SuperGLM(
         "LogDensity": Numeric(),
     },
 )
-model.fit(df, y, exposure=weights)
+model.fit(df, y, sample_weight=exposure)
 ```
+
+## Weights and offsets
+
+Public examples use `sample_weight=`. In insurance settings this is interpreted as **exposure / frequency weight**, not inverse-variance weight. The older `exposure=` keyword is still accepted as a backward-compatible alias.
+
+Two common patterns for count models:
+
+```python
+# Raw count target: offset absorbs exposure, model estimates a rate
+model.fit(df, claim_counts, offset=np.log(exposure))
+
+# Rate target (count / exposure): weight by exposure for heteroscedasticity
+model.fit(df, claim_rate, sample_weight=exposure)
+```
+
+## Fitting modes
+
+**1. Standard penalised fit**
+
+Use `fit()` when you want a fixed `lambda2` and a standard regularised GLM fit.
+
+```python
+model = SuperGLM(
+    family="poisson",
+    penalty="group_elastic_net",
+    lambda1=0.01,
+    lambda2=0.1,
+    features=features,
+)
+model.fit(df, y, sample_weight=exposure)
+```
+
+**2. Exact REML**
+
+Use `fit_reml(discrete=False)` for the standard smoothness-selection path (`lambda1=0`).
+
+```python
+model = SuperGLM(family="poisson", lambda1=0.0, features=features)
+model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
+```
+
+**3. Discrete / fREML-style REML**
+
+Use `fit_reml(discrete=True)` for large data. This is the fast path for spline-heavy frequency models.
+
+```python
+model = SuperGLM(
+    family="poisson",
+    lambda1=0.0,
+    discrete=True,
+    n_bins=256,
+    features=features,
+)
+model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
+```
+
+**4. Shrinkage vs selection**
+
+- `select=True` on a spline adds mgcv-style double-penalty shrinkage.
+- `lambda1 > 0` activates sparse/group penalties.
+
+Those are different tools:
+
+- `select=True` is the more REML-aligned way to let smooth terms shrink toward zero.
+- `lambda1 > 0` is the sparse-additive path, best used for screening / compression rather than mgcv-style inference.
 
 ## Feature types
 
@@ -114,7 +179,7 @@ model = SuperGLM(
     interactions=[("age", "region")],
     lambda1=0.01,
 )
-model.fit(df, y, exposure=weights)
+model.fit(df, y, sample_weight=exposure)
 ```
 
 Auto-detected interaction types:
@@ -142,6 +207,8 @@ GroupLasso(lambda1=0.01, flavor=Adaptive())        # adaptive group lasso (two-s
 
 If `lambda1=None` (default), it is auto-calibrated to 10% of `lambda_max` at fit time.
 
+For spline-heavy models, `GroupElasticNet` is usually the smoother selection path than pure `GroupLasso`. `Ridge` is shrinkage only and does not remove terms.
+
 ## Regularisation path
 
 Fit a sequence of models from high to low regularisation with warm starts:
@@ -157,7 +224,7 @@ model = SuperGLM(
         "Area": Categorical(base="most_exposed"),
     },
 )
-result = model.fit_path(df, y, exposure=weights, n_lambda=50, lambda_ratio=1e-3)
+result = model.fit_path(df, y, sample_weight=exposure, n_lambda=50, lambda_ratio=1e-3)
 
 result.lambda_seq       # (50,) decreasing lambda values
 result.coef_path        # (50, p) coefficients at each lambda
@@ -168,7 +235,7 @@ result.n_iter_path      # (50,) PIRLS iterations per lambda
 Or pass a custom lambda sequence:
 
 ```python
-result = model.fit_path(df, y, exposure=weights, lambda_seq=[1.0, 0.1, 0.01])
+result = model.fit_path(df, y, sample_weight=exposure, lambda_seq=[1.0, 0.1, 0.01])
 ```
 
 After `fit_path`, `model.predict()` uses the last (least-regularised) fit.
@@ -177,18 +244,18 @@ After `fit_path`, `model.predict()` uses the last (least-regularised) fit.
 
 ```python
 # Statsmodels-style summary table with SEs, p-values, and smooth tests
-m = model.metrics(df, y, exposure=weights)
+m = model.metrics(df, y, sample_weight=exposure)
 print(m.summary())
 
 # Relativity DataFrames with 95% CI
 rels = model.relativities(with_se=True)
 
 # Plot all curves with CI bands and exposure histogram
-model.plot_relativities(df, exposure=weights)
+model.plot_relativities(df, sample_weight=exposure)
 
 # Or use the standalone function
 from superglm import plot_relativities
-plot_relativities(rels, X=df, exposure=weights)
+plot_relativities(rels, X=df, sample_weight=exposure)
 
 # Manual curve access
 curve = model.reconstruct_feature("DrivAge")
@@ -209,7 +276,7 @@ Or estimate the power via profile likelihood:
 
 ```python
 model = SuperGLM(family="tweedie", penalty=GroupLasso(lambda1=0.01))
-result = model.estimate_p(df, y, exposure=weights, p_range=(1.1, 1.9))
+result = model.estimate_p(df, y, sample_weight=exposure, p_range=(1.1, 1.9))
 print(result.p_hat)  # estimated Tweedie power
 ```
 
@@ -218,15 +285,15 @@ print(result.p_hat)  # estimated Tweedie power
 For overdispersed count data where the Poisson variance assumption is too restrictive:
 
 ```python
-from superglm import NegativeBinomial, estimate_nb_theta
+from superglm import NegativeBinomial
 
 # Fixed theta
 model = SuperGLM(family=NegativeBinomial(theta=1.0), penalty=GroupLasso(lambda1=0.01))
-model.fit(df, y, exposure=weights)
+model.fit(df, y, sample_weight=exposure)
 
 # Profile estimate theta (MASS-style alternating GLM fit + Newton update)
-result = estimate_nb_theta(model, df, y, exposure=weights)
-print(result.theta)  # estimated dispersion
+result = model.estimate_theta(df, y, sample_weight=exposure)
+print(result.theta_hat)  # estimated dispersion
 ```
 
 ## sklearn interface
@@ -241,7 +308,7 @@ model = SuperGLMRegressor(
     spline_features=["DrivAge", "VehAge"],
     n_knots=10,
 )
-model.fit(df, y, sample_weight=weights)
+model.fit(df, y, sample_weight=exposure)
 model.predict(df)
 ```
 
