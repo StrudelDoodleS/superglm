@@ -61,20 +61,22 @@ model.fit(df, y, exposure=weights)
 
 ### Splines
 
-`Spline(kind, k)` is the recommended API for creating spline features. `kind` selects the basis type, `k` sets the basis dimension (analogous to mgcv's `k`). You can also use `n_knots` (interior knot count) instead of `k`.
+`Spline(kind, k)` is the recommended API for creating spline features. `kind` selects the basis type, `k` sets the final built basis dimension (number of columns from `.build()`). You can also use `n_knots` (interior knot count) instead of `k`.
 
 ```python
-Spline(kind="bs", k=14)                   # P-spline (default kind)
-Spline(kind="ns", k=10)                   # Natural spline (linear tails)
-Spline(kind="cr", k=10)                   # Cubic regression spline (mgcv bs="cr")
+Spline(kind="bs", k=14)                   # 14-column P-spline (default kind)
+Spline(kind="ns", k=10)                   # 10-column natural spline (linear tails)
+Spline(kind="cr", k=10)                   # 10-column cubic regression spline
 Spline(kind="bs", k=14, split_linear=True) # mgcv double penalty: spline-vs-linear selection
 ```
 
-| Kind | Basis | Penalty | Constraints |
-|------|-------|---------|-------------|
-| `"bs"` | B-spline | Second-difference | None |
-| `"ns"` | B-spline | Second-difference | f''=0 at boundaries (linear tails) |
-| `"cr"` | B-spline | Integrated f'' squared | Natural + identifiability |
+| Kind | Basis | Penalty | Constraints | `k` vs mgcv |
+|------|-------|---------|-------------|-------------|
+| `"bs"` | B-spline | Second-difference | None | same |
+| `"ns"` | B-spline | Second-difference | f''=0 at boundaries | same |
+| `"cr"` | B-spline | Integrated f'' squared | Natural + identifiability | `mgcv_k - 1` |
+
+For `"bs"` and `"ns"`, `k` matches mgcv's `k`. For `"cr"`, SuperGLM physically removes the identifiability direction that mgcv absorbs via a constraint, so `k` here is `mgcv_k - 1`.
 
 `split_linear=True` (BS only) decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped.
 
