@@ -17,9 +17,10 @@ Fitting paths tested:
   4. fit(lambda1>0)           — group lasso BCD   [sanity]
 
 Data:
-  Tests load from data/freMTPL2freq.parquet and data/freMTPL2sev.parquet
-  (gitignored).  All tests skip when these files are absent, so CI is
-  unaffected.  No derived data blobs are committed.
+  Uses tests/_datasets.py to locate freMTPL2 parquet files (checks
+  $SUPERGLM_DATA_DIR, ~/.cache/superglm/, and <project>/data/ in order).
+  All tests skip when data is absent, so CI is unaffected.  No derived
+  data blobs are committed.
 
   NB2: deterministic 50k subsample (sorted by IDpol, first 50k)
   Gamma: all claims joined with freq features (~25k rows)
@@ -35,10 +36,7 @@ Basis alignment:
   The integrated-f'' penalty matches mgcv's default m=2 for cr.
 """
 
-import os
-
 import numpy as np
-import pandas as pd
 import pytest
 
 from superglm import SuperGLM
@@ -46,7 +44,7 @@ from superglm.distributions import NegativeBinomial
 from superglm.features.categorical import Categorical
 from superglm.features.spline import Spline
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+from . import _datasets
 
 # ── mgcv reference values ────────────────────────────────────────────
 # R 4.5.2, mgcv 1.9-3, bs="cr", method="REML"
@@ -83,11 +81,11 @@ NB2_THETA = 1000
 
 
 def _freq_available():
-    return os.path.exists(os.path.join(DATA_DIR, "freMTPL2freq.parquet"))
+    return _datasets.find("freMTPL2freq.parquet") is not None
 
 
 def _sev_available():
-    return os.path.exists(os.path.join(DATA_DIR, "freMTPL2sev.parquet"))
+    return _datasets.find("freMTPL2sev.parquet") is not None
 
 
 def _prep_freq(df):
@@ -103,7 +101,7 @@ def _prep_freq(df):
 
 def _load_nb2_data():
     """Load 50k NB2 subsample: sort by IDpol, take first 50k."""
-    df = pd.read_parquet(os.path.join(DATA_DIR, "freMTPL2freq.parquet"))
+    df = _datasets.load_freq()
     df = _prep_freq(df)
     df = df.sort_values("IDpol").reset_index(drop=True).iloc[:50000]
     y = df["ClaimNb"].values.astype(float)
@@ -113,9 +111,9 @@ def _load_nb2_data():
 
 def _load_gamma_data():
     """Load Gamma severity: join freq features with aggregated claims."""
-    freq = pd.read_parquet(os.path.join(DATA_DIR, "freMTPL2freq.parquet"))
+    freq = _datasets.load_freq()
     freq = _prep_freq(freq)
-    sev = pd.read_parquet(os.path.join(DATA_DIR, "freMTPL2sev.parquet"))
+    sev = _datasets.load_sev()
     sev_agg = sev.groupby("IDpol")["ClaimAmount"].sum().reset_index()
     merged = freq.merge(sev_agg, on="IDpol", how="inner")
     y = merged["ClaimAmount"].values.astype(float)
