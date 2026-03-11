@@ -604,6 +604,15 @@ def optimize_direct_reml(
                 r_j = penalty_ranks[g.name]
                 denom = inv_phi * quad + trace_term
                 lam_new = r_j / denom if denom > 1e-12 else cand_lambdas[g.name]
+                # Snap degenerate split-linear groups to upper bound.
+                # When quad << trace, the FP update is degenerate (any lambda
+                # is approximately a fixed point).  Snap breaks the degeneracy.
+                if (
+                    g.subgroup_type is not None
+                    and trace_term > 1e-12
+                    and inv_phi * quad < 0.1 * trace_term
+                ):
+                    lam_new = np.exp(log_hi)
                 rho[i] = np.clip(np.log(max(lam_new, 1e-6)), log_lo, log_hi)
             _t_fp_update += _time.perf_counter() - _t0
             continue
@@ -699,60 +708,6 @@ def optimize_direct_reml(
 
     if best_pirls is None:
         raise RuntimeError("Direct REML Newton did not evaluate any candidates")
-
-    # ── Post-convergence probe for degenerate split-linear groups ──
-    # The Fellner-Schall FP update is degenerate for noise terms: when
-    # coefficients are shrunk, lambda = rank/(quad + rank/lambda) ≈ lambda,
-    # so ANY lambda is approximately a fixed point.  The bootstrap
-    # initialization biases toward moderate lambdas, leaving residual EDF
-    # on noise features.  Probe the upper bound for each split-linear
-    # subgroup that looks degenerate (small coefficients).  Signal groups
-    # are skipped (large ||β||) to avoid wasteful IRLS solves.
-    _probe_norm_thr = 0.01
-    probe_groups = [
-        (idx, g)
-        for idx, g in reml_groups
-        if g.subgroup_type is not None
-        and np.linalg.norm(best_pirls.beta[g.sl]) / max(np.sqrt(g.size), 1.0) < _probe_norm_thr
-    ]
-    for idx, g in probe_groups:
-        probe_lambdas = best_lambdas.copy()
-        probe_lambdas[g.name] = float(np.exp(log_hi))
-        probe_result, probe_inv, probe_xtwx = fit_irls_direct(
-            X=dm,
-            y=y,
-            weights=exposure,
-            family=distribution,
-            link=link,
-            groups=groups,
-            lambda2=probe_lambdas,
-            offset=offset_arr,
-            beta_init=warm_beta,
-            intercept_init=warm_intercept,
-            return_xtwx=True,
-            profile=profile,
-        )
-        probe_obj = reml_laml_objective(
-            dm,
-            distribution,
-            link,
-            groups,
-            y,
-            probe_result,
-            probe_lambdas,
-            exposure,
-            offset_arr,
-            XtWX=probe_xtwx,
-            penalty_caches=penalty_caches,
-        )
-        # Accept if objective improves or degrades by less than 0.1
-        # (the REML landscape is extremely flat for noise terms)
-        if probe_obj <= best_obj + 0.1:
-            best_obj = probe_obj
-            best_lambdas = probe_lambdas
-            best_pirls = probe_result
-            warm_beta = probe_result.beta.copy()
-            warm_intercept = float(probe_result.intercept)
 
     grad_norm = float(np.max(np.abs(best_grad))) if best_grad is not None else np.inf
     converged = converged or grad_norm <= grad_tol
@@ -1037,6 +992,13 @@ def optimize_discrete_reml_cached_w(
                 r_j = penalty_ranks[g.name]
                 denom = inv_phi * quad + trace_term
                 lam_new = r_j / denom if denom > 1e-12 else inner_lambdas[g.name]
+                # Snap degenerate split-linear groups (see optimize_direct_reml).
+                if (
+                    g.subgroup_type is not None
+                    and trace_term > 1e-12
+                    and inv_phi * quad < 0.1 * trace_term
+                ):
+                    lam_new = np.exp(log_hi)
                 rho[i] = np.clip(np.log(max(lam_new, 1e-6)), log_lo, log_hi)
 
             rho_change = float(np.max(np.abs(rho - rho_prev)))
@@ -1103,109 +1065,6 @@ def optimize_discrete_reml_cached_w(
 
     if best_pirls is None:
         raise RuntimeError("Discrete REML cached-W did not evaluate any candidates")
-
-    # ── Post-convergence probe for degenerate split-linear groups ──
-    # Same FP-degeneracy fix as optimize_direct_reml (see comment there).
-    _probe_norm_thr = 0.01
-    probe_groups = [
-        (idx, g)
-        for idx, g in reml_groups
-        if g.subgroup_type is not None
-        and np.linalg.norm(best_pirls.beta[g.sl]) / max(np.sqrt(g.size), 1.0) < _probe_norm_thr
-    ]
-    any_probe_accepted = False
-    for idx, g in probe_groups:
-        probe_lambdas = best_lambdas.copy()
-        probe_lambdas[g.name] = float(np.exp(log_hi))
-        probe_result, probe_inv, probe_xtwx = fit_irls_direct(
-            X=dm,
-            y=y,
-            weights=exposure,
-            family=distribution,
-            link=link,
-            groups=groups,
-            lambda2=probe_lambdas,
-            offset=offset_arr,
-            beta_init=warm_beta,
-            intercept_init=warm_intercept,
-            return_xtwx=True,
-            profile=profile,
-        )
-        probe_obj = reml_laml_objective(
-            dm,
-            distribution,
-            link,
-            groups,
-            y,
-            probe_result,
-            probe_lambdas,
-            exposure,
-            offset_arr,
-            XtWX=probe_xtwx,
-            penalty_caches=penalty_caches,
-        )
-        if probe_obj <= best_obj + 0.1:
-            best_obj = probe_obj
-            best_lambdas = probe_lambdas
-            best_pirls = probe_result
-            warm_beta = probe_result.beta.copy()
-            warm_intercept = float(probe_result.intercept)
-            any_probe_accepted = True
-
-    # After probing, re-run a few REML outer iterations so higher-rank
-    # groups can readjust their lambdas to the new rank-1 values.
-    if any_probe_accepted:
-        _probe_lambdas = best_lambdas.copy()
-        for _probe_outer in range(max_reml_iter):
-            _probe_result, _probe_inv, _probe_xtwx = fit_irls_direct(
-                X=dm,
-                y=y,
-                weights=exposure,
-                family=distribution,
-                link=link,
-                groups=groups,
-                lambda2=_probe_lambdas,
-                offset=offset_arr,
-                beta_init=warm_beta,
-                intercept_init=warm_intercept,
-                return_xtwx=True,
-                profile=profile,
-            )
-            _probe_obj = reml_laml_objective(
-                dm,
-                distribution,
-                link,
-                groups,
-                y,
-                _probe_result,
-                _probe_lambdas,
-                exposure,
-                offset_arr,
-                XtWX=_probe_xtwx,
-                penalty_caches=penalty_caches,
-            )
-            # FP update for all non-probed groups
-            _max_delta = 0.0
-            for i, (_idx, _g) in enumerate(reml_groups):
-                omega_ssp = penalty_caches[_g.name].omega_ssp
-                beta_g = _probe_result.beta[_g.sl]
-                quad = float(beta_g @ omega_ssp @ beta_g)
-                trace_term = float(np.trace(_probe_inv[_g.sl, _g.sl] @ omega_ssp))
-                r_j = penalty_ranks[_g.name]
-                denom = quad + trace_term
-                lam_new = r_j / denom if denom > 1e-12 else _probe_lambdas[_g.name]
-                lam_new = float(np.clip(lam_new, 1e-6, np.exp(log_hi)))
-                _delta = abs(np.log(lam_new) - np.log(_probe_lambdas[_g.name]))
-                _max_delta = max(_max_delta, _delta)
-                _probe_lambdas[_g.name] = lam_new
-            if _probe_obj < best_obj:
-                best_obj = _probe_obj
-                best_lambdas = _probe_lambdas.copy()
-                best_pirls = _probe_result
-            warm_beta = _probe_result.beta.copy()
-            warm_intercept = float(_probe_result.intercept)
-            if _max_delta < 0.02:
-                break
 
     if profile is not None:
         profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
