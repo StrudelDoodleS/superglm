@@ -388,9 +388,14 @@ def estimate_tweedie_p(
 ) -> TweedieProfileResult:
     """Estimate the Tweedie power parameter via profile likelihood.
 
-    Builds the design matrix once, then for each candidate p calls
-    fit_pirls directly with warm starts from the previous solution.
-    Optimised via bounded Brent (scipy minimize_scalar).
+    Dispatches to one of two internal paths based on *fit_mode*:
+
+    - ``"fit"`` (default): builds the design matrix once and calls
+      ``fit_pirls`` directly with warm starts for each candidate p.
+    - ``"fit_reml"``: calls ``model.fit_reml()`` for each candidate p,
+      re-estimating smoothing parameters at every evaluation.
+
+    Both paths use bounded Brent (scipy minimize_scalar) over p.
 
     Parameters
     ----------
@@ -429,6 +434,12 @@ def estimate_tweedie_p(
     is_tweedie = (isinstance(family, str) and family == "tweedie") or isinstance(family, Tweedie)
     if not is_tweedie:
         raise ValueError(f"estimate_tweedie_p requires family='tweedie', got {family!r}")
+
+    _VALID_FIT_MODES = {"fit", "fit_reml"}
+    if fit_mode not in _VALID_FIT_MODES:
+        raise ValueError(
+            f"fit_mode={fit_mode!r} is not valid, expected one of {sorted(_VALID_FIT_MODES)}"
+        )
 
     if fit_mode == "fit_reml":
         return _estimate_tweedie_p_reml(

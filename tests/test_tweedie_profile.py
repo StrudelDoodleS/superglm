@@ -442,6 +442,13 @@ class TestEstimatePFitMode:
         model.estimate_p(X, y, fit_mode="inherit")
         assert model._last_fit_meta["method"] == "fit"
 
+    def test_invalid_fit_mode_raises(self):
+        """Invalid fit_mode should raise immediately."""
+        X, y, _ = _tweedie_data()
+        model = SuperGLM(family="tweedie", lambda1=0, features={"x1": Numeric()})
+        with pytest.raises(ValueError, match="fit_mode"):
+            model.estimate_p(X, y, fit_mode="bogus")
+
     def test_wrong_family_raises(self):
         """Non-Tweedie model should raise immediately."""
         X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})

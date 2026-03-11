@@ -1317,6 +1317,11 @@ class SuperGLM:
         )
 
         # Resolve to internal method name: "fit" or "fit_reml"
+        _VALID_FIT_MODES = {"fit", "reml", "inherit"}
+        if fit_mode not in _VALID_FIT_MODES:
+            raise ValueError(
+                f"fit_mode={fit_mode!r} is not valid, expected one of {sorted(_VALID_FIT_MODES)}"
+            )
         if fit_mode == "reml":
             resolved_mode = "fit_reml"
         elif fit_mode == "inherit":
