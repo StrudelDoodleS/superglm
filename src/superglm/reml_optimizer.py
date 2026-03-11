@@ -925,14 +925,31 @@ def optimize_discrete_reml_cached_w(
                 for idx_j, name in enumerate(group_names):
                     best_lambdas[name] = float(np.clip(np.exp(rho_clipped_f[idx_j]), 1e-6, 1e10))
                 _edf = 1.0 + float(np.trace(XtWX_S_inv @ XtWX))
+                # Compute fresh deviance at analytical beta (O(n) data pass)
+                eta_f = np.clip(dm.matvec(warm_beta) + warm_intercept + offset_arr, -20, 20)
+                mu_f = np.clip(link.inverse(eta_f), 1e-7, 1e7)
+                dev_f = float(np.sum(exposure * distribution.deviance_unit(y, mu_f)))
                 best_pirls = PIRLSResult(
                     beta=warm_beta.copy(),
                     intercept=warm_intercept,
-                    deviance=best_pirls.deviance,
+                    deviance=dev_f,
                     n_iter=0,
                     converged=True,
                     phi=1.0,
                     effective_df=_edf,
+                )
+                best_obj = reml_laml_objective(
+                    dm,
+                    distribution,
+                    link,
+                    groups,
+                    y,
+                    best_pirls,
+                    best_lambdas,
+                    exposure,
+                    offset_arr,
+                    XtWX=XtWX,
+                    penalty_caches=penalty_caches,
                 )
                 converged = True
                 break
@@ -1028,6 +1045,7 @@ def optimize_discrete_reml_cached_w(
         # === Inner analytical REML loop (no data passes) ===
         _t0 = _time.perf_counter()
         beta_cur = pirls_result.beta.copy()
+        _dead_group_indices.clear()  # re-evaluate from fresh FP analysis
 
         for _inner in range(max_analytical_per_w):
             _n_analytical_iters += 1
@@ -1128,7 +1146,34 @@ def optimize_discrete_reml_cached_w(
                 rho_clipped = np.clip(rho, log_lo, log_hi)
                 for idx_j, name in enumerate(group_names):
                     best_lambdas[name] = float(np.clip(np.exp(rho_clipped[idx_j]), 1e-6, 1e10))
-                best_pirls = pirls_result
+                # Recompute deviance + objective at analytical beta + final lambdas
+                eta_f = np.clip(dm.matvec(warm_beta) + warm_intercept + offset_arr, -20, 20)
+                mu_f = np.clip(link.inverse(eta_f), 1e-7, 1e7)
+                dev_f = float(np.sum(exposure * distribution.deviance_unit(y, mu_f)))
+                # H_inv from last inner FP iteration is at the final lambdas
+                _edf = 1.0 + float(np.trace(H_inv @ XtWX))
+                best_pirls = PIRLSResult(
+                    beta=warm_beta.copy(),
+                    intercept=warm_intercept,
+                    deviance=dev_f,
+                    n_iter=pirls_result.n_iter,
+                    converged=True,
+                    phi=1.0,
+                    effective_df=_edf,
+                )
+                best_obj = reml_laml_objective(
+                    dm,
+                    distribution,
+                    link,
+                    groups,
+                    y,
+                    best_pirls,
+                    best_lambdas,
+                    exposure,
+                    offset_arr,
+                    XtWX=XtWX,
+                    penalty_caches=penalty_caches,
+                )
                 converged = True
                 break
             _skip_irls = non_dead_change < 0.02
