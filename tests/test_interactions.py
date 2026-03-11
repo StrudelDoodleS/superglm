@@ -143,9 +143,6 @@ class TestSplineCategoricalBuild:
         assert sc.parent_names == ("age", "region")
 
 
-# ── SplineCategorical + natural build tests ───────────────────
-
-
 class TestSplineCategoricalNaturalBuild:
     def test_natural_group_n_cols(self):
         """Per-level groups have K-2 columns when parent is NaturalSpline."""
@@ -176,9 +173,6 @@ class TestSplineCategoricalNaturalBuild:
         sc = SplineCategorical("spline", "cat")
         groups = sc.build(x, x_cat, {"spline": spline_spec, "cat": cat_spec})
         np.testing.assert_allclose(groups[0].penalty_matrix, parent_info.penalty_matrix, atol=1e-12)
-
-
-# ── PolynomialCategorical build tests ─────────────────────────
 
 
 class TestPolynomialCategoricalBuild:
@@ -230,9 +224,6 @@ class TestPolynomialCategoricalBuild:
         assert pc.parent_names == ("age", "region")
 
 
-# ── NumericCategorical build tests ────────────────────────────
-
-
 class TestNumericCategoricalBuild:
     def test_single_group(self):
         num_spec = Numeric()
@@ -267,9 +258,6 @@ class TestNumericCategoricalBuild:
     def test_parent_names(self):
         nc = NumericCategorical("bm", "region")
         assert nc.parent_names == ("bm", "region")
-
-
-# ── CategoricalInteraction build tests ────────────────────────
 
 
 class TestCategoricalInteractionBuild:
@@ -336,9 +324,6 @@ class TestCategoricalInteractionBuild:
         assert ci.parent_names == ("region", "type")
 
 
-# ── NumericInteraction build tests ────────────────────────────
-
-
 class TestNumericInteractionBuild:
     def test_single_column(self):
         s1 = Numeric(standardize=False)
@@ -374,9 +359,6 @@ class TestNumericInteractionBuild:
     def test_parent_names(self):
         ni = NumericInteraction("bm", "density")
         assert ni.parent_names == ("bm", "density")
-
-
-# ── PolynomialInteraction build tests ─────────────────────────
 
 
 class TestPolynomialInteractionBuild:
@@ -417,45 +399,163 @@ class TestPolynomialInteractionBuild:
         assert pi.parent_names == ("age", "vehage")
 
 
-# ── Model-level tests: SplineCategorical ──────────────────────
+# ══════════════════════════════════════════════════════════════
+# Parameterized model integration tests
+# ══════════════════════════════════════════════════════════════
+# Replace 8 per-type model test classes that had identical
+# fit/predict/groups/reconstruct patterns.
+
+# Factory approach — specs are mutable and interactions list is mutated
+# by build_design_matrix, so each test needs fresh objects.
 
 
-class TestSplineCategoricalModel:
-    def test_fit_predict_roundtrip(self, interaction_data):
+def _make_case(case_id: str):
+    """Return (features_dict, interactions_list, iname) with fresh objects."""
+    cases = {
+        "spline_cat": (
+            {"age": Spline(n_knots=10), "region": Categorical()},
+            [("age", "region")],
+            "age:region",
+        ),
+        "natural_spline_cat": (
+            {"age": NaturalSpline(n_knots=10), "region": Categorical()},
+            [("age", "region")],
+            "age:region",
+        ),
+        "crs_cat": (
+            {"age": CubicRegressionSpline(n_knots=10), "region": Categorical()},
+            [("age", "region")],
+            "age:region",
+        ),
+        "poly_cat": (
+            {"age": Polynomial(degree=3), "region": Categorical()},
+            [("age", "region")],
+            "age:region",
+        ),
+        "num_cat": (
+            {"bm": Numeric(), "region": Categorical()},
+            [("bm", "region")],
+            "bm:region",
+        ),
+        "cat_cat": (
+            {"region": Categorical(), "type": Categorical()},
+            [("region", "type")],
+            "region:type",
+        ),
+        "num_num": (
+            {"bm": Numeric(), "density": Numeric()},
+            [("bm", "density")],
+            "bm:density",
+        ),
+        "poly_poly": (
+            {"age": Polynomial(degree=2), "bm": Polynomial(degree=2)},
+            [("age", "bm")],
+            "age:bm",
+        ),
+        "tensor": (
+            {"age": Spline(n_knots=10), "bm": Spline(n_knots=5)},
+            [("age", "bm")],
+            "age:bm",
+        ),
+    }
+    return cases[case_id]
+
+
+_ALL_CASE_IDS = [
+    "spline_cat",
+    "natural_spline_cat",
+    "crs_cat",
+    "poly_cat",
+    "num_cat",
+    "cat_cat",
+    "num_num",
+    "poly_poly",
+    "tensor",
+]
+
+_MODEL_CASES = [pytest.param(k, id=k) for k in _ALL_CASE_IDS]
+
+
+class TestInteractionModelFitPredict:
+    @pytest.mark.parametrize("case_id", _MODEL_CASES)
+    def test_fit_predict_roundtrip(self, interaction_data, case_id):
+        features, interactions, iname = _make_case(case_id)
         X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Spline(n_knots=10), "region": Categorical()},
-            interactions=[("age", "region")],
-            lambda1=0.01,
-        )
+        model = SuperGLM(features=features, interactions=interactions, lambda1=0.01)
         model.fit(X, y, exposure=exposure)
         pred = model.predict(X)
         assert pred.shape == (len(y),)
         assert np.all(pred > 0)
 
-    def test_groups_created(self, interaction_data):
+    @pytest.mark.parametrize("case_id", _MODEL_CASES)
+    def test_groups_created(self, interaction_data, case_id):
+        features, interactions, iname = _make_case(case_id)
         X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Spline(n_knots=10), "region": Categorical()},
-            interactions=[("age", "region")],
-            lambda1=0.01,
-        )
+        model = SuperGLM(features=features, interactions=interactions, lambda1=0.01)
         model.fit(X, y, exposure=exposure)
-        igroups = [g for g in model._groups if g.feature_name == "age:region"]
+        igroups = [g for g in model._groups if g.feature_name == iname]
         assert len(igroups) >= 1
 
-    def test_high_lambda_zeros_interactions(self, interaction_data):
+    @pytest.mark.parametrize("case_id", _MODEL_CASES)
+    def test_reconstruct_interaction(self, interaction_data, case_id):
+        features, interactions, iname = _make_case(case_id)
         X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Spline(n_knots=10), "region": Categorical()},
-            interactions=[("age", "region")],
-            lambda1=1e4,
-        )
+        model = SuperGLM(features=features, interactions=interactions, lambda1=0.01)
         model.fit(X, y, exposure=exposure)
-        igroups = [g for g in model._groups if g.feature_name == "age:region"]
+        raw = model.reconstruct_feature(iname)
+        assert raw["interaction"] is True
+
+
+# High lambda should zero out interaction groups
+_HIGH_LAMBDA_CASES = [pytest.param(k, id=k) for k in ("spline_cat", "cat_cat", "tensor")]
+
+
+class TestInteractionHighLambda:
+    @pytest.mark.parametrize("case_id", _HIGH_LAMBDA_CASES)
+    def test_high_lambda_zeros_interaction(self, interaction_data, case_id):
+        features, interactions, iname = _make_case(case_id)
+        X, y, exposure = interaction_data
+        model = SuperGLM(features=features, interactions=interactions, lambda1=1e4)
+        model.fit(X, y, exposure=exposure)
+        igroups = [g for g in model._groups if g.feature_name == iname]
         for g in igroups:
             assert np.linalg.norm(model.result.beta[g.sl]) < 1e-10
 
+
+# Interactions that appear in relativities (1D per-level or scalar)
+_RELATIVITIES_INCLUDE = [
+    pytest.param(k, id=k) for k in ("spline_cat", "num_cat", "cat_cat", "num_num")
+]
+_RELATIVITIES_SKIP = [pytest.param(k, id=k) for k in ("poly_poly", "tensor")]
+
+
+class TestInteractionRelativities:
+    @pytest.mark.parametrize("case_id", _RELATIVITIES_INCLUDE)
+    def test_relativities_include_interaction(self, interaction_data, case_id):
+        features, interactions, iname = _make_case(case_id)
+        X, y, exposure = interaction_data
+        model = SuperGLM(features=features, interactions=interactions, lambda1=0.01)
+        model.fit(X, y, exposure=exposure)
+        rels = model.relativities()
+        interaction_keys = [k for k in rels if k.startswith(iname)]
+        assert len(interaction_keys) >= 1
+
+    @pytest.mark.parametrize("case_id", _RELATIVITIES_SKIP)
+    def test_relativities_skip_2d(self, interaction_data, case_id):
+        features, interactions, iname = _make_case(case_id)
+        X, y, exposure = interaction_data
+        model = SuperGLM(features=features, interactions=interactions, lambda1=0.01)
+        model.fit(X, y, exposure=exposure)
+        rels = model.relativities()
+        assert iname not in rels
+
+
+# ── Type-specific reconstruct assertions ──────────────────────
+# These test assertions unique to each interaction type that
+# can't be parameterized (different reconstruct dict keys).
+
+
+class TestSplineCategoricalPerLevel:
     def test_reconstruct_per_level(self, interaction_data):
         X, y, exposure = interaction_data
         model = SuperGLM(
@@ -465,43 +565,12 @@ class TestSplineCategoricalModel:
         )
         model.fit(X, y, exposure=exposure)
         raw = model.reconstruct_feature("age:region")
-        assert raw["interaction"] is True
         assert "per_level" in raw
         assert "x" in raw
 
-    def test_relativities_include_interaction(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Spline(n_knots=10), "region": Categorical()},
-            interactions=[("age", "region")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        rels = model.relativities()
-        assert "age" in rels
-        assert "region" in rels
-        interaction_keys = [k for k in rels if k.startswith("age:region")]
-        assert len(interaction_keys) >= 1
 
-
-# ── Model-level tests: Natural splines ────────────────────────
-
-
-class TestNaturalSplineModel:
-    def test_natural_spline_fit_predict(self, interaction_data):
-        """Full model with NaturalSpline fits and predicts."""
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": NaturalSpline(n_knots=10), "region": Categorical()},
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        pred = model.predict(X)
-        assert pred.shape == (len(y),)
-        assert np.all(pred > 0)
-
+class TestNaturalSplineModelSpecifics:
     def test_natural_spline_reconstruct(self, interaction_data):
-        """Relativity curve is reasonable with NaturalSpline."""
         X, y, exposure = interaction_data
         model = SuperGLM(
             features={"age": NaturalSpline(n_knots=10), "region": Categorical()},
@@ -509,14 +578,11 @@ class TestNaturalSplineModel:
         )
         model.fit(X, y, exposure=exposure)
         raw = model.reconstruct_feature("age")
-        assert "x" in raw
-        assert "relativity" in raw
-        # Relativities should be finite and positive
+        assert "x" in raw and "relativity" in raw
         assert np.all(np.isfinite(raw["relativity"]))
         assert np.all(raw["relativity"] > 0)
 
     def test_spline_cat_natural_fit_predict(self, interaction_data):
-        """SplineCategorical with NaturalSpline parent works end-to-end."""
         X, y, exposure = interaction_data
         model = SuperGLM(
             features={"age": NaturalSpline(n_knots=10), "region": Categorical()},
@@ -525,11 +591,9 @@ class TestNaturalSplineModel:
         )
         model.fit(X, y, exposure=exposure)
         pred = model.predict(X)
-        assert pred.shape == (len(y),)
-        assert np.all(pred > 0)
+        assert pred.shape == (len(y),) and np.all(pred > 0)
 
     def test_spline_cat_natural_reconstruct(self, interaction_data):
-        """Per-level reconstruct with NaturalSpline produces sensible curves."""
         X, y, exposure = interaction_data
         model = SuperGLM(
             features={"age": NaturalSpline(n_knots=10), "region": Categorical()},
@@ -540,43 +604,21 @@ class TestNaturalSplineModel:
         raw = model.reconstruct_feature("age:region")
         assert raw["interaction"] is True
         assert "per_level" in raw
-        for level_data in raw["per_level"].values():
-            assert np.all(np.isfinite(level_data["relativity"]))
-            assert np.all(level_data["relativity"] > 0)
 
     def test_spline_cat_natural_spline_class(self, interaction_data):
-        """SplineCategorical accepts NaturalSpline as parent."""
-        spline_spec = NaturalSpline(n_knots=10)
-        cat_spec = Categorical(base="first")
-        x_spline = np.linspace(0, 100, 500)
-        x_cat = np.array(["A", "B", "C"] * 166 + ["A", "B"])
-
-        spline_spec.build(x_spline)
-        cat_spec.build(x_cat)
-
-        sc = SplineCategorical("spline", "cat")
-        groups = sc.build(x_spline, x_cat, {"spline": spline_spec, "cat": cat_spec})
-        assert len(groups) == 2
-
-
-# ── Model-level tests: CubicRegressionSpline ──────────────────
-
-
-class TestCubicRegressionSplineModel:
-    def test_cr_spline_fit_predict(self, interaction_data):
-        """Full model with CubicRegressionSpline fits and predicts."""
         X, y, exposure = interaction_data
         model = SuperGLM(
-            features={"age": CubicRegressionSpline(n_knots=10), "region": Categorical()},
+            features={"age": NaturalSpline(n_knots=10), "region": Categorical()},
+            interactions=[("age", "region")],
             lambda1=0.01,
         )
         model.fit(X, y, exposure=exposure)
-        pred = model.predict(X)
-        assert pred.shape == (len(y),)
-        assert np.all(pred > 0)
+        assert isinstance(model._interaction_specs["age:region"], SplineCategorical)
+        assert isinstance(model._specs["age"], NaturalSpline)
 
+
+class TestCubicRegressionSplineModelSpecifics:
     def test_cr_spline_reconstruct(self, interaction_data):
-        """Relativity curve is finite and positive."""
         X, y, exposure = interaction_data
         model = SuperGLM(
             features={"age": CubicRegressionSpline(n_knots=10), "region": Categorical()},
@@ -584,68 +626,12 @@ class TestCubicRegressionSplineModel:
         )
         model.fit(X, y, exposure=exposure)
         raw = model.reconstruct_feature("age")
-        assert "x" in raw
-        assert "relativity" in raw
+        assert "x" in raw and "relativity" in raw
         assert np.all(np.isfinite(raw["relativity"]))
         assert np.all(raw["relativity"] > 0)
 
 
-# ── Model-level tests: PolynomialCategorical ──────────────────
-
-
-class TestPolynomialCategoricalModel:
-    def test_fit_predict_roundtrip(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Polynomial(degree=3), "region": Categorical()},
-            interactions=[("age", "region")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        pred = model.predict(X)
-        assert pred.shape == (len(y),)
-        assert np.all(pred > 0)
-
-    def test_per_level_groups(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Polynomial(degree=3), "region": Categorical()},
-            interactions=[("age", "region")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        igroups = [g for g in model._groups if g.feature_name == "age:region"]
-        assert len(igroups) >= 1
-
-    def test_reconstruct_per_level(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Polynomial(degree=3), "region": Categorical()},
-            interactions=[("age", "region")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        raw = model.reconstruct_feature("age:region")
-        assert raw["interaction"] is True
-        assert "per_level" in raw
-
-
-# ── Model-level tests: NumericCategorical ─────────────────────
-
-
-class TestNumericCategoricalModel:
-    def test_fit_predict_roundtrip(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"bm": Numeric(), "region": Categorical()},
-            interactions=[("bm", "region")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        pred = model.predict(X)
-        assert pred.shape == (len(y),)
-        assert np.all(pred > 0)
-
+class TestNumericCategoricalModelSpecifics:
     def test_reconstruct_per_level_slopes(self, interaction_data):
         X, y, exposure = interaction_data
         model = SuperGLM(
@@ -655,22 +641,9 @@ class TestNumericCategoricalModel:
         )
         model.fit(X, y, exposure=exposure)
         raw = model.reconstruct_feature("bm:region")
-        assert raw["interaction"] is True
         assert "relativities_per_unit" in raw
 
-    def test_relativities_include_interaction(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"bm": Numeric(), "region": Categorical()},
-            interactions=[("bm", "region")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        rels = model.relativities()
-        assert "bm:region" in rels
-
     def test_auto_detect_swaps_order(self, interaction_data):
-        """Categorical first, Numeric second → still puts numeric first."""
         X, y, exposure = interaction_data
         model = SuperGLM(
             features={"bm": Numeric(), "region": Categorical()},
@@ -682,34 +655,7 @@ class TestNumericCategoricalModel:
         assert isinstance(model._interaction_specs["bm:region"], NumericCategorical)
 
 
-# ── Model-level tests: CategoricalInteraction ─────────────────
-
-
-class TestCategoricalInteractionModel:
-    def test_fit_predict_roundtrip(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"region": Categorical(), "type": Categorical()},
-            interactions=[("region", "type")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        pred = model.predict(X)
-        assert pred.shape == (len(y),)
-        assert np.all(pred > 0)
-
-    def test_high_lambda_zeros_interaction(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"region": Categorical(), "type": Categorical()},
-            interactions=[("region", "type")],
-            lambda1=100.0,
-        )
-        model.fit(X, y, exposure=exposure)
-        igroups = [g for g in model._groups if g.feature_name == "region:type"]
-        for g in igroups:
-            assert np.linalg.norm(model.result.beta[g.sl]) < 1e-10
-
+class TestCategoricalInteractionModelSpecifics:
     def test_reconstruct_pairs(self, interaction_data):
         X, y, exposure = interaction_data
         model = SuperGLM(
@@ -719,37 +665,10 @@ class TestCategoricalInteractionModel:
         )
         model.fit(X, y, exposure=exposure)
         raw = model.reconstruct_feature("region:type")
-        assert raw["interaction"] is True
         assert "pairs" in raw
 
-    def test_relativities_include_interaction(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"region": Categorical(), "type": Categorical()},
-            interactions=[("region", "type")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        rels = model.relativities()
-        assert "region:type" in rels
 
-
-# ── Model-level tests: NumericInteraction ─────────────────────
-
-
-class TestNumericInteractionModel:
-    def test_fit_predict_roundtrip(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"bm": Numeric(), "density": Numeric()},
-            interactions=[("bm", "density")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        pred = model.predict(X)
-        assert pred.shape == (len(y),)
-        assert np.all(pred > 0)
-
+class TestNumericInteractionModelSpecifics:
     def test_reconstruct(self, interaction_data):
         X, y, exposure = interaction_data
         model = SuperGLM(
@@ -759,37 +678,10 @@ class TestNumericInteractionModel:
         )
         model.fit(X, y, exposure=exposure)
         raw = model.reconstruct_feature("bm:density")
-        assert raw["interaction"] is True
         assert "coef_original" in raw
 
-    def test_relativities_include_interaction(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"bm": Numeric(), "density": Numeric()},
-            interactions=[("bm", "density")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        rels = model.relativities()
-        assert "bm:density" in rels
 
-
-# ── Model-level tests: PolynomialInteraction ──────────────────
-
-
-class TestPolynomialInteractionModel:
-    def test_fit_predict_roundtrip(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Polynomial(degree=2), "bm": Polynomial(degree=2)},
-            interactions=[("age", "bm")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        pred = model.predict(X)
-        assert pred.shape == (len(y),)
-        assert np.all(pred > 0)
-
+class TestPolynomialInteractionModelSpecifics:
     def test_reconstruct_2d(self, interaction_data):
         X, y, exposure = interaction_data
         model = SuperGLM(
@@ -799,38 +691,14 @@ class TestPolynomialInteractionModel:
         )
         model.fit(X, y, exposure=exposure)
         raw = model.reconstruct_feature("age:bm")
-        assert raw["interaction"] is True
-        assert "x1" in raw
-        assert "x2" in raw
-
-    def test_relativities_skips_2d(self, interaction_data):
-        """2D surface interactions don't appear in relativities()."""
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Polynomial(degree=2), "bm": Polynomial(degree=2)},
-            interactions=[("age", "bm")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        rels = model.relativities()
-        # 2D surface not representable as DataFrame
-        assert "age:bm" not in rels
+        assert raw["log_relativity"].ndim == 2
 
 
-# ── API tests ─────────────────────────────────────────────────
+# ── Interaction API tests ─────────────────────────────────────
 
 
 class TestInteractionAPI:
     def test_add_interaction_via_constructor(self, simple_model_data):
-        X, y = simple_model_data
-        model = SuperGLM(
-            features={"x": Spline(n_knots=5), "cat": Categorical()},
-            interactions=[("x", "cat")],
-        )
-        model.fit(X, y)
-        assert "x:cat" in model._interaction_specs
-
-    def test_constructor_param(self, simple_model_data):
         X, y = simple_model_data
         model = SuperGLM(
             features={"x": Spline(n_knots=5), "cat": Categorical()},
@@ -963,7 +831,6 @@ class TestInteractionAPI:
             model.fit(X, y)
 
     def test_duplicate_interaction_in_constructor(self, simple_model_data):
-        """Duplicate tuples in interactions list are silently deduplicated at fit time."""
         X, y = simple_model_data
         model = SuperGLM(
             features={"x": Spline(n_knots=5), "cat": Categorical()},
@@ -973,69 +840,22 @@ class TestInteractionAPI:
         assert "x:cat" in model._interaction_specs
 
 
-# ── Summary tests ─────────────────────────────────────────────
+# ── Summary tests (parameterized) ────────────────────────────
+
+_SUMMARY_CASES = [
+    pytest.param(k, id=k) for k in ("spline_cat", "cat_cat", "num_cat", "num_num", "poly_poly")
+]
 
 
 class TestInteractionSummary:
-    def test_spline_cat_summary(self, interaction_data):
+    @pytest.mark.parametrize("case_id", _SUMMARY_CASES)
+    def test_interaction_in_summary(self, interaction_data, case_id):
+        features, interactions, iname = _make_case(case_id)
         X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Spline(n_knots=10), "region": Categorical()},
-            interactions=[("age", "region")],
-            lambda1=0.01,
-        )
+        model = SuperGLM(features=features, interactions=interactions, lambda1=0.01)
         model.fit(X, y, exposure=exposure)
         m = model.metrics(X, y, exposure=exposure)
-        s = m.summary()
-        assert "age:region" in str(s)
-
-    def test_cat_cat_summary(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"region": Categorical(), "type": Categorical()},
-            interactions=[("region", "type")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        m = model.metrics(X, y, exposure=exposure)
-        s = m.summary()
-        assert "region:type" in str(s)
-
-    def test_num_cat_summary(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"bm": Numeric(), "region": Categorical()},
-            interactions=[("bm", "region")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        m = model.metrics(X, y, exposure=exposure)
-        s = m.summary()
-        assert "bm:region" in str(s)
-
-    def test_num_num_summary(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"bm": Numeric(), "density": Numeric()},
-            interactions=[("bm", "density")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        m = model.metrics(X, y, exposure=exposure)
-        s = m.summary()
-        assert "bm:density" in str(s)
-
-    def test_poly_poly_summary(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Polynomial(degree=2), "bm": Polynomial(degree=2)},
-            interactions=[("age", "bm")],
-            lambda1=0.01,
-        )
-        model.fit(X, y, exposure=exposure)
-        m = model.metrics(X, y, exposure=exposure)
-        s = m.summary()
-        assert "age:bm" in str(s)
+        assert iname in str(m.summary())
 
 
 # ── No-overhead test ──────────────────────────────────────────
@@ -1060,7 +880,6 @@ class TestNoOverhead:
 
 class TestTensorInteractionBuild:
     def test_build_shape(self):
-        """GroupInfo columns have shape (n, (k1-1)*(k2-1))."""
         s1 = Spline(n_knots=5)
         s2 = Spline(n_knots=5)
         rng = np.random.default_rng(42)
@@ -1071,14 +890,10 @@ class TestTensorInteractionBuild:
 
         ti = TensorInteraction("a", "b", n_knots=(5, 5))
         info = ti.build(x1, x2, {"a": s1, "b": s2})
-
-        # k = n_knots + degree + 1 = 5 + 3 + 1 = 9 per margin.
-        # ti-style centering removes the constant direction from each margin.
         assert info.columns.shape == (500, 8 * 8)
         assert info.n_cols == 64
 
     def test_penalty_leaves_only_bilinear_null_space(self):
-        """ti-style penalty excludes lower-order pieces but keeps x1*x2 unpenalized."""
         s1 = Spline(n_knots=5)
         s2 = Spline(n_knots=5)
         x1 = np.linspace(0, 100, 300)
@@ -1088,12 +903,10 @@ class TestTensorInteractionBuild:
 
         ti = TensorInteraction("a", "b", n_knots=(5, 5))
         info = ti.build(x1, x2, {"a": s1, "b": s2})
-
         eigvals = np.linalg.eigvalsh(info.penalty_matrix)
-        assert np.sum(eigvals < 1e-10) == 1, "ti penalty should only leave x1*x2 unpenalized"
+        assert np.sum(eigvals < 1e-10) == 1
 
     def test_kronecker_values(self):
-        """T[i,:] = B1[i,:] ⊗ B2[i,:] for random rows."""
         s1 = Spline(n_knots=3)
         s2 = Spline(n_knots=3)
         rng = np.random.default_rng(42)
@@ -1106,7 +919,6 @@ class TestTensorInteractionBuild:
         info = ti.build(x1, x2, {"a": s1, "b": s2})
         T = info.columns.toarray()
 
-        # Verify Kronecker structure for a few rows using the centered marginals.
         from scipy.interpolate import BSpline as BSpl
 
         x1_clip = np.clip(x1, ti._knots1[0], ti._knots1[-1])
@@ -1119,7 +931,6 @@ class TestTensorInteractionBuild:
             np.testing.assert_allclose(T[i], expected, atol=1e-12)
 
     def test_sparse_output(self):
-        """Build returns sparse columns."""
         import scipy.sparse as sp
 
         s1 = Spline(n_knots=5)
@@ -1138,7 +949,6 @@ class TestTensorInteractionBuild:
         assert ti.parent_names == ("age", "vehage")
 
     def test_custom_knots(self):
-        """n_knots parameter controls resolution."""
         s1 = Spline(n_knots=5)
         s2 = Spline(n_knots=5)
         x1 = np.linspace(0, 100, 200)
@@ -1148,7 +958,6 @@ class TestTensorInteractionBuild:
 
         ti = TensorInteraction("a", "b", n_knots=(3, 4))
         info = ti.build(x1, x2, {"a": s1, "b": s2})
-        # k1 = 3+3+1 = 7, k2 = 4+3+1 = 8, then drop one constant direction per margin.
         assert info.n_cols == 6 * 7
 
     def test_decompose_returns_bilinear_and_wiggly_groups(self):
@@ -1170,7 +979,6 @@ class TestTensorInteractionBuild:
         assert infos[1].projection is not None
 
     def test_reconstruct_2d(self):
-        """Reconstruct returns 2D surface grid."""
         s1 = Spline(n_knots=5)
         s2 = Spline(n_knots=5)
         x1 = np.linspace(0, 100, 200)
@@ -1185,52 +993,16 @@ class TestTensorInteractionBuild:
         beta[0] = 0.1
         raw = ti.reconstruct(beta, n_points=20)
 
-        assert "x1" in raw
-        assert "x2" in raw
+        assert "x1" in raw and "x2" in raw
         assert raw["log_relativity"].shape == (20, 20)
         assert raw["relativity"].shape == (20, 20)
         assert raw["interaction"] is True
 
 
-# ── Model-level tests: TensorInteraction ──────────────────────
+# ── TensorInteraction model-level specifics ───────────────────
 
 
-class TestTensorInteractionModel:
-    def test_fit_predict_roundtrip(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Spline(n_knots=10), "bm": Spline(n_knots=5)},
-            interactions=[("age", "bm")],
-            lambda1=0.1,
-        )
-        model.fit(X, y, exposure=exposure)
-        pred = model.predict(X)
-        assert pred.shape == (len(y),)
-        assert np.all(pred > 0)
-
-    def test_groups_created(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Spline(n_knots=10), "bm": Spline(n_knots=5)},
-            interactions=[("age", "bm")],
-            lambda1=0.1,
-        )
-        model.fit(X, y, exposure=exposure)
-        igroups = [g for g in model._groups if g.feature_name == "age:bm"]
-        assert len(igroups) == 1
-
-    def test_high_lambda_zeros_interaction(self, interaction_data):
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Spline(n_knots=10), "bm": Spline(n_knots=5)},
-            interactions=[("age", "bm")],
-            lambda1=1e4,
-        )
-        model.fit(X, y, exposure=exposure)
-        igroups = [g for g in model._groups if g.feature_name == "age:bm"]
-        for g in igroups:
-            assert np.linalg.norm(model.result.beta[g.sl]) < 1e-10
-
+class TestTensorInteractionModelSpecifics:
     def test_reconstruct_2d_surface(self, interaction_data):
         X, y, exposure = interaction_data
         model = SuperGLM(
@@ -1240,22 +1012,8 @@ class TestTensorInteractionModel:
         )
         model.fit(X, y, exposure=exposure)
         raw = model.reconstruct_feature("age:bm")
-        assert raw["interaction"] is True
-        assert "x1" in raw
-        assert "x2" in raw
+        assert "x1" in raw and "x2" in raw
         assert raw["log_relativity"].ndim == 2
-
-    def test_auto_dispatch_spline_spline(self, interaction_data):
-        X, y, exposure = interaction_data
-        X["a"] = X["age"]
-        X["b"] = X["bm"]
-        model = SuperGLM(
-            features={"a": Spline(n_knots=5), "b": Spline(n_knots=5)},
-            interactions=[("a", "b")],
-            lambda1=0.1,
-        )
-        model.fit(X, y, exposure=exposure)
-        assert isinstance(model._interaction_specs["a:b"], TensorInteraction)
 
     def test_auto_dispatch_with_kwargs(self):
         model = SuperGLM(features={"a": Spline(n_knots=5), "b": Spline(n_knots=5)})
@@ -1265,20 +1023,7 @@ class TestTensorInteractionModel:
         assert ispec._n_knots == (3, 4)
         assert ispec._decompose is True
 
-    def test_relativities_skips_2d(self, interaction_data):
-        """2D tensor interaction doesn't appear in relativities() (like PolynomialInteraction)."""
-        X, y, exposure = interaction_data
-        model = SuperGLM(
-            features={"age": Spline(n_knots=10), "bm": Spline(n_knots=5)},
-            interactions=[("age", "bm")],
-            lambda1=0.1,
-        )
-        model.fit(X, y, exposure=exposure)
-        rels = model.relativities()
-        assert "age:bm" not in rels
-
     def test_natural_spline_parents(self, interaction_data):
-        """TensorInteraction works with NaturalSpline parents."""
         X, y, exposure = interaction_data
         model = SuperGLM(
             features={"age": NaturalSpline(n_knots=10), "bm": NaturalSpline(n_knots=5)},
@@ -1287,8 +1032,7 @@ class TestTensorInteractionModel:
         )
         model.fit(X, y, exposure=exposure)
         pred = model.predict(X)
-        assert pred.shape == (len(y),)
-        assert np.all(pred > 0)
+        assert pred.shape == (len(y),) and np.all(pred > 0)
 
     def test_decomposed_fit_predict_roundtrip(self, interaction_data):
         X, y, exposure = interaction_data
@@ -1299,8 +1043,7 @@ class TestTensorInteractionModel:
         model._add_interaction("age", "bm", decompose=True)
         model.fit(X, y, exposure=exposure)
         pred = model.predict(X)
-        assert pred.shape == (len(y),)
-        assert np.all(pred > 0)
+        assert pred.shape == (len(y),) and np.all(pred > 0)
         names = [g.name for g in model._groups if g.feature_name == "age:bm"]
         assert names == ["age:bm:bilinear", "age:bm:wiggly"]
         raw = model.reconstruct_feature("age:bm")

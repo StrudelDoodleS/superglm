@@ -43,8 +43,8 @@ def tensor_interaction_data():
 
 
 class TestDiscretizedFit:
-    def test_coefficients_close_to_exact(self, poisson_data):
-        """Discretized coefficients should be close to exact."""
+    def test_close_to_exact(self, poisson_data):
+        """Discretized coefficients, deviance, and predictions close to exact."""
         X, y = poisson_data
 
         model_exact = SuperGLM(
@@ -63,56 +63,19 @@ class TestDiscretizedFit:
         )
         model_disc.fit(X, y)
 
+        # Coefficients: ~5-10% difference at n=2000/256 bins
         beta_exact = model_exact.result.beta
         beta_disc = model_disc.result.beta
         rel_diff = np.linalg.norm(beta_exact - beta_disc) / (np.linalg.norm(beta_exact) + 1e-10)
-        # With n=2000 and 256 bins, ~8 obs/bin → expect ~5-10% coefficient difference.
-        # On real 678k data this would be <1%.
         assert rel_diff < 0.10, f"Relative coefficient difference {rel_diff:.4f} too large"
 
-    def test_deviance_close_to_exact(self, poisson_data):
-        """Discretized deviance should be close to exact."""
-        X, y = poisson_data
-
-        model_exact = SuperGLM(
-            family="poisson",
-            lambda1=0.01,
-            features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
-        )
-        model_exact.fit(X, y)
-
-        model_disc = SuperGLM(
-            family="poisson",
-            lambda1=0.01,
-            discrete=True,
-            features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
-        )
-        model_disc.fit(X, y)
-
+        # Deviance
         dev_exact = model_exact.result.deviance
         dev_disc = model_disc.result.deviance
-        rel_diff = abs(dev_exact - dev_disc) / (abs(dev_exact) + 1e-10)
-        assert rel_diff < 0.005, f"Relative deviance difference {rel_diff:.6f} too large"
+        dev_rel = abs(dev_exact - dev_disc) / (abs(dev_exact) + 1e-10)
+        assert dev_rel < 0.005, f"Relative deviance difference {dev_rel:.6f} too large"
 
-    def test_predictions_close_to_exact(self, poisson_data):
-        """Discretized predictions should be close to exact."""
-        X, y = poisson_data
-
-        model_exact = SuperGLM(
-            family="poisson",
-            lambda1=0.01,
-            features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
-        )
-        model_exact.fit(X, y)
-
-        model_disc = SuperGLM(
-            family="poisson",
-            lambda1=0.01,
-            discrete=True,
-            features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
-        )
-        model_disc.fit(X, y)
-
+        # Predictions
         mu_exact = model_exact.predict(X)
         mu_disc = model_disc.predict(X)
         max_rel = np.max(np.abs(mu_exact - mu_disc) / (mu_exact + 1e-10))
@@ -419,8 +382,15 @@ class TestDiscretizedIRLSDirect:
 class TestConstrainedSplineDiscrete:
     """Constrained splines (NaturalSpline, CRS) with discrete=True."""
 
-    def test_natural_spline_discrete_close_to_exact(self):
-        """NaturalSpline discrete predictions should be close to exact."""
+    @pytest.mark.parametrize(
+        "spline_cls",
+        [
+            pytest.param(NaturalSpline, id="natural"),
+            pytest.param(CubicRegressionSpline, id="crs"),
+        ],
+    )
+    def test_constrained_spline_discrete_close_to_exact(self, spline_cls):
+        """Constrained spline discrete fit should match exact in beta count and deviance."""
         rng = np.random.default_rng(42)
         n = 2000
         x = rng.uniform(0, 10, n)
@@ -429,9 +399,7 @@ class TestConstrainedSplineDiscrete:
         X = pd.DataFrame({"x": x})
 
         model_exact = SuperGLM(
-            family="poisson",
-            lambda1=0.01,
-            features={"x": NaturalSpline(n_knots=10)},
+            family="poisson", lambda1=0.01, features={"x": spline_cls(n_knots=10)}
         )
         model_exact.fit(X, y)
 
@@ -439,40 +407,7 @@ class TestConstrainedSplineDiscrete:
             family="poisson",
             lambda1=0.01,
             discrete=True,
-            features={"x": NaturalSpline(n_knots=10)},
-        )
-        model_disc.fit(X, y)
-
-        # Same number of coefficients (K-2, not K)
-        assert len(model_exact.result.beta) == len(model_disc.result.beta)
-
-        # Predictions close
-        mu_exact = model_exact.predict(X)
-        mu_disc = model_disc.predict(X)
-        max_rel = np.max(np.abs(mu_exact - mu_disc) / (mu_exact + 1e-10))
-        assert max_rel < 0.05, f"Max relative prediction difference {max_rel:.4f}"
-
-    def test_crs_discrete_close_to_exact(self):
-        """CubicRegressionSpline discrete predictions should be close to exact."""
-        rng = np.random.default_rng(42)
-        n = 2000
-        x = rng.uniform(0, 10, n)
-        mu = np.exp(0.5 + 0.3 * np.sin(x))
-        y = rng.poisson(mu).astype(float)
-        X = pd.DataFrame({"x": x})
-
-        model_exact = SuperGLM(
-            family="poisson",
-            lambda1=0.01,
-            features={"x": CubicRegressionSpline(n_knots=10)},
-        )
-        model_exact.fit(X, y)
-
-        model_disc = SuperGLM(
-            family="poisson",
-            lambda1=0.01,
-            discrete=True,
-            features={"x": CubicRegressionSpline(n_knots=10)},
+            features={"x": spline_cls(n_knots=10)},
         )
         model_disc.fit(X, y)
 
@@ -483,7 +418,13 @@ class TestConstrainedSplineDiscrete:
         dev_exact = model_exact.result.deviance
         dev_disc = model_disc.result.deviance
         rel_diff = abs(dev_exact - dev_disc) / (abs(dev_exact) + 1e-10)
-        assert rel_diff < 0.005, f"CRS deviance difference {rel_diff:.6f}"
+        assert rel_diff < 0.005, f"Deviance difference {rel_diff:.6f}"
+
+        # Predictions close
+        mu_exact = model_exact.predict(X)
+        mu_disc = model_disc.predict(X)
+        max_rel = np.max(np.abs(mu_exact - mu_disc) / (mu_exact + 1e-10))
+        assert max_rel < 0.05, f"Max relative prediction difference {max_rel:.4f}"
 
     def test_natural_spline_discrete_uses_discretized_matrix(self):
         """NaturalSpline + discrete=True should use DiscretizedSSPGroupMatrix."""
