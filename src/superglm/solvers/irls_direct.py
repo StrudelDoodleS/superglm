@@ -230,13 +230,15 @@ def fit_irls_direct(
     _t_solve = 0.0
     _t_deviance = 0.0
 
-    for it in range(max_iter):
-        # Working quantities
-        _t0 = time.perf_counter()
-        eta = dm.matvec(beta) + intercept + offset
-        eta = np.clip(eta, -20, 20)
-        mu = np.clip(link.inverse(eta), 1e-7, 1e7)
+    # Pre-compute initial eta/mu once — reused as the first iteration's
+    # working quantities, then updated at the end of each iteration.
+    # This eliminates one redundant matvec + link.inverse per iteration.
+    eta = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
+    mu = np.clip(link.inverse(eta), 1e-7, 1e7)
 
+    for it in range(max_iter):
+        # Working quantities from current eta/mu (already computed)
+        _t0 = time.perf_counter()
         V = family.variance(mu)
         V = np.maximum(V, 1e-10)
         dmu_deta = link.deriv_inverse(eta)
@@ -281,11 +283,12 @@ def fit_irls_direct(
         beta = beta_aug[1:]
         _t_solve += time.perf_counter() - _t0
 
-        # Deviance convergence check
+        # Update eta/mu from new beta — reused as next iteration's working
+        # quantities (no redundant matvec at the start of the loop).
         _t0 = time.perf_counter()
-        eta_new = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
-        mu_new = np.clip(link.inverse(eta_new), 1e-7, 1e7)
-        dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
+        eta = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
+        mu = np.clip(link.inverse(eta), 1e-7, 1e7)
+        dev = float(np.sum(weights * family.deviance_unit(y, mu)))
         _t_deviance += time.perf_counter() - _t0
 
         logger.info(
