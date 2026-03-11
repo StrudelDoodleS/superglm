@@ -143,6 +143,7 @@ class SuperGLM:
         self._fit_offset: NDArray | None = None
         self._nb_profile_result = None  # NBProfileResult, set by estimate_theta()
         self._tweedie_profile_result = None  # TweedieProfileResult, set by estimate_tweedie_p()
+        self._last_fit_meta: dict[str, Any] | None = None
 
         # Interaction support
         self._interaction_specs: dict[str, Any] = {}
@@ -452,6 +453,8 @@ class SuperGLM:
                 phi=1.0,
                 effective_df=self._result.effective_df,
             )
+
+        self._last_fit_meta = {"method": "fit", "discrete": self._discrete}
         return self
 
     def fit_path(
@@ -1217,6 +1220,8 @@ class SuperGLM:
         _profile["converged"] = converged
         self._reml_profile = _profile
 
+        self._last_fit_meta = {"method": "fit_reml", "discrete": self._discrete}
+
         logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")
         return self
 
@@ -1284,13 +1289,23 @@ class SuperGLM:
         offset: NDArray | None = None,
         *,
         sample_weight: NDArray | None = None,
+        fit_mode: str = "fit",
         **kwargs,
     ):
         """Estimate Tweedie p via profile likelihood, refit, and return result.
 
         Thin wrapper around :func:`superglm.tweedie_profile.estimate_tweedie_p`.
         After estimation, sets ``self.tweedie_p`` to the optimised value and
-        refits the model.
+        refits the model using the same fitting regime.
+
+        Parameters
+        ----------
+        fit_mode : {"fit", "reml", "inherit"}
+            Fitting regime for each candidate p evaluation:
+
+            - ``"fit"``: use ``fit()`` / ``fit_pirls`` (current default)
+            - ``"reml"``: use ``fit_reml()`` for each candidate p
+            - ``"inherit"``: use the last fitting method (from ``_last_fit_meta``)
 
         Returns
         -------
@@ -1302,10 +1317,33 @@ class SuperGLM:
             exposure, sample_weight, method_name="estimate_p()"
         )
 
-        result = estimate_tweedie_p(self, X, y, exposure=exposure, offset=offset, **kwargs)
+        # Resolve to internal method name: "fit" or "fit_reml"
+        _VALID_FIT_MODES = {"fit", "reml", "inherit"}
+        if fit_mode not in _VALID_FIT_MODES:
+            raise ValueError(
+                f"fit_mode={fit_mode!r} is not valid, expected one of {sorted(_VALID_FIT_MODES)}"
+            )
+        if fit_mode == "reml":
+            resolved_mode = "fit_reml"
+        elif fit_mode == "inherit":
+            if self._last_fit_meta is not None:
+                resolved_mode = self._last_fit_meta["method"]
+            else:
+                resolved_mode = "fit"
+        else:
+            resolved_mode = "fit"
+
+        result = estimate_tweedie_p(
+            self, X, y, exposure=exposure, offset=offset, fit_mode=resolved_mode, **kwargs
+        )
         self.tweedie_p = result.p_hat
         self._tweedie_profile_result = result
-        self.fit(X, y, exposure=exposure, offset=offset)
+
+        # Refit with the same regime used for profiling
+        if resolved_mode == "fit_reml":
+            self.fit_reml(X, y, exposure=exposure, offset=offset)
+        else:
+            self.fit(X, y, exposure=exposure, offset=offset)
         return result
 
     def estimate_theta(

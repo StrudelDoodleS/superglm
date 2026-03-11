@@ -384,12 +384,18 @@ def estimate_tweedie_p(
     xatol: float = 1e-3,
     maxiter: int = 30,
     verbose: bool = False,
+    fit_mode: str = "fit",
 ) -> TweedieProfileResult:
     """Estimate the Tweedie power parameter via profile likelihood.
 
-    Builds the design matrix once, then for each candidate p calls
-    fit_pirls directly with warm starts from the previous solution.
-    Optimised via bounded Brent (scipy minimize_scalar).
+    Dispatches to one of two internal paths based on *fit_mode*:
+
+    - ``"fit"`` (default): builds the design matrix once and calls
+      ``fit_pirls`` directly with warm starts for each candidate p.
+    - ``"fit_reml"``: calls ``model.fit_reml()`` for each candidate p,
+      re-estimating smoothing parameters at every evaluation.
+
+    Both paths use bounded Brent (scipy minimize_scalar) over p.
 
     Parameters
     ----------
@@ -414,6 +420,8 @@ def estimate_tweedie_p(
         Maximum iterations for the optimiser.
     verbose : bool
         Print progress.
+    fit_mode : {"fit", "fit_reml"}
+        Fitting regime for each candidate p evaluation.
 
     Returns
     -------
@@ -426,6 +434,53 @@ def estimate_tweedie_p(
     is_tweedie = (isinstance(family, str) and family == "tweedie") or isinstance(family, Tweedie)
     if not is_tweedie:
         raise ValueError(f"estimate_tweedie_p requires family='tweedie', got {family!r}")
+
+    _VALID_FIT_MODES = {"fit", "fit_reml"}
+    if fit_mode not in _VALID_FIT_MODES:
+        raise ValueError(
+            f"fit_mode={fit_mode!r} is not valid, expected one of {sorted(_VALID_FIT_MODES)}"
+        )
+
+    if fit_mode == "fit_reml":
+        return _estimate_tweedie_p_reml(
+            model,
+            X,
+            y,
+            exposure,
+            offset,
+            p_bounds=p_bounds,
+            xatol=xatol,
+            maxiter=maxiter,
+            verbose=verbose,
+        )
+
+    return _estimate_tweedie_p_fit(
+        model,
+        X,
+        y,
+        exposure,
+        offset,
+        p_bounds=p_bounds,
+        xatol=xatol,
+        maxiter=maxiter,
+        verbose=verbose,
+    )
+
+
+def _estimate_tweedie_p_fit(
+    model,
+    X,
+    y,
+    exposure,
+    offset,
+    *,
+    p_bounds,
+    xatol,
+    maxiter,
+    verbose,
+) -> TweedieProfileResult:
+    """Profile p using fit_pirls (original path)."""
+    from superglm.distributions import Tweedie
 
     y = np.asarray(y, dtype=np.float64)
 
@@ -535,6 +590,83 @@ def estimate_tweedie_p(
         mu_final = np.maximum(link.inverse(eta), 1e-10)
 
     phi_hat = max(estimate_phi(y_arr, mu_final, p_hat, weights=w_arr), 1e-10)
+
+    return TweedieProfileResult(
+        p_hat=p_hat,
+        phi_hat=phi_hat,
+        nll=nll,
+        n_evaluations=n_evals,
+        converged=result.success if hasattr(result, "success") else True,
+        cache=cache,
+        _objective=objective,
+        _w_sum=float(np.sum(w_arr)),
+    )
+
+
+def _estimate_tweedie_p_reml(
+    model,
+    X,
+    y,
+    exposure,
+    offset,
+    *,
+    p_bounds,
+    xatol,
+    maxiter,
+    verbose,
+) -> TweedieProfileResult:
+    """Profile p using fit_reml for each candidate."""
+    y_np = np.asarray(y, dtype=np.float64)
+    w_arr = np.asarray(exposure, dtype=np.float64) if exposure is not None else np.ones(len(y_np))
+
+    cache: dict[float, float] = {}
+    n_evals = 0
+    last_p_eval = None
+    last_mu = None
+
+    def objective(p: float) -> float:
+        nonlocal n_evals, last_p_eval, last_mu
+        key = round(p, 6)
+        if key in cache:
+            return cache[key]
+
+        # Set p and refit via REML
+        model.tweedie_p = p
+        model.fit_reml(X, y, exposure=exposure, offset=offset)
+
+        mu = np.maximum(model.predict(X), 1e-10)
+        phi = max(estimate_phi(y_np, mu, p, weights=w_arr), 1e-10)
+
+        ll = tweedie_logpdf(y_np, mu, phi, p, weights=w_arr)
+        nll = -np.sum(w_arr * ll) / np.sum(w_arr)
+
+        last_p_eval = p
+        last_mu = mu
+
+        cache[key] = nll
+        n_evals += 1
+        if verbose:
+            reml_iters = model._reml_result.n_reml_iter if hasattr(model, "_reml_result") else "?"
+            print(f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  reml_iters={reml_iters}")
+        return nll
+
+    result = minimize_scalar(
+        objective,
+        bounds=p_bounds,
+        method="bounded",
+        options={"xatol": xatol, "maxiter": maxiter},
+    )
+
+    p_hat = round(result.x, 6)
+    nll = result.fun
+
+    # Ensure we have mu at p_hat for phi
+    if last_p_eval is None or round(last_p_eval, 6) != p_hat:
+        model.tweedie_p = p_hat
+        model.fit_reml(X, y, exposure=exposure, offset=offset)
+        last_mu = np.maximum(model.predict(X), 1e-10)
+
+    phi_hat = max(estimate_phi(y_np, last_mu, p_hat, weights=w_arr), 1e-10)
 
     return TweedieProfileResult(
         p_hat=p_hat,
