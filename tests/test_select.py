@@ -537,3 +537,49 @@ class TestSelectFeatureSE:
         assert np.all(np.isfinite(se))
         assert np.all(se >= 0)
         assert np.max(se) > 0
+
+
+class TestSelectNoiseSuppressionREML:
+    """Regression test: REML with split_linear=True must suppress noise features."""
+
+    def test_noise_edf_below_threshold(self):
+        """Noise smooth total EDF < 0.02 on synthetic Poisson data (n=50k)."""
+        rng = np.random.default_rng(42)
+        n = 50000
+        x_signal = rng.uniform(0, 1, n)
+        x_noise = rng.uniform(0, 1, n)
+        mu = np.exp(-0.5 + 0.5 * np.sin(2 * np.pi * x_signal))
+        y = rng.poisson(mu)
+        X = pd.DataFrame({"signal": x_signal, "noise": x_noise})
+
+        model = SuperGLM(
+            features={
+                "signal": Spline(kind="bs", k=12, split_linear=True, discrete=True),
+                "noise": Spline(kind="bs", k=12, split_linear=True, discrete=True),
+            },
+            family="poisson",
+            lambda1=0,
+            discrete=True,
+            n_bins=256,
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+
+        # Noise lambdas should be at or near the upper bound
+        noise_lambdas = {
+            name: lam for name, lam in model._reml_lambdas.items() if "noise" in name.lower()
+        }
+        for name, lam in noise_lambdas.items():
+            assert lam > 1e6, f"{name} lambda={lam:.1f}, expected > 1e6"
+
+        # Signal lambdas should remain moderate
+        signal_lambdas = {
+            name: lam for name, lam in model._reml_lambdas.items() if "signal" in name.lower()
+        }
+        for name, lam in signal_lambdas.items():
+            assert lam < 1e4, f"{name} lambda={lam:.1f}, expected < 1e4"
+
+        # Noise coefficient norms should be near zero
+        for g in model._groups:
+            if "noise" in g.name.lower():
+                norm = float(np.linalg.norm(model.result.beta[g.sl]))
+                assert norm < 1e-4, f"{g.name} ||beta||={norm:.6f}"

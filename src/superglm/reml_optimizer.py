@@ -388,7 +388,7 @@ def optimize_direct_reml(
     scale_known = getattr(distribution, "scale_known", True)
     group_names = [g.name for _, g in reml_groups]
     m = len(group_names)
-    log_lo, log_hi = np.log(1e-6), np.log(1e6)
+    log_lo, log_hi = np.log(1e-6), np.log(1e10)
     max_newton_step = 5.0
 
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
@@ -472,7 +472,7 @@ def optimize_direct_reml(
 
         cand_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
-            cand_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
+            cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
 
         _t0 = _time.perf_counter()
         pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
@@ -649,7 +649,7 @@ def optimize_direct_reml(
             rho_trial = np.clip(rho_clipped + step * delta, log_lo, log_hi)
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
-                trial_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
+                trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
 
             _n_linesearch_fits += 1
             trial_result, trial_inv, trial_xtwx = fit_irls_direct(
@@ -699,6 +699,53 @@ def optimize_direct_reml(
 
     if best_pirls is None:
         raise RuntimeError("Direct REML Newton did not evaluate any candidates")
+
+    # ── Post-convergence probe ──────────────────────────────────────
+    # The Fellner-Schall FP update is degenerate for noise terms: when
+    # coefficients are shrunk, lambda = rank/(quad + rank/lambda) ≈ lambda,
+    # so ANY lambda is approximately a fixed point.  The bootstrap
+    # initialization biases toward moderate lambdas, leaving residual EDF
+    # on noise features.  Probe the upper bound for each group: if the
+    # REML objective improves (or barely degrades), accept the higher
+    # lambda.  Signal groups will be rejected (deviance rises sharply).
+    for idx, g in reml_groups:
+        probe_lambdas = best_lambdas.copy()
+        probe_lambdas[g.name] = float(np.exp(log_hi))
+        probe_result, probe_inv, probe_xtwx = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=exposure,
+            family=distribution,
+            link=link,
+            groups=groups,
+            lambda2=probe_lambdas,
+            offset=offset_arr,
+            beta_init=warm_beta,
+            intercept_init=warm_intercept,
+            return_xtwx=True,
+            profile=profile,
+        )
+        probe_obj = reml_laml_objective(
+            dm,
+            distribution,
+            link,
+            groups,
+            y,
+            probe_result,
+            probe_lambdas,
+            exposure,
+            offset_arr,
+            XtWX=probe_xtwx,
+            penalty_caches=penalty_caches,
+        )
+        # Accept if objective improves or degrades by less than 0.1
+        # (the REML landscape is extremely flat for noise terms)
+        if probe_obj <= best_obj + 0.1:
+            best_obj = probe_obj
+            best_lambdas = probe_lambdas
+            best_pirls = probe_result
+            warm_beta = probe_result.beta.copy()
+            warm_intercept = float(probe_result.intercept)
 
     grad_norm = float(np.max(np.abs(best_grad))) if best_grad is not None else np.inf
     converged = converged or grad_norm <= grad_tol
@@ -762,7 +809,7 @@ def optimize_discrete_reml_cached_w(
     scale_known = getattr(distribution, "scale_known", True)
     group_names = [g.name for _, g in reml_groups]
     m = len(group_names)
-    log_lo, log_hi = np.log(1e-6), np.log(1e6)
+    log_lo, log_hi = np.log(1e-6), np.log(1e10)
     p = dm.p
 
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
@@ -841,7 +888,7 @@ def optimize_discrete_reml_cached_w(
         rho_clipped = np.clip(rho, log_lo, log_hi)
         cand_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
-            cand_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
+            cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
 
         # Fit IRLS to convergence (data passes)
         _t0 = _time.perf_counter()
@@ -939,7 +986,7 @@ def optimize_discrete_reml_cached_w(
             rho_clipped = np.clip(rho, log_lo, log_hi)
             inner_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
-                inner_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
+                inner_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
 
             S_new = _build_penalty_matrix(dm.group_matrices, groups, inner_lambdas, p)
 
@@ -1009,7 +1056,7 @@ def optimize_discrete_reml_cached_w(
         rho_clipped = np.clip(rho, log_lo, log_hi)
         final_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
-            final_lambdas[name] = float(np.clip(val, 1e-6, 1e6))
+            final_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
         _t0 = _time.perf_counter()
         final_result, final_inv, final_xtwx = fit_irls_direct(
             X=dm,
@@ -1049,6 +1096,102 @@ def optimize_discrete_reml_cached_w(
 
     if best_pirls is None:
         raise RuntimeError("Discrete REML cached-W did not evaluate any candidates")
+
+    # ── Post-convergence probe for rank-1 groups ──────────────────
+    # Same FP-degeneracy fix as optimize_direct_reml (see comment there).
+    any_probe_accepted = False
+    for idx, g in reml_groups:
+        probe_lambdas = best_lambdas.copy()
+        probe_lambdas[g.name] = float(np.exp(log_hi))
+        probe_result, probe_inv, probe_xtwx = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=exposure,
+            family=distribution,
+            link=link,
+            groups=groups,
+            lambda2=probe_lambdas,
+            offset=offset_arr,
+            beta_init=warm_beta,
+            intercept_init=warm_intercept,
+            return_xtwx=True,
+            profile=profile,
+        )
+        probe_obj = reml_laml_objective(
+            dm,
+            distribution,
+            link,
+            groups,
+            y,
+            probe_result,
+            probe_lambdas,
+            exposure,
+            offset_arr,
+            XtWX=probe_xtwx,
+            penalty_caches=penalty_caches,
+        )
+        if probe_obj <= best_obj + 0.1:
+            best_obj = probe_obj
+            best_lambdas = probe_lambdas
+            best_pirls = probe_result
+            warm_beta = probe_result.beta.copy()
+            warm_intercept = float(probe_result.intercept)
+            any_probe_accepted = True
+
+    # After probing, re-run a few REML outer iterations so higher-rank
+    # groups can readjust their lambdas to the new rank-1 values.
+    if any_probe_accepted:
+        _probe_lambdas = best_lambdas.copy()
+        for _probe_outer in range(max_reml_iter):
+            _probe_result, _probe_inv, _probe_xtwx = fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=exposure,
+                family=distribution,
+                link=link,
+                groups=groups,
+                lambda2=_probe_lambdas,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+                return_xtwx=True,
+                profile=profile,
+            )
+            _probe_obj = reml_laml_objective(
+                dm,
+                distribution,
+                link,
+                groups,
+                y,
+                _probe_result,
+                _probe_lambdas,
+                exposure,
+                offset_arr,
+                XtWX=_probe_xtwx,
+                penalty_caches=penalty_caches,
+            )
+            # FP update for all non-probed groups
+            _max_delta = 0.0
+            for i, (_idx, _g) in enumerate(reml_groups):
+                omega_ssp = penalty_caches[_g.name].omega_ssp
+                beta_g = _probe_result.beta[_g.sl]
+                quad = float(beta_g @ omega_ssp @ beta_g)
+                trace_term = float(np.trace(_probe_inv[_g.sl, _g.sl] @ omega_ssp))
+                r_j = penalty_ranks[_g.name]
+                denom = quad + trace_term
+                lam_new = r_j / denom if denom > 1e-12 else _probe_lambdas[_g.name]
+                lam_new = float(np.clip(lam_new, 1e-6, np.exp(log_hi)))
+                _delta = abs(np.log(lam_new) - np.log(_probe_lambdas[_g.name]))
+                _max_delta = max(_max_delta, _delta)
+                _probe_lambdas[_g.name] = lam_new
+            if _probe_obj < best_obj:
+                best_obj = _probe_obj
+                best_lambdas = _probe_lambdas.copy()
+                best_pirls = _probe_result
+            warm_beta = _probe_result.beta.copy()
+            warm_intercept = float(_probe_result.intercept)
+            if _max_delta < 0.02:
+                break
 
     if profile is not None:
         profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
@@ -1170,7 +1313,7 @@ def optimize_efs_reml(
         r_j = penalty_ranks[g.name]
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
-        lambdas[g.name] = float(np.clip(lam_fp, 1e-6, 1e6))
+        lambdas[g.name] = float(np.clip(lam_fp, 1e-6, 1e10))
 
     # Rebuild DM with bootstrapped lambdas
     old_gms = dm.group_matrices
@@ -1274,7 +1417,7 @@ def optimize_efs_reml(
             log_step = np.clip(log_step, -5.0, 5.0)
             lam_new = lambdas[g.name] * np.exp(log_step)
 
-            lambdas_new[g.name] = float(np.clip(lam_new, 1e-6, 1e6))
+            lambdas_new[g.name] = float(np.clip(lam_new, 1e-6, 1e10))
 
         # ── Anderson(1) acceleration on log-lambda ────────────────
         if aa_prev_log_x is not None and len(reml_update_names) > 0:
@@ -1289,7 +1432,7 @@ def optimize_efs_reml(
                 theta = max(-0.5, min(theta, 2.0))
                 log_acc = (1.0 + theta) * log_gx - theta * aa_prev_log_gx
                 for i, name in enumerate(reml_update_names):
-                    lambdas_new[name] = float(np.clip(np.exp(log_acc[i]), 1e-6, 1e6))
+                    lambdas_new[name] = float(np.clip(np.exp(log_acc[i]), 1e-6, 1e10))
 
         if len(reml_update_names) > 0:
             aa_prev_log_x = np.array([np.log(lambdas[n_]) for n_ in reml_update_names])
@@ -1533,7 +1676,7 @@ def run_reml_once(
             r_j = penalty_ranks[g.name]
             denom = inv_phi * quad + trace_term
             lam_new = r_j / denom if denom > 1e-12 else lambdas[g.name]
-            lambdas_new[g.name] = float(np.clip(lam_new, 1e-6, 1e6))
+            lambdas_new[g.name] = float(np.clip(lam_new, 1e-6, 1e10))
 
         if aa_prev_log_x is not None and len(reml_update_names) > 0:
             log_x = np.array([np.log(lambdas[n]) for n in reml_update_names])
@@ -1547,7 +1690,7 @@ def run_reml_once(
                 theta = max(-0.5, min(theta, 2.0))
                 log_acc = (1.0 + theta) * log_gx - theta * aa_prev_log_gx
                 for i, name in enumerate(reml_update_names):
-                    lambdas_new[name] = float(np.clip(np.exp(log_acc[i]), 1e-6, 1e6))
+                    lambdas_new[name] = float(np.clip(np.exp(log_acc[i]), 1e-6, 1e10))
 
         if len(reml_update_names) > 0:
             aa_prev_log_x = np.array([np.log(lambdas[n]) for n in reml_update_names])
