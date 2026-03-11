@@ -537,3 +537,121 @@ class TestSelectFeatureSE:
         assert np.all(np.isfinite(se))
         assert np.all(se >= 0)
         assert np.max(se) > 0
+
+
+class TestSelectNoiseSuppressionREML:
+    """Regression test: REML with split_linear=True must suppress noise features."""
+
+    def test_noise_edf_below_threshold(self):
+        """Noise smooth total EDF < 0.02 on synthetic Poisson data (n=50k)."""
+        rng = np.random.default_rng(42)
+        n = 50000
+        x_signal = rng.uniform(0, 1, n)
+        x_noise = rng.uniform(0, 1, n)
+        mu = np.exp(-0.5 + 0.5 * np.sin(2 * np.pi * x_signal))
+        y = rng.poisson(mu)
+        X = pd.DataFrame({"signal": x_signal, "noise": x_noise})
+
+        model = SuperGLM(
+            features={
+                "signal": Spline(kind="bs", k=12, split_linear=True, discrete=True),
+                "noise": Spline(kind="bs", k=12, split_linear=True, discrete=True),
+            },
+            family="poisson",
+            lambda1=0,
+            discrete=True,
+            n_bins=256,
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+
+        # Compute per-group EDF via metrics machinery
+        metrics_obj = model.metrics(X, y)
+        edf, _ = metrics_obj._influence_edf
+        _, _, _, active_groups = metrics_obj._active_info
+        group_edf = {ag.name: float(np.sum(edf[ag.sl])) for ag in active_groups}
+
+        # Noise groups: EDF < 0.02 (inactive groups have EDF = 0 by construction)
+        for g in model._groups:
+            if "noise" in g.name.lower():
+                noise_edf = group_edf.get(g.name, 0.0)
+                assert noise_edf < 0.02, f"{g.name} EDF={noise_edf:.4f}, expected < 0.02"
+
+        # Signal groups should retain meaningful EDF
+        signal_edf = sum(
+            group_edf.get(g.name, 0.0) for g in model._groups if "signal" in g.name.lower()
+        )
+        assert signal_edf > 3.0, f"Signal total EDF={signal_edf:.2f}, expected > 3.0"
+
+        # Noise lambdas should be at or near the upper bound
+        noise_lambdas = {
+            name: lam for name, lam in model._reml_lambdas.items() if "noise" in name.lower()
+        }
+        for name, lam in noise_lambdas.items():
+            assert lam > 1e6, f"{name} lambda={lam:.1f}, expected > 1e6"
+
+
+class TestSplitLinearSnapWeakSignal:
+    """Regression test: FP snap must not falsely suppress weak-but-real signals.
+
+    Synthetic Poisson data with one strong signal, one weak (but real) signal,
+    and one pure noise spline. The snap should kill the noise but preserve
+    the weak signal with nontrivial EDF.
+    """
+
+    def test_weak_signal_preserved_noise_killed(self):
+        rng = np.random.default_rng(42)
+        n = 50_000
+        n_train = 40_000
+
+        # Generate data: strong + weak signal + noise predictor
+        x_strong = rng.uniform(0, 1, n)
+        x_weak = rng.uniform(0, 1, n)
+        x_noise = rng.uniform(0, 1, n)
+
+        log_mu = -0.5 + 0.8 * np.sin(2 * np.pi * x_strong) + 0.05 * np.sin(4 * np.pi * x_weak)
+        y = rng.poisson(np.exp(log_mu)).astype(float)
+        X = pd.DataFrame({"strong": x_strong, "weak": x_weak, "noise": x_noise})
+
+        features = {
+            "strong": Spline(kind="bs", k=12, split_linear=True, discrete=True),
+            "weak": Spline(kind="bs", k=12, split_linear=True, discrete=True),
+            "noise": Spline(kind="bs", k=12, split_linear=True, discrete=True),
+        }
+
+        model = SuperGLM(family="poisson", lambda1=0, discrete=True, n_bins=256, features=features)
+        model.fit_reml(
+            X.iloc[:n_train],
+            y[:n_train],
+            max_reml_iter=30,
+            verbose=False,
+        )
+
+        lambdas = model._reml_lambdas
+
+        # Compute per-group EDF
+        m = model.metrics(X.iloc[:n_train], y[:n_train])
+        edf, _ = m._influence_edf
+        _, _, _, active_groups = m._active_info
+        group_edf = {ag.name: float(np.sum(edf[ag.sl])) for ag in active_groups}
+        for g in model._groups:
+            if g.name not in group_edf:
+                group_edf[g.name] = 0.0
+
+        # Noise: both subgroups should be effectively dead (EDF < 0.5 total)
+        noise_total_edf = group_edf.get("noise:linear", 0) + group_edf.get("noise:spline", 0)
+        assert noise_total_edf < 0.5, f"Noise total EDF={noise_total_edf:.3f}, expected < 0.5"
+
+        # Noise lambdas should be very large (heavily penalized)
+        for name in ["noise:linear", "noise:spline"]:
+            if name in lambdas:
+                assert lambdas[name] > 1e2, f"{name} lambda={lambdas[name]:.1g}, expected > 1e2"
+
+        # Weak signal: should retain nontrivial EDF (not snapped out)
+        weak_total_edf = group_edf.get("weak:linear", 0) + group_edf.get("weak:spline", 0)
+        assert weak_total_edf > 2.0, (
+            f"Weak signal EDF={weak_total_edf:.3f}, expected > 2.0 (falsely suppressed?)"
+        )
+
+        # Strong signal: should be well-fit
+        strong_total_edf = group_edf.get("strong:linear", 0) + group_edf.get("strong:spline", 0)
+        assert strong_total_edf > 5.0, f"Strong signal EDF={strong_total_edf:.3f}, expected > 5.0"

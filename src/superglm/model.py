@@ -854,6 +854,7 @@ class SuperGLM:
             penalty_caches=penalty_caches,
             profile=profile,
             max_analytical_per_w=getattr(self, "_max_analytical_per_w", 30),
+            split_linear_snap=getattr(self, "_split_linear_snap", True),
         )
 
     def _optimize_discrete_reml_cached_w(

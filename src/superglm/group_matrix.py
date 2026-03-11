@@ -38,6 +38,70 @@ def _csr_weighted_gram(data, indices, indptr, W, p):
     return result
 
 
+@njit(cache=True)
+def _weighted_bincount_2d(bin_idx, W, M, n_bins):
+    """Fused W-weighted multi-column bincount for dense M.
+
+    result[b, c] = sum W[i] * M[i, c] for all i where bin_idx[i] == b.
+    Avoids the (n, p) intermediate allocation of W[:, None] * M.
+    """
+    n = len(bin_idx)
+    n_cols = M.shape[1]
+    result = np.zeros((n_bins, n_cols))
+    for i in range(n):
+        b = bin_idx[i]
+        w = W[i]
+        for c in range(n_cols):
+            result[b, c] += w * M[i, c]
+    return result
+
+
+@njit(cache=True)
+def _csr_weighted_bincount(data, indices, indptr, n_cols, bin_idx, W, n_bins):
+    """Fused CSR-aware W-weighted bincount — avoids materialising sparse to dense.
+
+    result[b, c] = sum W[row] * X_sparse[row, c]  for rows where bin_idx[row] == b.
+    For one-hot categoricals (1 non-zero/row) this is O(n), not O(n * n_cols).
+    """
+    n = len(bin_idx)
+    result = np.zeros((n_bins, n_cols))
+    for row in range(n):
+        b = bin_idx[row]
+        w = W[row]
+        for ptr in range(indptr[row], indptr[row + 1]):
+            col = indices[ptr]
+            result[b, col] += w * data[ptr]
+    return result
+
+
+@njit(cache=True)
+def _disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j):
+    """Fused 2D histogram for disc-disc cross-gram.
+
+    Replaces ``joint_idx = bin_i * n_bins_j + bin_j`` followed by
+    ``np.bincount(joint_idx, W).reshape(n_bins_i, n_bins_j)``.
+    Avoids two (n,) intermediate allocations per call.
+    """
+    n = len(W)
+    result = np.zeros((n_bins_i, n_bins_j))
+    for obs in range(n):
+        result[bin_idx_i[obs], bin_idx_j[obs]] += W[obs]
+    return result
+
+
+@njit(cache=True)
+def _fused_bincount_2(bin_idx, W, Wz, n_bins):
+    """Fused dual bincount: aggregate W and Wz by bin in one O(n) pass."""
+    n = len(bin_idx)
+    W_agg = np.zeros(n_bins)
+    Wz_agg = np.zeros(n_bins)
+    for i in range(n):
+        b = bin_idx[i]
+        W_agg[b] += W[i]
+        Wz_agg[b] += Wz[i]
+    return W_agg, Wz_agg
+
+
 class DenseGroupMatrix:
     """Dense group matrix wrapper."""
 
@@ -219,10 +283,9 @@ class DiscretizedSSPGroupMatrix:
     def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
         """Compute gram(W), rmatvec(W), rmatvec(Wz) with shared bincount.
 
-        Returns (gram, XtW, XtWz) — avoids redundant O(n) bincount passes.
+        Returns (gram, XtW, XtWz) — single O(n) pass for both aggregations.
         """
-        W_agg = np.bincount(self.bin_idx, weights=W, minlength=self.n_bins)
-        Wz_agg = np.bincount(self.bin_idx, weights=Wz, minlength=self.n_bins)
+        W_agg, Wz_agg = _fused_bincount_2(self.bin_idx, W, Wz, self.n_bins)
         BtW_agg = self.B_unique.T @ W_agg  # (K,)
         BtWz_agg = self.B_unique.T @ Wz_agg  # (K,)
         BtWB = self.B_unique.T @ (self.B_unique * W_agg[:, None])  # (K, K)
@@ -248,30 +311,71 @@ GroupMatrix = (
 _MAX_DISC_DISC_HIST_CELLS = 5_000_000
 
 
+def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> NDArray:
+    """Aggregate W * gm's columns by bin index → (n_bins, p_g) dense array.
+
+    Dispatches to the most efficient kernel for each GroupMatrix type:
+    - SparseGroupMatrix: CSR-aware kernel (avoids toarray, O(nnz) not O(n*p))
+    - SparseSSPGroupMatrix: CSR kernel in B-spline space + R_inv transform
+    - DenseGroupMatrix / other: fused dense kernel (avoids W-broadcast alloc)
+    """
+    if isinstance(gm, SparseGroupMatrix):
+        return _csr_weighted_bincount(
+            np.asarray(gm.M.data, dtype=np.float64),
+            gm.M.indices,
+            gm.M.indptr,
+            gm.M.shape[1],
+            bin_idx,
+            W,
+            n_bins,
+        )
+    if isinstance(gm, SparseSSPGroupMatrix):
+        B_agg = _csr_weighted_bincount(
+            gm._data, gm._indices, gm._indptr, gm._p_b, bin_idx, W, n_bins
+        )
+        return B_agg @ gm.R_inv
+    X = gm.toarray()
+    return _weighted_bincount_2d(bin_idx, W, X, n_bins)
+
+
 def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     """Compute X_i.T @ diag(W) @ X_j efficiently.
 
     For two DiscretizedSSPGroupMatrix, uses a 2D weight histogram to avoid
-    materializing either (n, p) matrix. Otherwise falls back to materializing
-    the smaller group and using rmatvec on the larger.
+    materializing either (n, p) matrix. For disc × non-disc, aggregates by
+    disc bins in a single compiled pass (fused W-weighting, no toarray for
+    sparse groups). Otherwise falls back to materializing the smaller group
+    and using rmatvec on the larger.
     """
     if isinstance(gm_i, DiscretizedSSPGroupMatrix) and isinstance(gm_j, DiscretizedSSPGroupMatrix):
         n_joint = gm_i.n_bins * gm_j.n_bins
         if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
-            # 2D histogram: bin weights by (bin_i, bin_j) jointly
-            joint_idx = gm_i.bin_idx * gm_j.n_bins + gm_j.bin_idx
-            W_2d = np.bincount(joint_idx, weights=W, minlength=n_joint).reshape(
-                gm_i.n_bins, gm_j.n_bins
-            )
+            # Fused 2D histogram: single O(n) pass, no (n,) temp allocations.
+            W_2d = _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
             BtWB = gm_i.B_unique.T @ W_2d @ gm_j.B_unique
             return gm_i.R_inv.T @ BtWB @ gm_j.R_inv
 
+    # Disc × non-disc: batch aggregate by disc bins, then dense matmuls.
+    # Avoids per-column rmatvec loop, toarray() for sparse groups, and
+    # the (n, p) W-broadcast allocation.
+    if isinstance(gm_i, DiscretizedSSPGroupMatrix) and not isinstance(
+        gm_j, DiscretizedSSPGroupMatrix
+    ):
+        WX_agg = _agg_by_bin(gm_j, gm_i.bin_idx, W, gm_i.n_bins)
+        return gm_i.R_inv.T @ (gm_i.B_unique.T @ WX_agg)
+
+    if isinstance(gm_j, DiscretizedSSPGroupMatrix) and not isinstance(
+        gm_i, DiscretizedSSPGroupMatrix
+    ):
+        WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins)
+        return (gm_j.R_inv.T @ (gm_j.B_unique.T @ WX_agg)).T
+
+    # Non-disc × non-disc: materialize smaller side, rmatvec larger side.
     if gm_i.shape[1] <= gm_j.shape[1]:
         X_i = gm_i.toarray()
         WX_i = W[:, None] * X_i
         return np.vstack([gm_j.rmatvec(WX_i[:, k]) for k in range(WX_i.shape[1])])
 
-    # Fall back: materialize group j, use rmatvec of group i per column
     X_j = gm_j.toarray()
     WX_j = W[:, None] * X_j
     return np.column_stack([gm_i.rmatvec(WX_j[:, k]) for k in range(WX_j.shape[1])])
