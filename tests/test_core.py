@@ -88,7 +88,7 @@ class TestSpline:
     def test_n_basis(self):
         for nk in [5, 10, 20]:
             info = Spline(n_knots=nk, degree=3).build(np.linspace(0, 1, 100))
-            assert info.n_cols == nk + 4  # n_interior + degree + 1
+            assert info.n_cols == nk + 3  # K - 1 = n_interior + degree (identifiability)
 
     def test_penalty_psd(self):
         info = Spline(n_knots=10).build(np.linspace(0, 1, 100))
@@ -103,9 +103,9 @@ class TestNaturalSpline:
     """Tests for NaturalSpline boundary constraints."""
 
     def test_natural_n_basis(self):
-        """K-2 columns (e.g., 12 for n_knots=10)."""
+        """K-3 columns (natural constraints remove 2, identifiability removes 1)."""
         info = NaturalSpline(n_knots=10).build(np.linspace(0, 1, 200))
-        assert info.n_cols == 10 + 4 - 2  # K - 2
+        assert info.n_cols == 10 + 4 - 3  # K - 3
 
     def test_natural_penalty_psd(self):
         """Projected penalty is positive semi-definite."""
@@ -128,20 +128,20 @@ class TestNaturalSpline:
             np.testing.assert_allclose(spl(sp._lo, nu=2), 0.0, atol=1e-10)
             np.testing.assert_allclose(spl(sp._hi, nu=2), 0.0, atol=1e-10)
 
-    def test_natural_penalty_null_space_1d(self):
-        """omega_nat has rank K-3 and 1D null space (constant only)."""
+    def test_natural_penalty_null_space_0d(self):
+        """After identifiability, omega has full rank (no null space)."""
         info = NaturalSpline(n_knots=10).build(np.linspace(0, 1, 200))
         eigvals = np.linalg.eigvalsh(info.penalty_matrix)
         n_null = np.sum(eigvals < 1e-10)
-        assert n_null == 1  # constant only; linear absorbed by natural constraints
+        assert n_null == 0  # constant removed by identifiability
 
     def test_natural_projection_shape(self):
-        """GroupInfo.projection is (K, K-2)."""
+        """GroupInfo.projection is (K, K-3) after natural + identifiability."""
         sp = NaturalSpline(n_knots=10)
         info = sp.build(np.linspace(0, 1, 200))
         K = sp._n_basis
         assert info.projection is not None
-        assert info.projection.shape == (K, K - 2)
+        assert info.projection.shape == (K, K - 3)
 
 
 class TestSplineBaseHierarchy:
@@ -186,8 +186,8 @@ class TestSplineBaseHierarchy:
         info = sp.build(np.linspace(0, 100, 300))
         interior = sp._knots[sp.degree + 1 : -(sp.degree + 1)]
         np.testing.assert_array_equal(interior, knots)
-        # NaturalSpline with 3 interior knots: K = 3+3+1 = 7, K-2 = 5
-        assert info.n_cols == sp._n_basis - 2
+        # NaturalSpline with 3 interior knots: K = 3+3+1 = 7, K-3 = 4
+        assert info.n_cols == sp._n_basis - 3
 
     def test_uniform_default(self):
         """Spline() uses uniform strategy by default."""
@@ -295,7 +295,7 @@ class TestCubicRegressionSpline:
         ns = NaturalSpline(n_knots=10)
         cr_info = cr.build(x)
         ns_info = ns.build(x)
-        assert cr_info.penalty_matrix.shape[0] == ns_info.penalty_matrix.shape[0] - 1
+        assert cr_info.penalty_matrix.shape[0] == ns_info.penalty_matrix.shape[0]
         assert not np.isclose(
             np.trace(cr_info.penalty_matrix),
             np.trace(ns_info.penalty_matrix),

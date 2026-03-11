@@ -377,7 +377,9 @@ def build_design_matrix(
         if use_discrete:
             from scipy.interpolate import BSpline as BSpl
 
-            omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(x_col)
+            omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
+                x_col, exposure
+            )
             n_bins_feat = resolve_discrete_n_bins(name, spec, n_bins_config)
             bin_centers, bin_idx = _discretize_column(x_col, n_bins_feat)
             bin_centers_clip = np.clip(bin_centers, spec._knots[0], spec._knots[-1])
@@ -533,9 +535,7 @@ def build_design_matrix(
             result = ispec.build(x1, x2, specs, exposure=exposure)
 
         if isinstance(result, list):
-            has_subgroups = any(
-                info.subgroup_name is not None or info.projection is not None for info in result
-            )
+            has_subgroups = any(info.subgroup_name is not None for info in result)
             if has_subgroups:
                 r_inv_parts_i: list[NDArray] = []
                 for info in result:
@@ -618,12 +618,25 @@ def build_design_matrix(
                 r_inv_dict: dict[str, NDArray] = {}
                 for level, info in zip(ispec._non_base, result):
                     if info.reparametrize and info.penalty_matrix is not None:
-                        R_inv = compute_R_inv(info.columns, info.penalty_matrix, exposure, lambda2)
+                        if info.projection is not None:
+                            P = info.projection
+                            R_inv_local = compute_projected_R_inv(
+                                info.columns, P, info.penalty_matrix, exposure, lambda2
+                            )
+                            R_inv = P @ R_inv_local
+                        else:
+                            R_inv = compute_R_inv(
+                                info.columns, info.penalty_matrix, exposure, lambda2
+                            )
                         r_inv_dict[level] = R_inv
                         n_cols = R_inv.shape[1]
                         if sp.issparse(info.columns):
                             gm = SparseSSPGroupMatrix(info.columns, R_inv)
-                            gm.omega = info.penalty_matrix
+                            if info.projection is not None:
+                                gm.omega = P @ info.penalty_matrix @ P.T
+                                gm.projection = P
+                            else:
+                                gm.omega = info.penalty_matrix
                         else:
                             gm = DenseGroupMatrix(info.columns @ R_inv)
                     else:

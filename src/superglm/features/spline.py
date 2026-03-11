@@ -98,6 +98,7 @@ class _SplineBase:
         self._lo: float = 0.0
         self._hi: float = 1.0
         self._R_inv: NDArray | None = None
+        self._constraint_projection: NDArray | None = None
         self._basis_lo: NDArray | None = None
         self._basis_hi: NDArray | None = None
         self._basis_d1_lo: NDArray | None = None
@@ -202,8 +203,14 @@ class _SplineBase:
 
     @property
     def absorbs_intercept(self) -> bool:
-        """Whether the smooth should absorb the intercept-like direction."""
-        return False
+        """Whether the smooth should absorb the intercept-like direction.
+
+        mgcv-style smooth terms are constrained so that the exposure-weighted
+        mean contribution over the training data is zero, making the model
+        intercept carry the constant part.  This is True by default for all
+        spline kinds.
+        """
+        return True
 
     @property
     def supports_linear_split(self) -> bool:
@@ -218,13 +225,21 @@ class _SplineBase:
         return B, omega, self._n_basis, None
 
     def _apply_identifiability(
-        self, x: NDArray, omega: NDArray, projection: NDArray | None
+        self,
+        x: NDArray,
+        omega: NDArray,
+        projection: NDArray | None,
+        exposure: NDArray | None = None,
     ) -> tuple[NDArray, int, NDArray | None]:
-        """Optionally remove the intercept-confounded smooth direction.
+        """Remove the intercept-confounded smooth direction.
 
-        mgcv-style smooth terms are constrained to sum to zero over the fit
-        data so the model intercept carries the constant part. For CR splines
-        this removes one null-space direction after the natural constraints.
+        mgcv-style smooth terms are constrained so that the
+        exposure-weighted mean contribution over the training data is zero,
+        letting the model intercept carry the constant part.
+
+        When *exposure* is provided the constraint is
+        ``sum(exposure_i * B(x_i)) @ beta = 0``; otherwise the unweighted
+        sum (equivalent to observation counts) is used.
         """
         if not self.absorbs_intercept:
             return omega, omega.shape[0], projection
@@ -234,12 +249,18 @@ class _SplineBase:
             return omega, n_cols, projection
 
         x = np.asarray(x, dtype=np.float64).ravel()
-        support, counts = np.unique(x, return_counts=True)
+        support, inverse = np.unique(x, return_inverse=True)
         basis = self._basis_matrix(support).toarray()
         if projection is not None:
             basis = basis @ projection
 
-        constraint = counts.astype(np.float64) @ basis
+        if exposure is not None:
+            weights = np.asarray(exposure, dtype=np.float64).ravel()
+        else:
+            weights = np.ones(len(x), dtype=np.float64)
+        weights_agg = np.bincount(inverse, weights=weights, minlength=len(support))
+
+        constraint = weights_agg @ basis
         if np.linalg.norm(constraint) < 1e-12:
             return omega, n_cols, projection
 
@@ -279,7 +300,8 @@ class _SplineBase:
         B = self._basis_matrix(x).tocsr()
         omega = self._build_penalty()
         B, omega, n_cols, projection = self._apply_constraints(B, omega)
-        omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
+        omega, n_cols, projection = self._apply_identifiability(x, omega, projection, exposure)
+        self._constraint_projection = projection
         return GroupInfo(
             columns=B,
             n_cols=n_cols,
@@ -288,12 +310,15 @@ class _SplineBase:
             projection=projection,
         )
 
-    def build_knots_and_penalty(self, x: NDArray) -> tuple[NDArray, int, NDArray | None]:
+    def build_knots_and_penalty(
+        self, x: NDArray, exposure: NDArray | None = None
+    ) -> tuple[NDArray, int, NDArray | None]:
         """Place knots and return penalty info, without building the full basis.
 
         Used by the discretization path to avoid the O(n) basis construction.
-        Applies boundary constraints (NaturalSpline/CRS) so the returned
-        penalty and column count match the exact ``build()`` path.
+        Applies boundary constraints (NaturalSpline/CRS) and identifiability
+        so the returned penalty and column count match the exact ``build()``
+        path.
 
         Returns
         -------
@@ -305,7 +330,8 @@ class _SplineBase:
         self._place_knots(x)
         omega = self._build_penalty()
         _, omega, n_cols, projection = self._apply_constraints(None, omega)
-        omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
+        omega, n_cols, projection = self._apply_identifiability(x, omega, projection, exposure)
+        self._constraint_projection = projection
         return omega, n_cols, projection
 
     def transform(self, x: NDArray) -> NDArray:
@@ -394,6 +420,15 @@ class BasisSpline(_SplineBase):
         self._omega_range: NDArray | None = None
 
     @property
+    def absorbs_intercept(self) -> bool:
+        """Non-split BasisSpline absorbs the intercept via identifiability.
+
+        When ``split_linear=True`` the eigendecompose step removes the
+        constant direction instead, so identifiability is skipped.
+        """
+        return not self.split_linear
+
+    @property
     def supports_linear_split(self) -> bool:
         return True
 
@@ -401,9 +436,11 @@ class BasisSpline(_SplineBase):
         D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
         return D2.T @ D2
 
-    def build_knots_and_penalty(self, x: NDArray) -> tuple[NDArray, int, NDArray | None]:
+    def build_knots_and_penalty(
+        self, x: NDArray, exposure: NDArray | None = None
+    ) -> tuple[NDArray, int, NDArray | None]:
         """Place knots and return penalty + eigendecompose for linear-split terms."""
-        omega, n_cols, projection = super().build_knots_and_penalty(x)
+        omega, n_cols, projection = super().build_knots_and_penalty(x, exposure)
         if self.split_linear:
             self._eigendecompose_penalty(omega)
         return omega, n_cols, projection
@@ -599,11 +636,6 @@ class CubicRegressionSpline(_SplineBase):
         )
         self._Z: NDArray | None = None
 
-    @property
-    def absorbs_intercept(self) -> bool:
-        """Match mgcv's identified CR smooth by removing the constant direction."""
-        return True
-
     def _build_penalty(self) -> NDArray:
         """Integrated f'' squared penalty: omega_ij = int B_i''(x) B_j''(x) dx.
 
@@ -661,19 +693,18 @@ _KIND_MAP = {
 def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     """Convert basis dimension ``k`` to interior knot count.
 
-    ``k`` is the number of basis functions, matching mgcv's ``k``
-    parameter for all spline kinds.  For ``"bs"`` and ``"ns"``,
-    ``k`` equals the built column count.  For ``"cr"``, the built
-    column count is ``k - 1`` because SuperGLM physically removes
-    the identifiability (sum-to-zero) direction.
+    ``k`` is the number of basis functions *before* identifiability,
+    matching mgcv's ``k`` parameter.  The built column count is
+    ``k - 1`` for all spline kinds because the identifiability
+    constraint (exposure-weighted sum-to-zero) removes one direction.
 
     Parameters
     ----------
     kind : str
         Spline kind: ``"bs"``, ``"ns"``, or ``"cr"``.
     k : int
-        Basis dimension (number of basis functions). Matches mgcv's
-        ``k``.  For ``"cr"`` the built column count is ``k - 1``.
+        Basis dimension (number of basis functions before
+        identifiability).  The built column count is always ``k - 1``.
     degree : int
         B-spline polynomial degree (default 3, cubic).
 
@@ -684,10 +715,12 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
 
     Mapping
     -------
-    - ``"bs"``: ``n_knots = k - degree - 1``  (no constraints)
-    - ``"ns"``: ``n_knots = k - degree + 1``  (2 natural constraints)
-    - ``"cr"``: ``n_knots = k - degree + 1``  (2 natural constraints; identifiability
-      removes 1 more at build time, so ``build().n_cols == k - 1``)
+    - ``"bs"``: ``n_knots = k - degree - 1``  (identifiability removes 1,
+      ``build().n_cols == k - 1``)
+    - ``"ns"``: ``n_knots = k - degree + 1``  (2 natural constraints +
+      identifiability, ``build().n_cols == k - 1``)
+    - ``"cr"``: ``n_knots = k - degree + 1``  (2 natural constraints +
+      identifiability, ``build().n_cols == k - 1``)
     """
     if kind not in _KIND_MAP:
         raise ValueError(f"Unknown spline kind {kind!r}, expected one of {sorted(_KIND_MAP)}")
@@ -747,12 +780,13 @@ def Spline(
           direction is physically removed.
 
     k : int, optional
-        Basis dimension (number of basis functions), matching mgcv's
-        ``k`` for all kinds.  For ``"bs"`` and ``"ns"`` this equals the
-        built column count.  For ``"cr"`` the built column count is
-        ``k - 1`` (identifiability constraint removes one direction).
-        Internally converted to ``n_knots`` via :func:`n_knots_from_k`.
-        Cannot be used together with ``n_knots``.
+        Basis dimension (number of basis functions before
+        identifiability), matching mgcv's ``k``.  The built column
+        count is always ``k - 1`` because the identifiability
+        constraint (exposure-weighted sum-to-zero) removes one
+        direction.  Internally converted to ``n_knots`` via
+        :func:`n_knots_from_k`.  Cannot be used together with
+        ``n_knots``.
     n_knots : int, optional
         Number of interior knots (lower-level parameter). Cannot be
         used together with ``k``. Defaults to 10 if neither ``k`` nor

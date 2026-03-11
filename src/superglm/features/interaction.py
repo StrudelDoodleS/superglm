@@ -48,7 +48,7 @@ class SplineCategorical:
         self._non_base: list[str] = []
         self._base_level: str = ""
         self._R_inv_dict: dict[str, NDArray] = {}
-        self._Z: NDArray | None = None
+        self._projection: NDArray | None = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -78,7 +78,7 @@ class SplineCategorical:
         self._hi = spline_spec._hi
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
-        self._Z = getattr(spline_spec, "_Z", None)
+        self._projection = getattr(spline_spec, "_constraint_projection", None)
 
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
         x_cat = np.asarray(x_cat).ravel()
@@ -88,10 +88,13 @@ class SplineCategorical:
         D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
         omega = D2.T @ D2
 
-        # Natural splines: project penalty and per-level basis through Z
-        if self._Z is not None:
-            omega = self._Z.T @ omega @ self._Z
-            n_cols = self._n_basis - 2
+        # Project penalty through the full constraint projection (natural
+        # constraints + identifiability).  The basis columns stay sparse —
+        # the projection is passed via GroupInfo so dm_builder folds it
+        # into R_inv (SparseSSPGroupMatrix keeps the factored form).
+        if self._projection is not None:
+            omega = self._projection.T @ omega @ self._projection
+            n_cols = self._projection.shape[1]
         else:
             n_cols = self._n_basis
 
@@ -99,15 +102,13 @@ class SplineCategorical:
         for level in self._non_base:
             indicator = (x_cat == level).astype(np.float64)
             B_level = B.multiply(indicator[:, None]).tocsr()
-            if self._Z is not None:
-                # Pre-multiply sparse B_level by Z → dense (n, K-2)
-                B_level = B_level.toarray() @ self._Z
             groups.append(
                 GroupInfo(
                     columns=B_level,
                     n_cols=n_cols,
                     penalty_matrix=omega,
                     reparametrize=True,
+                    projection=self._projection,
                 )
             )
         return groups
@@ -128,11 +129,12 @@ class SplineCategorical:
         for level in self._non_base:
             indicator = (x_cat == level).astype(np.float64)
             B_level = B * indicator[:, None]
-            if self._Z is not None:
-                B_level = B_level @ self._Z
             R_inv = self._R_inv_dict.get(level)
             if R_inv is not None:
+                # R_inv already includes projection (P @ R_inv_local)
                 B_level = B_level @ R_inv
+            elif self._projection is not None:
+                B_level = B_level @ self._projection
             blocks.append(B_level)
         return np.hstack(blocks)
 
@@ -145,18 +147,20 @@ class SplineCategorical:
         offset = 0
         for level in self._non_base:
             R_inv = self._R_inv_dict.get(level)
-            n_cols = R_inv.shape[1] if R_inv is not None else self._n_basis
-            if self._Z is not None and R_inv is None:
-                n_cols = self._n_basis - 2
+            if R_inv is not None:
+                n_cols = R_inv.shape[1]
+            elif self._projection is not None:
+                n_cols = self._projection.shape[1]
+            else:
+                n_cols = self._n_basis
             b_level = beta[offset : offset + n_cols]
             offset += n_cols
 
-            if self._Z is not None and R_inv is not None:
-                beta_orig = self._Z @ R_inv @ b_level
-            elif R_inv is not None:
+            # R_inv already includes projection (P @ R_inv_local)
+            if R_inv is not None:
                 beta_orig = R_inv @ b_level
-            elif self._Z is not None:
-                beta_orig = self._Z @ b_level
+            elif self._projection is not None:
+                beta_orig = self._projection @ b_level
             else:
                 beta_orig = b_level
             log_rels = B_grid @ beta_orig
