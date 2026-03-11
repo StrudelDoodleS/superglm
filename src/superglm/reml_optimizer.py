@@ -846,6 +846,19 @@ def optimize_discrete_reml_cached_w(
         )
         print(f"  REML bootstrap: lambdas=[{boot_lam_str}]")
 
+    # Track groups detected as dead (quad << trace) so that, when only
+    # dead-group lambdas changed, we can skip the expensive IRLS refit
+    # and use cached XtWX/XtWz for O(p³) analytical continuation.
+    _dead_group_indices: set[int] = set()
+    _skip_irls = False
+    # Cached IRLS quantities — set on the first W-update, reused by
+    # the W-cont path on subsequent iterations.
+    XtWX: NDArray = np.empty(0)
+    c_XtWz: NDArray = np.empty(0)
+    c_XtW1: NDArray = np.empty(0)
+    c_sum_W: float = 0.0
+    c_sum_Wz: float = 0.0
+
     # === Outer W-update loop ===
     for w_iter in range(max_reml_iter):
         _n_w_updates += 1
@@ -855,6 +868,93 @@ def optimize_discrete_reml_cached_w(
         cand_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
             cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+
+        if _skip_irls:
+            # Fixed-W continuation: only dead-group lambdas changed,
+            # so reuse cached XtWX/XtWz instead of a full IRLS refit.
+            # This is O(p³) instead of O(n·IRLS_iters·p).
+            _t0 = _time.perf_counter()
+            S_cont = _build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                cand_lambdas,
+                p,
+            )
+            M_aug = np.empty((p + 1, p + 1))
+            M_aug[0, 0] = c_sum_W
+            M_aug[0, 1:] = c_XtW1
+            M_aug[1:, 0] = c_XtW1
+            M_aug[1:, 1:] = XtWX + S_cont
+            rhs = np.empty(p + 1)
+            rhs[0] = c_sum_Wz
+            rhs[1:] = c_XtWz
+            try:
+                L = scipy.linalg.cholesky(M_aug, lower=True, check_finite=False)
+                beta_aug = scipy.linalg.cho_solve((L, True), rhs)
+            except np.linalg.LinAlgError:
+                eigvals_h, eigvecs_h = np.linalg.eigh(M_aug)
+                threshold = 1e-10 * max(eigvals_h.max(), 1e-12)
+                with np.errstate(divide="ignore"):
+                    inv_eig = np.where(eigvals_h > threshold, 1.0 / eigvals_h, 0.0)
+                beta_aug = (eigvecs_h * inv_eig[None, :]) @ eigvecs_h.T @ rhs
+            warm_beta = beta_aug[1:].copy()
+            warm_intercept = float(beta_aug[0])
+            XtWX_S_inv, _, _ = _safe_decompose_H(XtWX + S_cont)
+            _t_fp_update += _time.perf_counter() - _t0
+            _n_analytical_iters += 1
+
+            if verbose:
+                lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
+                print(f"  REML W-cont  {_n_w_updates}  [{lam_str}]")
+
+            lambda_history.append(cand_lambdas.copy())
+
+            # Apply next +1 nudge to dead groups for the next iteration
+            _any_nudged = False
+            for i in sorted(_dead_group_indices):
+                if rho[i] < log_hi - 0.5:
+                    rho[i] = min(rho[i] + 1.0, log_hi)
+                    _any_nudged = True
+
+            if not _any_nudged:
+                # All dead groups at ceiling.  The analytical beta is
+                # accurate because dead groups (β≈0) don't affect W
+                # and non-dead lambdas haven't changed since the last
+                # real IRLS.  Skip the verification IRLS.
+                rho_clipped_f = np.clip(rho, log_lo, log_hi)
+                for idx_j, name in enumerate(group_names):
+                    best_lambdas[name] = float(np.clip(np.exp(rho_clipped_f[idx_j]), 1e-6, 1e10))
+                _edf = 1.0 + float(np.trace(XtWX_S_inv @ XtWX))
+                # Compute fresh deviance at analytical beta (O(n) data pass)
+                eta_f = np.clip(dm.matvec(warm_beta) + warm_intercept + offset_arr, -20, 20)
+                mu_f = np.clip(link.inverse(eta_f), 1e-7, 1e7)
+                dev_f = float(np.sum(exposure * distribution.deviance_unit(y, mu_f)))
+                best_pirls = PIRLSResult(
+                    beta=warm_beta.copy(),
+                    intercept=warm_intercept,
+                    deviance=dev_f,
+                    n_iter=0,
+                    converged=True,
+                    phi=1.0,
+                    effective_df=_edf,
+                )
+                best_obj = reml_laml_objective(
+                    dm,
+                    distribution,
+                    link,
+                    groups,
+                    y,
+                    best_pirls,
+                    best_lambdas,
+                    exposure,
+                    offset_arr,
+                    XtWX=XtWX,
+                    penalty_caches=penalty_caches,
+                )
+                converged = True
+                break
+
+            continue  # skip the inner FP loop, go to next outer iteration
 
         # Fit IRLS to convergence (data passes)
         _t0 = _time.perf_counter()
@@ -945,6 +1045,7 @@ def optimize_discrete_reml_cached_w(
         # === Inner analytical REML loop (no data passes) ===
         _t0 = _time.perf_counter()
         beta_cur = pirls_result.beta.copy()
+        _dead_group_indices.clear()  # re-evaluate from fresh FP analysis
 
         for _inner in range(max_analytical_per_w):
             _n_analytical_iters += 1
@@ -996,14 +1097,19 @@ def optimize_discrete_reml_cached_w(
                 r_j = penalty_ranks[g.name]
                 denom = inv_phi * quad + trace_term
                 lam_new = r_j / denom if denom > 1e-12 else inner_lambdas[g.name]
-                # Snap degenerate split-linear groups (see optimize_direct_reml).
+                # Degenerate split-linear group: quad << trace means the
+                # signal is absent and the REML objective is flat.  Push
+                # lambda toward ceiling by +1 log-unit per inner step
+                # (mgcv-like gradual continuation).
                 if (
                     split_linear_snap
                     and g.subgroup_type is not None
                     and trace_term > 1e-12
                     and inv_phi * quad < 0.1 * trace_term
                 ):
-                    lam_new = np.exp(log_hi)
+                    _dead_group_indices.add(i)
+                    rho[i] = min(rho[i] + 1.0, log_hi)
+                    continue
                 rho[i] = np.clip(np.log(max(lam_new, 1e-6)), log_lo, log_hi)
 
             rho_change = float(np.max(np.abs(rho - rho_prev)))
@@ -1024,6 +1130,55 @@ def optimize_discrete_reml_cached_w(
         if _n_w_updates >= 2 and rho_outer_change < 0.02:
             converged = True
             break
+
+        # If dead groups were detected, check whether non-dead groups
+        # are converged — if so, we can skip IRLS on the next outer
+        # iteration (only dead-group lambdas are still moving, and
+        # dead groups don't affect W).  If dead groups are already at
+        # the ceiling, we can converge immediately.
+        if _dead_group_indices:
+            non_dead_change = 0.0
+            for i in range(m):
+                if i not in _dead_group_indices:
+                    non_dead_change = max(non_dead_change, abs(rho[i] - rho_at_w_start[i]))
+            all_at_ceil = all(rho[i] >= log_hi - 0.5 for i in _dead_group_indices)
+            if _n_w_updates >= 2 and non_dead_change < 0.02 and all_at_ceil:
+                rho_clipped = np.clip(rho, log_lo, log_hi)
+                for idx_j, name in enumerate(group_names):
+                    best_lambdas[name] = float(np.clip(np.exp(rho_clipped[idx_j]), 1e-6, 1e10))
+                # Recompute deviance + objective at analytical beta + final lambdas
+                eta_f = np.clip(dm.matvec(warm_beta) + warm_intercept + offset_arr, -20, 20)
+                mu_f = np.clip(link.inverse(eta_f), 1e-7, 1e7)
+                dev_f = float(np.sum(exposure * distribution.deviance_unit(y, mu_f)))
+                # H_inv from last inner FP iteration is at the final lambdas
+                _edf = 1.0 + float(np.trace(H_inv @ XtWX))
+                best_pirls = PIRLSResult(
+                    beta=warm_beta.copy(),
+                    intercept=warm_intercept,
+                    deviance=dev_f,
+                    n_iter=pirls_result.n_iter,
+                    converged=True,
+                    phi=1.0,
+                    effective_df=_edf,
+                )
+                best_obj = reml_laml_objective(
+                    dm,
+                    distribution,
+                    link,
+                    groups,
+                    y,
+                    best_pirls,
+                    best_lambdas,
+                    exposure,
+                    offset_arr,
+                    XtWX=XtWX,
+                    penalty_caches=penalty_caches,
+                )
+                converged = True
+                break
+            _skip_irls = non_dead_change < 0.02
+        else:
+            _skip_irls = False
 
     # === Final IRLS with converged lambdas for accurate result ===
     if not converged or best_pirls is None:
