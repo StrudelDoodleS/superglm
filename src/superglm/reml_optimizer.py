@@ -700,15 +700,22 @@ def optimize_direct_reml(
     if best_pirls is None:
         raise RuntimeError("Direct REML Newton did not evaluate any candidates")
 
-    # ── Post-convergence probe ──────────────────────────────────────
+    # ── Post-convergence probe for degenerate split-linear groups ──
     # The Fellner-Schall FP update is degenerate for noise terms: when
     # coefficients are shrunk, lambda = rank/(quad + rank/lambda) ≈ lambda,
     # so ANY lambda is approximately a fixed point.  The bootstrap
     # initialization biases toward moderate lambdas, leaving residual EDF
-    # on noise features.  Probe the upper bound for each group: if the
-    # REML objective improves (or barely degrades), accept the higher
-    # lambda.  Signal groups will be rejected (deviance rises sharply).
-    for idx, g in reml_groups:
+    # on noise features.  Probe the upper bound for each split-linear
+    # subgroup that looks degenerate (small coefficients).  Signal groups
+    # are skipped (large ||β||) to avoid wasteful IRLS solves.
+    _probe_norm_thr = 0.01
+    probe_groups = [
+        (idx, g)
+        for idx, g in reml_groups
+        if g.subgroup_type is not None
+        and np.linalg.norm(best_pirls.beta[g.sl]) / max(np.sqrt(g.size), 1.0) < _probe_norm_thr
+    ]
+    for idx, g in probe_groups:
         probe_lambdas = best_lambdas.copy()
         probe_lambdas[g.name] = float(np.exp(log_hi))
         probe_result, probe_inv, probe_xtwx = fit_irls_direct(
@@ -1097,10 +1104,17 @@ def optimize_discrete_reml_cached_w(
     if best_pirls is None:
         raise RuntimeError("Discrete REML cached-W did not evaluate any candidates")
 
-    # ── Post-convergence probe for rank-1 groups ──────────────────
+    # ── Post-convergence probe for degenerate split-linear groups ──
     # Same FP-degeneracy fix as optimize_direct_reml (see comment there).
+    _probe_norm_thr = 0.01
+    probe_groups = [
+        (idx, g)
+        for idx, g in reml_groups
+        if g.subgroup_type is not None
+        and np.linalg.norm(best_pirls.beta[g.sl]) / max(np.sqrt(g.size), 1.0) < _probe_norm_thr
+    ]
     any_probe_accepted = False
-    for idx, g in reml_groups:
+    for idx, g in probe_groups:
         probe_lambdas = best_lambdas.copy()
         probe_lambdas[g.name] = float(np.exp(log_hi))
         probe_result, probe_inv, probe_xtwx = fit_irls_direct(

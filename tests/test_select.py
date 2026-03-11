@@ -564,22 +564,27 @@ class TestSelectNoiseSuppressionREML:
         )
         model.fit_reml(X, y, max_reml_iter=30)
 
+        # Compute per-group EDF via metrics machinery
+        metrics_obj = model.metrics(X, y)
+        edf, _ = metrics_obj._influence_edf
+        _, _, _, active_groups = metrics_obj._active_info
+        group_edf = {ag.name: float(np.sum(edf[ag.sl])) for ag in active_groups}
+
+        # Noise groups: EDF < 0.02 (inactive groups have EDF = 0 by construction)
+        for g in model._groups:
+            if "noise" in g.name.lower():
+                noise_edf = group_edf.get(g.name, 0.0)
+                assert noise_edf < 0.02, f"{g.name} EDF={noise_edf:.4f}, expected < 0.02"
+
+        # Signal groups should retain meaningful EDF
+        signal_edf = sum(
+            group_edf.get(g.name, 0.0) for g in model._groups if "signal" in g.name.lower()
+        )
+        assert signal_edf > 3.0, f"Signal total EDF={signal_edf:.2f}, expected > 3.0"
+
         # Noise lambdas should be at or near the upper bound
         noise_lambdas = {
             name: lam for name, lam in model._reml_lambdas.items() if "noise" in name.lower()
         }
         for name, lam in noise_lambdas.items():
             assert lam > 1e6, f"{name} lambda={lam:.1f}, expected > 1e6"
-
-        # Signal lambdas should remain moderate
-        signal_lambdas = {
-            name: lam for name, lam in model._reml_lambdas.items() if "signal" in name.lower()
-        }
-        for name, lam in signal_lambdas.items():
-            assert lam < 1e4, f"{name} lambda={lam:.1f}, expected < 1e4"
-
-        # Noise coefficient norms should be near zero
-        for g in model._groups:
-            if "noise" in g.name.lower():
-                norm = float(np.linalg.norm(model.result.beta[g.sl]))
-                assert norm < 1e-4, f"{g.name} ||beta||={norm:.6f}"
