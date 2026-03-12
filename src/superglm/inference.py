@@ -104,11 +104,8 @@ def feature_se_from_cov(
     Cov_g = Cov_active[np.ix_(indices, indices)]
 
     if isinstance(spec, _SplineBase):
-        from scipy.interpolate import BSpline as BSpl
-
         x_grid = np.linspace(spec._lo, spec._hi, n_points)
-        x_clip = np.clip(x_grid, spec._knots[0], spec._knots[-1])
-        B_grid = BSpl.design_matrix(x_clip, spec._knots, spec.degree).toarray()
+        B_grid = spec._raw_basis_matrix(x_grid)
         M = B_grid @ spec._R_inv if spec._R_inv is not None else B_grid
 
         # For split_linear=True: only use columns for active subgroups
@@ -193,7 +190,6 @@ def simultaneous_bands(
         ci_lower_pointwise, ci_upper_pointwise,
         ci_lower_simultaneous, ci_upper_simultaneous.
     """
-    from scipy.interpolate import BSpline as BSpl
     from scipy.stats import norm
 
     from superglm.features.spline import _SplineBase
@@ -219,8 +215,7 @@ def simultaneous_bands(
 
     # Build basis evaluation matrix
     x_grid = np.linspace(spec._lo, spec._hi, n_points)
-    x_clip = np.clip(x_grid, spec._knots[0], spec._knots[-1])
-    B_grid = BSpl.design_matrix(x_clip, spec._knots, spec.degree).toarray()
+    B_grid = spec._raw_basis_matrix(x_grid)
     M = B_grid @ spec._R_inv if spec._R_inv is not None else B_grid
 
     # For split_linear=True: only use columns for active subgroups

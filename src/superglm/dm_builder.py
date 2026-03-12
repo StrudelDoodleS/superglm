@@ -375,15 +375,12 @@ def build_design_matrix(
         exposure_agg = None
 
         if use_discrete:
-            from scipy.interpolate import BSpline as BSpl
-
             omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
                 x_col, exposure
             )
             n_bins_feat = resolve_discrete_n_bins(name, spec, n_bins_config)
             bin_centers, bin_idx = _discretize_column(x_col, n_bins_feat)
-            bin_centers_clip = np.clip(bin_centers, spec._knots[0], spec._knots[-1])
-            B_unique = BSpl.design_matrix(bin_centers_clip, spec._knots, spec.degree).toarray()
+            B_unique = spec._raw_basis_matrix(bin_centers)
             exposure_agg = np.bincount(bin_idx, weights=exposure, minlength=len(bin_centers))
 
             if getattr(spec, "supports_linear_split", False) and getattr(

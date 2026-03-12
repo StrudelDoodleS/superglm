@@ -129,6 +129,19 @@ class _SplineBase:
         x_eval, extrapolate = self._prepare_eval_points(x)
         return BSpl.design_matrix(x_eval, self._knots, self.degree, extrapolate=extrapolate)
 
+    def _raw_basis_matrix(self, x: NDArray) -> NDArray:
+        """Evaluate the raw (pre-projection) basis at points clipped to training range.
+
+        Returns a dense ``(n, n_basis)`` array.  All code outside spline.py
+        that needs to evaluate a spline's basis should call this method
+        rather than constructing a ``BSpline.design_matrix`` directly, so
+        that non-B-spline subclasses (e.g. :class:`CardinalCRSpline`) get
+        their own evaluation strategy.
+        """
+        x = np.asarray(x, dtype=np.float64).ravel()
+        x_clip = np.clip(x, self._lo, self._hi)
+        return BSpl.design_matrix(x_clip, self._knots, self.degree, extrapolate=False).toarray()
+
     def _basis_value_and_slope_at(self, x0: float) -> tuple[NDArray, NDArray]:
         """Return the raw basis row and its first derivative at ``x0``."""
         basis = BSpl.design_matrix(
@@ -800,13 +813,77 @@ class CardinalCRSpline(_SplineBase):
         self._cr_M = np.zeros((K, K))
         self._cr_M[1 : K - 1, :] = D_inv_Bd
 
+    def _cardinal_boundary_slopes(self) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+        """Basis value and slope at the boundary knots for linear extrapolation.
+
+        Returns ``(basis_lo, slope_lo, basis_hi, slope_hi)`` where each is
+        a length-K vector in the raw cardinal basis.
+        """
+        knots = self._cr_knots
+        K = len(knots)
+        h = np.diff(knots)
+        M = self._cr_M
+
+        # At lo (knot 0): basis = e_0
+        basis_lo = np.zeros(K)
+        basis_lo[0] = 1.0
+        # Slope at lo via derivative of cardinal formula at t=0 in interval [x_0, x_1]:
+        # df/dx = (-1/h)*delta_0 + (1/h)*delta_1 + h*((-2/6)*gamma_0 + (-1/6)*gamma_1)
+        # gamma_0 = 0 (natural BC), so:
+        slope_lo = np.zeros(K)
+        slope_lo[0] = -1.0 / h[0]
+        slope_lo[1] = 1.0 / h[0]
+        slope_lo -= (h[0] / 6.0) * M[1, :]
+
+        # At hi (knot K-1): basis = e_{K-1}
+        basis_hi = np.zeros(K)
+        basis_hi[K - 1] = 1.0
+        # Slope at hi via derivative at t=1 in interval [x_{K-2}, x_{K-1}]:
+        # df/dx = (-1/h)*delta_{K-2} + (1/h)*delta_{K-1} + h*((1/6)*gamma_{K-2} + (1/3)*gamma_{K-1})
+        # gamma_{K-1} = 0 (natural BC), so:
+        slope_hi = np.zeros(K)
+        slope_hi[K - 2] = -1.0 / h[K - 2]
+        slope_hi[K - 1] = 1.0 / h[K - 2]
+        slope_hi += (h[K - 2] / 6.0) * M[K - 2, :]
+
+        return basis_lo, slope_lo, basis_hi, slope_hi
+
     def _build_penalty(self) -> NDArray:
         return self._cr_S
 
     def _basis_matrix(self, x: NDArray):
         """Evaluate the cardinal CR basis at data points."""
-        x_eval, _ = self._prepare_eval_points(x)
-        return self._eval_cardinal_basis(x_eval)
+        x_eval, extrapolate = self._prepare_eval_points(x)
+        if not extrapolate:
+            return self._eval_cardinal_basis(x_eval)
+        return self._linear_tail_cardinal_basis(x_eval)
+
+    def _raw_basis_matrix(self, x: NDArray) -> NDArray:
+        x = np.asarray(x, dtype=np.float64).ravel()
+        x_clip = np.clip(x, self._lo, self._hi)
+        return self._eval_cardinal_basis(x_clip).toarray()
+
+    def _linear_tail_cardinal_basis(self, x: NDArray) -> sp.csr_matrix:
+        """Evaluate cardinal basis with natural-spline linear tails outside range."""
+        x = np.asarray(x, dtype=np.float64).ravel()
+        lo_mask = x < self._lo
+        hi_mask = x > self._hi
+        mid_mask = ~(lo_mask | hi_mask)
+
+        K = len(self._cr_knots)
+        X = np.zeros((len(x), K))
+
+        if np.any(mid_mask):
+            X[mid_mask] = self._eval_cardinal_basis(x[mid_mask]).toarray()
+
+        if np.any(lo_mask) or np.any(hi_mask):
+            basis_lo, slope_lo, basis_hi, slope_hi = self._cardinal_boundary_slopes()
+            if np.any(lo_mask):
+                X[lo_mask] = basis_lo + (x[lo_mask, None] - self._lo) * slope_lo
+            if np.any(hi_mask):
+                X[hi_mask] = basis_hi + (x[hi_mask, None] - self._hi) * slope_hi
+
+        return sp.csr_matrix(X)
 
     def _eval_cardinal_basis(self, x: NDArray) -> sp.csr_matrix:
         """Vectorised cardinal cubic regression spline evaluation.

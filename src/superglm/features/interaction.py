@@ -71,6 +71,7 @@ class SplineCategorical:
         if not isinstance(cat_spec, Categorical):
             raise TypeError(f"Expected Categorical spec for {self.cat_name}")
 
+        self._spline_spec = spline_spec
         self._knots = spline_spec._knots
         self._n_basis = spline_spec._n_basis
         self._degree = spline_spec.degree
@@ -82,11 +83,9 @@ class SplineCategorical:
 
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
         x_cat = np.asarray(x_cat).ravel()
-        x_clip = np.clip(x_spline, self._knots[0], self._knots[-1])
-        B = BSpl.design_matrix(x_clip, self._knots, self._degree).tocsr()
+        B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
 
-        D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
-        omega = D2.T @ D2
+        omega = spline_spec._build_penalty()
 
         # Project penalty through the full constraint projection (natural
         # constraints + identifiability).  The basis columns stay sparse —
@@ -122,8 +121,7 @@ class SplineCategorical:
         _validate_categorical_levels(
             x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
         )
-        x_clip = np.clip(x_spline, self._knots[0], self._knots[-1])
-        B = BSpl.design_matrix(x_clip, self._knots, self._degree).toarray()
+        B = self._spline_spec._raw_basis_matrix(x_spline)
 
         blocks = []
         for level in self._non_base:
@@ -140,8 +138,7 @@ class SplineCategorical:
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
         x_grid = np.linspace(self._lo, self._hi, n_points)
-        x_clip = np.clip(x_grid, self._knots[0], self._knots[-1])
-        B_grid = BSpl.design_matrix(x_clip, self._knots, self._degree).toarray()
+        B_grid = self._spline_spec._raw_basis_matrix(x_grid)
 
         per_level: dict[str, dict[str, Any]] = {}
         offset = 0
