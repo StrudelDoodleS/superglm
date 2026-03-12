@@ -15,7 +15,7 @@ import scipy.sparse as sp
 from numpy.typing import ArrayLike, NDArray
 from scipy.interpolate import BSpline as BSpl
 
-from superglm.types import GroupInfo
+from superglm.types import GroupInfo, TensorMarginalInfo
 
 
 def _weighted_quantile_knots(x: NDArray, n_knots: int, alpha: float) -> NDArray:
@@ -476,6 +476,70 @@ class _SplineBase:
             "knots_interior": self._knots[self.degree + 1 : -(self.degree + 1)],
             "coefficients_original": beta_orig,
         }
+
+    def tensor_marginal_ingredients(self, x: NDArray) -> TensorMarginalInfo:
+        """Compute marginal basis, penalty, and projection for tensor products.
+
+        Must be called on an already-built spec (after ``build()`` or
+        ``_place_knots()``).  Reuses the parent's knot vector, penalty
+        type, and boundary constraints so that tensor marginals inherit
+        the parent spline geometry.
+
+        Returns a ``TensorMarginalInfo`` with the centered+constrained
+        marginal basis, penalty, and a projection from the raw B-spline
+        space to the effective (centered) space.
+        """
+        x = np.asarray(x, dtype=np.float64).ravel()
+
+        # 1. Raw basis
+        B_raw = self._raw_basis_matrix(x)  # (n, K)
+
+        # 2. Penalty in raw space
+        omega = self._build_penalty()  # (K, K)
+
+        # 3. Apply boundary constraints (e.g. natural f''=0)
+        _, omega_c, _, Z = self._apply_constraints(None, omega)
+        # Z is (K, K-c) or None
+
+        # 4. Apply constraints to basis
+        if Z is not None:
+            B_c = B_raw @ Z  # (n, K-c)
+        else:
+            B_c = B_raw  # (n, K)
+
+        # 5. Center (remove intercept direction)
+        c = B_c.sum(axis=0)
+        c_norm = np.linalg.norm(c)
+        if c_norm < 1e-12:
+            # Degenerate: no centering needed
+            P_ident = np.eye(B_c.shape[1])
+        else:
+            c = c / c_norm
+            q, _ = np.linalg.qr(c[:, None], mode="complete")
+            P_ident = q[:, 1:]  # (K-c, K-c-1)
+
+        # 6. Centered basis and penalty
+        B_centered = B_c @ P_ident  # (n, K_eff)
+        omega_centered = P_ident.T @ omega_c @ P_ident  # (K_eff, K_eff)
+
+        # 7. Full projection: raw → centered+constrained
+        if Z is not None:
+            projection = Z @ P_ident  # (K, K_eff)
+        else:
+            projection = P_ident  # (K, K_eff)
+
+        K_eff = projection.shape[1]
+
+        return TensorMarginalInfo(
+            basis=B_centered,
+            penalty=omega_centered,
+            knots=self._knots.copy(),
+            lo=self._lo,
+            hi=self._hi,
+            projection=projection,
+            K_eff=K_eff,
+            degree=self.degree,
+        )
 
 
 class BasisSpline(_SplineBase):
@@ -1123,6 +1187,12 @@ class CardinalCRSpline(_SplineBase):
             "knots_interior": self._cr_knots[1:-1],
             "coefficients_original": beta_orig,
         }
+
+    def tensor_marginal_ingredients(self, x: NDArray) -> TensorMarginalInfo:
+        raise TypeError(
+            "CardinalCRSpline does not support tensor marginal ingredients. "
+            "Use kind='cr' or kind='bs' for tensor product interactions."
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════

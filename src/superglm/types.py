@@ -105,3 +105,23 @@ class GroupSlice:
     @property
     def sl(self) -> slice:
         return slice(self.start, self.end)
+
+
+# ── Tensor marginal ingredients ────────────────────────────────
+@dataclass
+class TensorMarginalInfo:
+    """Pre-computed marginal ingredients for tensor product interactions.
+
+    Produced by ``_SplineBase.tensor_marginal_ingredients()`` so that
+    ``TensorInteraction`` can consume parent spline geometry (knot
+    vectors, penalties, constraints) without rebuilding from scratch.
+    """
+
+    basis: NDArray  # (n, K_eff) centered + constrained basis
+    penalty: NDArray  # (K_eff, K_eff) penalty in centered space
+    knots: NDArray  # full knot vector (for evaluating at new points)
+    lo: float  # training range lower bound
+    hi: float  # training range upper bound
+    projection: NDArray  # (K_raw, K_eff) raw→centered+constrained projection
+    K_eff: int  # effective column count
+    degree: int  # B-spline degree (for basis eval at new points)
