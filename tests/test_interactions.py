@@ -924,10 +924,11 @@ class TestTensorInteractionBuild:
 
         from scipy.interpolate import BSpline as BSpl
 
-        x1_clip = np.clip(x1, ti._knots1[0], ti._knots1[-1])
-        x2_clip = np.clip(x2, ti._knots2[0], ti._knots2[-1])
-        B1 = BSpl.design_matrix(x1_clip, ti._knots1, ti._degree).toarray() @ ti._P1
-        B2 = BSpl.design_matrix(x2_clip, ti._knots2, ti._degree).toarray() @ ti._P2
+        m1, m2 = ti._marginal1, ti._marginal2
+        x1_clip = np.clip(x1, m1.lo, m1.hi)
+        x2_clip = np.clip(x2, m2.lo, m2.hi)
+        B1 = BSpl.design_matrix(x1_clip, m1.knots, m1.degree).toarray() @ m1.projection
+        B2 = BSpl.design_matrix(x2_clip, m2.knots, m2.degree).toarray() @ m2.projection
 
         for i in [0, 50, 150]:
             expected = np.kron(B1[i], B2[i])
@@ -1064,3 +1065,230 @@ class TestTensorInteractionModelSpecifics:
         assert names == ["age:bm:bilinear", "age:bm:wiggly"]
         assert "age:bm:bilinear" in model._reml_lambdas
         assert "age:bm:wiggly" in model._reml_lambdas
+
+
+# ── Tensor marginal parent geometry tests ──────────────────────
+
+
+class TestTensorMarginalParentGeometry:
+    """Verify that TensorInteraction consumes parent spline geometry."""
+
+    def test_bs_edge_padding_flows_through(self):
+        """BasisSpline parent's open knot vector is used in tensor marginals."""
+        s1 = Spline(n_knots=5)
+        s2 = Spline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b", n_knots=(5, 5))
+        ti.build(x1, x2, {"a": s1, "b": s2})
+
+        # BasisSpline uses open knot vector with 0.001*range padding
+        # The tensor marginal should inherit the same knot vector
+        np.testing.assert_array_equal(ti._marginal1.knots, s1._knots)
+        np.testing.assert_array_equal(ti._marginal2.knots, s2._knots)
+
+        # Open knots extend beyond the data range
+        assert ti._marginal1.knots[0] < 0.0
+        assert ti._marginal1.knots[-1] > 100.0
+
+    def test_natural_spline_marginals_build(self):
+        """ns+ns tensor: column count reflects natural constraint reduction."""
+        s1 = NaturalSpline(n_knots=5)
+        s2 = NaturalSpline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b")
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+
+        # NaturalSpline: K_raw = n_knots + degree + 1 = 9
+        # Natural constraints remove 2: K_constrained = 7
+        # Centering removes 1: K_eff = 6
+        assert ti._marginal1.K_eff == 6
+        assert ti._marginal2.K_eff == 6
+        assert info.n_cols == 6 * 6
+
+    def test_crs_marginals_build(self):
+        """cr+cr tensor: uses integrated-f'' penalty, correct column count."""
+        s1 = CubicRegressionSpline(n_knots=5)
+        s2 = CubicRegressionSpline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b")
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+
+        # CRS: K_raw = 9, natural constraints remove 2, centering removes 1 → K_eff = 6
+        assert ti._marginal1.K_eff == 6
+        assert info.n_cols == 6 * 6
+
+        # Penalty should differ from D2.T@D2 (it's integrated f'')
+        # Verify it's not all zeros
+        assert np.linalg.norm(ti._marginal1.penalty) > 0
+
+    def test_mixed_bs_ns_build(self):
+        """bs+ns tensor builds correctly with different marginal types."""
+        s1 = Spline(n_knots=5)
+        s2 = NaturalSpline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b")
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+
+        # BasisSpline: K_raw=9, centering removes 1 → K_eff=8
+        # NaturalSpline: K_raw=9, natural removes 2, centering removes 1 → K_eff=6
+        assert ti._marginal1.K_eff == 8
+        assert ti._marginal2.K_eff == 6
+        assert info.n_cols == 8 * 6
+
+    def test_mixed_bs_cr_build(self):
+        """bs+cr tensor builds correctly with different marginal types."""
+        s1 = Spline(n_knots=5)
+        s2 = CubicRegressionSpline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b")
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+
+        assert ti._marginal1.K_eff == 8
+        assert ti._marginal2.K_eff == 6
+        assert info.n_cols == 8 * 6
+
+    def test_null_eigenvalue_invariant_bs(self):
+        """bs tensor penalty has exactly 1 null eigenvalue (bilinear)."""
+        s1 = Spline(n_knots=5)
+        s2 = Spline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b")
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+        eigvals = np.linalg.eigvalsh(info.penalty_matrix)
+        assert np.sum(eigvals < 1e-10) == 1
+
+    def test_ns_penalty_is_positive_definite(self):
+        """ns tensor penalty has no null eigenvalue.
+
+        The D2 penalty's 'linear in index' null direction is NOT in the
+        natural constraint subspace (Z), so after Z-projection + centering
+        the penalty is full rank.
+        """
+        s1 = NaturalSpline(n_knots=5)
+        s2 = NaturalSpline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b")
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+        eigvals = np.linalg.eigvalsh(info.penalty_matrix)
+        assert np.all(eigvals > 1e-12), "NS tensor penalty should be positive definite"
+
+    def test_null_eigenvalue_invariant_cr(self):
+        """cr tensor penalty has exactly 1 null eigenvalue (bilinear).
+
+        The integrated f'' penalty has null space {constant, linear in x},
+        both of which satisfy f''=0 at boundaries. After Z-projection (2
+        null eigvals) and centering (removes constant) → 1 null eigenvalue.
+        """
+        s1 = CubicRegressionSpline(n_knots=5)
+        s2 = CubicRegressionSpline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b")
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+        eigvals = np.linalg.eigvalsh(info.penalty_matrix)
+        assert np.sum(eigvals < 1e-10) == 1
+
+    def test_n_knots_none_uses_parent_geometry(self):
+        """Default n_knots=None matches parent knot count."""
+        s1 = Spline(n_knots=7)
+        s2 = Spline(n_knots=4)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b")  # n_knots=None
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+
+        # BasisSpline(n_knots=7): K=11, centered=10
+        # BasisSpline(n_knots=4): K=8, centered=7
+        assert ti._marginal1.K_eff == 10
+        assert ti._marginal2.K_eff == 7
+        assert info.n_cols == 10 * 7
+
+    def test_cardinal_cr_raises(self):
+        """CardinalCRSpline rejected via tensor_marginal_ingredients."""
+        from superglm.features.spline import CardinalCRSpline
+
+        s1 = CardinalCRSpline(n_knots=5)
+        s2 = Spline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b")
+        with pytest.raises(TypeError, match="CardinalCRSpline"):
+            ti.build(x1, x2, {"a": s1, "b": s2})
+
+    def test_cr_n_knots_override(self):
+        """CRS parents with n_knots override should not raise TypeError."""
+        s1 = CubicRegressionSpline(n_knots=5)
+        s2 = CubicRegressionSpline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b", n_knots=(7, 7))
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+        # CRS(n_knots=7): K=11, natural removes 2, centering removes 1 → K_eff=8
+        assert ti._marginal1.K_eff == 8
+        assert info.n_cols == 8 * 8
+
+    def test_n_knots_override_preserves_knot_alpha(self):
+        """Overridden marginals should use the parent's knot_alpha."""
+        s1 = Spline(n_knots=10, knot_strategy="quantile_tempered", knot_alpha=0.14)
+        s2 = Spline(n_knots=10, knot_strategy="quantile_tempered", knot_alpha=0.14)
+        rng = np.random.default_rng(42)
+        x1 = rng.exponential(50, 300)
+        x2 = rng.exponential(25, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b", n_knots=(5, 5))
+        ti.build(x1, x2, {"a": s1, "b": s2})
+
+        # Build reference with the correct knot_alpha
+        from superglm.features.spline import BasisSpline
+
+        ref = BasisSpline(
+            n_knots=5,
+            knot_strategy="quantile_tempered",
+            knot_alpha=0.14,
+            boundary=(s1._lo, s1._hi),
+        )
+        ref._place_knots(x1)
+        ref_info = ref.tensor_marginal_ingredients(x1)
+        np.testing.assert_array_equal(ti._marginal1.knots, ref_info.knots)
