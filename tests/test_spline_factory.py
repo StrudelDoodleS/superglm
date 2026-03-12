@@ -118,20 +118,20 @@ class TestKMapping:
         assert s.n_knots == 8
 
     def test_k_produces_correct_ncols_bs(self):
-        """For bs, k should equal the number of basis columns."""
+        """For bs, built column count is k-1 (identifiability removes 1)."""
         k = 14
         s = Spline(kind="bs", k=k)
         x = np.linspace(0, 1, 100)
         info = s.build(x)
-        assert info.n_cols == k
+        assert info.n_cols == k - 1
 
     def test_k_produces_correct_ncols_ns(self):
-        """For ns, k should equal the post-constraint column count."""
+        """For ns, built column count is k-1 (identifiability removes 1)."""
         k = 10
         s = Spline(kind="ns", k=k)
         x = np.linspace(0, 1, 100)
         info = s.build(x)
-        assert info.n_cols == k
+        assert info.n_cols == k - 1
 
     def test_k_produces_correct_ncols_cr(self):
         """For cr, built column count is k-1 (identifiability removes 1)."""

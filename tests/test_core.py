@@ -6,7 +6,12 @@ import pytest
 from superglm.distributions import Gamma, Poisson, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
-from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline, _SplineBase
+from superglm.features.spline import (
+    CubicRegressionSpline,
+    NaturalSpline,
+    Spline,
+    _SplineBase,
+)
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.types import GroupSlice
 
@@ -88,7 +93,7 @@ class TestSpline:
     def test_n_basis(self):
         for nk in [5, 10, 20]:
             info = Spline(n_knots=nk, degree=3).build(np.linspace(0, 1, 100))
-            assert info.n_cols == nk + 4  # n_interior + degree + 1
+            assert info.n_cols == nk + 3  # K - 1 = n_interior + degree (identifiability)
 
     def test_penalty_psd(self):
         info = Spline(n_knots=10).build(np.linspace(0, 1, 100))
@@ -103,9 +108,9 @@ class TestNaturalSpline:
     """Tests for NaturalSpline boundary constraints."""
 
     def test_natural_n_basis(self):
-        """K-2 columns (e.g., 12 for n_knots=10)."""
+        """K-3 columns (natural constraints remove 2, identifiability removes 1)."""
         info = NaturalSpline(n_knots=10).build(np.linspace(0, 1, 200))
-        assert info.n_cols == 10 + 4 - 2  # K - 2
+        assert info.n_cols == 10 + 4 - 3  # K - 3
 
     def test_natural_penalty_psd(self):
         """Projected penalty is positive semi-definite."""
@@ -128,20 +133,20 @@ class TestNaturalSpline:
             np.testing.assert_allclose(spl(sp._lo, nu=2), 0.0, atol=1e-10)
             np.testing.assert_allclose(spl(sp._hi, nu=2), 0.0, atol=1e-10)
 
-    def test_natural_penalty_null_space_1d(self):
-        """omega_nat has rank K-3 and 1D null space (constant only)."""
+    def test_natural_penalty_null_space_0d(self):
+        """After identifiability, omega has full rank (no null space)."""
         info = NaturalSpline(n_knots=10).build(np.linspace(0, 1, 200))
         eigvals = np.linalg.eigvalsh(info.penalty_matrix)
         n_null = np.sum(eigvals < 1e-10)
-        assert n_null == 1  # constant only; linear absorbed by natural constraints
+        assert n_null == 0  # constant removed by identifiability
 
     def test_natural_projection_shape(self):
-        """GroupInfo.projection is (K, K-2)."""
+        """GroupInfo.projection is (K, K-3) after natural + identifiability."""
         sp = NaturalSpline(n_knots=10)
         info = sp.build(np.linspace(0, 1, 200))
         K = sp._n_basis
         assert info.projection is not None
-        assert info.projection.shape == (K, K - 2)
+        assert info.projection.shape == (K, K - 3)
 
 
 class TestSplineBaseHierarchy:
@@ -186,8 +191,8 @@ class TestSplineBaseHierarchy:
         info = sp.build(np.linspace(0, 100, 300))
         interior = sp._knots[sp.degree + 1 : -(sp.degree + 1)]
         np.testing.assert_array_equal(interior, knots)
-        # NaturalSpline with 3 interior knots: K = 3+3+1 = 7, K-2 = 5
-        assert info.n_cols == sp._n_basis - 2
+        # NaturalSpline with 3 interior knots: K = 3+3+1 = 7, K-3 = 4
+        assert info.n_cols == sp._n_basis - 3
 
     def test_uniform_default(self):
         """Spline() uses uniform strategy by default."""
@@ -295,7 +300,7 @@ class TestCubicRegressionSpline:
         ns = NaturalSpline(n_knots=10)
         cr_info = cr.build(x)
         ns_info = ns.build(x)
-        assert cr_info.penalty_matrix.shape[0] == ns_info.penalty_matrix.shape[0] - 1
+        assert cr_info.penalty_matrix.shape[0] == ns_info.penalty_matrix.shape[0]
         assert not np.isclose(
             np.trace(cr_info.penalty_matrix),
             np.trace(ns_info.penalty_matrix),
@@ -623,3 +628,510 @@ class TestActiveSet:
         )
         assert combined.converged
         assert combined.deviance == pytest.approx(baseline.deviance, rel=1e-4)
+
+
+# ── Knot governance ──────────────────────────────────────────────
+
+
+class TestFittedKnots:
+    """Public accessors for fitted knot locations."""
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_fitted_knots_returns_interior(self, kind):
+        sp = Spline(kind=kind, n_knots=6)
+        assert sp.fitted_knots is None  # before fit
+
+        x = np.linspace(0, 10, 300)
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert knots is not None
+        assert len(knots) == 6
+        assert knots[0] > 0.0  # strictly inside boundaries
+        assert knots[-1] < 10.0
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_fitted_knots_is_copy(self, kind):
+        """Mutating the returned array must not alter the spec."""
+        sp = Spline(kind=kind, n_knots=4)
+        sp.build(np.linspace(0, 10, 200))
+        k1 = sp.fitted_knots
+        k1[:] = 999.0
+        k2 = sp.fitted_knots
+        assert not np.any(k2 == 999.0)
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_fitted_boundary(self, kind):
+        sp = Spline(kind=kind, n_knots=4)
+        assert sp.fitted_boundary is None  # before fit
+        x = np.linspace(2.0, 8.0, 200)
+        sp.build(x)
+        lo, hi = sp.fitted_boundary
+        assert lo == pytest.approx(2.0)
+        assert hi == pytest.approx(8.0)
+
+    def test_explicit_knots_round_trip(self):
+        """fitted_knots from one fit can freeze placement on a second fit."""
+        sp1 = Spline(kind="cr", n_knots=8)
+        x_uniform = np.linspace(0, 100, 500)
+        sp1.build(x_uniform)
+        frozen = sp1.fitted_knots
+
+        sp2 = Spline(kind="cr", knots=frozen)
+        x_skewed = np.concatenate([np.linspace(0, 10, 400), np.linspace(90, 100, 100)])
+        sp2.build(x_skewed)
+        np.testing.assert_array_equal(sp2.fitted_knots, frozen)
+
+
+class TestQuantileKnotGovernance:
+    """Quantile knot placement stores and freezes exact positions."""
+
+    def test_quantile_of_unique(self):
+        """Quantile strategy uses unique(x), producing strictly increasing knots."""
+        # Data with heavy ties: 80% at value 50, rest spread
+        rng = np.random.default_rng(0)
+        x = np.concatenate([np.full(800, 50.0), rng.uniform(0, 100, 200)])
+        sp = Spline(kind="bs", n_knots=8, knot_strategy="quantile")
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert len(knots) == 8
+        # Strictly increasing (no duplicates from ties)
+        assert np.all(np.diff(knots) > 0)
+
+    def test_quantile_knots_frozen_on_refit(self):
+        """Quantile knots from first fit can freeze placement on refit."""
+        rng = np.random.default_rng(42)
+        x1 = rng.exponential(10, 500)
+        sp = Spline(kind="cr_cardinal", n_knots=6, knot_strategy="quantile")
+        sp.build(x1)
+        knots_fit1 = sp.fitted_knots.copy()
+
+        # Refit on totally different distribution
+        sp2 = Spline(kind="cr_cardinal", knots=knots_fit1)
+        x2 = rng.uniform(0, 100, 500)
+        sp2.build(x2)
+        np.testing.assert_array_equal(sp2.fitted_knots, knots_fit1)
+
+
+class TestKnotSummary:
+    """SuperGLM.knot_summary() exposes fitted knot metadata."""
+
+    def test_knot_summary_content(self):
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(0)
+        n = 300
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n), "cat": rng.choice(["a", "b"], n)})
+        y = rng.poisson(2.0, n).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(kind="cr", n_knots=6), "cat": Categorical()},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        ks = model.knot_summary()
+
+        # Only spline features appear
+        assert "x" in ks
+        assert "cat" not in ks
+
+        info = ks["x"]
+        assert info["kind"] == "CubicRegressionSpline"
+        assert info["knot_strategy"] == "uniform"
+        assert len(info["interior_knots"]) == 6
+        assert info["boundary"][0] == pytest.approx(df["x"].min())
+        assert info["boundary"][1] == pytest.approx(df["x"].max())
+
+    def test_knot_summary_explicit_strategy_label(self):
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(1)
+        n = 200
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+        y = rng.poisson(1.0, n).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(knots=np.array([2.0, 5.0, 8.0]))},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        assert model.knot_summary()["x"]["knot_strategy"] == "explicit"
+
+
+class TestKnotPickleRoundTrip:
+    """Pickle round-trip preserves fitted knots exactly."""
+
+    @pytest.mark.parametrize("kind", ["bs", "cr", "cr_cardinal"])
+    def test_pickle_preserves_knots(self, kind):
+        import pickle
+
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(42)
+        n = 200
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+        y = rng.poisson(2.0, n).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(kind=kind, n_knots=6)},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        pred_before = model.predict(df)
+        knots_before = model.knot_summary()["x"]["interior_knots"].copy()
+
+        # Round-trip through pickle
+        blob = pickle.dumps(model)
+        model2 = pickle.loads(blob)
+
+        knots_after = model2.knot_summary()["x"]["interior_knots"]
+        pred_after = model2.predict(df)
+        np.testing.assert_array_equal(knots_before, knots_after)
+        np.testing.assert_array_equal(pred_before, pred_after)
+
+
+class TestBoundaryParameter:
+    """boundary= freezes (lo, hi) across refits."""
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_boundary_freezes_range(self, kind):
+        sp = Spline(kind=kind, n_knots=4, boundary=(0.0, 100.0))
+        # Fit on data that spans only [20, 80]
+        x = np.linspace(20, 80, 300)
+        sp.build(x)
+        lo, hi = sp.fitted_boundary
+        assert lo == pytest.approx(0.0)
+        assert hi == pytest.approx(100.0)
+
+    @pytest.mark.parametrize("kind", ["bs", "cr_cardinal"])
+    def test_boundary_stable_on_refit(self, kind):
+        """boundary= prevents drift when refitting on different data."""
+        sp1 = Spline(kind=kind, n_knots=6, boundary=(0.0, 50.0))
+        sp1.build(np.linspace(5, 45, 200))
+
+        sp2 = Spline(kind=kind, n_knots=6, boundary=(0.0, 50.0))
+        sp2.build(np.linspace(10, 90, 200))  # wider data
+
+        assert sp1.fitted_boundary == sp2.fitted_boundary
+        np.testing.assert_array_equal(sp1.fitted_knots, sp2.fitted_knots)
+
+    def test_boundary_via_factory(self):
+        sp = Spline(kind="cr", n_knots=4, boundary=(1.0, 9.0))
+        sp.build(np.linspace(3, 7, 200))
+        assert sp.fitted_boundary == pytest.approx((1.0, 9.0))
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_boundary_quantile_wider_refit(self, kind):
+        """Quantile knots stay inside [lo, hi] even when data extends beyond."""
+        sp = Spline(kind=kind, n_knots=6, knot_strategy="quantile", boundary=(0.0, 50.0))
+        # Data spans [10, 90] — well outside the frozen boundary
+        x = np.linspace(10, 90, 500)
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert np.all(knots >= 0.0), f"knots below lo: {knots}"
+        assert np.all(knots <= 50.0), f"knots above hi: {knots}"
+        assert np.all(np.diff(knots) > 0), f"knots not sorted: {knots}"
+
+    def test_boundary_reversed_raises(self):
+        with pytest.raises(ValueError, match="lo < hi"):
+            Spline(boundary=(10.0, 5.0))
+
+    def test_boundary_equal_raises(self):
+        with pytest.raises(ValueError, match="lo < hi"):
+            Spline(boundary=(5.0, 5.0))
+
+    def test_knots_outside_boundary_raises(self):
+        with pytest.raises(ValueError, match="strictly inside boundary"):
+            Spline(knots=np.array([2.0, 5.0, 8.0]), boundary=(3.0, 7.0))
+
+    def test_knots_at_boundary_raises(self):
+        """Knots exactly on the boundary are rejected (must be strictly inside)."""
+        with pytest.raises(ValueError, match="strictly inside boundary"):
+            Spline(knots=np.array([3.0, 5.0, 7.0]), boundary=(3.0, 9.0))
+
+    def test_knots_not_increasing_raises(self):
+        with pytest.raises(ValueError, match="strictly increasing"):
+            Spline(knots=np.array([5.0, 3.0, 8.0]))
+
+    def test_knots_with_duplicates_raises(self):
+        with pytest.raises(ValueError, match="strictly increasing"):
+            Spline(knots=np.array([3.0, 3.0, 8.0]))
+
+
+class TestStrategyActualTracking:
+    """_knot_strategy_actual reports what was really used."""
+
+    def test_quantile_fallback_reports_uniform(self):
+        """When too few unique values, quantile falls back to uniform."""
+        # Only 1 unique value → np.unique(np.percentile(...)) gives 1
+        # position < 8 knots → falls back to uniform.
+        x = np.full(400, 50.0)
+        sp = Spline(kind="bs", n_knots=8, knot_strategy="quantile")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "uniform"
+
+    def test_quantile_succeeds_reports_quantile(self):
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 100, 500)
+        sp = Spline(kind="bs", n_knots=6, knot_strategy="quantile")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile"
+
+    def test_explicit_knots_reports_explicit(self):
+        sp = Spline(knots=np.array([2.0, 5.0, 8.0]))
+        sp.build(np.linspace(0, 10, 200))
+        assert sp._knot_strategy_actual == "explicit"
+
+    def test_uniform_reports_uniform(self):
+        sp = Spline(kind="cr", n_knots=6)
+        sp.build(np.linspace(0, 10, 200))
+        assert sp._knot_strategy_actual == "uniform"
+
+    def test_cardinal_explicit_reports_explicit(self):
+        """CardinalCRSpline._place_knots tracks explicit strategy."""
+        sp = Spline(kind="cr_cardinal", knots=np.array([3.0, 5.0, 7.0]))
+        sp.build(np.linspace(0, 10, 200))
+        assert sp._knot_strategy_actual == "explicit"
+
+    def test_cardinal_quantile_reports_quantile(self):
+        """CardinalCRSpline._place_knots tracks quantile strategy."""
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 100, 500)
+        sp = Spline(kind="cr_cardinal", n_knots=6, knot_strategy="quantile")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile"
+
+    def test_knot_summary_uses_actual_strategy(self):
+        """knot_summary() reports the actual strategy, not the requested one."""
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        # 1 unique value, requesting 8 quantile knots → falls back to uniform
+        x = np.full(300, 50.0)
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame({"x": x})
+        y = rng.poisson(2.0, len(x)).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(n_knots=8, knot_strategy="quantile")},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        assert model.knot_summary()["x"]["knot_strategy"] == "uniform"
+
+
+class TestQuantileRowsStrategy:
+    """knot_strategy="quantile_rows" — row-quantile knot placement."""
+
+    def test_differs_from_quantile_on_tied_data(self):
+        """quantile_rows and quantile produce different knots on skewed data."""
+        # 80% of rows at value 5, rest spread out
+        rng = np.random.default_rng(0)
+        x = np.concatenate([np.full(800, 5.0), rng.uniform(0, 100, 200)])
+
+        sp_q = Spline(kind="bs", n_knots=6, knot_strategy="quantile")
+        sp_q.build(x)
+
+        sp_qr = Spline(kind="bs", n_knots=6, knot_strategy="quantile_rows")
+        sp_qr.build(x)
+
+        # quantile_rows should cluster more knots near 5.0 (the dense region)
+        # while quantile (of unique) spreads them across the full range
+        assert not np.allclose(sp_q.fitted_knots, sp_qr.fitted_knots)
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_supported_for_all_kinds(self, kind):
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 10, 500)
+        sp = Spline(kind=kind, n_knots=6, knot_strategy="quantile_rows")
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert knots is not None
+        assert len(knots) == 6
+        assert np.all(np.diff(knots) > 0)
+
+    def test_fallback_to_uniform_on_constant_data(self):
+        """All-constant data → all percentiles identical → fallback."""
+        x = np.full(400, 50.0)
+        sp = Spline(kind="bs", n_knots=8, knot_strategy="quantile_rows")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "uniform"
+
+    def test_strategy_actual_reports_quantile_rows(self):
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 100, 500)
+        sp = Spline(kind="bs", n_knots=6, knot_strategy="quantile_rows")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile_rows"
+
+    def test_strategy_actual_cardinal(self):
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 100, 500)
+        sp = Spline(kind="cr_cardinal", n_knots=6, knot_strategy="quantile_rows")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile_rows"
+
+    def test_boundary_restricts_quantile_rows(self):
+        """boundary= clips data before computing row-quantiles."""
+        sp = Spline(kind="bs", n_knots=6, knot_strategy="quantile_rows", boundary=(0.0, 50.0))
+        x = np.linspace(10, 90, 500)
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert np.all(knots >= 0.0)
+        assert np.all(knots <= 50.0)
+        assert np.all(np.diff(knots) > 0)
+
+    def test_knot_summary_reports_quantile_rows(self):
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(0)
+        n = 300
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+        y = rng.poisson(2.0, n).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(n_knots=6, knot_strategy="quantile_rows")},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        assert model.knot_summary()["x"]["knot_strategy"] == "quantile_rows"
+
+    def test_dense_region_gets_more_knots(self):
+        """quantile_rows clusters knots in the high-density region."""
+        rng = np.random.default_rng(123)
+        # 90% of data in [0, 10], 10% in [10, 100]
+        x = np.concatenate([rng.uniform(0, 10, 900), rng.uniform(10, 100, 100)])
+        sp = Spline(kind="cr", n_knots=8, knot_strategy="quantile_rows")
+        sp.build(x)
+        knots = sp.fitted_knots
+        # Most knots should be in [0, 10]
+        n_in_dense = int(np.sum(knots <= 10.0))
+        assert n_in_dense >= 6, f"Expected ≥6 knots in [0,10], got {n_in_dense}: {knots}"
+
+
+class TestQuantileTemperedStrategy:
+    """knot_strategy="quantile_tempered" — weighted-quantile knot placement."""
+
+    def test_alpha_zero_matches_quantile(self):
+        """alpha=0 gives equal weight per unique value → same as quantile."""
+        rng = np.random.default_rng(0)
+        x = np.concatenate([np.full(800, 5.0), rng.uniform(0, 100, 200)])
+
+        sp_q = Spline(kind="bs", n_knots=6, knot_strategy="quantile")
+        sp_q.build(x)
+
+        sp_t = Spline(kind="bs", n_knots=6, knot_strategy="quantile_tempered", knot_alpha=0.0)
+        sp_t.build(x)
+        np.testing.assert_allclose(sp_t.fitted_knots, sp_q.fitted_knots)
+
+    def test_higher_alpha_concentrates_knots(self):
+        """Higher alpha moves knots toward the dense region."""
+        rng = np.random.default_rng(0)
+        # 80% of data near 5, rest spread
+        x = np.concatenate([np.full(800, 5.0), rng.uniform(0, 100, 200)])
+
+        sp_lo = Spline(kind="cr", n_knots=6, knot_strategy="quantile_tempered", knot_alpha=0.0)
+        sp_lo.build(x)
+
+        sp_hi = Spline(kind="cr", n_knots=6, knot_strategy="quantile_tempered", knot_alpha=0.5)
+        sp_hi.build(x)
+
+        # Higher alpha should have lower median knot (closer to 5.0)
+        assert np.median(sp_hi.fitted_knots) < np.median(sp_lo.fitted_knots)
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_supported_for_all_kinds(self, kind):
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 10, 500)
+        sp = Spline(kind=kind, n_knots=6, knot_strategy="quantile_tempered")
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert knots is not None
+        assert len(knots) == 6
+        assert np.all(np.diff(knots) > 0)
+
+    def test_boundary_restricts_data(self):
+        sp = Spline(
+            kind="bs",
+            n_knots=6,
+            knot_strategy="quantile_tempered",
+            boundary=(0.0, 50.0),
+        )
+        x = np.linspace(10, 90, 500)
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert np.all(knots >= 0.0)
+        assert np.all(knots <= 50.0)
+        assert np.all(np.diff(knots) > 0)
+
+    def test_fallback_to_uniform_on_constant_data(self):
+        x = np.full(400, 50.0)
+        sp = Spline(kind="bs", n_knots=8, knot_strategy="quantile_tempered")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "uniform"
+
+    def test_strategy_actual_reports_correctly(self):
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 100, 500)
+        sp = Spline(kind="bs", n_knots=6, knot_strategy="quantile_tempered")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile_tempered"
+
+    def test_knot_summary_reports_quantile_tempered(self):
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(0)
+        n = 300
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+        y = rng.poisson(2.0, n).astype(float)
+
+        model = SuperGLM(
+            features={
+                "x": Spline(n_knots=6, knot_strategy="quantile_tempered"),
+            },
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        info = model.knot_summary()["x"]
+        assert info["knot_strategy"] == "quantile_tempered"
+        assert info["knot_alpha"] == pytest.approx(0.2)
+
+    def test_knot_summary_omits_alpha_for_non_tempered(self):
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(0)
+        n = 200
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+        y = rng.poisson(2.0, n).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(n_knots=6, knot_strategy="uniform")},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        assert "knot_alpha" not in model.knot_summary()["x"]
+
+    def test_survives_point_mass_where_quantile_rows_collapses(self):
+        """quantile_tempered on BonusMalus-like data (55% at 50) should not
+        fall back to uniform, unlike quantile_rows."""
+        rng = np.random.default_rng(0)
+        # Simulate BonusMalus: 55% at 50, rest spread in [50, 150]
+        x = np.concatenate([np.full(550, 50.0), rng.choice(np.arange(51.0, 151.0), 450)])
+        sp = Spline(kind="cr", n_knots=10, knot_strategy="quantile_tempered")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile_tempered"
+        knots = sp.fitted_knots
+        assert len(knots) == 10
+        assert np.all(np.diff(knots) > 0)

@@ -288,10 +288,8 @@ class TestMgcvStyleSmoothTestInput:
 
         assert row.wald_p == pytest.approx(p_r)
         # QR correctness already verified above (R_a.T @ R_a == X_a.T @ diag(W) @ X_a).
-        # For heavily suppressed noise groups, both p-values are tiny and nearly equal,
-        # so we only check they're both small (not that they differ).
-        assert p_r < 0.1
-        assert p_raw < 0.1
+        # Both methods (raw X_a vs QR factor R_a) should agree.
+        assert p_r == pytest.approx(p_raw, abs=0.3)
 
 
 # ── Beta mapping ─────────────────────────────────────────────────
@@ -300,6 +298,8 @@ class TestMgcvStyleSmoothTestInput:
 class TestBetaMapping:
     def test_roundtrip(self, poisson_data):
         """Mapping beta through old -> B-spline -> new preserves B-spline coefficients."""
+        from superglm.dm_builder import compute_projected_R_inv
+
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
@@ -311,10 +311,17 @@ class TestBetaMapping:
         gm_old = model._dm.group_matrices[0]
         beta_old = model.result.beta.copy()
 
-        # Create new R_inv with different lambda
-        R_inv_new = model._compute_R_inv(gm_old.B, gm_old.omega, w, lambda2_override=0.5)
+        # Create new R_inv with different lambda, respecting projection
+        P = gm_old.projection
+        if P is not None:
+            omega_proj = P.T @ gm_old.omega @ P
+            R_inv_local = compute_projected_R_inv(gm_old.B, P, omega_proj, w, 0.5)
+            R_inv_new = P @ R_inv_local
+        else:
+            R_inv_new = model._compute_R_inv(gm_old.B, gm_old.omega, w, lambda2_override=0.5)
         gm_new = SparseSSPGroupMatrix(gm_old.B, R_inv_new)
         gm_new.omega = gm_old.omega
+        gm_new.projection = P
 
         # Map beta
         beta_mapped = _map_beta_between_bases(

@@ -1266,6 +1266,50 @@ class SuperGLM:
             return self._interaction_specs[name].reconstruct(beta_combined)
         raise KeyError(f"Feature not found: {name}")
 
+    def knot_summary(self) -> dict[str, dict[str, Any]]:
+        """Return fitted knot metadata for all spline features.
+
+        Returns a dict keyed by feature name, each containing:
+
+        * ``kind`` — spline class name (e.g. ``"BasisSpline"``,
+          ``"CardinalCRSpline"``).
+        * ``knot_strategy`` — the strategy actually used: ``"uniform"``,
+          ``"quantile"``, ``"quantile_rows"``,
+          ``"quantile_tempered"``, or ``"explicit"``.  If a quantile
+          strategy fell back to uniform (too few distinct knots), this
+          reports ``"uniform"``.
+        * ``interior_knots`` — 1-D array of interior knot positions.
+        * ``boundary`` — ``(lo, hi)`` tuple.
+        * ``n_basis`` — number of raw basis functions (before
+          identifiability / SSP).
+        * ``knot_alpha`` — tempering exponent (only present when
+          ``knot_strategy`` is ``"quantile_tempered"``).
+
+        To fully freeze placement on a refit with different data, pass
+        both ``knots`` and ``boundary``::
+
+            info = model.knot_summary()["DrivAge"]
+            Spline(knots=info["interior_knots"],
+                   boundary=info["boundary"])
+        """
+        from superglm.features.spline import _SplineBase
+
+        out: dict[str, dict[str, Any]] = {}
+        for name, spec in self._specs.items():
+            if not isinstance(spec, _SplineBase):
+                continue
+            entry: dict[str, Any] = {
+                "kind": type(spec).__name__,
+                "knot_strategy": spec._knot_strategy_actual,
+                "interior_knots": spec.fitted_knots,
+                "boundary": spec.fitted_boundary,
+                "n_basis": spec._n_basis,
+            }
+            if spec._knot_strategy_actual == "quantile_tempered":
+                entry["knot_alpha"] = spec.knot_alpha
+            out[name] = entry
+        return out
+
     @cached_property
     def _coef_covariance(self) -> tuple[NDArray, list[GroupSlice]]:
         """Phi-scaled Bayesian covariance for active coefficients."""

@@ -18,6 +18,43 @@ from scipy.interpolate import BSpline as BSpl
 from superglm.types import GroupInfo
 
 
+def _weighted_quantile_knots(x: NDArray, n_knots: int, alpha: float) -> NDArray:
+    """Compute interior knots via weighted quantiles of unique values.
+
+    Parameters
+    ----------
+    x : 1-D array
+        Covariate values (already clipped to boundary if needed).
+    n_knots : int
+        Desired number of interior knots.
+    alpha : float
+        Tempering exponent.  ``alpha=0`` gives equal weight to every
+        unique value (same as ``"quantile"``).  Higher alpha concentrates
+        knots where more rows occur.
+
+    Returns
+    -------
+    interior : 1-D array
+        Unique interior knot positions (may be fewer than ``n_knots``
+        if ties collapse them).
+    """
+    ux, counts = np.unique(x, return_counts=True)
+    if len(ux) < 2:
+        return ux
+    w = counts.astype(np.float64) ** alpha
+    cw = np.cumsum(w)
+    # CDF mapped to [0, 1]: cdf[0]=0, cdf[-1]=1, intermediate
+    # proportional to cumulative weight.  For alpha=0 (equal weights)
+    # this gives cdf[i]=i/(N-1), matching np.percentile exactly.
+    denom = cw[-1] - w[0]
+    if denom <= 0:
+        return ux[:1]
+    cdf = (cw - w[0]) / denom
+    probs = np.linspace(0, 1, n_knots + 2)[1:-1]
+    raw = np.interp(probs, cdf, ux)
+    return np.unique(raw)
+
+
 class _SplineBase:
     """Base class for all spline feature specs.
 
@@ -38,7 +75,13 @@ class _SplineBase:
         numerical issues increase with no practical benefit.
     knot_strategy : str
         "uniform" (default) spaces knots evenly across the data range.
-        "quantile" places knots at data quantiles.
+        "quantile" places knots at quantiles of ``unique(x)`` (mgcv
+        convention — resistant to ties). "quantile_rows" places knots
+        at quantiles of all rows (``pd.qcut``-style — more knots in
+        dense regions). "quantile_tempered" places knots via weighted
+        quantiles of ``unique(x)`` with weights ``count^knot_alpha``
+        (density-weighted support quantiles; ``alpha=0`` recovers
+        ``"quantile"``, higher values concentrate knots in dense regions).
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
     knots : array-like or None
@@ -70,11 +113,15 @@ class _SplineBase:
         discrete: bool | None = None,
         n_bins: int | None = None,
         extrapolation: str = "clip",
+        boundary: tuple[float, float] | None = None,
+        knot_alpha: float = 0.2,
     ):
         if knots is not None:
             knots = np.asarray(knots, dtype=np.float64).ravel()
             if knots.ndim != 1 or len(knots) < 1:
                 raise ValueError("knots must be a non-empty 1D array")
+            if not np.all(np.diff(knots) > 0):
+                raise ValueError("knots must be strictly increasing")
             self.n_knots = len(knots)
             self._explicit_knots = knots
         else:
@@ -91,13 +138,30 @@ class _SplineBase:
                 f"extrapolation must be one of ('clip', 'extend', 'error'), got {extrapolation!r}"
             )
         self.extrapolation = extrapolation
+        self.knot_alpha = knot_alpha
+
+        if boundary is not None:
+            lo_b, hi_b = float(boundary[0]), float(boundary[1])
+            if lo_b >= hi_b:
+                raise ValueError(f"boundary must satisfy lo < hi, got boundary=({lo_b}, {hi_b})")
+            if self._explicit_knots is not None:
+                if self._explicit_knots[0] <= lo_b or self._explicit_knots[-1] >= hi_b:
+                    raise ValueError(
+                        f"explicit knots must lie strictly inside boundary=({lo_b}, {hi_b}), "
+                        f"got knots in [{self._explicit_knots[0]}, {self._explicit_knots[-1]}]"
+                    )
+            self._explicit_boundary: tuple[float, float] | None = (lo_b, hi_b)
+        else:
+            self._explicit_boundary = None
 
         # State set during build()
         self._knots: NDArray = np.array([])
         self._n_basis: int = 0
         self._lo: float = 0.0
         self._hi: float = 1.0
+        self._knot_strategy_actual: str = knot_strategy
         self._R_inv: NDArray | None = None
+        self._constraint_projection: NDArray | None = None
         self._basis_lo: NDArray | None = None
         self._basis_hi: NDArray | None = None
         self._basis_d1_lo: NDArray | None = None
@@ -127,6 +191,19 @@ class _SplineBase:
         """Evaluate the raw B-spline basis under the extrapolation policy."""
         x_eval, extrapolate = self._prepare_eval_points(x)
         return BSpl.design_matrix(x_eval, self._knots, self.degree, extrapolate=extrapolate)
+
+    def _raw_basis_matrix(self, x: NDArray) -> NDArray:
+        """Evaluate the raw (pre-projection) basis at points clipped to training range.
+
+        Returns a dense ``(n, n_basis)`` array.  All code outside spline.py
+        that needs to evaluate a spline's basis should call this method
+        rather than constructing a ``BSpline.design_matrix`` directly, so
+        that non-B-spline subclasses (e.g. :class:`CardinalCRSpline`) get
+        their own evaluation strategy.
+        """
+        x = np.asarray(x, dtype=np.float64).ravel()
+        x_clip = np.clip(x, self._lo, self._hi)
+        return BSpl.design_matrix(x_clip, self._knots, self.degree, extrapolate=False).toarray()
 
     def _basis_value_and_slope_at(self, x0: float) -> tuple[NDArray, NDArray]:
         """Return the raw basis row and its first derivative at ``x0``."""
@@ -172,7 +249,10 @@ class _SplineBase:
 
     def _place_knots(self, x: NDArray) -> None:
         """Place interior knots and build the full knot vector."""
-        self._lo, self._hi = float(x.min()), float(x.max())
+        if self._explicit_boundary is not None:
+            self._lo, self._hi = self._explicit_boundary
+        else:
+            self._lo, self._hi = float(x.min()), float(x.max())
         pad = (self._hi - self._lo) * 1e-6
         self._basis_lo = None
         self._basis_hi = None
@@ -181,11 +261,30 @@ class _SplineBase:
 
         if self._explicit_knots is not None:
             interior = self._explicit_knots
-        elif self.knot_strategy == "quantile":
-            probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
-            interior = np.percentile(x, probs)
+            self._knot_strategy_actual = "explicit"
+        elif self.knot_strategy in ("quantile", "quantile_rows", "quantile_tempered"):
+            # When boundary is frozen, restrict to [lo, hi] so quantile
+            # knots cannot land outside the boundary.
+            x_q = x[(x >= self._lo) & (x <= self._hi)] if self._explicit_boundary is not None else x
+            if len(x_q) == 0:
+                x_q = np.array([self._lo, self._hi])
+            if self.knot_strategy == "quantile_tempered":
+                interior = _weighted_quantile_knots(x_q, self.n_knots, self.knot_alpha)
+            else:
+                probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
+                if self.knot_strategy == "quantile":
+                    source = np.unique(x_q)
+                else:
+                    source = x_q
+                interior = np.unique(np.percentile(source, probs))
+            if len(interior) < self.n_knots:
+                interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
+                self._knot_strategy_actual = "uniform"
+            else:
+                self._knot_strategy_actual = self.knot_strategy
         else:  # "uniform" (default)
             interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
+            self._knot_strategy_actual = "uniform"
 
         self._knots = np.concatenate(
             [
@@ -201,9 +300,37 @@ class _SplineBase:
         raise NotImplementedError
 
     @property
+    def fitted_knots(self) -> NDArray | None:
+        """Interior knot locations from the fitted spline, or None before fit.
+
+        These are the data-driven (or explicit) interior knot positions,
+        excluding the boundary knots.  After fitting, these are frozen and
+        reused on every subsequent ``transform()`` / ``predict()`` call.
+        Pass them back via ``Spline(knots=..., boundary=...)`` to
+        guarantee identical placement *and* boundary on a refit with
+        different data.
+        """
+        if self._n_basis == 0:
+            return None
+        return self._knots[self.degree + 1 : -(self.degree + 1)].copy()
+
+    @property
+    def fitted_boundary(self) -> tuple[float, float] | None:
+        """Training-range boundary ``(lo, hi)``, or None before fit."""
+        if self._n_basis == 0:
+            return None
+        return (self._lo, self._hi)
+
+    @property
     def absorbs_intercept(self) -> bool:
-        """Whether the smooth should absorb the intercept-like direction."""
-        return False
+        """Whether the smooth should absorb the intercept-like direction.
+
+        mgcv-style smooth terms are constrained so that the unweighted
+        mean contribution over the training data is zero, making the model
+        intercept carry the constant part.  This is True by default for all
+        spline kinds.
+        """
+        return True
 
     @property
     def supports_linear_split(self) -> bool:
@@ -218,13 +345,18 @@ class _SplineBase:
         return B, omega, self._n_basis, None
 
     def _apply_identifiability(
-        self, x: NDArray, omega: NDArray, projection: NDArray | None
+        self,
+        x: NDArray,
+        omega: NDArray,
+        projection: NDArray | None,
     ) -> tuple[NDArray, int, NDArray | None]:
-        """Optionally remove the intercept-confounded smooth direction.
+        """Remove the intercept-confounded smooth direction.
 
-        mgcv-style smooth terms are constrained to sum to zero over the fit
-        data so the model intercept carries the constant part. For CR splines
-        this removes one null-space direction after the natural constraints.
+        mgcv-style: the constraint ``sum_i B(x_i) @ beta = 0`` (unweighted
+        over training observations) centres the smooth so that the mean
+        contribution over the covariate distribution is zero.  The model
+        intercept carries the constant part.  Exposure/weights are a
+        likelihood concept and do not enter the identifiability constraint.
         """
         if not self.absorbs_intercept:
             return omega, omega.shape[0], projection
@@ -234,12 +366,13 @@ class _SplineBase:
             return omega, n_cols, projection
 
         x = np.asarray(x, dtype=np.float64).ravel()
-        support, counts = np.unique(x, return_counts=True)
+        support, inverse = np.unique(x, return_inverse=True)
         basis = self._basis_matrix(support).toarray()
         if projection is not None:
             basis = basis @ projection
 
-        constraint = counts.astype(np.float64) @ basis
+        counts = np.bincount(inverse, minlength=len(support)).astype(np.float64)
+        constraint = counts @ basis
         if np.linalg.norm(constraint) < 1e-12:
             return omega, n_cols, projection
 
@@ -280,6 +413,7 @@ class _SplineBase:
         omega = self._build_penalty()
         B, omega, n_cols, projection = self._apply_constraints(B, omega)
         omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
+        self._constraint_projection = projection
         return GroupInfo(
             columns=B,
             n_cols=n_cols,
@@ -288,12 +422,15 @@ class _SplineBase:
             projection=projection,
         )
 
-    def build_knots_and_penalty(self, x: NDArray) -> tuple[NDArray, int, NDArray | None]:
+    def build_knots_and_penalty(
+        self, x: NDArray, exposure: NDArray | None = None
+    ) -> tuple[NDArray, int, NDArray | None]:
         """Place knots and return penalty info, without building the full basis.
 
         Used by the discretization path to avoid the O(n) basis construction.
-        Applies boundary constraints (NaturalSpline/CRS) so the returned
-        penalty and column count match the exact ``build()`` path.
+        Applies boundary constraints (NaturalSpline/CRS) and identifiability
+        so the returned penalty and column count match the exact ``build()``
+        path.
 
         Returns
         -------
@@ -306,6 +443,7 @@ class _SplineBase:
         omega = self._build_penalty()
         _, omega, n_cols, projection = self._apply_constraints(None, omega)
         omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
+        self._constraint_projection = projection
         return omega, n_cols, projection
 
     def transform(self, x: NDArray) -> NDArray:
@@ -347,7 +485,8 @@ class BasisSpline(_SplineBase):
     degree : int
         B-spline polynomial degree.
     knot_strategy : str
-        "uniform" (default) or "quantile".
+        "uniform" (default), "quantile", "quantile_rows", or
+        "quantile_tempered".
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
     split_linear : bool
@@ -377,6 +516,8 @@ class BasisSpline(_SplineBase):
         discrete: bool | None = None,
         n_bins: int | None = None,
         extrapolation: str = "clip",
+        boundary: tuple[float, float] | None = None,
+        knot_alpha: float = 0.2,
     ):
         super().__init__(
             n_knots,
@@ -387,11 +528,22 @@ class BasisSpline(_SplineBase):
             discrete,
             n_bins,
             extrapolation,
+            boundary,
+            knot_alpha,
         )
         self.split_linear = split_linear
         self._U_null: NDArray | None = None
         self._U_range: NDArray | None = None
         self._omega_range: NDArray | None = None
+
+    @property
+    def absorbs_intercept(self) -> bool:
+        """Non-split BasisSpline absorbs the intercept via identifiability.
+
+        When ``split_linear=True`` the eigendecompose step removes the
+        constant direction instead, so identifiability is skipped.
+        """
+        return not self.split_linear
 
     @property
     def supports_linear_split(self) -> bool:
@@ -401,9 +553,11 @@ class BasisSpline(_SplineBase):
         D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
         return D2.T @ D2
 
-    def build_knots_and_penalty(self, x: NDArray) -> tuple[NDArray, int, NDArray | None]:
+    def build_knots_and_penalty(
+        self, x: NDArray, exposure: NDArray | None = None
+    ) -> tuple[NDArray, int, NDArray | None]:
         """Place knots and return penalty + eigendecompose for linear-split terms."""
-        omega, n_cols, projection = super().build_knots_and_penalty(x)
+        omega, n_cols, projection = super().build_knots_and_penalty(x, exposure)
         if self.split_linear:
             self._eigendecompose_penalty(omega)
         return omega, n_cols, projection
@@ -506,7 +660,8 @@ class NaturalSpline(_SplineBase):
     degree : int
         B-spline polynomial degree.
     knot_strategy : str
-        "uniform" (default) or "quantile".
+        "uniform" (default), "quantile", "quantile_rows", or
+        "quantile_tempered".
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
     knots : array-like or None
@@ -523,6 +678,8 @@ class NaturalSpline(_SplineBase):
         discrete: bool | None = None,
         n_bins: int | None = None,
         extrapolation: str = "clip",
+        boundary: tuple[float, float] | None = None,
+        knot_alpha: float = 0.2,
     ):
         super().__init__(
             n_knots,
@@ -533,6 +690,8 @@ class NaturalSpline(_SplineBase):
             discrete,
             n_bins,
             extrapolation,
+            boundary,
+            knot_alpha,
         )
         self._Z: NDArray | None = None
 
@@ -570,7 +729,8 @@ class CubicRegressionSpline(_SplineBase):
     n_knots : int
         Number of interior knots.
     knot_strategy : str
-        "uniform" (default) or "quantile".
+        "uniform" (default), "quantile", "quantile_rows", or
+        "quantile_tempered".
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
     knots : array-like or None
@@ -586,6 +746,8 @@ class CubicRegressionSpline(_SplineBase):
         discrete: bool | None = None,
         n_bins: int | None = None,
         extrapolation: str = "clip",
+        boundary: tuple[float, float] | None = None,
+        knot_alpha: float = 0.2,
     ):
         super().__init__(
             n_knots,
@@ -596,13 +758,10 @@ class CubicRegressionSpline(_SplineBase):
             discrete=discrete,
             n_bins=n_bins,
             extrapolation=extrapolation,
+            boundary=boundary,
+            knot_alpha=knot_alpha,
         )
         self._Z: NDArray | None = None
-
-    @property
-    def absorbs_intercept(self) -> bool:
-        """Match mgcv's identified CR smooth by removing the constant direction."""
-        return True
 
     def _build_penalty(self) -> NDArray:
         """Integrated f'' squared penalty: omega_ij = int B_i''(x) B_j''(x) dx.
@@ -647,6 +806,287 @@ class CubicRegressionSpline(_SplineBase):
         return B, omega_nat, self._n_basis - 2, Z
 
 
+class CardinalCRSpline(_SplineBase):
+    """Cardinal cubic regression spline (mgcv ``bs="cr"`` parameterisation).
+
+    The basis functions are the natural cubic spline cardinal functions:
+    basis function *j* is the unique natural cubic spline that equals 1
+    at knot *j* and 0 at every other knot.  The penalty is the exact
+    integrated squared second derivative, ``S = B_d^T D^{-1} B_d``,
+    computed from the tridiagonal second-derivative system.
+
+    Natural boundary conditions (``f''=0`` at endpoints) are built into
+    the cardinal construction — no Z-projection is needed.
+
+    This is an **experimental** implementation for A/B comparison against
+    the existing ``CubicRegressionSpline`` (which uses a B-spline basis
+    projected via Z).  It is not yet the default for ``kind="cr"``.
+
+    Parameters
+    ----------
+    n_knots : int
+        Number of interior knots.  Total knots K = n_knots + 2
+        (boundaries are added automatically).
+    knot_strategy : str
+        ``"uniform"`` (default), ``"quantile"``, ``"quantile_rows"``,
+        or ``"quantile_tempered"``.
+    penalty : str
+        ``"ssp"`` enables SSP reparametrisation, ``"none"`` disables it.
+    knots : array-like or None
+        Explicit interior knot positions.
+    """
+
+    def __init__(
+        self,
+        n_knots: int = 10,
+        knot_strategy: str = "uniform",
+        penalty: str = "ssp",
+        knots: ArrayLike | None = None,
+        discrete: bool | None = None,
+        n_bins: int | None = None,
+        extrapolation: str = "clip",
+        boundary: tuple[float, float] | None = None,
+        knot_alpha: float = 0.2,
+    ):
+        super().__init__(
+            n_knots,
+            degree=3,
+            knot_strategy=knot_strategy,
+            penalty=penalty,
+            knots=knots,
+            discrete=discrete,
+            n_bins=n_bins,
+            extrapolation=extrapolation,
+            boundary=boundary,
+            knot_alpha=knot_alpha,
+        )
+        self._cr_knots: NDArray | None = None
+        self._cr_M: NDArray | None = None
+        self._cr_S: NDArray | None = None
+
+    def _place_knots(self, x: NDArray) -> None:
+        """Place K = n_knots + 2 knots and build the cardinal CR matrices."""
+        x = np.asarray(x, dtype=np.float64).ravel()
+        if self._explicit_boundary is not None:
+            self._lo, self._hi = self._explicit_boundary
+        else:
+            self._lo, self._hi = float(x.min()), float(x.max())
+        self._basis_lo = None
+        self._basis_hi = None
+        self._basis_d1_lo = None
+        self._basis_d1_hi = None
+
+        if self._explicit_knots is not None:
+            interior = self._explicit_knots
+            self._knot_strategy_actual = "explicit"
+        elif self.knot_strategy in ("quantile", "quantile_rows", "quantile_tempered"):
+            # Restrict to [lo, hi] when boundary is frozen (same logic as _SplineBase).
+            x_q = x[(x >= self._lo) & (x <= self._hi)] if self._explicit_boundary is not None else x
+            if len(x_q) == 0:
+                x_q = np.array([self._lo, self._hi])
+            if self.knot_strategy == "quantile_tempered":
+                interior = _weighted_quantile_knots(x_q, self.n_knots, self.knot_alpha)
+            else:
+                probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
+                if self.knot_strategy == "quantile":
+                    source = np.unique(x_q)
+                else:
+                    source = x_q
+                interior = np.unique(np.percentile(source, probs))
+            if len(interior) < self.n_knots:
+                interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
+                self._knot_strategy_actual = "uniform"
+            else:
+                self._knot_strategy_actual = self.knot_strategy
+        else:
+            interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
+            self._knot_strategy_actual = "uniform"
+
+        # Cardinal CR knots include the boundaries
+        self._cr_knots = np.concatenate([[self._lo], interior, [self._hi]])
+        K = len(self._cr_knots)
+        self._n_basis = K
+        # Store for base-class compatibility (reconstruct, etc.)
+        self._knots = self._cr_knots
+
+        self._build_cr_matrices()
+
+    def _build_cr_matrices(self) -> None:
+        """Build the tridiagonal system matrices for the cardinal CR spline.
+
+        Given K knots with spacings h_j = x_{j+1} - x_j:
+
+        * B_d (K-2, K): divided-difference band matrix mapping knot values
+          to second-derivative RHS.
+        * D (K-2, K-2): tridiagonal matrix for the interior second
+          derivatives gamma_2 ... gamma_{K-1}.
+        * M (K, K): full mapping delta -> gamma, with M[0,:] = M[K-1,:] = 0
+          encoding the natural boundary conditions gamma_1 = gamma_K = 0.
+        * S (K, K): penalty S = B_d^T D^{-1} B_d.
+        """
+        knots = self._cr_knots
+        K = len(knots)
+        h = np.diff(knots)
+
+        # B_d: (K-2, K) — divided-difference band matrix
+        B_d = np.zeros((K - 2, K))
+        for i in range(K - 2):
+            B_d[i, i] = 1.0 / h[i]
+            B_d[i, i + 1] = -1.0 / h[i] - 1.0 / h[i + 1]
+            B_d[i, i + 2] = 1.0 / h[i + 1]
+
+        # D: (K-2, K-2) — tridiagonal for interior second derivatives
+        D = np.zeros((K - 2, K - 2))
+        for i in range(K - 2):
+            D[i, i] = (h[i] + h[i + 1]) / 3.0
+            if i < K - 3:
+                D[i, i + 1] = h[i + 1] / 6.0
+                D[i + 1, i] = h[i + 1] / 6.0
+
+        # Penalty: S = B_d^T D^{-1} B_d
+        D_inv_Bd = np.linalg.solve(D, B_d)
+        self._cr_S = B_d.T @ D_inv_Bd
+
+        # M: K×K mapping knot values (delta) → second derivatives (gamma)
+        # gamma_1 = gamma_K = 0 (natural BCs); interior via D^{-1} B_d
+        self._cr_M = np.zeros((K, K))
+        self._cr_M[1 : K - 1, :] = D_inv_Bd
+
+    def _cardinal_boundary_slopes(self) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+        """Basis value and slope at the boundary knots for linear extrapolation.
+
+        Returns ``(basis_lo, slope_lo, basis_hi, slope_hi)`` where each is
+        a length-K vector in the raw cardinal basis.
+        """
+        knots = self._cr_knots
+        K = len(knots)
+        h = np.diff(knots)
+        M = self._cr_M
+
+        # At lo (knot 0): basis = e_0
+        basis_lo = np.zeros(K)
+        basis_lo[0] = 1.0
+        # Slope at lo via derivative of cardinal formula at t=0 in interval [x_0, x_1]:
+        # df/dx = (-1/h)*delta_0 + (1/h)*delta_1 + h*((-2/6)*gamma_0 + (-1/6)*gamma_1)
+        # gamma_0 = 0 (natural BC), so:
+        slope_lo = np.zeros(K)
+        slope_lo[0] = -1.0 / h[0]
+        slope_lo[1] = 1.0 / h[0]
+        slope_lo -= (h[0] / 6.0) * M[1, :]
+
+        # At hi (knot K-1): basis = e_{K-1}
+        basis_hi = np.zeros(K)
+        basis_hi[K - 1] = 1.0
+        # Slope at hi via derivative at t=1 in interval [x_{K-2}, x_{K-1}]:
+        # df/dx = (-1/h)*delta_{K-2} + (1/h)*delta_{K-1} + h*((1/6)*gamma_{K-2} + (1/3)*gamma_{K-1})
+        # gamma_{K-1} = 0 (natural BC), so:
+        slope_hi = np.zeros(K)
+        slope_hi[K - 2] = -1.0 / h[K - 2]
+        slope_hi[K - 1] = 1.0 / h[K - 2]
+        slope_hi += (h[K - 2] / 6.0) * M[K - 2, :]
+
+        return basis_lo, slope_lo, basis_hi, slope_hi
+
+    def _build_penalty(self) -> NDArray:
+        return self._cr_S
+
+    def _basis_matrix(self, x: NDArray):
+        """Evaluate the cardinal CR basis at data points."""
+        x_eval, extrapolate = self._prepare_eval_points(x)
+        if not extrapolate:
+            return self._eval_cardinal_basis(x_eval)
+        return self._linear_tail_cardinal_basis(x_eval)
+
+    def _raw_basis_matrix(self, x: NDArray) -> NDArray:
+        x = np.asarray(x, dtype=np.float64).ravel()
+        x_clip = np.clip(x, self._lo, self._hi)
+        return self._eval_cardinal_basis(x_clip).toarray()
+
+    def _linear_tail_cardinal_basis(self, x: NDArray) -> sp.csr_matrix:
+        """Evaluate cardinal basis with natural-spline linear tails outside range."""
+        x = np.asarray(x, dtype=np.float64).ravel()
+        lo_mask = x < self._lo
+        hi_mask = x > self._hi
+        mid_mask = ~(lo_mask | hi_mask)
+
+        K = len(self._cr_knots)
+        X = np.zeros((len(x), K))
+
+        if np.any(mid_mask):
+            X[mid_mask] = self._eval_cardinal_basis(x[mid_mask]).toarray()
+
+        if np.any(lo_mask) or np.any(hi_mask):
+            basis_lo, slope_lo, basis_hi, slope_hi = self._cardinal_boundary_slopes()
+            if np.any(lo_mask):
+                X[lo_mask] = basis_lo + (x[lo_mask, None] - self._lo) * slope_lo
+            if np.any(hi_mask):
+                X[hi_mask] = basis_hi + (x[hi_mask, None] - self._hi) * slope_hi
+
+        return sp.csr_matrix(X)
+
+    def _eval_cardinal_basis(self, x: NDArray) -> sp.csr_matrix:
+        """Vectorised cardinal cubic regression spline evaluation.
+
+        For x in [x_j, x_{j+1}] with t = (x - x_j) / h_j:
+
+            f(x) = (1-t)*delta_j + t*delta_{j+1}
+                   + h_j^2 * [((1-t)^3 - (1-t))/6 * gamma_j
+                              + (t^3 - t)/6 * gamma_{j+1}]
+
+        where gamma = M @ delta.
+        """
+        x = np.asarray(x, dtype=np.float64).ravel()
+        knots = self._cr_knots
+        K = len(knots)
+        h = np.diff(knots)
+        M = self._cr_M
+        n = len(x)
+
+        # Interval index for each point (clipped to valid range)
+        j = np.searchsorted(knots, x, side="right") - 1
+        j = np.clip(j, 0, K - 2)
+
+        # Local parameter t ∈ [0, 1]
+        hj = h[j]
+        t = (x - knots[j]) / hj
+
+        # Linear interpolation part
+        X = np.zeros((n, K))
+        rows = np.arange(n)
+        X[rows, j] = 1.0 - t
+        X[rows, j + 1] = t
+
+        # Cubic correction via second-derivative mapping M
+        c1 = hj**2 * ((1.0 - t) ** 3 - (1.0 - t)) / 6.0  # coeff of gamma_j
+        c2 = hj**2 * (t**3 - t) / 6.0  # coeff of gamma_{j+1}
+        X += c1[:, None] * M[j, :] + c2[:, None] * M[j + 1, :]
+
+        return sp.csr_matrix(X)
+
+    @property
+    def fitted_knots(self) -> NDArray | None:
+        if self._cr_knots is None:
+            return None
+        return self._cr_knots[1:-1].copy()
+
+    def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
+        """No Z-projection needed — natural BCs are built into M."""
+        return B, omega, self._n_basis, None
+
+    def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
+        beta_orig = self._R_inv @ beta if self._R_inv is not None else beta
+        x_grid = np.linspace(self._lo, self._hi, n_points)
+        B_grid = self._basis_matrix(x_grid).toarray()
+        log_rels = B_grid @ beta_orig
+        return {
+            "x": x_grid,
+            "log_relativity": log_rels,
+            "relativity": np.exp(log_rels),
+            "knots_interior": self._cr_knots[1:-1],
+            "coefficients_original": beta_orig,
+        }
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Public Spline factory
 # ═══════════════════════════════════════════════════════════════════
@@ -655,25 +1095,25 @@ _KIND_MAP = {
     "bs": BasisSpline,
     "ns": NaturalSpline,
     "cr": CubicRegressionSpline,
+    "cr_cardinal": CardinalCRSpline,
 }
 
 
 def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     """Convert basis dimension ``k`` to interior knot count.
 
-    ``k`` is the number of basis functions, matching mgcv's ``k``
-    parameter for all spline kinds.  For ``"bs"`` and ``"ns"``,
-    ``k`` equals the built column count.  For ``"cr"``, the built
-    column count is ``k - 1`` because SuperGLM physically removes
-    the identifiability (sum-to-zero) direction.
+    ``k`` is the number of basis functions *before* identifiability,
+    matching mgcv's ``k`` parameter.  The built column count is
+    ``k - 1`` for all spline kinds because the identifiability
+    constraint (unweighted sum-to-zero) removes one direction.
 
     Parameters
     ----------
     kind : str
         Spline kind: ``"bs"``, ``"ns"``, or ``"cr"``.
     k : int
-        Basis dimension (number of basis functions). Matches mgcv's
-        ``k``.  For ``"cr"`` the built column count is ``k - 1``.
+        Basis dimension (number of basis functions before
+        identifiability).  The built column count is always ``k - 1``.
     degree : int
         B-spline polynomial degree (default 3, cubic).
 
@@ -684,10 +1124,12 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
 
     Mapping
     -------
-    - ``"bs"``: ``n_knots = k - degree - 1``  (no constraints)
-    - ``"ns"``: ``n_knots = k - degree + 1``  (2 natural constraints)
-    - ``"cr"``: ``n_knots = k - degree + 1``  (2 natural constraints; identifiability
-      removes 1 more at build time, so ``build().n_cols == k - 1``)
+    - ``"bs"``: ``n_knots = k - degree - 1``  (identifiability removes 1,
+      ``build().n_cols == k - 1``)
+    - ``"ns"``: ``n_knots = k - degree + 1``  (2 natural constraints +
+      identifiability, ``build().n_cols == k - 1``)
+    - ``"cr"``: ``n_knots = k - degree + 1``  (2 natural constraints +
+      identifiability, ``build().n_cols == k - 1``)
     """
     if kind not in _KIND_MAP:
         raise ValueError(f"Unknown spline kind {kind!r}, expected one of {sorted(_KIND_MAP)}")
@@ -695,6 +1137,10 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     if kind == "bs":
         n_knots = k - degree - 1
         min_k = degree + 2  # need at least 1 interior knot
+    elif kind == "cr_cardinal":
+        # Cardinal CR: K total knots = n_knots + 2, K = k (basis dim before ident)
+        n_knots = k - 2
+        min_k = 3  # need at least 1 interior knot (K >= 3)
     else:
         # ns and cr: n_basis = n_knots + degree + 1, natural constraints remove 2
         # → pre-identifiability cols = n_knots + degree - 1 = k
@@ -724,6 +1170,8 @@ def Spline(
     discrete: bool | None = None,
     n_bins: int | None = None,
     extrapolation: str = "clip",
+    boundary: tuple[float, float] | None = None,
+    knot_alpha: float = 0.2,
 ) -> _SplineBase:
     """Create a spline feature spec.
 
@@ -745,14 +1193,20 @@ def Spline(
           Equivalent to ``CubicRegressionSpline`` / mgcv's ``bs="cr"``.
           The built column count is ``k - 1`` because the identifiability
           direction is physically removed.
+        - ``"cr_cardinal"`` — **Experimental** cardinal cubic regression
+          spline.  Uses the mgcv-native parameterisation where basis
+          functions are cardinal natural cubic spline interpolants.
+          Penalty is ``B_d^T D^{-1} B_d`` from the tridiagonal second-
+          derivative system.  Built column count is ``k - 1``.
 
     k : int, optional
-        Basis dimension (number of basis functions), matching mgcv's
-        ``k`` for all kinds.  For ``"bs"`` and ``"ns"`` this equals the
-        built column count.  For ``"cr"`` the built column count is
-        ``k - 1`` (identifiability constraint removes one direction).
-        Internally converted to ``n_knots`` via :func:`n_knots_from_k`.
-        Cannot be used together with ``n_knots``.
+        Basis dimension (number of basis functions before
+        identifiability), matching mgcv's ``k``.  The built column
+        count is always ``k - 1`` because the identifiability
+        constraint (unweighted sum-to-zero) removes one
+        direction.  Internally converted to ``n_knots`` via
+        :func:`n_knots_from_k`.  Cannot be used together with
+        ``n_knots``.
     n_knots : int, optional
         Number of interior knots (lower-level parameter). Cannot be
         used together with ``k``. Defaults to 10 if neither ``k`` nor
@@ -761,7 +1215,8 @@ def Spline(
         B-spline polynomial degree (default 3). Ignored for ``kind="cr"``
         which is always cubic.
     knot_strategy : str
-        ``"uniform"`` (default) or ``"quantile"``.
+        ``"uniform"`` (default), ``"quantile"``, ``"quantile_rows"``,
+        or ``"quantile_tempered"``.
     penalty : str
         ``"ssp"`` enables SSP reparametrisation (default), ``"none"``
         disables it.
@@ -782,6 +1237,16 @@ def Spline(
           ``"ns"`` and ``"cr"`` this gives linear tails; for ``"bs"``
           this uses the B-spline's native polynomial continuation.
         - ``"error"``: raise on out-of-range values.
+    boundary : tuple of float, optional
+        Explicit ``(lo, hi)`` boundary. When set, the boundary is
+        frozen across refits instead of being inferred from the data
+        range. Use together with ``knots`` to fully freeze knot
+        placement.
+    knot_alpha : float
+        Tempering exponent for ``knot_strategy="quantile_tempered"``.
+        Default 0.2.  ``alpha=0`` gives equal weight per unique value
+        (same as ``"quantile"``); higher values concentrate knots in
+        dense regions.  Ignored by other strategies.
 
     Returns
     -------
@@ -809,7 +1274,7 @@ def Spline(
 
     # Resolve n_knots
     if k is not None:
-        if kind == "cr":
+        if kind in ("cr", "cr_cardinal"):
             resolved_n_knots = n_knots_from_k(kind, k, degree=3)
         else:
             resolved_n_knots = n_knots_from_k(kind, k, degree)
@@ -832,8 +1297,10 @@ def Spline(
             discrete=discrete,
             n_bins=n_bins,
             extrapolation=extrapolation,
+            boundary=boundary,
+            knot_alpha=knot_alpha,
         )
-    elif kind == "cr":
+    elif kind in ("cr", "cr_cardinal"):
         return cls(
             n_knots=resolved_n_knots,
             knot_strategy=knot_strategy,
@@ -842,6 +1309,8 @@ def Spline(
             discrete=discrete,
             n_bins=n_bins,
             extrapolation=extrapolation,
+            boundary=boundary,
+            knot_alpha=knot_alpha,
         )
     else:  # "ns"
         return cls(
@@ -853,4 +1322,6 @@ def Spline(
             discrete=discrete,
             n_bins=n_bins,
             extrapolation=extrapolation,
+            boundary=boundary,
+            knot_alpha=knot_alpha,
         )

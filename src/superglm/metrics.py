@@ -729,11 +729,8 @@ class ModelMetrics:
         Cov_g = phi * XtWX_inv[np.ix_(indices, indices)]
 
         if isinstance(spec, _SplineBase):
-            from scipy.interpolate import BSpline as BSpl
-
             x_grid = np.linspace(spec._lo, spec._hi, n_points)
-            x_clip = np.clip(x_grid, spec._knots[0], spec._knots[-1])
-            B_grid = BSpl.design_matrix(x_clip, spec._knots, spec.degree).toarray()
+            B_grid = spec._raw_basis_matrix(x_grid)
 
             if spec._R_inv is not None:
                 M = B_grid @ spec._R_inv
