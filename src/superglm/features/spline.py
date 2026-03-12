@@ -183,8 +183,14 @@ class _SplineBase:
         if self._explicit_knots is not None:
             interior = self._explicit_knots
         elif self.knot_strategy == "quantile":
+            # mgcv-style: quantiles of unique values, strictly increasing.
+            # Using unique(x) prevents repeated knots from ties in the data.
+            ux = np.unique(x)
             probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
-            interior = np.percentile(x, probs)
+            interior = np.unique(np.percentile(ux, probs))
+            if len(interior) < self.n_knots:
+                # Too few unique values for requested knots; fall back to uniform
+                interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
         else:  # "uniform" (default)
             interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
 
@@ -671,6 +677,194 @@ class CubicRegressionSpline(_SplineBase):
         return B, omega_nat, self._n_basis - 2, Z
 
 
+class CardinalCRSpline(_SplineBase):
+    """Cardinal cubic regression spline (mgcv ``bs="cr"`` parameterisation).
+
+    The basis functions are the natural cubic spline cardinal functions:
+    basis function *j* is the unique natural cubic spline that equals 1
+    at knot *j* and 0 at every other knot.  The penalty is the exact
+    integrated squared second derivative, ``S = B_d^T D^{-1} B_d``,
+    computed from the tridiagonal second-derivative system.
+
+    Natural boundary conditions (``f''=0`` at endpoints) are built into
+    the cardinal construction — no Z-projection is needed.
+
+    This is an **experimental** implementation for A/B comparison against
+    the existing ``CubicRegressionSpline`` (which uses a B-spline basis
+    projected via Z).  It is not yet the default for ``kind="cr"``.
+
+    Parameters
+    ----------
+    n_knots : int
+        Number of interior knots.  Total knots K = n_knots + 2
+        (boundaries are added automatically).
+    knot_strategy : str
+        ``"uniform"`` (default) or ``"quantile"``.
+    penalty : str
+        ``"ssp"`` enables SSP reparametrisation, ``"none"`` disables it.
+    knots : array-like or None
+        Explicit interior knot positions.
+    """
+
+    def __init__(
+        self,
+        n_knots: int = 10,
+        knot_strategy: str = "uniform",
+        penalty: str = "ssp",
+        knots: ArrayLike | None = None,
+        discrete: bool | None = None,
+        n_bins: int | None = None,
+        extrapolation: str = "clip",
+    ):
+        super().__init__(
+            n_knots,
+            degree=3,
+            knot_strategy=knot_strategy,
+            penalty=penalty,
+            knots=knots,
+            discrete=discrete,
+            n_bins=n_bins,
+            extrapolation=extrapolation,
+        )
+        self._cr_knots: NDArray | None = None
+        self._cr_M: NDArray | None = None
+        self._cr_S: NDArray | None = None
+
+    def _place_knots(self, x: NDArray) -> None:
+        """Place K = n_knots + 2 knots and build the cardinal CR matrices."""
+        x = np.asarray(x, dtype=np.float64).ravel()
+        self._lo, self._hi = float(x.min()), float(x.max())
+        self._basis_lo = None
+        self._basis_hi = None
+        self._basis_d1_lo = None
+        self._basis_d1_hi = None
+
+        if self._explicit_knots is not None:
+            interior = self._explicit_knots
+        elif self.knot_strategy == "quantile":
+            ux = np.unique(x)
+            probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
+            interior = np.unique(np.percentile(ux, probs))
+            if len(interior) < self.n_knots:
+                interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
+        else:
+            interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
+
+        # Cardinal CR knots include the boundaries
+        self._cr_knots = np.concatenate([[self._lo], interior, [self._hi]])
+        K = len(self._cr_knots)
+        self._n_basis = K
+        # Store for base-class compatibility (reconstruct, etc.)
+        self._knots = self._cr_knots
+
+        self._build_cr_matrices()
+
+    def _build_cr_matrices(self) -> None:
+        """Build the tridiagonal system matrices for the cardinal CR spline.
+
+        Given K knots with spacings h_j = x_{j+1} - x_j:
+
+        * B_d (K-2, K): divided-difference band matrix mapping knot values
+          to second-derivative RHS.
+        * D (K-2, K-2): tridiagonal matrix for the interior second
+          derivatives gamma_2 ... gamma_{K-1}.
+        * M (K, K): full mapping delta -> gamma, with M[0,:] = M[K-1,:] = 0
+          encoding the natural boundary conditions gamma_1 = gamma_K = 0.
+        * S (K, K): penalty S = B_d^T D^{-1} B_d.
+        """
+        knots = self._cr_knots
+        K = len(knots)
+        h = np.diff(knots)
+
+        # B_d: (K-2, K) — divided-difference band matrix
+        B_d = np.zeros((K - 2, K))
+        for i in range(K - 2):
+            B_d[i, i] = 1.0 / h[i]
+            B_d[i, i + 1] = -1.0 / h[i] - 1.0 / h[i + 1]
+            B_d[i, i + 2] = 1.0 / h[i + 1]
+
+        # D: (K-2, K-2) — tridiagonal for interior second derivatives
+        D = np.zeros((K - 2, K - 2))
+        for i in range(K - 2):
+            D[i, i] = (h[i] + h[i + 1]) / 3.0
+            if i < K - 3:
+                D[i, i + 1] = h[i + 1] / 6.0
+                D[i + 1, i] = h[i + 1] / 6.0
+
+        # Penalty: S = B_d^T D^{-1} B_d
+        D_inv_Bd = np.linalg.solve(D, B_d)
+        self._cr_S = B_d.T @ D_inv_Bd
+
+        # M: K×K mapping knot values (delta) → second derivatives (gamma)
+        # gamma_1 = gamma_K = 0 (natural BCs); interior via D^{-1} B_d
+        self._cr_M = np.zeros((K, K))
+        self._cr_M[1 : K - 1, :] = D_inv_Bd
+
+    def _build_penalty(self) -> NDArray:
+        return self._cr_S
+
+    def _basis_matrix(self, x: NDArray):
+        """Evaluate the cardinal CR basis at data points."""
+        x_eval, _ = self._prepare_eval_points(x)
+        return self._eval_cardinal_basis(x_eval)
+
+    def _eval_cardinal_basis(self, x: NDArray) -> sp.csr_matrix:
+        """Vectorised cardinal cubic regression spline evaluation.
+
+        For x in [x_j, x_{j+1}] with t = (x - x_j) / h_j:
+
+            f(x) = (1-t)*delta_j + t*delta_{j+1}
+                   + h_j^2 * [((1-t)^3 - (1-t))/6 * gamma_j
+                              + (t^3 - t)/6 * gamma_{j+1}]
+
+        where gamma = M @ delta.
+        """
+        x = np.asarray(x, dtype=np.float64).ravel()
+        knots = self._cr_knots
+        K = len(knots)
+        h = np.diff(knots)
+        M = self._cr_M
+        n = len(x)
+
+        # Interval index for each point (clipped to valid range)
+        j = np.searchsorted(knots, x, side="right") - 1
+        j = np.clip(j, 0, K - 2)
+
+        # Local parameter t ∈ [0, 1]
+        hj = h[j]
+        t = (x - knots[j]) / hj
+
+        # Linear interpolation part
+        X = np.zeros((n, K))
+        rows = np.arange(n)
+        X[rows, j] = 1.0 - t
+        X[rows, j + 1] = t
+
+        # Cubic correction via second-derivative mapping M
+        c1 = hj**2 * ((1.0 - t) ** 3 - (1.0 - t)) / 6.0  # coeff of gamma_j
+        c2 = hj**2 * (t**3 - t) / 6.0  # coeff of gamma_{j+1}
+        X += c1[:, None] * M[j, :] + c2[:, None] * M[j + 1, :]
+
+        return sp.csr_matrix(X)
+
+    def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
+        """No Z-projection needed — natural BCs are built into M."""
+        return B, omega, self._n_basis, None
+
+    def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
+        beta_orig = self._R_inv @ beta if self._R_inv is not None else beta
+        x_grid = np.linspace(self._lo, self._hi, n_points)
+        B_grid = self._basis_matrix(x_grid).toarray()
+        log_rels = B_grid @ beta_orig
+        return {
+            "x": x_grid,
+            "log_relativity": log_rels,
+            "relativity": np.exp(log_rels),
+            "knots_interior": self._cr_knots[1:-1],
+            "coefficients_original": beta_orig,
+        }
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Public Spline factory
 # ═══════════════════════════════════════════════════════════════════
@@ -679,6 +873,7 @@ _KIND_MAP = {
     "bs": BasisSpline,
     "ns": NaturalSpline,
     "cr": CubicRegressionSpline,
+    "cr_cardinal": CardinalCRSpline,
 }
 
 
@@ -720,6 +915,10 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     if kind == "bs":
         n_knots = k - degree - 1
         min_k = degree + 2  # need at least 1 interior knot
+    elif kind == "cr_cardinal":
+        # Cardinal CR: K total knots = n_knots + 2, K = k (basis dim before ident)
+        n_knots = k - 2
+        min_k = 3  # need at least 1 interior knot (K >= 3)
     else:
         # ns and cr: n_basis = n_knots + degree + 1, natural constraints remove 2
         # → pre-identifiability cols = n_knots + degree - 1 = k
@@ -770,6 +969,11 @@ def Spline(
           Equivalent to ``CubicRegressionSpline`` / mgcv's ``bs="cr"``.
           The built column count is ``k - 1`` because the identifiability
           direction is physically removed.
+        - ``"cr_cardinal"`` — **Experimental** cardinal cubic regression
+          spline.  Uses the mgcv-native parameterisation where basis
+          functions are cardinal natural cubic spline interpolants.
+          Penalty is ``B_d^T D^{-1} B_d`` from the tridiagonal second-
+          derivative system.  Built column count is ``k - 1``.
 
     k : int, optional
         Basis dimension (number of basis functions before
@@ -835,7 +1039,7 @@ def Spline(
 
     # Resolve n_knots
     if k is not None:
-        if kind == "cr":
+        if kind in ("cr", "cr_cardinal"):
             resolved_n_knots = n_knots_from_k(kind, k, degree=3)
         else:
             resolved_n_knots = n_knots_from_k(kind, k, degree)
@@ -859,7 +1063,7 @@ def Spline(
             n_bins=n_bins,
             extrapolation=extrapolation,
         )
-    elif kind == "cr":
+    elif kind in ("cr", "cr_cardinal"):
         return cls(
             n_knots=resolved_n_knots,
             knot_strategy=knot_strategy,
