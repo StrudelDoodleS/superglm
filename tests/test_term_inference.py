@@ -344,6 +344,69 @@ class TestEnrichedSummary:
         assert row.smoothing_lambda is not None
 
 
+class TestModelSummarySplineKeys:
+    """model.summary() dict includes spline metadata for spline groups."""
+
+    def test_spline_group_has_enriched_keys(self, fitted_model):
+        s = fitted_model.summary()
+        # "age" is the spline group name
+        age_entry = s["age"]
+        assert "edf" in age_entry
+        assert "smoothing_lambda" in age_entry
+        assert "spline_kind" in age_entry
+        assert "knot_strategy" in age_entry
+        assert "boundary" in age_entry
+
+    def test_spline_group_values(self, fitted_model):
+        s = fitted_model.summary()
+        age_entry = s["age"]
+        assert age_entry["spline_kind"] == "BasisSpline"
+        assert age_entry["knot_strategy"] == "uniform"
+        assert age_entry["edf"] is not None
+        assert age_entry["edf"] > 0
+        assert age_entry["smoothing_lambda"] is not None
+        lo, hi = age_entry["boundary"]
+        assert lo < hi
+
+    def test_non_spline_group_no_extra_keys(self, fitted_model):
+        s = fitted_model.summary()
+        region_entry = s["region"]
+        assert "edf" not in region_entry
+        assert "spline_kind" not in region_entry
+
+    def test_numeric_group_no_extra_keys(self, fitted_model):
+        s = fitted_model.summary()
+        density_entry = s["density"]
+        assert "edf" not in density_entry
+        assert "spline_kind" not in density_entry
+
+    def test_backward_compat_keys_preserved(self, fitted_model):
+        s = fitted_model.summary()
+        for name in ["age", "region", "density"]:
+            assert "active" in s[name]
+            assert "group_norm" in s[name]
+            assert "n_params" in s[name]
+        assert "_model" in s
+
+    def test_model_summary_and_metrics_summary_agree(self, sample_data):
+        """Both summaries report the same edf/lambda for the same spline group."""
+        X, y, exposure = sample_data
+        model = SuperGLM(
+            penalty="group_lasso",
+            lambda1=0.01,
+            features={"age": Spline(n_knots=10, penalty="ssp")},
+        )
+        model.fit(X, y, exposure=exposure)
+
+        thin = model.summary()
+        rich = model.metrics(X, y, exposure=exposure).summary()
+        rich_row = next(r for r in rich._coef_rows if r.is_spline)
+
+        assert thin["age"]["edf"] == rich_row.edf
+        assert thin["age"]["smoothing_lambda"] == rich_row.smoothing_lambda
+        assert thin["age"]["spline_kind"] == rich_row.spline_kind
+
+
 # ── Phase 5: Spline kinds ───────────────────────────────────────
 
 

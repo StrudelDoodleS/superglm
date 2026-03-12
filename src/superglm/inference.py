@@ -1124,6 +1124,36 @@ def _resolve_term_lambda(
     return lambda2
 
 
+def spline_group_enrichment(
+    group_name: str,
+    spec,
+    group_edf: dict[str, float] | None,
+    reml_lambdas: dict[str, float] | None,
+    lambda2: float | dict | None,
+) -> dict[str, Any]:
+    """Return spline metadata dict for a single group.
+
+    Shared by ``model.summary()`` and ``metrics._build_coef_rows()``
+    so both surfaces emit identical spline metadata.
+
+    Returns
+    -------
+    dict with keys: edf, smoothing_lambda, spline_kind, knot_strategy, boundary.
+    """
+    edf = group_edf.get(group_name) if group_edf else None
+    if reml_lambdas and group_name in reml_lambdas:
+        lam: float | None = reml_lambdas[group_name]
+    else:
+        lam = float(lambda2) if isinstance(lambda2, int | float) else None
+    return {
+        "edf": edf,
+        "smoothing_lambda": lam,
+        "spline_kind": type(spec).__name__,
+        "knot_strategy": getattr(spec, "_knot_strategy_actual", None),
+        "boundary": getattr(spec, "fitted_boundary", None),
+    }
+
+
 def _interaction_inference(
     name: str,
     *,

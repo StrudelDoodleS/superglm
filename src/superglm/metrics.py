@@ -819,26 +819,19 @@ class ModelMetrics:
         )
 
         # Precompute per-group edf and lambda for spline metadata
+        from superglm.inference import spline_group_enrichment
+
         group_edf_map = getattr(self._model, "_group_edf", None)
         reml_lam = getattr(self._model, "_reml_lambdas", None)
 
         def _spline_enrichment(g_name, spec):
-            """Return (edf, lam, kind, knot_strategy, boundary) for a spline group."""
-            _edf = group_edf_map.get(g_name) if group_edf_map else None
-            if reml_lam and g_name in reml_lam:
-                _lam = reml_lam[g_name]
-            else:
-                _lam = (
-                    float(self._model.lambda2)
-                    if isinstance(self._model.lambda2, int | float)
-                    else None
-                )
+            d = spline_group_enrichment(g_name, spec, group_edf_map, reml_lam, self._model.lambda2)
             return (
-                _edf,
-                _lam,
-                type(spec).__name__,
-                getattr(spec, "_knot_strategy_actual", None),
-                getattr(spec, "fitted_boundary", None),
+                d["edf"],
+                d["smoothing_lambda"],
+                d["spline_kind"],
+                d["knot_strategy"],
+                d["boundary"],
             )
 
         # Feature rows

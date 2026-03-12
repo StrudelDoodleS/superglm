@@ -1238,15 +1238,27 @@ class SuperGLM:
         return self._result
 
     def summary(self) -> dict[str, Any]:
+        from superglm.features.spline import _SplineBase
+        from superglm.inference import spline_group_enrichment
+
         res = self.result
+        group_edf = self._group_edf
+        reml_lam = getattr(self, "_reml_lambdas", None)
+
         out = {}
         for g in self._groups:
             bg = res.beta[g.sl]
-            out[g.name] = {
+            entry: dict[str, Any] = {
                 "active": bool(np.any(bg != 0)),
                 "group_norm": float(np.linalg.norm(bg)),
                 "n_params": g.size,
             }
+            spec = self._specs.get(g.feature_name)
+            if isinstance(spec, _SplineBase):
+                entry.update(
+                    spline_group_enrichment(g.name, spec, group_edf, reml_lam, self.lambda2)
+                )
+            out[g.name] = entry
         out["_model"] = {
             "intercept": res.intercept,
             "deviance": res.deviance,
