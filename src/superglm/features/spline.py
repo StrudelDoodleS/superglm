@@ -80,7 +80,8 @@ class _SplineBase:
         at quantiles of all rows (``pd.qcut``-style — more knots in
         dense regions). "quantile_tempered" places knots via weighted
         quantiles of ``unique(x)`` with weights ``count^knot_alpha``
-        (interpolates between quantile and quantile_rows).
+        (density-weighted support quantiles; ``alpha=0`` recovers
+        ``"quantile"``, higher values concentrate knots in dense regions).
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
     knots : array-like or None
