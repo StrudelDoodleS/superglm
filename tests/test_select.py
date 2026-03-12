@@ -208,7 +208,7 @@ class TestSelectModel:
             lambda2=1.0,
         )
         m.fit(X, y, exposure=exposure)
-        s = m.summary()
+        s = m.diagnostics()
         assert "signal:linear" in s
         assert "signal:spline" in s
 
@@ -224,7 +224,7 @@ class TestSelectSparsity:
             lambda1=50.0,
         )
         m.fit(X, y, exposure=exposure)
-        s = m.summary()
+        s = m.diagnostics()
         # At high lambda1, group lasso selection should be happening.
         # The 1-col linear subgroup (weight ∝ sqrt(1)) gets zeroed at a lower lambda
         # than the multi-col spline subgroup (weight ∝ sqrt(K-2)), so at this lambda
@@ -246,7 +246,7 @@ class TestSelectSparsity:
             lambda1=1e6,
         )
         m.fit(X, y, exposure=exposure)
-        s = m.summary()
+        s = m.diagnostics()
         # Both subgroups are penalized — zeroed at very high lambda
         assert s["signal:linear"]["group_norm"] < 1e-10
         assert s["signal:spline"]["group_norm"] < 1e-10

@@ -147,6 +147,8 @@ class SuperGLM:
         self._dm: DesignMatrix | None = None
         self._fit_weights: NDArray | None = None
         self._fit_offset: NDArray | None = None
+        self._train_y: NDArray | None = None
+        self._train_mu: NDArray | None = None
         self._nb_profile_result = None  # NBProfileResult, set by estimate_theta()
         self._tweedie_profile_result = None  # TweedieProfileResult, set by estimate_tweedie_p()
         self._last_fit_meta: dict[str, Any] | None = None
@@ -459,6 +461,12 @@ class SuperGLM:
                 phi=1.0,
                 effective_df=self._result.effective_df,
             )
+
+        eta = self._dm.matvec(self._result.beta) + self._result.intercept
+        if offset is not None:
+            eta = eta + offset
+        self._train_y = y
+        self._train_mu = self._link.inverse(eta)
 
         self._last_fit_meta = {"method": "fit", "discrete": self._discrete}
         return self
@@ -1226,6 +1234,12 @@ class SuperGLM:
         _profile["converged"] = converged
         self._reml_profile = _profile
 
+        eta = self._dm.matvec(self._result.beta) + self._result.intercept
+        if offset is not None:
+            eta = eta + offset
+        self._train_y = y
+        self._train_mu = self._link.inverse(eta)
+
         self._last_fit_meta = {"method": "fit_reml", "discrete": self._discrete}
 
         logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")
@@ -1237,7 +1251,13 @@ class SuperGLM:
             raise RuntimeError("Not fitted")
         return self._result
 
-    def summary(self) -> dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
+        """Per-group diagnostic dict for programmatic / audit access.
+
+        Returns a dict keyed by group name with ``active``, ``group_norm``,
+        ``n_params`` (plus spline metadata when applicable) and a ``_model``
+        entry with scalar fit statistics.
+        """
         from superglm.features.spline import _SplineBase
         from superglm.inference import spline_group_enrichment
 
@@ -1269,6 +1289,37 @@ class SuperGLM:
             "lambda1": self.penalty.lambda1,
         }
         return out
+
+    def summary(self, alpha: float = 0.05):
+        """Rich model summary with coefficient table (statsmodels-style).
+
+        Uses cached training data so no ``X`` / ``y`` arguments are needed.
+        For diagnostics on a different sample, use ``model.metrics(X, y).summary()``.
+
+        Parameters
+        ----------
+        alpha : float
+            Significance level for confidence intervals (default 0.05 → 95% CI).
+
+        Returns
+        -------
+        ModelSummary
+            Object with ``__str__`` (ASCII), ``_repr_html_`` (HTML/Jupyter),
+            and dict-like access for backward compatibility.
+        """
+        from superglm.metrics import ModelMetrics
+
+        if self._train_y is None or self._train_mu is None:
+            raise RuntimeError("No cached training data — call fit() or fit_reml() first.")
+
+        m = ModelMetrics(
+            self,
+            y=self._train_y,
+            exposure=self._fit_weights,
+            offset=self._fit_offset,
+            _mu=self._train_mu,
+        )
+        return m.summary(alpha=alpha)
 
     def _feature_groups(self, name: str) -> list[GroupSlice]:
         """Get all groups belonging to a feature (1 normally, 2 for split-linear splines)."""

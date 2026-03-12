@@ -1133,7 +1133,7 @@ def spline_group_enrichment(
 ) -> dict[str, Any]:
     """Return spline metadata dict for a single group.
 
-    Shared by ``model.summary()`` and ``metrics._build_coef_rows()``
+    Shared by ``model.diagnostics()`` and ``metrics._build_coef_rows()``
     so both surfaces emit identical spline metadata.
 
     Returns
