@@ -1015,3 +1015,104 @@ class TestQuantileRowsStrategy:
         # Most knots should be in [0, 10]
         n_in_dense = int(np.sum(knots <= 10.0))
         assert n_in_dense >= 6, f"Expected ≥6 knots in [0,10], got {n_in_dense}: {knots}"
+
+
+class TestQuantileTemperedStrategy:
+    """knot_strategy="quantile_tempered" — weighted-quantile knot placement."""
+
+    def test_alpha_zero_matches_quantile(self):
+        """alpha=0 gives equal weight per unique value → same as quantile."""
+        rng = np.random.default_rng(0)
+        x = np.concatenate([np.full(800, 5.0), rng.uniform(0, 100, 200)])
+
+        sp_q = Spline(kind="bs", n_knots=6, knot_strategy="quantile")
+        sp_q.build(x)
+
+        sp_t = Spline(kind="bs", n_knots=6, knot_strategy="quantile_tempered", knot_alpha=0.0)
+        sp_t.build(x)
+        np.testing.assert_allclose(sp_t.fitted_knots, sp_q.fitted_knots)
+
+    def test_higher_alpha_concentrates_knots(self):
+        """Higher alpha moves knots toward the dense region."""
+        rng = np.random.default_rng(0)
+        # 80% of data near 5, rest spread
+        x = np.concatenate([np.full(800, 5.0), rng.uniform(0, 100, 200)])
+
+        sp_lo = Spline(kind="cr", n_knots=6, knot_strategy="quantile_tempered", knot_alpha=0.0)
+        sp_lo.build(x)
+
+        sp_hi = Spline(kind="cr", n_knots=6, knot_strategy="quantile_tempered", knot_alpha=0.5)
+        sp_hi.build(x)
+
+        # Higher alpha should have lower median knot (closer to 5.0)
+        assert np.median(sp_hi.fitted_knots) < np.median(sp_lo.fitted_knots)
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_supported_for_all_kinds(self, kind):
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 10, 500)
+        sp = Spline(kind=kind, n_knots=6, knot_strategy="quantile_tempered")
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert knots is not None
+        assert len(knots) == 6
+        assert np.all(np.diff(knots) > 0)
+
+    def test_boundary_restricts_data(self):
+        sp = Spline(
+            kind="bs",
+            n_knots=6,
+            knot_strategy="quantile_tempered",
+            boundary=(0.0, 50.0),
+        )
+        x = np.linspace(10, 90, 500)
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert np.all(knots >= 0.0)
+        assert np.all(knots <= 50.0)
+        assert np.all(np.diff(knots) > 0)
+
+    def test_fallback_to_uniform_on_constant_data(self):
+        x = np.full(400, 50.0)
+        sp = Spline(kind="bs", n_knots=8, knot_strategy="quantile_tempered")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "uniform"
+
+    def test_strategy_actual_reports_correctly(self):
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 100, 500)
+        sp = Spline(kind="bs", n_knots=6, knot_strategy="quantile_tempered")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile_tempered"
+
+    def test_knot_summary_reports_quantile_tempered(self):
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(0)
+        n = 300
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+        y = rng.poisson(2.0, n).astype(float)
+
+        model = SuperGLM(
+            features={
+                "x": Spline(n_knots=6, knot_strategy="quantile_tempered"),
+            },
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        assert model.knot_summary()["x"]["knot_strategy"] == "quantile_tempered"
+
+    def test_survives_point_mass_where_quantile_rows_collapses(self):
+        """quantile_tempered on BonusMalus-like data (55% at 50) should not
+        fall back to uniform, unlike quantile_rows."""
+        rng = np.random.default_rng(0)
+        # Simulate BonusMalus: 55% at 50, rest spread in [50, 150]
+        x = np.concatenate([np.full(550, 50.0), rng.choice(np.arange(51.0, 151.0), 450)])
+        sp = Spline(kind="cr", n_knots=10, knot_strategy="quantile_tempered")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile_tempered"
+        knots = sp.fitted_knots
+        assert len(knots) == 10
+        assert np.all(np.diff(knots) > 0)

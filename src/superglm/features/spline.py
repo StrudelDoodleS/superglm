@@ -18,6 +18,43 @@ from scipy.interpolate import BSpline as BSpl
 from superglm.types import GroupInfo
 
 
+def _weighted_quantile_knots(x: NDArray, n_knots: int, alpha: float) -> NDArray:
+    """Compute interior knots via weighted quantiles of unique values.
+
+    Parameters
+    ----------
+    x : 1-D array
+        Covariate values (already clipped to boundary if needed).
+    n_knots : int
+        Desired number of interior knots.
+    alpha : float
+        Tempering exponent.  ``alpha=0`` gives equal weight to every
+        unique value (same as ``"quantile"``).  Higher alpha concentrates
+        knots where more rows occur.
+
+    Returns
+    -------
+    interior : 1-D array
+        Unique interior knot positions (may be fewer than ``n_knots``
+        if ties collapse them).
+    """
+    ux, counts = np.unique(x, return_counts=True)
+    if len(ux) < 2:
+        return ux
+    w = counts.astype(np.float64) ** alpha
+    cw = np.cumsum(w)
+    # CDF mapped to [0, 1]: cdf[0]=0, cdf[-1]=1, intermediate
+    # proportional to cumulative weight.  For alpha=0 (equal weights)
+    # this gives cdf[i]=i/(N-1), matching np.percentile exactly.
+    denom = cw[-1] - w[0]
+    if denom <= 0:
+        return ux[:1]
+    cdf = (cw - w[0]) / denom
+    probs = np.linspace(0, 1, n_knots + 2)[1:-1]
+    raw = np.interp(probs, cdf, ux)
+    return np.unique(raw)
+
+
 class _SplineBase:
     """Base class for all spline feature specs.
 
@@ -41,7 +78,9 @@ class _SplineBase:
         "quantile" places knots at quantiles of ``unique(x)`` (mgcv
         convention — resistant to ties). "quantile_rows" places knots
         at quantiles of all rows (``pd.qcut``-style — more knots in
-        dense regions).
+        dense regions). "quantile_tempered" places knots via weighted
+        quantiles of ``unique(x)`` with weights ``count^knot_alpha``
+        (interpolates between quantile and quantile_rows).
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
     knots : array-like or None
@@ -74,6 +113,7 @@ class _SplineBase:
         n_bins: int | None = None,
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
+        knot_alpha: float = 0.2,
     ):
         if knots is not None:
             knots = np.asarray(knots, dtype=np.float64).ravel()
@@ -97,6 +137,7 @@ class _SplineBase:
                 f"extrapolation must be one of ('clip', 'extend', 'error'), got {extrapolation!r}"
             )
         self.extrapolation = extrapolation
+        self.knot_alpha = knot_alpha
 
         if boundary is not None:
             lo_b, hi_b = float(boundary[0]), float(boundary[1])
@@ -220,18 +261,21 @@ class _SplineBase:
         if self._explicit_knots is not None:
             interior = self._explicit_knots
             self._knot_strategy_actual = "explicit"
-        elif self.knot_strategy in ("quantile", "quantile_rows"):
+        elif self.knot_strategy in ("quantile", "quantile_rows", "quantile_tempered"):
             # When boundary is frozen, restrict to [lo, hi] so quantile
             # knots cannot land outside the boundary.
             x_q = x[(x >= self._lo) & (x <= self._hi)] if self._explicit_boundary is not None else x
-            probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
-            if self.knot_strategy == "quantile":
-                # mgcv-style: quantiles of unique values (resistant to ties).
-                source = np.unique(x_q) if len(x_q) > 0 else np.array([self._lo, self._hi])
+            if len(x_q) == 0:
+                x_q = np.array([self._lo, self._hi])
+            if self.knot_strategy == "quantile_tempered":
+                interior = _weighted_quantile_knots(x_q, self.n_knots, self.knot_alpha)
             else:
-                # quantile_rows: quantiles of all rows (qcut-style).
-                source = x_q if len(x_q) > 0 else np.array([self._lo, self._hi])
-            interior = np.unique(np.percentile(source, probs))
+                probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
+                if self.knot_strategy == "quantile":
+                    source = np.unique(x_q)
+                else:
+                    source = x_q
+                interior = np.unique(np.percentile(source, probs))
             if len(interior) < self.n_knots:
                 interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
                 self._knot_strategy_actual = "uniform"
@@ -440,7 +484,8 @@ class BasisSpline(_SplineBase):
     degree : int
         B-spline polynomial degree.
     knot_strategy : str
-        "uniform" (default), "quantile", or "quantile_rows".
+        "uniform" (default), "quantile", "quantile_rows", or
+        "quantile_tempered".
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
     split_linear : bool
@@ -471,6 +516,7 @@ class BasisSpline(_SplineBase):
         n_bins: int | None = None,
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
+        knot_alpha: float = 0.2,
     ):
         super().__init__(
             n_knots,
@@ -482,6 +528,7 @@ class BasisSpline(_SplineBase):
             n_bins,
             extrapolation,
             boundary,
+            knot_alpha,
         )
         self.split_linear = split_linear
         self._U_null: NDArray | None = None
@@ -612,7 +659,8 @@ class NaturalSpline(_SplineBase):
     degree : int
         B-spline polynomial degree.
     knot_strategy : str
-        "uniform" (default), "quantile", or "quantile_rows".
+        "uniform" (default), "quantile", "quantile_rows", or
+        "quantile_tempered".
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
     knots : array-like or None
@@ -630,6 +678,7 @@ class NaturalSpline(_SplineBase):
         n_bins: int | None = None,
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
+        knot_alpha: float = 0.2,
     ):
         super().__init__(
             n_knots,
@@ -641,6 +690,7 @@ class NaturalSpline(_SplineBase):
             n_bins,
             extrapolation,
             boundary,
+            knot_alpha,
         )
         self._Z: NDArray | None = None
 
@@ -678,7 +728,8 @@ class CubicRegressionSpline(_SplineBase):
     n_knots : int
         Number of interior knots.
     knot_strategy : str
-        "uniform" (default), "quantile", or "quantile_rows".
+        "uniform" (default), "quantile", "quantile_rows", or
+        "quantile_tempered".
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
     knots : array-like or None
@@ -695,6 +746,7 @@ class CubicRegressionSpline(_SplineBase):
         n_bins: int | None = None,
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
+        knot_alpha: float = 0.2,
     ):
         super().__init__(
             n_knots,
@@ -706,6 +758,7 @@ class CubicRegressionSpline(_SplineBase):
             n_bins=n_bins,
             extrapolation=extrapolation,
             boundary=boundary,
+            knot_alpha=knot_alpha,
         )
         self._Z: NDArray | None = None
 
@@ -774,7 +827,8 @@ class CardinalCRSpline(_SplineBase):
         Number of interior knots.  Total knots K = n_knots + 2
         (boundaries are added automatically).
     knot_strategy : str
-        ``"uniform"`` (default), ``"quantile"``, or ``"quantile_rows"``.
+        ``"uniform"`` (default), ``"quantile"``, ``"quantile_rows"``,
+        or ``"quantile_tempered"``.
     penalty : str
         ``"ssp"`` enables SSP reparametrisation, ``"none"`` disables it.
     knots : array-like or None
@@ -791,6 +845,7 @@ class CardinalCRSpline(_SplineBase):
         n_bins: int | None = None,
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
+        knot_alpha: float = 0.2,
     ):
         super().__init__(
             n_knots,
@@ -802,6 +857,7 @@ class CardinalCRSpline(_SplineBase):
             n_bins=n_bins,
             extrapolation=extrapolation,
             boundary=boundary,
+            knot_alpha=knot_alpha,
         )
         self._cr_knots: NDArray | None = None
         self._cr_M: NDArray | None = None
@@ -822,15 +878,20 @@ class CardinalCRSpline(_SplineBase):
         if self._explicit_knots is not None:
             interior = self._explicit_knots
             self._knot_strategy_actual = "explicit"
-        elif self.knot_strategy in ("quantile", "quantile_rows"):
+        elif self.knot_strategy in ("quantile", "quantile_rows", "quantile_tempered"):
             # Restrict to [lo, hi] when boundary is frozen (same logic as _SplineBase).
             x_q = x[(x >= self._lo) & (x <= self._hi)] if self._explicit_boundary is not None else x
-            probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
-            if self.knot_strategy == "quantile":
-                source = np.unique(x_q) if len(x_q) > 0 else np.array([self._lo, self._hi])
+            if len(x_q) == 0:
+                x_q = np.array([self._lo, self._hi])
+            if self.knot_strategy == "quantile_tempered":
+                interior = _weighted_quantile_knots(x_q, self.n_knots, self.knot_alpha)
             else:
-                source = x_q if len(x_q) > 0 else np.array([self._lo, self._hi])
-            interior = np.unique(np.percentile(source, probs))
+                probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
+                if self.knot_strategy == "quantile":
+                    source = np.unique(x_q)
+                else:
+                    source = x_q
+                interior = np.unique(np.percentile(source, probs))
             if len(interior) < self.n_knots:
                 interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
                 self._knot_strategy_actual = "uniform"
@@ -1109,6 +1170,7 @@ def Spline(
     n_bins: int | None = None,
     extrapolation: str = "clip",
     boundary: tuple[float, float] | None = None,
+    knot_alpha: float = 0.2,
 ) -> _SplineBase:
     """Create a spline feature spec.
 
@@ -1152,7 +1214,8 @@ def Spline(
         B-spline polynomial degree (default 3). Ignored for ``kind="cr"``
         which is always cubic.
     knot_strategy : str
-        ``"uniform"`` (default), ``"quantile"``, or ``"quantile_rows"``.
+        ``"uniform"`` (default), ``"quantile"``, ``"quantile_rows"``,
+        or ``"quantile_tempered"``.
     penalty : str
         ``"ssp"`` enables SSP reparametrisation (default), ``"none"``
         disables it.
@@ -1178,6 +1241,11 @@ def Spline(
         frozen across refits instead of being inferred from the data
         range. Use together with ``knots`` to fully freeze knot
         placement.
+    knot_alpha : float
+        Tempering exponent for ``knot_strategy="quantile_tempered"``.
+        Default 0.2.  ``alpha=0`` gives equal weight per unique value
+        (same as ``"quantile"``); higher values concentrate knots in
+        dense regions.  Ignored by other strategies.
 
     Returns
     -------
@@ -1229,6 +1297,7 @@ def Spline(
             n_bins=n_bins,
             extrapolation=extrapolation,
             boundary=boundary,
+            knot_alpha=knot_alpha,
         )
     elif kind in ("cr", "cr_cardinal"):
         return cls(
@@ -1240,6 +1309,7 @@ def Spline(
             n_bins=n_bins,
             extrapolation=extrapolation,
             boundary=boundary,
+            knot_alpha=knot_alpha,
         )
     else:  # "ns"
         return cls(
@@ -1252,4 +1322,5 @@ def Spline(
             n_bins=n_bins,
             extrapolation=extrapolation,
             boundary=boundary,
+            knot_alpha=knot_alpha,
         )
