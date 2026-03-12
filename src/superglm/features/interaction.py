@@ -23,7 +23,7 @@ from scipy.interpolate import BSpline as BSpl
 
 from superglm.features.categorical import _validate_categorical_levels
 from superglm.group_matrix import _discretize_column
-from superglm.types import GroupInfo
+from superglm.types import GroupInfo, TensorMarginalInfo
 
 # ── SplineCategorical ──────────────────────────────────────────
 
@@ -685,26 +685,24 @@ def _row_kron_dense(B1: NDArray, B2: NDArray) -> NDArray:
 class TensorInteraction:
     """Interaction-only tensor product spline (`ti`) term.
 
-    Builds independent marginal B-spline bases for two continuous features,
-    removes the constant direction from each marginal, and then forms their
-    row-wise Kronecker product. This yields an interaction-only surface:
-    constant and main-effect directions are excluded structurally rather than
-    via post-hoc ridge penalization.
+    Builds centered marginal bases from parent spline specs, inheriting
+    their knot vectors, penalties, and boundary constraints.  Forms
+    the row-wise Kronecker product to yield an interaction-only surface:
+    constant and main-effect directions are excluded structurally.
 
     The tensor penalty is ``kron(S1, I) + kron(I, S2)`` on the centered
-    marginals. For ordinary cubic P-spline marginals, this leaves the
-    bilinear ``x1 * x2`` direction in the tensor null space while excluding
-    the constant, ``x1`` and ``x2`` lower-order pieces. Group lasso can still
-    zero the whole interaction block cleanly.
+    marginals.  This leaves the bilinear ``x1 * x2`` direction in the
+    tensor null space while excluding the constant, ``x1`` and ``x2``
+    lower-order pieces.  Group lasso can still zero the whole
+    interaction block cleanly.
 
     Parameters
     ----------
     feat1_name, feat2_name : str
         Names of the parent spline features.
-    n_knots : tuple of int
+    n_knots : tuple of int or None
         ``(n_knots1, n_knots2)`` interior knots for each marginal basis.
-    degree : int
-        B-spline polynomial degree for both marginals.
+        When None (default), the parent's knot count is used directly.
     decompose : bool
         If True, split the centered tensor basis into a 1D bilinear subgroup
         and a wiggly subgroup. This is useful when you want the bilinear null
@@ -717,27 +715,17 @@ class TensorInteraction:
         feat1_name: str,
         feat2_name: str,
         *,
-        n_knots: tuple[int, int] = (5, 5),
-        degree: int = 3,
+        n_knots: tuple[int, int] | None = None,
         decompose: bool = False,
     ):
         self.feat1_name = feat1_name
         self.feat2_name = feat2_name
         self._n_knots = n_knots
-        self._degree = degree
         self._decompose = decompose
 
         # State set during build()
-        self._knots1: NDArray = np.array([])
-        self._knots2: NDArray = np.array([])
-        self._k1: int = 0
-        self._k2: int = 0
-        self._lo1: float = 0.0
-        self._hi1: float = 1.0
-        self._lo2: float = 0.0
-        self._hi2: float = 1.0
-        self._P1: NDArray = np.empty((0, 0))
-        self._P2: NDArray = np.empty((0, 0))
+        self._marginal1: TensorMarginalInfo | None = None
+        self._marginal2: TensorMarginalInfo | None = None
         self._p1: int = 0
         self._p2: int = 0
         self._R_inv: NDArray | None = None
@@ -746,52 +734,32 @@ class TensorInteraction:
     def parent_names(self) -> tuple[str, str]:
         return (self.feat1_name, self.feat2_name)
 
-    def _place_knots(self) -> None:
-        """Place interior knots and build full knot vectors for both margins."""
-        n_knots1, n_knots2 = self._n_knots
-        pad1 = (self._hi1 - self._lo1) * 1e-6
-        pad2 = (self._hi2 - self._lo2) * 1e-6
-
-        interior1 = np.linspace(self._lo1, self._hi1, n_knots1 + 2)[1:-1]
-        interior2 = np.linspace(self._lo2, self._hi2, n_knots2 + 2)[1:-1]
-
-        self._knots1 = np.concatenate(
-            [
-                np.repeat(self._lo1 - pad1, self._degree + 1),
-                interior1,
-                np.repeat(self._hi1 + pad1, self._degree + 1),
-            ]
-        )
-        self._knots2 = np.concatenate(
-            [
-                np.repeat(self._lo2 - pad2, self._degree + 1),
-                interior2,
-                np.repeat(self._hi2 + pad2, self._degree + 1),
-            ]
-        )
-
-        self._k1 = len(self._knots1) - self._degree - 1
-        self._k2 = len(self._knots2) - self._degree - 1
-
     @staticmethod
-    def _drop_intercept_direction(B: sp.csr_matrix) -> NDArray:
-        """Return a coefficient-space basis whose fitted columns are centered.
+    def _marginal_from_spec(spec, x: NDArray, n_knots_override: int | None) -> TensorMarginalInfo:
+        """Get marginal ingredients from a parent spec, optionally overriding n_knots."""
+        if n_knots_override is not None and n_knots_override != spec.n_knots:
+            kwargs: dict = dict(
+                n_knots=n_knots_override,
+                knot_strategy=spec.knot_strategy,
+                penalty=spec.penalty,
+                boundary=(spec._lo, spec._hi),
+                knot_alpha=spec.knot_alpha,
+            )
+            # CubicRegressionSpline/CardinalCRSpline hardcode degree=3
+            import inspect
 
-        Uses unweighted column sums (training-data counts) as the constraint
-        direction, matching mgcv's identifiability convention.
-        """
-        c = np.asarray(B.sum(axis=0)).ravel()
-        c = c / np.linalg.norm(c)
-        q, _ = np.linalg.qr(c[:, None], mode="complete")
-        return q[:, 1:]
+            if "degree" in inspect.signature(type(spec).__init__).parameters:
+                kwargs["degree"] = spec.degree
+            clone = type(spec)(**kwargs)
+            clone._place_knots(x)
+            return clone.tensor_marginal_ingredients(x)
+        return spec.tensor_marginal_ingredients(x)
 
-    def _centered_marginal_basis(
-        self, x: NDArray, knots: NDArray, projection: NDArray
-    ) -> sp.csr_matrix:
+    def _centered_marginal_basis(self, x: NDArray, info: TensorMarginalInfo) -> sp.csr_matrix:
         x = np.asarray(x, dtype=np.float64).ravel()
-        x_clip = np.clip(x, knots[0], knots[-1])
-        B = BSpl.design_matrix(x_clip, knots, self._degree).tocsr()
-        return sp.csr_matrix(B @ projection)
+        x_clip = np.clip(x, info.lo, info.hi)
+        B = BSpl.design_matrix(x_clip, info.knots, info.degree).tocsr()
+        return sp.csr_matrix(B @ info.projection)
 
     def _prepare_centered_marginals(
         self,
@@ -799,7 +767,7 @@ class TensorInteraction:
         x2: NDArray,
         parent_specs: dict,
     ) -> tuple[sp.csr_matrix, sp.csr_matrix, NDArray, NDArray]:
-        from superglm.features.spline import CardinalCRSpline, _SplineBase
+        from superglm.features.spline import _SplineBase
 
         spec1 = parent_specs[self.feat1_name]
         spec2 = parent_specs[self.feat2_name]
@@ -807,34 +775,24 @@ class TensorInteraction:
             raise TypeError(f"Expected a spline spec for {self.feat1_name}")
         if not isinstance(spec2, _SplineBase):
             raise TypeError(f"Expected a spline spec for {self.feat2_name}")
-        if isinstance(spec1, CardinalCRSpline) or isinstance(spec2, CardinalCRSpline):
-            raise TypeError(
-                "TensorInteraction does not support cr_cardinal splines. "
-                "Use kind='cr' or kind='bs' for spline-spline interactions."
-            )
-
-        self._lo1, self._hi1 = spec1._lo, spec1._hi
-        self._lo2, self._hi2 = spec2._lo, spec2._hi
-        self._place_knots()
 
         x1 = np.asarray(x1, dtype=np.float64).ravel()
         x2 = np.asarray(x2, dtype=np.float64).ravel()
-        x1_clip = np.clip(x1, self._knots1[0], self._knots1[-1])
-        x2_clip = np.clip(x2, self._knots2[0], self._knots2[-1])
-        B1_raw = BSpl.design_matrix(x1_clip, self._knots1, self._degree).tocsr()
-        B2_raw = BSpl.design_matrix(x2_clip, self._knots2, self._degree).tocsr()
-        self._P1 = self._drop_intercept_direction(B1_raw)
-        self._P2 = self._drop_intercept_direction(B2_raw)
-        self._p1 = self._P1.shape[1]
-        self._p2 = self._P2.shape[1]
 
-        B1 = sp.csr_matrix(B1_raw @ self._P1)
-        B2 = sp.csr_matrix(B2_raw @ self._P2)
+        nk1 = self._n_knots[0] if self._n_knots is not None else None
+        nk2 = self._n_knots[1] if self._n_knots is not None else None
 
-        D1 = np.diff(np.eye(self._k1), n=2, axis=0)
-        D2 = np.diff(np.eye(self._k2), n=2, axis=0)
-        S1 = self._P1.T @ (D1.T @ D1) @ self._P1
-        S2 = self._P2.T @ (D2.T @ D2) @ self._P2
+        # tensor_marginal_ingredients() raises TypeError for CardinalCRSpline
+        self._marginal1 = self._marginal_from_spec(spec1, x1, nk1)
+        self._marginal2 = self._marginal_from_spec(spec2, x2, nk2)
+
+        self._p1 = self._marginal1.K_eff
+        self._p2 = self._marginal2.K_eff
+
+        B1 = sp.csr_matrix(self._marginal1.basis)
+        B2 = sp.csr_matrix(self._marginal2.basis)
+        S1 = self._marginal1.penalty
+        S2 = self._marginal2.penalty
         return B1, B2, S1, S2
 
     def _build_group_infos(self, omega: NDArray) -> GroupInfo | list[GroupInfo]:
@@ -912,10 +870,11 @@ class TensorInteraction:
         omega = np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
         infos = self._build_group_infos(omega)
 
+        m1, m2 = self._marginal1, self._marginal2
         support1, idx1 = _discretize_column(x1, int(n_bins[0]))
         support2, idx2 = _discretize_column(x2, int(n_bins[1]))
-        B1_unique = self._centered_marginal_basis(support1, self._knots1, self._P1).toarray()
-        B2_unique = self._centered_marginal_basis(support2, self._knots2, self._P2).toarray()
+        B1_unique = self._centered_marginal_basis(support1, m1).toarray()
+        B2_unique = self._centered_marginal_basis(support2, m2).toarray()
 
         pair_codes = np.column_stack([idx1, idx2])
         observed_pairs, pair_idx = np.unique(pair_codes, axis=0, return_inverse=True)
@@ -931,8 +890,8 @@ class TensorInteraction:
     def transform(self, x1: NDArray, x2: NDArray) -> NDArray:
         x1 = np.asarray(x1, dtype=np.float64).ravel()
         x2 = np.asarray(x2, dtype=np.float64).ravel()
-        B1 = self._centered_marginal_basis(x1, self._knots1, self._P1)
-        B2 = self._centered_marginal_basis(x2, self._knots2, self._P2)
+        B1 = self._centered_marginal_basis(x1, self._marginal1)
+        B2 = self._centered_marginal_basis(x2, self._marginal2)
         T = _row_kron(B1, B2)
 
         if self._R_inv is not None:
@@ -946,15 +905,17 @@ class TensorInteraction:
         else:
             beta_orig = beta
 
+        m1, m2 = self._marginal1, self._marginal2
+
         # Reshape to the centered marginal coefficient layout.
         C = beta_orig.reshape(self._p1, self._p2)
 
         # Evaluate on grid
-        x1_grid = np.linspace(self._lo1, self._hi1, n_points)
-        x2_grid = np.linspace(self._lo2, self._hi2, n_points)
+        x1_grid = np.linspace(m1.lo, m1.hi, n_points)
+        x2_grid = np.linspace(m2.lo, m2.hi, n_points)
 
-        B1_grid = self._centered_marginal_basis(x1_grid, self._knots1, self._P1).toarray()
-        B2_grid = self._centered_marginal_basis(x2_grid, self._knots2, self._P2).toarray()
+        B1_grid = self._centered_marginal_basis(x1_grid, m1).toarray()
+        B2_grid = self._centered_marginal_basis(x2_grid, m2).toarray()
 
         # surface[j, i] = f(x1_grid[i], x2_grid[j]) — matches meshgrid convention
         surface = B2_grid @ C.T @ B1_grid.T
