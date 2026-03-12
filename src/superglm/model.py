@@ -1266,6 +1266,39 @@ class SuperGLM:
             return self._interaction_specs[name].reconstruct(beta_combined)
         raise KeyError(f"Feature not found: {name}")
 
+    def knot_summary(self) -> dict[str, dict[str, Any]]:
+        """Return fitted knot metadata for all spline features.
+
+        Returns a dict keyed by feature name, each containing:
+
+        * ``kind`` — spline class name (e.g. ``"BasisSpline"``,
+          ``"CardinalCRSpline"``).
+        * ``knot_strategy`` — ``"uniform"``, ``"quantile"``, or
+          ``"explicit"``.
+        * ``interior_knots`` — 1-D array of interior knot positions.
+        * ``boundary`` — ``(lo, hi)`` tuple.
+        * ``n_basis`` — number of raw basis functions (before
+          identifiability / SSP).
+
+        Use ``interior_knots`` with ``Spline(knots=...)`` to freeze
+        placement on a refit with different data.
+        """
+        from superglm.features.spline import _SplineBase
+
+        out: dict[str, dict[str, Any]] = {}
+        for name, spec in self._specs.items():
+            if not isinstance(spec, _SplineBase):
+                continue
+            strategy = "explicit" if spec._explicit_knots is not None else spec.knot_strategy
+            out[name] = {
+                "kind": type(spec).__name__,
+                "knot_strategy": strategy,
+                "interior_knots": spec.fitted_knots,
+                "boundary": spec.fitted_boundary,
+                "n_basis": spec._n_basis,
+            }
+        return out
+
     @cached_property
     def _coef_covariance(self) -> tuple[NDArray, list[GroupSlice]]:
         """Phi-scaled Bayesian covariance for active coefficients."""

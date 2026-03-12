@@ -221,6 +221,27 @@ class _SplineBase:
         raise NotImplementedError
 
     @property
+    def fitted_knots(self) -> NDArray | None:
+        """Interior knot locations from the fitted spline, or None before fit.
+
+        These are the data-driven (or explicit) interior knot positions,
+        excluding the boundary knots.  After fitting, these are frozen and
+        reused on every subsequent ``transform()`` / ``predict()`` call.
+        Pass them back via ``Spline(knots=model_spec.fitted_knots)`` to
+        guarantee identical placement on a refit with different data.
+        """
+        if self._n_basis == 0:
+            return None
+        return self._knots[self.degree + 1 : -(self.degree + 1)].copy()
+
+    @property
+    def fitted_boundary(self) -> tuple[float, float] | None:
+        """Training-range boundary ``(lo, hi)``, or None before fit."""
+        if self._n_basis == 0:
+            return None
+        return (self._lo, self._hi)
+
+    @property
     def absorbs_intercept(self) -> bool:
         """Whether the smooth should absorb the intercept-like direction.
 
@@ -923,6 +944,12 @@ class CardinalCRSpline(_SplineBase):
         X += c1[:, None] * M[j, :] + c2[:, None] * M[j + 1, :]
 
         return sp.csr_matrix(X)
+
+    @property
+    def fitted_knots(self) -> NDArray | None:
+        if self._cr_knots is None:
+            return None
+        return self._cr_knots[1:-1].copy()
 
     def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
         """No Z-projection needed — natural BCs are built into M."""

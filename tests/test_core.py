@@ -6,7 +6,12 @@ import pytest
 from superglm.distributions import Gamma, Poisson, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
-from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline, _SplineBase
+from superglm.features.spline import (
+    CubicRegressionSpline,
+    NaturalSpline,
+    Spline,
+    _SplineBase,
+)
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.types import GroupSlice
 
@@ -623,3 +628,168 @@ class TestActiveSet:
         )
         assert combined.converged
         assert combined.deviance == pytest.approx(baseline.deviance, rel=1e-4)
+
+
+# ── Knot governance ──────────────────────────────────────────────
+
+
+class TestFittedKnots:
+    """Public accessors for fitted knot locations."""
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_fitted_knots_returns_interior(self, kind):
+        sp = Spline(kind=kind, n_knots=6)
+        assert sp.fitted_knots is None  # before fit
+
+        x = np.linspace(0, 10, 300)
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert knots is not None
+        assert len(knots) == 6
+        assert knots[0] > 0.0  # strictly inside boundaries
+        assert knots[-1] < 10.0
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_fitted_knots_is_copy(self, kind):
+        """Mutating the returned array must not alter the spec."""
+        sp = Spline(kind=kind, n_knots=4)
+        sp.build(np.linspace(0, 10, 200))
+        k1 = sp.fitted_knots
+        k1[:] = 999.0
+        k2 = sp.fitted_knots
+        assert not np.any(k2 == 999.0)
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_fitted_boundary(self, kind):
+        sp = Spline(kind=kind, n_knots=4)
+        assert sp.fitted_boundary is None  # before fit
+        x = np.linspace(2.0, 8.0, 200)
+        sp.build(x)
+        lo, hi = sp.fitted_boundary
+        assert lo == pytest.approx(2.0)
+        assert hi == pytest.approx(8.0)
+
+    def test_explicit_knots_round_trip(self):
+        """fitted_knots from one fit can freeze placement on a second fit."""
+        sp1 = Spline(kind="cr", n_knots=8)
+        x_uniform = np.linspace(0, 100, 500)
+        sp1.build(x_uniform)
+        frozen = sp1.fitted_knots
+
+        sp2 = Spline(kind="cr", knots=frozen)
+        x_skewed = np.concatenate([np.linspace(0, 10, 400), np.linspace(90, 100, 100)])
+        sp2.build(x_skewed)
+        np.testing.assert_array_equal(sp2.fitted_knots, frozen)
+
+
+class TestQuantileKnotGovernance:
+    """Quantile knot placement stores and freezes exact positions."""
+
+    def test_quantile_of_unique(self):
+        """Quantile strategy uses unique(x), producing strictly increasing knots."""
+        # Data with heavy ties: 80% at value 50, rest spread
+        rng = np.random.default_rng(0)
+        x = np.concatenate([np.full(800, 50.0), rng.uniform(0, 100, 200)])
+        sp = Spline(kind="bs", n_knots=8, knot_strategy="quantile")
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert len(knots) == 8
+        # Strictly increasing (no duplicates from ties)
+        assert np.all(np.diff(knots) > 0)
+
+    def test_quantile_knots_frozen_on_refit(self):
+        """Quantile knots from first fit can freeze placement on refit."""
+        rng = np.random.default_rng(42)
+        x1 = rng.exponential(10, 500)
+        sp = Spline(kind="cr_cardinal", n_knots=6, knot_strategy="quantile")
+        sp.build(x1)
+        knots_fit1 = sp.fitted_knots.copy()
+
+        # Refit on totally different distribution
+        sp2 = Spline(kind="cr_cardinal", knots=knots_fit1)
+        x2 = rng.uniform(0, 100, 500)
+        sp2.build(x2)
+        np.testing.assert_array_equal(sp2.fitted_knots, knots_fit1)
+
+
+class TestKnotSummary:
+    """SuperGLM.knot_summary() exposes fitted knot metadata."""
+
+    def test_knot_summary_content(self):
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(0)
+        n = 300
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n), "cat": rng.choice(["a", "b"], n)})
+        y = rng.poisson(2.0, n).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(kind="cr", n_knots=6), "cat": Categorical()},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        ks = model.knot_summary()
+
+        # Only spline features appear
+        assert "x" in ks
+        assert "cat" not in ks
+
+        info = ks["x"]
+        assert info["kind"] == "CubicRegressionSpline"
+        assert info["knot_strategy"] == "uniform"
+        assert len(info["interior_knots"]) == 6
+        assert info["boundary"][0] == pytest.approx(df["x"].min())
+        assert info["boundary"][1] == pytest.approx(df["x"].max())
+
+    def test_knot_summary_explicit_strategy_label(self):
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(1)
+        n = 200
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+        y = rng.poisson(1.0, n).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(knots=np.array([2.0, 5.0, 8.0]))},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        assert model.knot_summary()["x"]["knot_strategy"] == "explicit"
+
+
+class TestKnotPickleRoundTrip:
+    """Pickle round-trip preserves fitted knots exactly."""
+
+    @pytest.mark.parametrize("kind", ["bs", "cr", "cr_cardinal"])
+    def test_pickle_preserves_knots(self, kind):
+        import pickle
+
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(42)
+        n = 200
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+        y = rng.poisson(2.0, n).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(kind=kind, n_knots=6)},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        pred_before = model.predict(df)
+        knots_before = model.knot_summary()["x"]["interior_knots"].copy()
+
+        # Round-trip through pickle
+        blob = pickle.dumps(model)
+        model2 = pickle.loads(blob)
+
+        knots_after = model2.knot_summary()["x"]["interior_knots"]
+        pred_after = model2.predict(df)
+        np.testing.assert_array_equal(knots_before, knots_after)
+        np.testing.assert_array_equal(pred_before, pred_after)
