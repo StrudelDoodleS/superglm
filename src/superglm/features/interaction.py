@@ -799,7 +799,7 @@ class TensorInteraction:
         x2: NDArray,
         parent_specs: dict,
     ) -> tuple[sp.csr_matrix, sp.csr_matrix, NDArray, NDArray]:
-        from superglm.features.spline import _SplineBase
+        from superglm.features.spline import CardinalCRSpline, _SplineBase
 
         spec1 = parent_specs[self.feat1_name]
         spec2 = parent_specs[self.feat2_name]
@@ -807,6 +807,11 @@ class TensorInteraction:
             raise TypeError(f"Expected a spline spec for {self.feat1_name}")
         if not isinstance(spec2, _SplineBase):
             raise TypeError(f"Expected a spline spec for {self.feat2_name}")
+        if isinstance(spec1, CardinalCRSpline) or isinstance(spec2, CardinalCRSpline):
+            raise TypeError(
+                "TensorInteraction does not support cr_cardinal splines. "
+                "Use kind='cr' or kind='bs' for spline-spline interactions."
+            )
 
         self._lo1, self._hi1 = spec1._lo, spec1._hi
         self._lo2, self._hi2 = spec2._lo, spec2._hi
