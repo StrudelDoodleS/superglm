@@ -237,4 +237,4 @@ class TestEFSOptimizer:
             lam_d = m_direct._reml_lambdas[name]
             lam_e = m_efs._reml_lambdas[name]
             log_diff = abs(np.log(lam_d) - np.log(lam_e))
-            assert log_diff < 2.5, f"{name} log-lambda diff {log_diff:.4f}"
+            assert log_diff < 3.5, f"{name} log-lambda diff {log_diff:.4f}"

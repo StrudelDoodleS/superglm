@@ -253,7 +253,6 @@ class _SplineBase:
             self._lo, self._hi = self._explicit_boundary
         else:
             self._lo, self._hi = float(x.min()), float(x.max())
-        pad = (self._hi - self._lo) * 1e-6
         self._basis_lo = None
         self._basis_hi = None
         self._basis_d1_lo = None
@@ -286,6 +285,15 @@ class _SplineBase:
             interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
             self._knot_strategy_actual = "uniform"
 
+        self._assemble_knot_vector(interior)
+
+    def _assemble_knot_vector(self, interior: NDArray) -> None:
+        """Build the full knot vector from interior knots.
+
+        Default: clamped (repeated-end) construction.  Subclasses may
+        override for open knot vectors.
+        """
+        pad = (self._hi - self._lo) * 1e-6
         self._knots = np.concatenate(
             [
                 np.repeat(self._lo - pad, self.degree + 1),
@@ -548,6 +556,36 @@ class BasisSpline(_SplineBase):
     @property
     def supports_linear_split(self) -> bool:
         return True
+
+    def _assemble_knot_vector(self, interior: NDArray) -> None:
+        """mgcv-style open knot vector with 0.001*range edge padding.
+
+        Instead of repeating the boundary knot ``degree + 1`` times
+        (clamped construction), extend the knot vector beyond the data
+        range at regular spacing.  The internal effective boundary is
+        expanded by ``0.001 * range`` on each side, matching mgcv's
+        ``smooth.construct.ps.smooth.spec``.
+
+        The public boundary (``self._lo``, ``self._hi``) is unchanged,
+        so ``fitted_boundary``, clipping, and extrapolation still refer
+        to the data range.
+        """
+        xr = self._hi - self._lo
+        lo_eff = self._lo - 0.001 * xr
+        hi_eff = self._hi + 0.001 * xr
+
+        # Interior knots bracketed by the effective boundary
+        inner = np.concatenate([[lo_eff], interior, [hi_eff]])
+
+        # Extension spacing: use the nearest interior gap at each end
+        dx_lo = inner[1] - inner[0]
+        dx_hi = inner[-1] - inner[-2]
+
+        lower = lo_eff - dx_lo * np.arange(self.degree, 0, -1)
+        upper = hi_eff + dx_hi * np.arange(1, self.degree + 1)
+
+        self._knots = np.concatenate([lower, inner, upper])
+        self._n_basis = len(self._knots) - self.degree - 1
 
     def _build_penalty(self) -> NDArray:
         D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
