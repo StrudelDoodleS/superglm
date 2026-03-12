@@ -33,11 +33,17 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
 )
-from superglm.inference import compute_coef_covariance, feature_se_from_cov
+from superglm.inference import (
+    InteractionInference,
+    TermInference,
+    compute_coef_covariance,
+    feature_se_from_cov,
+)
 from superglm.inference import drop1 as _drop1
 from superglm.inference import refit_unpenalised as _refit_unpenalised
 from superglm.inference import relativities as _relativities
 from superglm.inference import simultaneous_bands as _simultaneous_bands
+from superglm.inference import term_inference as _term_inference
 from superglm.links import Link
 from superglm.penalties.base import Penalty
 from superglm.penalties.group_elastic_net import GroupElasticNet
@@ -1536,6 +1542,98 @@ class SuperGLM:
             n_points=n_points,
             seed=seed,
         )
+
+    def term_inference(
+        self,
+        name: str,
+        *,
+        with_se: bool = True,
+        simultaneous: bool = False,
+        n_points: int = 200,
+        alpha: float = 0.05,
+        n_sim: int = 10_000,
+        seed: int = 42,
+    ) -> TermInference | InteractionInference:
+        """Per-term inference: curve, uncertainty, and metadata in one object.
+
+        Unifies ``reconstruct_feature()``, ``relativities(with_se=True)``,
+        and ``simultaneous_bands()`` into a single coherent result.
+
+        Parameters
+        ----------
+        name : str
+            Feature or interaction name.
+        with_se : bool
+            Compute standard errors and pointwise CIs (default True).
+        simultaneous : bool
+            Compute simultaneous confidence bands (spline only).
+        n_points : int
+            Grid size for spline/polynomial curves.
+        alpha : float
+            Significance level for CIs (default 0.05 → 95%).
+        n_sim : int
+            Number of simulations for simultaneous bands.
+        seed : int
+            Random seed for simultaneous bands.
+
+        Returns
+        -------
+        TermInference or InteractionInference
+        """
+        if self._result is None:
+            raise RuntimeError("Model must be fitted before calling term_inference().")
+        return _term_inference(
+            name,
+            result=self.result,
+            groups=self._groups,
+            specs=self._specs,
+            interaction_specs=self._interaction_specs,
+            covariance_fn=lambda: self._coef_covariance,
+            reml_lambdas=getattr(self, "_reml_lambdas", None),
+            lambda2=self.lambda2,
+            group_edf=self._group_edf,
+            with_se=with_se,
+            simultaneous=simultaneous,
+            n_points=n_points,
+            alpha=alpha,
+            n_sim=n_sim,
+            seed=seed,
+        )
+
+    @cached_property
+    def _group_edf(self) -> dict[str, float] | None:
+        """Per-group effective degrees of freedom via F = (X'WX+S)^{-1} X'WX."""
+        from superglm.metrics import _penalised_xtwx_inv
+
+        if self._dm is None or self._result is None:
+            return None
+
+        beta = self._result.beta
+        eta = self._dm.matvec(beta) + self._result.intercept
+        if self._fit_offset is not None:
+            eta = eta + self._fit_offset
+        eta = np.clip(eta, -20, 20)
+        mu = self._link.inverse(eta)
+        V = self._distribution.variance(mu)
+        dmu_deta = self._link.deriv_inverse(eta)
+        W = self._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
+
+        lam2 = getattr(self, "_reml_lambdas", None) or self.lambda2
+        X_a, XtWX_S_inv, active_groups, _ = _penalised_xtwx_inv(
+            beta, W, self._dm.group_matrices, self._groups, lam2
+        )
+
+        if X_a.shape[1] == 0:
+            return {}
+
+        XtWX = X_a.T @ (X_a * W[:, None])
+        F = XtWX_S_inv @ XtWX
+        edf_vec = np.diag(F)
+
+        out: dict[str, float] = {}
+        for ag in active_groups:
+            out[ag.name] = float(np.sum(edf_vec[ag.sl]))
+        return out
 
     def plot_relativities(
         self,

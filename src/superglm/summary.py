@@ -33,6 +33,12 @@ class _CoefRow:
     curve_se_min: float | None = None
     curve_se_max: float | None = None
     subgroup_type: str | None = None  # "linear", "spline", or None
+    # Enriched spline metadata
+    edf: float | None = None
+    smoothing_lambda: float | None = None
+    spline_kind: str | None = None  # "BasisSpline", "NaturalSpline", etc.
+    knot_strategy: str | None = None
+    boundary: tuple[float, float] | None = None
 
 
 def _compute_coef_stats(
@@ -218,6 +224,16 @@ class ModelSummary:
 
             if row.is_spline:
                 has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
+                # Build metadata suffix: edf, lambda
+                meta_parts = []
+                if row.edf is not None:
+                    meta_parts.append(f"edf={row.edf:.1f}")
+                if row.smoothing_lambda is not None:
+                    meta_parts.append(f"lam={row.smoothing_lambda:.2g}")
+                meta_str = ", ".join(meta_parts)
+                if meta_str:
+                    meta_str = f", {meta_str}"
+
                 if has_test:
                     p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "<0.001"
                     stars = _sig_stars(row.wald_p)
@@ -233,12 +249,12 @@ class ModelSummary:
                     spline_text = (
                         f"[{kind}, {row.n_params} params, "
                         f"chi2({df_str})={row.wald_chi2:.1f}, "
-                        f"p={p_str}{se_str}]"
+                        f"p={p_str}{meta_str}{se_str}]"
                     )
                     lines.append(f"{row.name:<{name_w}s}  {spline_text} {stars:<3s}")
                 elif row.active:
                     kind = "linear" if row.subgroup_type == "linear" else "spline"
-                    spline_text = f"[{kind}, {row.n_params} params, active]"
+                    spline_text = f"[{kind}, {row.n_params} params, active{meta_str}]"
                     lines.append(f"{row.name:<{name_w}s}  {spline_text}")
                 else:
                     kind = "linear" if row.subgroup_type == "linear" else "spline"
@@ -380,6 +396,16 @@ class ModelSummary:
             if row.is_spline:
                 has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
                 kind = "linear" if row.subgroup_type == "linear" else "spline"
+                # Build metadata suffix: edf, lambda
+                meta_parts = []
+                if row.edf is not None:
+                    meta_parts.append(f"edf={row.edf:.1f}")
+                if row.smoothing_lambda is not None:
+                    meta_parts.append(f"&lambda;={row.smoothing_lambda:.2g}")
+                meta_str = ", ".join(meta_parts)
+                if meta_str:
+                    meta_str = f", {meta_str}"
+
                 if has_test:
                     p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "&lt;0.001"
                     stars = _sig_stars(row.wald_p)
@@ -393,7 +419,7 @@ class ModelSummary:
                     text = (
                         f"[{kind}, {row.n_params} params, "
                         f"&chi;&sup2;({df_str})={row.wald_chi2:.1f}, "
-                        f"p={p_str}{se_str}]"
+                        f"p={p_str}{meta_str}{se_str}]"
                     )
                     parts.append(
                         f"<tr>"
@@ -404,7 +430,7 @@ class ModelSummary:
                         f"</tr>"
                     )
                 elif row.active:
-                    text = f"[{kind}, {row.n_params} params, active]"
+                    text = f"[{kind}, {row.n_params} params, active{meta_str}]"
                     parts.append(
                         f"<tr>"
                         f'<td style="{cell_l}">{row.name}</td>'

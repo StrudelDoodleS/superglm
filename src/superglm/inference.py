@@ -7,6 +7,7 @@ on SuperGLM delegate here.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -19,6 +20,140 @@ if TYPE_CHECKING:
     from superglm.links import Link
     from superglm.solvers.pirls import PIRLSResult
     from superglm.types import GroupSlice
+
+
+# ── Term Inference Result ────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SplineMetadata:
+    """Knot and basis metadata for a spline term."""
+
+    kind: str  # e.g. "BasisSpline", "NaturalSpline", "CubicRegressionSpline"
+    knot_strategy: str  # "uniform", "quantile", "quantile_tempered", "explicit"
+    interior_knots: NDArray
+    boundary: tuple[float, float]
+    n_basis: int
+    degree: int
+    extrapolation: str  # "clip", "extend", "error"
+    knot_alpha: float | None = None  # only for "quantile_tempered"
+
+
+@dataclass(frozen=True)
+class TermInference:
+    """Per-term inference result.
+
+    Holds the fitted curve (or levels/slope), uncertainty measures, and
+    metadata for a single model term.  Returned by
+    ``SuperGLM.term_inference()``.
+    """
+
+    # Identity
+    name: str
+    kind: str  # "spline", "categorical", "numeric", "polynomial"
+    active: bool
+
+    # Curve / levels / slope
+    x: NDArray | None = None  # grid for spline/polynomial, None otherwise
+    levels: list[str] | None = None  # for categorical
+    log_relativity: NDArray | None = None
+    relativity: NDArray | None = None
+
+    # Uncertainty (pointwise)
+    se_log_relativity: NDArray | None = None
+    ci_lower: NDArray | None = None  # pointwise lower
+    ci_upper: NDArray | None = None  # pointwise upper
+
+    # Uncertainty (simultaneous) — only when simultaneous=True
+    ci_lower_simultaneous: NDArray | None = None
+    ci_upper_simultaneous: NDArray | None = None
+    critical_value_simultaneous: float | None = None
+
+    # Centering
+    absorbs_intercept: bool = True
+    centering_mode: str = "training_mean_zero_unweighted"
+
+    # Smoothness / penalty
+    edf: float | None = None
+    smoothing_lambda: float | dict[str, float] | None = None
+
+    # Spline-specific metadata
+    spline: SplineMetadata | None = None
+
+    # CI alpha used
+    alpha: float = 0.05
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Convert to a tidy DataFrame for plotting or export."""
+        if self.kind in ("spline", "polynomial"):
+            d: dict[str, Any] = {
+                "x": self.x,
+                "log_relativity": self.log_relativity,
+                "relativity": self.relativity,
+            }
+            if self.se_log_relativity is not None:
+                d["se_log_relativity"] = self.se_log_relativity
+            if self.ci_lower is not None:
+                d["ci_lower"] = self.ci_lower
+                d["ci_upper"] = self.ci_upper
+            if self.ci_lower_simultaneous is not None:
+                d["ci_lower_simultaneous"] = self.ci_lower_simultaneous
+                d["ci_upper_simultaneous"] = self.ci_upper_simultaneous
+            return pd.DataFrame(d)
+
+        elif self.kind == "categorical":
+            d = {
+                "level": self.levels,
+                "log_relativity": self.log_relativity,
+                "relativity": self.relativity,
+            }
+            if self.se_log_relativity is not None:
+                d["se_log_relativity"] = self.se_log_relativity
+            if self.ci_lower is not None:
+                d["ci_lower"] = self.ci_lower
+                d["ci_upper"] = self.ci_upper
+            return pd.DataFrame(d)
+
+        else:
+            # numeric
+            d = {
+                "label": ["per_unit"],
+                "log_relativity": self.log_relativity,
+                "relativity": self.relativity,
+            }
+            if self.se_log_relativity is not None:
+                d["se_log_relativity"] = self.se_log_relativity
+            if self.ci_lower is not None:
+                d["ci_lower"] = self.ci_lower
+                d["ci_upper"] = self.ci_upper
+            return pd.DataFrame(d)
+
+
+@dataclass(frozen=True)
+class InteractionInference:
+    """Per-interaction inference result (lighter than TermInference)."""
+
+    name: str
+    kind: str  # "spline_categorical", "categorical", "numeric_categorical", etc.
+    active: bool
+
+    # For spline×categorical: per-level curves
+    x: NDArray | None = None
+    levels: list[str] | None = None
+    per_level: dict[str, dict[str, NDArray]] | None = None
+
+    # For categorical×categorical: per-pair
+    pairs: list[tuple[str, str]] | None = None
+    log_relativity: NDArray | dict[str, float] | None = None
+    relativity: NDArray | dict[str, float] | None = None
+
+    # For numeric×categorical: per-level slopes
+    relativities_per_unit: dict[str, float] | None = None
+    log_relativities_per_unit: dict[str, float] | None = None
+
+    # For numeric×numeric: single product coefficient
+    relativity_per_unit_unit: float | None = None
+    coef_original: float | None = None
 
 
 # ── Covariance ────────────────────────────────────────────────────
@@ -658,3 +793,398 @@ def refit_unpenalised(
     new_model = model._clone_without_features(inactive, lambda1=0.0, lambda2=lam2)
     new_model.fit(X, y, exposure=exposure, offset=offset)
     return new_model
+
+
+# ── Term Inference ───────────────────────────────────────────────
+
+
+def term_inference(
+    name: str,
+    *,
+    result: PIRLSResult,
+    groups: list[GroupSlice],
+    specs: dict[str, Any],
+    interaction_specs: dict[str, Any],
+    covariance_fn,
+    reml_lambdas: dict[str, float] | None,
+    lambda2: float,
+    group_edf: dict[str, float] | None = None,
+    with_se: bool = True,
+    simultaneous: bool = False,
+    n_points: int = 200,
+    alpha: float = 0.05,
+    n_sim: int = 10_000,
+    seed: int = 42,
+) -> TermInference | InteractionInference:
+    """Build a per-term inference object.
+
+    Parameters
+    ----------
+    name : str
+        Feature or interaction name.
+    result : PIRLSResult
+        Fitted model result.
+    groups : list[GroupSlice]
+        Group definitions from the fitted model.
+    specs, interaction_specs : dict
+        Feature and interaction specs.
+    covariance_fn : callable
+        Zero-arg callable returning ``(Cov_active, active_groups)``.
+    reml_lambdas : dict or None
+        REML-estimated per-group lambdas (from model._reml_lambdas).
+    lambda2 : float
+        Global smoothing penalty.
+    group_edf : dict[str, float] or None
+        Per-group effective degrees of freedom (keyed by group name).
+    with_se : bool
+        Compute standard errors and pointwise CIs.
+    simultaneous : bool
+        Compute simultaneous bands (spline only, requires with_se).
+    n_points : int
+        Grid size for spline/polynomial curves.
+    alpha : float
+        Significance level for CIs.
+    n_sim : int
+        Number of simulations for simultaneous bands.
+    seed : int
+        Random seed for simultaneous bands.
+
+    Returns
+    -------
+    TermInference or InteractionInference
+    """
+    from superglm.features.categorical import Categorical
+    from superglm.features.numeric import Numeric
+    from superglm.features.polynomial import Polynomial
+    from superglm.features.spline import _SplineBase
+
+    beta = result.beta
+    feature_groups = [g for g in groups if g.feature_name == name]
+
+    # ── Interaction dispatch ─────────────────────────────────────
+    if name in interaction_specs:
+        return _interaction_inference(
+            name,
+            result=result,
+            groups=groups,
+            interaction_specs=interaction_specs,
+        )
+
+    spec = specs.get(name)
+    if spec is None:
+        raise KeyError(f"Feature not found: {name}")
+
+    # Check active
+    beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
+    active = bool(np.linalg.norm(beta_combined) > 1e-12)
+
+    # Covariance (lazy, only if needed)
+    Cov_active = active_groups_cov = None
+    if with_se and active:
+        Cov_active, active_groups_cov = covariance_fn()
+
+    # Per-group edf
+    edf = _compute_term_edf(name, feature_groups, group_edf)
+
+    # Per-group lambda
+    lam = _resolve_term_lambda(name, feature_groups, reml_lambdas, lambda2)
+
+    z_alpha = float(__import__("scipy").stats.norm.ppf(1.0 - alpha / 2.0))
+
+    # ── Spline ───────────────────────────────────────────────────
+    if isinstance(spec, _SplineBase):
+        raw = spec.reconstruct(beta_combined, n_points=n_points)
+        x_grid = raw["x"]
+        log_rel = raw["log_relativity"]
+        rel = raw["relativity"]
+
+        se = ci_lo = ci_hi = None
+        ci_lo_sim = ci_hi_sim = c_sim = None
+
+        if with_se and active and Cov_active is not None:
+            se = feature_se_from_cov(
+                name,
+                Cov_active,
+                active_groups_cov,
+                result,
+                groups,
+                specs,
+                interaction_specs,
+                n_points=n_points,
+            )
+            ci_lo = np.exp(log_rel - z_alpha * se)
+            ci_hi = np.exp(log_rel + z_alpha * se)
+
+            if simultaneous:
+                bands = simultaneous_bands(
+                    name,
+                    result=result,
+                    groups=groups,
+                    specs=specs,
+                    covariance_fn=covariance_fn,
+                    alpha=alpha,
+                    n_sim=n_sim,
+                    n_points=n_points,
+                    seed=seed,
+                )
+                ci_lo_sim = bands["ci_lower_simultaneous"].values
+                ci_hi_sim = bands["ci_upper_simultaneous"].values
+                # Back out the critical value: ci_upper_sim = exp(log_rel + c*se)
+                safe_se = np.maximum(se, 1e-20)
+                c_vals = (np.log(ci_hi_sim) - log_rel) / safe_se
+                c_sim = float(np.median(c_vals[safe_se > 1e-15]))
+
+        spline_meta = _build_spline_metadata(spec)
+
+        return TermInference(
+            name=name,
+            kind="spline",
+            active=active,
+            x=x_grid,
+            log_relativity=log_rel,
+            relativity=rel,
+            se_log_relativity=se,
+            ci_lower=ci_lo,
+            ci_upper=ci_hi,
+            ci_lower_simultaneous=ci_lo_sim,
+            ci_upper_simultaneous=ci_hi_sim,
+            critical_value_simultaneous=c_sim,
+            absorbs_intercept=spec.absorbs_intercept,
+            edf=edf,
+            smoothing_lambda=lam,
+            spline=spline_meta,
+            alpha=alpha,
+        )
+
+    # ── Categorical ──────────────────────────────────────────────
+    elif isinstance(spec, Categorical):
+        raw = spec.reconstruct(beta_combined)
+        levels = raw["levels"]
+        log_rels = np.array([raw["log_relativities"][lv] for lv in levels])
+        rels = np.array([raw["relativities"][lv] for lv in levels])
+
+        se = ci_lo = ci_hi = None
+        if with_se and active and Cov_active is not None:
+            se = feature_se_from_cov(
+                name,
+                Cov_active,
+                active_groups_cov,
+                result,
+                groups,
+                specs,
+                interaction_specs,
+            )
+            ci_lo = np.exp(log_rels - z_alpha * se)
+            ci_hi = np.exp(log_rels + z_alpha * se)
+
+        return TermInference(
+            name=name,
+            kind="categorical",
+            active=active,
+            levels=levels,
+            log_relativity=log_rels,
+            relativity=rels,
+            se_log_relativity=se,
+            ci_lower=ci_lo,
+            ci_upper=ci_hi,
+            absorbs_intercept=False,
+            centering_mode="base_level",
+            edf=edf,
+            smoothing_lambda=lam,
+            alpha=alpha,
+        )
+
+    # ── Polynomial ───────────────────────────────────────────────
+    elif isinstance(spec, Polynomial):
+        raw = spec.reconstruct(beta_combined)
+        x_grid = raw["x"]
+        log_rel = raw["log_relativity"]
+        rel = raw["relativity"]
+
+        se = ci_lo = ci_hi = None
+        if with_se and active and Cov_active is not None:
+            se = feature_se_from_cov(
+                name,
+                Cov_active,
+                active_groups_cov,
+                result,
+                groups,
+                specs,
+                interaction_specs,
+                n_points=n_points,
+            )
+            ci_lo = np.exp(log_rel - z_alpha * se)
+            ci_hi = np.exp(log_rel + z_alpha * se)
+
+        return TermInference(
+            name=name,
+            kind="polynomial",
+            active=active,
+            x=x_grid,
+            log_relativity=log_rel,
+            relativity=rel,
+            se_log_relativity=se,
+            ci_lower=ci_lo,
+            ci_upper=ci_hi,
+            absorbs_intercept=True,
+            edf=edf,
+            smoothing_lambda=lam,
+            alpha=alpha,
+        )
+
+    # ── Numeric ──────────────────────────────────────────────────
+    elif isinstance(spec, Numeric):
+        raw = spec.reconstruct(beta_combined)
+        log_rel = np.array([np.log(raw["relativity_per_unit"])])
+        rel = np.array([raw["relativity_per_unit"]])
+
+        se = ci_lo = ci_hi = None
+        if with_se and active and Cov_active is not None:
+            se = feature_se_from_cov(
+                name,
+                Cov_active,
+                active_groups_cov,
+                result,
+                groups,
+                specs,
+                interaction_specs,
+            )
+            ci_lo = np.exp(log_rel - z_alpha * se)
+            ci_hi = np.exp(log_rel + z_alpha * se)
+
+        return TermInference(
+            name=name,
+            kind="numeric",
+            active=active,
+            log_relativity=log_rel,
+            relativity=rel,
+            se_log_relativity=se,
+            ci_lower=ci_lo,
+            ci_upper=ci_hi,
+            absorbs_intercept=False,
+            centering_mode="none",
+            edf=edf,
+            smoothing_lambda=lam,
+            alpha=alpha,
+        )
+
+    else:
+        raise TypeError(f"Unknown feature type: {type(spec).__name__}")
+
+
+def _build_spline_metadata(spec) -> SplineMetadata:
+    """Extract spline knot/basis metadata from a fitted spline spec."""
+    knot_alpha = None
+    if getattr(spec, "_knot_strategy_actual", None) == "quantile_tempered":
+        knot_alpha = spec.knot_alpha
+
+    return SplineMetadata(
+        kind=type(spec).__name__,
+        knot_strategy=spec._knot_strategy_actual,
+        interior_knots=spec.fitted_knots,
+        boundary=spec.fitted_boundary,
+        n_basis=spec._n_basis,
+        degree=spec.degree,
+        extrapolation=spec.extrapolation,
+        knot_alpha=knot_alpha,
+    )
+
+
+def _compute_term_edf(
+    name: str,
+    feature_groups: list[GroupSlice],
+    group_edf: dict[str, float] | None,
+) -> float | None:
+    """Sum per-group edf for a feature term."""
+    if group_edf is None:
+        return None
+    total = 0.0
+    for g in feature_groups:
+        if g.name in group_edf:
+            total += group_edf[g.name]
+    return total
+
+
+def _resolve_term_lambda(
+    name: str,
+    feature_groups: list[GroupSlice],
+    reml_lambdas: dict[str, float] | None,
+    lambda2: float,
+) -> float | dict[str, float] | None:
+    """Resolve the smoothing lambda for a term."""
+    if reml_lambdas is not None:
+        group_lams = {}
+        for g in feature_groups:
+            if g.name in reml_lambdas:
+                group_lams[g.name] = reml_lambdas[g.name]
+        if len(group_lams) == 1:
+            return next(iter(group_lams.values()))
+        if group_lams:
+            return group_lams
+    return lambda2
+
+
+def _interaction_inference(
+    name: str,
+    *,
+    result: PIRLSResult,
+    groups: list[GroupSlice],
+    interaction_specs: dict[str, Any],
+) -> InteractionInference:
+    """Build an InteractionInference from a fitted interaction."""
+    ispec = interaction_specs[name]
+    feature_groups = [g for g in groups if g.feature_name == name]
+    beta_combined = np.concatenate([result.beta[g.sl] for g in feature_groups])
+    active = bool(np.linalg.norm(beta_combined) > 1e-12)
+
+    raw = ispec.reconstruct(beta_combined)
+
+    # SplineCategorical / PolynomialCategorical
+    if "per_level" in raw and "x" in raw:
+        return InteractionInference(
+            name=name,
+            kind="spline_categorical",
+            active=active,
+            x=raw["x"],
+            levels=raw["levels"],
+            per_level=raw["per_level"],
+        )
+
+    # CategoricalInteraction
+    if "pairs" in raw:
+        return InteractionInference(
+            name=name,
+            kind="categorical",
+            active=active,
+            pairs=raw["pairs"],
+            log_relativity=raw["log_relativities"],
+            relativity=raw["relativities"],
+        )
+
+    # NumericCategorical
+    if "relativities_per_unit" in raw:
+        return InteractionInference(
+            name=name,
+            kind="numeric_categorical",
+            active=active,
+            levels=raw["levels"],
+            relativities_per_unit=raw["relativities_per_unit"],
+            log_relativities_per_unit=raw["log_relativities_per_unit"],
+        )
+
+    # NumericInteraction
+    if "relativity_per_unit_unit" in raw:
+        return InteractionInference(
+            name=name,
+            kind="numeric",
+            active=active,
+            relativity_per_unit_unit=raw["relativity_per_unit_unit"],
+            coef_original=raw["coef_original"],
+        )
+
+    # Fallback (e.g. PolynomialInteraction 2D surface)
+    return InteractionInference(
+        name=name,
+        kind="surface",
+        active=active,
+    )
