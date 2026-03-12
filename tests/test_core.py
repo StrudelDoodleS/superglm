@@ -924,3 +924,94 @@ class TestStrategyActualTracking:
         )
         model.fit(X=df, y=y)
         assert model.knot_summary()["x"]["knot_strategy"] == "uniform"
+
+
+class TestQuantileRowsStrategy:
+    """knot_strategy="quantile_rows" — row-quantile knot placement."""
+
+    def test_differs_from_quantile_on_tied_data(self):
+        """quantile_rows and quantile produce different knots on skewed data."""
+        # 80% of rows at value 5, rest spread out
+        rng = np.random.default_rng(0)
+        x = np.concatenate([np.full(800, 5.0), rng.uniform(0, 100, 200)])
+
+        sp_q = Spline(kind="bs", n_knots=6, knot_strategy="quantile")
+        sp_q.build(x)
+
+        sp_qr = Spline(kind="bs", n_knots=6, knot_strategy="quantile_rows")
+        sp_qr.build(x)
+
+        # quantile_rows should cluster more knots near 5.0 (the dense region)
+        # while quantile (of unique) spreads them across the full range
+        assert not np.allclose(sp_q.fitted_knots, sp_qr.fitted_knots)
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_supported_for_all_kinds(self, kind):
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 10, 500)
+        sp = Spline(kind=kind, n_knots=6, knot_strategy="quantile_rows")
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert knots is not None
+        assert len(knots) == 6
+        assert np.all(np.diff(knots) > 0)
+
+    def test_fallback_to_uniform_on_constant_data(self):
+        """All-constant data → all percentiles identical → fallback."""
+        x = np.full(400, 50.0)
+        sp = Spline(kind="bs", n_knots=8, knot_strategy="quantile_rows")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "uniform"
+
+    def test_strategy_actual_reports_quantile_rows(self):
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 100, 500)
+        sp = Spline(kind="bs", n_knots=6, knot_strategy="quantile_rows")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile_rows"
+
+    def test_strategy_actual_cardinal(self):
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 100, 500)
+        sp = Spline(kind="cr_cardinal", n_knots=6, knot_strategy="quantile_rows")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile_rows"
+
+    def test_boundary_restricts_quantile_rows(self):
+        """boundary= clips data before computing row-quantiles."""
+        sp = Spline(kind="bs", n_knots=6, knot_strategy="quantile_rows", boundary=(0.0, 50.0))
+        x = np.linspace(10, 90, 500)
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert np.all(knots >= 0.0)
+        assert np.all(knots <= 50.0)
+        assert np.all(np.diff(knots) > 0)
+
+    def test_knot_summary_reports_quantile_rows(self):
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(0)
+        n = 300
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+        y = rng.poisson(2.0, n).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(n_knots=6, knot_strategy="quantile_rows")},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        assert model.knot_summary()["x"]["knot_strategy"] == "quantile_rows"
+
+    def test_dense_region_gets_more_knots(self):
+        """quantile_rows clusters knots in the high-density region."""
+        rng = np.random.default_rng(123)
+        # 90% of data in [0, 10], 10% in [10, 100]
+        x = np.concatenate([rng.uniform(0, 10, 900), rng.uniform(10, 100, 100)])
+        sp = Spline(kind="cr", n_knots=8, knot_strategy="quantile_rows")
+        sp.build(x)
+        knots = sp.fitted_knots
+        # Most knots should be in [0, 10]
+        n_in_dense = int(np.sum(knots <= 10.0))
+        assert n_in_dense >= 6, f"Expected ≥6 knots in [0,10], got {n_in_dense}: {knots}"

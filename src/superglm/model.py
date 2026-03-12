@@ -1274,9 +1274,9 @@ class SuperGLM:
         * ``kind`` — spline class name (e.g. ``"BasisSpline"``,
           ``"CardinalCRSpline"``).
         * ``knot_strategy`` — the strategy actually used: ``"uniform"``,
-          ``"quantile"``, or ``"explicit"``.  If a quantile strategy fell
-          back to uniform (too few unique values), this reports
-          ``"uniform"``.
+          ``"quantile"``, ``"quantile_rows"``, or ``"explicit"``.  If a
+          quantile strategy fell back to uniform (too few distinct
+          percentiles), this reports ``"uniform"``.
         * ``interior_knots`` — 1-D array of interior knot positions.
         * ``boundary`` — ``(lo, hi)`` tuple.
         * ``n_basis`` — number of raw basis functions (before
