@@ -56,6 +56,7 @@ from superglm.features.spline import (
     Spline,
     n_knots_from_k,
 )
+from superglm.inference import InteractionInference, SplineMetadata, TermInference
 from superglm.links import LogLink
 from superglm.metrics import ModelMetrics
 from superglm.model import PathResult, SuperGLM
@@ -125,5 +126,8 @@ __all__ = [
     "satterthwaite",
     "wood_test_smooth",
     "n_knots_from_k",
+    "TermInference",
+    "InteractionInference",
+    "SplineMetadata",
 ]
 __version__ = "0.1.0"
