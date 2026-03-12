@@ -738,13 +738,19 @@ class TensorInteraction:
     def _marginal_from_spec(spec, x: NDArray, n_knots_override: int | None) -> TensorMarginalInfo:
         """Get marginal ingredients from a parent spec, optionally overriding n_knots."""
         if n_knots_override is not None and n_knots_override != spec.n_knots:
-            clone = type(spec)(
+            kwargs: dict = dict(
                 n_knots=n_knots_override,
-                degree=spec.degree,
                 knot_strategy=spec.knot_strategy,
                 penalty=spec.penalty,
                 boundary=(spec._lo, spec._hi),
+                knot_alpha=spec.knot_alpha,
             )
+            # CubicRegressionSpline/CardinalCRSpline hardcode degree=3
+            import inspect
+
+            if "degree" in inspect.signature(type(spec).__init__).parameters:
+                kwargs["degree"] = spec.degree
+            clone = type(spec)(**kwargs)
             clone._place_knots(x)
             return clone.tensor_marginal_ingredients(x)
         return spec.tensor_marginal_ingredients(x)

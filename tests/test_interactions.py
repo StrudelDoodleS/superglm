@@ -1251,3 +1251,44 @@ class TestTensorMarginalParentGeometry:
         ti = TensorInteraction("a", "b")
         with pytest.raises(TypeError, match="CardinalCRSpline"):
             ti.build(x1, x2, {"a": s1, "b": s2})
+
+    def test_cr_n_knots_override(self):
+        """CRS parents with n_knots override should not raise TypeError."""
+        s1 = CubicRegressionSpline(n_knots=5)
+        s2 = CubicRegressionSpline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b", n_knots=(7, 7))
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+        # CRS(n_knots=7): K=11, natural removes 2, centering removes 1 → K_eff=8
+        assert ti._marginal1.K_eff == 8
+        assert info.n_cols == 8 * 8
+
+    def test_n_knots_override_preserves_knot_alpha(self):
+        """Overridden marginals should use the parent's knot_alpha."""
+        s1 = Spline(n_knots=10, knot_strategy="quantile_tempered", knot_alpha=0.14)
+        s2 = Spline(n_knots=10, knot_strategy="quantile_tempered", knot_alpha=0.14)
+        rng = np.random.default_rng(42)
+        x1 = rng.exponential(50, 300)
+        x2 = rng.exponential(25, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b", n_knots=(5, 5))
+        ti.build(x1, x2, {"a": s1, "b": s2})
+
+        # Build reference with the correct knot_alpha
+        from superglm.features.spline import BasisSpline
+
+        ref = BasisSpline(
+            n_knots=5,
+            knot_strategy="quantile_tempered",
+            knot_alpha=0.14,
+            boundary=(s1._lo, s1._hi),
+        )
+        ref._place_knots(x1)
+        ref_info = ref.tensor_marginal_ingredients(x1)
+        np.testing.assert_array_equal(ti._marginal1.knots, ref_info.knots)
