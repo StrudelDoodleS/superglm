@@ -48,7 +48,7 @@ class SplineCategorical:
         self._non_base: list[str] = []
         self._base_level: str = ""
         self._R_inv_dict: dict[str, NDArray] = {}
-        self._Z: NDArray | None = None
+        self._projection: NDArray | None = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -71,6 +71,7 @@ class SplineCategorical:
         if not isinstance(cat_spec, Categorical):
             raise TypeError(f"Expected Categorical spec for {self.cat_name}")
 
+        self._spline_spec = spline_spec
         self._knots = spline_spec._knots
         self._n_basis = spline_spec._n_basis
         self._degree = spline_spec.degree
@@ -78,20 +79,21 @@ class SplineCategorical:
         self._hi = spline_spec._hi
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
-        self._Z = getattr(spline_spec, "_Z", None)
+        self._projection = getattr(spline_spec, "_constraint_projection", None)
 
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
         x_cat = np.asarray(x_cat).ravel()
-        x_clip = np.clip(x_spline, self._knots[0], self._knots[-1])
-        B = BSpl.design_matrix(x_clip, self._knots, self._degree).tocsr()
+        B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
 
-        D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
-        omega = D2.T @ D2
+        omega = spline_spec._build_penalty()
 
-        # Natural splines: project penalty and per-level basis through Z
-        if self._Z is not None:
-            omega = self._Z.T @ omega @ self._Z
-            n_cols = self._n_basis - 2
+        # Project penalty through the full constraint projection (natural
+        # constraints + identifiability).  The basis columns stay sparse —
+        # the projection is passed via GroupInfo so dm_builder folds it
+        # into R_inv (SparseSSPGroupMatrix keeps the factored form).
+        if self._projection is not None:
+            omega = self._projection.T @ omega @ self._projection
+            n_cols = self._projection.shape[1]
         else:
             n_cols = self._n_basis
 
@@ -99,15 +101,13 @@ class SplineCategorical:
         for level in self._non_base:
             indicator = (x_cat == level).astype(np.float64)
             B_level = B.multiply(indicator[:, None]).tocsr()
-            if self._Z is not None:
-                # Pre-multiply sparse B_level by Z → dense (n, K-2)
-                B_level = B_level.toarray() @ self._Z
             groups.append(
                 GroupInfo(
                     columns=B_level,
                     n_cols=n_cols,
                     penalty_matrix=omega,
                     reparametrize=True,
+                    projection=self._projection,
                 )
             )
         return groups
@@ -121,42 +121,43 @@ class SplineCategorical:
         _validate_categorical_levels(
             x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
         )
-        x_clip = np.clip(x_spline, self._knots[0], self._knots[-1])
-        B = BSpl.design_matrix(x_clip, self._knots, self._degree).toarray()
+        B = self._spline_spec._raw_basis_matrix(x_spline)
 
         blocks = []
         for level in self._non_base:
             indicator = (x_cat == level).astype(np.float64)
             B_level = B * indicator[:, None]
-            if self._Z is not None:
-                B_level = B_level @ self._Z
             R_inv = self._R_inv_dict.get(level)
             if R_inv is not None:
+                # R_inv already includes projection (P @ R_inv_local)
                 B_level = B_level @ R_inv
+            elif self._projection is not None:
+                B_level = B_level @ self._projection
             blocks.append(B_level)
         return np.hstack(blocks)
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
         x_grid = np.linspace(self._lo, self._hi, n_points)
-        x_clip = np.clip(x_grid, self._knots[0], self._knots[-1])
-        B_grid = BSpl.design_matrix(x_clip, self._knots, self._degree).toarray()
+        B_grid = self._spline_spec._raw_basis_matrix(x_grid)
 
         per_level: dict[str, dict[str, Any]] = {}
         offset = 0
         for level in self._non_base:
             R_inv = self._R_inv_dict.get(level)
-            n_cols = R_inv.shape[1] if R_inv is not None else self._n_basis
-            if self._Z is not None and R_inv is None:
-                n_cols = self._n_basis - 2
+            if R_inv is not None:
+                n_cols = R_inv.shape[1]
+            elif self._projection is not None:
+                n_cols = self._projection.shape[1]
+            else:
+                n_cols = self._n_basis
             b_level = beta[offset : offset + n_cols]
             offset += n_cols
 
-            if self._Z is not None and R_inv is not None:
-                beta_orig = self._Z @ R_inv @ b_level
-            elif R_inv is not None:
+            # R_inv already includes projection (P @ R_inv_local)
+            if R_inv is not None:
                 beta_orig = R_inv @ b_level
-            elif self._Z is not None:
-                beta_orig = self._Z @ b_level
+            elif self._projection is not None:
+                beta_orig = self._projection @ b_level
             else:
                 beta_orig = b_level
             log_rels = B_grid @ beta_orig
@@ -773,13 +774,13 @@ class TensorInteraction:
         self._k2 = len(self._knots2) - self._degree - 1
 
     @staticmethod
-    def _drop_intercept_direction(B: sp.csr_matrix, weights: NDArray | None) -> NDArray:
-        """Return a coefficient-space basis whose fitted columns are centered."""
-        if weights is None:
-            weights = np.ones(B.shape[0], dtype=np.float64)
-        else:
-            weights = np.asarray(weights, dtype=np.float64).ravel()
-        c = np.asarray(B.T @ weights).ravel()
+    def _drop_intercept_direction(B: sp.csr_matrix) -> NDArray:
+        """Return a coefficient-space basis whose fitted columns are centered.
+
+        Uses unweighted column sums (training-data counts) as the constraint
+        direction, matching mgcv's identifiability convention.
+        """
+        c = np.asarray(B.sum(axis=0)).ravel()
         c = c / np.linalg.norm(c)
         q, _ = np.linalg.qr(c[:, None], mode="complete")
         return q[:, 1:]
@@ -797,9 +798,8 @@ class TensorInteraction:
         x1: NDArray,
         x2: NDArray,
         parent_specs: dict,
-        exposure: NDArray | None,
     ) -> tuple[sp.csr_matrix, sp.csr_matrix, NDArray, NDArray]:
-        from superglm.features.spline import _SplineBase
+        from superglm.features.spline import CardinalCRSpline, _SplineBase
 
         spec1 = parent_specs[self.feat1_name]
         spec2 = parent_specs[self.feat2_name]
@@ -807,6 +807,11 @@ class TensorInteraction:
             raise TypeError(f"Expected a spline spec for {self.feat1_name}")
         if not isinstance(spec2, _SplineBase):
             raise TypeError(f"Expected a spline spec for {self.feat2_name}")
+        if isinstance(spec1, CardinalCRSpline) or isinstance(spec2, CardinalCRSpline):
+            raise TypeError(
+                "TensorInteraction does not support cr_cardinal splines. "
+                "Use kind='cr' or kind='bs' for spline-spline interactions."
+            )
 
         self._lo1, self._hi1 = spec1._lo, spec1._hi
         self._lo2, self._hi2 = spec2._lo, spec2._hi
@@ -818,8 +823,8 @@ class TensorInteraction:
         x2_clip = np.clip(x2, self._knots2[0], self._knots2[-1])
         B1_raw = BSpl.design_matrix(x1_clip, self._knots1, self._degree).tocsr()
         B2_raw = BSpl.design_matrix(x2_clip, self._knots2, self._degree).tocsr()
-        self._P1 = self._drop_intercept_direction(B1_raw, exposure)
-        self._P2 = self._drop_intercept_direction(B2_raw, exposure)
+        self._P1 = self._drop_intercept_direction(B1_raw)
+        self._P2 = self._drop_intercept_direction(B2_raw)
         self._p1 = self._P1.shape[1]
         self._p2 = self._P2.shape[1]
 
@@ -879,7 +884,7 @@ class TensorInteraction:
         parent_specs: dict,
         exposure: NDArray | None = None,
     ) -> GroupInfo | list[GroupInfo]:
-        B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs, exposure)
+        B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs)
 
         # Row-wise Kronecker product
         T = _row_kron(B1, B2)
@@ -903,7 +908,7 @@ class TensorInteraction:
         exposure: NDArray | None = None,
     ) -> tuple[GroupInfo | list[GroupInfo], NDArray, NDArray]:
         """Build a discretized tensor basis on observed joint support pairs."""
-        B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs, exposure)
+        B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs)
         omega = np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
         infos = self._build_group_infos(omega)
 

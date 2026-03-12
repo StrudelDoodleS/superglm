@@ -101,7 +101,7 @@ class TestSplineCategoricalBuild:
         sc = SplineCategorical("spline", "cat")
         groups = sc.build(x_spline, x_cat, {"spline": spline_spec, "cat": cat_spec})
         for g in groups:
-            assert g.n_cols == spline_spec._n_basis
+            assert g.n_cols == spline_spec._n_basis - 1  # identifiability
             assert g.reparametrize is True
             assert g.penalty_matrix is not None
 
@@ -120,7 +120,10 @@ class TestSplineCategoricalBuild:
         groups = sc.build(x_spline, x_cat, {"spline": spline_spec, "cat": cat_spec})
 
         B_level = groups[0].columns
+        # B_level stays sparse (projection is on GroupInfo, not applied to columns)
         assert sp.issparse(B_level)
+        # Projection is set for dm_builder to fold into R_inv
+        assert groups[0].projection is not None
         mask_not_b = x_cat != "B"
         arr = B_level.toarray()
         np.testing.assert_array_equal(arr[mask_not_b], 0.0)
@@ -145,7 +148,7 @@ class TestSplineCategoricalBuild:
 
 class TestSplineCategoricalNaturalBuild:
     def test_natural_group_n_cols(self):
-        """Per-level groups have K-2 columns when parent is NaturalSpline."""
+        """Per-level groups have K-3 columns when parent is NaturalSpline."""
         spline_spec = NaturalSpline(n_knots=10)
         cat_spec = Categorical(base="first")
         x_spline = np.linspace(0, 100, 500)
@@ -158,7 +161,7 @@ class TestSplineCategoricalNaturalBuild:
         groups = sc.build(x_spline, x_cat, {"spline": spline_spec, "cat": cat_spec})
         assert len(groups) == 2
         for g in groups:
-            assert g.n_cols == spline_spec._n_basis - 2
+            assert g.n_cols == spline_spec._n_basis - 3
 
     def test_natural_penalty_projected(self):
         """Per-level penalty is the projected (K-2, K-2) penalty."""
