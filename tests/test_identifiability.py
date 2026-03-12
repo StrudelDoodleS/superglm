@@ -1,7 +1,7 @@
-"""Tests for spline identifiability constraint (exposure-weighted sum-to-zero).
+"""Tests for spline identifiability constraint (unweighted sum-to-zero).
 
 Verifies acceptance criteria from the identifiability fix:
-1. Exposure-weighted mean contribution ≈ 0 for bs/ns/cr
+1. Unweighted mean contribution ≈ 0 for bs/ns/cr
 2. Exact vs discrete path agreement
 3. SE/CI are well-behaved (no runaway values)
 4. SplineCategorical interaction compatibility
@@ -31,18 +31,18 @@ def _make_poisson_data(n=2000, seed=42):
     return df, y, exposure
 
 
-# ── Acceptance criterion 1: exposure-weighted mean ≈ 0 ────────────
+# ── Acceptance criterion 1: unweighted mean ≈ 0 ──────────────────
 
 
-class TestExposureWeightedMeanZero:
-    """For each spline kind, the exposure-weighted mean contribution must be ≈ 0."""
+class TestUnweightedMeanZero:
+    """For each spline kind, the unweighted mean contribution must be ≈ 0."""
 
     @pytest.fixture
     def data(self):
         return _make_poisson_data()
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
-    def test_weighted_mean_zero_reml(self, data, kind):
+    def test_unweighted_mean_zero_reml(self, data, kind):
         df, y, exposure = data
         model = SuperGLM(
             family="poisson",
@@ -58,11 +58,11 @@ class TestExposureWeightedMeanZero:
         B_train = spec.transform(x_train)
         f_train = B_train @ beta
 
-        wmean = np.average(f_train, weights=exposure)
-        assert abs(wmean) < 1e-10, f"Exposure-weighted mean {wmean:.2e} not zero for kind={kind}"
+        umean = np.mean(f_train)
+        assert abs(umean) < 1e-10, f"Unweighted mean {umean:.2e} not zero for kind={kind}"
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
-    def test_weighted_mean_zero_fit(self, data, kind):
+    def test_unweighted_mean_zero_fit(self, data, kind):
         """Also works with plain fit() (no REML)."""
         df, y, exposure = data
         model = SuperGLM(
@@ -77,34 +77,33 @@ class TestExposureWeightedMeanZero:
         beta = np.concatenate([model.result.beta[g.sl] for g in fgroups])
         f_train = spec.transform(df["x1"].to_numpy(dtype=np.float64)) @ beta
 
-        wmean = np.average(f_train, weights=exposure)
-        assert abs(wmean) < 1e-10, f"Exposure-weighted mean {wmean:.2e} not zero for kind={kind}"
+        umean = np.mean(f_train)
+        assert abs(umean) < 1e-10, f"Unweighted mean {umean:.2e} not zero for kind={kind}"
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
-    def test_unweighted_mean_nonzero(self, data, kind):
-        """Unweighted mean should NOT be zero (constraint is exposure-weighted)."""
-        df, y, exposure = data
+    def test_no_exposure_model(self, kind):
+        """Identifiability works without exposure too."""
+        df, y, _ = _make_poisson_data()
         model = SuperGLM(
             family="poisson",
             lambda1=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp")},
         )
-        model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
+        model.fit_reml(df, y, max_reml_iter=10)
 
         spec = model._specs["x1"]
         fgroups = [g for g in model._groups if g.feature_name == "x1"]
         beta = np.concatenate([model.result.beta[g.sl] for g in fgroups])
         f_train = spec.transform(df["x1"].to_numpy(dtype=np.float64)) @ beta
 
-        # Verify the constraint is exposure-weighted
-        wmean = np.average(f_train, weights=exposure)
-        assert abs(wmean) < 1e-10
+        umean = np.mean(f_train)
+        assert abs(umean) < 1e-10, f"Unweighted mean {umean:.2e} not zero for kind={kind}"
 
 
 class TestMultipleSplineMeanZero:
-    """Exposure-weighted mean ≈ 0 for each term in a multi-spline model."""
+    """Unweighted mean ≈ 0 for each term in a multi-spline model."""
 
-    def test_multi_spline_weighted_mean(self):
+    def test_multi_spline_unweighted_mean(self):
         df, y, exposure = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
@@ -122,8 +121,8 @@ class TestMultipleSplineMeanZero:
             fgroups = [g for g in model._groups if g.feature_name == name]
             beta = np.concatenate([model.result.beta[g.sl] for g in fgroups])
             f_train = spec.transform(df[name].to_numpy(dtype=np.float64)) @ beta
-            wmean = np.average(f_train, weights=exposure)
-            assert abs(wmean) < 1e-10, f"Exposure-weighted mean {wmean:.2e} not zero for {name}"
+            umean = np.mean(f_train)
+            assert abs(umean) < 1e-10, f"Unweighted mean {umean:.2e} not zero for {name}"
 
 
 # ── Acceptance criterion 2: exact vs discrete agreement ───────────
@@ -153,8 +152,8 @@ class TestExactVsDiscreteAgreement:
         assert rel_diff < 0.02, f"Deviance mismatch: exact={dev_exact:.2f}, disc={dev_disc:.2f}"
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
-    def test_discrete_weighted_mean_zero(self, kind):
-        """Discretized path also has exposure-weighted mean ≈ 0."""
+    def test_discrete_unweighted_mean_zero(self, kind):
+        """Discretized path also has unweighted mean ≈ 0."""
         df, y, exposure = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
@@ -167,8 +166,8 @@ class TestExactVsDiscreteAgreement:
         fgroups = [g for g in model._groups if g.feature_name == "x1"]
         beta = np.concatenate([model.result.beta[g.sl] for g in fgroups])
         f_train = spec.transform(df["x1"].to_numpy(dtype=np.float64)) @ beta
-        wmean = np.average(f_train, weights=exposure)
-        assert abs(wmean) < 1e-10, f"Discrete: exposure-weighted mean {wmean:.2e} not zero"
+        umean = np.mean(f_train)
+        assert abs(umean) < 1e-10, f"Discrete: unweighted mean {umean:.2e} not zero"
 
 
 # ── Acceptance criterion 3: SE/CI behavior ────────────────────────

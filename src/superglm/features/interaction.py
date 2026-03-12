@@ -777,13 +777,13 @@ class TensorInteraction:
         self._k2 = len(self._knots2) - self._degree - 1
 
     @staticmethod
-    def _drop_intercept_direction(B: sp.csr_matrix, weights: NDArray | None) -> NDArray:
-        """Return a coefficient-space basis whose fitted columns are centered."""
-        if weights is None:
-            weights = np.ones(B.shape[0], dtype=np.float64)
-        else:
-            weights = np.asarray(weights, dtype=np.float64).ravel()
-        c = np.asarray(B.T @ weights).ravel()
+    def _drop_intercept_direction(B: sp.csr_matrix) -> NDArray:
+        """Return a coefficient-space basis whose fitted columns are centered.
+
+        Uses unweighted column sums (training-data counts) as the constraint
+        direction, matching mgcv's identifiability convention.
+        """
+        c = np.asarray(B.sum(axis=0)).ravel()
         c = c / np.linalg.norm(c)
         q, _ = np.linalg.qr(c[:, None], mode="complete")
         return q[:, 1:]
@@ -801,7 +801,6 @@ class TensorInteraction:
         x1: NDArray,
         x2: NDArray,
         parent_specs: dict,
-        exposure: NDArray | None,
     ) -> tuple[sp.csr_matrix, sp.csr_matrix, NDArray, NDArray]:
         from superglm.features.spline import _SplineBase
 
@@ -822,8 +821,8 @@ class TensorInteraction:
         x2_clip = np.clip(x2, self._knots2[0], self._knots2[-1])
         B1_raw = BSpl.design_matrix(x1_clip, self._knots1, self._degree).tocsr()
         B2_raw = BSpl.design_matrix(x2_clip, self._knots2, self._degree).tocsr()
-        self._P1 = self._drop_intercept_direction(B1_raw, exposure)
-        self._P2 = self._drop_intercept_direction(B2_raw, exposure)
+        self._P1 = self._drop_intercept_direction(B1_raw)
+        self._P2 = self._drop_intercept_direction(B2_raw)
         self._p1 = self._P1.shape[1]
         self._p2 = self._P2.shape[1]
 
@@ -883,7 +882,7 @@ class TensorInteraction:
         parent_specs: dict,
         exposure: NDArray | None = None,
     ) -> GroupInfo | list[GroupInfo]:
-        B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs, exposure)
+        B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs)
 
         # Row-wise Kronecker product
         T = _row_kron(B1, B2)
@@ -907,7 +906,7 @@ class TensorInteraction:
         exposure: NDArray | None = None,
     ) -> tuple[GroupInfo | list[GroupInfo], NDArray, NDArray]:
         """Build a discretized tensor basis on observed joint support pairs."""
-        B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs, exposure)
+        B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs)
         omega = np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
         infos = self._build_group_infos(omega)
 

@@ -229,17 +229,14 @@ class _SplineBase:
         x: NDArray,
         omega: NDArray,
         projection: NDArray | None,
-        exposure: NDArray | None = None,
     ) -> tuple[NDArray, int, NDArray | None]:
         """Remove the intercept-confounded smooth direction.
 
-        mgcv-style smooth terms are constrained so that the
-        exposure-weighted mean contribution over the training data is zero,
-        letting the model intercept carry the constant part.
-
-        When *exposure* is provided the constraint is
-        ``sum(exposure_i * B(x_i)) @ beta = 0``; otherwise the unweighted
-        sum (equivalent to observation counts) is used.
+        mgcv-style: the constraint ``sum_i B(x_i) @ beta = 0`` (unweighted
+        over training observations) centres the smooth so that the mean
+        contribution over the covariate distribution is zero.  The model
+        intercept carries the constant part.  Exposure/weights are a
+        likelihood concept and do not enter the identifiability constraint.
         """
         if not self.absorbs_intercept:
             return omega, omega.shape[0], projection
@@ -254,13 +251,8 @@ class _SplineBase:
         if projection is not None:
             basis = basis @ projection
 
-        if exposure is not None:
-            weights = np.asarray(exposure, dtype=np.float64).ravel()
-        else:
-            weights = np.ones(len(x), dtype=np.float64)
-        weights_agg = np.bincount(inverse, weights=weights, minlength=len(support))
-
-        constraint = weights_agg @ basis
+        counts = np.bincount(inverse, minlength=len(support)).astype(np.float64)
+        constraint = counts @ basis
         if np.linalg.norm(constraint) < 1e-12:
             return omega, n_cols, projection
 
@@ -300,7 +292,7 @@ class _SplineBase:
         B = self._basis_matrix(x).tocsr()
         omega = self._build_penalty()
         B, omega, n_cols, projection = self._apply_constraints(B, omega)
-        omega, n_cols, projection = self._apply_identifiability(x, omega, projection, exposure)
+        omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
         self._constraint_projection = projection
         return GroupInfo(
             columns=B,
@@ -330,7 +322,7 @@ class _SplineBase:
         self._place_knots(x)
         omega = self._build_penalty()
         _, omega, n_cols, projection = self._apply_constraints(None, omega)
-        omega, n_cols, projection = self._apply_identifiability(x, omega, projection, exposure)
+        omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
         self._constraint_projection = projection
         return omega, n_cols, projection
 
