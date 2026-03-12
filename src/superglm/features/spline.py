@@ -94,10 +94,10 @@ class _SplineBase:
         self.extrapolation = extrapolation
 
         if boundary is not None:
-            self._explicit_boundary: tuple[float, float] | None = (
-                float(boundary[0]),
-                float(boundary[1]),
-            )
+            lo_b, hi_b = float(boundary[0]), float(boundary[1])
+            if lo_b >= hi_b:
+                raise ValueError(f"boundary must satisfy lo < hi, got boundary=({lo_b}, {hi_b})")
+            self._explicit_boundary: tuple[float, float] | None = (lo_b, hi_b)
         else:
             self._explicit_boundary = None
 
@@ -212,7 +212,10 @@ class _SplineBase:
         elif self.knot_strategy == "quantile":
             # mgcv-style: quantiles of unique values, strictly increasing.
             # Using unique(x) prevents repeated knots from ties in the data.
-            ux = np.unique(x)
+            # When boundary is frozen, restrict to [lo, hi] so quantile
+            # knots cannot land outside the boundary.
+            x_q = x[(x >= self._lo) & (x <= self._hi)] if self._explicit_boundary is not None else x
+            ux = np.unique(x_q) if len(x_q) > 0 else np.array([self._lo, self._hi])
             probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
             interior = np.unique(np.percentile(ux, probs))
             if len(interior) < self.n_knots:
@@ -807,7 +810,9 @@ class CardinalCRSpline(_SplineBase):
             interior = self._explicit_knots
             self._knot_strategy_actual = "explicit"
         elif self.knot_strategy == "quantile":
-            ux = np.unique(x)
+            # Restrict to [lo, hi] when boundary is frozen (same logic as _SplineBase).
+            x_q = x[(x >= self._lo) & (x <= self._hi)] if self._explicit_boundary is not None else x
+            ux = np.unique(x_q) if len(x_q) > 0 else np.array([self._lo, self._hi])
             probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
             interior = np.unique(np.percentile(ux, probs))
             if len(interior) < self.n_knots:

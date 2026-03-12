@@ -825,6 +825,26 @@ class TestBoundaryParameter:
         sp.build(np.linspace(3, 7, 200))
         assert sp.fitted_boundary == pytest.approx((1.0, 9.0))
 
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_boundary_quantile_wider_refit(self, kind):
+        """Quantile knots stay inside [lo, hi] even when data extends beyond."""
+        sp = Spline(kind=kind, n_knots=6, knot_strategy="quantile", boundary=(0.0, 50.0))
+        # Data spans [10, 90] — well outside the frozen boundary
+        x = np.linspace(10, 90, 500)
+        sp.build(x)
+        knots = sp.fitted_knots
+        assert np.all(knots >= 0.0), f"knots below lo: {knots}"
+        assert np.all(knots <= 50.0), f"knots above hi: {knots}"
+        assert np.all(np.diff(knots) > 0), f"knots not sorted: {knots}"
+
+    def test_boundary_reversed_raises(self):
+        with pytest.raises(ValueError, match="lo < hi"):
+            Spline(boundary=(10.0, 5.0))
+
+    def test_boundary_equal_raises(self):
+        with pytest.raises(ValueError, match="lo < hi"):
+            Spline(boundary=(5.0, 5.0))
+
 
 class TestStrategyActualTracking:
     """_knot_strategy_actual reports what was really used."""
