@@ -1273,15 +1273,21 @@ class SuperGLM:
 
         * ``kind`` — spline class name (e.g. ``"BasisSpline"``,
           ``"CardinalCRSpline"``).
-        * ``knot_strategy`` — ``"uniform"``, ``"quantile"``, or
-          ``"explicit"``.
+        * ``knot_strategy`` — the strategy actually used: ``"uniform"``,
+          ``"quantile"``, or ``"explicit"``.  If a quantile strategy fell
+          back to uniform (too few unique values), this reports
+          ``"uniform"``.
         * ``interior_knots`` — 1-D array of interior knot positions.
         * ``boundary`` — ``(lo, hi)`` tuple.
         * ``n_basis`` — number of raw basis functions (before
           identifiability / SSP).
 
-        Use ``interior_knots`` with ``Spline(knots=...)`` to freeze
-        placement on a refit with different data.
+        To fully freeze placement on a refit with different data, pass
+        both ``knots`` and ``boundary``::
+
+            info = model.knot_summary()["DrivAge"]
+            Spline(knots=info["interior_knots"],
+                   boundary=info["boundary"])
         """
         from superglm.features.spline import _SplineBase
 
@@ -1289,10 +1295,9 @@ class SuperGLM:
         for name, spec in self._specs.items():
             if not isinstance(spec, _SplineBase):
                 continue
-            strategy = "explicit" if spec._explicit_knots is not None else spec.knot_strategy
             out[name] = {
                 "kind": type(spec).__name__,
-                "knot_strategy": strategy,
+                "knot_strategy": spec._knot_strategy_actual,
                 "interior_knots": spec.fitted_knots,
                 "boundary": spec.fitted_boundary,
                 "n_basis": spec._n_basis,

@@ -70,6 +70,7 @@ class _SplineBase:
         discrete: bool | None = None,
         n_bins: int | None = None,
         extrapolation: str = "clip",
+        boundary: tuple[float, float] | None = None,
     ):
         if knots is not None:
             knots = np.asarray(knots, dtype=np.float64).ravel()
@@ -92,11 +93,20 @@ class _SplineBase:
             )
         self.extrapolation = extrapolation
 
+        if boundary is not None:
+            self._explicit_boundary: tuple[float, float] | None = (
+                float(boundary[0]),
+                float(boundary[1]),
+            )
+        else:
+            self._explicit_boundary = None
+
         # State set during build()
         self._knots: NDArray = np.array([])
         self._n_basis: int = 0
         self._lo: float = 0.0
         self._hi: float = 1.0
+        self._knot_strategy_actual: str = knot_strategy
         self._R_inv: NDArray | None = None
         self._constraint_projection: NDArray | None = None
         self._basis_lo: NDArray | None = None
@@ -186,7 +196,10 @@ class _SplineBase:
 
     def _place_knots(self, x: NDArray) -> None:
         """Place interior knots and build the full knot vector."""
-        self._lo, self._hi = float(x.min()), float(x.max())
+        if self._explicit_boundary is not None:
+            self._lo, self._hi = self._explicit_boundary
+        else:
+            self._lo, self._hi = float(x.min()), float(x.max())
         pad = (self._hi - self._lo) * 1e-6
         self._basis_lo = None
         self._basis_hi = None
@@ -195,6 +208,7 @@ class _SplineBase:
 
         if self._explicit_knots is not None:
             interior = self._explicit_knots
+            self._knot_strategy_actual = "explicit"
         elif self.knot_strategy == "quantile":
             # mgcv-style: quantiles of unique values, strictly increasing.
             # Using unique(x) prevents repeated knots from ties in the data.
@@ -204,8 +218,12 @@ class _SplineBase:
             if len(interior) < self.n_knots:
                 # Too few unique values for requested knots; fall back to uniform
                 interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
+                self._knot_strategy_actual = "uniform"
+            else:
+                self._knot_strategy_actual = "quantile"
         else:  # "uniform" (default)
             interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
+            self._knot_strategy_actual = "uniform"
 
         self._knots = np.concatenate(
             [
@@ -227,8 +245,9 @@ class _SplineBase:
         These are the data-driven (or explicit) interior knot positions,
         excluding the boundary knots.  After fitting, these are frozen and
         reused on every subsequent ``transform()`` / ``predict()`` call.
-        Pass them back via ``Spline(knots=model_spec.fitted_knots)`` to
-        guarantee identical placement on a refit with different data.
+        Pass them back via ``Spline(knots=..., boundary=...)`` to
+        guarantee identical placement *and* boundary on a refit with
+        different data.
         """
         if self._n_basis == 0:
             return None
@@ -435,6 +454,7 @@ class BasisSpline(_SplineBase):
         discrete: bool | None = None,
         n_bins: int | None = None,
         extrapolation: str = "clip",
+        boundary: tuple[float, float] | None = None,
     ):
         super().__init__(
             n_knots,
@@ -445,6 +465,7 @@ class BasisSpline(_SplineBase):
             discrete,
             n_bins,
             extrapolation,
+            boundary,
         )
         self.split_linear = split_linear
         self._U_null: NDArray | None = None
@@ -592,6 +613,7 @@ class NaturalSpline(_SplineBase):
         discrete: bool | None = None,
         n_bins: int | None = None,
         extrapolation: str = "clip",
+        boundary: tuple[float, float] | None = None,
     ):
         super().__init__(
             n_knots,
@@ -602,6 +624,7 @@ class NaturalSpline(_SplineBase):
             discrete,
             n_bins,
             extrapolation,
+            boundary,
         )
         self._Z: NDArray | None = None
 
@@ -655,6 +678,7 @@ class CubicRegressionSpline(_SplineBase):
         discrete: bool | None = None,
         n_bins: int | None = None,
         extrapolation: str = "clip",
+        boundary: tuple[float, float] | None = None,
     ):
         super().__init__(
             n_knots,
@@ -665,6 +689,7 @@ class CubicRegressionSpline(_SplineBase):
             discrete=discrete,
             n_bins=n_bins,
             extrapolation=extrapolation,
+            boundary=boundary,
         )
         self._Z: NDArray | None = None
 
@@ -749,6 +774,7 @@ class CardinalCRSpline(_SplineBase):
         discrete: bool | None = None,
         n_bins: int | None = None,
         extrapolation: str = "clip",
+        boundary: tuple[float, float] | None = None,
     ):
         super().__init__(
             n_knots,
@@ -759,6 +785,7 @@ class CardinalCRSpline(_SplineBase):
             discrete=discrete,
             n_bins=n_bins,
             extrapolation=extrapolation,
+            boundary=boundary,
         )
         self._cr_knots: NDArray | None = None
         self._cr_M: NDArray | None = None
@@ -767,7 +794,10 @@ class CardinalCRSpline(_SplineBase):
     def _place_knots(self, x: NDArray) -> None:
         """Place K = n_knots + 2 knots and build the cardinal CR matrices."""
         x = np.asarray(x, dtype=np.float64).ravel()
-        self._lo, self._hi = float(x.min()), float(x.max())
+        if self._explicit_boundary is not None:
+            self._lo, self._hi = self._explicit_boundary
+        else:
+            self._lo, self._hi = float(x.min()), float(x.max())
         self._basis_lo = None
         self._basis_hi = None
         self._basis_d1_lo = None
@@ -775,14 +805,19 @@ class CardinalCRSpline(_SplineBase):
 
         if self._explicit_knots is not None:
             interior = self._explicit_knots
+            self._knot_strategy_actual = "explicit"
         elif self.knot_strategy == "quantile":
             ux = np.unique(x)
             probs = np.linspace(0, 100, self.n_knots + 2)[1:-1]
             interior = np.unique(np.percentile(ux, probs))
             if len(interior) < self.n_knots:
                 interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
+                self._knot_strategy_actual = "uniform"
+            else:
+                self._knot_strategy_actual = "quantile"
         else:
             interior = np.linspace(self._lo, self._hi, self.n_knots + 2)[1:-1]
+            self._knot_strategy_actual = "uniform"
 
         # Cardinal CR knots include the boundaries
         self._cr_knots = np.concatenate([[self._lo], interior, [self._hi]])
@@ -1052,6 +1087,7 @@ def Spline(
     discrete: bool | None = None,
     n_bins: int | None = None,
     extrapolation: str = "clip",
+    boundary: tuple[float, float] | None = None,
 ) -> _SplineBase:
     """Create a spline feature spec.
 
@@ -1116,6 +1152,11 @@ def Spline(
           ``"ns"`` and ``"cr"`` this gives linear tails; for ``"bs"``
           this uses the B-spline's native polynomial continuation.
         - ``"error"``: raise on out-of-range values.
+    boundary : tuple of float, optional
+        Explicit ``(lo, hi)`` boundary. When set, the boundary is
+        frozen across refits instead of being inferred from the data
+        range. Use together with ``knots`` to fully freeze knot
+        placement.
 
     Returns
     -------
@@ -1166,6 +1207,7 @@ def Spline(
             discrete=discrete,
             n_bins=n_bins,
             extrapolation=extrapolation,
+            boundary=boundary,
         )
     elif kind in ("cr", "cr_cardinal"):
         return cls(
@@ -1176,6 +1218,7 @@ def Spline(
             discrete=discrete,
             n_bins=n_bins,
             extrapolation=extrapolation,
+            boundary=boundary,
         )
     else:  # "ns"
         return cls(
@@ -1187,4 +1230,5 @@ def Spline(
             discrete=discrete,
             n_bins=n_bins,
             extrapolation=extrapolation,
+            boundary=boundary,
         )

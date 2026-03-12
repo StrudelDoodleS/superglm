@@ -793,3 +793,97 @@ class TestKnotPickleRoundTrip:
         pred_after = model2.predict(df)
         np.testing.assert_array_equal(knots_before, knots_after)
         np.testing.assert_array_equal(pred_before, pred_after)
+
+
+class TestBoundaryParameter:
+    """boundary= freezes (lo, hi) across refits."""
+
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr", "cr_cardinal"])
+    def test_boundary_freezes_range(self, kind):
+        sp = Spline(kind=kind, n_knots=4, boundary=(0.0, 100.0))
+        # Fit on data that spans only [20, 80]
+        x = np.linspace(20, 80, 300)
+        sp.build(x)
+        lo, hi = sp.fitted_boundary
+        assert lo == pytest.approx(0.0)
+        assert hi == pytest.approx(100.0)
+
+    @pytest.mark.parametrize("kind", ["bs", "cr_cardinal"])
+    def test_boundary_stable_on_refit(self, kind):
+        """boundary= prevents drift when refitting on different data."""
+        sp1 = Spline(kind=kind, n_knots=6, boundary=(0.0, 50.0))
+        sp1.build(np.linspace(5, 45, 200))
+
+        sp2 = Spline(kind=kind, n_knots=6, boundary=(0.0, 50.0))
+        sp2.build(np.linspace(10, 90, 200))  # wider data
+
+        assert sp1.fitted_boundary == sp2.fitted_boundary
+        np.testing.assert_array_equal(sp1.fitted_knots, sp2.fitted_knots)
+
+    def test_boundary_via_factory(self):
+        sp = Spline(kind="cr", n_knots=4, boundary=(1.0, 9.0))
+        sp.build(np.linspace(3, 7, 200))
+        assert sp.fitted_boundary == pytest.approx((1.0, 9.0))
+
+
+class TestStrategyActualTracking:
+    """_knot_strategy_actual reports what was really used."""
+
+    def test_quantile_fallback_reports_uniform(self):
+        """When too few unique values, quantile falls back to uniform."""
+        # Only 1 unique value → np.unique(np.percentile(...)) gives 1
+        # position < 8 knots → falls back to uniform.
+        x = np.full(400, 50.0)
+        sp = Spline(kind="bs", n_knots=8, knot_strategy="quantile")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "uniform"
+
+    def test_quantile_succeeds_reports_quantile(self):
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 100, 500)
+        sp = Spline(kind="bs", n_knots=6, knot_strategy="quantile")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile"
+
+    def test_explicit_knots_reports_explicit(self):
+        sp = Spline(knots=np.array([2.0, 5.0, 8.0]))
+        sp.build(np.linspace(0, 10, 200))
+        assert sp._knot_strategy_actual == "explicit"
+
+    def test_uniform_reports_uniform(self):
+        sp = Spline(kind="cr", n_knots=6)
+        sp.build(np.linspace(0, 10, 200))
+        assert sp._knot_strategy_actual == "uniform"
+
+    def test_cardinal_explicit_reports_explicit(self):
+        """CardinalCRSpline._place_knots tracks explicit strategy."""
+        sp = Spline(kind="cr_cardinal", knots=np.array([3.0, 5.0, 7.0]))
+        sp.build(np.linspace(0, 10, 200))
+        assert sp._knot_strategy_actual == "explicit"
+
+    def test_cardinal_quantile_reports_quantile(self):
+        """CardinalCRSpline._place_knots tracks quantile strategy."""
+        rng = np.random.default_rng(0)
+        x = rng.uniform(0, 100, 500)
+        sp = Spline(kind="cr_cardinal", n_knots=6, knot_strategy="quantile")
+        sp.build(x)
+        assert sp._knot_strategy_actual == "quantile"
+
+    def test_knot_summary_uses_actual_strategy(self):
+        """knot_summary() reports the actual strategy, not the requested one."""
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        # 1 unique value, requesting 8 quantile knots → falls back to uniform
+        x = np.full(300, 50.0)
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame({"x": x})
+        y = rng.poisson(2.0, len(x)).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(n_knots=8, knot_strategy="quantile")},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        assert model.knot_summary()["x"]["knot_strategy"] == "uniform"
