@@ -818,6 +818,22 @@ class ModelMetrics:
             )
         )
 
+        # Precompute per-group edf and lambda for spline metadata
+        from superglm.inference import spline_group_enrichment
+
+        group_edf_map = getattr(self._model, "_group_edf", None)
+        reml_lam = getattr(self._model, "_reml_lambdas", None)
+
+        def _spline_enrichment(g_name, spec):
+            d = spline_group_enrichment(g_name, spec, group_edf_map, reml_lam, self._model.lambda2)
+            return (
+                d["edf"],
+                d["smoothing_lambda"],
+                d["spline_kind"],
+                d["knot_strategy"],
+                d["boundary"],
+            )
+
         # Feature rows
         for g in self._groups:
             spec = self._model._specs.get(g.feature_name) or self._model._interaction_specs.get(
@@ -886,6 +902,7 @@ class ModelMetrics:
                         curve_se_min = float(np.min(se_curve))
                         curve_se_max = float(np.max(se_curve))
 
+                    s_edf, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(g.name, spec)
                     rows.append(
                         _CoefRow(
                             name=g.name,
@@ -900,9 +917,15 @@ class ModelMetrics:
                             curve_se_min=curve_se_min,
                             curve_se_max=curve_se_max,
                             subgroup_type=g.subgroup_type,
+                            edf=s_edf,
+                            smoothing_lambda=s_lam,
+                            spline_kind=s_kind,
+                            knot_strategy=s_knot_strat,
+                            boundary=s_bnd,
                         )
                     )
                 else:
+                    s_edf, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(g.name, spec)
                     rows.append(
                         _CoefRow(
                             name=g.name,
@@ -912,6 +935,11 @@ class ModelMetrics:
                             active=False,
                             group_norm=0.0,
                             subgroup_type=g.subgroup_type,
+                            edf=0.0,
+                            smoothing_lambda=s_lam,
+                            spline_kind=s_kind,
+                            knot_strategy=s_knot_strat,
+                            boundary=s_bnd,
                         )
                     )
 
