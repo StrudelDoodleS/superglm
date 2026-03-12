@@ -1135,3 +1135,121 @@ class TestQuantileTemperedStrategy:
         knots = sp.fitted_knots
         assert len(knots) == 10
         assert np.all(np.diff(knots) > 0)
+
+
+class TestBasisSplineOpenKnotVector:
+    """Tests for the mgcv-style open knot vector on BasisSpline."""
+
+    def test_knot_vector_extends_beyond_boundary(self):
+        """BasisSpline internal knot vector extends beyond the public boundary."""
+        from superglm.features.spline import BasisSpline
+
+        sp = BasisSpline(n_knots=8)
+        x = np.linspace(10.0, 90.0, 500)
+        sp.build(x)
+        # Outermost knots should be beyond the data range
+        assert sp._knots[0] < 10.0 - 0.001 * 80
+        assert sp._knots[-1] > 90.0 + 0.001 * 80
+        # The first non-extension knot (at degree position) is the expanded boundary
+        xr = 90.0 - 10.0
+        lo_eff = 10.0 - 0.001 * xr
+        hi_eff = 90.0 + 0.001 * xr
+        np.testing.assert_allclose(sp._knots[sp.degree], lo_eff, atol=1e-10)
+        np.testing.assert_allclose(sp._knots[-(sp.degree + 1)], hi_eff, atol=1e-10)
+
+    def test_public_boundary_unchanged(self):
+        """fitted_boundary still reports the data range, not the expanded range."""
+        from superglm.features.spline import BasisSpline
+
+        sp = BasisSpline(n_knots=8)
+        x = np.linspace(10.0, 90.0, 500)
+        sp.build(x)
+        assert sp._lo == 10.0
+        assert sp._hi == 90.0
+        assert sp.fitted_boundary == (10.0, 90.0)
+
+    def test_n_basis_unchanged(self):
+        """Same number of basis functions as clamped construction."""
+        from superglm.features.spline import BasisSpline
+
+        sp = BasisSpline(n_knots=8, degree=3)
+        sp.build(np.linspace(0, 1, 200))
+        assert sp._n_basis == 8 + 3 + 1  # n_knots + degree + 1
+
+    def test_interior_knots_preserved(self):
+        """Interior knots extracted via [degree+1:-(degree+1)] match the placed knots."""
+        from superglm.features.spline import BasisSpline
+
+        sp = BasisSpline(n_knots=5, degree=3)
+        sp.build(np.linspace(0, 100, 500))
+        interior = sp.fitted_knots
+        expected = np.linspace(0, 100, 7)[1:-1]
+        np.testing.assert_allclose(interior, expected, atol=1e-10)
+
+    def test_partition_of_unity(self):
+        """Row sums of the open-knot B-spline basis are 1."""
+        from superglm.features.spline import BasisSpline
+
+        sp = BasisSpline(n_knots=10, penalty="none")
+        x = np.linspace(5.0, 95.0, 500)
+        info = sp.build(x)
+        row_sums = np.asarray(info.columns.sum(axis=1)).ravel()
+        np.testing.assert_allclose(row_sums, 1.0, atol=1e-10)
+
+    def test_ns_and_cr_still_use_clamped(self):
+        """NaturalSpline and CRS should NOT use the open knot vector."""
+        for cls in [NaturalSpline, CubicRegressionSpline]:
+            sp = cls(n_knots=8)
+            sp.build(np.linspace(10.0, 90.0, 500))
+            # Clamped: first degree+1 knots are nearly equal (repeated boundary)
+            pad = (90.0 - 10.0) * 1e-6
+            for i in range(sp.degree + 1):
+                np.testing.assert_allclose(sp._knots[i], 10.0 - pad, atol=1e-10)
+
+    def test_boundary_param_still_works(self):
+        """boundary= freezes the public boundary with open knot vector."""
+        sp = Spline(kind="bs", n_knots=6, boundary=(0.0, 100.0))
+        x = np.linspace(20, 80, 300)
+        sp.build(x)
+        assert sp.fitted_boundary == (0.0, 100.0)
+        # Interior knots should be within [0, 100]
+        knots = sp.fitted_knots
+        assert np.all(knots > 0.0)
+        assert np.all(knots < 100.0)
+
+    def test_no_kink_near_boundary(self):
+        """Smooth function near boundary should not produce a kink.
+
+        Fit a smooth monotone function and verify the predicted curve
+        doesn't turn down near the upper boundary.
+        """
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(42)
+        n = 2000
+        x = rng.uniform(0, 100, n)
+        mu = np.exp(-0.5 + 0.02 * x)
+        y = rng.poisson(mu).astype(float)
+        df = pd.DataFrame({"x": x})
+
+        m = SuperGLM(
+            family="poisson",
+            features={"x": Spline(kind="bs", n_knots=10)},
+            lambda1=0,
+        )
+        m.fit_reml(df, y, max_reml_iter=15)
+
+        rec = m.reconstruct_feature("x")
+        x_vals = rec["x"]
+        log_rels = rec["log_relativity"]
+
+        # The upper 10% of the curve should be non-decreasing (no kink)
+        upper_mask = x_vals > 90
+        upper_log_rels = log_rels[upper_mask]
+        diffs = np.diff(upper_log_rels)
+        assert np.sum(diffs < -0.01) <= 1, (
+            f"Upper boundary has {np.sum(diffs < -0.01)} downturns; "
+            f"open knot vector should prevent boundary kink"
+        )

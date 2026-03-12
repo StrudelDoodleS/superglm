@@ -171,8 +171,9 @@ class TestSelectModel:
         m2.fit(X, y, exposure=exposure)
         pred2 = m2.predict(X)
 
-        # Not numerically identical (different parameterization), but close
-        np.testing.assert_allclose(pred1, pred2, rtol=0.1)
+        # Not numerically identical (different parameterization), but close.
+        # Open knot vectors can shift edge predictions slightly.
+        np.testing.assert_allclose(pred1, pred2, rtol=0.2)
 
     def test_select_reconstruct(self, simple_data):
         X, y, exposure = simple_data
