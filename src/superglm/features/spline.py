@@ -205,7 +205,7 @@ class _SplineBase:
     def absorbs_intercept(self) -> bool:
         """Whether the smooth should absorb the intercept-like direction.
 
-        mgcv-style smooth terms are constrained so that the exposure-weighted
+        mgcv-style smooth terms are constrained so that the unweighted
         mean contribution over the training data is zero, making the model
         intercept carry the constant part.  This is True by default for all
         spline kinds.
@@ -688,7 +688,7 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     ``k`` is the number of basis functions *before* identifiability,
     matching mgcv's ``k`` parameter.  The built column count is
     ``k - 1`` for all spline kinds because the identifiability
-    constraint (exposure-weighted sum-to-zero) removes one direction.
+    constraint (unweighted sum-to-zero) removes one direction.
 
     Parameters
     ----------
@@ -775,7 +775,7 @@ def Spline(
         Basis dimension (number of basis functions before
         identifiability), matching mgcv's ``k``.  The built column
         count is always ``k - 1`` because the identifiability
-        constraint (exposure-weighted sum-to-zero) removes one
+        constraint (unweighted sum-to-zero) removes one
         direction.  Internally converted to ``n_knots`` via
         :func:`n_knots_from_k`.  Cannot be used together with
         ``n_knots``.
