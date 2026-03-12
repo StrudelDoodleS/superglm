@@ -1282,6 +1282,8 @@ class SuperGLM:
         * ``boundary`` — ``(lo, hi)`` tuple.
         * ``n_basis`` — number of raw basis functions (before
           identifiability / SSP).
+        * ``knot_alpha`` — tempering exponent (only present when
+          ``knot_strategy`` is ``"quantile_tempered"``).
 
         To fully freeze placement on a refit with different data, pass
         both ``knots`` and ``boundary``::
@@ -1296,13 +1298,16 @@ class SuperGLM:
         for name, spec in self._specs.items():
             if not isinstance(spec, _SplineBase):
                 continue
-            out[name] = {
+            entry: dict[str, Any] = {
                 "kind": type(spec).__name__,
                 "knot_strategy": spec._knot_strategy_actual,
                 "interior_knots": spec.fitted_knots,
                 "boundary": spec.fitted_boundary,
                 "n_basis": spec._n_basis,
             }
+            if spec._knot_strategy_actual == "quantile_tempered":
+                entry["knot_alpha"] = spec.knot_alpha
+            out[name] = entry
         return out
 
     @cached_property

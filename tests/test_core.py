@@ -1102,7 +1102,26 @@ class TestQuantileTemperedStrategy:
             family="poisson",
         )
         model.fit(X=df, y=y)
-        assert model.knot_summary()["x"]["knot_strategy"] == "quantile_tempered"
+        info = model.knot_summary()["x"]
+        assert info["knot_strategy"] == "quantile_tempered"
+        assert info["knot_alpha"] == pytest.approx(0.2)
+
+    def test_knot_summary_omits_alpha_for_non_tempered(self):
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(0)
+        n = 200
+        df = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+        y = rng.poisson(2.0, n).astype(float)
+
+        model = SuperGLM(
+            features={"x": Spline(n_knots=6, knot_strategy="uniform")},
+            family="poisson",
+        )
+        model.fit(X=df, y=y)
+        assert "knot_alpha" not in model.knot_summary()["x"]
 
     def test_survives_point_mass_where_quantile_rows_collapses(self):
         """quantile_tempered on BonusMalus-like data (55% at 50) should not
