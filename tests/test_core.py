@@ -845,6 +845,23 @@ class TestBoundaryParameter:
         with pytest.raises(ValueError, match="lo < hi"):
             Spline(boundary=(5.0, 5.0))
 
+    def test_knots_outside_boundary_raises(self):
+        with pytest.raises(ValueError, match="strictly inside boundary"):
+            Spline(knots=np.array([2.0, 5.0, 8.0]), boundary=(3.0, 7.0))
+
+    def test_knots_at_boundary_raises(self):
+        """Knots exactly on the boundary are rejected (must be strictly inside)."""
+        with pytest.raises(ValueError, match="strictly inside boundary"):
+            Spline(knots=np.array([3.0, 5.0, 7.0]), boundary=(3.0, 9.0))
+
+    def test_knots_not_increasing_raises(self):
+        with pytest.raises(ValueError, match="strictly increasing"):
+            Spline(knots=np.array([5.0, 3.0, 8.0]))
+
+    def test_knots_with_duplicates_raises(self):
+        with pytest.raises(ValueError, match="strictly increasing"):
+            Spline(knots=np.array([3.0, 3.0, 8.0]))
+
 
 class TestStrategyActualTracking:
     """_knot_strategy_actual reports what was really used."""

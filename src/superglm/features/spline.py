@@ -76,6 +76,8 @@ class _SplineBase:
             knots = np.asarray(knots, dtype=np.float64).ravel()
             if knots.ndim != 1 or len(knots) < 1:
                 raise ValueError("knots must be a non-empty 1D array")
+            if not np.all(np.diff(knots) > 0):
+                raise ValueError("knots must be strictly increasing")
             self.n_knots = len(knots)
             self._explicit_knots = knots
         else:
@@ -97,6 +99,12 @@ class _SplineBase:
             lo_b, hi_b = float(boundary[0]), float(boundary[1])
             if lo_b >= hi_b:
                 raise ValueError(f"boundary must satisfy lo < hi, got boundary=({lo_b}, {hi_b})")
+            if self._explicit_knots is not None:
+                if self._explicit_knots[0] <= lo_b or self._explicit_knots[-1] >= hi_b:
+                    raise ValueError(
+                        f"explicit knots must lie strictly inside boundary=({lo_b}, {hi_b}), "
+                        f"got knots in [{self._explicit_knots[0]}, {self._explicit_knots[-1]}]"
+                    )
             self._explicit_boundary: tuple[float, float] | None = (lo_b, hi_b)
         else:
             self._explicit_boundary = None
