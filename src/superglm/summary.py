@@ -86,7 +86,7 @@ def _sig_stars(p: float | None) -> str:
 class ModelSummary:
     """Formatted model summary with ASCII and HTML output.
 
-    Returned by ``ModelMetrics.summary()``. Supports:
+    Returned by ``model.summary()`` and ``ModelMetrics.summary()``. Supports:
 
     - ``print(summary)`` — ASCII table for terminals
     - Jupyter ``_repr_html_`` — HTML table for notebooks

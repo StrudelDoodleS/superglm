@@ -225,10 +225,12 @@ class ModelMetrics:
     def __init__(
         self,
         model: SuperGLM,
-        X,
-        y,
+        X=None,
+        y=None,
         exposure=None,
         offset=None,
+        *,
+        _mu: NDArray | None = None,
     ):
         self._model = model
         self._family = model._distribution
@@ -242,8 +244,10 @@ class ModelMetrics:
         self._weights = np.ones(n) if exposure is None else np.asarray(exposure, dtype=np.float64)
         self._offset = np.zeros(n) if offset is None else np.asarray(offset, dtype=np.float64)
 
-        # Recompute mu from fitted model
-        self._mu = model.predict(X, offset=offset)
+        if _mu is not None:
+            self._mu = _mu
+        else:
+            self._mu = model.predict(X, offset=offset)
 
     # ── Scalar properties ─────────────────────────────────────────
 

@@ -138,6 +138,6 @@ class TestPolynomialIntegration:
             },
         )
         model.fit(X, y, exposure=exposure)
-        s = model.summary()
+        s = model.diagnostics()
         assert "age" in s
         assert s["age"]["n_params"] == 2

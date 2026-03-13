@@ -344,11 +344,11 @@ class TestEnrichedSummary:
         assert row.smoothing_lambda is not None
 
 
-class TestModelSummarySplineKeys:
-    """model.summary() dict includes spline metadata for spline groups."""
+class TestModelDiagnosticsSplineKeys:
+    """model.diagnostics() dict includes spline metadata for spline groups."""
 
     def test_spline_group_has_enriched_keys(self, fitted_model):
-        s = fitted_model.summary()
+        s = fitted_model.diagnostics()
         # "age" is the spline group name
         age_entry = s["age"]
         assert "edf" in age_entry
@@ -358,7 +358,7 @@ class TestModelSummarySplineKeys:
         assert "boundary" in age_entry
 
     def test_spline_group_values(self, fitted_model):
-        s = fitted_model.summary()
+        s = fitted_model.diagnostics()
         age_entry = s["age"]
         assert age_entry["spline_kind"] == "BasisSpline"
         assert age_entry["knot_strategy"] == "uniform"
@@ -369,27 +369,27 @@ class TestModelSummarySplineKeys:
         assert lo < hi
 
     def test_non_spline_group_no_extra_keys(self, fitted_model):
-        s = fitted_model.summary()
+        s = fitted_model.diagnostics()
         region_entry = s["region"]
         assert "edf" not in region_entry
         assert "spline_kind" not in region_entry
 
     def test_numeric_group_no_extra_keys(self, fitted_model):
-        s = fitted_model.summary()
+        s = fitted_model.diagnostics()
         density_entry = s["density"]
         assert "edf" not in density_entry
         assert "spline_kind" not in density_entry
 
     def test_backward_compat_keys_preserved(self, fitted_model):
-        s = fitted_model.summary()
+        s = fitted_model.diagnostics()
         for name in ["age", "region", "density"]:
             assert "active" in s[name]
             assert "group_norm" in s[name]
             assert "n_params" in s[name]
         assert "_model" in s
 
-    def test_model_summary_and_metrics_summary_agree(self, sample_data):
-        """Both summaries report the same edf/lambda for the same spline group."""
+    def test_diagnostics_and_metrics_summary_agree(self, sample_data):
+        """Both report the same edf/lambda for the same spline group."""
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
@@ -398,13 +398,13 @@ class TestModelSummarySplineKeys:
         )
         model.fit(X, y, exposure=exposure)
 
-        thin = model.summary()
+        diag = model.diagnostics()
         rich = model.metrics(X, y, exposure=exposure).summary()
         rich_row = next(r for r in rich._coef_rows if r.is_spline)
 
-        assert thin["age"]["edf"] == rich_row.edf
-        assert thin["age"]["smoothing_lambda"] == rich_row.smoothing_lambda
-        assert thin["age"]["spline_kind"] == rich_row.spline_kind
+        assert diag["age"]["edf"] == rich_row.edf
+        assert diag["age"]["smoothing_lambda"] == rich_row.smoothing_lambda
+        assert diag["age"]["spline_kind"] == rich_row.spline_kind
 
 
 # ── Phase 5: Spline kinds ───────────────────────────────────────

@@ -145,9 +145,13 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         feature_cols = [c for c in self.feature_names_in_]
         return self._model.predict(X[feature_cols], offset=offset_array)
 
-    def summary(self) -> dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         check_is_fitted(self)
-        return self._model.summary()
+        return self._model.diagnostics()
+
+    def summary(self, alpha: float = 0.05):
+        check_is_fitted(self)
+        return self._model.summary(alpha=alpha)
 
     def reconstruct_feature(self, name: str) -> dict[str, Any]:
         check_is_fitted(self)
