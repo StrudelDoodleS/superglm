@@ -125,3 +125,20 @@ class TensorMarginalInfo:
     projection: NDArray  # (K_raw, K_eff) raw→centered+constrained projection
     K_eff: int  # effective column count
     degree: int  # B-spline degree (for basis eval at new points)
+
+
+# ── Fit statistics (summary without sample arrays) ────────────
+@dataclass(frozen=True)
+class FitStats:
+    """Scalar fit statistics computed at end of fit()/fit_reml().
+
+    Stores everything ``summary()`` needs so that the model no longer
+    has to cache training arrays (``_train_y``, ``_train_mu``).
+    """
+
+    log_likelihood: float
+    null_log_likelihood: float
+    null_deviance: float
+    explained_deviance: float
+    pearson_chi2: float
+    n_obs: int

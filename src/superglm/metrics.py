@@ -205,6 +205,461 @@ def _penalised_xtwx_inv_gram(
     return XtWX_S_inv, active_groups_out
 
 
+def build_coef_rows(
+    *,
+    groups: list[GroupSlice],
+    specs: dict,
+    interaction_specs: dict,
+    result: Any,
+    X_a: NDArray,
+    W: NDArray,
+    XtWX_inv: NDArray,
+    active_groups: list[GroupSlice],
+    known_scale: bool,
+    group_edf_map: dict | None,
+    reml_lambdas: dict | None,
+    lambda2: float | dict,
+    n_obs: int,
+    alpha: float = 0.05,
+) -> list[_CoefRow]:
+    """Build coefficient table rows for summary output.
+
+    Standalone function that can be called from ``ModelMetrics._build_coef_rows``
+    or from ``SuperGLM.summary()`` without a ``ModelMetrics`` instance.
+    """
+    from superglm.features.categorical import Categorical
+    from superglm.features.interaction import (
+        CategoricalInteraction,
+        NumericCategorical,
+        NumericInteraction,
+        PolynomialCategorical,
+        PolynomialInteraction,
+        SplineCategorical,
+    )
+    from superglm.features.numeric import Numeric
+    from superglm.features.spline import _SplineBase
+    from superglm.inference import feature_se_from_cov, spline_group_enrichment
+
+    beta = result.beta
+    phi = result.phi
+
+    # Compute per-group SEs from XtWX_inv
+    se_dict: dict[str, NDArray] = {}
+    for g in groups:
+        if np.linalg.norm(beta[g.sl]) < 1e-12:
+            se_dict[g.name] = np.zeros(g.size)
+        else:
+            ag = next((a for a in active_groups if a.name == g.name), None)
+            if ag is None:
+                se_dict[g.name] = np.zeros(g.size)
+            else:
+                scale = 1.0 if known_scale else phi
+                var_diag = scale * np.diag(XtWX_inv[ag.sl, ag.sl])
+                se_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
+
+    # Intercept SE
+    w_sum = float(np.sum(W))
+    if w_sum > 0:
+        icpt_se = (
+            float(np.sqrt(1.0 / w_sum)) if known_scale else float(np.sqrt(max(phi, 0.0) / w_sum))
+        )
+    else:
+        icpt_se = 0.0
+
+    rows: list[_CoefRow] = []
+
+    # Intercept row
+    intercept = result.intercept
+    z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
+    rows.append(
+        _CoefRow(
+            name="Intercept",
+            coef=intercept,
+            se=icpt_se,
+            z=z,
+            p=p,
+            ci_low=ci_lo,
+            ci_high=ci_hi,
+        )
+    )
+
+    # Lazily computed R factor and influence edf (only needed for smooth tests)
+    _R_factor = None
+    _influence_edf = None
+
+    def _get_R_factor():
+        nonlocal _R_factor
+        if _R_factor is None:
+            if X_a.shape[1] == 0:
+                _R_factor = np.empty((0, 0))
+            else:
+                _, _R_factor = np.linalg.qr(X_a * np.sqrt(W)[:, None], mode="reduced")
+        return _R_factor
+
+    def _get_influence_edf():
+        nonlocal _influence_edf
+        if _influence_edf is None:
+            if X_a.shape[1] == 0:
+                _influence_edf = (np.array([]), np.array([]))
+            else:
+                XtWX = X_a.T @ (X_a * W[:, None])
+                F = XtWX_inv @ XtWX
+                edf = np.diag(F)
+                edf1 = 2.0 * edf - np.sum(F * F, axis=1)
+                _influence_edf = (edf, edf1)
+        return _influence_edf
+
+    def _curve_se_range(feature_name):
+        """Compute curve SE min/max for a spline feature."""
+        scale = phi if not known_scale else 1.0
+        Cov_active = scale * XtWX_inv
+        se_curve = feature_se_from_cov(
+            feature_name, Cov_active, active_groups, result, groups, specs, interaction_specs
+        )
+        return float(np.min(se_curve)), float(np.max(se_curve))
+
+    def _spline_enrichment(g_name, spec):
+        d = spline_group_enrichment(g_name, spec, group_edf_map, reml_lambdas, lambda2)
+        return (
+            d["edf"],
+            d["smoothing_lambda"],
+            d["spline_kind"],
+            d["knot_strategy"],
+            d["boundary"],
+        )
+
+    # Feature rows
+    for g in groups:
+        spec = specs.get(g.feature_name) or interaction_specs.get(g.feature_name)
+        b_g = beta[g.sl]
+        se_g = se_dict[g.name]
+        active = np.linalg.norm(b_g) > 1e-12
+
+        if isinstance(spec, _SplineBase):
+            is_linear_subgroup = g.subgroup_type == "linear"
+            if active:
+                stat = float("nan")
+                p_val = float("nan")
+                ref_df = float(g.size)
+                curve_se_min = float("nan")
+                curve_se_max = float("nan")
+
+                ag = next(a for a in active_groups if a.name == g.name)
+                V_b_j = XtWX_inv[ag.sl, ag.sl] if known_scale else phi * XtWX_inv[ag.sl, ag.sl]
+
+                if is_linear_subgroup:
+                    from scipy.stats import chi2 as chi2_dist
+
+                    try:
+                        stat = float(b_g @ np.linalg.solve(V_b_j, b_g))
+                        ref_df = float(g.size)
+                        p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
+                    except np.linalg.LinAlgError:
+                        pass
+
+                    curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
+                else:
+                    from superglm.wood_pvalue import wood_test_smooth
+
+                    R_a = _get_R_factor()
+                    edf, edf1 = _get_influence_edf()
+                    edf1_j = float(np.sum(edf1[ag.sl]))
+                    X_j = R_a[:, ag.sl]
+                    res_df = -1.0 if known_scale else float(n_obs - np.sum(edf))
+
+                    try:
+                        stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
+                    except Exception:
+                        pass
+
+                    curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
+
+                s_edf, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(g.name, spec)
+                rows.append(
+                    _CoefRow(
+                        name=g.name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=g.size,
+                        active=True,
+                        group_norm=float(np.linalg.norm(b_g)),
+                        wald_chi2=stat,
+                        wald_p=p_val,
+                        ref_df=ref_df,
+                        curve_se_min=curve_se_min,
+                        curve_se_max=curve_se_max,
+                        subgroup_type=g.subgroup_type,
+                        edf=s_edf,
+                        smoothing_lambda=s_lam,
+                        spline_kind=s_kind,
+                        knot_strategy=s_knot_strat,
+                        boundary=s_bnd,
+                    )
+                )
+            else:
+                s_edf, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(g.name, spec)
+                rows.append(
+                    _CoefRow(
+                        name=g.name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=g.size,
+                        active=False,
+                        group_norm=0.0,
+                        subgroup_type=g.subgroup_type,
+                        edf=0.0,
+                        smoothing_lambda=s_lam,
+                        spline_kind=s_kind,
+                        knot_strategy=s_knot_strat,
+                        boundary=s_bnd,
+                    )
+                )
+
+        elif isinstance(spec, Categorical):
+            for i, level in enumerate(spec._non_base):
+                coef_val = float(b_g[i])
+                se_val = float(se_g[i])
+                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                rows.append(
+                    _CoefRow(
+                        name=f"{g.name}[{level}]",
+                        group=g.name,
+                        coef=coef_val,
+                        se=se_val,
+                        z=z,
+                        p=p,
+                        ci_low=ci_lo,
+                        ci_high=ci_hi,
+                    )
+                )
+
+        elif isinstance(spec, SplineCategorical):
+            if active:
+                stat = float("nan")
+                p_val = float("nan")
+                ref_df = float(g.size)
+
+                ag = next(a for a in active_groups if a.name == g.name)
+                V_b_j = XtWX_inv[ag.sl, ag.sl] if known_scale else phi * XtWX_inv[ag.sl, ag.sl]
+
+                from superglm.wood_pvalue import wood_test_smooth
+
+                R_a = _get_R_factor()
+                edf, edf1 = _get_influence_edf()
+                edf1_j = float(np.sum(edf1[ag.sl]))
+                X_j = R_a[:, ag.sl]
+                res_df = -1.0 if known_scale else float(n_obs - np.sum(edf))
+
+                try:
+                    stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
+                except Exception:
+                    pass
+
+                rows.append(
+                    _CoefRow(
+                        name=g.name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=g.size,
+                        active=True,
+                        group_norm=float(np.linalg.norm(b_g)),
+                        wald_chi2=stat,
+                        wald_p=p_val,
+                        ref_df=ref_df,
+                    )
+                )
+            else:
+                rows.append(
+                    _CoefRow(
+                        name=g.name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=g.size,
+                        active=False,
+                        group_norm=0.0,
+                    )
+                )
+
+        elif isinstance(spec, PolynomialCategorical):
+            if active:
+                stat = float("nan")
+                p_val = float("nan")
+                ref_df = float(g.size)
+
+                ag = next(a for a in active_groups if a.name == g.name)
+                V_b_j = XtWX_inv[ag.sl, ag.sl] if known_scale else phi * XtWX_inv[ag.sl, ag.sl]
+
+                from scipy.stats import chi2 as chi2_dist
+
+                try:
+                    stat = float(b_g @ np.linalg.solve(V_b_j, b_g))
+                    p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
+                except np.linalg.LinAlgError:
+                    pass
+
+                rows.append(
+                    _CoefRow(
+                        name=g.name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=g.size,
+                        active=True,
+                        group_norm=float(np.linalg.norm(b_g)),
+                        wald_chi2=stat,
+                        wald_p=p_val,
+                        ref_df=ref_df,
+                    )
+                )
+            else:
+                rows.append(
+                    _CoefRow(
+                        name=g.name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=g.size,
+                        active=False,
+                        group_norm=0.0,
+                    )
+                )
+
+        elif isinstance(spec, CategoricalInteraction):
+            for i, (lev1, lev2) in enumerate(spec._pairs):
+                coef_val = float(b_g[i])
+                se_val = float(se_g[i])
+                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                rows.append(
+                    _CoefRow(
+                        name=f"{g.name}[{lev1}:{lev2}]",
+                        group=g.name,
+                        coef=coef_val,
+                        se=se_val,
+                        z=z,
+                        p=p,
+                        ci_low=ci_lo,
+                        ci_high=ci_hi,
+                    )
+                )
+
+        elif isinstance(spec, NumericCategorical):
+            for i, level in enumerate(spec._non_base):
+                coef_val = float(b_g[i])
+                se_val = float(se_g[i])
+                if spec._standardize:
+                    coef_val = coef_val / spec._std
+                    se_val = se_val / spec._std
+                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                rows.append(
+                    _CoefRow(
+                        name=f"{g.name}[{level}]",
+                        group=g.name,
+                        coef=coef_val,
+                        se=se_val,
+                        z=z,
+                        p=p,
+                        ci_low=ci_lo,
+                        ci_high=ci_hi,
+                    )
+                )
+
+        elif isinstance(spec, NumericInteraction | PolynomialInteraction):
+            if active and g.size <= 4:
+                for i in range(g.size):
+                    coef_val = float(b_g[i])
+                    se_val = float(se_g[i])
+                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                    rows.append(
+                        _CoefRow(
+                            name=f"{g.name}[{i}]" if g.size > 1 else g.name,
+                            group=g.name,
+                            coef=coef_val,
+                            se=se_val,
+                            z=z,
+                            p=p,
+                            ci_low=ci_lo,
+                            ci_high=ci_hi,
+                        )
+                    )
+            elif active:
+                stat = float("nan")
+                p_val = float("nan")
+                ref_df = float(g.size)
+                ag = next(a for a in active_groups if a.name == g.name)
+                V_b_j = XtWX_inv[ag.sl, ag.sl] if known_scale else phi * XtWX_inv[ag.sl, ag.sl]
+                from scipy.stats import chi2 as chi2_dist
+
+                try:
+                    stat = float(b_g @ np.linalg.solve(V_b_j, b_g))
+                    p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
+                except np.linalg.LinAlgError:
+                    pass
+                rows.append(
+                    _CoefRow(
+                        name=g.name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=g.size,
+                        active=True,
+                        group_norm=float(np.linalg.norm(b_g)),
+                        wald_chi2=stat,
+                        wald_p=p_val,
+                        ref_df=ref_df,
+                    )
+                )
+            else:
+                rows.append(
+                    _CoefRow(
+                        name=g.name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=g.size,
+                        active=False,
+                        group_norm=0.0,
+                    )
+                )
+
+        elif isinstance(spec, Numeric):
+            coef_internal = float(b_g[0])
+            se_internal = float(se_g[0])
+            if spec.standardize:
+                coef_display = coef_internal / spec._std
+                se_display = se_internal / spec._std
+            else:
+                coef_display = coef_internal
+                se_display = se_internal
+            z, p, ci_lo, ci_hi = _compute_coef_stats(coef_display, se_display, alpha)
+            rows.append(
+                _CoefRow(
+                    name=g.name,
+                    group=g.name,
+                    coef=coef_display,
+                    se=se_display,
+                    z=z,
+                    p=p,
+                    ci_low=ci_lo,
+                    ci_high=ci_hi,
+                )
+            )
+
+        else:
+            coef_val = float(b_g[0])
+            se_val = float(se_g[0]) if len(se_g) > 0 else 0.0
+            z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+            rows.append(
+                _CoefRow(
+                    name=g.name,
+                    group=g.name,
+                    coef=coef_val,
+                    se=se_val,
+                    z=z,
+                    p=p,
+                    ci_low=ci_lo,
+                    ci_high=ci_hi,
+                )
+            )
+
+    return rows
+
+
 class ModelMetrics:
     """Post-fit diagnostics for a SuperGLM model.
 
@@ -790,427 +1245,23 @@ class ModelMetrics:
 
     def _build_coef_rows(self, alpha: float = 0.05) -> list[_CoefRow]:
         """Build coefficient table rows for the summary."""
-        from superglm.features.categorical import Categorical
-        from superglm.features.interaction import (
-            CategoricalInteraction,
-            NumericCategorical,
-            NumericInteraction,
-            PolynomialCategorical,
-            PolynomialInteraction,
-            SplineCategorical,
+        X_a, W, XtWX_inv, active_groups = self._active_info
+        return build_coef_rows(
+            groups=self._groups,
+            specs=self._model._specs,
+            interaction_specs=self._model._interaction_specs,
+            result=self._result,
+            X_a=X_a,
+            W=W,
+            XtWX_inv=XtWX_inv,
+            active_groups=active_groups,
+            known_scale=self._known_scale,
+            group_edf_map=getattr(self._model, "_group_edf", None),
+            reml_lambdas=getattr(self._model, "_reml_lambdas", None),
+            lambda2=self._model.lambda2,
+            n_obs=self.n_obs,
+            alpha=alpha,
         )
-        from superglm.features.numeric import Numeric
-        from superglm.features.spline import _SplineBase
-
-        beta = self._result.beta
-        se_dict = self.coefficient_se_raw if self._known_scale else self.coefficient_se
-        rows: list[_CoefRow] = []
-
-        # Intercept row
-        intercept = self._result.intercept
-        icpt_se = self.intercept_se_raw if self._known_scale else self.intercept_se
-        z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
-        rows.append(
-            _CoefRow(
-                name="Intercept",
-                coef=intercept,
-                se=icpt_se,
-                z=z,
-                p=p,
-                ci_low=ci_lo,
-                ci_high=ci_hi,
-            )
-        )
-
-        # Precompute per-group edf and lambda for spline metadata
-        from superglm.inference import spline_group_enrichment
-
-        group_edf_map = getattr(self._model, "_group_edf", None)
-        reml_lam = getattr(self._model, "_reml_lambdas", None)
-
-        def _spline_enrichment(g_name, spec):
-            d = spline_group_enrichment(g_name, spec, group_edf_map, reml_lam, self._model.lambda2)
-            return (
-                d["edf"],
-                d["smoothing_lambda"],
-                d["spline_kind"],
-                d["knot_strategy"],
-                d["boundary"],
-            )
-
-        # Feature rows
-        for g in self._groups:
-            spec = self._model._specs.get(g.feature_name) or self._model._interaction_specs.get(
-                g.feature_name
-            )
-            b_g = beta[g.sl]
-            se_g = se_dict[g.name]
-            active = np.linalg.norm(b_g) > 1e-12
-
-            if isinstance(spec, _SplineBase):
-                is_linear_subgroup = g.subgroup_type == "linear"
-                if active:
-                    stat = float("nan")
-                    p_val = float("nan")
-                    ref_df = float(g.size)
-                    curve_se_min = float("nan")
-                    curve_se_max = float("nan")
-
-                    X_a, _, XtWX_inv, active_groups = self._active_info
-                    R_a = self._active_R_factor
-                    ag = next(a for a in active_groups if a.name == g.name)
-                    if self._known_scale:
-                        V_b_j = XtWX_inv[ag.sl, ag.sl]
-                    else:
-                        V_b_j = self.phi * XtWX_inv[ag.sl, ag.sl]
-
-                    if is_linear_subgroup:
-                        # Wald chi-squared for linear subgroup
-                        from scipy.stats import chi2 as chi2_dist
-
-                        try:
-                            stat = float(b_g @ np.linalg.solve(V_b_j, b_g))
-                            ref_df = float(g.size)
-                            p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
-                        except np.linalg.LinAlgError:
-                            pass
-
-                        # Curve SE range for the full feature
-                        fse = self._feature_se_impl(
-                            g.feature_name,
-                            phi_scale=not self._known_scale,
-                        )
-                        se_curve = fse["se_log_relativity"]
-                        curve_se_min = float(np.min(se_curve))
-                        curve_se_max = float(np.max(se_curve))
-                    else:
-                        # Wood (2013) Bayesian test for smooth terms
-                        from superglm.wood_pvalue import wood_test_smooth
-
-                        edf, edf1 = self._influence_edf
-                        edf1_j = float(np.sum(edf1[ag.sl]))
-                        X_j = R_a[:, ag.sl]
-                        res_df = -1.0 if self._known_scale else float(self.n_obs - np.sum(edf))
-
-                        try:
-                            stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
-                        except Exception:
-                            pass
-
-                        # Curve-level SE range (using feature_name for full feature)
-                        fse = self._feature_se_impl(
-                            g.feature_name,
-                            phi_scale=not self._known_scale,
-                        )
-                        se_curve = fse["se_log_relativity"]
-                        curve_se_min = float(np.min(se_curve))
-                        curve_se_max = float(np.max(se_curve))
-
-                    s_edf, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(g.name, spec)
-                    rows.append(
-                        _CoefRow(
-                            name=g.name,
-                            group=g.feature_name,
-                            is_spline=True,
-                            n_params=g.size,
-                            active=True,
-                            group_norm=float(np.linalg.norm(b_g)),
-                            wald_chi2=stat,
-                            wald_p=p_val,
-                            ref_df=ref_df,
-                            curve_se_min=curve_se_min,
-                            curve_se_max=curve_se_max,
-                            subgroup_type=g.subgroup_type,
-                            edf=s_edf,
-                            smoothing_lambda=s_lam,
-                            spline_kind=s_kind,
-                            knot_strategy=s_knot_strat,
-                            boundary=s_bnd,
-                        )
-                    )
-                else:
-                    s_edf, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(g.name, spec)
-                    rows.append(
-                        _CoefRow(
-                            name=g.name,
-                            group=g.feature_name,
-                            is_spline=True,
-                            n_params=g.size,
-                            active=False,
-                            group_norm=0.0,
-                            subgroup_type=g.subgroup_type,
-                            edf=0.0,
-                            smoothing_lambda=s_lam,
-                            spline_kind=s_kind,
-                            knot_strategy=s_knot_strat,
-                            boundary=s_bnd,
-                        )
-                    )
-
-            elif isinstance(spec, Categorical):
-                for i, level in enumerate(spec._non_base):
-                    coef_val = float(b_g[i])
-                    se_val = float(se_g[i])
-                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
-                    rows.append(
-                        _CoefRow(
-                            name=f"{g.name}[{level}]",
-                            group=g.name,
-                            coef=coef_val,
-                            se=se_val,
-                            z=z,
-                            p=p,
-                            ci_low=ci_lo,
-                            ci_high=ci_hi,
-                        )
-                    )
-
-            elif isinstance(spec, SplineCategorical):
-                # Interaction spline group — Wood test (has penalty/SSP)
-                if active:
-                    stat = float("nan")
-                    p_val = float("nan")
-                    ref_df = float(g.size)
-
-                    X_a, _, XtWX_inv, active_groups = self._active_info
-                    R_a = self._active_R_factor
-                    ag = next(a for a in active_groups if a.name == g.name)
-                    if self._known_scale:
-                        V_b_j = XtWX_inv[ag.sl, ag.sl]
-                    else:
-                        V_b_j = self.phi * XtWX_inv[ag.sl, ag.sl]
-
-                    from superglm.wood_pvalue import wood_test_smooth
-
-                    edf, edf1 = self._influence_edf
-                    edf1_j = float(np.sum(edf1[ag.sl]))
-                    X_j = R_a[:, ag.sl]
-                    res_df = -1.0 if self._known_scale else float(self.n_obs - np.sum(edf))
-
-                    try:
-                        stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
-                    except Exception:
-                        pass
-
-                    rows.append(
-                        _CoefRow(
-                            name=g.name,
-                            group=g.feature_name,
-                            is_spline=True,
-                            n_params=g.size,
-                            active=True,
-                            group_norm=float(np.linalg.norm(b_g)),
-                            wald_chi2=stat,
-                            wald_p=p_val,
-                            ref_df=ref_df,
-                        )
-                    )
-                else:
-                    rows.append(
-                        _CoefRow(
-                            name=g.name,
-                            group=g.feature_name,
-                            is_spline=True,
-                            n_params=g.size,
-                            active=False,
-                            group_norm=0.0,
-                        )
-                    )
-
-            elif isinstance(spec, PolynomialCategorical):
-                # Per-level polynomial group — Wald chi2 (no penalty/SSP)
-                if active:
-                    stat = float("nan")
-                    p_val = float("nan")
-                    ref_df = float(g.size)
-
-                    _, _, XtWX_inv, active_groups = self._active_info
-                    ag = next(a for a in active_groups if a.name == g.name)
-                    if self._known_scale:
-                        V_b_j = XtWX_inv[ag.sl, ag.sl]
-                    else:
-                        V_b_j = self.phi * XtWX_inv[ag.sl, ag.sl]
-
-                    from scipy.stats import chi2 as chi2_dist
-
-                    try:
-                        stat = float(b_g @ np.linalg.solve(V_b_j, b_g))
-                        p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
-                    except np.linalg.LinAlgError:
-                        pass
-
-                    rows.append(
-                        _CoefRow(
-                            name=g.name,
-                            group=g.feature_name,
-                            is_spline=True,
-                            n_params=g.size,
-                            active=True,
-                            group_norm=float(np.linalg.norm(b_g)),
-                            wald_chi2=stat,
-                            wald_p=p_val,
-                            ref_df=ref_df,
-                        )
-                    )
-                else:
-                    rows.append(
-                        _CoefRow(
-                            name=g.name,
-                            group=g.feature_name,
-                            is_spline=True,
-                            n_params=g.size,
-                            active=False,
-                            group_norm=0.0,
-                        )
-                    )
-
-            elif isinstance(spec, CategoricalInteraction):
-                # Per-pair coefficient rows
-                for i, (lev1, lev2) in enumerate(spec._pairs):
-                    coef_val = float(b_g[i])
-                    se_val = float(se_g[i])
-                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
-                    rows.append(
-                        _CoefRow(
-                            name=f"{g.name}[{lev1}:{lev2}]",
-                            group=g.name,
-                            coef=coef_val,
-                            se=se_val,
-                            z=z,
-                            p=p,
-                            ci_low=ci_lo,
-                            ci_high=ci_hi,
-                        )
-                    )
-
-            elif isinstance(spec, NumericCategorical):
-                # Per-level slope coefficient rows
-                for i, level in enumerate(spec._non_base):
-                    coef_val = float(b_g[i])
-                    se_val = float(se_g[i])
-                    if spec._standardize:
-                        coef_val = coef_val / spec._std
-                        se_val = se_val / spec._std
-                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
-                    rows.append(
-                        _CoefRow(
-                            name=f"{g.name}[{level}]",
-                            group=g.name,
-                            coef=coef_val,
-                            se=se_val,
-                            z=z,
-                            p=p,
-                            ci_low=ci_lo,
-                            ci_high=ci_hi,
-                        )
-                    )
-
-            elif isinstance(spec, NumericInteraction | PolynomialInteraction):
-                # Single or multi-column group — show group norm + Wald
-                if active and g.size <= 4:
-                    # Few enough coefficients to show individually
-                    for i in range(g.size):
-                        coef_val = float(b_g[i])
-                        se_val = float(se_g[i])
-                        z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
-                        rows.append(
-                            _CoefRow(
-                                name=f"{g.name}[{i}]" if g.size > 1 else g.name,
-                                group=g.name,
-                                coef=coef_val,
-                                se=se_val,
-                                z=z,
-                                p=p,
-                                ci_low=ci_lo,
-                                ci_high=ci_hi,
-                            )
-                        )
-                elif active:
-                    # Too many columns — show as group summary
-                    stat = float("nan")
-                    p_val = float("nan")
-                    ref_df = float(g.size)
-                    _, _, XtWX_inv, active_groups = self._active_info
-                    ag = next(a for a in active_groups if a.name == g.name)
-                    if self._known_scale:
-                        V_b_j = XtWX_inv[ag.sl, ag.sl]
-                    else:
-                        V_b_j = self.phi * XtWX_inv[ag.sl, ag.sl]
-                    from scipy.stats import chi2 as chi2_dist
-
-                    try:
-                        stat = float(b_g @ np.linalg.solve(V_b_j, b_g))
-                        p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
-                    except np.linalg.LinAlgError:
-                        pass
-                    rows.append(
-                        _CoefRow(
-                            name=g.name,
-                            group=g.feature_name,
-                            is_spline=True,
-                            n_params=g.size,
-                            active=True,
-                            group_norm=float(np.linalg.norm(b_g)),
-                            wald_chi2=stat,
-                            wald_p=p_val,
-                            ref_df=ref_df,
-                        )
-                    )
-                else:
-                    rows.append(
-                        _CoefRow(
-                            name=g.name,
-                            group=g.feature_name,
-                            is_spline=True,
-                            n_params=g.size,
-                            active=False,
-                            group_norm=0.0,
-                        )
-                    )
-
-            elif isinstance(spec, Numeric):
-                # Show original-scale coefficient and SE
-                coef_internal = float(b_g[0])
-                se_internal = float(se_g[0])
-                if spec.standardize:
-                    coef_display = coef_internal / spec._std
-                    se_display = se_internal / spec._std
-                else:
-                    coef_display = coef_internal
-                    se_display = se_internal
-                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_display, se_display, alpha)
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=g.name,
-                        coef=coef_display,
-                        se=se_display,
-                        z=z,
-                        p=p,
-                        ci_low=ci_lo,
-                        ci_high=ci_hi,
-                    )
-                )
-
-            else:
-                # Generic: show first coefficient
-                coef_val = float(b_g[0])
-                se_val = float(se_g[0]) if len(se_g) > 0 else 0.0
-                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=g.name,
-                        coef=coef_val,
-                        se=se_val,
-                        z=z,
-                        p=p,
-                        ci_low=ci_lo,
-                        ci_high=ci_hi,
-                    )
-                )
-
-        return rows
 
     def summary(self, alpha: float = 0.05) -> ModelSummary:
         """Formatted model summary with coefficient table.
