@@ -1462,7 +1462,9 @@ class SuperGLM:
 
         lam1 = penalty.lambda1
         model_info = {
-            "family": type(self._distribution).__name__,
+            "family": {"NegativeBinomial": "Neg. Binomial"}.get(
+                type(self._distribution).__name__, type(self._distribution).__name__
+            ),
             "link": link_name,
             "penalty": penalty_name,
             "penalty_abbrevs": penalty_abbrevs,

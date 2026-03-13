@@ -147,11 +147,41 @@ class ModelSummary:
         half = self._alpha / 2.0
         _fmt = self._fmt_scalar
 
-        # Compute content width from coefficient columns
-        #   name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4)
+        # Build header rows first (needed to compute minimum width)
+        conv_str = f"{info['converged']} ({info['n_iter']} iter)"
+        rows = [
+            ("Family", info["family"], "No. Observations", str(info["n_obs"])),
+            ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
+            ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
+            ("Scale (phi)", _fmt(info["phi"]), "Lambda1", _fmt(info["lambda1"])),
+            ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
+            ("Deviance", _fmt(info["deviance"]), "Converged", conv_str),
+        ]
+
+        # NB theta profile row
+        if "nb_theta" in info:
+            ci = info["nb_theta_ci"]
+            theta_str = f"{info['nb_theta']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+            rows.append(("Theta", theta_str, "Method", info["nb_theta_method"]))
+
+        # Tweedie p profile row
+        if "tweedie_p" in info:
+            ci = info["tweedie_p_ci"]
+            p_str = f"{info['tweedie_p']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+            rows.append(("Tweedie p", p_str, "Method", info["tweedie_p_method"]))
+
+        # Compute content width from coefficient columns AND header values
+        #   coef table: name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4)
         name_w = max(len(r.name) for r in self._coef_rows) if self._coef_rows else 10
         name_w = max(name_w, 10)
-        W = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4  # content width
+        coef_W = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4
+
+        # Header layout: "{k1:20}{v1:>val}  {k2:20}{v2:>val}" → need val >= max value len
+        # Each half = 20 (key) + val; total = 20 + val + 2 + 20 + val = 42 + 2*val
+        max_val = max(max(len(v1), len(v2)) for _, v1, _, v2 in rows if v2) if rows else 0
+        header_W = 42 + 2 * max_val
+
+        W = max(coef_W, header_W)  # content width
         F = W + 2  # fill width (between border chars, includes padding spaces)
 
         # Box-drawing helpers
@@ -189,38 +219,14 @@ class ModelSummary:
         lines.append(_top(" SuperGLM Results "))
 
         # Header key-value pairs
-        inner = W  # content space between "║ " and " ║"
-        left_w = (inner - 2) // 2
-        right_w = inner - 2 - left_w
-        val_l = left_w - 20
-        val_r = right_w - 20
+        val_w = (W - 42) // 2
+        val_l = val_w
+        val_r = W - 42 - val_w  # absorb odd remainder
 
         def _header_row(k1: str, v1: str, k2: str, v2: str) -> str:
             left = f"{k1 + ':':<20s}{v1:>{val_l}s}"
             right = f"{k2 + ':':<20s}{v2:>{val_r}s}"
             return _row(f"{left}  {right}")
-
-        conv_str = f"{info['converged']} ({info['n_iter']} iter)"
-        rows = [
-            ("Family", info["family"], "No. Observations", str(info["n_obs"])),
-            ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
-            ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
-            ("Scale (phi)", _fmt(info["phi"]), "Lambda1", _fmt(info["lambda1"])),
-            ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
-            ("Deviance", _fmt(info["deviance"]), "Converged", conv_str),
-        ]
-
-        # NB theta profile row
-        if "nb_theta" in info:
-            ci = info["nb_theta_ci"]
-            theta_str = f"{info['nb_theta']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
-            rows.append(("Theta", theta_str, "Method", info["nb_theta_method"]))
-
-        # Tweedie p profile row
-        if "tweedie_p" in info:
-            ci = info["tweedie_p_ci"]
-            p_str = f"{info['tweedie_p']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
-            rows.append(("Tweedie p", p_str, "Method", info["tweedie_p_method"]))
 
         for k1, v1, k2, v2 in rows:
             lines.append(_header_row(k1, v1, k2, v2))
@@ -277,7 +283,7 @@ class ModelSummary:
                         f"p={p_str}]"
                     )
                     prefix = f"{row.name:<{name_w}s}  {spline_text} "
-                    pad = max(inner - len(prefix) - 3, 0)
+                    pad = max(W - len(prefix) - 3, 0)
                     lines.append(_row(f"{prefix}{'':<{pad}s}{stars:<3s}"))
                     if detail_str:
                         lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
