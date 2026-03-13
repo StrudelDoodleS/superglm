@@ -1010,3 +1010,107 @@ class TestNumericUnstandardizedSE:
         fse = m.feature_se("x")
         assert "se_coef" in fse
         assert fse["se_coef"] > 0
+
+
+# ── model.summary() / model.diagnostics() API ──────────────────
+
+
+class TestModelSummaryAPI:
+    """model.summary() returns ModelSummary; model.diagnostics() returns dict."""
+
+    @pytest.fixture
+    def fitted(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 10, n)
+        mu = np.exp(0.5 + 0.1 * x)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.01,
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+        model.fit(X, y)
+        return model, X, y
+
+    def test_summary_returns_model_summary(self, fitted):
+        from superglm.summary import ModelSummary
+
+        model, _, _ = fitted
+        s = model.summary()
+        assert isinstance(s, ModelSummary)
+
+    def test_summary_str(self, fitted):
+        model, _, _ = fitted
+        text = str(model.summary())
+        assert "SuperGLM Results" in text
+        assert "Poisson" in text
+        assert "Intercept" in text
+
+    def test_summary_repr_html(self, fitted):
+        model, _, _ = fitted
+        html = model.summary()._repr_html_()
+        assert "<table" in html
+        assert "SuperGLM Results" in html
+
+    def test_print_summary(self, fitted, capsys):
+        model, _, _ = fitted
+        print(model.summary())
+        out = capsys.readouterr().out
+        assert "SuperGLM Results" in out
+
+    def test_diagnostics_returns_dict(self, fitted):
+        model, _, _ = fitted
+        d = model.diagnostics()
+        assert isinstance(d, dict)
+        assert "_model" in d
+        assert "x" in d
+
+    def test_diagnostics_shape(self, fitted):
+        model, _, _ = fitted
+        d = model.diagnostics()
+        assert "active" in d["x"]
+        assert "group_norm" in d["x"]
+        assert "n_params" in d["x"]
+
+    def test_diagnostics_spline_metadata(self, fitted):
+        model, _, _ = fitted
+        d = model.diagnostics()
+        assert "edf" in d["x"]
+        assert "smoothing_lambda" in d["x"]
+        assert "spline_kind" in d["x"]
+        assert d["x"]["spline_kind"] == "BasisSpline"
+
+    def test_summary_spline_edf_in_text(self, fitted):
+        model, _, _ = fitted
+        text = str(model.summary())
+        assert "edf=" in text
+
+    def test_summary_matches_metrics_summary(self, fitted):
+        """model.summary() and model.metrics(X,y).summary() agree."""
+        model, X, y = fitted
+        s1 = model.summary()
+        s2 = model.metrics(X, y).summary()
+        # Both should have the same coefficient rows
+        assert len(s1._coef_rows) == len(s2._coef_rows)
+        for r1, r2 in zip(s1._coef_rows, s2._coef_rows):
+            assert r1.name == r2.name
+            if r1.coef is not None:
+                assert abs(r1.coef - r2.coef) < 1e-10
+
+    def test_summary_before_fit_raises(self):
+        model = SuperGLM(family="poisson", features={"x": Numeric()})
+        with pytest.raises(RuntimeError, match="No cached training data"):
+            model.summary()
+
+    def test_summary_immune_to_caller_mutation(self, fitted):
+        """Mutating caller's y/exposure after fit must not change summary."""
+        model, X, y = fitted
+        ll_before = model.summary()["information_criteria"]["log_likelihood"]
+
+        # Mutate the original arrays the caller passed to fit()
+        y[:] = 999.0
+
+        ll_after = model.summary()["information_criteria"]["log_likelihood"]
+        assert ll_before == ll_after
