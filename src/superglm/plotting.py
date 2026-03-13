@@ -619,12 +619,14 @@ def _plot_categorical_panel_vertical(
             linewidth=_EXP_EDGE_LW,
             alpha=0.65,
             zorder=0,
-            label="Exposure",
+            label="Weight",
         )
         ax2.set_ylim(0, 1.4)
-        ax2.set_yticks([])
+        ax2.set_yticks([0.0, 0.5, 1.0])
+        ax2.set_ylabel("Weight", color=_EXP_EDGE)
+        ax2.tick_params(axis="y", colors=_EXP_EDGE, labelsize=9)
         ax2.spines["top"].set_visible(False)
-        ax2.spines["right"].set_visible(False)
+        ax2.spines["right"].set_color(_EXP_EDGE)
         ax.set_zorder(ax2.get_zorder() + 1)
         ax.patch.set_visible(False)
 
@@ -758,15 +760,22 @@ def _plot_relativities_new(
                     ax_den.set_ylabel("Exposure\ndensity", fontsize=8)
 
         elif ti.kind == "categorical":
-            _plot_categorical_panel(ax, ti, interval)
+            _plot_categorical_panel_vertical(
+                ax, ti, interval, X=X, exposure=exposure if has_density else None
+            )
 
         elif ti.kind == "numeric":
-            _plot_numeric_panel(ax, ti, interval)
+            if X is not None and ti.name in X.columns:
+                x_vals = X[ti.name].to_numpy(dtype=np.float64)
+                x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
+            else:
+                x_grid = np.linspace(0.0, 1.0, 200)
+            _plot_numeric_panel_continuous(ax, ti, interval, x_grid)
+            if idx % ncols == 0:
+                ax.set_ylabel("Relativity")
 
             if ax_den is not None:
-                x_vals = X[ti.name].to_numpy(dtype=np.float64)
-                grid = np.linspace(x_vals.min(), x_vals.max(), 200)
-                _plot_density_strip(ax_den, ti.name, X, exposure, grid, False, None)
+                _plot_density_strip(ax_den, ti.name, X, exposure, x_grid, False, None)
                 if idx % ncols == 0:
                     ax_den.set_ylabel("Exposure\ndensity", fontsize=8)
 

@@ -344,34 +344,25 @@ class TestPlotRelativitiesNew:
         assert isinstance(fig, Figure)
 
         visible = [ax for ax in fig.get_axes() if ax.get_visible()]
-        # Spline (age): main + density strip = 2 visible
-        # Categorical (region): 1 visible (spans both rows, no hidden stub)
-        # Numeric (density): main + density strip = 2 visible
-        # Total: 5 visible (+ 1 hidden for the unused grid cell at [1,1])
+        # Spline (age): main + density strip = 2
+        # Categorical (region): main + twin exposure axis = 2 (spans both grid rows)
+        # Numeric (density): main + density strip = 2
+        # + 1 hidden unused grid cell
         assert len(visible) >= 5, f"Expected >= 5 visible axes, got {len(visible)}"
 
-        # Categorical panel must have readable y-tick labels (level names)
+        # Categorical panel: vertical orientation — level labels on x-axis
         cat_axes = [
             ax
             for ax in visible
-            if any(t.get_text() in ("A", "B", "C") for t in ax.get_yticklabels())
+            if any(t.get_text() in ("A", "B", "C") for t in ax.get_xticklabels())
         ]
-        assert len(cat_axes) >= 1, "Categorical panel should have visible level labels"
+        assert len(cat_axes) >= 1, "Categorical panel should have visible level labels on x-axis"
 
-        # Numeric panel must have readable y-tick labels
-        num_axes = [
-            ax for ax in visible if any(t.get_text() == "per_unit" for t in ax.get_yticklabels())
-        ]
-        assert len(num_axes) >= 1, "Numeric panel should have visible labels"
-
-        # Numeric (density) should have a density strip (PolyCollection in a lower axis)
-        num_main = num_axes[0]
-        # Find density strip axis: visible, has PolyCollection, is NOT the main numeric panel
+        # Numeric panel: continuous flat line — has a density strip below
         density_strips = [
             ax
             for ax in visible
-            if ax is not num_main
-            and any(isinstance(c, mcoll.PolyCollection) for c in ax.get_children())
+            if any(isinstance(c, mcoll.PolyCollection) for c in ax.get_children())
             and ax.get_xlabel() == "density"
         ]
         assert len(density_strips) >= 1, "Numeric term should have an exposure density strip"
@@ -472,6 +463,9 @@ class TestPlotRelativity:
         fig = fitted_model.plot_relativity("region", X=X, exposure=exposure)
         # Twin axis for exposure bars → 2 axes total
         assert len(fig.get_axes()) >= 2
+        ax2 = fig.get_axes()[1]
+        assert ax2.get_ylabel() == "Weight"
+        assert len(ax2.get_yticks()) > 0
 
     def test_numeric_returns_figure(self, fitted_model):
         import matplotlib
