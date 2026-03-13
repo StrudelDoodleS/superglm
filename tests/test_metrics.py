@@ -1103,3 +1103,14 @@ class TestModelSummaryAPI:
         model = SuperGLM(family="poisson", features={"x": Numeric()})
         with pytest.raises(RuntimeError, match="No cached training data"):
             model.summary()
+
+    def test_summary_immune_to_caller_mutation(self, fitted):
+        """Mutating caller's y/exposure after fit must not change summary."""
+        model, X, y = fitted
+        ll_before = model.summary()["information_criteria"]["log_likelihood"]
+
+        # Mutate the original arrays the caller passed to fit()
+        y[:] = 999.0
+
+        ll_after = model.summary()["information_criteria"]["log_likelihood"]
+        assert ll_before == ll_after

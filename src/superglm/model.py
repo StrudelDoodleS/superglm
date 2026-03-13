@@ -411,8 +411,10 @@ class SuperGLM:
             logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
 
         y, exposure, offset = self._build_design_matrix(X, y, exposure, offset)
-        self._fit_weights = exposure  # store for covariance computation
-        self._fit_offset = offset  # store for covariance computation
+        self._fit_weights = np.array(exposure)  # copy: caller mutation must not affect summary
+        self._fit_offset = np.array(offset) if offset is not None else None
+        exposure = self._fit_weights  # use our copy downstream
+        offset = self._fit_offset
 
         # Auto-calibrate lambda1 if not set
         if self.penalty.lambda1 is None:
@@ -465,7 +467,7 @@ class SuperGLM:
         eta = self._dm.matvec(self._result.beta) + self._result.intercept
         if offset is not None:
             eta = eta + offset
-        self._train_y = y
+        self._train_y = np.array(y)  # copy: caller mutation must not affect summary
         self._train_mu = self._link.inverse(eta)
 
         self._last_fit_meta = {"method": "fit", "discrete": self._discrete}
@@ -491,8 +493,10 @@ class SuperGLM:
             exposure, sample_weight, method_name="fit_path()"
         )
         y, exposure, offset = self._build_design_matrix(X, y, exposure, offset)
-        self._fit_weights = exposure
-        self._fit_offset = offset
+        self._fit_weights = np.array(exposure)
+        self._fit_offset = np.array(offset) if offset is not None else None
+        exposure = self._fit_weights
+        offset = self._fit_offset
         self.__dict__.pop("_coef_covariance", None)
         lambda_max = self._compute_lambda_max(y, exposure)
 
@@ -628,8 +632,10 @@ class SuperGLM:
             logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
 
         y, exposure, offset = self._build_design_matrix(X, y, exposure, offset)
-        self._fit_weights = exposure
-        self._fit_offset = offset
+        self._fit_weights = np.array(exposure)
+        self._fit_offset = np.array(offset) if offset is not None else None
+        exposure = self._fit_weights
+        offset = self._fit_offset
         self.__dict__.pop("_coef_covariance", None)
 
         # Lambda sequence from full data
@@ -1063,8 +1069,10 @@ class SuperGLM:
         y, exposure, offset = self._build_design_matrix(X, y, exposure, offset)
         _profile["dm_build_s"] = _time.perf_counter() - _t0
 
-        self._fit_weights = exposure
-        self._fit_offset = offset
+        self._fit_weights = np.array(exposure)
+        self._fit_offset = np.array(offset) if offset is not None else None
+        exposure = self._fit_weights
+        offset = self._fit_offset
         self.__dict__.pop("_coef_covariance", None)
 
         # Auto-calibrate lambda1 if not set
@@ -1237,7 +1245,7 @@ class SuperGLM:
         eta = self._dm.matvec(self._result.beta) + self._result.intercept
         if offset is not None:
             eta = eta + offset
-        self._train_y = y
+        self._train_y = np.array(y)
         self._train_mu = self._link.inverse(eta)
 
         self._last_fit_meta = {"method": "fit_reml", "discrete": self._discrete}
