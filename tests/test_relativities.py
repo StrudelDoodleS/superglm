@@ -111,8 +111,8 @@ class TestPlotRelativities:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        rels = fitted_model.relativities()
-        fig = plot_relativities(rels)
+        terms = [fitted_model.term_inference(n) for n in ("age", "region", "density")]
+        fig = plot_relativities(terms)
         assert isinstance(fig, Figure)
 
     def test_ncols_parameter(self, fitted_model):
@@ -154,17 +154,17 @@ class TestPlotRelativities:
         from matplotlib.figure import Figure
 
         X, y, exposure = sample_data
-        rels = fitted_model.relativities()
-        fig = plot_relativities(rels, X=X, exposure=exposure)
+        terms = [fitted_model.term_inference(n) for n in ("age", "region", "density")]
+        fig = plot_relativities(terms, X=X, exposure=exposure)
         assert isinstance(fig, Figure)
 
-    def test_empty_dict(self):
+    def test_empty_list(self):
         import matplotlib
 
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        fig = plot_relativities({})
+        fig = plot_relativities([])
         assert isinstance(fig, Figure)
 
     def test_plot_with_ci(self, fitted_model):
@@ -321,14 +321,14 @@ class TestPlotRelativitiesNew:
         )
         assert not has_poly, "No bands expected when with_ci=False"
 
-    def test_legacy_dict_api(self, fitted_model):
+    def test_standalone_term_list(self, fitted_model):
         import matplotlib
 
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        rels = fitted_model.relativities()
-        fig = plot_relativities(rels)
+        terms = [fitted_model.term_inference(n) for n in ("age", "region", "density")]
+        fig = plot_relativities(terms)
         assert isinstance(fig, Figure)
 
     def test_mixed_features(self, sample_data, fitted_model):
@@ -358,14 +358,15 @@ class TestPlotRelativitiesNew:
         ]
         assert len(cat_axes) >= 1, "Categorical panel should have visible level labels on x-axis"
 
-        # Numeric panel: continuous flat line — has a density strip below
+        # Density strips: axes with PolyCollection + ylim near [0, 1.05] + no yticks
         density_strips = [
             ax
             for ax in visible
             if any(isinstance(c, mcoll.PolyCollection) for c in ax.get_children())
-            and ax.get_xlabel() == "density"
+            and len(ax.get_yticks()) == 0
         ]
-        assert len(density_strips) >= 1, "Numeric term should have an exposure density strip"
+        # At least 2 density strips: one for spline (age), one for numeric (density)
+        assert len(density_strips) >= 2, f"Expected >= 2 density strips, got {len(density_strips)}"
 
 
 class TestPlotRelativity:
@@ -466,6 +467,15 @@ class TestPlotRelativity:
         ax2 = fig.get_axes()[1]
         assert ax2.get_ylabel() == "Weight"
         assert len(ax2.get_yticks()) > 0
+        ti = fitted_model.term_inference("region")
+        expected = (
+            pd.DataFrame({"level": X["region"], "weight": exposure})
+            .groupby("level", sort=False)["weight"]
+            .sum()
+        )
+        expected_vals = np.array([expected.get(level, 0.0) for level in ti.levels], dtype=float)
+        heights = np.array([patch.get_height() for patch in ax2.patches], dtype=float)
+        np.testing.assert_allclose(heights, expected_vals)
 
     def test_numeric_returns_figure(self, fitted_model):
         import matplotlib
