@@ -147,6 +147,13 @@ def _compute_fit_stats(
 
 
 class SuperGLM:
+    """Penalised generalised linear model with splines, group penalties, and REML.
+
+    Supports Poisson, Gamma, NB2, and Tweedie families with group lasso,
+    sparse group lasso, or ridge penalties.  Smoothing parameters can be
+    estimated via REML (``fit_reml``) or cross-validation (``fit_cv``).
+    """
+
     def __init__(
         self,
         family: str | Distribution = "poisson",
@@ -173,6 +180,57 @@ class SuperGLM:
         discrete: bool = False,
         n_bins: int | dict[str, int] = 256,
     ):
+        """
+        Parameters
+        ----------
+        family : str or Distribution
+            Response distribution. One of ``"poisson"``, ``"gamma"``,
+            ``"tweedie"``, ``"negative_binomial"``, or a Distribution object.
+        link : str or Link, optional
+            Link function. Defaults to the family's canonical link (log).
+        penalty : str or Penalty, optional
+            Penalty type. One of ``"group_lasso"``, ``"sparse_group_lasso"``,
+            ``"group_elastic_net"``, ``"ridge"``, or a Penalty object.
+            Defaults to ``GroupLasso(lambda1=lambda1)``.
+        lambda1 : float, optional
+            Regularisation strength for the group penalty.  ``None`` (default)
+            auto-calibrates to 10% of lambda_max at fit time.  Set to ``0.0``
+            for unpenalised / REML-only fits.
+        lambda2 : float
+            Ridge shrinkage applied within each group (only used by
+            ``GroupElasticNet``).
+        tweedie_p : float, optional
+            Power parameter for ``family="tweedie"``.  Must be in (1, 2).
+        nb_theta : float, optional
+            Overdispersion parameter for ``family="negative_binomial"``.
+        features : dict[str, FeatureSpec], optional
+            Explicit feature specifications mapping column names to feature
+            objects (``Spline``, ``Categorical``, ``Numeric``, ``Polynomial``).
+            Mutually exclusive with *splines*.
+        splines : list[str], optional
+            Column names to treat as splines in auto-detect mode.  All other
+            columns are auto-detected as categorical or numeric.
+            Mutually exclusive with *features*.
+        n_knots : int or list[int]
+            Number of interior knots for auto-detect splines.
+        degree : int
+            B-spline degree for auto-detect splines.
+        categorical_base : str
+            Base level strategy for auto-detected categoricals.
+        standardize_numeric : bool
+            Whether to standardize auto-detected numeric features.
+        interactions : list[tuple[str, str]], optional
+            Pairs of feature names to interact.  Interaction type is
+            auto-detected from the parent feature specs.
+        anderson_memory : int
+            Anderson acceleration memory for the BCD solver (0 = off).
+        active_set : bool
+            Use active-set cycling in the BCD solver.
+        discrete : bool
+            Use discretized basis matrices for large-*n* REML (fREML-style).
+        n_bins : int or dict[str, int]
+            Number of discretization bins per feature when ``discrete=True``.
+        """
         if features is not None and splines is not None:
             raise ValueError(
                 "Cannot set both 'features' and 'splines'. "
@@ -1320,6 +1378,10 @@ class SuperGLM:
 
     @property
     def result(self) -> PIRLSResult:
+        """The fitted PIRLS result (coefficients, deviance, convergence info).
+
+        Raises ``RuntimeError`` if the model has not been fitted.
+        """
         if self._result is None:
             raise RuntimeError("Not fitted")
         return self._result
@@ -1548,6 +1610,19 @@ class SuperGLM:
         return [g for g in self._groups if g.feature_name == name]
 
     def reconstruct_feature(self, name: str) -> dict[str, Any]:
+        """Reconstruct a fitted feature's curve or effect on its original scale.
+
+        Parameters
+        ----------
+        name : str
+            Feature or interaction name.
+
+        Returns
+        -------
+        dict[str, Any]
+            Feature-type-specific reconstruction (e.g. grid values,
+            relativity curve, knot positions).
+        """
         res = self.result
         groups = self._feature_groups(name)
         beta_combined = np.concatenate([res.beta[g.sl] for g in groups])
@@ -2168,6 +2243,21 @@ class SuperGLM:
         return discretization_impact(self, X, y, exposure, **kwargs)
 
     def predict(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+        """Predict the response mean for new data.
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            Input features with the same columns used during fitting.
+        offset : NDArray or None
+            Optional offset added to the linear predictor before
+            applying the inverse link.
+
+        Returns
+        -------
+        NDArray
+            Predicted mean on the response scale (inverse-link of eta).
+        """
         blocks = []
         for name in self._feature_order:
             spec = self._specs[name]

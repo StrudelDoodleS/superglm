@@ -1,0 +1,82 @@
+site_name: SuperGLM
+site_description: Penalised GLMs for insurance pricing
+site_author: Max Hicks
+repo_url: https://github.com/StrudelDoodleS/superglm
+repo_name: StrudelDoodleS/superglm
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+  - attr_list
+  - md_in_html
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            heading_level: 3
+            members_order: source
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            docstring_style: numpy
+            merge_init_into_class: true
+            show_if_no_docstring: false
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+  - User Guide:
+    - Feature Types: guide/features.md
+    - Fitting Modes: guide/fitting.md
+    - Families & Dispersion: guide/families.md
+    - Interactions: guide/interactions.md
+    - Inspecting Results: guide/results.md
+  - API Reference:
+    - SuperGLM: api/model.md
+    - Features: api/features.md
+    - Families: api/families.md
+    - Penalties: api/penalties.md
+    - Inference: api/inference.md
+    - Plotting: api/plotting.md

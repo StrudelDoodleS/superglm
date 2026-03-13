@@ -31,6 +31,7 @@ class Numeric:
         x: NDArray[np.floating],
         exposure: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
+        """Build a single-column design matrix, optionally standardizing *x*."""
         x = np.asarray(x, dtype=np.float64).ravel()
         if self.standardize:
             self._mean = float(np.mean(x))
@@ -48,6 +49,7 @@ class Numeric:
         return x.reshape(-1, 1)
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
+        """Back-transform the standardized coefficient to original scale."""
         b = float(beta[0])
         if self.standardize:
             b_orig = b / self._std

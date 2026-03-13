@@ -57,16 +57,19 @@ class Polynomial:
         x: NDArray[np.floating],
         exposure: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
+        """Build Legendre basis columns after learning min/max from *x*."""
         x = np.asarray(x, dtype=np.float64).ravel()
         self._lo, self._hi = float(x.min()), float(x.max())
         cols = self._basis(self._scale(x))
         return GroupInfo(columns=cols, n_cols=self.degree)
 
     def transform(self, x: NDArray) -> NDArray:
+        """Scale *x* using fitted min/max and return the Legendre basis matrix."""
         x = np.asarray(x, dtype=np.float64).ravel()
         return self._basis(self._scale(x))
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
+        """Evaluate the fitted polynomial on a grid and return relativities."""
         x_grid = np.linspace(self._lo, self._hi, n_points)
         P_grid = self._basis(self._scale(x_grid))
         log_rels = P_grid @ beta
