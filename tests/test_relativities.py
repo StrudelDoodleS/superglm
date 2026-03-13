@@ -307,15 +307,34 @@ class TestPlotRelativitiesNew:
         fig = plot_relativities(rels)
         assert isinstance(fig, Figure)
 
-    def test_mixed_features(self, fitted_model):
+    def test_mixed_features(self, sample_data, fitted_model):
         import matplotlib
 
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
+        X, y, exposure = sample_data
         # fitted_model has spline (age), categorical (region), numeric (density)
-        fig = fitted_model.plot_relativities()
+        fig = fitted_model.plot_relativities(X=X, exposure=exposure, show_exposure=True)
         assert isinstance(fig, Figure)
-        # At least 3 visible panels
+
         visible = [ax for ax in fig.get_axes() if ax.get_visible()]
-        assert len(visible) >= 3
+        # Spline (age): main panel + density strip = 2 visible axes
+        # Categorical (region): 1 visible main panel (no density strip)
+        # Numeric (density): 1 visible main panel (no density strip)
+        # Total: at least 4
+        assert len(visible) >= 4, f"Expected >= 4 visible axes, got {len(visible)}"
+
+        # Categorical panel must have readable y-tick labels (level names)
+        cat_axes = [
+            ax
+            for ax in visible
+            if any(t.get_text() in ("A", "B", "C") for t in ax.get_yticklabels())
+        ]
+        assert len(cat_axes) >= 1, "Categorical panel should have visible level labels"
+
+        # Numeric panel must have readable y-tick labels
+        num_axes = [
+            ax for ax in visible if any(t.get_text() == "per_unit" for t in ax.get_yticklabels())
+        ]
+        assert len(num_axes) >= 1, "Numeric panel should have visible labels"

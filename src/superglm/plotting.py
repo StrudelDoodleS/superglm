@@ -395,12 +395,19 @@ def _plot_relativities_new(
         density_axes = []
         for idx in range(n):
             r, c = divmod(idx, ncols)
+            ti = terms[idx]
+            uses_strip = ti.kind in ("spline", "polynomial") and ti.name in X.columns
             ax_main = fig.add_subplot(gs[r * 2, c])
-            ax_den = fig.add_subplot(gs[r * 2 + 1, c], sharex=ax_main)
+            if uses_strip:
+                ax_den = fig.add_subplot(gs[r * 2 + 1, c], sharex=ax_main)
+                # Hide x labels on main panel — density strip shows them
+                plt.setp(ax_main.get_xticklabels(), visible=False)
+            else:
+                # No density strip — merge the two rows visually
+                ax_den = fig.add_subplot(gs[r * 2 + 1, c])
+                ax_den.set_visible(False)
             main_axes.append(ax_main)
             density_axes.append(ax_den)
-            # Hide x labels on main panel (shared with density)
-            plt.setp(ax_main.get_xticklabels(), visible=False)
 
         # Hide unused grid cells
         for idx in range(n, nrows * ncols):
@@ -429,28 +436,18 @@ def _plot_relativities_new(
             if idx % ncols == 0:
                 ax.set_ylabel("Relativity")
 
-            # Density strip
-            needs_density = (
-                has_density and ti.kind in ("spline", "polynomial") and ti.name in X.columns
-            )
-            if ax_den is not None:
-                if needs_density:
-                    knots = ti.spline.interior_knots if ti.spline is not None else None
-                    _plot_density_strip(ax_den, ti.name, X, exposure, ti.x, show_knots, knots)
-                    if idx % ncols == 0:
-                        ax_den.set_ylabel("Exposure\ndensity", fontsize=8)
-                else:
-                    ax_den.set_visible(False)
+            # Density strip (only when ax_den is visible — set up in layout phase)
+            if ax_den is not None and ax_den.get_visible():
+                knots = ti.spline.interior_knots if ti.spline is not None else None
+                _plot_density_strip(ax_den, ti.name, X, exposure, ti.x, show_knots, knots)
+                if idx % ncols == 0:
+                    ax_den.set_ylabel("Exposure\ndensity", fontsize=8)
 
         elif ti.kind == "categorical":
             _plot_categorical_panel(ax, ti, interval)
-            if ax_den is not None:
-                ax_den.set_visible(False)
 
         elif ti.kind == "numeric":
             _plot_numeric_panel(ax, ti, interval)
-            if ax_den is not None:
-                ax_den.set_visible(False)
 
         else:
             ax.set_visible(False)
