@@ -309,6 +309,7 @@ class TestPlotRelativitiesNew:
 
     def test_mixed_features(self, sample_data, fitted_model):
         import matplotlib
+        import matplotlib.collections as mcoll
 
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
@@ -319,11 +320,11 @@ class TestPlotRelativitiesNew:
         assert isinstance(fig, Figure)
 
         visible = [ax for ax in fig.get_axes() if ax.get_visible()]
-        # Spline (age): main panel + density strip = 2 visible axes
-        # Categorical (region): 1 visible main panel (no density strip)
-        # Numeric (density): 1 visible main panel (no density strip)
-        # Total: at least 4
-        assert len(visible) >= 4, f"Expected >= 4 visible axes, got {len(visible)}"
+        # Spline (age): main + density strip = 2 visible
+        # Categorical (region): 1 visible (spans both rows, no hidden stub)
+        # Numeric (density): main + density strip = 2 visible
+        # Total: 5 visible (+ 1 hidden for the unused grid cell at [1,1])
+        assert len(visible) >= 5, f"Expected >= 5 visible axes, got {len(visible)}"
 
         # Categorical panel must have readable y-tick labels (level names)
         cat_axes = [
@@ -338,3 +339,15 @@ class TestPlotRelativitiesNew:
             ax for ax in visible if any(t.get_text() == "per_unit" for t in ax.get_yticklabels())
         ]
         assert len(num_axes) >= 1, "Numeric panel should have visible labels"
+
+        # Numeric (density) should have a density strip (PolyCollection in a lower axis)
+        num_main = num_axes[0]
+        # Find density strip axis: visible, has PolyCollection, is NOT the main numeric panel
+        density_strips = [
+            ax
+            for ax in visible
+            if ax is not num_main
+            and any(isinstance(c, mcoll.PolyCollection) for c in ax.get_children())
+            and ax.get_xlabel() == "density"
+        ]
+        assert len(density_strips) >= 1, "Numeric term should have an exposure density strip"

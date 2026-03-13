@@ -373,8 +373,9 @@ def _plot_relativities_new(
     nrows = math.ceil(n / ncols)
 
     has_density = show_exposure and X is not None and exposure is not None
+    _CONTINUOUS_KINDS = ("spline", "polynomial", "numeric")
     any_density = has_density and any(
-        ti.kind in ("spline", "polynomial") and ti.name in X.columns for ti in terms
+        ti.kind in _CONTINUOUS_KINDS and ti.name in X.columns for ti in terms
     )
 
     if any_density:
@@ -396,24 +397,23 @@ def _plot_relativities_new(
         for idx in range(n):
             r, c = divmod(idx, ncols)
             ti = terms[idx]
-            uses_strip = ti.kind in ("spline", "polynomial") and ti.name in X.columns
-            ax_main = fig.add_subplot(gs[r * 2, c])
+            uses_strip = ti.kind in _CONTINUOUS_KINDS and ti.name in X.columns
             if uses_strip:
-                ax_den = fig.add_subplot(gs[r * 2 + 1, c], sharex=ax_main)
+                ax_main = fig.add_subplot(gs[r * 2, c])
+                ax_den = fig.add_subplot(gs[r * 2 + 1, c])
                 # Hide x labels on main panel — density strip shows them
                 plt.setp(ax_main.get_xticklabels(), visible=False)
             else:
-                # No density strip — merge the two rows visually
-                ax_den = fig.add_subplot(gs[r * 2 + 1, c])
-                ax_den.set_visible(False)
+                # No density strip — span both rows to reclaim the space
+                ax_main = fig.add_subplot(gs[r * 2 : r * 2 + 2, c])
+                ax_den = None
             main_axes.append(ax_main)
             density_axes.append(ax_den)
 
         # Hide unused grid cells
         for idx in range(n, nrows * ncols):
             r, c = divmod(idx, ncols)
-            fig.add_subplot(gs[r * 2, c]).set_visible(False)
-            fig.add_subplot(gs[r * 2 + 1, c]).set_visible(False)
+            fig.add_subplot(gs[r * 2 : r * 2 + 2, c]).set_visible(False)
     else:
         # Simple single-row layout
         if figsize is None:
@@ -436,8 +436,7 @@ def _plot_relativities_new(
             if idx % ncols == 0:
                 ax.set_ylabel("Relativity")
 
-            # Density strip (only when ax_den is visible — set up in layout phase)
-            if ax_den is not None and ax_den.get_visible():
+            if ax_den is not None:
                 knots = ti.spline.interior_knots if ti.spline is not None else None
                 _plot_density_strip(ax_den, ti.name, X, exposure, ti.x, show_knots, knots)
                 if idx % ncols == 0:
@@ -449,10 +448,15 @@ def _plot_relativities_new(
         elif ti.kind == "numeric":
             _plot_numeric_panel(ax, ti, interval)
 
+            if ax_den is not None:
+                x_vals = X[ti.name].to_numpy(dtype=np.float64)
+                grid = np.linspace(x_vals.min(), x_vals.max(), 200)
+                _plot_density_strip(ax_den, ti.name, X, exposure, grid, False, None)
+                if idx % ncols == 0:
+                    ax_den.set_ylabel("Exposure\ndensity", fontsize=8)
+
         else:
             ax.set_visible(False)
-            if ax_den is not None:
-                ax_den.set_visible(False)
 
     # ── Figure-level legend ──
     legend_handles = []
