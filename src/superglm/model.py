@@ -65,7 +65,7 @@ from superglm.solvers.irls_direct import (
     fit_irls_direct,
 )
 from superglm.solvers.pirls import PIRLSResult, fit_pirls
-from superglm.types import FeatureSpec, GroupSlice
+from superglm.types import FeatureSpec, FitStats, GroupSlice
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +88,62 @@ class PathResult:
     n_iter_path: NDArray  # shape (n_lambda,) — PIRLS iters per lambda
     converged_path: NDArray  # shape (n_lambda,) — bool
     edf_path: NDArray | None = None  # shape (n_lambda,) — effective df
+
+
+def _compute_fit_stats(
+    y: NDArray,
+    mu: NDArray,
+    weights: NDArray,
+    offset: NDArray | None,
+    distribution: Distribution,
+    link: Link,
+    phi: float,
+) -> FitStats:
+    """Compute scalar fit statistics from training arrays.
+
+    Called once at end of fit()/fit_reml() while y/mu are still in scope,
+    so that summary() never needs to cache the full training arrays.
+    """
+    ll = distribution.log_likelihood(y, mu, weights, phi)
+
+    # Null model (intercept-only MLE), offset-aware
+    y_bar = float(np.average(y, weights=weights))
+    y_bar = max(y_bar, 1e-10)
+
+    if offset is None or np.all(offset == 0):
+        null_mu = np.full(len(y), y_bar)
+    else:
+        b0 = link.link(y_bar) - float(np.average(offset, weights=weights))
+        for _ in range(25):
+            eta_null = b0 + offset
+            mu_null = link.inverse(np.clip(eta_null, -20, 20))
+            dmu = link.deriv_inverse(np.clip(eta_null, -20, 20))
+            V = distribution.variance(mu_null)
+            score = np.sum(weights * (y - mu_null) * dmu / V)
+            info = np.sum(weights * dmu**2 / V)
+            step = score / max(info, 1e-10)
+            b0 += step
+            if abs(step) < 1e-8:
+                break
+        eta_null = b0 + offset
+        null_mu = np.maximum(link.inverse(np.clip(eta_null, -20, 20)), 1e-10)
+
+    null_ll = distribution.log_likelihood(y, null_mu, weights, phi)
+    null_dev = float(np.sum(weights * distribution.deviance_unit(y, null_mu)))
+    dev = float(np.sum(weights * distribution.deviance_unit(y, mu)))
+    expl_dev = 1.0 - dev / null_dev if null_dev > 0 else 0.0
+
+    V = distribution.variance(mu)
+    pearson = float(np.sum(weights * (y - mu) ** 2 / V))
+
+    return FitStats(
+        log_likelihood=ll,
+        null_log_likelihood=null_ll,
+        null_deviance=null_dev,
+        explained_deviance=expl_dev,
+        pearson_chi2=pearson,
+        n_obs=len(y),
+    )
 
 
 class SuperGLM:
@@ -147,8 +203,7 @@ class SuperGLM:
         self._dm: DesignMatrix | None = None
         self._fit_weights: NDArray | None = None
         self._fit_offset: NDArray | None = None
-        self._train_y: NDArray | None = None
-        self._train_mu: NDArray | None = None
+        self._fit_stats: FitStats | None = None
         self._nb_profile_result = None  # NBProfileResult, set by estimate_theta()
         self._tweedie_profile_result = None  # TweedieProfileResult, set by estimate_tweedie_p()
         self._last_fit_meta: dict[str, Any] | None = None
@@ -420,8 +475,9 @@ class SuperGLM:
         if self.penalty.lambda1 is None:
             self.penalty.lambda1 = self._compute_lambda_max(y, exposure) * 0.1
 
-        # Invalidate cached covariance from previous fit
+        # Invalidate cached properties from previous fit
         self.__dict__.pop("_coef_covariance", None)
+        self.__dict__.pop("_fit_active_info", None)
 
         # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed)
         if self.penalty.lambda1 is not None and self.penalty.lambda1 == 0:
@@ -467,8 +523,11 @@ class SuperGLM:
         eta = self._dm.matvec(self._result.beta) + self._result.intercept
         if offset is not None:
             eta = eta + offset
-        self._train_y = np.array(y)  # copy: caller mutation must not affect summary
-        self._train_mu = self._link.inverse(eta)
+        mu = self._link.inverse(eta)
+
+        self._fit_stats = _compute_fit_stats(
+            y, mu, exposure, offset, self._distribution, self._link, self._result.phi
+        )
 
         self._last_fit_meta = {"method": "fit", "discrete": self._discrete}
         return self
@@ -498,6 +557,7 @@ class SuperGLM:
         exposure = self._fit_weights
         offset = self._fit_offset
         self.__dict__.pop("_coef_covariance", None)
+        self.__dict__.pop("_fit_active_info", None)
         lambda_max = self._compute_lambda_max(y, exposure)
 
         if lambda_seq is None:
@@ -637,6 +697,7 @@ class SuperGLM:
         exposure = self._fit_weights
         offset = self._fit_offset
         self.__dict__.pop("_coef_covariance", None)
+        self.__dict__.pop("_fit_active_info", None)
 
         # Lambda sequence from full data
         lambda_max = self._compute_lambda_max(y, exposure)
@@ -1074,6 +1135,7 @@ class SuperGLM:
         exposure = self._fit_weights
         offset = self._fit_offset
         self.__dict__.pop("_coef_covariance", None)
+        self.__dict__.pop("_fit_active_info", None)
 
         # Auto-calibrate lambda1 if not set
         if self.penalty.lambda1 is None:
@@ -1245,8 +1307,11 @@ class SuperGLM:
         eta = self._dm.matvec(self._result.beta) + self._result.intercept
         if offset is not None:
             eta = eta + offset
-        self._train_y = np.array(y)
-        self._train_mu = self._link.inverse(eta)
+        mu = self._link.inverse(eta)
+
+        self._fit_stats = _compute_fit_stats(
+            y, mu, exposure, offset, self._distribution, self._link, self._result.phi
+        )
 
         self._last_fit_meta = {"method": "fit_reml", "discrete": self._discrete}
 
@@ -1301,7 +1366,7 @@ class SuperGLM:
     def summary(self, alpha: float = 0.05):
         """Rich model summary with coefficient table (statsmodels-style).
 
-        Uses cached training data so no ``X`` / ``y`` arguments are needed.
+        Uses cached fit statistics so no ``X`` / ``y`` arguments are needed.
         For diagnostics on a different sample, use ``model.metrics(X, y).summary()``.
 
         Parameters
@@ -1315,19 +1380,140 @@ class SuperGLM:
             Object with ``__str__`` (ASCII), ``_repr_html_`` (HTML/Jupyter),
             and dict-like access for backward compatibility.
         """
-        from superglm.metrics import ModelMetrics
+        import re
 
-        if self._train_y is None or self._train_mu is None:
-            raise RuntimeError("No cached training data — call fit() or fit_reml() first.")
+        from superglm.metrics import build_coef_rows
+        from superglm.summary import ModelSummary
 
-        m = ModelMetrics(
-            self,
-            y=self._train_y,
-            exposure=self._fit_weights,
-            offset=self._fit_offset,
-            _mu=self._train_mu,
+        if self._fit_stats is None:
+            raise RuntimeError("No fit stats — call fit() or fit_reml() first.")
+
+        fs = self._fit_stats
+        res = self.result
+        edf = res.effective_df
+        n = fs.n_obs
+        ll = fs.log_likelihood
+
+        # Derived ICs
+        aic = -2 * ll + 2 * edf
+        bic = -2 * ll + np.log(n) * edf
+        denom = n - edf - 1.0
+        aicc = aic + 2 * edf * (edf + 1) / denom if denom > 0 else np.inf
+        n_active = sum(1 for g in self._groups if np.linalg.norm(res.beta[g.sl]) > 1e-12)
+        p_total = len(self._groups)
+        from scipy.special import gammaln
+
+        ebic = bic + 2 * 0.5 * (
+            gammaln(p_total + 1) - gammaln(n_active + 1) - gammaln(p_total - n_active + 1)
         )
-        return m.summary(alpha=alpha)
+
+        data = {
+            "information_criteria": {
+                "log_likelihood": ll,
+                "null_log_likelihood": fs.null_log_likelihood,
+                "aic": aic,
+                "bic": bic,
+                "aicc": aicc,
+                "ebic": ebic,
+            },
+            "deviance": {
+                "deviance": res.deviance,
+                "null_deviance": fs.null_deviance,
+                "explained_deviance": fs.explained_deviance,
+            },
+            "fit": {
+                "phi": res.phi,
+                "effective_df": edf,
+                "pearson_chi2": fs.pearson_chi2,
+                "n_obs": n,
+                "n_active_groups": n_active,
+            },
+        }
+
+        # Model info (same structure as ModelMetrics.summary())
+        penalty = self.penalty
+        link_name = type(self._link).__name__
+        if link_name.endswith("Link"):
+            link_name = link_name[:-4]
+        penalty_name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", type(penalty).__name__)
+
+        model_info = {
+            "family": type(self._distribution).__name__,
+            "link": link_name,
+            "penalty": penalty_name,
+            "n_obs": n,
+            "effective_df": edf,
+            "lambda1": penalty.lambda1,
+            "phi": res.phi,
+            "deviance": res.deviance,
+            "log_likelihood": ll,
+            "aic": aic,
+            "converged": res.converged,
+            "n_iter": res.n_iter,
+        }
+
+        # NB theta profile info
+        nb_pr = getattr(self, "_nb_profile_result", None)
+        if nb_pr is not None:
+            ci = nb_pr.ci(alpha=alpha)
+            model_info["nb_theta"] = nb_pr.theta_hat
+            model_info["nb_theta_ci"] = ci
+            model_info["nb_theta_method"] = "Profile (exact)"
+
+        # Tweedie p profile info
+        tw_pr = getattr(self, "_tweedie_profile_result", None)
+        if tw_pr is not None:
+            ci = tw_pr.ci(alpha=alpha)
+            model_info["tweedie_p"] = tw_pr.p_hat
+            model_info["tweedie_p_ci"] = ci
+            model_info["tweedie_phi"] = tw_pr.phi_hat
+            model_info["tweedie_p_method"] = "Profile (exact)"
+
+        # Coef rows from shared builder
+        X_a, W, XtWX_inv, active_groups = self._fit_active_info
+        known_scale = getattr(self._distribution, "scale_known", True)
+        coef_rows = build_coef_rows(
+            groups=self._groups,
+            specs=self._specs,
+            interaction_specs=self._interaction_specs,
+            result=res,
+            X_a=X_a,
+            W=W,
+            XtWX_inv=XtWX_inv,
+            active_groups=active_groups,
+            known_scale=known_scale,
+            group_edf_map=self._group_edf,
+            reml_lambdas=getattr(self, "_reml_lambdas", None),
+            lambda2=self.lambda2,
+            n_obs=n,
+            alpha=alpha,
+        )
+
+        # Standard errors for backward compat dict access
+        phi = res.phi
+        se_dict: dict[str, NDArray] = {}
+        se_raw_dict: dict[str, NDArray] = {}
+        beta = res.beta
+        for g in self._groups:
+            if np.linalg.norm(beta[g.sl]) < 1e-12:
+                se_dict[g.name] = np.zeros(g.size)
+                se_raw_dict[g.name] = np.zeros(g.size)
+            else:
+                ag = next((a for a in active_groups if a.name == g.name), None)
+                if ag is None:
+                    se_dict[g.name] = np.zeros(g.size)
+                    se_raw_dict[g.name] = np.zeros(g.size)
+                else:
+                    var_diag = np.diag(XtWX_inv[ag.sl, ag.sl])
+                    se_raw_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
+                    se_dict[g.name] = np.sqrt(np.maximum(phi * var_diag, 0.0))
+
+        data["standard_errors"] = {
+            "coefficient_se": se_dict,
+            "coefficient_se_raw": se_raw_dict,
+        }
+
+        return ModelSummary(data, model_info, coef_rows, alpha=alpha)
 
     def _feature_groups(self, name: str) -> list[GroupSlice]:
         """Get all groups belonging to a feature (1 normally, 2 for split-linear splines)."""
@@ -1401,6 +1587,29 @@ class SuperGLM:
             self._fit_offset,
             lam2,
         )
+
+    @cached_property
+    def _fit_active_info(self) -> tuple[NDArray, NDArray, NDArray, list[GroupSlice]]:
+        """Active design columns, weights, and (X'WX+S)^{-1} from fit state.
+
+        Same computation as ``ModelMetrics._active_info`` but recomputes mu
+        from beta so no cached ``_train_mu`` is needed.
+        """
+        from superglm.metrics import _penalised_xtwx_inv
+
+        eta = self._dm.matvec(self.result.beta) + self.result.intercept
+        if self._fit_offset is not None:
+            eta = eta + self._fit_offset
+        mu = self._link.inverse(np.clip(eta, -20, 20))
+        V = self._distribution.variance(mu)
+        dmu_deta = self._link.deriv_inverse(np.clip(eta, -20, 20))
+        W = self._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
+
+        lam2 = getattr(self, "_reml_lambdas", None) or self.lambda2
+        X_a, XtWX_inv, active_groups, _ = _penalised_xtwx_inv(
+            self.result.beta, W, self._dm.group_matrices, self._groups, lam2
+        )
+        return X_a, W, XtWX_inv, active_groups
 
     def estimate_p(
         self,

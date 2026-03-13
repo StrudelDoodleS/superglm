@@ -1101,7 +1101,7 @@ class TestModelSummaryAPI:
 
     def test_summary_before_fit_raises(self):
         model = SuperGLM(family="poisson", features={"x": Numeric()})
-        with pytest.raises(RuntimeError, match="No cached training data"):
+        with pytest.raises(RuntimeError, match="No fit stats"):
             model.summary()
 
     def test_summary_immune_to_caller_mutation(self, fitted):
@@ -1114,3 +1114,49 @@ class TestModelSummaryAPI:
 
         ll_after = model.summary()["information_criteria"]["log_likelihood"]
         assert ll_before == ll_after
+
+    def test_no_train_y_or_train_mu_after_fit(self, fitted):
+        """After refactor, model should not have _train_y or _train_mu."""
+        model, _, _ = fitted
+        assert not hasattr(model, "_train_y")
+        assert not hasattr(model, "_train_mu")
+
+    def test_summary_after_fit_reml(self):
+        """model.summary() works after fit_reml()."""
+        from superglm.summary import ModelSummary
+
+        rng = np.random.default_rng(42)
+        n = 300
+        x = rng.uniform(0, 10, n)
+        mu = np.exp(0.5 + 0.1 * x)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0,
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+        model.fit_reml(X, y)
+        s = model.summary()
+        assert isinstance(s, ModelSummary)
+        assert "SuperGLM Results" in str(s)
+
+    def test_summary_has_fit_stats(self, fitted):
+        """model._fit_stats is populated after fit()."""
+        from superglm.types import FitStats
+
+        model, _, _ = fitted
+        assert model._fit_stats is not None
+        assert isinstance(model._fit_stats, FitStats)
+        assert model._fit_stats.n_obs > 0
+        assert np.isfinite(model._fit_stats.log_likelihood)
+        assert np.isfinite(model._fit_stats.null_deviance)
+        assert 0 <= model._fit_stats.explained_deviance <= 1
+
+    def test_summary_standard_errors_key(self, fitted):
+        """model.summary() includes standard_errors for backward compat."""
+        model, _, _ = fitted
+        s = model.summary()
+        assert "standard_errors" in s
+        assert "coefficient_se" in s["standard_errors"]
+        assert "coefficient_se_raw" in s["standard_errors"]
