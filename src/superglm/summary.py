@@ -248,7 +248,9 @@ class ModelSummary:
                         f"chi2({df_str})={row.wald_chi2:.1f}, "
                         f"p={p_str}]"
                     )
-                    lines.append(f"{row.name:<{name_w}s}  {spline_text} {stars:<3s}")
+                    prefix = f"{row.name:<{name_w}s}  {spline_text} "
+                    pad = max(table_w - len(prefix) - 3, 0)
+                    lines.append(f"{prefix}{'':<{pad}s}{stars:<3s}")
                     if detail_str:
                         lines.append(f"{'':<{name_w}s}    {detail_str}")
                 elif row.active:
