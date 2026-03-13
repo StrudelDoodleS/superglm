@@ -4,7 +4,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Numeric, Spline, SuperGLM, plot_relativities, plot_term
+from superglm import (
+    Categorical,
+    Numeric,
+    Polynomial,
+    Spline,
+    SuperGLM,
+    plot_relativities,
+    plot_term,
+)
 
 
 @pytest.fixture
@@ -35,6 +43,22 @@ def fitted_model(sample_data):
     )
     model.fit(X, y, exposure=exposure)
     return model
+
+
+@pytest.fixture
+def polynomial_model():
+    rng = np.random.default_rng(123)
+    n = 400
+    age = rng.uniform(18, 90, n)
+    exposure = rng.uniform(0.4, 1.2, n)
+    age_s = (age - 50.0) / 20.0
+    mu = np.exp(-1.8 + 0.35 * age_s - 0.25 * age_s**2)
+    y = rng.poisson(mu * exposure).astype(float)
+    X = pd.DataFrame({"age": age})
+
+    model = SuperGLM(features={"age": Polynomial(degree=2)})
+    model.fit(X, y, exposure=exposure)
+    return X, exposure, model
 
 
 class TestRelativities:
@@ -477,3 +501,24 @@ class TestPlotRelativity:
         ti = fitted_model.term_inference("age")
         fig = plot_term(ti)
         assert isinstance(fig, Figure)
+
+    def test_polynomial_returns_figure(self, polynomial_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        X, exposure, model = polynomial_model
+        fig = model.plot_relativity("age", X=X, exposure=exposure)
+        assert isinstance(fig, Figure)
+
+    def test_polynomial_term_inference_matches_grid(self, polynomial_model):
+        X, _, model = polynomial_model
+        ti = model.term_inference("age")
+
+        assert ti.kind == "polynomial"
+        assert ti.x is not None
+        assert ti.se_log_relativity is not None
+        assert len(ti.x) == len(ti.relativity) == len(ti.se_log_relativity)
+        assert ti.x.min() == pytest.approx(X["age"].min())
+        assert ti.x.max() == pytest.approx(X["age"].max())
