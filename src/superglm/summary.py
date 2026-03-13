@@ -224,22 +224,19 @@ class ModelSummary:
 
             if row.is_spline:
                 has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
-                # Build metadata suffix: edf, lambda
-                meta_parts = []
+                # Build detail line: edf, lambda, curve SE
+                detail_parts = []
                 if row.edf is not None:
-                    meta_parts.append(f"edf={row.edf:.1f}")
+                    detail_parts.append(f"edf={row.edf:.1f}")
                 if row.smoothing_lambda is not None:
-                    meta_parts.append(f"lam={row.smoothing_lambda:.2g}")
-                meta_str = ", ".join(meta_parts)
-                if meta_str:
-                    meta_str = f", {meta_str}"
+                    detail_parts.append(f"lam={row.smoothing_lambda:.2g}")
+                if has_test and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
+                    detail_parts.append(f"curve SE: {row.curve_se_min:.2f}-{row.curve_se_max:.2f}")
+                detail_str = ", ".join(detail_parts)
 
                 if has_test:
                     p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "<0.001"
                     stars = _sig_stars(row.wald_p)
-                    se_str = ""
-                    if row.curve_se_min is not None and not np.isnan(row.curve_se_min):
-                        se_str = f", curve SE: {row.curve_se_min:.2f}-{row.curve_se_max:.2f}"
                     # Show fractional ref_df from Wood (2013) test
                     if row.ref_df is not None:
                         df_str = f"{row.ref_df:.1f}"
@@ -249,13 +246,17 @@ class ModelSummary:
                     spline_text = (
                         f"[{kind}, {row.n_params} params, "
                         f"chi2({df_str})={row.wald_chi2:.1f}, "
-                        f"p={p_str}{meta_str}{se_str}]"
+                        f"p={p_str}]"
                     )
                     lines.append(f"{row.name:<{name_w}s}  {spline_text} {stars:<3s}")
+                    if detail_str:
+                        lines.append(f"{'':<{name_w}s}    {detail_str}")
                 elif row.active:
                     kind = "linear" if row.subgroup_type == "linear" else "spline"
-                    spline_text = f"[{kind}, {row.n_params} params, active{meta_str}]"
+                    spline_text = f"[{kind}, {row.n_params} params, active]"
                     lines.append(f"{row.name:<{name_w}s}  {spline_text}")
+                    if detail_str:
+                        lines.append(f"{'':<{name_w}s}    {detail_str}")
                 else:
                     kind = "linear" if row.subgroup_type == "linear" else "spline"
                     spline_text = f"[{kind}, {row.n_params} params, inactive]"
@@ -396,22 +397,24 @@ class ModelSummary:
             if row.is_spline:
                 has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
                 kind = "linear" if row.subgroup_type == "linear" else "spline"
-                # Build metadata suffix: edf, lambda
-                meta_parts = []
+                # Build detail suffix: edf, lambda, curve SE
+                detail_parts = []
                 if row.edf is not None:
-                    meta_parts.append(f"edf={row.edf:.1f}")
+                    detail_parts.append(f"edf={row.edf:.1f}")
                 if row.smoothing_lambda is not None:
-                    meta_parts.append(f"&lambda;={row.smoothing_lambda:.2g}")
-                meta_str = ", ".join(meta_parts)
-                if meta_str:
-                    meta_str = f", {meta_str}"
+                    detail_parts.append(f"&lambda;={row.smoothing_lambda:.2g}")
+                if has_test and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
+                    detail_parts.append(
+                        f"curve SE: {row.curve_se_min:.2f}&ndash;{row.curve_se_max:.2f}"
+                    )
+                detail_str = ", ".join(detail_parts)
+                detail_html = (
+                    f"<br><span style='font-size:11px;'>{detail_str}</span>" if detail_str else ""
+                )
 
                 if has_test:
                     p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "&lt;0.001"
                     stars = _sig_stars(row.wald_p)
-                    se_str = ""
-                    if row.curve_se_min is not None and not np.isnan(row.curve_se_min):
-                        se_str = f", curve SE: {row.curve_se_min:.2f}&ndash;{row.curve_se_max:.2f}"
                     if row.ref_df is not None:
                         df_str = f"{row.ref_df:.1f}"
                     else:
@@ -419,7 +422,7 @@ class ModelSummary:
                     text = (
                         f"[{kind}, {row.n_params} params, "
                         f"&chi;&sup2;({df_str})={row.wald_chi2:.1f}, "
-                        f"p={p_str}{meta_str}{se_str}]"
+                        f"p={p_str}]{detail_html}"
                     )
                     parts.append(
                         f"<tr>"
@@ -430,7 +433,7 @@ class ModelSummary:
                         f"</tr>"
                     )
                 elif row.active:
-                    text = f"[{kind}, {row.n_params} params, active{meta_str}]"
+                    text = f"[{kind}, {row.n_params} params, active]{detail_html}"
                     parts.append(
                         f"<tr>"
                         f'<td style="{cell_l}">{row.name}</td>'
