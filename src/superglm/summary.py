@@ -143,33 +143,62 @@ class ModelSummary:
     # ── ASCII output ──────────────────────────────────────────────
 
     def __str__(self) -> str:
-        lines: list[str] = []
         info = self._info
         half = self._alpha / 2.0
         _fmt = self._fmt_scalar
 
-        # Compute table width from coefficient columns
+        # Compute content width from coefficient columns
         #   name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4)
         name_w = max(len(r.name) for r in self._coef_rows) if self._coef_rows else 10
         name_w = max(name_w, 10)
-        table_w = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4
+        W = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4  # content width
+        F = W + 2  # fill width (between border chars, includes padding spaces)
 
-        sep = "\u2550" * table_w
-        thin_sep = "\u2500" * table_w
+        # Box-drawing helpers
+        def _top(text: str = "") -> str:
+            if text:
+                pad = F - len(text)
+                left = pad // 2
+                right = pad - left
+                return f"\u2554{'\u2550' * left}{text}{'\u2550' * right}\u2557"
+            return f"\u2554{'\u2550' * F}\u2557"
 
-        lines.append(f"{'SuperGLM Results':^{table_w}}")
-        lines.append(sep)
+        def _mid() -> str:
+            return f"\u2560{'\u2550' * F}\u2563"
 
-        # Header key-value pairs (two columns stretching to table_w)
-        left_w = (table_w - 2) // 2
-        right_w = table_w - 2 - left_w
+        def _thin() -> str:
+            return f"\u255f{'\u2500' * F}\u2562"
+
+        def _group_sep(name: str) -> str:
+            label = f"\u2561 {name} \u255e"
+            label_cols = len(name) + 4
+            pad = F - label_cols
+            left = pad // 2
+            right = pad - left
+            return f"\u2560{'\u2550' * left}{label}{'\u2550' * right}\u2563"
+
+        def _row(text: str) -> str:
+            return f"\u2551 {text:<{W}s} \u2551"
+
+        def _bot() -> str:
+            return f"\u255a{'\u2550' * F}\u255d"
+
+        lines: list[str] = []
+
+        # Title
+        lines.append(_top(" SuperGLM Results "))
+
+        # Header key-value pairs
+        inner = W  # content space between "║ " and " ║"
+        left_w = (inner - 2) // 2
+        right_w = inner - 2 - left_w
         val_l = left_w - 20
         val_r = right_w - 20
 
         def _header_row(k1: str, v1: str, k2: str, v2: str) -> str:
             left = f"{k1 + ':':<20s}{v1:>{val_l}s}"
             right = f"{k2 + ':':<20s}{v2:>{val_r}s}"
-            return f"{left}  {right}"
+            return _row(f"{left}  {right}")
 
         rows = [
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
@@ -194,7 +223,7 @@ class ModelSummary:
 
         for k1, v1, k2, v2 in rows:
             lines.append(_header_row(k1, v1, k2, v2))
-        lines.append(sep)
+        lines.append(_mid())
 
         # Coefficient table header
         hdr = (
@@ -207,21 +236,18 @@ class ModelSummary:
             f"{f'{1 - half:.3f}' + ']':>9s}"
             f"{'':>4s}"
         )
-        lines.append(hdr)
-        lines.append(thin_sep)
+        lines.append(_row(hdr))
+        lines.append(_thin())
 
         # Coefficient rows with group separators
         prev_group = None
         for row in self._coef_rows:
-            # Emit group separator when the group changes
+            # Emit group separator when the group changes (blank rows for breathing room)
             if row.group and row.group != prev_group:
-                label = f"\u2524 {row.group} \u251c"
-                # Each box-drawing char is 1 column wide in monospace fonts
-                label_cols = len(row.group) + 4  # "┤ " + name + " ├"
-                pad = table_w - label_cols
-                left = pad // 2
-                right = pad - left
-                lines.append(f"{'\u2500' * left}{label}{'\u2500' * right}")
+                if prev_group is not None:
+                    lines.append(_row(""))
+                lines.append(_group_sep(row.group))
+                lines.append(_row(""))
             prev_group = row.group
 
             if row.is_spline:
@@ -239,7 +265,6 @@ class ModelSummary:
                 if has_test:
                     p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "<0.001"
                     stars = _sig_stars(row.wald_p)
-                    # Show fractional ref_df from Wood (2013) test
                     if row.ref_df is not None:
                         df_str = f"{row.ref_df:.1f}"
                     else:
@@ -251,52 +276,54 @@ class ModelSummary:
                         f"p={p_str}]"
                     )
                     prefix = f"{row.name:<{name_w}s}  {spline_text} "
-                    pad = max(table_w - len(prefix) - 3, 0)
-                    lines.append(f"{prefix}{'':<{pad}s}{stars:<3s}")
+                    pad = max(inner - len(prefix) - 3, 0)
+                    lines.append(_row(f"{prefix}{'':<{pad}s}{stars:<3s}"))
                     if detail_str:
-                        lines.append(f"{'':<{name_w}s}    {detail_str}")
+                        lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
                 elif row.active:
                     kind = "linear" if row.subgroup_type == "linear" else "spline"
                     spline_text = f"[{kind}, {row.n_params} params, active]"
-                    lines.append(f"{row.name:<{name_w}s}  {spline_text}")
+                    lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
                     if detail_str:
-                        lines.append(f"{'':<{name_w}s}    {detail_str}")
+                        lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
                 else:
                     kind = "linear" if row.subgroup_type == "linear" else "spline"
                     spline_text = f"[{kind}, {row.n_params} params, inactive]"
-                    lines.append(f"{row.name:<{name_w}s}  {spline_text}")
+                    lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
             elif row.coef is not None and row.se is not None and row.se > 0:
                 stars = _sig_stars(row.p)
-                # Adaptive z format: use fewer decimals for large values
                 if abs(row.z) >= 100:
                     z_str = f"{row.z:>8.1f}"
                 else:
                     z_str = f"{row.z:>8.3f}"
                 lines.append(
-                    f"{row.name:<{name_w}s}"
-                    f"{row.coef:>10.4f}"
-                    f"{row.se:>10.4f}"
-                    f"{z_str}"
-                    f"{row.p:>8.3f}"
-                    f"{row.ci_low:>9.3f}"
-                    f"{row.ci_high:>9.3f}"
-                    f" {stars:<3s}"
+                    _row(
+                        f"{row.name:<{name_w}s}"
+                        f"{row.coef:>10.4f}"
+                        f"{row.se:>10.4f}"
+                        f"{z_str}"
+                        f"{row.p:>8.3f}"
+                        f"{row.ci_low:>9.3f}"
+                        f"{row.ci_high:>9.3f}"
+                        f" {stars:<3s}"
+                    )
                 )
             else:
-                # Inactive or zero SE
                 coef_str = f"{row.coef:>10.4f}" if row.coef is not None else f"{'---':>10s}"
                 lines.append(
-                    f"{row.name:<{name_w}s}"
-                    f"{coef_str}"
-                    f"{'---':>10s}"
-                    f"{'---':>8s}"
-                    f"{'---':>8s}"
-                    f"{'---':>9s}"
-                    f"{'---':>9s}"
-                    f"{'':>4s}"
+                    _row(
+                        f"{row.name:<{name_w}s}"
+                        f"{coef_str}"
+                        f"{'---':>10s}"
+                        f"{'---':>8s}"
+                        f"{'---':>8s}"
+                        f"{'---':>9s}"
+                        f"{'---':>9s}"
+                        f"{'':>4s}"
+                    )
                 )
 
-        lines.append(sep)
+        lines.append(_bot())
         lines.append(_SIG_LEGEND)
         lines.append(_WALD_NOTE)
         return "\n".join(lines)

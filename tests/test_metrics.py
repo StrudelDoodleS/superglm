@@ -388,11 +388,17 @@ class TestSummary:
         assert "Signif. codes:" in text
 
     def test_summary_consistent_width(self, metrics_obj):
-        """Header separator and coef separator should be the same width."""
+        """All box-framed lines should be the same width."""
         text = str(metrics_obj.summary())
-        eq_lines = [line for line in text.split("\n") if set(line) == {"\u2550"}]
-        assert len(eq_lines) >= 2
-        assert len(eq_lines[0]) == len(eq_lines[1])
+        # Lines starting with box-drawing border chars
+        box_lines = [
+            line
+            for line in text.split("\n")
+            if line and line[0] in "\u2554\u2551\u2560\u255f\u255a"
+        ]
+        assert len(box_lines) >= 4
+        widths = {len(line) for line in box_lines}
+        assert len(widths) == 1, f"Inconsistent widths: {widths}"
 
 
 class TestSummaryMixedFeatures:
