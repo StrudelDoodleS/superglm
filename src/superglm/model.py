@@ -1943,6 +1943,97 @@ class SuperGLM:
             out[ag.name] = float(np.sum(edf_vec[ag.sl]))
         return out
 
+    def plot_relativity(
+        self,
+        name: str,
+        *,
+        X: pd.DataFrame | None = None,
+        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
+        with_ci: bool = True,
+        interval: str | None = "pointwise",
+        show_exposure: bool = True,
+        show_knots: bool = False,
+        n_points: int = 200,
+        alpha: float = 0.05,
+        n_sim: int = 10_000,
+        seed: int = 42,
+        figsize: tuple[float, float] | None = None,
+        title: str | None = None,
+        subtitle: str | None = None,
+    ):
+        """Plot a single term's relativity curve or bar chart.
+
+        This is the primary single-term plotting entry point.
+
+        Parameters
+        ----------
+        name : str
+            Feature name (must be in the fitted model).
+        X : DataFrame, optional
+            Training data for exposure overlays.
+        exposure : array-like, optional
+            Exposure / frequency weights.
+        with_ci : bool
+            When *False*, forces ``interval=None`` (no bands).
+        interval : {"pointwise", "simultaneous", "both", None}
+            Band style.  For categoricals/numerics, simultaneous/both
+            fall back to pointwise.
+        show_exposure : bool
+            Show exposure distribution (density strip for continuous,
+            vertical bars for categorical).
+        show_knots : bool
+            Show interior knot ticks (spline only).
+        n_points : int
+            Grid resolution for spline/polynomial curves.
+        alpha : float
+            Significance level for confidence intervals.
+        n_sim : int
+            Number of posterior simulations for simultaneous bands.
+        seed : int
+            Random seed for simultaneous band simulation.
+        figsize : tuple, optional
+            Figure size override.
+        title, subtitle : str, optional
+            Figure-level title and subtitle.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        from superglm.plotting import plot_term
+
+        exposure = self._resolve_sample_weight_alias(
+            exposure, sample_weight, method_name="plot_relativity()"
+        )
+
+        if not with_ci:
+            interval = None
+
+        need_sim = interval in ("simultaneous", "both")
+
+        ti = self.term_inference(
+            name,
+            with_se=(interval is not None),
+            simultaneous=need_sim,
+            n_points=n_points,
+            alpha=alpha,
+            n_sim=n_sim,
+            seed=seed,
+        )
+
+        return plot_term(
+            ti,
+            X=X,
+            exposure=exposure,
+            interval=interval,
+            show_exposure=show_exposure,
+            show_knots=show_knots,
+            figsize=figsize,
+            title=title,
+            subtitle=subtitle,
+        )
+
     def plot_relativities(
         self,
         X: pd.DataFrame | None = None,
@@ -1950,6 +2041,15 @@ class SuperGLM:
         with_ci: bool = True,
         *,
         sample_weight: NDArray | None = None,
+        interval: str | None = "pointwise",
+        show_exposure: bool = True,
+        show_knots: bool = False,
+        n_points: int = 200,
+        alpha: float = 0.05,
+        n_sim: int = 10_000,
+        seed: int = 42,
+        title: str | None = None,
+        subtitle: str | None = None,
         **kwargs,
     ):
         """Plot relativity curves/bars for all features.
@@ -1962,7 +2062,26 @@ class SuperGLM:
         exposure : array-like, optional
             Exposure weights corresponding to rows of *X*.
         with_ci : bool
-            If *True* (default), show 95 % confidence bands / error bars.
+            When *False*, forces ``interval=None`` (no bands).
+        interval : {"pointwise", "simultaneous", "both", None}
+            ``"pointwise"``: orange CI band.
+            ``"simultaneous"``: blue simultaneous band.
+            ``"both"``: nested (simultaneous outside, pointwise inside).
+            ``None``: no bands.
+        show_exposure : bool
+            Show exposure density strip below spline panels (default *True*).
+        show_knots : bool
+            Show interior knot ticks on x-axis (default *False*).
+        n_points : int
+            Grid resolution for spline/polynomial curves.
+        alpha : float
+            Significance level for confidence intervals.
+        n_sim : int
+            Number of posterior simulations for simultaneous bands.
+        seed : int
+            Random seed for simultaneous band simulation.
+        title, subtitle : str, optional
+            Figure-level title and subtitle.
         **kwargs
             Forwarded to :func:`superglm.plotting.plot_relativities`.
         """
@@ -1972,11 +2091,33 @@ class SuperGLM:
             exposure, sample_weight, method_name="plot_relativities()"
         )
 
+        if not with_ci:
+            interval = None
+
+        need_sim = interval in ("simultaneous", "both")
+
+        terms = []
+        for name in self._feature_order:
+            ti = self.term_inference(
+                name,
+                with_se=(interval is not None),
+                simultaneous=need_sim,
+                n_points=n_points,
+                alpha=alpha,
+                n_sim=n_sim,
+                seed=seed,
+            )
+            terms.append(ti)
+
         return plot_relativities(
-            self.relativities(with_se=with_ci),
+            terms,
             X=X,
             exposure=exposure,
-            with_ci=with_ci,
+            interval=interval,
+            show_exposure=show_exposure,
+            show_knots=show_knots,
+            title=title,
+            subtitle=subtitle,
             **kwargs,
         )
 

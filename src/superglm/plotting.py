@@ -3,11 +3,36 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.ticker import FixedLocator
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from superglm.inference import TermInference
+
+# ── Visual language constants ──────────────────────────────────────
+_LINE_COLOR = "#006FDD"
+_LINE_WIDTH = 1.35
+_PW_FILL = "#F58518"
+_PW_ALPHA = 0.24
+_PW_EDGE_ALPHA = 0.9
+_PW_EDGE_LW = 1.0
+_SIM_FILL = "#4C78A8"
+_SIM_ALPHA = 0.16
+_SIM_EDGE_ALPHA = 0.85
+_SIM_EDGE_LW = 0.95
+_EXP_FILL = "#F4D35E"
+_EXP_EDGE = "#D8A10F"
+_EXP_EDGE_LW = 1.1
+_REF_COLOR = "0.45"
+_REF_LW = 0.8
+_KNOT_COLOR = "#006FDD"
+_CAT_BAR_COLOR = "#006FDD"
 
 
 def _exposure_kde(x_vals, exposure, grid, bw_factor=0.03):
@@ -46,7 +71,7 @@ def _kde_2d(
 
 
 def plot_relativities(
-    relativities: dict[str, pd.DataFrame],
+    terms: list[TermInference],
     *,
     X: pd.DataFrame | None = None,
     exposure: NDArray | None = None,
@@ -54,35 +79,48 @@ def plot_relativities(
     ncols: int = 2,
     figsize: tuple[float, float] | None = None,
     with_ci: bool = True,
+    interval: str | None = "pointwise",
+    show_exposure: bool = True,
+    show_knots: bool = False,
+    title: str | None = None,
+    subtitle: str | None = None,
 ) -> Figure:
-    """Create a grid of relativity plots from ``SuperGLM.relativities()`` output.
+    """Create a grid of relativity plots from ``TermInference`` objects.
 
     Parameters
     ----------
-    relativities : dict[str, DataFrame]
-        Output of :meth:`SuperGLM.relativities`.
+    terms : list[TermInference]
+        Per-term inference objects from :meth:`SuperGLM.term_inference`.
     X : DataFrame, optional
-        Training data.  When provided together with *exposure*, an exposure
-        distribution is shown on each subplot (filled area for continuous
-        features, bars for categoricals).
+        Training data for exposure density overlays.
     exposure : array-like, optional
-        Backward-compatible alias for ``sample_weight``.
+        Exposure / frequency weights.
     sample_weight : array-like, optional
-        Exposure/frequency weights corresponding to rows of *X*.
+        Alias for *exposure*.
     ncols : int
         Number of subplot columns (default 2).
     figsize : tuple, optional
-        Figure size ``(width, height)``.  Auto-sized if *None*.
+        Figure size.  Auto-sized if *None*.
     with_ci : bool
-        If *True* (default) and ``se_log_relativity`` is present in the
-        DataFrames, draw 95 % confidence bands / error bars.
+        When *False*, forces ``interval=None`` (no bands).
+    interval : {"pointwise", "simultaneous", "both", None}
+        ``"pointwise"``: orange CI band only.
+        ``"simultaneous"``: blue simultaneous band only.
+        ``"both"``: nested (simultaneous outside, pointwise inside).
+        ``None``: no uncertainty bands.
+        For categorical/numeric terms, ``"simultaneous"`` and ``"both"``
+        silently fall back to pointwise CI.
+    show_exposure : bool
+        Show exposure density strip below continuous panels (default *True*).
+    show_knots : bool
+        Show interior knot positions as minor x-axis ticks (default *False*).
+    title, subtitle : str, optional
+        Figure-level title and subtitle.
 
     Returns
     -------
     matplotlib.figure.Figure
     """
-    import matplotlib.pyplot as plt
-
     if exposure is not None and sample_weight is not None:
         raise TypeError(
             "plot_relativities() received both 'exposure' and 'sample_weight'. "
@@ -91,169 +129,682 @@ def plot_relativities(
     if sample_weight is not None:
         exposure = sample_weight
 
-    names = list(relativities.keys())
-    n = len(names)
+    if not with_ci:
+        interval = None
+
+    return _plot_relativities_new(
+        terms,
+        X=X,
+        exposure=exposure,
+        ncols=ncols,
+        figsize=figsize,
+        interval=interval,
+        show_exposure=show_exposure,
+        show_knots=show_knots,
+        title=title,
+        subtitle=subtitle,
+    )
+
+
+# ── New TermInference-based plotting ─────────────────────────────
+
+
+def _plot_spline_panel(ax, ti: TermInference, interval: str | None, show_knots: bool):
+    """Render a spline/polynomial relativity panel."""
+    x = ti.x
+    rel = ti.relativity
+
+    ax.axhline(1.0, linestyle="--", linewidth=_REF_LW, color=_REF_COLOR, zorder=0)
+
+    # Simultaneous band (outer)
+    if interval in ("simultaneous", "both") and ti.ci_lower_simultaneous is not None:
+        sim_lo = ti.ci_lower_simultaneous
+        sim_hi = ti.ci_upper_simultaneous
+        ax.fill_between(
+            x,
+            sim_lo,
+            sim_hi,
+            color=_SIM_FILL,
+            alpha=_SIM_ALPHA,
+            label="95% simultaneous band",
+            zorder=1,
+        )
+        ax.plot(
+            x,
+            sim_lo,
+            color=_SIM_FILL,
+            linestyle="--",
+            linewidth=_SIM_EDGE_LW,
+            alpha=_SIM_EDGE_ALPHA,
+            zorder=2,
+        )
+        ax.plot(
+            x,
+            sim_hi,
+            color=_SIM_FILL,
+            linestyle="--",
+            linewidth=_SIM_EDGE_LW,
+            alpha=_SIM_EDGE_ALPHA,
+            zorder=2,
+        )
+
+    # Pointwise band (inner)
+    if interval in ("pointwise", "both") and ti.ci_lower is not None:
+        pw_lo = ti.ci_lower
+        pw_hi = ti.ci_upper
+        ax.fill_between(
+            x,
+            pw_lo,
+            pw_hi,
+            color=_PW_FILL,
+            alpha=_PW_ALPHA,
+            label="95% pointwise CI",
+            zorder=3,
+        )
+        ax.plot(
+            x,
+            pw_lo,
+            color=_PW_FILL,
+            linestyle="--",
+            linewidth=_PW_EDGE_LW,
+            alpha=_PW_EDGE_ALPHA,
+            zorder=4,
+        )
+        ax.plot(
+            x,
+            pw_hi,
+            color=_PW_FILL,
+            linestyle="--",
+            linewidth=_PW_EDGE_LW,
+            alpha=_PW_EDGE_ALPHA,
+            zorder=4,
+        )
+
+    ax.plot(x, rel, color=_LINE_COLOR, linewidth=_LINE_WIDTH, label="Relativity", zorder=5)
+
+    if show_knots and ti.spline is not None and ti.spline.interior_knots.size > 0:
+        knots = ti.spline.interior_knots
+        ax.xaxis.set_minor_locator(FixedLocator(knots))
+        ax.tick_params(
+            axis="x",
+            which="minor",
+            length=4,
+            width=1.0,
+            color=_KNOT_COLOR,
+            direction="in",
+        )
+
+    ax.set_title(ti.name, fontweight="bold")
+    ax.grid(alpha=0.22)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def _plot_density_strip(
+    ax_d,
+    feature_name: str,
+    X: pd.DataFrame,
+    exposure: NDArray,
+    x_grid: NDArray,
+    show_knots: bool,
+    knots: NDArray | None,
+):
+    """Render the exposure density strip beneath a spline panel."""
+    x_vals = X[feature_name].to_numpy(dtype=np.float64)
+    density = _exposure_kde(x_vals, exposure, x_grid)
+
+    ax_d.fill_between(x_grid, 0.0, density, color=_EXP_FILL, alpha=0.95, linewidth=0)
+    ax_d.plot(x_grid, density, color=_EXP_EDGE, linewidth=_EXP_EDGE_LW)
+    ax_d.set_ylim(0.0, 1.05)
+    ax_d.set_yticks([])
+    ax_d.set_xlabel(feature_name)
+
+    if show_knots and knots is not None and len(knots) > 0:
+        ax_d.xaxis.set_minor_locator(FixedLocator(knots))
+        ax_d.tick_params(
+            axis="x",
+            which="minor",
+            length=4,
+            width=1.0,
+            color=_KNOT_COLOR,
+            direction="in",
+        )
+
+    ax_d.spines["top"].set_visible(False)
+    ax_d.spines["right"].set_visible(False)
+    ax_d.spines["left"].set_visible(False)
+    ax_d.grid(False)
+
+
+def _plot_numeric_panel_continuous(
+    ax,
+    ti: TermInference,
+    interval: str | None,
+    x_grid: NDArray,
+):
+    """Render a numeric term as a flat line + flat CI band over the feature range.
+
+    Uses the same continuous visual language as spline panels: horizontal
+    relativity line across ``x_grid`` with optional constant CI band(s).
+    """
+    rel = float(np.asarray(ti.relativity).ravel()[0])
+    x = x_grid
+
+    # Reference line
+    ax.axhline(1.0, linestyle="--", color=_REF_COLOR, linewidth=_REF_LW, zorder=0)
+
+    # CI band (flat, constant across x range)
+    if interval is not None and ti.ci_lower is not None:
+        ci_lo = float(np.asarray(ti.ci_lower).ravel()[0])
+        ci_hi = float(np.asarray(ti.ci_upper).ravel()[0])
+        ax.fill_between(
+            x,
+            ci_lo,
+            ci_hi,
+            color=_PW_FILL,
+            alpha=_PW_ALPHA,
+            linewidth=0,
+            label="Pointwise 95% CI",
+        )
+        ax.plot(
+            x,
+            np.full_like(x, ci_lo),
+            color=_PW_FILL,
+            alpha=_PW_EDGE_ALPHA,
+            linewidth=_PW_EDGE_LW,
+            linestyle="--",
+        )
+        ax.plot(
+            x,
+            np.full_like(x, ci_hi),
+            color=_PW_FILL,
+            alpha=_PW_EDGE_ALPHA,
+            linewidth=_PW_EDGE_LW,
+            linestyle="--",
+        )
+
+    # Flat relativity line
+    ax.plot(x, np.full_like(x, rel), color=_LINE_COLOR, linewidth=_LINE_WIDTH, label="Relativity")
+
+    ax.set_ylabel("Relativity")
+    ax.set_title(ti.name, fontweight="bold")
+    ax.grid(alpha=0.22)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def _make_continuous_figure(
+    needs_strip: bool,
+    figsize: tuple[float, float] | None,
+) -> tuple[Figure, object, object | None]:
+    """Create a figure for a continuous term with optional density strip.
+
+    Returns (fig, ax_main, ax_density_or_None).
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    if needs_strip:
+        if figsize is None:
+            figsize = (7, 5.5)
+        fig = plt.figure(figsize=figsize)
+        gs = GridSpec(2, 1, figure=fig, height_ratios=[4.2, 1.0], hspace=0.16)
+        ax = fig.add_subplot(gs[0])
+        ax_den = fig.add_subplot(gs[1])
+        ax_den.tick_params(axis="x", labelbottom=False)
+        ax.set_zorder(ax_den.get_zorder() + 1)
+        ax.patch.set_visible(False)
+        ax.tick_params(axis="x", labelbottom=True, pad=-2)
+    else:
+        if figsize is None:
+            figsize = (7, 4.5)
+        fig, ax = plt.subplots(figsize=figsize)
+        ax_den = None
+    return fig, ax, ax_den
+
+
+def plot_term(
+    ti: TermInference,
+    *,
+    X: pd.DataFrame | None = None,
+    exposure: NDArray | None = None,
+    interval: str | None = "pointwise",
+    show_exposure: bool = True,
+    show_knots: bool = False,
+    figsize: tuple[float, float] | None = None,
+    title: str | None = None,
+    subtitle: str | None = None,
+) -> Figure:
+    """Plot a single term's relativity.
+
+    This is the core single-term plotting function.  All term types
+    (spline, polynomial, numeric, categorical) are handled.
+
+    Parameters
+    ----------
+    ti : TermInference
+        Inference result from :meth:`SuperGLM.term_inference`.
+    X : DataFrame, optional
+        Training data for exposure overlays.
+    exposure : array-like, optional
+        Exposure / frequency weights.
+    interval : {"pointwise", "simultaneous", "both", None}
+        Band style.  For categoricals, simultaneous/both fall back to pointwise.
+    show_exposure : bool
+        Show exposure distribution (density strip for continuous, vertical
+        bars for categorical).
+    show_knots : bool
+        Show interior knot ticks (spline only).
+    figsize : tuple, optional
+        Figure size.
+    title, subtitle : str, optional
+        Title and subtitle.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+
+    if exposure is not None:
+        exposure = np.asarray(exposure, dtype=np.float64)
+
+    has_density = show_exposure and X is not None and exposure is not None
+
+    if ti.kind in ("spline", "polynomial"):
+        needs_strip = has_density and ti.name in X.columns
+        fig, ax, ax_den = _make_continuous_figure(needs_strip, figsize)
+
+        _plot_spline_panel(ax, ti, interval, show_knots)
+        ax.set_ylabel("Relativity")
+
+        if ax_den is not None:
+            knots = ti.spline.interior_knots if ti.spline is not None else None
+            _plot_density_strip(ax_den, ti.name, X, exposure, ti.x, show_knots, knots)
+            ax_den.set_ylabel("Weight\ndensity", fontsize=8)
+
+    elif ti.kind == "numeric":
+        needs_strip = has_density and ti.name in X.columns
+        if X is not None and ti.name in X.columns:
+            x_vals = X[ti.name].to_numpy(dtype=np.float64)
+            x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
+        else:
+            x_grid = np.linspace(0.0, 1.0, 200)
+
+        fig, ax, ax_den = _make_continuous_figure(needs_strip, figsize)
+        _plot_numeric_panel_continuous(ax, ti, interval, x_grid)
+
+        if ax_den is not None:
+            _plot_density_strip(ax_den, ti.name, X, exposure, x_grid, False, None)
+            ax_den.set_ylabel("Weight\ndensity", fontsize=8)
+
+    elif ti.kind == "categorical":
+        if figsize is None:
+            figsize = (max(5, len(ti.levels) * 0.9 + 1.5), 4.5)
+        fig, ax = plt.subplots(figsize=figsize)
+        _plot_categorical_panel_vertical(
+            ax, ti, interval, X=X, exposure=exposure if has_density else None
+        )
+
+    else:
+        if figsize is None:
+            figsize = (7, 4.5)
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, f"Unknown term kind: {ti.kind!r}", transform=ax.transAxes, ha="center")
+
+    # ── Legend ──
+    all_axes = fig.get_axes()
+    legend_handles = []
+    legend_labels = []
+    for a in all_axes:
+        for h, lab in zip(*a.get_legend_handles_labels()):
+            if lab not in legend_labels:
+                legend_handles.append(h)
+                legend_labels.append(lab)
+
+    if (
+        show_knots
+        and ti.kind in ("spline", "polynomial")
+        and ti.spline is not None
+        and ti.spline.interior_knots.size > 0
+    ):
+        knot_handle = Line2D(
+            [0],
+            [0],
+            color=_KNOT_COLOR,
+            marker="|",
+            linestyle="None",
+            markersize=9,
+            markeredgewidth=1.1,
+            label="Interior knots",
+        )
+        legend_handles.append(knot_handle)
+        legend_labels.append("Interior knots")
+
+    # tight_layout is incompatible with explicit GridSpec — only call for plain subplots
+    has_gs = any(
+        hasattr(ax, "get_gridspec") and ax.get_gridspec() is not None for ax in fig.get_axes()
+    )
+
+    has_title = title is not None
+    has_subtitle = subtitle is not None
+    has_legend = bool(legend_handles)
+
+    layout_top = 0.96
+    title_y = None
+    subtitle_y = None
+    legend_y = None
+
+    if has_title and has_subtitle and has_legend:
+        layout_top = 0.72
+        title_y = 0.988
+        subtitle_y = 0.910
+        legend_y = 0.860
+    elif has_title and has_legend:
+        layout_top = 0.82
+        title_y = 0.982
+        legend_y = 0.915
+    elif has_title and has_subtitle:
+        layout_top = 0.78
+        title_y = 0.988
+        subtitle_y = 0.916
+    elif has_legend and has_subtitle:
+        layout_top = 0.83
+        subtitle_y = 0.958
+        legend_y = 0.915
+    elif has_title:
+        layout_top = 0.88
+        title_y = 0.982
+    elif has_subtitle:
+        layout_top = 0.89
+        subtitle_y = 0.960
+    elif has_legend:
+        layout_top = 0.90
+        legend_y = 0.965
+
+    if has_gs:
+        fig.subplots_adjust(top=layout_top)
+    else:
+        fig.tight_layout(rect=[0, 0, 1, layout_top])
+
+    if has_legend:
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, legend_y),
+            ncol=min(len(legend_handles), 4),
+            frameon=False,
+            fontsize=9,
+        )
+
+    # ── Title / subtitle ──
+    if has_title and title_y is not None:
+        fig.suptitle(title, fontsize=14, fontweight="bold", y=title_y)
+    if has_subtitle and subtitle_y is not None:
+        fig.text(0.5, subtitle_y, subtitle, ha="center", fontsize=10.5, color="#444444")
+
+    return fig
+
+
+def _plot_categorical_panel_vertical(
+    ax,
+    ti: TermInference,
+    interval: str | None,
+    *,
+    X: pd.DataFrame | None = None,
+    exposure: NDArray | None = None,
+):
+    """Render a categorical panel with vertical orientation.
+
+    Levels on x-axis, relativity on y-axis.  Optional exposure bars
+    in the background.
+    """
+    levels = list(ti.levels)
+    rel = np.asarray(ti.relativity)
+    x_pos = np.arange(len(levels))
+
+    # Exposure bars in background
+    if exposure is not None and X is not None and ti.name in X.columns:
+        level_exp = (
+            pd.DataFrame({"level": X[ti.name], "exposure": exposure})
+            .groupby("level", sort=False)["exposure"]
+            .sum()
+        )
+        exp_vals = np.array([level_exp.get(lv, 0.0) for lv in levels])
+        ax2 = ax.twinx()
+        ax2.bar(
+            x_pos,
+            exp_vals,
+            width=0.6,
+            color=_EXP_FILL,
+            edgecolor=_EXP_EDGE,
+            linewidth=_EXP_EDGE_LW,
+            alpha=0.65,
+            zorder=0,
+            label="Weight",
+        )
+        ymax = float(exp_vals.max()) if exp_vals.size else 0.0
+        ax2.set_ylim(0.0, ymax * 1.12 if ymax > 0 else 1.0)
+        ax2.set_ylabel("Weight", color=_EXP_EDGE)
+        ax2.tick_params(axis="y", colors=_EXP_EDGE, labelsize=9)
+        ax2.spines["top"].set_visible(False)
+        ax2.spines["right"].set_color(_EXP_EDGE)
+        ax.set_zorder(ax2.get_zorder() + 1)
+        ax.patch.set_visible(False)
+
+    # Relativity line + markers + error bars
+    ax.plot(x_pos, rel, color=_LINE_COLOR, linewidth=_LINE_WIDTH, alpha=0.6, zorder=4)
+    if interval is not None and ti.ci_lower is not None:
+        ci_lo = np.asarray(ti.ci_lower)
+        ci_hi = np.asarray(ti.ci_upper)
+        ax.errorbar(
+            x_pos,
+            rel,
+            yerr=[rel - ci_lo, ci_hi - rel],
+            fmt="o",
+            color=_LINE_COLOR,
+            markersize=7,
+            ecolor="#333333",
+            elinewidth=1.2,
+            capsize=4,
+            label="Relativity",
+            zorder=5,
+        )
+    else:
+        ax.scatter(x_pos, rel, color=_LINE_COLOR, s=50, zorder=5, label="Relativity")
+
+    ax.axhline(1.0, linestyle="--", color=_REF_COLOR, linewidth=_REF_LW, zorder=0)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(levels)
+    ax.set_ylabel("Relativity")
+    ax.set_title(ti.name, fontweight="bold")
+    ax.grid(alpha=0.22, axis="y")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def _plot_relativities_new(
+    terms: list[TermInference],
+    *,
+    X: pd.DataFrame | None = None,
+    exposure: NDArray | None = None,
+    ncols: int = 2,
+    figsize: tuple[float, float] | None = None,
+    interval: str | None = "pointwise",
+    show_exposure: bool = True,
+    show_knots: bool = False,
+    title: str | None = None,
+    subtitle: str | None = None,
+) -> Figure:
+    """TermInference-based relativity grid with the new visual language."""
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    n = len(terms)
     if n == 0:
         fig, _ = plt.subplots()
         return fig
 
-    show_exposure = X is not None and exposure is not None
-    if show_exposure:
+    if exposure is not None:
         exposure = np.asarray(exposure, dtype=np.float64)
 
     ncols = min(ncols, n)
     nrows = math.ceil(n / ncols)
-    if figsize is None:
-        figsize = (5 * ncols, 3.5 * nrows)
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    has_density = show_exposure and X is not None and exposure is not None
+    _CONTINUOUS_KINDS = ("spline", "polynomial", "numeric")
+    any_density = has_density and any(
+        ti.kind in _CONTINUOUS_KINDS and ti.name in X.columns for ti in terms
+    )
 
-    for idx, name in enumerate(names):
-        ax = axes[idx // ncols][idx % ncols]
-        df = relativities[name]
+    if any_density:
+        # 2-row layout: main panel + density strip per row
+        if figsize is None:
+            figsize = (5 * ncols, 5.2 * nrows + 0.5)
+        fig = plt.figure(figsize=figsize)
+        gs = GridSpec(
+            nrows * 2,
+            ncols,
+            figure=fig,
+            height_ratios=[4.2, 1.0] * nrows,
+            hspace=0.16,
+        )
+        fig.subplots_adjust(top=0.88 if title else 0.95, wspace=0.26)
 
-        if "x" in df.columns:
-            # Continuous (spline / polynomial)
-            if show_exposure and name in X.columns:
-                x_vals = np.asarray(X[name], dtype=np.float64)
-                grid = np.asarray(df["x"], dtype=np.float64)
-                density = _exposure_kde(x_vals, exposure, grid)
-                ax2 = ax.twinx()
-                ax2.fill_between(
-                    grid,
-                    0,
-                    density,
-                    color="lightgrey",
-                    alpha=0.4,
-                    label="Exposure",
-                )
-                ax2.set_ylim(0, 1.3)  # leave headroom
-                ax2.set_yticks([])
-                ax.set_zorder(ax2.get_zorder() + 1)
-                ax.patch.set_visible(False)
-            if with_ci and "se_log_relativity" in df.columns:
-                se = df["se_log_relativity"].to_numpy()
-                log_rel = df["log_relativity"].to_numpy()
-                ci_lo = np.exp(log_rel - 1.96 * se)
-                ci_hi = np.exp(log_rel + 1.96 * se)
-                ax.fill_between(
-                    df["x"],
-                    ci_lo,
-                    ci_hi,
-                    alpha=0.25,
-                    color="steelblue",
-                    label="95% CI",
-                )
-            ax.plot(
-                df["x"],
-                df["relativity"],
-                color="steelblue",
-                linewidth=1.5,
-                label="Relativity",
+        main_axes = []
+        density_axes = []
+        for idx in range(n):
+            r, c = divmod(idx, ncols)
+            ti = terms[idx]
+            uses_strip = ti.kind in _CONTINUOUS_KINDS and ti.name in X.columns
+            if uses_strip:
+                ax_main = fig.add_subplot(gs[r * 2, c])
+                ax_den = fig.add_subplot(gs[r * 2 + 1, c])
+                # Keep x labels on the main panel; the strip just shows shape/support.
+                ax_den.tick_params(axis="x", labelbottom=False)
+                ax_main.set_zorder(ax_den.get_zorder() + 1)
+                ax_main.patch.set_visible(False)
+                ax_main.tick_params(axis="x", labelbottom=True, pad=-2)
+            else:
+                # No density strip — span both rows to reclaim the space
+                ax_main = fig.add_subplot(gs[r * 2 : r * 2 + 2, c])
+                ax_den = None
+            main_axes.append(ax_main)
+            density_axes.append(ax_den)
+
+        # Hide unused grid cells
+        for idx in range(n, nrows * ncols):
+            r, c = divmod(idx, ncols)
+            fig.add_subplot(gs[r * 2 : r * 2 + 2, c]).set_visible(False)
+    else:
+        # Simple single-row layout
+        if figsize is None:
+            figsize = (5 * ncols, 3.5 * nrows)
+        fig, axes_arr = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+        fig.subplots_adjust(top=0.88 if title else 0.95)
+        main_axes = [axes_arr[idx // ncols][idx % ncols] for idx in range(n)]
+        density_axes = [None] * n
+
+        for idx in range(n, nrows * ncols):
+            axes_arr[idx // ncols][idx % ncols].set_visible(False)
+
+    # ── Render each panel ──
+    for idx, ti in enumerate(terms):
+        ax = main_axes[idx]
+        ax_den = density_axes[idx]
+
+        if ti.kind in ("spline", "polynomial"):
+            _plot_spline_panel(ax, ti, interval, show_knots)
+            if idx % ncols == 0:
+                ax.set_ylabel("Relativity")
+
+            if ax_den is not None:
+                knots = ti.spline.interior_knots if ti.spline is not None else None
+                _plot_density_strip(ax_den, ti.name, X, exposure, ti.x, show_knots, knots)
+                if idx % ncols == 0:
+                    ax_den.set_ylabel("Weight\ndensity", fontsize=8)
+                ax_den.set_xlabel("")
+
+        elif ti.kind == "categorical":
+            _plot_categorical_panel_vertical(
+                ax, ti, interval, X=X, exposure=exposure if has_density else None
             )
-            ax.axhline(1.0, linestyle="--", color="grey", linewidth=0.8)
 
-        elif "level" in df.columns:
-            # Categorical — horizontal bars
-            if show_exposure and name in X.columns:
-                level_exp = (
-                    pd.DataFrame({"level": X[name], "exposure": exposure})
-                    .groupby("level", sort=False)["exposure"]
-                    .sum()
-                )
-                exp_vals = [level_exp.get(lv, 0.0) for lv in df["level"]]
-                ax2 = ax.twinx()
-                ax2.barh(
-                    df["level"],
-                    exp_vals,
-                    color="lightgrey",
-                    alpha=0.4,
-                    label="Exposure",
-                )
-                ax2.set_yticks([])
-                ax.set_zorder(ax2.get_zorder() + 1)
-                ax.patch.set_visible(False)
-            ax.barh(
-                df["level"],
-                df["relativity"],
-                color="steelblue",
-                label="Relativity",
-            )
-            if with_ci and "se_log_relativity" in df.columns:
-                se = df["se_log_relativity"].to_numpy()
-                log_rel = df["log_relativity"].to_numpy()
-                rel = df["relativity"].to_numpy()
-                ci_lo = np.exp(log_rel - 1.96 * se)
-                ci_hi = np.exp(log_rel + 1.96 * se)
-                ax.errorbar(
-                    rel,
-                    df["level"],
-                    xerr=[rel - ci_lo, ci_hi - rel],
-                    fmt="none",
-                    ecolor="black",
-                    capsize=3,
-                    label="95% CI",
-                )
-            ax.axvline(1.0, linestyle="--", color="grey", linewidth=0.8)
+        elif ti.kind == "numeric":
+            if X is not None and ti.name in X.columns:
+                x_vals = X[ti.name].to_numpy(dtype=np.float64)
+                x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
+            else:
+                x_grid = np.linspace(0.0, 1.0, 200)
+            _plot_numeric_panel_continuous(ax, ti, interval, x_grid)
+            if idx % ncols == 0:
+                ax.set_ylabel("Relativity")
 
-        elif "label" in df.columns:
-            # Numeric — single horizontal bar
-            ax.barh(df["label"], df["relativity"], color="steelblue")
-            if with_ci and "se_log_relativity" in df.columns:
-                se = df["se_log_relativity"].to_numpy()
-                log_rel = df["log_relativity"].to_numpy()
-                rel = df["relativity"].to_numpy()
-                ci_lo = np.exp(log_rel - 1.96 * se)
-                ci_hi = np.exp(log_rel + 1.96 * se)
-                ax.errorbar(
-                    rel,
-                    df["label"],
-                    xerr=[rel - ci_lo, ci_hi - rel],
-                    fmt="none",
-                    ecolor="black",
-                    capsize=3,
-                    label="95% CI",
-                )
-            ax.axvline(1.0, linestyle="--", color="grey", linewidth=0.8)
+            if ax_den is not None:
+                _plot_density_strip(ax_den, ti.name, X, exposure, x_grid, False, None)
+                if idx % ncols == 0:
+                    ax_den.set_ylabel("Weight\ndensity", fontsize=8)
+                ax_den.set_xlabel("")
 
-        ax.set_title(name)
-        if idx % ncols == 0:
-            ax.set_ylabel("Relativity")
+        else:
+            ax.set_visible(False)
 
-    # Single legend for the whole figure
-    if show_exposure or with_ci:
-        handles, labels = [], []
-        # Grab from first axis that has both
-        for ax_row in axes:
-            for ax in ax_row:
-                h, lab = ax.get_legend_handles_labels()
-                if h:
-                    handles, labels = h, lab
-                    break
-            if handles:
-                break
-        # Add the exposure patch from twin axis
-        for ax_row in axes:
-            for ax in ax_row:
-                for child in ax.figure.get_axes():
-                    h2, l2 = child.get_legend_handles_labels()
-                    for h, lab in zip(h2, l2):
-                        if lab == "Exposure" and lab not in labels:
-                            handles.append(h)
-                            labels.append(lab)
-                            break
-                if "Exposure" in labels:
-                    break
-            if "Exposure" in labels:
-                break
-        if handles:
-            fig.legend(handles, labels, loc="lower right", fontsize=9, framealpha=0.8)
+    # ── Figure-level legend ──
+    legend_handles = []
+    legend_labels = []
+    for ax in main_axes:
+        h, lab = ax.get_legend_handles_labels()
+        for hi, li in zip(h, lab):
+            if li not in legend_labels:
+                legend_handles.append(hi)
+                legend_labels.append(li)
 
-    # Hide unused subplots
-    for idx in range(len(names), nrows * ncols):
-        axes[idx // ncols][idx % ncols].set_visible(False)
+    if show_knots and any(
+        ti.spline is not None and ti.spline.interior_knots.size > 0
+        for ti in terms
+        if ti.kind in ("spline", "polynomial")
+    ):
+        knot_handle = Line2D(
+            [0],
+            [0],
+            color=_KNOT_COLOR,
+            marker="|",
+            linestyle="None",
+            markersize=9,
+            markeredgewidth=1.1,
+            label="Interior knots",
+        )
+        legend_handles.append(knot_handle)
+        legend_labels.append("Interior knots")
 
-    fig.tight_layout()
+    if legend_handles:
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.93 if title else 0.99),
+            ncol=min(len(legend_handles), 4),
+            frameon=False,
+            fontsize=9,
+        )
+
+    # ── Title / subtitle ──
+    if title:
+        fig.suptitle(title, fontsize=14, fontweight="bold", y=0.98)
+    if subtitle:
+        fig.text(
+            0.5,
+            0.935 if title else 0.97,
+            subtitle,
+            ha="center",
+            va="center",
+            fontsize=10.5,
+            color="#444444",
+        )
+
+    if not any_density:
+        fig.tight_layout(rect=[0, 0, 1, 0.93 if title else 0.95])
     return fig
 
 
