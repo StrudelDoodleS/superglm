@@ -215,11 +215,13 @@ class ModelSummary:
         for row in self._coef_rows:
             # Emit group separator when the group changes
             if row.group and row.group != prev_group:
-                label = f" {row.group} "
-                pad = table_w - len(label)
+                label = f"\u2524 {row.group} \u251c"
+                # Each box-drawing char is 1 column wide in monospace fonts
+                label_cols = len(row.group) + 4  # "┤ " + name + " ├"
+                pad = table_w - label_cols
                 left = pad // 2
                 right = pad - left
-                lines.append(f"{'-' * left}{label}{'-' * right}")
+                lines.append(f"{'\u2500' * left}{label}{'\u2500' * right}")
             prev_group = row.group
 
             if row.is_spline:
