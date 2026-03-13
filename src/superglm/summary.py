@@ -184,34 +184,49 @@ class ModelSummary:
         W = max(coef_W, header_W)  # content width
         F = W + 2  # fill width (between border chars, includes padding spaces)
 
+        # Box-drawing characters (avoid backslash in f-strings for Python <3.12)
+        _D = "\u2550"  # ═ double horizontal
+        _S = "\u2500"  # ─ single horizontal
+        _TL = "\u2554"  # ╔
+        _TR = "\u2557"  # ╗
+        _BL = "\u255a"  # ╚
+        _BR = "\u255d"  # ╝
+        _V = "\u2551"  # ║
+        _ML = "\u2560"  # ╠
+        _MR = "\u2563"  # ╣
+        _SL = "\u255f"  # ╟
+        _SR = "\u2562"  # ╢
+        _LT = "\u2561"  # ╡
+        _RT = "\u255e"  # ╞
+
         # Box-drawing helpers
         def _top(text: str = "") -> str:
             if text:
                 pad = F - len(text)
                 left = pad // 2
                 right = pad - left
-                return f"\u2554{'\u2550' * left}{text}{'\u2550' * right}\u2557"
-            return f"\u2554{'\u2550' * F}\u2557"
+                return f"{_TL}{_D * left}{text}{_D * right}{_TR}"
+            return f"{_TL}{_D * F}{_TR}"
 
         def _mid() -> str:
-            return f"\u2560{'\u2550' * F}\u2563"
+            return f"{_ML}{_D * F}{_MR}"
 
         def _thin() -> str:
-            return f"\u255f{'\u2500' * F}\u2562"
+            return f"{_SL}{_S * F}{_SR}"
 
         def _group_sep(name: str) -> str:
-            label = f"\u2561 {name} \u255e"
+            label = f"{_LT} {name} {_RT}"
             label_cols = len(name) + 4
             pad = F - label_cols
             left = pad // 2
             right = pad - left
-            return f"\u2560{'\u2550' * left}{label}{'\u2550' * right}\u2563"
+            return f"{_ML}{_D * left}{label}{_D * right}{_MR}"
 
         def _row(text: str) -> str:
-            return f"\u2551 {text:<{W}s} \u2551"
+            return f"{_V} {text:<{W}s} {_V}"
 
         def _bot() -> str:
-            return f"\u255a{'\u2550' * F}\u255d"
+            return f"{_BL}{_D * F}{_BR}"
 
         lines: list[str] = []
 
