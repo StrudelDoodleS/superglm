@@ -209,6 +209,7 @@ def feature_se_from_cov(
     """Compute feature-level SEs from a precomputed covariance matrix."""
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
+    from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
 
     beta = result.beta
@@ -220,6 +221,8 @@ def feature_se_from_cov(
     if np.linalg.norm(beta_combined) < 1e-12:
         if isinstance(spec, _SplineBase):
             return np.zeros(n_points)
+        elif isinstance(spec, Polynomial):
+            return np.zeros(n_points)
         elif isinstance(spec, Categorical):
             return np.zeros(len(spec._levels))
         else:
@@ -229,6 +232,8 @@ def feature_se_from_cov(
     active_subs = [ag for ag in active_groups if ag.feature_name == name]
     if not active_subs:
         if isinstance(spec, _SplineBase):
+            return np.zeros(n_points)
+        elif isinstance(spec, Polynomial):
             return np.zeros(n_points)
         elif isinstance(spec, Categorical):
             return np.zeros(len(spec._levels))
@@ -253,6 +258,12 @@ def feature_se_from_cov(
         )
         M = M[:, active_cols]
 
+        Q = M @ Cov_g
+        return np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
+
+    elif isinstance(spec, Polynomial):
+        x_grid = np.linspace(spec._lo, spec._hi, n_points)
+        M = spec.transform(x_grid)
         Q = M @ Cov_g
         return np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
 

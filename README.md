@@ -247,19 +247,17 @@ After `fit_path`, `model.predict()` uses the last (least-regularised) fit.
 m = model.metrics(df, y, sample_weight=exposure)
 print(m.summary())
 
-# Relativity DataFrames with 95% CI
+# Per-term inference (TermInference dataclass)
+ti = model.term_inference("DrivAge")
+
+# Plot a single term with CI bands and exposure density strip
+model.plot_relativity("DrivAge", X=df, exposure=exposure)
+
+# Plot all terms in a grid
+model.plot_relativities(X=df, exposure=exposure, interval="both")
+
+# Relativity DataFrames (for manual access / export)
 rels = model.relativities(with_se=True)
-
-# Plot all curves with CI bands and exposure histogram
-model.plot_relativities(df, sample_weight=exposure)
-
-# Or use the standalone function
-from superglm import plot_relativities
-plot_relativities(rels, X=df, sample_weight=exposure)
-
-# Manual curve access
-curve = model.reconstruct_feature("DrivAge")
-plt.plot(curve["x"], curve["relativity"])
 ```
 
 ## Tweedie support
