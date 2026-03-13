@@ -143,41 +143,19 @@ class ModelSummary:
     # ── ASCII output ──────────────────────────────────────────────
 
     def __str__(self) -> str:
-        lines: list[str] = []
         info = self._info
         half = self._alpha / 2.0
         _fmt = self._fmt_scalar
 
-        # Compute table width from coefficient columns
-        #   name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4)
-        name_w = max(len(r.name) for r in self._coef_rows) if self._coef_rows else 10
-        name_w = max(name_w, 10)
-        table_w = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4
-
-        sep = "=" * table_w
-        thin_sep = "-" * table_w
-
-        lines.append(f"{'SuperGLM Results':^{table_w}}")
-        lines.append(sep)
-
-        # Header key-value pairs (two columns stretching to table_w)
-        left_w = (table_w - 2) // 2
-        right_w = table_w - 2 - left_w
-        val_l = left_w - 20
-        val_r = right_w - 20
-
-        def _header_row(k1: str, v1: str, k2: str, v2: str) -> str:
-            left = f"{k1 + ':':<20s}{v1:>{val_l}s}"
-            right = f"{k2 + ':':<20s}{v2:>{val_r}s}"
-            return f"{left}  {right}"
-
+        # Build header rows first (needed to compute minimum width)
+        conv_str = f"{info['converged']} ({info['n_iter']} iter)"
         rows = [
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
             ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
-            ("Penalty", info["penalty"], "Lambda1", _fmt(info["lambda1"])),
-            ("Scale (phi)", _fmt(info["phi"]), "Deviance", _fmt(info["deviance"])),
+            ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
+            ("Scale (phi)", _fmt(info["phi"]), "Lambda1", _fmt(info["lambda1"])),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
-            ("Converged", str(info["converged"]), "Iterations", str(info["n_iter"])),
+            ("Deviance", _fmt(info["deviance"]), "Converged", conv_str),
         ]
 
         # NB theta profile row
@@ -192,9 +170,82 @@ class ModelSummary:
             p_str = f"{info['tweedie_p']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
             rows.append(("Tweedie p", p_str, "Method", info["tweedie_p_method"]))
 
+        # Compute content width from coefficient columns AND header values
+        #   coef table: name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4)
+        name_w = max(len(r.name) for r in self._coef_rows) if self._coef_rows else 10
+        name_w = max(name_w, 10)
+        coef_W = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4
+
+        # Header layout: "{k1:20}{v1:>val}  {k2:20}{v2:>val}" → need val >= max value len
+        # Each half = 20 (key) + val; total = 20 + val + 2 + 20 + val = 42 + 2*val
+        max_val = max(max(len(v1), len(v2)) for _, v1, _, v2 in rows if v2) if rows else 0
+        header_W = 42 + 2 * max_val
+
+        W = max(coef_W, header_W)  # content width
+        F = W + 2  # fill width (between border chars, includes padding spaces)
+
+        # Box-drawing characters (avoid backslash in f-strings for Python <3.12)
+        _D = "\u2550"  # ═ double horizontal
+        _S = "\u2500"  # ─ single horizontal
+        _TL = "\u2554"  # ╔
+        _TR = "\u2557"  # ╗
+        _BL = "\u255a"  # ╚
+        _BR = "\u255d"  # ╝
+        _V = "\u2551"  # ║
+        _ML = "\u2560"  # ╠
+        _MR = "\u2563"  # ╣
+        _SL = "\u255f"  # ╟
+        _SR = "\u2562"  # ╢
+        _LT = "\u2561"  # ╡
+        _RT = "\u255e"  # ╞
+
+        # Box-drawing helpers
+        def _top(text: str = "") -> str:
+            if text:
+                pad = F - len(text)
+                left = pad // 2
+                right = pad - left
+                return f"{_TL}{_D * left}{text}{_D * right}{_TR}"
+            return f"{_TL}{_D * F}{_TR}"
+
+        def _mid() -> str:
+            return f"{_ML}{_D * F}{_MR}"
+
+        def _thin() -> str:
+            return f"{_SL}{_S * F}{_SR}"
+
+        def _group_sep(name: str) -> str:
+            label = f"{_LT} {name} {_RT}"
+            label_cols = len(name) + 4
+            pad = F - label_cols
+            left = pad // 2
+            right = pad - left
+            return f"{_ML}{_D * left}{label}{_D * right}{_MR}"
+
+        def _row(text: str) -> str:
+            return f"{_V} {text:<{W}s} {_V}"
+
+        def _bot() -> str:
+            return f"{_BL}{_D * F}{_BR}"
+
+        lines: list[str] = []
+
+        # Title
+        lines.append(_top(" SuperGLM Results "))
+
+        # Header key-value pairs
+        val_w = (W - 42) // 2
+        val_l = val_w
+        val_r = W - 42 - val_w  # absorb odd remainder
+
+        def _header_row(k1: str, v1: str, k2: str, v2: str) -> str:
+            left = f"{k1 + ':':<20s}{v1:>{val_l}s}"
+            right = f"{k2 + ':':<20s}{v2:>{val_r}s}"
+            return _row(f"{left}  {right}")
+
         for k1, v1, k2, v2 in rows:
             lines.append(_header_row(k1, v1, k2, v2))
-        lines.append(sep)
+        lines.append(_mid())
 
         # Coefficient table header
         hdr = (
@@ -207,40 +258,35 @@ class ModelSummary:
             f"{f'{1 - half:.3f}' + ']':>9s}"
             f"{'':>4s}"
         )
-        lines.append(hdr)
-        lines.append(thin_sep)
+        lines.append(_row(hdr))
+        lines.append(_thin())
 
         # Coefficient rows with group separators
         prev_group = None
         for row in self._coef_rows:
-            # Emit group separator when the group changes
+            # Emit group separator when the group changes (blank rows for breathing room)
             if row.group and row.group != prev_group:
-                label = f" {row.group} "
-                pad = table_w - len(label)
-                left = pad // 2
-                right = pad - left
-                lines.append(f"{'-' * left}{label}{'-' * right}")
+                if prev_group is not None:
+                    lines.append(_row(""))
+                lines.append(_group_sep(row.group))
+                lines.append(_row(""))
             prev_group = row.group
 
             if row.is_spline:
                 has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
-                # Build metadata suffix: edf, lambda
-                meta_parts = []
+                # Build detail line: edf, lambda, curve SE
+                detail_parts = []
                 if row.edf is not None:
-                    meta_parts.append(f"edf={row.edf:.1f}")
+                    detail_parts.append(f"edf={row.edf:.1f}")
                 if row.smoothing_lambda is not None:
-                    meta_parts.append(f"lam={row.smoothing_lambda:.2g}")
-                meta_str = ", ".join(meta_parts)
-                if meta_str:
-                    meta_str = f", {meta_str}"
+                    detail_parts.append(f"lam={row.smoothing_lambda:.2g}")
+                if has_test and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
+                    detail_parts.append(f"curve SE: {row.curve_se_min:.2f}-{row.curve_se_max:.2f}")
+                detail_str = ", ".join(detail_parts)
 
                 if has_test:
                     p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "<0.001"
                     stars = _sig_stars(row.wald_p)
-                    se_str = ""
-                    if row.curve_se_min is not None and not np.isnan(row.curve_se_min):
-                        se_str = f", curve SE: {row.curve_se_min:.2f}-{row.curve_se_max:.2f}"
-                    # Show fractional ref_df from Wood (2013) test
                     if row.ref_df is not None:
                         df_str = f"{row.ref_df:.1f}"
                     else:
@@ -249,50 +295,61 @@ class ModelSummary:
                     spline_text = (
                         f"[{kind}, {row.n_params} params, "
                         f"chi2({df_str})={row.wald_chi2:.1f}, "
-                        f"p={p_str}{meta_str}{se_str}]"
+                        f"p={p_str}]"
                     )
-                    lines.append(f"{row.name:<{name_w}s}  {spline_text} {stars:<3s}")
+                    prefix = f"{row.name:<{name_w}s}  {spline_text} "
+                    pad = max(W - len(prefix) - 3, 0)
+                    lines.append(_row(f"{prefix}{'':<{pad}s}{stars:<3s}"))
+                    if detail_str:
+                        lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
                 elif row.active:
                     kind = "linear" if row.subgroup_type == "linear" else "spline"
-                    spline_text = f"[{kind}, {row.n_params} params, active{meta_str}]"
-                    lines.append(f"{row.name:<{name_w}s}  {spline_text}")
+                    spline_text = f"[{kind}, {row.n_params} params, active]"
+                    lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
+                    if detail_str:
+                        lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
                 else:
                     kind = "linear" if row.subgroup_type == "linear" else "spline"
                     spline_text = f"[{kind}, {row.n_params} params, inactive]"
-                    lines.append(f"{row.name:<{name_w}s}  {spline_text}")
+                    lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
             elif row.coef is not None and row.se is not None and row.se > 0:
                 stars = _sig_stars(row.p)
-                # Adaptive z format: use fewer decimals for large values
                 if abs(row.z) >= 100:
                     z_str = f"{row.z:>8.1f}"
                 else:
                     z_str = f"{row.z:>8.3f}"
                 lines.append(
-                    f"{row.name:<{name_w}s}"
-                    f"{row.coef:>10.4f}"
-                    f"{row.se:>10.4f}"
-                    f"{z_str}"
-                    f"{row.p:>8.3f}"
-                    f"{row.ci_low:>9.3f}"
-                    f"{row.ci_high:>9.3f}"
-                    f" {stars:<3s}"
+                    _row(
+                        f"{row.name:<{name_w}s}"
+                        f"{row.coef:>10.4f}"
+                        f"{row.se:>10.4f}"
+                        f"{z_str}"
+                        f"{row.p:>8.3f}"
+                        f"{row.ci_low:>9.3f}"
+                        f"{row.ci_high:>9.3f}"
+                        f" {stars:<3s}"
+                    )
                 )
             else:
-                # Inactive or zero SE
                 coef_str = f"{row.coef:>10.4f}" if row.coef is not None else f"{'---':>10s}"
                 lines.append(
-                    f"{row.name:<{name_w}s}"
-                    f"{coef_str}"
-                    f"{'---':>10s}"
-                    f"{'---':>8s}"
-                    f"{'---':>8s}"
-                    f"{'---':>9s}"
-                    f"{'---':>9s}"
-                    f"{'':>4s}"
+                    _row(
+                        f"{row.name:<{name_w}s}"
+                        f"{coef_str}"
+                        f"{'---':>10s}"
+                        f"{'---':>8s}"
+                        f"{'---':>8s}"
+                        f"{'---':>9s}"
+                        f"{'---':>9s}"
+                        f"{'':>4s}"
+                    )
                 )
 
-        lines.append(sep)
+        lines.append(_bot())
         lines.append(_SIG_LEGEND)
+        abbrevs = info.get("penalty_abbrevs", {})
+        if abbrevs:
+            lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
         lines.append(_WALD_NOTE)
         return "\n".join(lines)
 
@@ -327,13 +384,14 @@ class ModelSummary:
         )
 
         # Header rows
+        conv_str = f"{info['converged']} ({info['n_iter']} iter)"
         header_rows = [
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
             ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
-            ("Penalty", info["penalty"], "Lambda1", _fmt(info["lambda1"])),
-            ("Scale (phi)", _fmt(info["phi"]), "Deviance", _fmt(info["deviance"])),
+            ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
+            ("Scale (phi)", _fmt(info["phi"]), "Lambda1", _fmt(info["lambda1"])),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
-            ("Converged", str(info["converged"]), "Iterations", str(info["n_iter"])),
+            ("Deviance", _fmt(info["deviance"]), "Converged", conv_str),
         ]
 
         # NB theta profile row
@@ -396,22 +454,24 @@ class ModelSummary:
             if row.is_spline:
                 has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
                 kind = "linear" if row.subgroup_type == "linear" else "spline"
-                # Build metadata suffix: edf, lambda
-                meta_parts = []
+                # Build detail suffix: edf, lambda, curve SE
+                detail_parts = []
                 if row.edf is not None:
-                    meta_parts.append(f"edf={row.edf:.1f}")
+                    detail_parts.append(f"edf={row.edf:.1f}")
                 if row.smoothing_lambda is not None:
-                    meta_parts.append(f"&lambda;={row.smoothing_lambda:.2g}")
-                meta_str = ", ".join(meta_parts)
-                if meta_str:
-                    meta_str = f", {meta_str}"
+                    detail_parts.append(f"&lambda;={row.smoothing_lambda:.2g}")
+                if has_test and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
+                    detail_parts.append(
+                        f"curve SE: {row.curve_se_min:.2f}&ndash;{row.curve_se_max:.2f}"
+                    )
+                detail_str = ", ".join(detail_parts)
+                detail_html = (
+                    f"<br><span style='font-size:11px;'>{detail_str}</span>" if detail_str else ""
+                )
 
                 if has_test:
                     p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "&lt;0.001"
                     stars = _sig_stars(row.wald_p)
-                    se_str = ""
-                    if row.curve_se_min is not None and not np.isnan(row.curve_se_min):
-                        se_str = f", curve SE: {row.curve_se_min:.2f}&ndash;{row.curve_se_max:.2f}"
                     if row.ref_df is not None:
                         df_str = f"{row.ref_df:.1f}"
                     else:
@@ -419,7 +479,7 @@ class ModelSummary:
                     text = (
                         f"[{kind}, {row.n_params} params, "
                         f"&chi;&sup2;({df_str})={row.wald_chi2:.1f}, "
-                        f"p={p_str}{meta_str}{se_str}]"
+                        f"p={p_str}]{detail_html}"
                     )
                     parts.append(
                         f"<tr>"
@@ -430,7 +490,7 @@ class ModelSummary:
                         f"</tr>"
                     )
                 elif row.active:
-                    text = f"[{kind}, {row.n_params} params, active{meta_str}]"
+                    text = f"[{kind}, {row.n_params} params, active]{detail_html}"
                     parts.append(
                         f"<tr>"
                         f'<td style="{cell_l}">{row.name}</td>'
