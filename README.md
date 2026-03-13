@@ -260,6 +260,16 @@ model.plot_relativities(X=df, exposure=exposure, interval="both")
 rels = model.relativities(with_se=True)
 ```
 
+### Example: single-term relativity plots
+
+Poisson frequency model on French MTPL2 (678k policies), REML smoothness selection.
+Nested pointwise (orange) and simultaneous (blue) 95% confidence bands with exposure-weighted
+density strip and interior knot positions.
+
+| Vehicle Age (`quantile_rows` knots) | Bonus-Malus (`quantile_tempered`, α=0.2) |
+|:---:|:---:|
+| ![VehAge](docs/images/readme_vehage.png) | ![BonusMalus](docs/images/readme_bonusmalus.png) |
+
 ## Tweedie support
 
 Fit with a fixed Tweedie power:
