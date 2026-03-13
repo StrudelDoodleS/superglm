@@ -344,82 +344,61 @@ def _plot_numeric_panel(ax, ti: TermInference, interval: str | None):
     ax.spines["right"].set_visible(False)
 
 
-def _plot_numeric_panel_vertical(
+def _plot_numeric_panel_continuous(
     ax,
     ti: TermInference,
     interval: str | None,
-    *,
-    X: pd.DataFrame | None = None,
-    exposure: NDArray | None = None,
+    x_grid: NDArray,
 ):
-    """Render a numeric panel with vertical orientation for single-term figures.
+    """Render a numeric term as a flat line + flat CI band over the feature range.
 
-    Single marker at the per-unit relativity, vertical error bar, optional
-    exposure density bars in the background.
+    Uses the same continuous visual language as spline panels: horizontal
+    relativity line across ``x_grid`` with optional constant CI band(s).
     """
     rel = float(np.asarray(ti.relativity).ravel()[0])
+    x = x_grid
 
-    # Exposure density background (twin axis, like categorical vertical)
-    if exposure is not None and X is not None and ti.name in X.columns:
-        x_vals = X[ti.name].to_numpy(dtype=np.float64)
-        # Show distribution as a histogram in the background
-        ax2 = ax.twinx()
-        ax2.hist(
-            x_vals,
-            bins=30,
-            weights=exposure,
-            color=_EXP_FILL,
-            alpha=0.45,
-            edgecolor=_EXP_EDGE,
-            linewidth=0.6,
-            zorder=0,
-            density=True,
-            label="Exposure",
-        )
-        ax2.set_yticks([])
-        ax2.spines["top"].set_visible(False)
-        ax2.spines["right"].set_visible(False)
-        ax.set_zorder(ax2.get_zorder() + 1)
-        ax.patch.set_visible(False)
+    # Reference line
+    ax.axhline(1.0, linestyle="--", color=_REF_COLOR, linewidth=_REF_LW, zorder=0)
 
-    # Relativity marker + error bar
-    x_pos = np.array([0])
+    # CI band (flat, constant across x range)
     if interval is not None and ti.ci_lower is not None:
         ci_lo = float(np.asarray(ti.ci_lower).ravel()[0])
         ci_hi = float(np.asarray(ti.ci_upper).ravel()[0])
-        ax.errorbar(
-            x_pos,
-            [rel],
-            yerr=[[rel - ci_lo], [ci_hi - rel]],
-            fmt="o",
-            color=_LINE_COLOR,
-            markersize=9,
-            ecolor="#333333",
-            elinewidth=1.4,
-            capsize=5,
-            label="Relativity",
-            zorder=5,
+        ax.fill_between(
+            x,
+            ci_lo,
+            ci_hi,
+            color=_PW_FILL,
+            alpha=_PW_ALPHA,
+            linewidth=0,
+            label="Pointwise 95% CI",
         )
-    else:
-        ax.scatter(x_pos, [rel], color=_LINE_COLOR, s=80, zorder=5, label="Relativity")
+        ax.plot(
+            x,
+            np.full_like(x, ci_lo),
+            color=_PW_FILL,
+            alpha=_PW_EDGE_ALPHA,
+            linewidth=_PW_EDGE_LW,
+            linestyle="--",
+        )
+        ax.plot(
+            x,
+            np.full_like(x, ci_hi),
+            color=_PW_FILL,
+            alpha=_PW_EDGE_ALPHA,
+            linewidth=_PW_EDGE_LW,
+            linestyle="--",
+        )
 
-    ax.axhline(1.0, linestyle="--", color=_REF_COLOR, linewidth=_REF_LW, zorder=0)
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(["per unit"])
+    # Flat relativity line
+    ax.plot(x, np.full_like(x, rel), color=_LINE_COLOR, linewidth=_LINE_WIDTH, label="Relativity")
+
     ax.set_ylabel("Relativity")
     ax.set_title(ti.name, fontweight="bold")
-    ax.grid(alpha=0.22, axis="y")
+    ax.grid(alpha=0.22)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    # Give some vertical breathing room around the marker
-    y_lo = min(rel, 1.0) - 0.15
-    y_hi = max(rel, 1.0) + 0.15
-    if interval is not None and ti.ci_lower is not None:
-        ci_lo = float(np.asarray(ti.ci_lower).ravel()[0])
-        ci_hi = float(np.asarray(ti.ci_upper).ravel()[0])
-        y_lo = min(ci_lo, 1.0) - 0.1
-        y_hi = max(ci_hi, 1.0) + 0.1
-    ax.set_ylim(y_lo, y_hi)
 
 
 def plot_term(
@@ -496,12 +475,33 @@ def plot_term(
             ax_den.set_ylabel("Exposure\ndensity", fontsize=8)
 
     elif ti.kind == "numeric":
-        if figsize is None:
-            figsize = (4, 4.5)
-        fig, ax = plt.subplots(figsize=figsize)
-        _plot_numeric_panel_vertical(
-            ax, ti, interval, X=X, exposure=exposure if has_density else None
-        )
+        needs_strip = has_density and ti.name in X.columns
+        # Build x_grid from data if available, otherwise a nominal [0,1]
+        if X is not None and ti.name in X.columns:
+            x_vals = X[ti.name].to_numpy(dtype=np.float64)
+            x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
+        else:
+            x_grid = np.linspace(0.0, 1.0, 200)
+
+        if needs_strip:
+            if figsize is None:
+                figsize = (7, 5.5)
+            fig = plt.figure(figsize=figsize)
+            gs = GridSpec(2, 1, figure=fig, height_ratios=[4.2, 1.0], hspace=0.06)
+            ax = fig.add_subplot(gs[0])
+            ax_den = fig.add_subplot(gs[1])
+            plt.setp(ax.get_xticklabels(), visible=False)
+        else:
+            if figsize is None:
+                figsize = (7, 4.5)
+            fig, ax = plt.subplots(figsize=figsize)
+            ax_den = None
+
+        _plot_numeric_panel_continuous(ax, ti, interval, x_grid)
+
+        if ax_den is not None:
+            _plot_density_strip(ax_den, ti.name, X, exposure, x_grid, False, None)
+            ax_den.set_ylabel("Exposure\ndensity", fontsize=8)
 
     elif ti.kind == "categorical":
         if figsize is None:
@@ -610,7 +610,17 @@ def _plot_categorical_panel_vertical(
         if exp_max > 0:
             exp_vals = exp_vals / exp_max
         ax2 = ax.twinx()
-        ax2.bar(x_pos, exp_vals, width=0.6, color=_EXP_FILL, alpha=0.5, zorder=0, label="Exposure")
+        ax2.bar(
+            x_pos,
+            exp_vals,
+            width=0.6,
+            color=_EXP_FILL,
+            edgecolor=_EXP_EDGE,
+            linewidth=_EXP_EDGE_LW,
+            alpha=0.65,
+            zorder=0,
+            label="Exposure",
+        )
         ax2.set_ylim(0, 1.4)
         ax2.set_yticks([])
         ax2.spines["top"].set_visible(False)
@@ -618,7 +628,8 @@ def _plot_categorical_panel_vertical(
         ax.set_zorder(ax2.get_zorder() + 1)
         ax.patch.set_visible(False)
 
-    # Relativity markers + error bars
+    # Relativity line + markers + error bars
+    ax.plot(x_pos, rel, color=_LINE_COLOR, linewidth=_LINE_WIDTH, alpha=0.6, zorder=4)
     if interval is not None and ti.ci_lower is not None:
         ci_lo = np.asarray(ti.ci_lower)
         ci_hi = np.asarray(ti.ci_upper)
