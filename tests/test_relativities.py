@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Numeric, Spline, SuperGLM, plot_relativities
+from superglm import Categorical, Numeric, Spline, SuperGLM, plot_relativities, plot_term
 
 
 @pytest.fixture
@@ -351,3 +351,129 @@ class TestPlotRelativitiesNew:
             and ax.get_xlabel() == "density"
         ]
         assert len(density_strips) >= 1, "Numeric term should have an exposure density strip"
+
+
+class TestPlotRelativity:
+    """Smoke tests for the single-term plot_relativity() entry point."""
+
+    def test_spline_returns_figure(self, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        fig = fitted_model.plot_relativity("age")
+        assert isinstance(fig, Figure)
+
+    def test_spline_interval_both(self, fitted_model):
+        import matplotlib
+        import matplotlib.collections as mcoll
+
+        matplotlib.use("Agg")
+
+        fig = fitted_model.plot_relativity("age", interval="both")
+        poly_count = sum(
+            isinstance(child, mcoll.PolyCollection)
+            for ax in fig.get_axes()
+            for child in ax.get_children()
+        )
+        assert poly_count >= 2, f"Expected nested bands, got {poly_count} PolyCollections"
+
+    def test_spline_interval_none(self, fitted_model):
+        import matplotlib
+        import matplotlib.collections as mcoll
+
+        matplotlib.use("Agg")
+
+        fig = fitted_model.plot_relativity("age", interval=None)
+        has_poly = any(
+            isinstance(child, mcoll.PolyCollection)
+            for ax in fig.get_axes()
+            for child in ax.get_children()
+        )
+        assert not has_poly, "No bands expected with interval=None"
+
+    def test_spline_with_ci_false(self, fitted_model):
+        import matplotlib
+        import matplotlib.collections as mcoll
+
+        matplotlib.use("Agg")
+
+        fig = fitted_model.plot_relativity("age", with_ci=False)
+        has_poly = any(
+            isinstance(child, mcoll.PolyCollection)
+            for ax in fig.get_axes()
+            for child in ax.get_children()
+        )
+        assert not has_poly, "No bands expected when with_ci=False"
+
+    def test_spline_show_knots(self, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        fig = fitted_model.plot_relativity("age", show_knots=True)
+        assert isinstance(fig, Figure)
+
+    def test_spline_density_strip(self, sample_data, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+
+        X, y, exposure = sample_data
+        fig = fitted_model.plot_relativity("age", X=X, exposure=exposure)
+        # Main panel + density strip = 2 axes
+        assert len(fig.get_axes()) >= 2
+
+    def test_categorical_vertical(self, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        fig = fitted_model.plot_relativity("region")
+        assert isinstance(fig, Figure)
+        ax = fig.get_axes()[0]
+        # Vertical orientation: levels on x-axis
+        x_labels = [t.get_text() for t in ax.get_xticklabels()]
+        assert set(x_labels) & {"A", "B", "C"}, f"Expected level labels on x-axis, got {x_labels}"
+
+    def test_categorical_with_exposure_bars(self, sample_data, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+
+        X, y, exposure = sample_data
+        fig = fitted_model.plot_relativity("region", X=X, exposure=exposure)
+        # Twin axis for exposure bars → 2 axes total
+        assert len(fig.get_axes()) >= 2
+
+    def test_numeric_returns_figure(self, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        fig = fitted_model.plot_relativity("density")
+        assert isinstance(fig, Figure)
+
+    def test_numeric_density_strip(self, sample_data, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+
+        X, y, exposure = sample_data
+        fig = fitted_model.plot_relativity("density", X=X, exposure=exposure)
+        # Main panel + density strip = 2 axes
+        assert len(fig.get_axes()) >= 2
+
+    def test_standalone_plot_term(self, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        ti = fitted_model.term_inference("age")
+        fig = plot_term(ti)
+        assert isinstance(fig, Figure)

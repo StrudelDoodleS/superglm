@@ -344,6 +344,240 @@ def _plot_numeric_panel(ax, ti: TermInference, interval: str | None):
     ax.spines["right"].set_visible(False)
 
 
+def plot_term(
+    ti: TermInference,
+    *,
+    X: pd.DataFrame | None = None,
+    exposure: NDArray | None = None,
+    interval: str | None = "pointwise",
+    show_exposure: bool = True,
+    show_knots: bool = False,
+    figsize: tuple[float, float] | None = None,
+    title: str | None = None,
+    subtitle: str | None = None,
+) -> Figure:
+    """Plot a single term's relativity.
+
+    This is the core single-term plotting function.  All term types
+    (spline, polynomial, numeric, categorical) are handled.
+
+    Parameters
+    ----------
+    ti : TermInference
+        Inference result from :meth:`SuperGLM.term_inference`.
+    X : DataFrame, optional
+        Training data for exposure overlays.
+    exposure : array-like, optional
+        Exposure / frequency weights.
+    interval : {"pointwise", "simultaneous", "both", None}
+        Band style.  For categoricals, simultaneous/both fall back to pointwise.
+    show_exposure : bool
+        Show exposure distribution (density strip for continuous, vertical
+        bars for categorical).
+    show_knots : bool
+        Show interior knot ticks (spline only).
+    figsize : tuple, optional
+        Figure size.
+    title, subtitle : str, optional
+        Title and subtitle.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    if exposure is not None:
+        exposure = np.asarray(exposure, dtype=np.float64)
+
+    has_density = show_exposure and X is not None and exposure is not None
+
+    if ti.kind in ("spline", "polynomial"):
+        needs_strip = has_density and ti.name in X.columns
+        if needs_strip:
+            if figsize is None:
+                figsize = (7, 5.5)
+            fig = plt.figure(figsize=figsize)
+            gs = GridSpec(2, 1, figure=fig, height_ratios=[4.2, 1.0], hspace=0.06)
+            ax = fig.add_subplot(gs[0])
+            ax_den = fig.add_subplot(gs[1])
+            plt.setp(ax.get_xticklabels(), visible=False)
+        else:
+            if figsize is None:
+                figsize = (7, 4.5)
+            fig, ax = plt.subplots(figsize=figsize)
+            ax_den = None
+
+        _plot_spline_panel(ax, ti, interval, show_knots)
+        ax.set_ylabel("Relativity")
+
+        if ax_den is not None:
+            knots = ti.spline.interior_knots if ti.spline is not None else None
+            _plot_density_strip(ax_den, ti.name, X, exposure, ti.x, show_knots, knots)
+            ax_den.set_ylabel("Exposure\ndensity", fontsize=8)
+
+    elif ti.kind == "numeric":
+        needs_strip = has_density and ti.name in X.columns
+        if needs_strip:
+            if figsize is None:
+                figsize = (7, 5.5)
+            fig = plt.figure(figsize=figsize)
+            gs = GridSpec(2, 1, figure=fig, height_ratios=[4.2, 1.0], hspace=0.06)
+            ax = fig.add_subplot(gs[0])
+            ax_den = fig.add_subplot(gs[1])
+        else:
+            if figsize is None:
+                figsize = (4, 4)
+            fig, ax = plt.subplots(figsize=figsize)
+            ax_den = None
+
+        _plot_numeric_panel(ax, ti, interval)
+
+        if ax_den is not None:
+            x_vals = X[ti.name].to_numpy(dtype=np.float64)
+            grid = np.linspace(x_vals.min(), x_vals.max(), 200)
+            _plot_density_strip(ax_den, ti.name, X, exposure, grid, False, None)
+            ax_den.set_ylabel("Exposure\ndensity", fontsize=8)
+
+    elif ti.kind == "categorical":
+        if figsize is None:
+            figsize = (max(5, len(ti.levels) * 0.9 + 1.5), 4.5)
+        fig, ax = plt.subplots(figsize=figsize)
+        _plot_categorical_panel_vertical(
+            ax, ti, interval, X=X, exposure=exposure if has_density else None
+        )
+
+    else:
+        if figsize is None:
+            figsize = (7, 4.5)
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, f"Unknown term kind: {ti.kind!r}", transform=ax.transAxes, ha="center")
+
+    # ── Legend ──
+    all_axes = fig.get_axes()
+    legend_handles = []
+    legend_labels = []
+    for a in all_axes:
+        for h, lab in zip(*a.get_legend_handles_labels()):
+            if lab not in legend_labels:
+                legend_handles.append(h)
+                legend_labels.append(lab)
+
+    if (
+        show_knots
+        and ti.kind in ("spline", "polynomial")
+        and ti.spline is not None
+        and ti.spline.interior_knots.size > 0
+    ):
+        knot_handle = Line2D(
+            [0],
+            [0],
+            color=_KNOT_COLOR,
+            marker="|",
+            linestyle="None",
+            markersize=9,
+            markeredgewidth=1.1,
+            label="Interior knots",
+        )
+        legend_handles.append(knot_handle)
+        legend_labels.append("Interior knots")
+
+    if legend_handles:
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.99 if not title else 0.93),
+            ncol=min(len(legend_handles), 4),
+            frameon=False,
+            fontsize=9,
+        )
+
+    # ── Title / subtitle ──
+    if title:
+        fig.suptitle(title, fontsize=14, fontweight="bold", y=1.02)
+    if subtitle:
+        fig.text(
+            0.5, 0.97 if not title else 0.96, subtitle, ha="center", fontsize=10.5, color="#444444"
+        )
+
+    # tight_layout is incompatible with explicit GridSpec — only call for plain subplots
+    has_gs = any(
+        hasattr(ax, "get_gridspec") and ax.get_gridspec() is not None for ax in fig.get_axes()
+    )
+    if not has_gs:
+        fig.tight_layout()
+    return fig
+
+
+def _plot_categorical_panel_vertical(
+    ax,
+    ti: TermInference,
+    interval: str | None,
+    *,
+    X: pd.DataFrame | None = None,
+    exposure: NDArray | None = None,
+):
+    """Render a categorical panel with vertical orientation.
+
+    Levels on x-axis, relativity on y-axis.  Optional exposure bars
+    in the background.
+    """
+    levels = list(ti.levels)
+    rel = np.asarray(ti.relativity)
+    x_pos = np.arange(len(levels))
+
+    # Exposure bars in background
+    if exposure is not None and X is not None and ti.name in X.columns:
+        level_exp = (
+            pd.DataFrame({"level": X[ti.name], "exposure": exposure})
+            .groupby("level", sort=False)["exposure"]
+            .sum()
+        )
+        exp_vals = np.array([level_exp.get(lv, 0.0) for lv in levels])
+        exp_max = exp_vals.max()
+        if exp_max > 0:
+            exp_vals = exp_vals / exp_max
+        ax2 = ax.twinx()
+        ax2.bar(x_pos, exp_vals, width=0.6, color=_EXP_FILL, alpha=0.5, zorder=0, label="Exposure")
+        ax2.set_ylim(0, 1.4)
+        ax2.set_yticks([])
+        ax2.spines["top"].set_visible(False)
+        ax2.spines["right"].set_visible(False)
+        ax.set_zorder(ax2.get_zorder() + 1)
+        ax.patch.set_visible(False)
+
+    # Relativity markers + error bars
+    if interval is not None and ti.ci_lower is not None:
+        ci_lo = np.asarray(ti.ci_lower)
+        ci_hi = np.asarray(ti.ci_upper)
+        ax.errorbar(
+            x_pos,
+            rel,
+            yerr=[rel - ci_lo, ci_hi - rel],
+            fmt="o",
+            color=_LINE_COLOR,
+            markersize=7,
+            ecolor="#333333",
+            elinewidth=1.2,
+            capsize=4,
+            label="Relativity",
+            zorder=5,
+        )
+    else:
+        ax.scatter(x_pos, rel, color=_LINE_COLOR, s=50, zorder=5, label="Relativity")
+
+    ax.axhline(1.0, linestyle="--", color=_REF_COLOR, linewidth=_REF_LW, zorder=0)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(levels)
+    ax.set_ylabel("Relativity")
+    ax.set_title(ti.name, fontweight="bold")
+    ax.grid(alpha=0.22, axis="y")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
 def _plot_relativities_new(
     terms: list[TermInference],
     *,
