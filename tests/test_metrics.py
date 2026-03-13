@@ -390,7 +390,7 @@ class TestSummary:
     def test_summary_consistent_width(self, metrics_obj):
         """Header separator and coef separator should be the same width."""
         text = str(metrics_obj.summary())
-        eq_lines = [line for line in text.split("\n") if set(line) == {"="}]
+        eq_lines = [line for line in text.split("\n") if set(line) == {"\u2550"}]
         assert len(eq_lines) >= 2
         assert len(eq_lines[0]) == len(eq_lines[1])
 

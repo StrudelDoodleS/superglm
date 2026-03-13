@@ -154,8 +154,8 @@ class ModelSummary:
         name_w = max(name_w, 10)
         table_w = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4
 
-        sep = "=" * table_w
-        thin_sep = "-" * table_w
+        sep = "\u2550" * table_w
+        thin_sep = "\u2500" * table_w
 
         lines.append(f"{'SuperGLM Results':^{table_w}}")
         lines.append(sep)
