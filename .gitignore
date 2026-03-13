@@ -27,3 +27,6 @@ scratch/
 
 # Benchmark outputs (generated, not tracked)
 benchmarks/results/
+
+# MkDocs build output
+site/

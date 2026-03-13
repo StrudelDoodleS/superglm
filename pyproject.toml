@@ -104,3 +104,9 @@ warn_unused_configs = true
 [[tool.mypy.overrides]]
 module = ["scipy.*", "matplotlib.*"]
 ignore_missing_imports = true
+
+[dependency-groups]
+docs = [
+    "mkdocs-material>=9.7.5",
+    "mkdocstrings[python]>=1.0.3",
+]

@@ -70,6 +70,7 @@ class Categorical:
         x: NDArray,
         exposure: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
+        """Build sparse one-hot design columns, choosing the base level from *x*."""
         x = np.asarray(x).ravel()
         self._levels = sorted(np.unique(x).tolist())
 

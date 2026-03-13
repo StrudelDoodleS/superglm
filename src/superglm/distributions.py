@@ -59,12 +59,15 @@ class Poisson:
         return "log"
 
     def variance(self, mu: NDArray) -> NDArray:
+        """V(μ) = μ."""
         return mu.copy()
 
     def variance_derivative(self, mu: NDArray) -> NDArray:
+        """V'(μ) = 1."""
         return np.ones_like(mu)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
+        """Unit deviance: 2[y log(y/μ) - (y - μ)]."""
         d = np.zeros_like(y, dtype=float)
         pos = y > 0
         d[pos] = 2 * (y[pos] * np.log(y[pos] / mu[pos]) - (y[pos] - mu[pos]))
@@ -72,7 +75,7 @@ class Poisson:
         return d
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
-        """Poisson log-likelihood (phi is ignored, fixed at 1)."""
+        """Poisson log-likelihood (φ fixed at 1)."""
         return float(np.sum(weights * (y * np.log(np.maximum(mu, 1e-300)) - mu - gammaln(y + 1))))
 
 
@@ -88,16 +91,19 @@ class Gamma:
         return "log"
 
     def variance(self, mu: NDArray) -> NDArray:
+        """V(μ) = μ²."""
         return mu**2
 
     def variance_derivative(self, mu: NDArray) -> NDArray:
+        """V'(μ) = 2μ."""
         return 2.0 * mu
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
+        """Unit deviance: 2[-log(y/μ) + (y - μ)/μ]."""
         return 2 * (-np.log(y / mu) + (y - mu) / mu)
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
-        """Gamma log-likelihood. Shape k = 1/phi."""
+        """Gamma log-likelihood. Shape k = 1/φ."""
         k = 1.0 / phi
         return float(
             np.sum(weights * (k * np.log(k * y / mu) - k * y / mu - np.log(y) - gammaln(k)))
@@ -128,12 +134,15 @@ class NegativeBinomial:
         return "log"
 
     def variance(self, mu: NDArray) -> NDArray:
+        """V(μ) = μ + μ²/θ."""
         return mu + mu**2 / self.theta
 
     def variance_derivative(self, mu: NDArray) -> NDArray:
+        """V'(μ) = 1 + 2μ/θ."""
         return 1.0 + 2.0 * mu / self.theta
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
+        """NB2 unit deviance."""
         theta = self.theta
         d = np.where(
             y > 0,
@@ -147,6 +156,7 @@ class NegativeBinomial:
         return d
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
+        """NB2 log-likelihood: Σ w[log Γ(y+θ) - log Γ(θ) - log Γ(y+1) + θ log(θ/(μ+θ)) + y log(μ/(μ+θ))]."""
         theta = self.theta
         ll = (
             gammaln(y + theta)
@@ -182,12 +192,15 @@ class Tweedie:
         return "log"
 
     def variance(self, mu: NDArray) -> NDArray:
+        """V(μ) = μᵖ."""
         return np.power(mu, self.p)
 
     def variance_derivative(self, mu: NDArray) -> NDArray:
+        """V'(μ) = p·μᵖ⁻¹."""
         return self.p * np.power(mu, self.p - 1)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
+        """Tweedie unit deviance."""
         p = self.p
         t1 = np.where(y > 0, np.power(y, 2 - p) / ((1 - p) * (2 - p)), 0.0)
         t2 = y * np.power(mu, 1 - p) / (1 - p)
@@ -195,7 +208,7 @@ class Tweedie:
         return 2 * (t1 - t2 + t3)
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
-        """Tweedie log-likelihood via tweedie_logpdf."""
+        """Tweedie log-likelihood via exact Wright-Bessel evaluation."""
         from superglm.tweedie_profile import tweedie_logpdf
 
         logpdf = tweedie_logpdf(y, mu, phi, self.p, weights=weights)
