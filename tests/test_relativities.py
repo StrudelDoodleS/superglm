@@ -186,3 +186,136 @@ class TestPlotRelativities:
             for child in ax.get_children()
         )
         assert has_linecoll, "Expected a LineCollection (error bars) on a categorical subplot"
+
+
+class TestPlotRelativitiesNew:
+    """Smoke tests for the new TermInference-based plotting path."""
+
+    def test_returns_figure(self, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        fig = fitted_model.plot_relativities()
+        assert isinstance(fig, Figure)
+
+    def test_interval_pointwise(self, fitted_model):
+        import matplotlib
+        import matplotlib.collections as mcoll
+
+        matplotlib.use("Agg")
+
+        fig = fitted_model.plot_relativities(interval="pointwise")
+        has_poly = any(
+            isinstance(child, mcoll.PolyCollection)
+            for ax in fig.get_axes()
+            for child in ax.get_children()
+        )
+        assert has_poly, "Expected CI band with interval='pointwise'"
+
+    def test_interval_simultaneous(self, sample_data, fitted_model):
+        import matplotlib
+        import matplotlib.collections as mcoll
+
+        matplotlib.use("Agg")
+
+        fig = fitted_model.plot_relativities(interval="simultaneous")
+        has_poly = any(
+            isinstance(child, mcoll.PolyCollection)
+            for ax in fig.get_axes()
+            for child in ax.get_children()
+        )
+        assert has_poly, "Expected simultaneous band"
+
+    def test_interval_both(self, sample_data, fitted_model):
+        import matplotlib
+        import matplotlib.collections as mcoll
+
+        matplotlib.use("Agg")
+
+        fig = fitted_model.plot_relativities(interval="both")
+        # Count PolyCollections — should have at least 2 per spline (pw + sim)
+        poly_count = sum(
+            isinstance(child, mcoll.PolyCollection)
+            for ax in fig.get_axes()
+            for child in ax.get_children()
+        )
+        assert poly_count >= 2, f"Expected nested bands, got {poly_count} PolyCollections"
+
+    def test_interval_none(self, fitted_model):
+        import matplotlib
+        import matplotlib.collections as mcoll
+
+        matplotlib.use("Agg")
+
+        fig = fitted_model.plot_relativities(interval=None)
+        has_poly = any(
+            isinstance(child, mcoll.PolyCollection)
+            for ax in fig.get_axes()
+            for child in ax.get_children()
+        )
+        assert not has_poly, "No bands expected with interval=None"
+
+    def test_show_exposure(self, sample_data, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        X, y, exposure = sample_data
+        fig = fitted_model.plot_relativities(
+            X=X,
+            exposure=exposure,
+            show_exposure=True,
+        )
+        assert isinstance(fig, Figure)
+        # With density strips, there should be more axes than just the main panels
+        all_axes = fig.get_axes()
+        assert len(all_axes) > 3
+
+    def test_show_knots(self, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        fig = fitted_model.plot_relativities(show_knots=True)
+        assert isinstance(fig, Figure)
+
+    def test_with_ci_false(self, fitted_model):
+        import matplotlib
+        import matplotlib.collections as mcoll
+
+        matplotlib.use("Agg")
+
+        fig = fitted_model.plot_relativities(with_ci=False)
+        has_poly = any(
+            isinstance(child, mcoll.PolyCollection)
+            for ax in fig.get_axes()
+            for child in ax.get_children()
+        )
+        assert not has_poly, "No bands expected when with_ci=False"
+
+    def test_legacy_dict_api(self, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        rels = fitted_model.relativities()
+        fig = plot_relativities(rels)
+        assert isinstance(fig, Figure)
+
+    def test_mixed_features(self, fitted_model):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        # fitted_model has spline (age), categorical (region), numeric (density)
+        fig = fitted_model.plot_relativities()
+        assert isinstance(fig, Figure)
+        # At least 3 visible panels
+        visible = [ax for ax in fig.get_axes() if ax.get_visible()]
+        assert len(visible) >= 3
