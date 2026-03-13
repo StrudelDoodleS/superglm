@@ -200,13 +200,14 @@ class ModelSummary:
             right = f"{k2 + ':':<20s}{v2:>{val_r}s}"
             return _row(f"{left}  {right}")
 
+        conv_str = f"{info['converged']} ({info['n_iter']} iter)"
         rows = [
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
             ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
-            ("Penalty", info["penalty"], "Lambda1", _fmt(info["lambda1"])),
-            ("Scale (phi)", _fmt(info["phi"]), "Deviance", _fmt(info["deviance"])),
+            ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
+            ("Scale (phi)", _fmt(info["phi"]), "Lambda1", _fmt(info["lambda1"])),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
-            ("Converged", str(info["converged"]), "Iterations", str(info["n_iter"])),
+            ("Deviance", _fmt(info["deviance"]), "Converged", conv_str),
         ]
 
         # NB theta profile row
@@ -325,6 +326,9 @@ class ModelSummary:
 
         lines.append(_bot())
         lines.append(_SIG_LEGEND)
+        abbrevs = info.get("penalty_abbrevs", {})
+        if abbrevs:
+            lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
         lines.append(_WALD_NOTE)
         return "\n".join(lines)
 
@@ -359,13 +363,14 @@ class ModelSummary:
         )
 
         # Header rows
+        conv_str = f"{info['converged']} ({info['n_iter']} iter)"
         header_rows = [
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
             ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
-            ("Penalty", info["penalty"], "Lambda1", _fmt(info["lambda1"])),
-            ("Scale (phi)", _fmt(info["phi"]), "Deviance", _fmt(info["deviance"])),
+            ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
+            ("Scale (phi)", _fmt(info["phi"]), "Lambda1", _fmt(info["lambda1"])),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
-            ("Converged", str(info["converged"]), "Iterations", str(info["n_iter"])),
+            ("Deviance", _fmt(info["deviance"]), "Converged", conv_str),
         ]
 
         # NB theta profile row

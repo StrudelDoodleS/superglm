@@ -1437,13 +1437,39 @@ class SuperGLM:
             link_name = link_name[:-4]
         penalty_name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", type(penalty).__name__)
 
+        # Append "+ SL" if any split_linear splines are present
+        has_select = any(g.subgroup_type is not None for g in self._groups)
+        penalty_abbrevs: dict[str, str] = {}  # abbrev -> full name
+        if has_select:
+            short = {"Group Lasso": "GL", "Sparse Group Lasso": "SGL", "Group Elastic Net": "GEN"}
+            abbrev = short.get(penalty_name)
+            if abbrev is not None:
+                penalty_abbrevs[abbrev] = penalty_name
+                penalty_name = abbrev
+            penalty_abbrevs["SL"] = "split-linear double penalty (Wood, 2011)"
+            penalty_name += " + SL"
+
+        # Build method string from fit metadata
+        meta = self._last_fit_meta or {}
+        method_parts = []
+        if meta.get("method") == "fit_reml":
+            method_parts.append("REML")
+        else:
+            method_parts.append("ML")
+        if meta.get("discrete"):
+            method_parts.append("discrete")
+        method_str = ", ".join(method_parts)
+
+        lam1 = penalty.lambda1
         model_info = {
             "family": type(self._distribution).__name__,
             "link": link_name,
             "penalty": penalty_name,
+            "penalty_abbrevs": penalty_abbrevs,
+            "method": method_str,
             "n_obs": n,
             "effective_df": edf,
-            "lambda1": penalty.lambda1,
+            "lambda1": lam1,
             "phi": res.phi,
             "deviance": res.deviance,
             "log_likelihood": ll,
