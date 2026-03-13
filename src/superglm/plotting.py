@@ -344,6 +344,84 @@ def _plot_numeric_panel(ax, ti: TermInference, interval: str | None):
     ax.spines["right"].set_visible(False)
 
 
+def _plot_numeric_panel_vertical(
+    ax,
+    ti: TermInference,
+    interval: str | None,
+    *,
+    X: pd.DataFrame | None = None,
+    exposure: NDArray | None = None,
+):
+    """Render a numeric panel with vertical orientation for single-term figures.
+
+    Single marker at the per-unit relativity, vertical error bar, optional
+    exposure density bars in the background.
+    """
+    rel = float(np.asarray(ti.relativity).ravel()[0])
+
+    # Exposure density background (twin axis, like categorical vertical)
+    if exposure is not None and X is not None and ti.name in X.columns:
+        x_vals = X[ti.name].to_numpy(dtype=np.float64)
+        # Show distribution as a histogram in the background
+        ax2 = ax.twinx()
+        ax2.hist(
+            x_vals,
+            bins=30,
+            weights=exposure,
+            color=_EXP_FILL,
+            alpha=0.45,
+            edgecolor=_EXP_EDGE,
+            linewidth=0.6,
+            zorder=0,
+            density=True,
+            label="Exposure",
+        )
+        ax2.set_yticks([])
+        ax2.spines["top"].set_visible(False)
+        ax2.spines["right"].set_visible(False)
+        ax.set_zorder(ax2.get_zorder() + 1)
+        ax.patch.set_visible(False)
+
+    # Relativity marker + error bar
+    x_pos = np.array([0])
+    if interval is not None and ti.ci_lower is not None:
+        ci_lo = float(np.asarray(ti.ci_lower).ravel()[0])
+        ci_hi = float(np.asarray(ti.ci_upper).ravel()[0])
+        ax.errorbar(
+            x_pos,
+            [rel],
+            yerr=[[rel - ci_lo], [ci_hi - rel]],
+            fmt="o",
+            color=_LINE_COLOR,
+            markersize=9,
+            ecolor="#333333",
+            elinewidth=1.4,
+            capsize=5,
+            label="Relativity",
+            zorder=5,
+        )
+    else:
+        ax.scatter(x_pos, [rel], color=_LINE_COLOR, s=80, zorder=5, label="Relativity")
+
+    ax.axhline(1.0, linestyle="--", color=_REF_COLOR, linewidth=_REF_LW, zorder=0)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(["per unit"])
+    ax.set_ylabel("Relativity")
+    ax.set_title(ti.name, fontweight="bold")
+    ax.grid(alpha=0.22, axis="y")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    # Give some vertical breathing room around the marker
+    y_lo = min(rel, 1.0) - 0.15
+    y_hi = max(rel, 1.0) + 0.15
+    if interval is not None and ti.ci_lower is not None:
+        ci_lo = float(np.asarray(ti.ci_lower).ravel()[0])
+        ci_hi = float(np.asarray(ti.ci_upper).ravel()[0])
+        y_lo = min(ci_lo, 1.0) - 0.1
+        y_hi = max(ci_hi, 1.0) + 0.1
+    ax.set_ylim(y_lo, y_hi)
+
+
 def plot_term(
     ti: TermInference,
     *,
@@ -418,27 +496,12 @@ def plot_term(
             ax_den.set_ylabel("Exposure\ndensity", fontsize=8)
 
     elif ti.kind == "numeric":
-        needs_strip = has_density and ti.name in X.columns
-        if needs_strip:
-            if figsize is None:
-                figsize = (7, 5.5)
-            fig = plt.figure(figsize=figsize)
-            gs = GridSpec(2, 1, figure=fig, height_ratios=[4.2, 1.0], hspace=0.06)
-            ax = fig.add_subplot(gs[0])
-            ax_den = fig.add_subplot(gs[1])
-        else:
-            if figsize is None:
-                figsize = (4, 4)
-            fig, ax = plt.subplots(figsize=figsize)
-            ax_den = None
-
-        _plot_numeric_panel(ax, ti, interval)
-
-        if ax_den is not None:
-            x_vals = X[ti.name].to_numpy(dtype=np.float64)
-            grid = np.linspace(x_vals.min(), x_vals.max(), 200)
-            _plot_density_strip(ax_den, ti.name, X, exposure, grid, False, None)
-            ax_den.set_ylabel("Exposure\ndensity", fontsize=8)
+        if figsize is None:
+            figsize = (4, 4.5)
+        fig, ax = plt.subplots(figsize=figsize)
+        _plot_numeric_panel_vertical(
+            ax, ti, interval, X=X, exposure=exposure if has_density else None
+        )
 
     elif ti.kind == "categorical":
         if figsize is None:
@@ -484,11 +547,18 @@ def plot_term(
         legend_labels.append("Interior knots")
 
     if legend_handles:
+        # Place legend above axes; push up if title/subtitle present
+        if title and subtitle:
+            legend_y = 1.10
+        elif title:
+            legend_y = 1.06
+        else:
+            legend_y = 1.02
         fig.legend(
             legend_handles,
             legend_labels,
-            loc="upper center",
-            bbox_to_anchor=(0.5, 0.99 if not title else 0.93),
+            loc="lower center",
+            bbox_to_anchor=(0.5, legend_y),
             ncol=min(len(legend_handles), 4),
             frameon=False,
             fontsize=9,
@@ -496,11 +566,11 @@ def plot_term(
 
     # ── Title / subtitle ──
     if title:
-        fig.suptitle(title, fontsize=14, fontweight="bold", y=1.02)
+        y_title = legend_y + 0.05 if legend_handles else 1.02
+        fig.suptitle(title, fontsize=14, fontweight="bold", y=y_title)
     if subtitle:
-        fig.text(
-            0.5, 0.97 if not title else 0.96, subtitle, ha="center", fontsize=10.5, color="#444444"
-        )
+        y_sub = (y_title - 0.04) if title and legend_handles else (1.06 if title else 1.0)
+        fig.text(0.5, y_sub, subtitle, ha="center", fontsize=10.5, color="#444444")
 
     # tight_layout is incompatible with explicit GridSpec — only call for plain subplots
     has_gs = any(

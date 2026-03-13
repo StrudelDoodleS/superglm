@@ -465,7 +465,7 @@ class TestPlotRelativity:
 
         X, y, exposure = sample_data
         fig = fitted_model.plot_relativity("density", X=X, exposure=exposure)
-        # Main panel + density strip = 2 axes
+        # Twin axis for exposure histogram → 2 axes total
         assert len(fig.get_axes()) >= 2
 
     def test_standalone_plot_term(self, fitted_model):
