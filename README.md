@@ -252,10 +252,10 @@ print(m.summary())
 ti = model.term_inference("DrivAge")
 
 # Plot a single term with CI bands and exposure density strip
-model.plot_relativity("DrivAge", X=df, exposure=exposure)
+model.plot("DrivAge", X=df, sample_weight=exposure)
 
 # Plot all terms in a grid
-model.plot_relativities(X=df, exposure=exposure, interval="both")
+model.plot(X=df, sample_weight=exposure, ci="both")
 
 # Relativity DataFrames (for manual access / export)
 rels = model.relativities(with_se=True)

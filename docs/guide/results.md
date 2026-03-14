@@ -25,19 +25,23 @@ ti.spline                   # SplineMetadata (interior_knots, boundary_knots, ba
 
 ## Plotting
 
-### Single term
+All plotting goes through `model.plot()`:
 
 ```python
-model.plot_relativity("DrivAge", X=df, exposure=exposure)
+# Single term
+model.plot("DrivAge", X=df, sample_weight=exposure)
+
+# All terms in a grid
+model.plot(X=df, sample_weight=exposure)
+
+# Subset of terms
+model.plot(["DrivAge", "VehAge"], X=df, sample_weight=exposure)
+
+# Interaction
+model.plot("DrivAge:Area")
 ```
 
-Options: `interval` (`"pointwise"`, `"simultaneous"`, `"both"`, `None`), `show_knots`, `show_exposure`, `title`, `subtitle`.
-
-### All terms
-
-```python
-model.plot_relativities(X=df, exposure=exposure, interval="pointwise")
-```
+Options: `ci` (`"pointwise"`, `"simultaneous"`, `"both"`, `None`, `False`), `show_knots`, `show_density`, `title`, `subtitle`, `engine`.
 
 ## Relativity DataFrames
 

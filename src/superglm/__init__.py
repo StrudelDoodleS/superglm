@@ -66,7 +66,6 @@ from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
-from superglm.plotting import plot_interaction, plot_relativities, plot_term
 from superglm.reml import REMLResult
 from superglm.sklearn import SuperGLMRegressor
 from superglm.summary import ModelSummary
@@ -112,9 +111,6 @@ __all__ = [
     "SparseGroupLasso",
     "Ridge",
     "Adaptive",
-    "plot_interaction",
-    "plot_relativities",
-    "plot_term",
     "NBProfileResult",
     "REMLResult",
     "estimate_nb_theta",

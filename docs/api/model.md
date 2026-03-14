@@ -10,8 +10,7 @@
         - predict
         - relativities
         - term_inference
-        - plot_relativity
-        - plot_relativities
+        - plot
         - metrics
         - refit_unpenalised
         - drop1
