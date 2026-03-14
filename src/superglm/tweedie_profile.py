@@ -330,7 +330,9 @@ class TweedieProfileResult:
         # Mark original Brent evaluation points (not grid/CI evals)
         if orig_cache:
             cache_ps = np.array(sorted(orig_cache.keys()))
-            cache_dev = 2.0 * self._ll_scale * (np.array([orig_cache[p] for p in cache_ps]) - self.nll)
+            cache_dev = (
+                2.0 * self._ll_scale * (np.array([orig_cache[p] for p in cache_ps]) - self.nll)
+            )
             ax.scatter(
                 cache_ps,
                 cache_dev,
@@ -600,7 +602,9 @@ def _estimate_tweedie_p_fit(
         edf_final = float(final_result.effective_df)
 
     df_resid_final = max(len(y_arr) - float(edf_final), 1.0)
-    phi_hat = max(estimate_phi(y_arr, mu_final, p_hat, weights=w_arr, df_resid=df_resid_final), 1e-10)
+    phi_hat = max(
+        estimate_phi(y_arr, mu_final, p_hat, weights=w_arr, df_resid=df_resid_final), 1e-10
+    )
 
     return TweedieProfileResult(
         p_hat=p_hat,

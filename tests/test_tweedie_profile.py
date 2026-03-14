@@ -27,6 +27,7 @@ def _generate_weighted_tweedie(mu, phi, p, weights, rng):
         y[i] = generate_tweedie_cpg(1, mu=mu[i], phi=phi / weights[i], p=p, rng=rng)[0]
     return y
 
+
 # =====================================================================
 # TestGenerateTweedieCPG
 # =====================================================================
