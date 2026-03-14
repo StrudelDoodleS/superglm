@@ -802,14 +802,30 @@ class TestCardinalCRSelect:
 class TestCRSelectInteraction:
     """Regression test: CR select=True parent inside spline×categorical interaction."""
 
-    def test_cr_select_spline_categorical_constraint_projection(self):
-        """CR select=True must store _constraint_projection for SplineCategorical."""
+    def test_cr_select_constraint_projection_includes_identifiability(self):
+        """CR select=True _constraint_projection is (K, K-3): constraints + identifiability."""
         sp = Spline(kind="cr", n_knots=10, select=True)
         sp.build(np.linspace(0, 10, 200))
-        # CR has natural boundary constraints → _constraint_projection must not be None
         assert sp._constraint_projection is not None
         K = sp._n_basis
-        assert sp._constraint_projection.shape == (K, K - 2)
+        # K-2 from natural constraints, -1 from identifiability = K-3
+        assert sp._constraint_projection.shape == (K, K - 3)
+
+    def test_cr_select_constraint_projection_matches_no_select(self):
+        """CR select=True and select=False produce the same _constraint_projection."""
+        x = np.linspace(0, 10, 200)
+        sp_sel = Spline(kind="cr", n_knots=10, select=True)
+        sp_sel.build(x)
+        sp_std = Spline(kind="cr", n_knots=10, select=False)
+        sp_std.build(x)
+        # Both should have the same shape
+        assert sp_sel._constraint_projection.shape == sp_std._constraint_projection.shape
+        # Projections span the same subspace (columns may differ by rotation)
+        P1 = sp_sel._constraint_projection
+        P2 = sp_std._constraint_projection
+        # P1.T @ P2 should have full rank (same column space)
+        cross = P1.T @ P2
+        assert np.linalg.matrix_rank(cross) == P1.shape[1]
 
     def test_cr_select_spline_categorical_fit(self):
         """CR select=True parent with spline×categorical interaction fits correctly."""
@@ -838,22 +854,84 @@ class TestCRSelectInteraction:
         assert np.all(np.isfinite(pred))
         assert np.all(pred > 0)
 
-        # Interaction groups should use constrained (K-2) column count,
-        # not raw K columns
+        # Interaction groups must use identified column count (K-3),
+        # not raw K or constraint-only K-2
+        K = m._specs["x"]._n_basis
+        expected_ncols = K - 3  # natural constraints + identifiability
         interaction_groups = [g for g in m._groups if "x:cat" in g.name]
         assert len(interaction_groups) > 0
         for g in interaction_groups:
-            # CR with n_knots=8: K=12, constrained K-2=10,
-            # then identifiability removes 1 more → n_cols = 9
-            # But interaction uses _constraint_projection which is (K, K-2)
-            # so the per-level n_cols should be K-2 = 10
-            assert g.size == m._specs["x"]._constraint_projection.shape[1]
+            assert g.size == expected_ncols, (
+                f"Expected interaction group size {expected_ncols}, got {g.size}"
+            )
 
-    def test_bs_select_constraint_projection_none(self):
-        """BS select=True has no boundary constraints → _constraint_projection is None."""
+    def test_cr_select_interaction_full_rank(self):
+        """CR select=True + spline×categorical must produce a full-rank design."""
+        from superglm.features.categorical import Categorical
+
+        rng = np.random.default_rng(42)
+        n = 300
+        x = rng.uniform(0, 10, n)
+        cat = rng.choice(["A", "B", "C"], n)
+        mu = np.exp(-0.5 + 0.3 * np.sin(x))
+        y = rng.poisson(mu)
+        X = pd.DataFrame({"x": x, "cat": cat})
+
+        m = SuperGLM(
+            family="poisson",
+            features={
+                "x": Spline(kind="cr", n_knots=8, select=True),
+                "cat": Categorical(),
+            },
+            interactions=[("x", "cat")],
+            lambda2=1.0,
+            lambda1=0.01,
+        )
+        m.fit(X, y)
+
+        # Materialize design matrix and check rank
+        p = m._dm.p
+        X_mat = np.column_stack([m._dm.matvec(np.eye(p)[:, j]) for j in range(p)])
+        rank = np.linalg.matrix_rank(X_mat)
+        assert rank == p, f"Design matrix rank {rank} < p={p}: rank-deficient"
+
+    def test_bs_select_constraint_projection_has_identifiability(self):
+        """BS select=True _constraint_projection is (K, K-1): identifiability only."""
         sp = Spline(kind="bs", n_knots=10, select=True)
         sp.build(np.linspace(0, 10, 200))
-        assert sp._constraint_projection is None
+        # BS has no boundary constraints, just identifiability
+        assert sp._constraint_projection is not None
+        K = sp._n_basis
+        assert sp._constraint_projection.shape == (K, K - 1)
+
+    def test_bs_select_interaction_full_rank(self):
+        """BS select=True + spline×categorical must produce a full-rank design."""
+        from superglm.features.categorical import Categorical
+
+        rng = np.random.default_rng(42)
+        n = 300
+        x = rng.uniform(0, 10, n)
+        cat = rng.choice(["A", "B", "C"], n)
+        mu = np.exp(-0.5 + 0.3 * np.sin(x))
+        y = rng.poisson(mu)
+        X = pd.DataFrame({"x": x, "cat": cat})
+
+        m = SuperGLM(
+            family="poisson",
+            features={
+                "x": Spline(kind="bs", n_knots=8, select=True),
+                "cat": Categorical(),
+            },
+            interactions=[("x", "cat")],
+            lambda2=1.0,
+            lambda1=0.01,
+        )
+        m.fit(X, y)
+
+        p = m._dm.p
+        X_mat = np.column_stack([m._dm.matvec(np.eye(p)[:, j]) for j in range(p)])
+        rank = np.linalg.matrix_rank(X_mat)
+        assert rank == p, f"Design matrix rank {rank} < p={p}: rank-deficient"
 
 
 class TestNSSelectRejection:

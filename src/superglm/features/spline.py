@@ -362,6 +362,43 @@ class _SplineBase:
         """
         return B, omega, self._n_basis, None
 
+    def _identifiability_projection(
+        self,
+        x: NDArray,
+        constraint_projection: NDArray | None,
+    ) -> NDArray | None:
+        """Compute the projection that removes the intercept-confounded direction.
+
+        Returns the (possibly composed) projection from the raw basis
+        space to the identified+constrained space.  For BS this is
+        ``(K, K-1)``; for CR it is ``(K, K-3)`` (natural + identifiability).
+
+        Used by both the standard ``_apply_identifiability`` and the
+        ``select=True`` path (where the main effect handles constant
+        removal via eigendecomposition, but interactions still need the
+        identified projection to avoid rank deficiency).
+        """
+        n_cols = (
+            constraint_projection.shape[1] if constraint_projection is not None else self._n_basis
+        )
+        if n_cols <= 1:
+            return constraint_projection
+
+        x = np.asarray(x, dtype=np.float64).ravel()
+        support, inverse = np.unique(x, return_inverse=True)
+        basis = self._basis_matrix(support).toarray()
+        if constraint_projection is not None:
+            basis = basis @ constraint_projection
+
+        counts = np.bincount(inverse, minlength=len(support)).astype(np.float64)
+        constraint = counts @ basis
+        if np.linalg.norm(constraint) < 1e-12:
+            return constraint_projection
+
+        q, _ = np.linalg.qr(constraint.reshape(-1, 1), mode="complete")
+        z = q[:, 1:]
+        return z if constraint_projection is None else constraint_projection @ z
+
     def _apply_identifiability(
         self,
         x: NDArray,
@@ -379,25 +416,20 @@ class _SplineBase:
         if not self.absorbs_intercept:
             return omega, omega.shape[0], projection
 
-        n_cols = omega.shape[0]
-        if n_cols <= 1:
-            return omega, n_cols, projection
+        projection_ident = self._identifiability_projection(x, projection)
+        if projection_ident is projection:
+            return omega, omega.shape[0], projection
 
-        x = np.asarray(x, dtype=np.float64).ravel()
-        support, inverse = np.unique(x, return_inverse=True)
-        basis = self._basis_matrix(support).toarray()
+        # Extract the local identifiability direction to transform omega.
+        # projection_ident = projection @ z (or just z if projection is None).
+        # We need z to compute omega_ident = z.T @ omega @ z.
         if projection is not None:
-            basis = basis @ projection
-
-        counts = np.bincount(inverse, minlength=len(support)).astype(np.float64)
-        constraint = counts @ basis
-        if np.linalg.norm(constraint) < 1e-12:
-            return omega, n_cols, projection
-
-        q, _ = np.linalg.qr(constraint.reshape(-1, 1), mode="complete")
-        z = q[:, 1:]
+            # z = pinv(projection) @ projection_ident, but since projection
+            # has orthonormal columns, pinv = projection.T
+            z = projection.T @ projection_ident
+        else:
+            z = projection_ident
         omega_ident = z.T @ omega @ z
-        projection_ident = z if projection is None else projection @ z
         return omega_ident, omega_ident.shape[0], projection_ident
 
     def _natural_constraint_null_space(self) -> NDArray:
@@ -467,11 +499,12 @@ class _SplineBase:
         omega = self._build_penalty()
         _, omega_c, _, Z = self._apply_constraints(None, omega)
 
-        # Store the constraint projection so that downstream consumers
-        # (e.g. SplineCategorical) can project interactions into the
-        # constrained basis.  For CR this is the (K, K-2) natural
-        # boundary null space; for BS it is None (no constraints).
-        self._constraint_projection = Z
+        # Store the full constraint + identifiability projection for
+        # interactions (SplineCategorical).  The main effect handles
+        # constant removal via eigendecomposition, but interactions
+        # need the standard identified projection to stay full-rank.
+        # BS: (K, K-1), CR: (K, K-3), CardinalCR: (K, K-1).
+        self._constraint_projection = self._identifiability_projection(x, Z)
 
         self._eigendecompose_select(omega_c, Z)
 
@@ -546,8 +579,8 @@ class _SplineBase:
         if self.select:
             Z = projection  # constraint projection (or None)
             self._eigendecompose_select(omega_c, Z)
-            # Return the constrained penalty for the non-select DM path
-            self._constraint_projection = projection
+            # Store constraint + identifiability projection for interactions
+            self._constraint_projection = self._identifiability_projection(x, Z)
             return omega_c, n_cols, projection
 
         omega_c, n_cols, projection = self._apply_identifiability(x, omega_c, projection)

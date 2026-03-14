@@ -293,9 +293,12 @@ class TestConstraintProjection:
         PtP = P.T @ P
         assert np.allclose(PtP, np.eye(PtP.shape[0]), atol=1e-12)
 
-    def test_split_linear_no_constraint_projection(self):
-        """split_linear=True skips identifiability → no constraint projection."""
-        s = BasisSpline(n_knots=8, split_linear=True)
+    def test_select_stores_identifiability_projection(self):
+        """select=True stores identifiability projection for interaction support."""
+        s = BasisSpline(n_knots=8, select=True)
         x = np.linspace(0, 1, 100)
         s.build(x)
-        assert s._constraint_projection is None
+        # BS has no boundary constraints, so _constraint_projection is
+        # just the identifiability projection (K, K-1)
+        assert s._constraint_projection is not None
+        assert s._constraint_projection.shape == (s._n_basis, s._n_basis - 1)
