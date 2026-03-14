@@ -116,3 +116,18 @@ class TestClassifierThreshold:
         proba = clf.predict_proba(X)
         expected = (proba[:, 1] >= 0.8).astype(int)
         assert_allclose(preds, expected)
+
+
+class TestClassifierEdgeCases:
+    def test_one_class_raises(self, binary_data):
+        X, _ = binary_data
+        y_all_zero = np.zeros(len(X))
+        clf = SuperGLMClassifier(lambda1=0)
+        with pytest.raises(ValueError, match="requires both classes"):
+            clf.fit(X, y_all_zero)
+
+    def test_classes_from_data(self, binary_data):
+        X, y = binary_data
+        clf = SuperGLMClassifier(lambda1=0)
+        clf.fit(X, y)
+        assert_allclose(clf.classes_, [0, 1])

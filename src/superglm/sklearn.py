@@ -244,7 +244,11 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         X = pd.DataFrame(X).copy()
         y = np.asarray(y, dtype=np.float64)
 
-        self.classes_ = np.array([0, 1])
+        self.classes_ = np.unique(y)
+        if len(self.classes_) < 2:
+            raise ValueError(
+                f"SuperGLMClassifier requires both classes in y, but got only {self.classes_}."
+            )
 
         # Extract offset columns before passing to SuperGLM
         offset_array = self._extract_offset(X)
