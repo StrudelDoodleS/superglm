@@ -248,7 +248,7 @@ def feature_se_from_cov(
         B_grid = spec._raw_basis_matrix(x_grid)
         M = B_grid @ spec._R_inv if spec._R_inv is not None else B_grid
 
-        # For split_linear=True: only use columns for active subgroups
+        # For select=True: only use columns for active subgroups
         active_cols = np.concatenate(
             [
                 np.arange(g.start, g.end) - feature_groups[0].start
@@ -364,7 +364,7 @@ def simultaneous_bands(
     B_grid = spec._raw_basis_matrix(x_grid)
     M = B_grid @ spec._R_inv if spec._R_inv is not None else B_grid
 
-    # For split_linear=True: only use columns for active subgroups
+    # For select=True: only use columns for active subgroups
     active_cols = np.concatenate(
         [
             np.arange(g.start, g.end) - feature_groups[0].start

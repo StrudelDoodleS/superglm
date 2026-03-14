@@ -79,7 +79,7 @@ class SplineCategorical:
         self._hi = spline_spec._hi
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
-        self._projection = getattr(spline_spec, "_constraint_projection", None)
+        self._projection = getattr(spline_spec, "_interaction_projection", None)
 
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
         x_cat = np.asarray(x_cat).ravel()

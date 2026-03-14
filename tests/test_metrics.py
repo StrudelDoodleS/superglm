@@ -961,6 +961,42 @@ class TestPolynomialCategoricalSummary:
         assert "x:cat" in html
 
 
+class TestPolynomialSummary:
+    """Plain polynomial terms should be rendered as degree components."""
+
+    def test_polynomial_summary_split_by_degree(self):
+        from superglm.features.polynomial import Polynomial
+
+        rng = np.random.default_rng(123)
+        n = 400
+        age = rng.uniform(18, 90, n)
+        exposure = rng.uniform(0.3, 1.0, n)
+        age_s = (age - 50.0) / 20.0
+        mu = np.exp(-1.8 + 0.35 * age_s - 0.25 * age_s**2 + 0.08 * age_s**3)
+        y = rng.poisson(mu * exposure).astype(float)
+        X = pd.DataFrame({"age": age})
+
+        model = SuperGLM(
+            family="poisson",
+            lambda1=0.001,
+            features={"age": Polynomial(degree=3)},
+        )
+        model.fit(X, y, exposure=exposure)
+
+        text = str(model.summary())
+        html = model.summary()._repr_html_()
+
+        assert "age P(3)" in text
+        assert "age[P1]" in text
+        assert "age[P2]" in text
+        assert "age[P3]" in text
+
+        assert "age P(3)" in html
+        assert "age[P1]" in html
+        assert "age[P2]" in html
+        assert "age[P3]" in html
+
+
 class TestAICcEdgeCase:
     """AICc with near-saturated model."""
 

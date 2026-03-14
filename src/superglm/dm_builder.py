@@ -383,9 +383,7 @@ def build_design_matrix(
             B_unique = spec._raw_basis_matrix(bin_centers)
             exposure_agg = np.bincount(bin_idx, weights=exposure, minlength=len(bin_centers))
 
-            if getattr(spec, "supports_linear_split", False) and getattr(
-                spec, "split_linear", False
-            ):
+            if getattr(spec, "select", False):
                 n_null = 1
                 n_range = spec._U_range.shape[1]
                 infos = [
