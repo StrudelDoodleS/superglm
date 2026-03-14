@@ -57,7 +57,19 @@ from superglm.features.spline import (
     n_knots_from_k,
 )
 from superglm.inference import InteractionInference, SplineMetadata, TermInference
-from superglm.links import LogitLink, LogLink
+from superglm.links import (
+    CauchitLink,
+    CloglogLink,
+    IdentityLink,
+    InverseLink,
+    InverseSquaredLink,
+    LogitLink,
+    LogLink,
+    NegativeBinomialLink,
+    PowerLink,
+    ProbitLink,
+    SqrtLink,
+)
 from superglm.metrics import ModelMetrics
 from superglm.model import PathResult, SuperGLM
 from superglm.nb_profile import NBProfileResult, estimate_nb_theta
@@ -95,6 +107,15 @@ __all__ = [
     "Tweedie",
     "LogLink",
     "LogitLink",
+    "IdentityLink",
+    "ProbitLink",
+    "CloglogLink",
+    "CauchitLink",
+    "InverseLink",
+    "InverseSquaredLink",
+    "SqrtLink",
+    "PowerLink",
+    "NegativeBinomialLink",
     "Spline",
     "BasisSpline",
     "NaturalSpline",
