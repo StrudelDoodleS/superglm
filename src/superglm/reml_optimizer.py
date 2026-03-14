@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributions import clip_mu
 from superglm.group_matrix import (
     DesignMatrix,
     _block_xtwx,
@@ -112,7 +113,7 @@ def reml_w_correction(
         -20,
         20,
     )
-    mu = np.clip(link.inverse(eta), 1e-7, 1e7)
+    mu = clip_mu(link.inverse(eta), distribution)
     dW_deta = compute_dW_deta(link, distribution, mu, eta, exposure)
 
     if dW_deta is None:
@@ -185,7 +186,7 @@ def reml_laml_objective(
     estimated-scale families (Gamma, Tweedie) via φ-profiled REML.
     """
     eta = np.clip(dm.matvec(result.beta) + result.intercept + offset_arr, -20, 20)
-    mu = np.clip(link.inverse(eta), 1e-7, 1e7)
+    mu = clip_mu(link.inverse(eta), distribution)
     if XtWX is None:
         V = distribution.variance(mu)
         dmu_deta = link.deriv_inverse(eta)
@@ -927,7 +928,7 @@ def optimize_discrete_reml_cached_w(
                 _edf = 1.0 + float(np.trace(XtWX_S_inv @ XtWX))
                 # Compute fresh deviance at analytical beta (O(n) data pass)
                 eta_f = np.clip(dm.matvec(warm_beta) + warm_intercept + offset_arr, -20, 20)
-                mu_f = np.clip(link.inverse(eta_f), 1e-7, 1e7)
+                mu_f = clip_mu(link.inverse(eta_f), distribution)
                 dev_f = float(np.sum(exposure * distribution.deviance_unit(y, mu_f)))
                 best_pirls = PIRLSResult(
                     beta=warm_beta.copy(),
@@ -1148,7 +1149,7 @@ def optimize_discrete_reml_cached_w(
                     best_lambdas[name] = float(np.clip(np.exp(rho_clipped[idx_j]), 1e-6, 1e10))
                 # Recompute deviance + objective at analytical beta + final lambdas
                 eta_f = np.clip(dm.matvec(warm_beta) + warm_intercept + offset_arr, -20, 20)
-                mu_f = np.clip(link.inverse(eta_f), 1e-7, 1e7)
+                mu_f = clip_mu(link.inverse(eta_f), distribution)
                 dev_f = float(np.sum(exposure * distribution.deviance_unit(y, mu_f)))
                 # H_inv from last inner FP iteration is at the final lambdas
                 _edf = 1.0 + float(np.trace(H_inv @ XtWX))
@@ -1315,7 +1316,7 @@ def optimize_efs_reml(
 
     # Compute W and X'WX from bootstrap fit
     boot_eta = np.clip(dm.matvec(boot_result.beta) + boot_result.intercept + offset_arr, -20, 20)
-    boot_mu = np.clip(link.inverse(boot_eta), 1e-7, 1e7)
+    boot_mu = clip_mu(link.inverse(boot_eta), distribution)
     boot_V = distribution.variance(boot_mu)
     boot_dmu = link.deriv_inverse(boot_eta)
     boot_W = exposure * boot_dmu**2 / np.maximum(boot_V, 1e-10)
@@ -1403,7 +1404,7 @@ def optimize_efs_reml(
 
             # Compute IRLS weights and cache X'WX
             eta = np.clip(dm.matvec(beta) + intercept + offset_arr, -20, 20)
-            mu = np.clip(link.inverse(eta), 1e-7, 1e7)
+            mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
             W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
@@ -1632,7 +1633,7 @@ def run_reml_once(
             cached_direct_xtwx = XtWX_full
 
             eta = np.clip(dm.matvec(beta) + intercept + offset_arr, -20, 20)
-            mu = np.clip(link.inverse(eta), 1e-7, 1e7)
+            mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
             W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
@@ -1660,7 +1661,7 @@ def run_reml_once(
             last_pirls_iters = pirls_result.n_iter
 
             eta = np.clip(dm.matvec(beta) + intercept + offset_arr, -20, 20)
-            mu = np.clip(link.inverse(eta), 1e-7, 1e7)
+            mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
             W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)

@@ -36,7 +36,7 @@ sklearn-compatible API:
 from superglm.cv import CVResult
 from superglm.davies import psum_chisq, satterthwaite
 from superglm.discretize import DiscretizationResult, discretization_impact
-from superglm.distributions import Gamma, NegativeBinomial, Poisson, Tweedie
+from superglm.distributions import Binomial, Gamma, NegativeBinomial, Poisson, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.interaction import (
     CategoricalInteraction,
@@ -57,7 +57,19 @@ from superglm.features.spline import (
     n_knots_from_k,
 )
 from superglm.inference import InteractionInference, SplineMetadata, TermInference
-from superglm.links import LogLink
+from superglm.links import (
+    CauchitLink,
+    CloglogLink,
+    IdentityLink,
+    InverseLink,
+    InverseSquaredLink,
+    LogitLink,
+    LogLink,
+    NegativeBinomialLink,
+    PowerLink,
+    ProbitLink,
+    SqrtLink,
+)
 from superglm.metrics import ModelMetrics
 from superglm.model import PathResult, SuperGLM
 from superglm.nb_profile import NBProfileResult, estimate_nb_theta
@@ -67,7 +79,7 @@ from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.reml import REMLResult
-from superglm.sklearn import SuperGLMRegressor
+from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
 from superglm.summary import ModelSummary
 from superglm.tweedie_profile import (
     TweedieProfileResult,
@@ -87,11 +99,23 @@ __all__ = [
     "ModelMetrics",
     "ModelSummary",
     "SuperGLMRegressor",
+    "SuperGLMClassifier",
     "Poisson",
     "Gamma",
+    "Binomial",
     "NegativeBinomial",
     "Tweedie",
     "LogLink",
+    "LogitLink",
+    "IdentityLink",
+    "ProbitLink",
+    "CloglogLink",
+    "CauchitLink",
+    "InverseLink",
+    "InverseSquaredLink",
+    "SqrtLink",
+    "PowerLink",
+    "NegativeBinomialLink",
     "Spline",
     "BasisSpline",
     "NaturalSpline",
