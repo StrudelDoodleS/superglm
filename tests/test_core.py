@@ -1,5 +1,7 @@
 """Tests for SuperGLM. Each test encodes a property that MUST hold."""
 
+import pickle
+
 import numpy as np
 import pytest
 
@@ -1253,3 +1255,31 @@ class TestBasisSplineOpenKnotVector:
             f"Upper boundary has {np.sum(diffs < -0.01)} downturns; "
             f"open knot vector should prevent boundary kink"
         )
+
+
+class TestClassIdentity:
+    """SuperGLM must present itself at the public facade path, not the internal module."""
+
+    def test_module_is_superglm_model(self):
+        from superglm.model import SuperGLM
+
+        assert SuperGLM.__module__ == "superglm.model"
+
+    def test_top_level_is_same_class(self):
+        from superglm import SuperGLM as Top
+        from superglm.model import SuperGLM as Model
+
+        assert Top is Model
+
+    def test_pickle_round_trip(self):
+        from superglm.model import SuperGLM
+
+        blob = pickle.dumps(SuperGLM())
+        model = pickle.loads(blob)
+        assert isinstance(model, SuperGLM)
+
+    def test_pickle_bytes_use_facade_path(self):
+        from superglm.model import SuperGLM
+
+        blob = pickle.dumps(SuperGLM())
+        assert b"superglm.model.api" not in blob
