@@ -1626,9 +1626,17 @@ class SuperGLM:
         res = self.result
         groups = self._feature_groups(name)
         beta_combined = np.concatenate([res.beta[g.sl] for g in groups])
-        if name in self._specs:
+        in_main = name in self._specs
+        in_inter = name in self._interaction_specs
+        if in_main and in_inter:
+            raise ValueError(
+                f"Ambiguous name {name!r}: exists as both a main effect "
+                f"and an interaction. Use the feature or interaction spec "
+                f"directly to disambiguate."
+            )
+        if in_main:
             return self._specs[name].reconstruct(beta_combined)
-        if name in self._interaction_specs:
+        if in_inter:
             return self._interaction_specs[name].reconstruct(beta_combined)
         raise KeyError(f"Feature not found: {name}")
 
@@ -2098,14 +2106,29 @@ class SuperGLM:
             mode = "all_main"
         elif isinstance(terms, str):
             names = [terms]
-            if terms in self._interaction_specs:
+            in_main = terms in self._specs
+            in_inter = terms in self._interaction_specs
+            if in_main and in_inter:
+                raise ValueError(
+                    f"Ambiguous term {terms!r}: exists as both a main effect "
+                    f"and an interaction. Use the feature or interaction spec "
+                    f"directly to disambiguate."
+                )
+            if in_inter:
                 mode = "interaction"
-            elif terms in self._specs:
+            elif in_main:
                 mode = "single_main"
             else:
                 raise KeyError(f"Term not found: {terms!r}")
         else:
             names = list(terms)
+            ambiguous = [n for n in names if n in self._specs and n in self._interaction_specs]
+            if ambiguous:
+                raise ValueError(
+                    f"Ambiguous term(s) {ambiguous}: exist as both main effects "
+                    f"and interactions. Use the feature or interaction spec "
+                    f"directly to disambiguate."
+                )
             interactions = [n for n in names if n in self._interaction_specs]
             mains = [n for n in names if n in self._specs]
             unknown = [

@@ -406,6 +406,7 @@ def plot_term(
     """
     import matplotlib.pyplot as plt
 
+    weighted = exposure is not None
     if exposure is not None:
         exposure = np.asarray(exposure, dtype=np.float64)
     elif X is not None and show_exposure:
@@ -413,6 +414,8 @@ def plot_term(
         # sample_weight is provided.
         exposure = np.ones(len(X), dtype=np.float64)
 
+    density_label = "Weight\ndensity" if weighted else "Obs.\ndensity"
+    weight_label = "Weight" if weighted else "Count"
     has_density = show_exposure and X is not None and exposure is not None
 
     if ti.kind in ("spline", "polynomial"):
@@ -425,7 +428,7 @@ def plot_term(
         if ax_den is not None:
             knots = ti.spline.interior_knots if ti.spline is not None else None
             _plot_density_strip(ax_den, ti.name, X, exposure, ti.x, show_knots, knots)
-            ax_den.set_ylabel("Weight\ndensity", fontsize=8)
+            ax_den.set_ylabel(density_label, fontsize=8)
 
     elif ti.kind == "numeric":
         needs_strip = has_density and ti.name in X.columns
@@ -440,14 +443,19 @@ def plot_term(
 
         if ax_den is not None:
             _plot_density_strip(ax_den, ti.name, X, exposure, x_grid, False, None)
-            ax_den.set_ylabel("Weight\ndensity", fontsize=8)
+            ax_den.set_ylabel(density_label, fontsize=8)
 
     elif ti.kind == "categorical":
         if figsize is None:
             figsize = (max(5, len(ti.levels) * 0.9 + 1.5), 4.5)
         fig, ax = plt.subplots(figsize=figsize)
         _plot_categorical_panel_vertical(
-            ax, ti, interval, X=X, exposure=exposure if has_density else None
+            ax,
+            ti,
+            interval,
+            X=X,
+            exposure=exposure if has_density else None,
+            weight_label=weight_label,
         )
 
     else:
@@ -558,6 +566,7 @@ def _plot_categorical_panel_vertical(
     *,
     X: pd.DataFrame | None = None,
     exposure: NDArray | None = None,
+    weight_label: str = "Weight",
 ):
     """Render a categorical panel with vertical orientation.
 
@@ -586,11 +595,11 @@ def _plot_categorical_panel_vertical(
             linewidth=_EXP_EDGE_LW,
             alpha=0.65,
             zorder=0,
-            label="Weight",
+            label=weight_label,
         )
         ymax = float(exp_vals.max()) if exp_vals.size else 0.0
         ax2.set_ylim(0.0, ymax * 1.12 if ymax > 0 else 1.0)
-        ax2.set_ylabel("Weight", color=_EXP_EDGE)
+        ax2.set_ylabel(weight_label, color=_EXP_EDGE)
         ax2.tick_params(axis="y", colors=_EXP_EDGE, labelsize=9)
         ax2.spines["top"].set_visible(False)
         ax2.spines["right"].set_color(_EXP_EDGE)
@@ -650,11 +659,14 @@ def _plot_relativities_new(
         fig, _ = plt.subplots()
         return fig
 
+    weighted = exposure is not None
     if exposure is not None:
         exposure = np.asarray(exposure, dtype=np.float64)
     elif X is not None and show_exposure:
         exposure = np.ones(len(X), dtype=np.float64)
 
+    density_label = "Weight\ndensity" if weighted else "Obs.\ndensity"
+    weight_label = "Weight" if weighted else "Count"
     ncols = min(ncols, n)
     nrows = math.ceil(n / ncols)
 
@@ -729,12 +741,17 @@ def _plot_relativities_new(
                 knots = ti.spline.interior_knots if ti.spline is not None else None
                 _plot_density_strip(ax_den, ti.name, X, exposure, ti.x, show_knots, knots)
                 if idx % ncols == 0:
-                    ax_den.set_ylabel("Weight\ndensity", fontsize=8)
+                    ax_den.set_ylabel(density_label, fontsize=8)
                 ax_den.set_xlabel("")
 
         elif ti.kind == "categorical":
             _plot_categorical_panel_vertical(
-                ax, ti, interval, X=X, exposure=exposure if has_density else None
+                ax,
+                ti,
+                interval,
+                X=X,
+                exposure=exposure if has_density else None,
+                weight_label=weight_label,
             )
 
         elif ti.kind == "numeric":
@@ -750,7 +767,7 @@ def _plot_relativities_new(
             if ax_den is not None:
                 _plot_density_strip(ax_den, ti.name, X, exposure, x_grid, False, None)
                 if idx % ncols == 0:
-                    ax_den.set_ylabel("Weight\ndensity", fontsize=8)
+                    ax_den.set_ylabel(density_label, fontsize=8)
                 ax_den.set_xlabel("")
 
         else:
@@ -869,12 +886,20 @@ def plot_interaction(
     parent_names = ispec.parent_names
 
     density_data = None
+    if X is not None and exposure is None:
+        exposure = np.ones(len(X), dtype=np.float64)
     if X is not None and exposure is not None:
         exposure = np.asarray(exposure, dtype=np.float64)
-        if parent_names[0] in X.columns and parent_names[1] in X.columns:
+        p0, p1 = parent_names[0], parent_names[1]
+        if (
+            p0 in X.columns
+            and p1 in X.columns
+            and pd.api.types.is_numeric_dtype(X[p0])
+            and pd.api.types.is_numeric_dtype(X[p1])
+        ):
             density_data = (
-                np.asarray(X[parent_names[0]], dtype=np.float64),
-                np.asarray(X[parent_names[1]], dtype=np.float64),
+                np.asarray(X[p0], dtype=np.float64),
+                np.asarray(X[p1], dtype=np.float64),
                 exposure,
             )
 

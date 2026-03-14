@@ -261,6 +261,44 @@ class TestDensity:
         # Without sample_weight, falls back to observation density → strip shown
         assert len(fig.get_axes()) >= 2
 
+    def test_density_label_with_weight(self, sample_data, fitted_model):
+        """When sample_weight is provided, density strip is labeled 'Weight density'."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+
+        X, y, exposure = sample_data
+        fig = fitted_model.plot("age", X=X, sample_weight=exposure, show_density=True)
+        ylabels = [ax.get_ylabel() for ax in fig.get_axes()]
+        assert any("Weight" in lbl for lbl in ylabels)
+
+    def test_density_label_without_weight(self, sample_data, fitted_model):
+        """Without sample_weight, density strip is labeled 'Obs. density'."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+
+        X, y, _ = sample_data
+        fig = fitted_model.plot("age", X=X, show_density=True)
+        ylabels = [ax.get_ylabel() for ax in fig.get_axes()]
+        assert any("Obs." in lbl for lbl in ylabels)
+        assert not any("Weight" in lbl for lbl in ylabels)
+
+    def test_categorical_label_without_weight(self, sample_data, fitted_model):
+        """Categorical bars are labeled 'Count' when sample_weight is omitted."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+
+        X, y, _ = sample_data
+        fig = fitted_model.plot("region", X=X, show_density=True)
+        all_labels = []
+        for ax in fig.get_axes():
+            all_labels.append(ax.get_ylabel())
+            h, lab = ax.get_legend_handles_labels()
+            all_labels.extend(lab)
+        assert any("Count" in lbl for lbl in all_labels)
+
     def test_density_disabled(self, sample_data, fitted_model):
         import matplotlib
 
@@ -305,6 +343,90 @@ class TestPlotErrors:
         with pytest.raises(RuntimeError, match="fitted"):
             model.plot()
 
+    def test_ambiguous_term_raises(self):
+        """Feature named 'a:b' + interaction ('a','b') → ambiguity error."""
+        rng = np.random.default_rng(42)
+        n = 200
+        a = rng.uniform(0, 10, n)
+        b = rng.choice(["X", "Y"], n)
+        y = rng.poisson(np.exp(0.5 + 0.1 * a)).astype(float)
+        X = pd.DataFrame({"a": a, "b": b, "a:b": a})
+
+        model = SuperGLM(
+            features={
+                "a": Spline(n_knots=5),
+                "b": Categorical(),
+                "a:b": Spline(n_knots=5),
+            },
+            interactions=[("a", "b")],
+        )
+        model.fit(X, y)
+        with pytest.raises(ValueError, match="Ambiguous"):
+            model.plot("a:b")
+
+    def test_ambiguous_term_in_list_raises(self):
+        """Ambiguity error also fires from list path."""
+        rng = np.random.default_rng(42)
+        n = 200
+        a = rng.uniform(0, 10, n)
+        b = rng.choice(["X", "Y"], n)
+        y = rng.poisson(np.exp(0.5 + 0.1 * a)).astype(float)
+        X = pd.DataFrame({"a": a, "b": b, "a:b": a})
+
+        model = SuperGLM(
+            features={
+                "a": Spline(n_knots=5),
+                "b": Categorical(),
+                "a:b": Spline(n_knots=5),
+            },
+            interactions=[("a", "b")],
+        )
+        model.fit(X, y)
+        with pytest.raises(ValueError, match="Ambiguous"):
+            model.plot(["a:b"])
+
+    def test_reconstruct_feature_ambiguous_raises(self):
+        """reconstruct_feature() also raises on name collision."""
+        rng = np.random.default_rng(42)
+        n = 200
+        a = rng.uniform(0, 10, n)
+        b = rng.choice(["X", "Y"], n)
+        y = rng.poisson(np.exp(0.5 + 0.1 * a)).astype(float)
+        X = pd.DataFrame({"a": a, "b": b, "a:b": a})
+
+        model = SuperGLM(
+            features={
+                "a": Spline(n_knots=5),
+                "b": Categorical(),
+                "a:b": Spline(n_knots=5),
+            },
+            interactions=[("a", "b")],
+        )
+        model.fit(X, y)
+        with pytest.raises(ValueError, match="Ambiguous"):
+            model.reconstruct_feature("a:b")
+
+    def test_term_inference_ambiguous_raises(self):
+        """term_inference() also raises on name collision."""
+        rng = np.random.default_rng(42)
+        n = 200
+        a = rng.uniform(0, 10, n)
+        b = rng.choice(["X", "Y"], n)
+        y = rng.poisson(np.exp(0.5 + 0.1 * a)).astype(float)
+        X = pd.DataFrame({"a": a, "b": b, "a:b": a})
+
+        model = SuperGLM(
+            features={
+                "a": Spline(n_knots=5),
+                "b": Categorical(),
+                "a:b": Spline(n_knots=5),
+            },
+            interactions=[("a", "b")],
+        )
+        model.fit(X, y)
+        with pytest.raises(ValueError, match="Ambiguous"):
+            model.term_inference("a:b")
+
 
 # ── Regression: colon in feature names ─────────────────────────
 
@@ -327,4 +449,20 @@ class TestColonInFeatureName:
         model.fit(X, y)
 
         fig = model.plot("a:b")
+        assert isinstance(fig, Figure)
+
+
+# ── Interaction density fallback ──────────────────────────────
+
+
+class TestInteractionDensity:
+    def test_interaction_density_without_sample_weight(self, sample_data, interaction_model):
+        """Interaction plot shows density overlay when X given but no sample_weight."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        X, y, _ = sample_data
+        fig = interaction_model.plot("age:region", X=X)
         assert isinstance(fig, Figure)
