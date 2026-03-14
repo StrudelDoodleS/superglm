@@ -872,6 +872,14 @@ def term_inference(
     beta = result.beta
     feature_groups = [g for g in groups if g.feature_name == name]
 
+    # ── Ambiguity check ───────────────────────────────────────────
+    if name in specs and name in interaction_specs:
+        raise ValueError(
+            f"Ambiguous name {name!r}: exists as both a main effect "
+            f"and an interaction. Use the feature or interaction spec "
+            f"directly to disambiguate."
+        )
+
     # ── Interaction dispatch ─────────────────────────────────────
     if name in interaction_specs:
         return _interaction_inference(

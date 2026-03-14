@@ -10,9 +10,8 @@ from superglm import (
     Polynomial,
     Spline,
     SuperGLM,
-    plot_relativities,
-    plot_term,
 )
+from superglm.plotting import plot_relativities, plot_term
 
 
 @pytest.fixture
@@ -102,7 +101,7 @@ class TestPlotRelativities:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        fig = fitted_model.plot_relativities()
+        fig = fitted_model.plot()
         assert isinstance(fig, Figure)
 
     def test_standalone_function(self, fitted_model):
@@ -120,7 +119,7 @@ class TestPlotRelativities:
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativities(ncols=3)
+        fig = fitted_model.plot(ncols=3)
         axes = fig.get_axes()
         assert len(axes) == 3  # 3 features, 1 row of 3
 
@@ -129,7 +128,7 @@ class TestPlotRelativities:
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativities(figsize=(12, 8))
+        fig = fitted_model.plot(figsize=(12, 8))
         w, h = fig.get_size_inches()
         assert w == pytest.approx(12)
         assert h == pytest.approx(8)
@@ -141,7 +140,7 @@ class TestPlotRelativities:
         from matplotlib.figure import Figure
 
         X, y, exposure = sample_data
-        fig = fitted_model.plot_relativities(X=X, exposure=exposure)
+        fig = fitted_model.plot(X=X, sample_weight=exposure)
         assert isinstance(fig, Figure)
         # Twin axes created for spline (age) and categorical (region) → extra axes
         all_axes = fig.get_axes()
@@ -173,7 +172,7 @@ class TestPlotRelativities:
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativities()
+        fig = fitted_model.plot()
         # Spline subplot should have a PolyCollection from fill_between
         has_poly = any(
             isinstance(child, mcoll.PolyCollection)
@@ -188,13 +187,13 @@ class TestPlotRelativities:
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativities(with_ci=False)
+        fig = fitted_model.plot(ci=False)
         has_poly = any(
             isinstance(child, mcoll.PolyCollection)
             for ax in fig.get_axes()
             for child in ax.get_children()
         )
-        assert not has_poly, "No PolyCollection expected when with_ci=False"
+        assert not has_poly, "No PolyCollection expected when ci=False"
 
     def test_plot_ci_categorical_errorbars(self, fitted_model):
         import matplotlib
@@ -202,7 +201,7 @@ class TestPlotRelativities:
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativities()
+        fig = fitted_model.plot()
         # Categorical subplot should have a LineCollection from errorbar
         has_linecoll = any(
             isinstance(child, mcoll.LineCollection)
@@ -213,7 +212,7 @@ class TestPlotRelativities:
 
 
 class TestPlotRelativitiesNew:
-    """Smoke tests for the new TermInference-based plotting path."""
+    """Smoke tests for the TermInference-based plotting path."""
 
     def test_returns_figure(self, fitted_model):
         import matplotlib
@@ -221,30 +220,30 @@ class TestPlotRelativitiesNew:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        fig = fitted_model.plot_relativities()
+        fig = fitted_model.plot()
         assert isinstance(fig, Figure)
 
-    def test_interval_pointwise(self, fitted_model):
+    def test_ci_pointwise(self, fitted_model):
         import matplotlib
         import matplotlib.collections as mcoll
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativities(interval="pointwise")
+        fig = fitted_model.plot(ci="pointwise")
         has_poly = any(
             isinstance(child, mcoll.PolyCollection)
             for ax in fig.get_axes()
             for child in ax.get_children()
         )
-        assert has_poly, "Expected CI band with interval='pointwise'"
+        assert has_poly, "Expected CI band with ci='pointwise'"
 
-    def test_interval_simultaneous(self, sample_data, fitted_model):
+    def test_ci_simultaneous(self, sample_data, fitted_model):
         import matplotlib
         import matplotlib.collections as mcoll
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativities(interval="simultaneous")
+        fig = fitted_model.plot(ci="simultaneous")
         has_poly = any(
             isinstance(child, mcoll.PolyCollection)
             for ax in fig.get_axes()
@@ -252,13 +251,13 @@ class TestPlotRelativitiesNew:
         )
         assert has_poly, "Expected simultaneous band"
 
-    def test_interval_both(self, sample_data, fitted_model):
+    def test_ci_both(self, sample_data, fitted_model):
         import matplotlib
         import matplotlib.collections as mcoll
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativities(interval="both")
+        fig = fitted_model.plot(ci="both")
         # Count PolyCollections — should have at least 2 per spline (pw + sim)
         poly_count = sum(
             isinstance(child, mcoll.PolyCollection)
@@ -267,31 +266,31 @@ class TestPlotRelativitiesNew:
         )
         assert poly_count >= 2, f"Expected nested bands, got {poly_count} PolyCollections"
 
-    def test_interval_none(self, fitted_model):
+    def test_ci_none(self, fitted_model):
         import matplotlib
         import matplotlib.collections as mcoll
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativities(interval=None)
+        fig = fitted_model.plot(ci=None)
         has_poly = any(
             isinstance(child, mcoll.PolyCollection)
             for ax in fig.get_axes()
             for child in ax.get_children()
         )
-        assert not has_poly, "No bands expected with interval=None"
+        assert not has_poly, "No bands expected with ci=None"
 
-    def test_show_exposure(self, sample_data, fitted_model):
+    def test_show_density(self, sample_data, fitted_model):
         import matplotlib
 
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
         X, y, exposure = sample_data
-        fig = fitted_model.plot_relativities(
+        fig = fitted_model.plot(
             X=X,
-            exposure=exposure,
-            show_exposure=True,
+            sample_weight=exposure,
+            show_density=True,
         )
         assert isinstance(fig, Figure)
         # With density strips, there should be more axes than just the main panels
@@ -304,22 +303,22 @@ class TestPlotRelativitiesNew:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        fig = fitted_model.plot_relativities(show_knots=True)
+        fig = fitted_model.plot(show_knots=True)
         assert isinstance(fig, Figure)
 
-    def test_with_ci_false(self, fitted_model):
+    def test_ci_false(self, fitted_model):
         import matplotlib
         import matplotlib.collections as mcoll
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativities(with_ci=False)
+        fig = fitted_model.plot(ci=False)
         has_poly = any(
             isinstance(child, mcoll.PolyCollection)
             for ax in fig.get_axes()
             for child in ax.get_children()
         )
-        assert not has_poly, "No bands expected when with_ci=False"
+        assert not has_poly, "No bands expected when ci=False"
 
     def test_standalone_term_list(self, fitted_model):
         import matplotlib
@@ -340,7 +339,7 @@ class TestPlotRelativitiesNew:
 
         X, y, exposure = sample_data
         # fitted_model has spline (age), categorical (region), numeric (density)
-        fig = fitted_model.plot_relativities(X=X, exposure=exposure, show_exposure=True)
+        fig = fitted_model.plot(X=X, sample_weight=exposure, show_density=True)
         assert isinstance(fig, Figure)
 
         visible = [ax for ax in fig.get_axes() if ax.get_visible()]
@@ -370,7 +369,7 @@ class TestPlotRelativitiesNew:
 
 
 class TestPlotRelativity:
-    """Smoke tests for the single-term plot_relativity() entry point."""
+    """Smoke tests for model.plot('term') single-term plotting."""
 
     def test_spline_returns_figure(self, fitted_model):
         import matplotlib
@@ -378,16 +377,16 @@ class TestPlotRelativity:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        fig = fitted_model.plot_relativity("age")
+        fig = fitted_model.plot("age")
         assert isinstance(fig, Figure)
 
-    def test_spline_interval_both(self, fitted_model):
+    def test_spline_ci_both(self, fitted_model):
         import matplotlib
         import matplotlib.collections as mcoll
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativity("age", interval="both")
+        fig = fitted_model.plot("age", ci="both")
         poly_count = sum(
             isinstance(child, mcoll.PolyCollection)
             for ax in fig.get_axes()
@@ -395,33 +394,33 @@ class TestPlotRelativity:
         )
         assert poly_count >= 2, f"Expected nested bands, got {poly_count} PolyCollections"
 
-    def test_spline_interval_none(self, fitted_model):
+    def test_spline_ci_none(self, fitted_model):
         import matplotlib
         import matplotlib.collections as mcoll
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativity("age", interval=None)
+        fig = fitted_model.plot("age", ci=None)
         has_poly = any(
             isinstance(child, mcoll.PolyCollection)
             for ax in fig.get_axes()
             for child in ax.get_children()
         )
-        assert not has_poly, "No bands expected with interval=None"
+        assert not has_poly, "No bands expected with ci=None"
 
-    def test_spline_with_ci_false(self, fitted_model):
+    def test_spline_ci_false(self, fitted_model):
         import matplotlib
         import matplotlib.collections as mcoll
 
         matplotlib.use("Agg")
 
-        fig = fitted_model.plot_relativity("age", with_ci=False)
+        fig = fitted_model.plot("age", ci=False)
         has_poly = any(
             isinstance(child, mcoll.PolyCollection)
             for ax in fig.get_axes()
             for child in ax.get_children()
         )
-        assert not has_poly, "No bands expected when with_ci=False"
+        assert not has_poly, "No bands expected when ci=False"
 
     def test_spline_show_knots(self, fitted_model):
         import matplotlib
@@ -429,7 +428,7 @@ class TestPlotRelativity:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        fig = fitted_model.plot_relativity("age", show_knots=True)
+        fig = fitted_model.plot("age", show_knots=True)
         assert isinstance(fig, Figure)
 
     def test_spline_density_strip(self, sample_data, fitted_model):
@@ -438,7 +437,7 @@ class TestPlotRelativity:
         matplotlib.use("Agg")
 
         X, y, exposure = sample_data
-        fig = fitted_model.plot_relativity("age", X=X, exposure=exposure)
+        fig = fitted_model.plot("age", X=X, sample_weight=exposure)
         # Main panel + density strip = 2 axes
         assert len(fig.get_axes()) >= 2
 
@@ -448,7 +447,7 @@ class TestPlotRelativity:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        fig = fitted_model.plot_relativity("region")
+        fig = fitted_model.plot("region")
         assert isinstance(fig, Figure)
         ax = fig.get_axes()[0]
         # Vertical orientation: levels on x-axis
@@ -461,7 +460,7 @@ class TestPlotRelativity:
         matplotlib.use("Agg")
 
         X, y, exposure = sample_data
-        fig = fitted_model.plot_relativity("region", X=X, exposure=exposure)
+        fig = fitted_model.plot("region", X=X, sample_weight=exposure)
         # Twin axis for exposure bars → 2 axes total
         assert len(fig.get_axes()) >= 2
         ax2 = fig.get_axes()[1]
@@ -483,7 +482,7 @@ class TestPlotRelativity:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        fig = fitted_model.plot_relativity("density")
+        fig = fitted_model.plot("density")
         assert isinstance(fig, Figure)
 
     def test_numeric_density_strip(self, sample_data, fitted_model):
@@ -492,7 +491,7 @@ class TestPlotRelativity:
         matplotlib.use("Agg")
 
         X, y, exposure = sample_data
-        fig = fitted_model.plot_relativity("density", X=X, exposure=exposure)
+        fig = fitted_model.plot("density", X=X, sample_weight=exposure)
         # Twin axis for exposure histogram → 2 axes total
         assert len(fig.get_axes()) >= 2
 
@@ -513,7 +512,7 @@ class TestPlotRelativity:
         from matplotlib.figure import Figure
 
         X, exposure, model = polynomial_model
-        fig = model.plot_relativity("age", X=X, exposure=exposure)
+        fig = model.plot("age", X=X, sample_weight=exposure)
         assert isinstance(fig, Figure)
 
     def test_polynomial_term_inference_matches_grid(self, polynomial_model):

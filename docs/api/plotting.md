@@ -1,7 +1,11 @@
 # Plotting
 
-::: superglm.plot_term
+The primary plotting entry point is [`SuperGLM.plot()`](model.md). The standalone
+functions below are the underlying renderers and can be used directly with
+`TermInference` objects for advanced customization.
 
-::: superglm.plot_relativities
+::: superglm.plotting.plot_term
 
-::: superglm.plot_interaction
+::: superglm.plotting.plot_relativities
+
+::: superglm.plotting.plot_interaction

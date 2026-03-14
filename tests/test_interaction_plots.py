@@ -250,11 +250,11 @@ class TestSurfacePlotly:
 
 
 class TestInteractionPlotAPI:
-    def test_model_method_delegates(self, interaction_data):
+    def test_model_plot_dispatches_interaction(self, interaction_data):
         from matplotlib.figure import Figure
 
         model = _fit_spline_cat(interaction_data)
-        fig = model.plot_interaction("age:region")
+        fig = model.plot("age:region")
         assert isinstance(fig, Figure)
 
     def test_unknown_interaction_raises(self, interaction_data):
