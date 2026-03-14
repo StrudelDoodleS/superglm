@@ -656,3 +656,150 @@ class TestSplitLinearSnapWeakSignal:
         # Strong signal: should be well-fit
         strong_total_edf = group_edf.get("strong:linear", 0) + group_edf.get("strong:spline", 0)
         assert strong_total_edf > 5.0, f"Strong signal EDF={strong_total_edf:.3f}, expected > 5.0"
+
+
+# ── CR select=True tests ──────────────────────────────────────
+
+
+class TestCRSelect:
+    """Tests for CubicRegressionSpline with select=True."""
+
+    def test_cr_select_build_returns_two_groups(self):
+        sp = Spline(kind="cr", n_knots=10, select=True)
+        result = sp.build(np.linspace(0, 1, 100))
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0].subgroup_name == "linear"
+        assert result[1].subgroup_name == "spline"
+
+    def test_cr_select_null_space_size(self):
+        """Null space is 1 (linear only, constant removed)."""
+        for nk in [5, 10, 20]:
+            sp = Spline(kind="cr", n_knots=nk, select=True)
+            result = sp.build(np.linspace(0, 1, 200))
+            assert result[0].n_cols == 1, f"null space should be 1 for n_knots={nk}"
+
+    def test_cr_select_range_space_size(self):
+        """Range space has K-4 columns (K raw, -2 constraints, -2 null)."""
+        sp = Spline(kind="cr", n_knots=10, select=True)
+        result = sp.build(np.linspace(0, 1, 100))
+        K = sp._n_basis
+        expected_range = K - 2 - 2  # -2 constraints, -2 null eigenvalues
+        assert result[1].n_cols == expected_range
+
+    def test_cr_select_projections_orthogonal(self):
+        sp = Spline(kind="cr", n_knots=10, select=True)
+        sp.build(np.linspace(0, 1, 100))
+        U_null = sp._U_null
+        U_range = sp._U_range
+        cross = U_null.T @ U_range
+        np.testing.assert_allclose(cross, 0.0, atol=1e-10)
+        np.testing.assert_allclose(U_null.T @ U_null, np.eye(1), atol=1e-10)
+        np.testing.assert_allclose(U_range.T @ U_range, np.eye(U_range.shape[1]), atol=1e-10)
+
+    def test_cr_select_fit_close_to_no_select(self):
+        """Predictions with select=True should be close to select=False."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 10, n)
+        mu = np.exp(-0.5 + 0.3 * np.sin(x))
+        y = rng.poisson(mu)
+        X = pd.DataFrame({"x": x})
+
+        m1 = SuperGLM(
+            family="poisson",
+            features={"x": Spline(kind="cr", n_knots=10, select=False)},
+            lambda2=1.0,
+            lambda1=0.01,
+        )
+        m1.fit(X, y)
+        pred1 = m1.predict(X)
+
+        m2 = SuperGLM(
+            family="poisson",
+            features={"x": Spline(kind="cr", n_knots=10, select=True)},
+            lambda2=1.0,
+            lambda1=0.01,
+        )
+        m2.fit(X, y)
+        pred2 = m2.predict(X)
+
+        np.testing.assert_allclose(pred1, pred2, rtol=0.2)
+
+    def test_cr_select_reml_suppresses_noise(self):
+        """REML with CR select=True should suppress noise feature."""
+        rng = np.random.default_rng(42)
+        n = 2000
+        x_signal = rng.uniform(0, 10, n)
+        x_noise = rng.uniform(0, 10, n)
+        mu = np.exp(-0.5 + 0.5 * np.sin(x_signal))
+        y = rng.poisson(mu)
+        X = pd.DataFrame({"signal": x_signal, "noise": x_noise})
+
+        m = SuperGLM(
+            family="poisson",
+            features={
+                "signal": Spline(kind="cr", n_knots=8, select=True),
+                "noise": Spline(kind="cr", n_knots=8, select=True),
+            },
+            lambda1=0,
+        )
+        m.fit_reml(X, y, max_reml_iter=20)
+
+        # Noise lambdas should be large
+        noise_lambdas = {
+            name: lam for name, lam in m._reml_lambdas.items() if "noise" in name.lower()
+        }
+        for name, lam in noise_lambdas.items():
+            assert lam > 1e3, f"{name} lambda={lam:.1f}, expected > 1e3"
+
+    def test_cr_select_discrete(self):
+        """CR select=True with discrete=True builds correctly."""
+        sp = Spline(kind="cr", n_knots=10, select=True, discrete=True)
+        x = np.linspace(0, 10, 1000)
+        # build_knots_and_penalty should populate _U_null/_U_range
+        sp.build_knots_and_penalty(x)
+        assert sp._U_null is not None
+        assert sp._U_range is not None
+        assert sp._U_null.shape == (sp._n_basis, 1)
+
+
+class TestCardinalCRSelect:
+    """Tests for CardinalCRSpline with select=True."""
+
+    def test_cr_cardinal_select_build(self):
+        sp = Spline(kind="cr_cardinal", n_knots=10, select=True)
+        result = sp.build(np.linspace(0, 10, 200))
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0].subgroup_name == "linear"
+        assert result[1].subgroup_name == "spline"
+        K = sp._n_basis
+        assert result[0].n_cols == 1
+        assert result[1].n_cols == K - 2
+
+    def test_cr_cardinal_select_fit(self):
+        """CardinalCR select=True fit works end-to-end."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 10, n)
+        mu = np.exp(-0.5 + 0.3 * np.sin(x))
+        y = rng.poisson(mu)
+        X = pd.DataFrame({"x": x})
+
+        m = SuperGLM(
+            family="poisson",
+            features={"x": Spline(kind="cr_cardinal", n_knots=10, select=True)},
+            lambda2=1.0,
+            lambda1=0.01,
+        )
+        m.fit(X, y)
+        pred = m.predict(X)
+        assert np.all(np.isfinite(pred))
+        assert np.all(pred > 0)
+
+
+class TestNSSelectRejection:
+    def test_ns_select_raises_not_implemented(self):
+        with pytest.raises(NotImplementedError, match="select=True is not yet supported"):
+            Spline(kind="ns", select=True)

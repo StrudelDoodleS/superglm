@@ -8,7 +8,8 @@
 Spline(kind="bs", k=14)                   # 14-column P-spline (default kind)
 Spline(kind="ns", k=10)                   # 10-column natural spline (linear tails)
 Spline(kind="cr", k=10)                   # 9-column cubic regression spline (k-1 after identifiability)
-Spline(kind="bs", k=14, split_linear=True) # mgcv double penalty: spline-vs-linear selection
+Spline(kind="bs", k=14, select=True)       # mgcv double penalty: spline-vs-linear selection
+Spline(kind="cr", k=12, select=True)       # CR with double penalty selection
 ```
 
 | Kind | Basis | Penalty | Constraints | Built cols |
@@ -33,7 +34,7 @@ Control where interior knots are placed:
 
 ### Double-penalty shrinkage
 
-`select=True` (or `split_linear=True` for BS) decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped.
+`select=True` decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). Works for BS, CR, and CR cardinal splines. With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped. Not supported for NS (its constrained penalty has only 1 null eigenvalue). `split_linear=True` is a backward-compatible alias for BS.
 
 ## Polynomial
 

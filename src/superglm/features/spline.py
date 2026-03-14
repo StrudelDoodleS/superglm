@@ -115,6 +115,7 @@ class _SplineBase:
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
+        select: bool = False,
     ):
         if knots is not None:
             knots = np.asarray(knots, dtype=np.float64).ravel()
@@ -131,6 +132,7 @@ class _SplineBase:
         self.degree = degree
         self.knot_strategy = knot_strategy
         self.penalty = penalty
+        self.select = select
         self.discrete = discrete
         self.n_bins = n_bins
         if extrapolation not in {"clip", "extend", "error"}:
@@ -166,6 +168,11 @@ class _SplineBase:
         self._basis_hi: NDArray | None = None
         self._basis_d1_lo: NDArray | None = None
         self._basis_d1_hi: NDArray | None = None
+
+        # select=True state (set during _eigendecompose_select)
+        self._U_null: NDArray | None = None
+        self._U_range: NDArray | None = None
+        self._omega_range: NDArray | None = None
 
     def _prepare_eval_points(self, x: NDArray) -> tuple[NDArray, bool]:
         """Apply the configured extrapolation policy for basis evaluation."""
@@ -337,8 +344,11 @@ class _SplineBase:
         mean contribution over the training data is zero, making the model
         intercept carry the constant part.  This is True by default for all
         spline kinds.
+
+        When ``select=True`` the eigendecompose step removes the
+        constant direction instead, so identifiability is skipped.
         """
-        return True
+        return not self.select
 
     @property
     def supports_linear_split(self) -> bool:
@@ -413,11 +423,84 @@ class _SplineBase:
         Q, _ = np.linalg.qr(C.T, mode="complete")
         return Q[:, 2:]  # (K, K-2)
 
-    def build(self, x: NDArray, exposure: NDArray | None = None) -> GroupInfo:
+    def _eigendecompose_select(self, omega_c: NDArray, Z: NDArray | None) -> None:
+        """Eigendecompose the constrained penalty for select=True splitting.
+
+        Populates ``_U_null``, ``_U_range``, ``_omega_range`` on self.
+        Works for any spline kind whose constrained penalty has exactly
+        2 null eigenvalues (constant + linear).
+
+        Parameters
+        ----------
+        omega_c : (d, d) constrained penalty matrix
+        Z : (K, d) constraint projection, or None if no constraints
+        """
+        eigvals, eigvecs = np.linalg.eigh(omega_c)
+        null_mask = eigvals < 1e-10
+        n_null = int(np.sum(null_mask))
+        if n_null != 2:
+            raise ValueError(
+                f"select=True requires exactly 2 null eigenvalues in the "
+                f"constrained penalty, got {n_null}. "
+                f"Spline kind {type(self).__name__} may not support select=True."
+            )
+
+        U_null_raw = eigvecs[:, null_mask]  # (d, 2)
+        U_range = eigvecs[:, ~null_mask]  # (d, d-2)
+        omega_range = np.diag(eigvals[~null_mask])
+
+        # Remove constant: ones_c = Z.T @ ones if Z else ones
+        ones_c = (Z.T @ np.ones(self._n_basis)) if Z is not None else np.ones(omega_c.shape[0])
+        ones_in_null = U_null_raw.T @ ones_c
+        ones_in_null /= np.linalg.norm(ones_in_null)
+        U_null_centered = U_null_raw - U_null_raw @ np.outer(ones_in_null, ones_in_null)
+        u, s, _ = np.linalg.svd(U_null_centered, full_matrices=False)
+        U_null_1d = u[:, :1]  # (d, 1)
+
+        # Compose projections to raw basis space (K-dimensional)
+        self._U_null = Z @ U_null_1d if Z is not None else U_null_1d  # (K, 1)
+        self._U_range = Z @ U_range if Z is not None else U_range  # (K, n_range)
+        self._omega_range = omega_range
+
+    def _build_select(self, x: NDArray, B) -> list[GroupInfo]:
+        """Build select=True GroupInfos: [linear, spline] subgroups."""
+        omega = self._build_penalty()
+        _, omega_c, _, Z = self._apply_constraints(None, omega)
+
+        self._eigendecompose_select(omega_c, Z)
+
+        n_null = 1
+        n_range = self._U_range.shape[1]
+
+        return [
+            GroupInfo(
+                columns=B,
+                n_cols=n_null,
+                penalty_matrix=np.eye(n_null),
+                reparametrize=False,
+                penalized=True,
+                subgroup_name="linear",
+                projection=self._U_null,
+            ),
+            GroupInfo(
+                columns=B,
+                n_cols=n_range,
+                penalty_matrix=self._omega_range,
+                reparametrize=True,
+                subgroup_name="spline",
+                projection=self._U_range,
+            ),
+        ]
+
+    def build(self, x: NDArray, exposure: NDArray | None = None) -> GroupInfo | list[GroupInfo]:
         """Build B-spline basis and penalty matrix."""
         x = np.asarray(x, dtype=np.float64).ravel()
         self._place_knots(x)
         B = self._basis_matrix(x).tocsr()
+
+        if self.select:
+            return self._build_select(x, B)
+
         omega = self._build_penalty()
         B, omega, n_cols, projection = self._apply_constraints(B, omega)
         omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
@@ -440,6 +523,9 @@ class _SplineBase:
         so the returned penalty and column count match the exact ``build()``
         path.
 
+        For ``select=True``, also runs the eigendecompose step to populate
+        ``_U_null``, ``_U_range``, ``_omega_range``.
+
         Returns
         -------
         omega : (n_cols, n_cols) penalty matrix (projected if constrained).
@@ -449,10 +535,18 @@ class _SplineBase:
         x = np.asarray(x, dtype=np.float64).ravel()
         self._place_knots(x)
         omega = self._build_penalty()
-        _, omega, n_cols, projection = self._apply_constraints(None, omega)
-        omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
+        _, omega_c, n_cols, projection = self._apply_constraints(None, omega)
+
+        if self.select:
+            Z = projection  # constraint projection (or None)
+            self._eigendecompose_select(omega_c, Z)
+            # Return the constrained penalty for the non-select DM path
+            self._constraint_projection = projection
+            return omega_c, n_cols, projection
+
+        omega_c, n_cols, projection = self._apply_identifiability(x, omega_c, projection)
         self._constraint_projection = projection
-        return omega, n_cols, projection
+        return omega_c, n_cols, projection
 
     def transform(self, x: NDArray) -> NDArray:
         """Build design matrix using knots learned during build()."""
@@ -561,7 +655,7 @@ class BasisSpline(_SplineBase):
         "quantile_tempered".
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
-    split_linear : bool
+    select : bool
         If True, decompose the spline into null-space (linear) and
         range-space (wiggly) subgroups for mgcv-style three-way
         selection: nonlinear -> linear -> dropped.
@@ -573,6 +667,9 @@ class BasisSpline(_SplineBase):
         infinity effectively zeros the linear component (three-way
         selection: nonlinear -> linear -> dropped). See Wood (2011).
 
+    split_linear : bool
+        Deprecated alias for ``select``. If either is True, select
+        mode is enabled.
     knots : array-like or None
         Explicit interior knot positions.
     """
@@ -584,6 +681,7 @@ class BasisSpline(_SplineBase):
         knot_strategy: str = "uniform",
         penalty: str = "ssp",
         split_linear: bool = False,
+        select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
@@ -591,6 +689,7 @@ class BasisSpline(_SplineBase):
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
     ):
+        effective_select = select or split_linear
         super().__init__(
             n_knots,
             degree,
@@ -602,20 +701,13 @@ class BasisSpline(_SplineBase):
             extrapolation,
             boundary,
             knot_alpha,
+            select=effective_select,
         )
-        self.split_linear = split_linear
-        self._U_null: NDArray | None = None
-        self._U_range: NDArray | None = None
-        self._omega_range: NDArray | None = None
 
     @property
-    def absorbs_intercept(self) -> bool:
-        """Non-split BasisSpline absorbs the intercept via identifiability.
-
-        When ``split_linear=True`` the eigendecompose step removes the
-        constant direction instead, so identifiability is skipped.
-        """
-        return not self.split_linear
+    def split_linear(self) -> bool:
+        """Backward-compatible alias for ``select``."""
+        return self.select
 
     @property
     def supports_linear_split(self) -> bool:
@@ -654,93 +746,6 @@ class BasisSpline(_SplineBase):
     def _build_penalty(self) -> NDArray:
         D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
         return D2.T @ D2
-
-    def build_knots_and_penalty(
-        self, x: NDArray, exposure: NDArray | None = None
-    ) -> tuple[NDArray, int, NDArray | None]:
-        """Place knots and return penalty + eigendecompose for linear-split terms."""
-        omega, n_cols, projection = super().build_knots_and_penalty(x, exposure)
-        if self.split_linear:
-            self._eigendecompose_penalty(omega)
-        return omega, n_cols, projection
-
-    def _eigendecompose_penalty(self, omega: NDArray) -> None:
-        """Eigendecompose omega into null/range spaces for linear splitting."""
-        eigvals, eigvecs = np.linalg.eigh(omega)
-        null_mask = eigvals < 1e-10
-        n_null_eig = int(np.sum(null_mask))
-        if n_null_eig != 2:
-            raise ValueError(
-                f"Expected 2 null eigenvalues for second-difference penalty, "
-                f"got {n_null_eig}. Check penalty matrix or B-spline degree."
-            )
-        U_null_raw = eigvecs[:, null_mask]
-        self._U_range = eigvecs[:, ~null_mask]
-        self._omega_range = np.diag(eigvals[~null_mask])
-        ones = np.ones(self._n_basis)
-        ones_in_null = U_null_raw.T @ ones
-        ones_in_null = ones_in_null / np.linalg.norm(ones_in_null)
-        U_null_centered = U_null_raw - U_null_raw @ np.outer(ones_in_null, ones_in_null)
-        u, s, _ = np.linalg.svd(U_null_centered, full_matrices=False)
-        self._U_null = u[:, :1]
-
-    def build(self, x: NDArray, exposure: NDArray | None = None) -> GroupInfo | list[GroupInfo]:
-        if not self.split_linear:
-            return super().build(x, exposure)
-
-        # split_linear=True path: eigendecompose, return [linear, spline] GroupInfos
-        x = np.asarray(x, dtype=np.float64).ravel()
-        self._place_knots(x)
-        B = self._basis_matrix(x).tocsr()
-        omega = self._build_penalty()
-
-        eigvals, eigvecs = np.linalg.eigh(omega)
-        null_mask = eigvals < 1e-10
-        n_null_eig = int(np.sum(null_mask))
-        if n_null_eig != 2:
-            raise ValueError(
-                f"Expected 2 null eigenvalues for second-difference penalty, "
-                f"got {n_null_eig}. Check penalty matrix or B-spline degree."
-            )
-        U_null_raw = eigvecs[:, null_mask]  # (K, 2): constant + linear
-        self._U_range = eigvecs[:, ~null_mask]  # (K, K-2)
-        omega_range = np.diag(eigvals[~null_mask])
-
-        # Identifiability: remove the constant from the null space.
-        # B-splines have partition of unity (rows sum to 1), so the
-        # constant function in coefficient space is proportional to
-        # the ones vector. Project it out to keep only the linear part.
-        ones = np.ones(self._n_basis)
-        ones_in_null = U_null_raw.T @ ones  # project ones onto null basis
-        ones_in_null = ones_in_null / np.linalg.norm(ones_in_null)
-        # Gram-Schmidt: remove the constant direction
-        U_null_centered = U_null_raw - U_null_raw @ np.outer(ones_in_null, ones_in_null)
-        # SVD to get the 1D orthonormal basis for the linear part
-        u, s, _ = np.linalg.svd(U_null_centered, full_matrices=False)
-        self._U_null = u[:, :1]  # (K, 1): linear trend only
-
-        n_null = 1
-        n_range = self._U_range.shape[1]
-
-        return [
-            GroupInfo(
-                columns=B,
-                n_cols=n_null,
-                penalty_matrix=np.eye(n_null),
-                reparametrize=False,
-                penalized=True,
-                subgroup_name="linear",
-                projection=self._U_null,
-            ),
-            GroupInfo(
-                columns=B,
-                n_cols=n_range,
-                penalty_matrix=omega_range,
-                reparametrize=True,
-                subgroup_name="spline",
-                projection=self._U_range,
-            ),
-        ]
 
 
 class NaturalSpline(_SplineBase):
@@ -835,6 +840,8 @@ class CubicRegressionSpline(_SplineBase):
         "quantile_tempered".
     penalty : str
         "ssp" enables SSP reparametrisation, "none" disables it.
+    select : bool
+        If True, decompose into linear + wiggly subgroups (double penalty).
     knots : array-like or None
         Explicit interior knot positions.
     """
@@ -844,6 +851,7 @@ class CubicRegressionSpline(_SplineBase):
         n_knots: int = 10,
         knot_strategy: str = "uniform",
         penalty: str = "ssp",
+        select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
@@ -862,6 +870,7 @@ class CubicRegressionSpline(_SplineBase):
             extrapolation=extrapolation,
             boundary=boundary,
             knot_alpha=knot_alpha,
+            select=select,
         )
         self._Z: NDArray | None = None
 
@@ -934,6 +943,8 @@ class CardinalCRSpline(_SplineBase):
         or ``"quantile_tempered"``.
     penalty : str
         ``"ssp"`` enables SSP reparametrisation, ``"none"`` disables it.
+    select : bool
+        If True, decompose into linear + wiggly subgroups (double penalty).
     knots : array-like or None
         Explicit interior knot positions.
     """
@@ -943,6 +954,7 @@ class CardinalCRSpline(_SplineBase):
         n_knots: int = 10,
         knot_strategy: str = "uniform",
         penalty: str = "ssp",
+        select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
@@ -961,6 +973,7 @@ class CardinalCRSpline(_SplineBase):
             extrapolation=extrapolation,
             boundary=boundary,
             knot_alpha=knot_alpha,
+            select=select,
         )
         self._cr_knots: NDArray | None = None
         self._cr_M: NDArray | None = None
@@ -1273,6 +1286,7 @@ def Spline(
     degree: int = 3,
     knot_strategy: str = "uniform",
     penalty: str = "ssp",
+    select: bool = False,
     split_linear: bool = False,
     knots: ArrayLike | None = None,
     discrete: bool | None = None,
@@ -1328,9 +1342,13 @@ def Spline(
     penalty : str
         ``"ssp"`` enables SSP reparametrisation (default), ``"none"``
         disables it.
-    split_linear : bool
+    select : bool
         If True, decompose into linear + wiggly subgroups for mgcv-style
-        double-penalty selection. Only supported for ``kind="bs"``.
+        double-penalty selection.  Supported for ``"bs"``, ``"cr"``, and
+        ``"cr_cardinal"``.  Not supported for ``"ns"`` (its constrained
+        penalty has only 1 null eigenvalue).
+    split_linear : bool
+        Deprecated alias for ``select``.
     knots : array-like, optional
         Explicit interior knot positions. Overrides ``k`` / ``n_knots``.
     discrete : bool, optional
@@ -1368,6 +1386,7 @@ def Spline(
     >>> Spline(kind="cr", k=10)           # 9-column cubic regression spline (k-1)
     >>> Spline(kind="ns", n_knots=8)      # 8 interior knots, natural spline
     >>> Spline(n_knots=10, penalty="ssp")  # backward-compatible, defaults to "bs"
+    >>> Spline(kind="cr", k=12, select=True)  # CR with double-penalty selection
     """
     if kind not in _KIND_MAP:
         raise ValueError(f"Unknown spline kind {kind!r}, expected one of {sorted(_KIND_MAP)}")
@@ -1377,8 +1396,14 @@ def Spline(
             "Cannot specify both k and n_knots. Use k (public basis size) or n_knots (interior knots), not both."
         )
 
-    if split_linear and kind != "bs":
-        raise ValueError(f"split_linear is only supported for kind='bs', got kind={kind!r}")
+    effective_select = select or split_linear
+
+    if effective_select and kind == "ns":
+        raise NotImplementedError(
+            "select=True is not yet supported for kind='ns'. "
+            "The NaturalSpline penalty has only 1 null eigenvalue after "
+            "boundary constraints. Use kind='cr' or kind='bs' with select=True."
+        )
 
     # Resolve n_knots
     if k is not None:
@@ -1400,7 +1425,7 @@ def Spline(
             degree=degree,
             knot_strategy=knot_strategy,
             penalty=penalty,
-            split_linear=split_linear,
+            select=effective_select,
             knots=knots,
             discrete=discrete,
             n_bins=n_bins,
@@ -1413,6 +1438,7 @@ def Spline(
             n_knots=resolved_n_knots,
             knot_strategy=knot_strategy,
             penalty=penalty,
+            select=effective_select,
             knots=knots,
             discrete=discrete,
             n_bins=n_bins,

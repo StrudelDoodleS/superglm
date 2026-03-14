@@ -353,7 +353,7 @@ def optimize_direct_reml(
     penalty_caches: dict | None = None,
     profile: dict | None = None,
     max_analytical_per_w: int = 30,
-    split_linear_snap: bool = True,
+    select_snap: bool = True,
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
 
@@ -384,7 +384,7 @@ def optimize_direct_reml(
             penalty_caches=penalty_caches,
             profile=profile,
             max_analytical_per_w=max_analytical_per_w,
-            split_linear_snap=split_linear_snap,
+            select_snap=select_snap,
         )
 
     scale_known = getattr(distribution, "scale_known", True)
@@ -606,11 +606,11 @@ def optimize_direct_reml(
                 r_j = penalty_ranks[g.name]
                 denom = inv_phi * quad + trace_term
                 lam_new = r_j / denom if denom > 1e-12 else cand_lambdas[g.name]
-                # Snap degenerate split-linear groups to upper bound.
+                # Snap degenerate select=True groups to upper bound.
                 # When quad << trace, the FP update is degenerate (any lambda
                 # is approximately a fixed point).  Snap breaks the degeneracy.
                 if (
-                    split_linear_snap
+                    select_snap
                     and g.subgroup_type is not None
                     and trace_term > 1e-12
                     and inv_phi * quad < 0.1 * trace_term
@@ -760,7 +760,7 @@ def optimize_discrete_reml_cached_w(
     penalty_caches: dict | None = None,
     profile: dict | None = None,
     max_analytical_per_w: int = 30,
-    split_linear_snap: bool = True,
+    select_snap: bool = True,
 ) -> REMLResult:
     """Cached-W fREML optimizer for the discrete path.
 
@@ -1097,12 +1097,12 @@ def optimize_discrete_reml_cached_w(
                 r_j = penalty_ranks[g.name]
                 denom = inv_phi * quad + trace_term
                 lam_new = r_j / denom if denom > 1e-12 else inner_lambdas[g.name]
-                # Degenerate split-linear group: quad << trace means the
+                # Degenerate select=True group: quad << trace means the
                 # signal is absent and the REML objective is flat.  Push
                 # lambda toward ceiling by +1 log-unit per inner step
                 # (mgcv-like gradual continuation).
                 if (
-                    split_linear_snap
+                    select_snap
                     and g.subgroup_type is not None
                     and trace_term > 1e-12
                     and inv_phi * quad < 0.1 * trace_term

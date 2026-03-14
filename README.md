@@ -132,7 +132,8 @@ Those are different tools:
 Spline(kind="bs", k=14)                   # 14-column P-spline (default kind)
 Spline(kind="ns", k=10)                   # 10-column natural spline (linear tails)
 Spline(kind="cr", k=10)                   # 9-column cubic regression spline (k-1 after identifiability)
-Spline(kind="bs", k=14, split_linear=True) # mgcv double penalty: spline-vs-linear selection
+Spline(kind="bs", k=14, select=True)       # mgcv double penalty: spline-vs-linear selection
+Spline(kind="cr", k=12, select=True)       # CR with double penalty selection
 ```
 
 | Kind | Basis | Penalty | Constraints | Built cols |
@@ -143,7 +144,7 @@ Spline(kind="bs", k=14, split_linear=True) # mgcv double penalty: spline-vs-line
 
 `k` matches mgcv's `k` for all kinds. For `"cr"`, the built column count is `k - 1` because the identifiability direction is physically removed (mgcv absorbs it via a side constraint instead).
 
-`split_linear=True` (BS only) decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped.
+`select=True` (BS, CR, and CR cardinal) decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped. Not supported for NS (its constrained penalty has only 1 null eigenvalue). `split_linear=True` is a backward-compatible alias for BS.
 
 The concrete classes `BasisSpline`, `NaturalSpline`, and `CubicRegressionSpline` are also available for direct use.
 
