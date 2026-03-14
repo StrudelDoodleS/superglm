@@ -2018,16 +2018,196 @@ class SuperGLM:
             out[ag.name] = float(np.sum(edf_vec[ag.sl]))
         return out
 
+    def plot(
+        self,
+        terms: str | list[str] | None = None,
+        *,
+        ci: str | bool | None = "pointwise",
+        X: pd.DataFrame | None = None,
+        sample_weight: NDArray | None = None,
+        show_density: bool = True,
+        show_knots: bool = False,
+        engine: str = "matplotlib",
+        n_points: int = 200,
+        figsize: tuple[float, float] | None = None,
+        title: str | None = None,
+        subtitle: str | None = None,
+        alpha: float = 0.05,
+        n_sim: int = 10_000,
+        seed: int = 42,
+        **kwargs,
+    ):
+        """Plot model terms.
+
+        Single entry point for all plotting.  Dispatches based on *terms*:
+
+        - ``None`` — all main effects in a grid.
+        - ``"age"`` — one main effect.
+        - ``["age", "region"]`` — subset of main effects.
+        - ``"age:region"`` — one interaction.
+
+        Parameters
+        ----------
+        terms : str, list of str, or None
+            Which term(s) to plot.  ``None`` plots all main effects.
+        ci : {None, False, "pointwise", "simultaneous", "both"}
+            Confidence interval style.  ``None`` or ``False`` disables bands.
+        X : DataFrame, optional
+            Training data for density overlays.
+        sample_weight : array-like, optional
+            Frequency weights / exposure for density overlays.
+        show_density : bool
+            Show exposure/observation density (strip for continuous,
+            bars for categorical).  Default True.
+        show_knots : bool
+            Show interior knot ticks (spline terms only).
+        engine : {"matplotlib", "plotly"}
+            Plotting backend.  ``"plotly"`` is currently supported only
+            for single interactions.
+        n_points : int
+            Grid resolution for spline/polynomial curves.
+        figsize : tuple, optional
+            Figure size override.
+        title, subtitle : str, optional
+            Figure-level title and subtitle.
+        alpha : float
+            Significance level for CIs (default 0.05).
+        n_sim : int
+            Posterior simulations for simultaneous bands.
+        seed : int
+            Random seed for simultaneous bands.
+        **kwargs
+            Forwarded to the underlying renderer (e.g. ``ncols`` for
+            grid plots, ``colormap`` for interactions).
+
+        Returns
+        -------
+        matplotlib.figure.Figure or plotly Figure
+        """
+        from superglm.plotting import plot_interaction, plot_relativities, plot_term
+
+        if self._result is None:
+            raise RuntimeError("Model must be fitted before calling plot().")
+
+        # ── Normalize ci ────────────────────────────────────────
+        interval = self._resolve_ci(ci)
+
+        # ── Resolve terms ───────────────────────────────────────
+        if terms is None:
+            names = list(self._feature_order)
+            mode = "all_main"
+        elif isinstance(terms, str):
+            names = [terms]
+            mode = "interaction" if ":" in terms else "single_main"
+        else:
+            names = list(terms)
+            interactions = [n for n in names if ":" in n]
+            mains = [n for n in names if ":" not in n]
+            if interactions and mains:
+                raise ValueError(
+                    "Cannot mix main effects and interactions in one plot() call. "
+                    f"Got main effects {mains} and interactions {interactions}."
+                )
+            mode = "interaction" if interactions else "multi_main"
+
+        # ── Validate names ──────────────────────────────────────
+        if mode == "interaction":
+            if len(names) != 1:
+                raise ValueError(
+                    f"plot() supports one interaction at a time. Got {len(names)}: {names}."
+                )
+            iname = names[0]
+            if iname not in self._interaction_specs:
+                raise KeyError(f"Interaction not found: {iname!r}")
+        else:
+            for n in names:
+                if n not in self._specs:
+                    raise KeyError(f"Feature not found: {n!r}")
+
+        # ── Dispatch ────────────────────────────────────────────
+        if mode == "interaction":
+            if engine not in ("matplotlib", "plotly"):
+                raise ValueError(f"Unknown engine {engine!r}. Expected 'matplotlib' or 'plotly'.")
+            return plot_interaction(
+                self,
+                iname,
+                engine=engine,
+                with_ci=(interval is not None),
+                figsize=figsize,
+                X=X,
+                exposure=sample_weight,
+                **kwargs,
+            )
+
+        if engine != "matplotlib":
+            raise ValueError(
+                f"engine={engine!r} is only supported for single interactions. "
+                "Use engine='matplotlib' for main effects."
+            )
+
+        need_sim = interval in ("simultaneous", "both")
+        ti_list = [
+            self.term_inference(
+                n,
+                with_se=(interval is not None),
+                simultaneous=need_sim,
+                n_points=n_points,
+                alpha=alpha,
+                n_sim=n_sim,
+                seed=seed,
+            )
+            for n in names
+        ]
+
+        if mode == "single_main":
+            return plot_term(
+                ti_list[0],
+                X=X,
+                exposure=sample_weight,
+                interval=interval,
+                show_exposure=show_density,
+                show_knots=show_knots,
+                figsize=figsize,
+                title=title,
+                subtitle=subtitle,
+            )
+
+        # all_main or multi_main → grid
+        return plot_relativities(
+            ti_list,
+            X=X,
+            exposure=sample_weight,
+            interval=interval,
+            show_exposure=show_density,
+            show_knots=show_knots,
+            title=title,
+            subtitle=subtitle,
+            figsize=figsize,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _resolve_ci(ci: str | bool | None) -> str | None:
+        """Normalize the ``ci`` parameter to an interval string or None."""
+        if ci is None or ci is False:
+            return None
+        if ci is True:
+            return "pointwise"
+        valid = {"pointwise", "simultaneous", "both"}
+        if ci not in valid:
+            raise ValueError(
+                f"ci={ci!r} is not valid. Expected one of {sorted(valid)}, None, or False."
+            )
+        return ci
+
     def plot_relativity(
         self,
         name: str,
         *,
         X: pd.DataFrame | None = None,
-        exposure: NDArray | None = None,
         sample_weight: NDArray | None = None,
-        with_ci: bool = True,
-        interval: str | None = "pointwise",
-        show_exposure: bool = True,
+        ci: str | bool | None = "pointwise",
+        show_density: bool = True,
         show_knots: bool = False,
         n_points: int = 200,
         alpha: float = 0.05,
@@ -2039,71 +2219,20 @@ class SuperGLM:
     ):
         """Plot a single term's relativity curve or bar chart.
 
-        This is the primary single-term plotting entry point.
-
-        Parameters
-        ----------
-        name : str
-            Feature name (must be in the fitted model).
-        X : DataFrame, optional
-            Training data for exposure overlays.
-        exposure : array-like, optional
-            Exposure / frequency weights.
-        with_ci : bool
-            When *False*, forces ``interval=None`` (no bands).
-        interval : {"pointwise", "simultaneous", "both", None}
-            Band style.  For categoricals/numerics, simultaneous/both
-            fall back to pointwise.
-        show_exposure : bool
-            Show exposure distribution (density strip for continuous,
-            vertical bars for categorical).
-        show_knots : bool
-            Show interior knot ticks (spline only).
-        n_points : int
-            Grid resolution for spline/polynomial curves.
-        alpha : float
-            Significance level for confidence intervals.
-        n_sim : int
-            Number of posterior simulations for simultaneous bands.
-        seed : int
-            Random seed for simultaneous band simulation.
-        figsize : tuple, optional
-            Figure size override.
-        title, subtitle : str, optional
-            Figure-level title and subtitle.
-
-        Returns
-        -------
-        matplotlib.figure.Figure
+        .. deprecated::
+            Use :meth:`plot` instead: ``model.plot("feature_name", ...)``.
         """
-        from superglm.plotting import plot_term
-
-        exposure = self._resolve_sample_weight_alias(
-            exposure, sample_weight, method_name="plot_relativity()"
-        )
-
-        if not with_ci:
-            interval = None
-
-        need_sim = interval in ("simultaneous", "both")
-
-        ti = self.term_inference(
+        return self.plot(
             name,
-            with_se=(interval is not None),
-            simultaneous=need_sim,
+            ci=ci,
+            X=X,
+            sample_weight=sample_weight,
+            show_density=show_density,
+            show_knots=show_knots,
             n_points=n_points,
             alpha=alpha,
             n_sim=n_sim,
             seed=seed,
-        )
-
-        return plot_term(
-            ti,
-            X=X,
-            exposure=exposure,
-            interval=interval,
-            show_exposure=show_exposure,
-            show_knots=show_knots,
             figsize=figsize,
             title=title,
             subtitle=subtitle,
@@ -2111,13 +2240,11 @@ class SuperGLM:
 
     def plot_relativities(
         self,
-        X: pd.DataFrame | None = None,
-        exposure: NDArray | None = None,
-        with_ci: bool = True,
         *,
+        X: pd.DataFrame | None = None,
         sample_weight: NDArray | None = None,
-        interval: str | None = "pointwise",
-        show_exposure: bool = True,
+        ci: str | bool | None = "pointwise",
+        show_density: bool = True,
         show_knots: bool = False,
         n_points: int = 200,
         alpha: float = 0.05,
@@ -2129,68 +2256,20 @@ class SuperGLM:
     ):
         """Plot relativity curves/bars for all features.
 
-        Parameters
-        ----------
-        X : DataFrame, optional
-            Training data — when provided with *exposure*, overlays the
-            exposure distribution on each subplot.
-        exposure : array-like, optional
-            Exposure weights corresponding to rows of *X*.
-        with_ci : bool
-            When *False*, forces ``interval=None`` (no bands).
-        interval : {"pointwise", "simultaneous", "both", None}
-            ``"pointwise"``: orange CI band.
-            ``"simultaneous"``: blue simultaneous band.
-            ``"both"``: nested (simultaneous outside, pointwise inside).
-            ``None``: no bands.
-        show_exposure : bool
-            Show exposure density strip below spline panels (default *True*).
-        show_knots : bool
-            Show interior knot ticks on x-axis (default *False*).
-        n_points : int
-            Grid resolution for spline/polynomial curves.
-        alpha : float
-            Significance level for confidence intervals.
-        n_sim : int
-            Number of posterior simulations for simultaneous bands.
-        seed : int
-            Random seed for simultaneous band simulation.
-        title, subtitle : str, optional
-            Figure-level title and subtitle.
-        **kwargs
-            Forwarded to :func:`superglm.plotting.plot_relativities`.
+        .. deprecated::
+            Use :meth:`plot` instead: ``model.plot(...)``.
         """
-        from superglm.plotting import plot_relativities
-
-        exposure = self._resolve_sample_weight_alias(
-            exposure, sample_weight, method_name="plot_relativities()"
-        )
-
-        if not with_ci:
-            interval = None
-
-        need_sim = interval in ("simultaneous", "both")
-
-        terms = []
-        for name in self._feature_order:
-            ti = self.term_inference(
-                name,
-                with_se=(interval is not None),
-                simultaneous=need_sim,
-                n_points=n_points,
-                alpha=alpha,
-                n_sim=n_sim,
-                seed=seed,
-            )
-            terms.append(ti)
-
-        return plot_relativities(
-            terms,
+        return self.plot(
+            terms=None,
+            ci=ci,
             X=X,
-            exposure=exposure,
-            interval=interval,
-            show_exposure=show_exposure,
+            sample_weight=sample_weight,
+            show_density=show_density,
             show_knots=show_knots,
+            n_points=n_points,
+            alpha=alpha,
+            n_sim=n_sim,
+            seed=seed,
             title=title,
             subtitle=subtitle,
             **kwargs,
@@ -2201,25 +2280,20 @@ class SuperGLM:
         name: str,
         *,
         engine: str = "matplotlib",
-        with_ci: bool = True,
+        ci: str | bool | None = "pointwise",
         **kwargs,
     ):
         """Plot an interaction surface/effect.
 
-        Parameters
-        ----------
-        name : str
-            Interaction name, e.g. ``"DrivAge:Area"``.
-        engine : {"matplotlib", "plotly"}
-            Plotting backend.  ``"plotly"`` requires plotly to be installed.
-        with_ci : bool
-            Show confidence bands where applicable.
-        **kwargs
-            Forwarded to :func:`superglm.plotting.plot_interaction`.
+        .. deprecated::
+            Use :meth:`plot` instead: ``model.plot("feat1:feat2", ...)``.
         """
-        from superglm.plotting import plot_interaction
-
-        return plot_interaction(self, name, engine=engine, with_ci=with_ci, **kwargs)
+        return self.plot(
+            name,
+            ci=ci,
+            engine=engine,
+            **kwargs,
+        )
 
     def discretization_impact(
         self,
