@@ -799,6 +799,63 @@ class TestCardinalCRSelect:
         assert np.all(pred > 0)
 
 
+class TestCRSelectInteraction:
+    """Regression test: CR select=True parent inside spline×categorical interaction."""
+
+    def test_cr_select_spline_categorical_constraint_projection(self):
+        """CR select=True must store _constraint_projection for SplineCategorical."""
+        sp = Spline(kind="cr", n_knots=10, select=True)
+        sp.build(np.linspace(0, 10, 200))
+        # CR has natural boundary constraints → _constraint_projection must not be None
+        assert sp._constraint_projection is not None
+        K = sp._n_basis
+        assert sp._constraint_projection.shape == (K, K - 2)
+
+    def test_cr_select_spline_categorical_fit(self):
+        """CR select=True parent with spline×categorical interaction fits correctly."""
+        from superglm.features.categorical import Categorical
+
+        rng = np.random.default_rng(42)
+        n = 800
+        x = rng.uniform(0, 10, n)
+        cat = rng.choice(["A", "B", "C"], n)
+        mu = np.exp(-0.5 + 0.3 * np.sin(x) + 0.2 * (cat == "B").astype(float))
+        y = rng.poisson(mu)
+        X = pd.DataFrame({"x": x, "cat": cat})
+
+        m = SuperGLM(
+            family="poisson",
+            features={
+                "x": Spline(kind="cr", n_knots=8, select=True),
+                "cat": Categorical(),
+            },
+            interactions=[("x", "cat")],
+            lambda2=1.0,
+            lambda1=0.01,
+        )
+        m.fit(X, y)
+        pred = m.predict(X)
+        assert np.all(np.isfinite(pred))
+        assert np.all(pred > 0)
+
+        # Interaction groups should use constrained (K-2) column count,
+        # not raw K columns
+        interaction_groups = [g for g in m._groups if "x:cat" in g.name]
+        assert len(interaction_groups) > 0
+        for g in interaction_groups:
+            # CR with n_knots=8: K=12, constrained K-2=10,
+            # then identifiability removes 1 more → n_cols = 9
+            # But interaction uses _constraint_projection which is (K, K-2)
+            # so the per-level n_cols should be K-2 = 10
+            assert g.size == m._specs["x"]._constraint_projection.shape[1]
+
+    def test_bs_select_constraint_projection_none(self):
+        """BS select=True has no boundary constraints → _constraint_projection is None."""
+        sp = Spline(kind="bs", n_knots=10, select=True)
+        sp.build(np.linspace(0, 10, 200))
+        assert sp._constraint_projection is None
+
+
 class TestNSSelectRejection:
     def test_ns_select_raises_not_implemented(self):
         with pytest.raises(NotImplementedError, match="select=True is not yet supported"):

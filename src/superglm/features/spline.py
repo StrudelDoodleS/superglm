@@ -467,6 +467,12 @@ class _SplineBase:
         omega = self._build_penalty()
         _, omega_c, _, Z = self._apply_constraints(None, omega)
 
+        # Store the constraint projection so that downstream consumers
+        # (e.g. SplineCategorical) can project interactions into the
+        # constrained basis.  For CR this is the (K, K-2) natural
+        # boundary null space; for BS it is None (no constraints).
+        self._constraint_projection = Z
+
         self._eigendecompose_select(omega_c, Z)
 
         n_null = 1
@@ -757,8 +763,13 @@ class NaturalSpline(_SplineBase):
     unconstrained B-splines. Prediction behavior outside the training
     range is then controlled by ``extrapolation``: ``"clip"``
     (default) freezes at the boundary, while ``"extend"`` exposes the
-    linear tails. Equivalent to R's ``splines::ns()`` or mgcv's ``cr``
-    basis.
+    linear tails.
+
+    Uses a second-difference penalty (like BS) rather than the
+    integrated-f'' penalty of ``CubicRegressionSpline``.  The
+    boundary constraints reduce the penalty null space to 1 dimension
+    (constant only), so ``select=True`` is not supported — use
+    ``kind="cr"`` or ``kind="bs"`` for double-penalty selection.
 
     Parameters
     ----------
