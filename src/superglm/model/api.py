@@ -27,9 +27,9 @@ if TYPE_CHECKING:
 class SuperGLM:
     """Penalised generalised linear model with splines, group penalties, and REML.
 
-    Supports Poisson, Gamma, NB2, and Tweedie families with group lasso,
-    sparse group lasso, or ridge penalties.  Smoothing parameters can be
-    estimated via REML (``fit_reml``) or cross-validation (``fit_cv``).
+    Supports Poisson, Gamma, NB2, Tweedie, and Binomial families with group
+    lasso, sparse group lasso, or ridge penalties.  Smoothing parameters can
+    be estimated via REML (``fit_reml``) or cross-validation (``fit_cv``).
     """
 
     def __init__(
@@ -63,7 +63,9 @@ class SuperGLM:
         ----------
         family : str or Distribution
             Response distribution. One of ``"poisson"``, ``"gamma"``,
-            ``"tweedie"``, ``"negative_binomial"``, or a Distribution object.
+            ``"binomial"``, ``"tweedie"``, ``"negative_binomial"``, or a
+            Distribution object.  For ``"binomial"``, y must be in {0, 1}
+            and ``predict()`` returns probabilities.
         link : str or Link, optional
             Link function. Defaults to the family's canonical link (log).
         penalty : str or Penalty, optional

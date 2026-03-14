@@ -191,8 +191,10 @@ def discretization_impact(
         x_col = np.asarray(X[name])
         blocks.append(spec.transform(x_col))
 
+    from superglm.distributions import clip_mu
+
     eta_orig = np.hstack(blocks) @ beta + intercept
-    original_predictions = model._link.inverse(eta_orig)
+    original_predictions = clip_mu(model._link.inverse(eta_orig), model._distribution)
 
     # For each target feature, compute the delta (binned - smooth)
     tables: dict[str, pd.DataFrame] = {}
@@ -250,7 +252,7 @@ def discretization_impact(
 
     # Discretized predictions
     eta_disc = eta_orig + total_delta
-    predictions = model._link.inverse(eta_disc)
+    predictions = clip_mu(model._link.inverse(eta_disc), model._distribution)
 
     # Compute metrics
     dist = model._distribution

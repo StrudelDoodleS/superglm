@@ -168,6 +168,42 @@ class NegativeBinomial:
         return float(np.sum(weights * ll))
 
 
+class Binomial:
+    """Binomial (Bernoulli) distribution. V(mu) = mu * (1 - mu).
+
+    For use with binary y in {0, 1}.  This is a Bernoulli GLM (n_trials=1);
+    sample_weight is case/frequency weight, not binomial trials.
+    """
+
+    @property
+    def scale_known(self) -> bool:
+        return True
+
+    @property
+    def default_link(self) -> str:
+        return "logit"
+
+    def variance(self, mu: NDArray) -> NDArray:
+        """V(μ) = μ(1 − μ)."""
+        return mu * (1 - mu)
+
+    def variance_derivative(self, mu: NDArray) -> NDArray:
+        """V'(μ) = 1 − 2μ."""
+        return 1.0 - 2.0 * mu
+
+    def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
+        """Bernoulli unit deviance: 2[y log(y/μ) + (1-y) log((1-y)/(1-μ))]."""
+        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
+        # For Bernoulli y in {0,1}: d = -2[y·log(μ) + (1-y)·log(1-μ)]
+        return -2 * (y * np.log(mu_safe) + (1 - y) * np.log(1 - mu_safe))
+
+    def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
+        """Bernoulli log-likelihood."""
+        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
+        ll = y * np.log(mu_safe) + (1 - y) * np.log(1 - mu_safe)
+        return float(np.sum(weights * ll))
+
+
 class Tweedie:
     """Tweedie distribution. V(mu) = mu^p, with p in (1, 2).
 
@@ -218,6 +254,7 @@ class Tweedie:
 DISTRIBUTION_SHORTCUTS: dict[str, type] = {
     "poisson": Poisson,
     "gamma": Gamma,
+    "binomial": Binomial,
 }
 
 
@@ -240,6 +277,48 @@ def resolve_distribution(
             raise ValueError("NB distribution requires nb_theta=")
         return NegativeBinomial(theta=nb_theta)
     raise ValueError(
-        f"Unknown distribution '{family}'. Use 'poisson', 'gamma', 'tweedie', "
-        f"'negative_binomial', or pass a Distribution object."
+        f"Unknown distribution '{family}'. Use 'poisson', 'gamma', 'binomial', "
+        f"'tweedie', 'negative_binomial', or pass a Distribution object."
     )
+
+
+# ── Family-aware helpers ───────────────────────────────────────────
+
+
+def validate_response(y: NDArray, family: Distribution) -> None:
+    """Validate the response vector for the given family.
+
+    Raises ValueError for invalid responses (e.g. non-binary for binomial,
+    negative for Poisson/Gamma).
+    """
+    if isinstance(family, Binomial):
+        bad = ~np.isin(y, [0, 1])
+        if np.any(bad):
+            n_bad = int(np.sum(bad))
+            vals = np.unique(y[bad])[:5]
+            raise ValueError(
+                f"Binomial family requires y in {{0, 1}}, "
+                f"but found {n_bad} invalid values (e.g. {vals})."
+            )
+
+
+def initial_mean(y: NDArray, weights: NDArray, family: Distribution) -> float:
+    """Weighted mean of y, clipped to the valid range for the family.
+
+    For positive-response families (Poisson, Gamma, NB, Tweedie), zeros in y
+    are replaced with 0.1 before averaging to avoid log(0) in the initial
+    intercept.  For binomial, the raw weighted mean is clipped to (eps, 1-eps).
+    """
+    if isinstance(family, Binomial):
+        y_bar = float(np.average(y, weights=weights))
+        return np.clip(y_bar, 1e-3, 1 - 1e-3)
+    # Positive-response families: guard against y=0 for log-link init
+    y_safe = np.where(y > 0, y, 0.1)
+    return max(float(np.average(y_safe, weights=weights)), 1e-10)
+
+
+def clip_mu(mu: NDArray, family: Distribution) -> NDArray:
+    """Clip predicted means to a valid range for the family."""
+    if isinstance(family, Binomial):
+        return np.clip(mu, 1e-7, 1 - 1e-7)
+    return np.clip(mu, 1e-7, 1e7)

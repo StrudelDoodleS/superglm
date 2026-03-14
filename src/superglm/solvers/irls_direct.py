@@ -25,7 +25,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution
+from superglm.distributions import Distribution, clip_mu, initial_mean
 from superglm.group_matrix import (
     DesignMatrix,
     DiscretizedSSPGroupMatrix,
@@ -213,8 +213,8 @@ def fit_irls_direct(
     if intercept_init is not None:
         intercept = intercept_init
     else:
-        y_safe = np.where(y > 0, y, 0.1)
-        intercept = float(link.link(np.atleast_1d(np.average(y_safe, weights=weights)))[0])
+        mu0 = initial_mean(y, weights, family)
+        intercept = float(link.link(np.atleast_1d(mu0))[0])
 
     # Build penalty matrix S (p×p, block-diagonal)
     S = _build_penalty_matrix(gms, groups, lambda2, p)
@@ -234,7 +234,7 @@ def fit_irls_direct(
     # working quantities, then updated at the end of each iteration.
     # This eliminates one redundant matvec + link.inverse per iteration.
     eta = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
-    mu = np.clip(link.inverse(eta), 1e-7, 1e7)
+    mu = clip_mu(link.inverse(eta), family)
 
     for it in range(max_iter):
         # Working quantities from current eta/mu (already computed)
@@ -287,7 +287,7 @@ def fit_irls_direct(
         # quantities (no redundant matvec at the start of the loop).
         _t0 = time.perf_counter()
         eta = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
-        mu = np.clip(link.inverse(eta), 1e-7, 1e7)
+        mu = clip_mu(link.inverse(eta), family)
         dev = float(np.sum(weights * family.deviance_unit(y, mu)))
         _t_deviance += time.perf_counter() - _t0
 

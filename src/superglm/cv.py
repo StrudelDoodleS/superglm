@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution
+from superglm.distributions import Distribution, clip_mu, initial_mean
 from superglm.group_matrix import DesignMatrix
 from superglm.links import Link
 from superglm.penalties.base import Penalty
@@ -98,8 +98,7 @@ def _fit_cv_folds(
         off_test = offset[test_idx] if offset is not None else None
 
         # Null deviance for this fold (fallback for non-convergence)
-        y_safe = np.where(y_test > 0, y_test, 0.1)
-        mu_null = np.average(y_safe, weights=exp_test)
+        mu_null = initial_mean(y_test, exp_test, family)
         dev_null = family.deviance_unit(y_test, np.full_like(y_test, mu_null))
         null_dev = np.sum(exp_test * dev_null) / np.sum(exp_test)
 
@@ -144,8 +143,7 @@ def _fit_cv_folds(
             eta_test = dm_test.matvec(result.beta) + result.intercept
             if off_test is not None:
                 eta_test = eta_test + off_test
-            mu_test = link.inverse(eta_test)
-            mu_test = np.clip(mu_test, 1e-10, np.inf)
+            mu_test = clip_mu(link.inverse(eta_test), family)
             dev_unit = family.deviance_unit(y_test, mu_test)
             test_dev = np.sum(exp_test * dev_unit) / np.sum(exp_test)
 

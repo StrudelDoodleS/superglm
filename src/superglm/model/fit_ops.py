@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution
+from superglm.distributions import Distribution, clip_mu
 from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
@@ -57,19 +57,26 @@ def _compute_fit_stats(
     phi: float,
 ) -> FitStats:
     """Compute scalar fit statistics from training arrays."""
+    from superglm.distributions import Binomial, clip_mu
+
     ll = distribution.log_likelihood(y, mu, weights, phi)
 
-    # Null model (intercept-only MLE), offset-aware
+    # Null model (intercept-only MLE), offset-aware.
+    # For the null model, use the actual weighted mean (the true MLE for
+    # canonical links), clipped into the valid range for the link function.
     y_bar = float(np.average(y, weights=weights))
-    y_bar = max(y_bar, 1e-10)
+    if isinstance(distribution, Binomial):
+        y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
+    else:
+        y_bar = max(y_bar, 1e-10)
 
     if offset is None or np.all(offset == 0):
         null_mu = np.full(len(y), y_bar)
     else:
-        b0 = link.link(y_bar) - float(np.average(offset, weights=weights))
+        b0 = float(link.link(np.atleast_1d(y_bar))[0]) - float(np.average(offset, weights=weights))
         for _ in range(25):
             eta_null = b0 + offset
-            mu_null = link.inverse(np.clip(eta_null, -20, 20))
+            mu_null = clip_mu(link.inverse(np.clip(eta_null, -20, 20)), distribution)
             dmu = link.deriv_inverse(np.clip(eta_null, -20, 20))
             V = distribution.variance(mu_null)
             score = np.sum(weights * (y - mu_null) * dmu / V)
@@ -79,7 +86,7 @@ def _compute_fit_stats(
             if abs(step) < 1e-8:
                 break
         eta_null = b0 + offset
-        null_mu = np.maximum(link.inverse(np.clip(eta_null, -20, 20)), 1e-10)
+        null_mu = clip_mu(link.inverse(np.clip(eta_null, -20, 20)), distribution)
 
     null_ll = distribution.log_likelihood(y, null_mu, weights, phi)
     null_dev = float(np.sum(weights * distribution.deviance_unit(y, null_mu)))
@@ -121,6 +128,12 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
     from superglm.model.base import compute_lambda_max, model_build_design_matrix
 
     y, exposure, offset = model_build_design_matrix(model, X, y, exposure, offset)
+
+    # Validate response for the resolved distribution
+    from superglm.distributions import validate_response
+
+    validate_response(y, model._distribution)
+
     model._fit_weights = np.array(exposure)
     model._fit_offset = np.array(offset) if offset is not None else None
     exposure = model._fit_weights
@@ -178,7 +191,7 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
     eta = model._dm.matvec(model._result.beta) + model._result.intercept
     if offset is not None:
         eta = eta + offset
-    mu = model._link.inverse(eta)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = _compute_fit_stats(
         y, mu, exposure, offset, model._distribution, model._link, model._result.phi
@@ -796,7 +809,7 @@ def fit_reml(
     eta = model._dm.matvec(model._result.beta) + model._result.intercept
     if offset is not None:
         eta = eta + offset
-    mu = model._link.inverse(eta)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = _compute_fit_stats(
         y, mu, exposure, offset, model._distribution, model._link, model._result.phi

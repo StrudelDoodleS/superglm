@@ -10,7 +10,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution
+from superglm.distributions import Distribution, clip_mu, initial_mean
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
@@ -131,8 +131,8 @@ def _fit_pirls_inner(
     if intercept_init is not None:
         intercept = intercept_init
     else:
-        y_safe = np.where(y > 0, y, 0.1)
-        intercept = float(link.link(np.atleast_1d(np.average(y_safe, weights=weights)))[0])
+        mu0 = initial_mean(y, weights, family)
+        intercept = float(link.link(np.atleast_1d(mu0))[0])
 
     gms = dm.group_matrices
     n_groups = len(groups)
@@ -151,7 +151,7 @@ def _fit_pirls_inner(
         # Current predictions
         eta = dm.matvec(beta) + intercept + offset
         eta = np.clip(eta, -20, 20)
-        mu = np.clip(link.inverse(eta), 1e-7, 1e7)
+        mu = clip_mu(link.inverse(eta), family)
 
         # Working weights and response (PIRLS)
         V = family.variance(mu)
@@ -254,7 +254,7 @@ def _fit_pirls_inner(
 
         # Deviance for outer convergence
         eta_new = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
-        mu_new = np.clip(link.inverse(eta_new), 1e-7, 1e7)
+        mu_new = clip_mu(link.inverse(eta_new), family)
         dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
 
         # Warn on extreme working weight range (helps diagnose bad data)

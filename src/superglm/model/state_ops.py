@@ -273,12 +273,13 @@ def coef_covariance(model):
 
 def fit_active_info(model):
     """Active design columns, weights, and (X'WX+S)^{-1} from fit state."""
+    from superglm.distributions import clip_mu
     from superglm.metrics import _penalised_xtwx_inv
 
     eta = model._dm.matvec(model.result.beta) + model.result.intercept
     if model._fit_offset is not None:
         eta = eta + model._fit_offset
-    mu = model._link.inverse(np.clip(eta, -20, 20))
+    mu = clip_mu(model._link.inverse(np.clip(eta, -20, 20)), model._distribution)
     V = model._distribution.variance(mu)
     dmu_deta = model._link.deriv_inverse(np.clip(eta, -20, 20))
     W = model._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
@@ -292,6 +293,7 @@ def fit_active_info(model):
 
 def group_edf(model) -> dict[str, float] | None:
     """Per-group effective degrees of freedom via F = (X'WX+S)^{-1} X'WX."""
+    from superglm.distributions import clip_mu
     from superglm.metrics import _penalised_xtwx_inv
 
     if model._dm is None or model._result is None:
@@ -302,7 +304,7 @@ def group_edf(model) -> dict[str, float] | None:
     if model._fit_offset is not None:
         eta = eta + model._fit_offset
     eta = np.clip(eta, -20, 20)
-    mu = model._link.inverse(eta)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
     V = model._distribution.variance(mu)
     dmu_deta = model._link.deriv_inverse(eta)
     W = model._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
