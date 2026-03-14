@@ -241,8 +241,12 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
     def fit(
         self, X: pd.DataFrame, y: NDArray, sample_weight: NDArray | None = None
     ) -> SuperGLMClassifier:
+        from superglm.distributions import Binomial, validate_response
+
         X = pd.DataFrame(X).copy()
         y = np.asarray(y, dtype=np.float64)
+
+        validate_response(y, Binomial())
 
         self.classes_ = np.unique(y)
         if len(self.classes_) < 2:

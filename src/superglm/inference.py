@@ -181,8 +181,10 @@ def compute_coef_covariance(
     eta = dm.matvec(beta) + result.intercept
     if fit_offset is not None:
         eta = eta + fit_offset
+    from superglm.distributions import clip_mu
+
     eta = np.clip(eta, -20, 20)
-    mu = link.inverse(eta)
+    mu = clip_mu(link.inverse(eta), distribution)
     V = distribution.variance(mu)
     dmu_deta = link.deriv_inverse(eta)
     W = fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
