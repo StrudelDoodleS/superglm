@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution
+from superglm.distributions import Distribution, clip_mu
 from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
@@ -191,7 +191,7 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
     eta = model._dm.matvec(model._result.beta) + model._result.intercept
     if offset is not None:
         eta = eta + offset
-    mu = model._link.inverse(eta)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = _compute_fit_stats(
         y, mu, exposure, offset, model._distribution, model._link, model._result.phi
@@ -809,7 +809,7 @@ def fit_reml(
     eta = model._dm.matvec(model._result.beta) + model._result.intercept
     if offset is not None:
         eta = eta + offset
-    mu = model._link.inverse(eta)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = _compute_fit_stats(
         y, mu, exposure, offset, model._distribution, model._link, model._result.phi

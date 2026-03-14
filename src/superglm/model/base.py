@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution
+from superglm.distributions import Distribution, clip_mu
 from superglm.dm_builder import (
     add_interaction,
     auto_detect_features,
@@ -364,4 +364,4 @@ def predict(model, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
     eta = np.hstack(blocks) @ model.result.beta + model.result.intercept
     if offset is not None:
         eta = eta + np.asarray(offset, dtype=np.float64)
-    return model._link.inverse(eta)
+    return clip_mu(model._link.inverse(eta), model._distribution)

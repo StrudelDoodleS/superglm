@@ -206,6 +206,22 @@ class TestBinomialFit:
         with pytest.raises(ValueError, match="Binomial family requires y"):
             m.fit(X, y_bad)
 
+    def test_predict_clipped_with_unbounded_link(self, binary_data):
+        """Predictions should be clipped to (0, 1) even with an unbounded link."""
+        from superglm.links import IdentityLink
+
+        X, y = binary_data
+        m = SuperGLM(
+            family="binomial",
+            link=IdentityLink(),
+            lambda1=0,
+            features={"x1": Numeric(), "x2": Categorical(base="first")},
+        )
+        m.fit(X, y)
+        proba = m.predict(X)
+        assert np.all(proba > 0), f"min prediction {proba.min()} <= 0"
+        assert np.all(proba < 1), f"max prediction {proba.max()} >= 1"
+
 
 # ── Statsmodels parity ─────────────────────────────────────────────
 
