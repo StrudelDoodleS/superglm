@@ -996,7 +996,7 @@ class SuperGLM:
             penalty_caches=penalty_caches,
             profile=profile,
             max_analytical_per_w=getattr(self, "_max_analytical_per_w", 30),
-            split_linear_snap=getattr(self, "_split_linear_snap", True),
+            select_snap=getattr(self, "_select_snap", True),
         )
 
     def _optimize_discrete_reml_cached_w(
@@ -1499,7 +1499,7 @@ class SuperGLM:
             link_name = link_name[:-4]
         penalty_name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", type(penalty).__name__)
 
-        # Append "+ SL" if any split_linear splines are present
+        # Append "+ SEL" if any select=True splines are present
         has_select = any(g.subgroup_type is not None for g in self._groups)
         penalty_abbrevs: dict[str, str] = {}  # abbrev -> full name
         if has_select:
@@ -1508,8 +1508,8 @@ class SuperGLM:
             if abbrev is not None:
                 penalty_abbrevs[abbrev] = penalty_name
                 penalty_name = abbrev
-            penalty_abbrevs["SL"] = "split-linear double penalty (Wood, 2011)"
-            penalty_name += " + SL"
+            penalty_abbrevs["SEL"] = "double penalty selection (Wood, 2011)"
+            penalty_name += " + SEL"
 
         # Build method string from fit metadata
         meta = self._last_fit_meta or {}

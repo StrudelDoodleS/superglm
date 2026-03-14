@@ -157,7 +157,7 @@ class TestDiscretizedFit:
 
 class TestDiscretizedSelect:
     def test_select_true_discrete(self):
-        """split_linear=True + discrete=True should work and give same sparsity pattern."""
+        """select=True + discrete=True should work and give same sparsity pattern."""
         rng = np.random.default_rng(42)
         n = 1000
         x_signal = rng.uniform(0, 10, n)
@@ -170,8 +170,8 @@ class TestDiscretizedSelect:
             family="poisson",
             lambda1=0.05,
             features={
-                "signal": Spline(n_knots=10, penalty="ssp", split_linear=True),
-                "noise": Spline(n_knots=10, penalty="ssp", split_linear=True),
+                "signal": Spline(n_knots=10, penalty="ssp", select=True),
+                "noise": Spline(n_knots=10, penalty="ssp", select=True),
             },
         )
         model_exact.fit(X, y)
@@ -181,8 +181,8 @@ class TestDiscretizedSelect:
             lambda1=0.05,
             discrete=True,
             features={
-                "signal": Spline(n_knots=10, penalty="ssp", split_linear=True),
-                "noise": Spline(n_knots=10, penalty="ssp", split_linear=True),
+                "signal": Spline(n_knots=10, penalty="ssp", select=True),
+                "noise": Spline(n_knots=10, penalty="ssp", select=True),
             },
         )
         model_disc.fit(X, y)
@@ -305,7 +305,7 @@ class TestDiscretizedREML:
         assert hasattr(model, "_reml_lambdas")
 
     def test_freml_select_true(self):
-        """split_linear=True + discrete=True + REML should converge and select correctly."""
+        """select=True + discrete=True + REML should converge and select correctly."""
         rng = np.random.default_rng(42)
         n = 1000
         x_signal = rng.uniform(0, 10, n)
@@ -319,8 +319,8 @@ class TestDiscretizedREML:
             lambda1=0,
             discrete=True,
             features={
-                "signal": Spline(n_knots=10, penalty="ssp", split_linear=True),
-                "noise": Spline(n_knots=10, penalty="ssp", split_linear=True),
+                "signal": Spline(n_knots=10, penalty="ssp", select=True),
+                "noise": Spline(n_knots=10, penalty="ssp", select=True),
             },
         )
         model.fit_reml(X, y)

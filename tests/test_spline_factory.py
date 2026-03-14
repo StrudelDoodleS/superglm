@@ -44,10 +44,10 @@ class TestSplineFactoryDispatch:
             s = Spline(kind=kind, n_knots=5)
             assert isinstance(s, _SplineBase)
 
-    def test_bs_split_linear(self):
-        s = Spline(kind="bs", n_knots=8, split_linear=True)
+    def test_bs_select(self):
+        s = Spline(kind="bs", n_knots=8, select=True)
         assert isinstance(s, BasisSpline)
-        assert s.split_linear is True
+        assert s.select is True
 
     def test_params_forwarded(self):
         s = Spline(
@@ -168,13 +168,18 @@ class TestSplineValidation:
         with pytest.raises(ValueError, match="too small"):
             Spline(kind="cr", k=2)
 
-    def test_split_linear_non_bs_raises(self):
-        with pytest.raises(ValueError, match="split_linear is only supported"):
-            Spline(kind="ns", n_knots=8, split_linear=True)
+    def test_select_ns_raises_not_implemented(self):
+        with pytest.raises(NotImplementedError, match="select=True is not yet supported"):
+            Spline(kind="ns", n_knots=8, select=True)
 
-    def test_split_linear_cr_raises(self):
-        with pytest.raises(ValueError, match="split_linear is only supported"):
-            Spline(kind="cr", n_knots=8, split_linear=True)
+    def test_select_cr_succeeds(self):
+        s = Spline(kind="cr", n_knots=8, select=True)
+        assert isinstance(s, CubicRegressionSpline)
+        assert s.select is True
+
+    def test_select_cr_cardinal_succeeds(self):
+        s = Spline(kind="cr_cardinal", n_knots=8, select=True)
+        assert s.select is True
 
     def test_n_knots_from_k_unknown_kind(self):
         with pytest.raises(ValueError, match="Unknown spline kind"):

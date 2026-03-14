@@ -279,23 +279,26 @@ class TestColumnCounts:
 # ── Projection stored correctly ──────────────────────────────────
 
 
-class TestConstraintProjection:
-    """Verify _constraint_projection is set and has correct shape."""
+class TestInteractionProjection:
+    """Verify _interaction_projection is set and has correct shape."""
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
-    def test_constraint_projection_exists(self, kind):
+    def test_interaction_projection_exists(self, kind):
         s = Spline(kind=kind, n_knots=8)
         x = np.linspace(0, 1, 100)
         s.build(x)
-        assert s._constraint_projection is not None
+        assert s._interaction_projection is not None
         # Projection should be orthogonal
-        P = s._constraint_projection
+        P = s._interaction_projection
         PtP = P.T @ P
         assert np.allclose(PtP, np.eye(PtP.shape[0]), atol=1e-12)
 
-    def test_split_linear_no_constraint_projection(self):
-        """split_linear=True skips identifiability → no constraint projection."""
-        s = BasisSpline(n_knots=8, split_linear=True)
+    def test_select_stores_interaction_projection(self):
+        """select=True stores interaction projection for interaction support."""
+        s = BasisSpline(n_knots=8, select=True)
         x = np.linspace(0, 1, 100)
         s.build(x)
-        assert s._constraint_projection is None
+        # BS has no boundary constraints, so _interaction_projection is
+        # just the identifiability projection (K, K-1)
+        assert s._interaction_projection is not None
+        assert s._interaction_projection.shape == (s._n_basis, s._n_basis - 1)

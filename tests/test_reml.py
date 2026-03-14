@@ -571,17 +571,17 @@ class TestREMLFallbacks:
         assert not hasattr(model, "_reml_lambdas")
 
 
-# ── REML + split_linear=True (mgcv double penalty) ─────────────────────
+# ── REML + select=True (mgcv double penalty) ─────────────────────
 
 
 class TestREMLSelectTrue:
     def test_reml_select_true_converges(self, poisson_data):
-        """fit_reml() works with split_linear=True (double penalty)."""
+        """fit_reml() works with select=True (double penalty)."""
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
             lambda1=0.01,
-            features={"x1": Spline(n_knots=8, penalty="ssp", split_linear=True)},
+            features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
         )
         model.fit_reml(X[["x1"]], y, exposure=w, max_reml_iter=15)
         assert model._reml_result.converged
@@ -596,8 +596,8 @@ class TestREMLSelectTrue:
             family="poisson",
             lambda1=0.01,
             features={
-                "x1": Spline(n_knots=8, penalty="ssp", split_linear=True),
-                "x2": Spline(n_knots=8, penalty="ssp", split_linear=True),
+                "x1": Spline(n_knots=8, penalty="ssp", select=True),
+                "x2": Spline(n_knots=8, penalty="ssp", select=True),
             },
         )
         model.fit_reml(X[["x1", "x2"]], y, exposure=w, max_reml_iter=15)

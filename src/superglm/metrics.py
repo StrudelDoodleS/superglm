@@ -89,7 +89,7 @@ def _penalised_xtwx_inv(
     p_a = X_a.shape[1]
 
     # Build sqrt(S) factor: L such that L'L = S (block-diagonal penalty)
-    # Unpenalized groups (e.g. split_linear=True null-space) get no penalty contribution.
+    # Unpenalized groups (e.g. select=True null-space) get no penalty contribution.
     S_rows = np.zeros((p_a, p_a))
     for gm_orig, ag, gname in zip(active_gms, active_groups_out, active_group_names):
         if isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix) and ag.penalized:
@@ -237,6 +237,7 @@ def build_coef_rows(
         SplineCategorical,
     )
     from superglm.features.numeric import Numeric
+    from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
     from superglm.inference import feature_se_from_cov, spline_group_enrichment
 
@@ -477,6 +478,25 @@ def build_coef_rows(
                         n_params=g.size,
                         active=False,
                         group_norm=0.0,
+                    )
+                )
+
+        elif isinstance(spec, Polynomial):
+            poly_group = f"{g.name} P({spec.degree})"
+            for i in range(g.size):
+                coef_val = float(b_g[i])
+                se_val = float(se_g[i]) if len(se_g) > i else 0.0
+                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                rows.append(
+                    _CoefRow(
+                        name=f"{g.name}[P{i + 1}]",
+                        group=poly_group,
+                        coef=coef_val,
+                        se=se_val,
+                        z=z,
+                        p=p,
+                        ci_low=ci_lo,
+                        ci_high=ci_hi,
                     )
                 )
 
@@ -1141,7 +1161,7 @@ class ModelMetrics:
         Parameters
         ----------
         name : str
-            Feature name (e.g. "DrivAge"). For split_linear=True splines with multiple
+            Feature name (e.g. "DrivAge"). For select=True splines with multiple
             subgroups, all subgroups are gathered automatically.
         """
         from superglm.features.categorical import Categorical

@@ -13,7 +13,7 @@ groups this reduces the O(n·p²) bottleneck to O(n_bins·K²) per group.
 This replaces BCD when lambda1=0 (no L1/group lasso penalty), which is
 the mgcv-style workflow where REML handles both smoothing and selection
 through the double penalty.  Without BCD, the 33-iteration aliasing from
-shared B matrices between split_linear=True subgroups vanishes entirely.
+shared B matrices between select=True subgroups vanishes entirely.
 """
 
 from __future__ import annotations
