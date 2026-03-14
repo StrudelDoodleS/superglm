@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
+from superglm.distributions import Tweedie as TweedieDistribution
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
@@ -15,6 +16,16 @@ from superglm.tweedie_profile import (
     generate_tweedie_cpg,
     tweedie_logpdf,
 )
+
+
+def _generate_weighted_tweedie(mu, phi, p, weights, rng):
+    """Simulate Tweedie responses under the prior-weight convention phi / w."""
+    mu = np.asarray(mu, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    y = np.empty(len(mu), dtype=np.float64)
+    for i in range(len(mu)):
+        y[i] = generate_tweedie_cpg(1, mu=mu[i], phi=phi / weights[i], p=p, rng=rng)[0]
+    return y
 
 # =====================================================================
 # TestGenerateTweedieCPG
@@ -117,6 +128,20 @@ class TestTweedieLogpdf:
         lp_half_phi = tweedie_logpdf(y, mu, phi / 2.0, p)
         np.testing.assert_allclose(lp_weighted, lp_half_phi, rtol=1e-10)
 
+    def test_distribution_log_likelihood_matches_weighted_logpdf(self):
+        """Tweedie.log_likelihood should sum weighted logpdf once, not twice."""
+        rng = np.random.default_rng(123)
+        n = 2_000
+        mu = np.full(n, 10.0)
+        weights = rng.uniform(0.5, 2.0, n)
+        phi, p = 3.0, 1.6
+        y = _generate_weighted_tweedie(mu, phi, p, weights, rng)
+
+        dist = TweedieDistribution(p)
+        ll_direct = float(np.sum(tweedie_logpdf(y, mu, phi, p, weights=weights)))
+        ll_dist = dist.log_likelihood(y, mu, weights, phi=phi)
+        np.testing.assert_allclose(ll_dist, ll_direct, rtol=1e-10)
+
 
 # =====================================================================
 # TestEstimatePhi
@@ -137,6 +162,17 @@ class TestEstimatePhi:
         y = generate_tweedie_cpg(1_000, mu=10.0, phi=3.0, p=1.6, rng=rng)
         mu_arr = np.full_like(y, 10.0)
         assert estimate_phi(y, mu_arr, 1.6) > 0
+
+    def test_weighted_phi_recovery(self):
+        rng = np.random.default_rng(123)
+        n = 12_000
+        mu = np.full(n, 10.0)
+        phi_true, p = 3.0, 1.6
+        weights = rng.uniform(0.5, 2.0, n)
+        y = _generate_weighted_tweedie(mu, phi_true, p, weights, rng)
+
+        phi_hat = estimate_phi(y, mu, p, weights=weights)
+        np.testing.assert_allclose(phi_hat, phi_true, rtol=0.12)
 
 
 # =====================================================================
@@ -197,6 +233,28 @@ class TestProfileLikelihood:
         model = _make_model_with_covariates(lambda1=0.0)
         result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
+
+    def test_recovers_p_with_prior_weights(self):
+        """Profile likelihood should recover p when exposure acts through phi / w."""
+        rng = np.random.default_rng(321)
+        p_true = 1.6
+        phi_true = 3.0
+        n = 4_000
+        x1 = rng.normal(0, 1, n)
+        exposure = rng.uniform(0.5, 2.0, n)
+        mu = np.exp(1.5 + 0.25 * x1)
+        y = _generate_weighted_tweedie(mu, phi_true, p_true, exposure, rng)
+        X = pd.DataFrame({"x1": x1})
+
+        model = SuperGLM(
+            family="tweedie",
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x1": Numeric()},
+        )
+
+        result = estimate_tweedie_p(model, X, y, exposure=exposure, p_bounds=(1.1, 1.9))
+        np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
+        np.testing.assert_allclose(result.phi_hat, phi_true, rtol=0.2)
 
     @pytest.mark.slow
     def test_insurance_like(self):

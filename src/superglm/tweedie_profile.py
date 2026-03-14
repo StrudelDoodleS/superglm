@@ -203,13 +203,19 @@ def estimate_phi(
     p: float,
     *,
     weights: NDArray | None = None,
-    df_resid: int | None = None,
+    df_resid: float | None = None,
 ) -> float:
     """Weighted Pearson estimate of dispersion parameter phi.
 
     phi_hat = sum(w * (y - mu)^2 / mu^p) / denom
 
-    where denom = df_resid if provided, else sum(w) (i.e. no df correction).
+    Under the prior-weight convention used here,
+    ``Var(Y_i) = phi * mu_i^p / w_i``. Therefore
+    ``E[w_i * (Y_i - mu_i)^2 / mu_i^p] = phi`` for each observation, and the
+    natural denominator is the residual observation count rather than the sum
+    of weights.
+
+    where denom = df_resid if provided, else n_obs (i.e. no df correction).
     """
     y = np.asarray(y, dtype=np.float64)
     mu = np.asarray(mu, dtype=np.float64)
@@ -217,13 +223,12 @@ def estimate_phi(
     variance_fn = np.power(mu_safe, p)
     pearson = (y - mu) ** 2 / variance_fn
 
+    denom = float(df_resid if df_resid is not None else len(y))
     if weights is not None:
         weights = np.asarray(weights, dtype=np.float64)
         numer = float(np.sum(weights * pearson))
-        denom = float(df_resid if df_resid is not None else np.sum(weights))
     else:
         numer = float(np.sum(pearson))
-        denom = float(df_resid if df_resid is not None else len(y))
     return numer / denom
 
 
@@ -245,7 +250,7 @@ class TweedieProfileResult:
 
     # Stored to enable .ci()
     _objective: Any = field(default=None, repr=False)
-    _w_sum: float = field(default=0.0, repr=False)
+    _ll_scale: float = field(default=0.0, repr=False)
 
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
         """Profile likelihood confidence interval for Tweedie p.
@@ -258,7 +263,7 @@ class TweedieProfileResult:
                 "Profile CI requires the objective function. Use "
                 "estimate_tweedie_p() to produce this result."
             )
-        return profile_ci_p(self._objective, self.p_hat, self.nll, self._w_sum, alpha=alpha)
+        return profile_ci_p(self._objective, self.p_hat, self.nll, self._ll_scale, alpha=alpha)
 
     def profile_plot(
         self,
@@ -311,7 +316,7 @@ class TweedieProfileResult:
         p_grid = np.linspace(grid_lo, grid_hi, n_points)
 
         nll_values = np.array([self._objective(p) for p in p_grid])
-        deviance = 2.0 * self._w_sum * (nll_values - self.nll)
+        deviance = 2.0 * self._ll_scale * (nll_values - self.nll)
 
         cutoff = chi2.ppf(1.0 - alpha, 1)
 
@@ -325,7 +330,7 @@ class TweedieProfileResult:
         # Mark original Brent evaluation points (not grid/CI evals)
         if orig_cache:
             cache_ps = np.array(sorted(orig_cache.keys()))
-            cache_dev = 2.0 * self._w_sum * (np.array([orig_cache[p] for p in cache_ps]) - self.nll)
+            cache_dev = 2.0 * self._ll_scale * (np.array([orig_cache[p] for p in cache_ps]) - self.nll)
             ax.scatter(
                 cache_ps,
                 cache_dev,
@@ -514,12 +519,13 @@ def _estimate_tweedie_p_fit(
     # Track the last PIRLS result for final phi estimation
     last_p_eval = None
     last_mu = None
+    last_edf = None
 
     cache: dict[float, float] = {}
     n_evals = 0
 
     def objective(p: float) -> float:
-        nonlocal n_evals, warm_beta, warm_intercept, last_p_eval, last_mu
+        nonlocal n_evals, warm_beta, warm_intercept, last_p_eval, last_mu, last_edf
         key = round(p, 6)
         if key in cache:
             return cache[key]
@@ -540,17 +546,19 @@ def _estimate_tweedie_p_fit(
 
         eta = np.clip(dm.matvec(result.beta) + result.intercept + offset_arr, -20, 20)
         mu = np.maximum(link.inverse(eta), 1e-10)
+        df_resid = max(len(y_arr) - float(result.effective_df), 1.0)
 
-        phi = max(estimate_phi(y_arr, mu, p, weights=w_arr), 1e-10)
+        phi = max(estimate_phi(y_arr, mu, p, weights=w_arr, df_resid=df_resid), 1e-10)
 
         ll = tweedie_logpdf(y_arr, mu, phi, p, weights=w_arr)
-        nll = -np.sum(w_arr * ll) / np.sum(w_arr)
+        nll = -np.mean(ll)
 
         # Update warm starts for next evaluation
         warm_beta = result.beta
         warm_intercept = result.intercept
         last_p_eval = p
         last_mu = mu
+        last_edf = float(result.effective_df)
 
         cache[key] = nll
         n_evals += 1
@@ -572,6 +580,7 @@ def _estimate_tweedie_p_fit(
     # otherwise do one final (warm-started) fit.
     if last_p_eval is not None and round(last_p_eval, 6) == p_hat:
         mu_final = last_mu
+        edf_final = last_edf
     else:
         dist = Tweedie(p_hat)
         final_result = fit_pirls(
@@ -588,8 +597,10 @@ def _estimate_tweedie_p_fit(
         )
         eta = np.clip(dm.matvec(final_result.beta) + final_result.intercept + offset_arr, -20, 20)
         mu_final = np.maximum(link.inverse(eta), 1e-10)
+        edf_final = float(final_result.effective_df)
 
-    phi_hat = max(estimate_phi(y_arr, mu_final, p_hat, weights=w_arr), 1e-10)
+    df_resid_final = max(len(y_arr) - float(edf_final), 1.0)
+    phi_hat = max(estimate_phi(y_arr, mu_final, p_hat, weights=w_arr, df_resid=df_resid_final), 1e-10)
 
     return TweedieProfileResult(
         p_hat=p_hat,
@@ -599,7 +610,7 @@ def _estimate_tweedie_p_fit(
         converged=result.success if hasattr(result, "success") else True,
         cache=cache,
         _objective=objective,
-        _w_sum=float(np.sum(w_arr)),
+        _ll_scale=float(len(y_arr)),
     )
 
 
@@ -623,9 +634,10 @@ def _estimate_tweedie_p_reml(
     n_evals = 0
     last_p_eval = None
     last_mu = None
+    last_edf = None
 
     def objective(p: float) -> float:
-        nonlocal n_evals, last_p_eval, last_mu
+        nonlocal n_evals, last_p_eval, last_mu, last_edf
         key = round(p, 6)
         if key in cache:
             return cache[key]
@@ -635,13 +647,15 @@ def _estimate_tweedie_p_reml(
         model.fit_reml(X, y, exposure=exposure, offset=offset)
 
         mu = np.maximum(model.predict(X), 1e-10)
-        phi = max(estimate_phi(y_np, mu, p, weights=w_arr), 1e-10)
+        df_resid = max(len(y_np) - float(model.result.effective_df), 1.0)
+        phi = max(estimate_phi(y_np, mu, p, weights=w_arr, df_resid=df_resid), 1e-10)
 
         ll = tweedie_logpdf(y_np, mu, phi, p, weights=w_arr)
-        nll = -np.sum(w_arr * ll) / np.sum(w_arr)
+        nll = -np.mean(ll)
 
         last_p_eval = p
         last_mu = mu
+        last_edf = float(model.result.effective_df)
 
         cache[key] = nll
         n_evals += 1
@@ -665,8 +679,10 @@ def _estimate_tweedie_p_reml(
         model.tweedie_p = p_hat
         model.fit_reml(X, y, exposure=exposure, offset=offset)
         last_mu = np.maximum(model.predict(X), 1e-10)
+        last_edf = float(model.result.effective_df)
 
-    phi_hat = max(estimate_phi(y_np, last_mu, p_hat, weights=w_arr), 1e-10)
+    df_resid_final = max(len(y_np) - float(last_edf), 1.0)
+    phi_hat = max(estimate_phi(y_np, last_mu, p_hat, weights=w_arr, df_resid=df_resid_final), 1e-10)
 
     return TweedieProfileResult(
         p_hat=p_hat,
@@ -676,7 +692,7 @@ def _estimate_tweedie_p_reml(
         converged=result.success if hasattr(result, "success") else True,
         cache=cache,
         _objective=objective,
-        _w_sum=float(np.sum(w_arr)),
+        _ll_scale=float(len(y_np)),
     )
 
 
@@ -684,7 +700,7 @@ def profile_ci_p(
     objective,
     p_hat: float,
     nll_hat: float,
-    w_sum: float,
+    ll_scale: float,
     *,
     alpha: float = 0.05,
     p_range: tuple[float, float] = (1.02, 1.98),
@@ -692,8 +708,8 @@ def profile_ci_p(
     """Profile likelihood confidence interval for Tweedie power p.
 
     Each evaluation calls ``objective(p)`` which refits the GLM via PIRLS.
-    The objective returns mean NLL = ``-sum(w*ll)/sum(w)``, so the LRT
-    statistic is ``2 * w_sum * (mean_nll(p) - mean_nll(p_hat))``.
+    The objective returns mean NLL per observation, so the LRT
+    statistic is ``2 * ll_scale * (mean_nll(p) - mean_nll(p_hat))``.
 
     Parameters
     ----------
@@ -703,8 +719,8 @@ def profile_ci_p(
         MLE of p.
     nll_hat : float
         Mean NLL at p_hat.
-    w_sum : float
-        Sum of weights (converts mean NLL to total for LRT).
+    ll_scale : float
+        Number of effective observations used to convert mean NLL to total.
     alpha : float
         Significance level.
     p_range : tuple
@@ -721,7 +737,7 @@ def profile_ci_p(
 
     def g(p: float) -> float:
         nll = objective(p)
-        return 2.0 * w_sum * (nll - nll_hat) - cutoff
+        return 2.0 * ll_scale * (nll - nll_hat) - cutoff
 
     # Lower bound
     lo = p_range[0]
