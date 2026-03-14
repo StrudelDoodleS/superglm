@@ -212,7 +212,7 @@ class Tweedie:
         from superglm.tweedie_profile import tweedie_logpdf
 
         logpdf = tweedie_logpdf(y, mu, phi, self.p, weights=weights)
-        return float(np.sum(weights * logpdf))
+        return float(np.sum(logpdf))
 
 
 DISTRIBUTION_SHORTCUTS: dict[str, type] = {
