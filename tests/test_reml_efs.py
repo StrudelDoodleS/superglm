@@ -83,7 +83,7 @@ class TestEFSOptimizer:
         model = SuperGLM(
             family="poisson",
             lambda1=0.01,
-            features={"x1": Spline(n_knots=8, penalty="ssp", split_linear=True)},
+            features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
         )
         model.fit_reml(X, y, max_reml_iter=20)
 

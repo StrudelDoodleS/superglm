@@ -34,7 +34,7 @@ Control where interior knots are placed:
 
 ### Double-penalty shrinkage
 
-`select=True` decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). Works for BS, CR, and CR cardinal splines. With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped. Not supported for NS (its constrained penalty has only 1 null eigenvalue). `split_linear=True` is a backward-compatible alias for BS.
+`select=True` decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). Works for BS, CR, and CR cardinal splines. With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped. Not supported for NS (its constrained penalty has only 1 null eigenvalue).
 
 ## Polynomial
 

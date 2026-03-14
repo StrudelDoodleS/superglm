@@ -163,7 +163,7 @@ class _SplineBase:
         self._hi: float = 1.0
         self._knot_strategy_actual: str = knot_strategy
         self._R_inv: NDArray | None = None
-        self._constraint_projection: NDArray | None = None
+        self._interaction_projection: NDArray | None = None
         self._basis_lo: NDArray | None = None
         self._basis_hi: NDArray | None = None
         self._basis_d1_lo: NDArray | None = None
@@ -350,11 +350,6 @@ class _SplineBase:
         """
         return not self.select
 
-    @property
-    def supports_linear_split(self) -> bool:
-        """Whether this spline can split linear and wiggly subspaces."""
-        return False
-
     def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
         """Apply boundary constraints. Returns (B, omega, n_cols, projection).
 
@@ -504,7 +499,7 @@ class _SplineBase:
         # constant removal via eigendecomposition, but interactions
         # need the standard identified projection to stay full-rank.
         # BS: (K, K-1), CR: (K, K-3), CardinalCR: (K, K-1).
-        self._constraint_projection = self._identifiability_projection(x, Z)
+        self._interaction_projection = self._identifiability_projection(x, Z)
 
         self._eigendecompose_select(omega_c, Z)
 
@@ -543,7 +538,7 @@ class _SplineBase:
         omega = self._build_penalty()
         B, omega, n_cols, projection = self._apply_constraints(B, omega)
         omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
-        self._constraint_projection = projection
+        self._interaction_projection = projection
         return GroupInfo(
             columns=B,
             n_cols=n_cols,
@@ -580,11 +575,11 @@ class _SplineBase:
             Z = projection  # constraint projection (or None)
             self._eigendecompose_select(omega_c, Z)
             # Store constraint + identifiability projection for interactions
-            self._constraint_projection = self._identifiability_projection(x, Z)
+            self._interaction_projection = self._identifiability_projection(x, Z)
             return omega_c, n_cols, projection
 
         omega_c, n_cols, projection = self._apply_identifiability(x, omega_c, projection)
-        self._constraint_projection = projection
+        self._interaction_projection = projection
         return omega_c, n_cols, projection
 
     def transform(self, x: NDArray) -> NDArray:
@@ -706,9 +701,6 @@ class BasisSpline(_SplineBase):
         infinity effectively zeros the linear component (three-way
         selection: nonlinear -> linear -> dropped). See Wood (2011).
 
-    split_linear : bool
-        Deprecated alias for ``select``. If either is True, select
-        mode is enabled.
     knots : array-like or None
         Explicit interior knot positions.
     """
@@ -719,7 +711,6 @@ class BasisSpline(_SplineBase):
         degree: int = 3,
         knot_strategy: str = "uniform",
         penalty: str = "ssp",
-        split_linear: bool = False,
         select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
@@ -728,7 +719,6 @@ class BasisSpline(_SplineBase):
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
     ):
-        effective_select = select or split_linear
         super().__init__(
             n_knots,
             degree,
@@ -740,17 +730,8 @@ class BasisSpline(_SplineBase):
             extrapolation,
             boundary,
             knot_alpha,
-            select=effective_select,
+            select=select,
         )
-
-    @property
-    def split_linear(self) -> bool:
-        """Backward-compatible alias for ``select``."""
-        return self.select
-
-    @property
-    def supports_linear_split(self) -> bool:
-        return True
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
         """mgcv-style open knot vector with 0.001*range edge padding.
@@ -1331,7 +1312,6 @@ def Spline(
     knot_strategy: str = "uniform",
     penalty: str = "ssp",
     select: bool = False,
-    split_linear: bool = False,
     knots: ArrayLike | None = None,
     discrete: bool | None = None,
     n_bins: int | None = None,
@@ -1391,8 +1371,6 @@ def Spline(
         double-penalty selection.  Supported for ``"bs"``, ``"cr"``, and
         ``"cr_cardinal"``.  Not supported for ``"ns"`` (its constrained
         penalty has only 1 null eigenvalue).
-    split_linear : bool
-        Deprecated alias for ``select``.
     knots : array-like, optional
         Explicit interior knot positions. Overrides ``k`` / ``n_knots``.
     discrete : bool, optional
@@ -1440,9 +1418,7 @@ def Spline(
             "Cannot specify both k and n_knots. Use k (public basis size) or n_knots (interior knots), not both."
         )
 
-    effective_select = select or split_linear
-
-    if effective_select and kind == "ns":
+    if select and kind == "ns":
         raise NotImplementedError(
             "select=True is not yet supported for kind='ns'. "
             "The NaturalSpline penalty has only 1 null eigenvalue after "
@@ -1469,7 +1445,7 @@ def Spline(
             degree=degree,
             knot_strategy=knot_strategy,
             penalty=penalty,
-            select=effective_select,
+            select=select,
             knots=knots,
             discrete=discrete,
             n_bins=n_bins,
@@ -1482,7 +1458,7 @@ def Spline(
             n_knots=resolved_n_knots,
             knot_strategy=knot_strategy,
             penalty=penalty,
-            select=effective_select,
+            select=select,
             knots=knots,
             discrete=discrete,
             n_bins=n_bins,

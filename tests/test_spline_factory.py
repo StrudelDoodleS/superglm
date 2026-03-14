@@ -44,10 +44,10 @@ class TestSplineFactoryDispatch:
             s = Spline(kind=kind, n_knots=5)
             assert isinstance(s, _SplineBase)
 
-    def test_bs_split_linear(self):
-        s = Spline(kind="bs", n_knots=8, split_linear=True)
+    def test_bs_select(self):
+        s = Spline(kind="bs", n_knots=8, select=True)
         assert isinstance(s, BasisSpline)
-        assert s.split_linear is True
+        assert s.select is True
 
     def test_params_forwarded(self):
         s = Spline(
@@ -172,11 +172,6 @@ class TestSplineValidation:
         with pytest.raises(NotImplementedError, match="select=True is not yet supported"):
             Spline(kind="ns", n_knots=8, select=True)
 
-    def test_split_linear_ns_raises_not_implemented(self):
-        """Backward compat: split_linear=True on NS also raises."""
-        with pytest.raises(NotImplementedError, match="select=True is not yet supported"):
-            Spline(kind="ns", n_knots=8, split_linear=True)
-
     def test_select_cr_succeeds(self):
         s = Spline(kind="cr", n_knots=8, select=True)
         assert isinstance(s, CubicRegressionSpline)
@@ -185,12 +180,6 @@ class TestSplineValidation:
     def test_select_cr_cardinal_succeeds(self):
         s = Spline(kind="cr_cardinal", n_knots=8, select=True)
         assert s.select is True
-
-    def test_split_linear_backward_compat(self):
-        """split_linear=True on BS is equivalent to select=True."""
-        s = Spline(kind="bs", n_knots=8, split_linear=True)
-        assert s.select is True
-        assert s.split_linear is True
 
     def test_n_knots_from_k_unknown_kind(self):
         with pytest.raises(ValueError, match="Unknown spline kind"):
