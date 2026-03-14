@@ -408,6 +408,10 @@ def plot_term(
 
     if exposure is not None:
         exposure = np.asarray(exposure, dtype=np.float64)
+    elif X is not None and show_exposure:
+        # Fall back to uniform weights (observation counts) when no
+        # sample_weight is provided.
+        exposure = np.ones(len(X), dtype=np.float64)
 
     has_density = show_exposure and X is not None and exposure is not None
 
@@ -648,6 +652,8 @@ def _plot_relativities_new(
 
     if exposure is not None:
         exposure = np.asarray(exposure, dtype=np.float64)
+    elif X is not None and show_exposure:
+        exposure = np.ones(len(X), dtype=np.float64)
 
     ncols = min(ncols, n)
     nrows = math.ceil(n / ncols)

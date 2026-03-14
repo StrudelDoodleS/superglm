@@ -255,12 +255,11 @@ class TestDensity:
         import matplotlib
 
         matplotlib.use("Agg")
-        from matplotlib.figure import Figure
 
         X, y, _ = sample_data
         fig = fitted_model.plot("age", X=X, show_density=True)
-        # Without sample_weight, no density strip — just the main panel
-        assert isinstance(fig, Figure)
+        # Without sample_weight, falls back to observation density → strip shown
+        assert len(fig.get_axes()) >= 2
 
     def test_density_disabled(self, sample_data, fitted_model):
         import matplotlib
@@ -285,13 +284,13 @@ class TestPlotErrors:
         with pytest.raises(ValueError, match="one interaction"):
             interaction_model.plot(["age:region", "age:region"])
 
-    def test_unknown_feature_raises(self, fitted_model):
-        with pytest.raises(KeyError, match="Feature not found"):
+    def test_unknown_term_raises(self, fitted_model):
+        with pytest.raises(KeyError, match="Term not found"):
             fitted_model.plot("nonexistent")
 
-    def test_unknown_interaction_raises(self, fitted_model):
-        with pytest.raises(KeyError, match="Interaction not found"):
-            fitted_model.plot("age:nonexistent")
+    def test_unknown_term_in_list_raises(self, fitted_model):
+        with pytest.raises(KeyError, match="Term.*not found"):
+            fitted_model.plot(["age", "nonexistent"])
 
     def test_plotly_for_main_effects_raises(self, fitted_model):
         with pytest.raises(ValueError, match="engine=.*only supported"):
@@ -305,3 +304,27 @@ class TestPlotErrors:
         model = SuperGLM(features={"x": Spline(n_knots=5)})
         with pytest.raises(RuntimeError, match="fitted"):
             model.plot()
+
+
+# ── Regression: colon in feature names ─────────────────────────
+
+
+class TestColonInFeatureName:
+    def test_colon_feature_plots_as_main_effect(self):
+        """Feature named 'a:b' should plot as a main effect, not an interaction."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 10, n)
+        y = rng.poisson(np.exp(0.5 + 0.1 * x)).astype(float)
+        X = pd.DataFrame({"a:b": x})
+
+        model = SuperGLM(features={"a:b": Spline(n_knots=5)})
+        model.fit(X, y)
+
+        fig = model.plot("a:b")
+        assert isinstance(fig, Figure)

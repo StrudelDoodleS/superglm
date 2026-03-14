@@ -2098,11 +2098,21 @@ class SuperGLM:
             mode = "all_main"
         elif isinstance(terms, str):
             names = [terms]
-            mode = "interaction" if ":" in terms else "single_main"
+            if terms in self._interaction_specs:
+                mode = "interaction"
+            elif terms in self._specs:
+                mode = "single_main"
+            else:
+                raise KeyError(f"Term not found: {terms!r}")
         else:
             names = list(terms)
-            interactions = [n for n in names if ":" in n]
-            mains = [n for n in names if ":" not in n]
+            interactions = [n for n in names if n in self._interaction_specs]
+            mains = [n for n in names if n in self._specs]
+            unknown = [
+                n for n in names if n not in self._specs and n not in self._interaction_specs
+            ]
+            if unknown:
+                raise KeyError(f"Term(s) not found: {unknown}")
             if interactions and mains:
                 raise ValueError(
                     "Cannot mix main effects and interactions in one plot() call. "
@@ -2110,19 +2120,13 @@ class SuperGLM:
                 )
             mode = "interaction" if interactions else "multi_main"
 
-        # ── Validate names ──────────────────────────────────────
+        # ── Validate interaction count ──────────────────────────
         if mode == "interaction":
             if len(names) != 1:
                 raise ValueError(
                     f"plot() supports one interaction at a time. Got {len(names)}: {names}."
                 )
             iname = names[0]
-            if iname not in self._interaction_specs:
-                raise KeyError(f"Interaction not found: {iname!r}")
-        else:
-            for n in names:
-                if n not in self._specs:
-                    raise KeyError(f"Feature not found: {n!r}")
 
         # ── Dispatch ────────────────────────────────────────────
         if mode == "interaction":
