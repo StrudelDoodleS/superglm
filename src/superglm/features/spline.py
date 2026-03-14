@@ -1337,13 +1337,11 @@ def Spline(
         - ``"cr"`` — Cubic regression spline (integrated f'' penalty +
           natural constraints + identifiability).
           Equivalent to ``CubicRegressionSpline`` / mgcv's ``bs="cr"``.
-          The built column count is ``k - 1`` because the identifiability
-          direction is physically removed.
         - ``"cr_cardinal"`` — **Experimental** cardinal cubic regression
           spline.  Uses the mgcv-native parameterisation where basis
           functions are cardinal natural cubic spline interpolants.
           Penalty is ``B_d^T D^{-1} B_d`` from the tridiagonal second-
-          derivative system.  Built column count is ``k - 1``.
+          derivative system.
 
     k : int, optional
         Basis dimension (number of basis functions before
