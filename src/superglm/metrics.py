@@ -754,17 +754,24 @@ class ModelMetrics:
         With offset: solves for b0 via Newton so that sum(w*(y-mu))=0
         where mu_i = link^{-1}(b0 + offset_i).
         """
-        y_bar = np.average(self._y, weights=self._weights)
-        y_bar = max(y_bar, 1e-10)  # guard for log link
+        from superglm.distributions import Binomial, clip_mu
+
+        y_bar = float(np.average(self._y, weights=self._weights))
+        if isinstance(self._family, Binomial):
+            y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
+        else:
+            y_bar = max(y_bar, 1e-10)
 
         if np.all(self._offset == 0):
             return np.full(self.n_obs, y_bar)
 
         # Newton iterations for intercept-only with offset
-        b0 = self._link.link(y_bar) - np.average(self._offset, weights=self._weights)
+        b0 = float(self._link.link(np.atleast_1d(y_bar))[0]) - np.average(
+            self._offset, weights=self._weights
+        )
         for _ in range(25):
             eta = b0 + self._offset
-            mu = self._link.inverse(np.clip(eta, -20, 20))
+            mu = clip_mu(self._link.inverse(np.clip(eta, -20, 20)), self._family)
             dmu = self._link.deriv_inverse(np.clip(eta, -20, 20))
             score = np.sum(self._weights * (self._y - mu) * dmu / self._family.variance(mu))
             info = np.sum(self._weights * dmu**2 / self._family.variance(mu))
@@ -774,7 +781,7 @@ class ModelMetrics:
                 break
 
         eta = b0 + self._offset
-        return np.maximum(self._link.inverse(np.clip(eta, -20, 20)), 1e-10)
+        return clip_mu(self._link.inverse(np.clip(eta, -20, 20)), self._family)
 
     @cached_property
     def null_log_likelihood(self) -> float:
@@ -881,12 +888,17 @@ class ModelMetrics:
         from scipy.stats import gamma as gamma_dist
         from scipy.stats import nbinom, norm, poisson
 
-        from superglm.distributions import Gamma, NegativeBinomial, Poisson, Tweedie
+        from superglm.distributions import Binomial, Gamma, NegativeBinomial, Poisson, Tweedie
 
         y, mu = self._y, self._mu
         rng = np.random.default_rng(seed)
 
-        if isinstance(self._family, Poisson):
+        if isinstance(self._family, Binomial):
+            # Bernoulli: F(0|mu) = 1-mu, F(1|mu) = 1. Jitter in [F(y-1), F(y)].
+            a = np.where(y == 0, 0.0, 1.0 - mu)
+            b = np.where(y == 0, 1.0 - mu, 1.0)
+            u = rng.uniform(a, b)
+        elif isinstance(self._family, Poisson):
             a = poisson.cdf(y - 1, mu)
             b = poisson.cdf(y, mu)
             u = rng.uniform(a, b)

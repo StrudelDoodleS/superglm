@@ -64,8 +64,38 @@ class LogLink:
         return np.exp(eta)
 
 
+class LogitLink:
+    """Logit link: eta = log(mu / (1-mu)), mu = expit(eta)."""
+
+    def link(self, mu: NDArray) -> NDArray:
+        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
+        return np.log(mu_safe / (1 - mu_safe))
+
+    def inverse(self, eta: NDArray) -> NDArray:
+        from scipy.special import expit
+
+        return expit(eta)
+
+    def deriv(self, mu: NDArray) -> NDArray:
+        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
+        return 1.0 / (mu_safe * (1 - mu_safe))
+
+    def deriv_inverse(self, eta: NDArray) -> NDArray:
+        from scipy.special import expit
+
+        p = expit(eta)
+        return p * (1 - p)
+
+    def deriv2_inverse(self, eta: NDArray) -> NDArray:
+        from scipy.special import expit
+
+        p = expit(eta)
+        return p * (1 - p) * (1 - 2 * p)
+
+
 _LINK_SHORTCUTS: dict[str, type] = {
     "log": LogLink,
+    "logit": LogitLink,
 }
 
 

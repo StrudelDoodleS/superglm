@@ -328,8 +328,9 @@ def model_compute_projected_R_inv(
 
 def compute_lambda_max(model, y, weights):
     """Smallest lambda1 at which all groups are zeroed (null model)."""
-    y_safe = np.where(y > 0, y, 0.1)
-    mu_null = np.average(y_safe, weights=weights)
+    from superglm.distributions import initial_mean
+
+    mu_null = initial_mean(y, weights, model._distribution)
     residual = weights * (y - mu_null)
     grad = model._dm.rmatvec(residual)
     n = model._dm.n

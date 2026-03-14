@@ -683,22 +683,28 @@ def drop1(
 
         if not remaining:
             # Intercept-only model: compute null deviance directly
+            from superglm.distributions import Binomial, clip_mu
+
             y_arr = np.asarray(y, dtype=np.float64)
             w = (
                 np.ones(n, dtype=np.float64)
                 if exposure is None
                 else np.asarray(exposure, dtype=np.float64)
             )
-            if offset is not None:
-                # With offset: solve for intercept b0 such that
-                # mu = link^{-1}(b0 + offset) minimises deviance.
-                # Moment approximation: set b0 so mean(mu) ≈ mean(y).
-                offset_arr = np.asarray(offset, dtype=np.float64)
-                y_mean = np.average(y_arr, weights=w)
-                b0 = model._link.link(max(y_mean, 1e-10)) - np.average(offset_arr, weights=w)
-                null_mu = np.maximum(model._link.inverse(b0 + offset_arr), 1e-10)
+            y_mean = float(np.average(y_arr, weights=w))
+            if isinstance(model._distribution, Binomial):
+                y_mean = np.clip(y_mean, 1e-3, 1 - 1e-3)
             else:
-                null_mu = np.full(n, np.average(y_arr, weights=w))
+                y_mean = max(y_mean, 1e-10)
+
+            if offset is not None:
+                offset_arr = np.asarray(offset, dtype=np.float64)
+                b0 = float(model._link.link(np.atleast_1d(y_mean))[0]) - np.average(
+                    offset_arr, weights=w
+                )
+                null_mu = clip_mu(model._link.inverse(b0 + offset_arr), model._distribution)
+            else:
+                null_mu = np.full(n, y_mean)
             dev_reduced = float(np.sum(w * model._distribution.deviance_unit(y_arr, null_mu)))
             edf_reduced = 1.0  # intercept only
         else:
