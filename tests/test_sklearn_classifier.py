@@ -131,3 +131,33 @@ class TestClassifierEdgeCases:
         clf = SuperGLMClassifier(lambda1=0)
         clf.fit(X, y)
         assert_allclose(clf.classes_, [0, 1])
+
+
+class TestClassifierPenaltyAliases:
+    """Alias coverage for SuperGLMClassifier."""
+
+    def test_new_names(self, binary_data):
+        X, y = binary_data
+        clf = SuperGLMClassifier(selection_penalty=0.05, spline_penalty=0.2)
+        clf.fit(X, y)
+        assert clf._model.penalty.lambda1 == 0.05
+        assert clf._model.lambda2 == 0.2
+
+    def test_old_names(self, binary_data):
+        X, y = binary_data
+        clf = SuperGLMClassifier(lambda1=0.05, lambda2=0.2)
+        clf.fit(X, y)
+        assert clf._model.penalty.lambda1 == 0.05
+        assert clf._model.lambda2 == 0.2
+
+    def test_selection_penalty_lambda1_conflict(self, binary_data):
+        X, y = binary_data
+        with pytest.raises(ValueError, match="selection_penalty.*lambda1"):
+            clf = SuperGLMClassifier(selection_penalty=0.05, lambda1=0.03)
+            clf.fit(X, y)
+
+    def test_spline_penalty_lambda2_conflict(self, binary_data):
+        X, y = binary_data
+        with pytest.raises(ValueError, match="spline_penalty.*lambda2"):
+            clf = SuperGLMClassifier(spline_penalty=0.2, lambda2=0.7)
+            clf.fit(X, y)

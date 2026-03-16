@@ -281,3 +281,51 @@ class TestSampleWeightAlias:
 
         with pytest.raises(TypeError, match="both 'exposure' and 'sample_weight'"):
             model.fit(X, y, exposure=exposure, sample_weight=exposure)
+
+
+class TestPenaltyAliases:
+    """Test selection_penalty/lambda1 and spline_penalty/lambda2 aliases."""
+
+    def test_selection_penalty_primary(self, sample_data):
+        X, y, exposure = sample_data
+        m = SuperGLM(selection_penalty=0.05, splines=["age"])
+        m.fit(X, y, sample_weight=exposure)
+        assert m.penalty.lambda1 == 0.05
+
+    def test_lambda1_alias(self, sample_data):
+        X, y, exposure = sample_data
+        m = SuperGLM(lambda1=0.05, splines=["age"])
+        m.fit(X, y, sample_weight=exposure)
+        assert m.penalty.lambda1 == 0.05
+
+    def test_selection_penalty_and_lambda1_conflict(self):
+        with pytest.raises(ValueError, match="Cannot set both 'selection_penalty' and 'lambda1'"):
+            SuperGLM(selection_penalty=0.05, lambda1=0.03)
+
+    def test_spline_penalty_primary(self, sample_data):
+        X, y, exposure = sample_data
+        m = SuperGLM(selection_penalty=0.05, spline_penalty=0.2, splines=["age"])
+        m.fit(X, y, sample_weight=exposure)
+        assert m.lambda2 == 0.2
+
+    def test_lambda2_alias(self, sample_data):
+        X, y, exposure = sample_data
+        m = SuperGLM(selection_penalty=0.05, lambda2=0.2, splines=["age"])
+        m.fit(X, y, sample_weight=exposure)
+        assert m.lambda2 == 0.2
+
+    def test_spline_penalty_and_lambda2_conflict(self):
+        with pytest.raises(ValueError, match="Cannot set both 'spline_penalty' and 'lambda2'"):
+            SuperGLM(spline_penalty=0.2, lambda2=0.7)
+
+    def test_spline_penalty_default(self):
+        m = SuperGLM(selection_penalty=0.05)
+        assert m.lambda2 == 0.1
+
+    def test_new_names_produce_same_fit(self, sample_data):
+        X, y, exposure = sample_data
+        m_old = SuperGLM(lambda1=0.05, lambda2=0.2, splines=["age"])
+        m_new = SuperGLM(selection_penalty=0.05, spline_penalty=0.2, splines=["age"])
+        m_old.fit(X, y, sample_weight=exposure)
+        m_new.fit(X, y, sample_weight=exposure)
+        np.testing.assert_allclose(m_old.predict(X), m_new.predict(X), atol=1e-10)

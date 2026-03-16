@@ -155,3 +155,31 @@ class TestSklearnContract:
         model = SuperGLMRegressor(lambda1=0.01)
         model.fit(X, y)
         assert model.coef_ is not None
+
+
+class TestRegressorPenaltyAliases:
+    """Alias coverage for SuperGLMRegressor."""
+
+    def test_new_names(self, sample_data):
+        X, y, w = sample_data
+        m = SuperGLMRegressor(selection_penalty=0.05, spline_penalty=0.2, spline_features=["age"])
+        m.fit(X, y, sample_weight=w)
+        assert m._model.penalty.lambda1 == 0.05
+        assert m._model.lambda2 == 0.2
+
+    def test_old_names(self, sample_data):
+        X, y, w = sample_data
+        m = SuperGLMRegressor(lambda1=0.05, lambda2=0.2, spline_features=["age"])
+        m.fit(X, y, sample_weight=w)
+        assert m._model.penalty.lambda1 == 0.05
+        assert m._model.lambda2 == 0.2
+
+    def test_selection_penalty_lambda1_conflict(self):
+        with pytest.raises(ValueError, match="selection_penalty.*lambda1"):
+            m = SuperGLMRegressor(selection_penalty=0.05, lambda1=0.03)
+            m.fit(pd.DataFrame({"x": [1, 2]}), np.array([1.0, 2.0]))
+
+    def test_spline_penalty_lambda2_conflict(self):
+        with pytest.raises(ValueError, match="spline_penalty.*lambda2"):
+            m = SuperGLMRegressor(spline_penalty=0.2, lambda2=0.7)
+            m.fit(pd.DataFrame({"x": [1, 2]}), np.array([1.0, 2.0]))

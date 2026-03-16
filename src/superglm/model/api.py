@@ -16,6 +16,27 @@ from superglm.types import FeatureSpec
 
 from . import base, explain_ops, fit_ops, monotone_ops, profile_ops, state_ops
 
+
+def _resolve_penalty_alias(
+    primary_name: str,
+    primary_val: float | None,
+    alias_name: str,
+    alias_val: float | None,
+    default: float | None = None,
+) -> float | None:
+    """Resolve a primary/alias penalty pair, raising on conflicts."""
+    if primary_val is not None and alias_val is not None:
+        raise ValueError(
+            f"Cannot set both '{primary_name}' and '{alias_name}'. "
+            f"Use '{primary_name}' ('{alias_name}' is a deprecated alias)."
+        )
+    if alias_val is not None:
+        return alias_val
+    if primary_val is not None:
+        return primary_val
+    return default
+
+
 if TYPE_CHECKING:
     from superglm.discretize import DiscretizationResult
     from superglm.inference import InteractionInference, TermInference
@@ -37,8 +58,8 @@ class SuperGLM:
         family: str | Distribution = "poisson",
         link: str | Link | None = None,
         penalty: Penalty | str | None = None,
-        lambda1: float | None = None,
-        lambda2: float = 0.1,
+        selection_penalty: float | None = None,
+        spline_penalty: float | None = None,
         penalty_features: str | list[str] | None = None,
         tweedie_p: float | None = None,
         # Feature configuration
@@ -57,6 +78,9 @@ class SuperGLM:
         # Discretization
         discrete: bool = False,
         n_bins: int | dict[str, int] = 256,
+        # Backward-compatible aliases
+        lambda1: float | None = None,
+        lambda2: float | None = None,
     ):
         """
         Parameters
@@ -71,25 +95,19 @@ class SuperGLM:
         penalty : str or Penalty, optional
             Penalty type. One of ``"group_lasso"``, ``"sparse_group_lasso"``,
             ``"group_elastic_net"``, ``"ridge"``, or a Penalty object.
-            Defaults to ``GroupLasso(lambda1=lambda1)``.
-        lambda1 : float, optional
-            Regularisation strength for the group penalty.  ``None`` (default)
-            auto-calibrates to 10% of lambda_max at fit time.  Set to ``0.0``
-            for unpenalised / REML-only fits.
-        lambda2 : float
-            Ridge shrinkage applied within each group (only used by
-            ``GroupElasticNet``).
+            Defaults to ``GroupLasso``.
+        selection_penalty : float, optional
+            Regularisation strength for the group penalty (feature selection).
+            ``None`` (default) auto-calibrates to 10% of lambda_max at fit
+            time. Set to ``0.0`` for unpenalised / REML-only fits.
+            Alias: ``lambda1``.
+        spline_penalty : float, optional
+            Within-group ridge shrinkage for spline smoothing. Defaults to
+            0.1 when neither ``spline_penalty`` nor ``lambda2`` is set.
+            Alias: ``lambda2``.
         penalty_features : str or list[str], optional
-            Restrict the ``lambda1`` penalty to selected feature or group
-            names. ``None`` (default) applies the penalty to all penalizable
-            groups. Exact feature names (for example ``"region"``) and exact
-            group names (for example ``"age:spline"`` for ``select=True``
-            subgroups) are both supported.
-
-            This only affects the ``lambda1``-style penalty path
-            (group lasso / sparse group lasso / ridge / group elastic net).
-            It does not disable spline smoothing or REML ``lambda2`` penalties
-            on other terms.
+            Restrict the selection penalty to specific feature or group names.
+            ``None`` (default) applies to all penalizable groups.
         tweedie_p : float, optional
             Power parameter for ``family="tweedie"``.  Must be in (1, 2).
         nb_theta : float, optional
@@ -119,14 +137,32 @@ class SuperGLM:
             Use discretized basis matrices for large-*n* REML (fREML-style).
         n_bins : int or dict[str, int]
             Number of discretization bins per feature when ``discrete=True``.
+        lambda1 : float, optional
+            Deprecated alias for ``selection_penalty``.
+        lambda2 : float, optional
+            Deprecated alias for ``spline_penalty``.
         """
+        resolved_lambda1 = _resolve_penalty_alias(
+            "selection_penalty",
+            selection_penalty,
+            "lambda1",
+            lambda1,
+        )
+        resolved_lambda2 = _resolve_penalty_alias(
+            "spline_penalty",
+            spline_penalty,
+            "lambda2",
+            lambda2,
+            default=0.1,
+        )
+
         base.init_model(
             self,
             family=family,
             link=link,
             penalty=penalty,
-            lambda1=lambda1,
-            lambda2=lambda2,
+            lambda1=resolved_lambda1,
+            lambda2=resolved_lambda2,
             penalty_features=penalty_features,
             tweedie_p=tweedie_p,
             nb_theta=nb_theta,
