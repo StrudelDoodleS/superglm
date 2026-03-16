@@ -116,7 +116,18 @@ class _SplineBase:
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
         select: bool = False,
+        monotone: str | None = None,
+        monotone_mode: str = "postfit",
     ):
+        if monotone is not None and monotone not in ("increasing", "decreasing"):
+            raise ValueError(
+                f"monotone must be None, 'increasing', or 'decreasing', got {monotone!r}"
+            )
+        if monotone_mode not in ("postfit", "fit"):
+            raise ValueError(f"monotone_mode must be 'postfit' or 'fit', got {monotone_mode!r}")
+        self.monotone = monotone
+        self.monotone_mode = monotone_mode
+
         if knots is not None:
             knots = np.asarray(knots, dtype=np.float64).ravel()
             if knots.ndim != 1 or len(knots) < 1:
@@ -528,6 +539,11 @@ class _SplineBase:
 
     def build(self, x: NDArray, exposure: NDArray | None = None) -> GroupInfo | list[GroupInfo]:
         """Build B-spline basis and penalty matrix."""
+        if self.monotone is not None and self.monotone_mode == "fit":
+            raise NotImplementedError(
+                "Fit-time monotone constraints are not yet implemented. "
+                "Use monotone_mode='postfit' and call model.apply_monotone_postfit() after fitting."
+            )
         x = np.asarray(x, dtype=np.float64).ravel()
         self._place_knots(x)
         B = self._basis_matrix(x).tocsr()
@@ -703,6 +719,13 @@ class BasisSpline(_SplineBase):
 
     knots : array-like or None
         Explicit interior knot positions.
+    monotone : str or None
+        Monotonicity constraint direction. ``None`` (default) means no
+        constraint. ``"increasing"`` or ``"decreasing"`` requests
+        monotone repair.
+    monotone_mode : str
+        ``"postfit"`` (default) applies isotonic regression after fitting.
+        ``"fit"`` is reserved for future constrained IRLS (not yet implemented).
     """
 
     def __init__(
@@ -718,6 +741,8 @@ class BasisSpline(_SplineBase):
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
+        monotone: str | None = None,
+        monotone_mode: str = "postfit",
     ):
         super().__init__(
             n_knots,
@@ -731,6 +756,8 @@ class BasisSpline(_SplineBase):
             boundary,
             knot_alpha,
             select=select,
+            monotone=monotone,
+            monotone_mode=monotone_mode,
         )
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
@@ -869,6 +896,10 @@ class CubicRegressionSpline(_SplineBase):
         If True, decompose into linear + wiggly subgroups (double penalty).
     knots : array-like or None
         Explicit interior knot positions.
+    monotone : str or None
+        Monotonicity constraint direction.
+    monotone_mode : str
+        ``"postfit"`` (default) or ``"fit"`` (not yet implemented).
     """
 
     def __init__(
@@ -883,6 +914,8 @@ class CubicRegressionSpline(_SplineBase):
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
+        monotone: str | None = None,
+        monotone_mode: str = "postfit",
     ):
         super().__init__(
             n_knots,
@@ -896,6 +929,8 @@ class CubicRegressionSpline(_SplineBase):
             boundary=boundary,
             knot_alpha=knot_alpha,
             select=select,
+            monotone=monotone,
+            monotone_mode=monotone_mode,
         )
         self._Z: NDArray | None = None
 
@@ -972,6 +1007,10 @@ class CardinalCRSpline(_SplineBase):
         If True, decompose into linear + wiggly subgroups (double penalty).
     knots : array-like or None
         Explicit interior knot positions.
+    monotone : str or None
+        Monotonicity constraint direction.
+    monotone_mode : str
+        ``"postfit"`` (default) or ``"fit"`` (not yet implemented).
     """
 
     def __init__(
@@ -986,6 +1025,8 @@ class CardinalCRSpline(_SplineBase):
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
+        monotone: str | None = None,
+        monotone_mode: str = "postfit",
     ):
         super().__init__(
             n_knots,
@@ -999,6 +1040,8 @@ class CardinalCRSpline(_SplineBase):
             boundary=boundary,
             knot_alpha=knot_alpha,
             select=select,
+            monotone=monotone,
+            monotone_mode=monotone_mode,
         )
         self._cr_knots: NDArray | None = None
         self._cr_M: NDArray | None = None
@@ -1318,6 +1361,8 @@ def Spline(
     extrapolation: str = "clip",
     boundary: tuple[float, float] | None = None,
     knot_alpha: float = 0.2,
+    monotone: str | None = None,
+    monotone_mode: str = "postfit",
 ) -> _SplineBase:
     """Create a spline feature spec.
 
@@ -1423,6 +1468,12 @@ def Spline(
             "boundary constraints. Use kind='cr' or kind='bs' with select=True."
         )
 
+    if monotone is not None and kind == "ns":
+        raise NotImplementedError(
+            "monotone is not supported for kind='ns'. "
+            "Use kind='cr' or kind='bs' with monotone='increasing' or 'decreasing'."
+        )
+
     # Resolve n_knots
     if k is not None:
         if kind in ("cr", "cr_cardinal"):
@@ -1450,6 +1501,8 @@ def Spline(
             extrapolation=extrapolation,
             boundary=boundary,
             knot_alpha=knot_alpha,
+            monotone=monotone,
+            monotone_mode=monotone_mode,
         )
     elif kind in ("cr", "cr_cardinal"):
         return cls(
@@ -1463,6 +1516,8 @@ def Spline(
             extrapolation=extrapolation,
             boundary=boundary,
             knot_alpha=knot_alpha,
+            monotone=monotone,
+            monotone_mode=monotone_mode,
         )
     else:  # "ns"
         return cls(
