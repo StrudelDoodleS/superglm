@@ -60,19 +60,23 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         tweedie_p: float | None = None,
         nb_theta: float | str | None = None,
         penalty: str | Penalty = "group_lasso",
-        lambda1: float | None = None,
-        lambda2: float = 0.1,
+        selection_penalty: float | None = None,
+        spline_penalty: float | None = None,
         spline_features: list[str] | None = None,
         n_knots: int | list[int] = 10,
         degree: int = 3,
         categorical_base: str = "most_exposed",
         standardize_numeric: bool = True,
         offset: str | list[str] | None = None,
+        lambda1: float | None = None,
+        lambda2: float | None = None,
     ):
         self.family = family
         self.tweedie_p = tweedie_p
         self.nb_theta = nb_theta
         self.penalty = penalty
+        self.selection_penalty = selection_penalty
+        self.spline_penalty = spline_penalty
         self.lambda1 = lambda1
         self.lambda2 = lambda2
         self.spline_features = spline_features
@@ -98,11 +102,23 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
             cat_base = "first"
 
         # Build core model — delegates all feature config
+        from superglm.model.api import _resolve_penalty_alias
+
         self._model = SuperGLM(
             family=self.family,
             penalty=self.penalty,
-            lambda1=self.lambda1,
-            lambda2=self.lambda2,
+            selection_penalty=_resolve_penalty_alias(
+                "selection_penalty",
+                self.selection_penalty,
+                "lambda1",
+                self.lambda1,
+            ),
+            spline_penalty=_resolve_penalty_alias(
+                "spline_penalty",
+                self.spline_penalty,
+                "lambda2",
+                self.lambda2,
+            ),
             tweedie_p=self.tweedie_p,
             nb_theta=self.nb_theta,
             splines=self.spline_features or [],
@@ -217,8 +233,8 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
     def __init__(
         self,
         penalty: str | Penalty = "group_lasso",
-        lambda1: float | None = None,
-        lambda2: float = 0.1,
+        selection_penalty: float | None = None,
+        spline_penalty: float | None = None,
         spline_features: list[str] | None = None,
         n_knots: int | list[int] = 10,
         degree: int = 3,
@@ -226,8 +242,12 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         standardize_numeric: bool = True,
         offset: str | list[str] | None = None,
         threshold: float = 0.5,
+        lambda1: float | None = None,
+        lambda2: float | None = None,
     ):
         self.penalty = penalty
+        self.selection_penalty = selection_penalty
+        self.spline_penalty = spline_penalty
         self.lambda1 = lambda1
         self.lambda2 = lambda2
         self.spline_features = spline_features
@@ -262,11 +282,23 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         if cat_base == "most_exposed" and sample_weight is None:
             cat_base = "first"
 
+        from superglm.model.api import _resolve_penalty_alias
+
         self._model = SuperGLM(
             family="binomial",
             penalty=self.penalty,
-            lambda1=self.lambda1,
-            lambda2=self.lambda2,
+            selection_penalty=_resolve_penalty_alias(
+                "selection_penalty",
+                self.selection_penalty,
+                "lambda1",
+                self.lambda1,
+            ),
+            spline_penalty=_resolve_penalty_alias(
+                "spline_penalty",
+                self.spline_penalty,
+                "lambda2",
+                self.lambda2,
+            ),
             splines=self.spline_features or [],
             n_knots=self.n_knots,
             degree=self.degree,
