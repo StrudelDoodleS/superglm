@@ -14,7 +14,7 @@ from superglm.penalties.base import Penalty
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import FeatureSpec
 
-from . import base, explain_ops, fit_ops, profile_ops, state_ops
+from . import base, explain_ops, fit_ops, monotone_ops, profile_ops, state_ops
 
 if TYPE_CHECKING:
     from superglm.discretize import DiscretizationResult
@@ -676,6 +676,45 @@ class SuperGLM:
             Predicted mean on the response scale (inverse-link of eta).
         """
         return base.predict(self, X, offset)
+
+    # ── Monotone repair ─────────────────────────────────────────
+
+    def apply_monotone_postfit(
+        self,
+        X: pd.DataFrame,
+        exposure: NDArray | None = None,
+        offset: NDArray | None = None,
+        *,
+        sample_weight: NDArray | None = None,
+        n_grid: int = 500,
+    ) -> SuperGLM:
+        """Apply post-fit monotone repair to splines with ``monotone`` set.
+
+        Finds all spline features with ``monotone='increasing'`` or
+        ``monotone='decreasing'``, applies weighted isotonic regression
+        to the fitted curve, and projects back to spline coefficients.
+
+        Idempotent: calling twice does not re-repair already-repaired features.
+
+        Parameters
+        ----------
+        X : DataFrame
+            Training data (used to compute density-based grid weights).
+        exposure, sample_weight : array-like, optional
+            Frequency weights.
+        offset : array-like, optional
+            Offset term (unused, reserved for deviance computation).
+        n_grid : int
+            Grid resolution for isotonic regression (default 500).
+
+        Returns
+        -------
+        SuperGLM
+            The model (self), with monotone repairs stored.
+        """
+        return monotone_ops.apply_monotone_postfit(
+            self, X, exposure, offset, sample_weight=sample_weight, n_grid=n_grid
+        )
 
     # ── Diagnostics ───────────────────────────────────────────────
 
