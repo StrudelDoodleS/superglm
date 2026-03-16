@@ -1,10 +1,12 @@
-# SuperGLM
+<p align="center">
+  <img src="docs/images/logo.png" alt="SuperGLM" width="300">
+</p>
 
 [![CI](https://github.com/StrudelDoodleS/superglm/actions/workflows/ci.yml/badge.svg)](https://github.com/StrudelDoodleS/superglm/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/github/StrudelDoodleS/superglm/graph/badge.svg?token=2HO71TA2ZY)](https://codecov.io/github/StrudelDoodleS/superglm)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/StrudelDoodleS/superglm/actions/workflows/ci.yml)
 
-Penalised GLMs for insurance pricing. SuperGLM supports standard penalised fits, exact REML, large-`n` discrete/fREML-style REML, spline double-penalty shrinkage, group penalties, interactions, and statsmodels-style summaries for Poisson, Gamma, NB2, and Tweedie models.
+Penalised GLMs for insurance pricing. SuperGLM supports standard penalised fits, exact REML, large-`n` discrete/fREML-style REML, spline double-penalty shrinkage, group penalties, interactions, and statsmodels-style summaries for Poisson, Gamma, NB2, Tweedie, and Binomial models.
 
 ## Installation
 
@@ -265,10 +267,11 @@ rels = model.relativities(with_se=True)
 
 Poisson frequency model on French MTPL2 (678k policies), REML smoothness selection.
 95% pointwise confidence bands with exposure-weighted density strip and interior knot positions.
+Click an image to open it at full size.
 
 | Vehicle Age (`quantile_rows` knots) | Bonus-Malus (`quantile_tempered`, α=0.2) |
 |:---:|:---:|
-| ![VehAge](docs/images/readme_vehage.png) | ![BonusMalus](docs/images/readme_bonusmalus.png) |
+| [![VehAge](docs/images/readme_vehage.png)](docs/images/readme_vehage.png) | [![BonusMalus](docs/images/readme_bonusmalus.png)](docs/images/readme_bonusmalus.png) |
 
 ## Tweedie support
 
@@ -304,7 +307,36 @@ result = model.estimate_theta(df, y, sample_weight=exposure)
 print(result.theta_hat)  # estimated dispersion
 ```
 
+## Binomial (binary classification)
+
+For binary outcomes (0/1):
+
+```python
+from superglm import SuperGLM, Spline, Categorical
+
+model = SuperGLM(
+    family="binomial",
+    lambda1=0,
+    features={
+        "age": Spline(k=10),
+        "region": Categorical(base="first"),
+    },
+)
+model.fit(df, y)
+probabilities = model.predict(df)  # returns P(Y=1)
+```
+
+The default link is logit. Alternative links (probit, cloglog, cauchit) can be passed via `link=`:
+
+```python
+from superglm import ProbitLink
+
+model = SuperGLM(family="binomial", link=ProbitLink(), lambda1=0)
+```
+
 ## sklearn interface
+
+**Regressor** — for count/severity models:
 
 ```python
 from superglm import SuperGLMRegressor
@@ -320,19 +352,60 @@ model.fit(df, y, sample_weight=exposure)
 model.predict(df)
 ```
 
+**Classifier** — for binary outcomes:
+
+```python
+from superglm import SuperGLMClassifier
+
+clf = SuperGLMClassifier(lambda1=0, spline_features=["age"])
+clf.fit(df, y)
+clf.predict(df)          # hard labels (0/1)
+clf.predict_proba(df)    # (n, 2) class probabilities
+clf.decision_function(df)  # log-odds
+```
+
 Feature types are auto-detected: object/category columns become `Categorical`, columns in `spline_features` become `Spline`, everything else becomes `Numeric`.
 
 ## Families
 
-| Family | Variance function | Use case |
-|--------|------------------|----------|
-| `Poisson()` | V(mu) = mu | Claim frequency |
-| `NegativeBinomial(theta=1.0)` | V(mu) = mu + mu^2/theta | Overdispersed frequency |
-| `Gamma()` | V(mu) = mu^2 | Claim severity |
-| `Tweedie(p=1.5)` | V(mu) = mu^p | Pure premium (frequency x severity) |
+| Family | Variance function | Default link | Use case |
+|--------|------------------|-------------|----------|
+| `Poisson()` | V(mu) = mu | log | Claim frequency |
+| `NegativeBinomial(theta=1.0)` | V(mu) = mu + mu^2/theta | log | Overdispersed frequency |
+| `Gamma()` | V(mu) = mu^2 | log | Claim severity |
+| `Tweedie(p=1.5)` | V(mu) = mu^p | log | Pure premium (frequency x severity) |
+| `Binomial()` | V(mu) = mu(1-mu) | logit | Binary classification |
+
+## Link functions
+
+Every family has a default link, but any link can be overridden:
+
+```python
+from superglm import SuperGLM, InverseLink
+
+model = SuperGLM(family="gamma", link=InverseLink())
+```
+
+| Link | Class | String shortcut |
+|------|-------|----------------|
+| Log | `LogLink` | `"log"` |
+| Logit | `LogitLink` | `"logit"` |
+| Identity | `IdentityLink` | `"identity"` |
+| Probit | `ProbitLink` | `"probit"` |
+| Complementary log-log | `CloglogLink` | `"cloglog"` |
+| Cauchit | `CauchitLink` | `"cauchit"` |
+| Inverse (reciprocal) | `InverseLink` | `"inverse"` |
+| Inverse-squared | `InverseSquaredLink` | `"inverse_squared"` |
+| Square root | `SqrtLink` | `"sqrt"` |
+| Power (parametric) | `PowerLink(power=p)` | -- |
+| NB2 canonical | `NegativeBinomialLink(theta=t)` | -- |
+
+All links implement `deriv2_inverse` for REML W(rho) correction support.
 
 ## How it works
 
 SuperGLM fits penalised GLMs via PIRLS (penalised iteratively reweighted least squares) with a proximal Newton block coordinate descent inner solver. Each feature group gets its own block in the BCD cycle, and the group lasso proximal operator either keeps or zeros the entire group.
 
 SSP (smoothing spline penalty) reparametrisation transforms the B-spline basis so that the group lasso penalty acts on coefficients that are orthogonal with respect to the smoothing penalty. This means group lasso can select smooth functions without distorting their shape.
+
+For a detailed walkthrough of the solver stack (IRLS, PIRLS, BCD, REML, discretization), see [docs/guide/optimization.md](docs/guide/optimization.md).

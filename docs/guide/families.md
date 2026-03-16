@@ -2,12 +2,51 @@
 
 ## Supported families
 
-| Family | Variance function | Use case |
-|--------|------------------|----------|
-| `Poisson()` | V(μ) = μ | Claim frequency |
-| `NegativeBinomial(theta=1.0)` | V(μ) = μ + μ²/θ | Overdispersed frequency |
-| `Gamma()` | V(μ) = μ² | Claim severity |
-| `Tweedie(p=1.5)` | V(μ) = μᵖ | Pure premium (frequency × severity) |
+| Family | Variance function | Default link | Use case |
+|--------|------------------|-------------|----------|
+| `Poisson()` | V(μ) = μ | log | Claim frequency |
+| `NegativeBinomial(theta=1.0)` | V(μ) = μ + μ²/θ | log | Overdispersed frequency |
+| `Gamma()` | V(μ) = μ² | log | Claim severity |
+| `Tweedie(p=1.5)` | V(μ) = μᵖ | log | Pure premium (frequency × severity) |
+| `Binomial()` | V(μ) = μ(1 − μ) | logit | Binary classification |
+
+## Binomial (binary classification)
+
+For binary outcomes (y in {0, 1}):
+
+```python
+from superglm import SuperGLM
+
+model = SuperGLM(family="binomial", lambda1=0)
+model.fit(df, y)
+probabilities = model.predict(df)  # returns P(Y=1)
+```
+
+The default link is logit. Alternative links can be passed via `link=`:
+
+```python
+from superglm import SuperGLM, ProbitLink, CloglogLink
+
+# Probit link (latent variable interpretation)
+model = SuperGLM(family="binomial", link=ProbitLink(), lambda1=0)
+
+# Complementary log-log (asymmetric alternative)
+model = SuperGLM(family="binomial", link=CloglogLink(), lambda1=0)
+```
+
+For sklearn-compatible binary classification, use `SuperGLMClassifier`:
+
+```python
+from superglm import SuperGLMClassifier
+
+clf = SuperGLMClassifier(lambda1=0, spline_features=["age"])
+clf.fit(df, y)
+clf.predict(df)            # hard labels (0/1)
+clf.predict_proba(df)      # (n, 2) class probabilities
+clf.decision_function(df)  # log-odds
+```
+
+Scale is known (phi = 1) for binomial, so no dispersion estimation is needed.
 
 ## Negative binomial: estimating theta
 

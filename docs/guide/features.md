@@ -20,6 +20,25 @@ Spline(kind="cr", k=12, select=True)       # CR with double penalty selection
 
 `k` matches mgcv's `k` for all kinds. The built column count is always `k - 1` because the identifiability constraint (unweighted sum-to-zero) removes one direction. mgcv absorbs this via a side constraint instead of physically removing the column.
 
+### What `ssp` means here
+
+In this repo, `penalty="ssp"` means the spline is stored in a reparameterized
+form that separates:
+
+- the sparse basis matrix `B`
+- a small dense transform `R_inv`
+- the penalty matrix `omega`
+
+So internally the effective spline design is `B @ R_inv`, but the code tries
+not to materialize that full product unless it has to. This makes the penalized
+system better conditioned, keeps the basis-side operations sparse, and makes it
+cheap to rebuild the spline representation when REML changes the smoothing
+parameter.
+
+That is why internal names like `SparseSSPGroupMatrix` and
+`DiscretizedSSPGroupMatrix` show up in the optimization code: they are just the
+factored spline representation used for penalized spline groups.
+
 ### Knot strategies
 
 Control where interior knots are placed:
