@@ -11,7 +11,7 @@ from numpy.typing import NDArray
 
 from superglm.distributions import Distribution, clip_mu, initial_mean
 from superglm.group_matrix import DesignMatrix
-from superglm.links import Link
+from superglm.links import Link, stabilize_eta
 from superglm.penalties.base import Penalty
 from superglm.solvers.pirls import PIRLSResult, fit_pirls
 from superglm.types import GroupSlice
@@ -69,7 +69,6 @@ def _fit_cv_folds(
     lambda_seq: NDArray,
     fold_indices: list[NDArray],
     offset: NDArray | None,
-    anderson_memory: int,
     active_set: bool,
 ) -> NDArray:
     """Run the K-fold CV inner loop.
@@ -121,7 +120,6 @@ def _fit_cv_folds(
                 offset=off_train,
                 beta_init=beta_warm,
                 intercept_init=intercept_warm,
-                anderson_memory=anderson_memory,
                 active_set=active_set,
             )
 
@@ -143,6 +141,7 @@ def _fit_cv_folds(
             eta_test = dm_test.matvec(result.beta) + result.intercept
             if off_test is not None:
                 eta_test = eta_test + off_test
+            eta_test = stabilize_eta(eta_test, link)
             mu_test = clip_mu(link.inverse(eta_test), family)
             dev_unit = family.deviance_unit(y_test, mu_test)
             test_dev = np.sum(exp_test * dev_unit) / np.sum(exp_test)

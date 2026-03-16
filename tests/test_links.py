@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from superglm.distributions import Binomial, Gamma, Poisson, Tweedie
+from superglm.distributions import Binomial, Gamma, Gaussian, Poisson, Tweedie
 from superglm.links import (
     CauchitLink,
     CloglogLink,
@@ -82,6 +82,10 @@ class TestResolveLink:
     def test_none_uses_binomial_default(self):
         link = resolve_link(None, Binomial())
         assert isinstance(link, LogitLink)
+
+    def test_none_uses_gaussian_default(self):
+        link = resolve_link(None, Gaussian())
+        assert isinstance(link, IdentityLink)
 
     def test_logit_from_string(self):
         link = resolve_link("logit", Binomial())

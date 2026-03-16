@@ -21,6 +21,8 @@ from numpy.typing import NDArray
 from scipy.optimize import minimize_scalar
 from scipy.special import wright_bessel
 
+from superglm.distributions import clip_mu
+from superglm.links import stabilize_eta
 from superglm.solvers.pirls import fit_pirls
 
 # ---------------------------------------------------------------------------
@@ -596,8 +598,8 @@ def _estimate_tweedie_p_fit(
             intercept_init=warm_intercept,
         )
 
-        eta = np.clip(dm.matvec(result.beta) + result.intercept + offset_arr, -20, 20)
-        mu = np.maximum(link.inverse(eta), 1e-10)
+        eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
+        mu = clip_mu(link.inverse(eta), dist)
         df_resid = max(len(y_arr) - float(result.effective_df), 1.0)
 
         phi, nll = _profile_phi(
@@ -651,8 +653,10 @@ def _estimate_tweedie_p_fit(
             beta_init=warm_beta,
             intercept_init=warm_intercept,
         )
-        eta = np.clip(dm.matvec(final_result.beta) + final_result.intercept + offset_arr, -20, 20)
-        mu_final = np.maximum(link.inverse(eta), 1e-10)
+        eta = stabilize_eta(
+            dm.matvec(final_result.beta) + final_result.intercept + offset_arr, link
+        )
+        mu_final = clip_mu(link.inverse(eta), dist)
         edf_final = float(final_result.effective_df)
 
     df_resid_final = max(len(y_arr) - float(edf_final), 1.0)

@@ -176,6 +176,10 @@ class TestPenaltyResolution:
         with pytest.raises(ValueError, match="Cannot set 'lambda1'"):
             SuperGLM(penalty=GroupLasso(lambda1=0.01), lambda1=0.05)
 
+    def test_object_with_penalty_features_raises(self):
+        with pytest.raises(ValueError, match="Cannot set 'penalty_features'"):
+            SuperGLM(penalty=GroupLasso(lambda1=0.01), penalty_features=["region"])
+
     def test_unknown_string_raises(self):
         with pytest.raises(ValueError, match="Unknown penalty"):
             SuperGLM(penalty="lasso")
@@ -191,6 +195,26 @@ class TestPenaltyResolution:
         model.fit(X, y, exposure=exposure)
         assert model.penalty.lambda1 is not None
         assert model.penalty.lambda1 > 0
+
+    def test_string_penalty_features(self):
+        model = SuperGLM(penalty="group_lasso", lambda1=0.05, penalty_features=["region"])
+        assert isinstance(model.penalty, GroupLasso)
+        assert model.penalty.features == frozenset({"region"})
+
+    def test_unknown_penalty_feature_raises_at_fit(self, sample_data):
+        X, y, exposure = sample_data
+        model = SuperGLM(
+            penalty="group_lasso",
+            lambda1=0.01,
+            penalty_features=["missing"],
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "region": Categorical(),
+                "density": Numeric(),
+            },
+        )
+        with pytest.raises(ValueError, match="Unknown penalty feature/group filter"):
+            model.fit(X, y, exposure=exposure)
 
 
 class TestSampleWeightAlias:

@@ -80,6 +80,10 @@ class TermInference:
     # Spline-specific metadata
     spline: SplineMetadata | None = None
 
+    # Monotonicity
+    monotone: str | None = None  # "increasing", "decreasing", or None
+    monotone_repaired: bool = False
+
     # CI alpha used
     alpha: float = 0.05
 
@@ -175,6 +179,7 @@ def compute_coef_covariance(
     - Cov_active: (p_active, p_active) = phi * (X'WX + S)^{-1}
     - active_groups: list of GroupSlice re-indexed to Cov_active columns
     """
+    from superglm.links import stabilize_eta
     from superglm.metrics import _penalised_xtwx_inv_gram
 
     beta = result.beta
@@ -183,7 +188,7 @@ def compute_coef_covariance(
         eta = eta + fit_offset
     from superglm.distributions import clip_mu
 
-    eta = np.clip(eta, -20, 20)
+    eta = stabilize_eta(eta, link)
     mu = clip_mu(link.inverse(eta), distribution)
     V = distribution.variance(mu)
     dmu_deta = link.deriv_inverse(eta)
@@ -685,7 +690,8 @@ def drop1(
 
         if not remaining:
             # Intercept-only model: compute null deviance directly
-            from superglm.distributions import Binomial, clip_mu
+            from superglm.distributions import Binomial, Gaussian, clip_mu
+            from superglm.links import stabilize_eta
 
             y_arr = np.asarray(y, dtype=np.float64)
             w = (
@@ -696,6 +702,8 @@ def drop1(
             y_mean = float(np.average(y_arr, weights=w))
             if isinstance(model._distribution, Binomial):
                 y_mean = np.clip(y_mean, 1e-3, 1 - 1e-3)
+            elif isinstance(model._distribution, Gaussian):
+                y_mean = float(y_mean)
             else:
                 y_mean = max(y_mean, 1e-10)
 
@@ -704,7 +712,8 @@ def drop1(
                 b0 = float(model._link.link(np.atleast_1d(y_mean))[0]) - np.average(
                     offset_arr, weights=w
                 )
-                null_mu = clip_mu(model._link.inverse(b0 + offset_arr), model._distribution)
+                eta0 = stabilize_eta(b0 + offset_arr, model._link)
+                null_mu = clip_mu(model._link.inverse(eta0), model._distribution)
             else:
                 null_mu = np.full(n, y_mean)
             dev_reduced = float(np.sum(w * model._distribution.deviance_unit(y_arr, null_mu)))
@@ -980,6 +989,8 @@ def term_inference(
             edf=edf,
             smoothing_lambda=lam,
             spline=spline_meta,
+            monotone=getattr(spec, "monotone", None),
+            monotone_repaired=False,  # caller can override if repairs exist
             alpha=alpha,
         )
 

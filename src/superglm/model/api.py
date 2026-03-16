@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 class SuperGLM:
     """Penalised generalised linear model with splines, group penalties, and REML.
 
-    Supports Poisson, Gamma, NB2, Tweedie, and Binomial families with group
+    Supports Poisson, Gaussian, Gamma, NB2, Tweedie, and Binomial families with group
     lasso, sparse group lasso, or ridge penalties.  Smoothing parameters can
     be estimated via REML (``fit_reml``) or cross-validation (``fit_cv``).
     """
@@ -39,6 +39,7 @@ class SuperGLM:
         penalty: Penalty | str | None = None,
         lambda1: float | None = None,
         lambda2: float = 0.1,
+        penalty_features: str | list[str] | None = None,
         tweedie_p: float | None = None,
         # Feature configuration
         nb_theta: float | str | None = None,
@@ -52,7 +53,6 @@ class SuperGLM:
         # Interactions
         interactions: list[tuple[str, str]] | None = None,
         # Solver options
-        anderson_memory: int = 0,
         active_set: bool = False,
         # Discretization
         discrete: bool = False,
@@ -62,12 +62,12 @@ class SuperGLM:
         Parameters
         ----------
         family : str or Distribution
-            Response distribution. One of ``"poisson"``, ``"gamma"``,
+            Response distribution. One of ``"poisson"``, ``"gaussian"``, ``"gamma"``,
             ``"binomial"``, ``"tweedie"``, ``"negative_binomial"``, or a
             Distribution object.  For ``"binomial"``, y must be in {0, 1}
             and ``predict()`` returns probabilities.
         link : str or Link, optional
-            Link function. Defaults to the family's canonical link (log).
+            Link function. Defaults to the family's configured default link.
         penalty : str or Penalty, optional
             Penalty type. One of ``"group_lasso"``, ``"sparse_group_lasso"``,
             ``"group_elastic_net"``, ``"ridge"``, or a Penalty object.
@@ -79,6 +79,17 @@ class SuperGLM:
         lambda2 : float
             Ridge shrinkage applied within each group (only used by
             ``GroupElasticNet``).
+        penalty_features : str or list[str], optional
+            Restrict the ``lambda1`` penalty to selected feature or group
+            names. ``None`` (default) applies the penalty to all penalizable
+            groups. Exact feature names (for example ``"region"``) and exact
+            group names (for example ``"age:spline"`` for ``select=True``
+            subgroups) are both supported.
+
+            This only affects the ``lambda1``-style penalty path
+            (group lasso / sparse group lasso / ridge / group elastic net).
+            It does not disable spline smoothing or REML ``lambda2`` penalties
+            on other terms.
         tweedie_p : float, optional
             Power parameter for ``family="tweedie"``.  Must be in (1, 2).
         nb_theta : float, optional
@@ -102,8 +113,6 @@ class SuperGLM:
         interactions : list[tuple[str, str]], optional
             Pairs of feature names to interact.  Interaction type is
             auto-detected from the parent feature specs.
-        anderson_memory : int
-            Anderson acceleration memory for the BCD solver (0 = off).
         active_set : bool
             Use active-set cycling in the BCD solver.
         discrete : bool
@@ -118,6 +127,7 @@ class SuperGLM:
             penalty=penalty,
             lambda1=lambda1,
             lambda2=lambda2,
+            penalty_features=penalty_features,
             tweedie_p=tweedie_p,
             nb_theta=nb_theta,
             features=features,
@@ -127,7 +137,6 @@ class SuperGLM:
             categorical_base=categorical_base,
             standardize_numeric=standardize_numeric,
             interactions=interactions,
-            anderson_memory=anderson_memory,
             active_set=active_set,
             discrete=discrete,
             n_bins=n_bins,
@@ -136,8 +145,8 @@ class SuperGLM:
     # ── Static / class helpers ────────────────────────────────────
 
     @staticmethod
-    def _resolve_penalty(penalty, lambda1):
-        return base.resolve_penalty(penalty, lambda1)
+    def _resolve_penalty(penalty, lambda1, penalty_features=None):
+        return base.resolve_penalty(penalty, lambda1, penalty_features)
 
     def _resolve_knots(self, spline_cols):
         return base.resolve_knots(self, spline_cols)
@@ -520,11 +529,30 @@ class SuperGLM:
         *,
         sample_weight: NDArray | None = None,
         fit_mode: str = "fit",
+        phi_method: str = "pearson",
         **kwargs,
     ):
-        """Estimate Tweedie p via profile likelihood, refit, and return result."""
+        """Estimate Tweedie p via profile likelihood, refit, and return result.
+
+        Parameters
+        ----------
+        fit_mode : {"fit", "reml", "inherit"}
+            Fitting regime for each candidate ``p`` evaluation.
+        phi_method : {"pearson", "mle"}
+            How to profile out Tweedie dispersion ``phi`` at each candidate ``p``.
+            ``"pearson"`` uses the weighted Pearson moment estimate, while
+            ``"mle"`` runs a nested 1D likelihood optimization in ``phi``.
+        """
         return profile_ops.estimate_p(
-            self, X, y, exposure, offset, sample_weight=sample_weight, fit_mode=fit_mode, **kwargs
+            self,
+            X,
+            y,
+            exposure,
+            offset,
+            sample_weight=sample_weight,
+            fit_mode=fit_mode,
+            phi_method=phi_method,
+            **kwargs,
         )
 
     def estimate_theta(
@@ -648,6 +676,67 @@ class SuperGLM:
             Predicted mean on the response scale (inverse-link of eta).
         """
         return base.predict(self, X, offset)
+
+    # ── Diagnostics ───────────────────────────────────────────────
+
+    def term_importance(
+        self,
+        X: pd.DataFrame,
+        exposure: NDArray | None = None,
+        *,
+        sample_weight: NDArray | None = None,
+    ) -> pd.DataFrame:
+        """Weighted variance of each term's contribution to eta.
+
+        Returns a DataFrame with columns: ``term``, ``feature``,
+        ``subgroup_type``, ``variance_eta``, ``sd_eta``, ``edf``,
+        ``lambda``, ``group_norm``.
+        """
+        return explain_ops.term_importance(self, X, exposure, sample_weight=sample_weight)
+
+    def term_drop_diagnostics(
+        self,
+        X: pd.DataFrame,
+        y: NDArray,
+        exposure: NDArray | None = None,
+        offset: NDArray | None = None,
+        *,
+        sample_weight: NDArray | None = None,
+        mode: str = "refit",
+        X_val: pd.DataFrame | None = None,
+        y_val: NDArray | None = None,
+    ) -> pd.DataFrame:
+        """Drop-term diagnostics: AIC/BIC deltas or holdout loss deltas.
+
+        Parameters
+        ----------
+        mode : {"refit", "holdout"}
+            ``"refit"`` calls ``drop1()`` and adds delta IC columns.
+            ``"holdout"`` zeros each term on a validation set (no refit).
+        X_val, y_val : optional
+            Validation data for ``mode="holdout"``.
+        """
+        return explain_ops.term_drop_diagnostics(
+            self,
+            X,
+            y,
+            exposure,
+            offset,
+            sample_weight=sample_weight,
+            mode=mode,
+            X_val=X_val,
+            y_val=y_val,
+        )
+
+    def spline_redundancy(
+        self,
+        X: pd.DataFrame,
+        exposure: NDArray | None = None,
+        *,
+        sample_weight: NDArray | None = None,
+    ) -> dict:
+        """Spline redundancy diagnostics: knot spacing, basis correlation, effective rank."""
+        return explain_ops.spline_redundancy(self, X, exposure, sample_weight=sample_weight)
 
     # ── Discretization ────────────────────────────────────────────
 

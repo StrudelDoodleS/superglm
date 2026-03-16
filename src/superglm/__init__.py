@@ -35,8 +35,9 @@ sklearn-compatible API:
 
 from superglm.cv import CVResult
 from superglm.davies import psum_chisq, satterthwaite
+from superglm.diagnostics import SplineRedundancyReport
 from superglm.discretize import DiscretizationResult, discretization_impact
-from superglm.distributions import Binomial, Gamma, NegativeBinomial, Poisson, Tweedie
+from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.interaction import (
     CategoricalInteraction,
@@ -101,6 +102,7 @@ __all__ = [
     "SuperGLMRegressor",
     "SuperGLMClassifier",
     "Poisson",
+    "Gaussian",
     "Gamma",
     "Binomial",
     "NegativeBinomial",
@@ -150,5 +152,6 @@ __all__ = [
     "TermInference",
     "InteractionInference",
     "SplineMetadata",
+    "SplineRedundancyReport",
 ]
 __version__ = "0.1.0"
