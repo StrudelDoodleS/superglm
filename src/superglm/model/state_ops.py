@@ -142,6 +142,9 @@ def summary(model, alpha: float = 0.05):
         "deviance": res.deviance,
         "log_likelihood": ll,
         "aic": aic,
+        "aicc": aicc,
+        "bic": bic,
+        "ebic": ebic,
         "converged": res.converged,
         "n_iter": res.n_iter,
     }
@@ -181,6 +184,7 @@ def summary(model, alpha: float = 0.05):
         lambda2=model.lambda2,
         n_obs=n,
         alpha=alpha,
+        monotone_repairs=getattr(model, "_monotone_repairs", None),
     )
 
     # Standard errors for backward compat dict access
@@ -274,14 +278,16 @@ def coef_covariance(model):
 def fit_active_info(model):
     """Active design columns, weights, and (X'WX+S)^{-1} from fit state."""
     from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
     from superglm.metrics import _penalised_xtwx_inv
 
     eta = model._dm.matvec(model.result.beta) + model.result.intercept
     if model._fit_offset is not None:
         eta = eta + model._fit_offset
-    mu = clip_mu(model._link.inverse(np.clip(eta, -20, 20)), model._distribution)
+    eta = stabilize_eta(eta, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
     V = model._distribution.variance(mu)
-    dmu_deta = model._link.deriv_inverse(np.clip(eta, -20, 20))
+    dmu_deta = model._link.deriv_inverse(eta)
     W = model._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
@@ -294,6 +300,7 @@ def fit_active_info(model):
 def group_edf(model) -> dict[str, float] | None:
     """Per-group effective degrees of freedom via F = (X'WX+S)^{-1} X'WX."""
     from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
     from superglm.metrics import _penalised_xtwx_inv
 
     if model._dm is None or model._result is None:
@@ -303,7 +310,7 @@ def group_edf(model) -> dict[str, float] | None:
     eta = model._dm.matvec(beta) + model._result.intercept
     if model._fit_offset is not None:
         eta = eta + model._fit_offset
-    eta = np.clip(eta, -20, 20)
+    eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
     V = model._distribution.variance(mu)
     dmu_deta = model._link.deriv_inverse(eta)

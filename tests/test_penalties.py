@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from superglm.penalties.base import penalty_targets_group, validate_penalty_features
 from superglm.penalties.flavors import Adaptive
 from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
@@ -55,6 +56,17 @@ class TestGroupLasso:
         beta_copy = beta.copy()
         GroupLasso(lambda1=0.1).prox(beta, groups, step=1.0)
         np.testing.assert_array_equal(beta, beta_copy)
+
+    def test_feature_filter(self):
+        groups = [
+            GroupSlice("age", 0, 2, weight=np.sqrt(2), feature_name="age"),
+            GroupSlice("region", 2, 4, weight=np.sqrt(2), feature_name="region"),
+        ]
+        beta = np.array([2.0, 1.0, 2.0, 1.0])
+        pen = GroupLasso(lambda1=1.0, features=["region"])
+        result = pen.prox(beta, groups, step=1.0)
+        np.testing.assert_allclose(result[:2], beta[:2])
+        assert np.linalg.norm(result[2:]) < np.linalg.norm(beta[2:])
 
 
 class TestGroupLassoProxGroup:
@@ -114,6 +126,17 @@ class TestSparseGroupLasso:
         pen = SparseGroupLasso(lambda1=0.5, alpha=0.5)
         assert pen.eval(beta, groups) > 0
 
+    def test_feature_filter_skips_untargeted_group(self):
+        groups = [
+            GroupSlice("age", 0, 2, weight=np.sqrt(2), feature_name="age"),
+            GroupSlice("region", 2, 4, weight=np.sqrt(2), feature_name="region"),
+        ]
+        beta = np.array([0.8, -0.7, 0.8, -0.7])
+        pen = SparseGroupLasso(lambda1=0.5, alpha=1.0, features=["region"])
+        result = pen.prox(beta, groups, step=1.0)
+        np.testing.assert_allclose(result[:2], beta[:2])
+        assert np.linalg.norm(result[2:]) < np.linalg.norm(beta[2:])
+
 
 class TestSparseGroupLassoProxGroup:
     def test_matches_full_prox(self, groups):
@@ -157,6 +180,17 @@ class TestRidge:
 
     def test_no_flavor(self):
         assert Ridge(lambda1=1.0).flavor is None
+
+    def test_feature_filter(self):
+        groups = [
+            GroupSlice("age", 0, 2, weight=np.sqrt(2), feature_name="age"),
+            GroupSlice("region", 2, 4, weight=np.sqrt(2), feature_name="region"),
+        ]
+        beta = np.array([2.0, 1.0, 2.0, 1.0])
+        pen = Ridge(lambda1=1.0, features=["region"])
+        result = pen.prox(beta, groups, step=1.0)
+        np.testing.assert_allclose(result[:2], beta[:2])
+        np.testing.assert_allclose(result[2:], beta[2:] / 2.0)
 
 
 class TestRidgeProxGroup:
@@ -211,6 +245,55 @@ class TestGroupElasticNet:
     def test_eval_zero_for_zero_beta(self, groups):
         pen = GroupElasticNet(lambda1=0.5, alpha=0.5)
         assert pen.eval(np.zeros(4), groups) == 0.0
+
+    def test_feature_filter(self):
+        groups = [
+            GroupSlice("age", 0, 2, weight=np.sqrt(2), feature_name="age"),
+            GroupSlice("region", 2, 4, weight=np.sqrt(2), feature_name="region"),
+        ]
+        beta = np.array([2.0, 1.0, 2.0, 1.0])
+        pen = GroupElasticNet(lambda1=1.0, alpha=0.5, features=["region"])
+        result = pen.prox(beta, groups, step=1.0)
+        np.testing.assert_allclose(result[:2], beta[:2])
+        assert np.linalg.norm(result[2:]) < np.linalg.norm(beta[2:])
+
+
+class TestPenaltyFeatureHelpers:
+    def test_matches_feature_name_and_group_name(self):
+        groups = [
+            GroupSlice(
+                "age:linear",
+                0,
+                1,
+                weight=1.0,
+                feature_name="age",
+                subgroup_type="linear",
+            ),
+            GroupSlice(
+                "age:spline",
+                1,
+                4,
+                weight=np.sqrt(3),
+                feature_name="age",
+                subgroup_type="spline",
+            ),
+            GroupSlice("region", 4, 6, weight=np.sqrt(2), feature_name="region"),
+        ]
+        pen_feature = GroupLasso(lambda1=0.1, features=["age"])
+        assert penalty_targets_group(pen_feature, groups[0])
+        assert penalty_targets_group(pen_feature, groups[1])
+        assert not penalty_targets_group(pen_feature, groups[2])
+
+        pen_group = GroupLasso(lambda1=0.1, features=["age:spline"])
+        assert not penalty_targets_group(pen_group, groups[0])
+        assert penalty_targets_group(pen_group, groups[1])
+        assert not penalty_targets_group(pen_group, groups[2])
+
+    def test_validate_penalty_features_raises_on_unknown_name(self):
+        groups = [GroupSlice("region", 0, 2, feature_name="region")]
+        pen = GroupLasso(lambda1=0.1, features=["missing"])
+        with pytest.raises(ValueError, match="Unknown penalty feature/group filter"):
+            validate_penalty_features(pen, groups)
 
 
 class TestGroupElasticNetProxGroup:

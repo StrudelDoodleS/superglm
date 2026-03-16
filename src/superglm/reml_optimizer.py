@@ -30,6 +30,7 @@ from superglm.group_matrix import (
     _block_xtwx,
     _block_xtwx_signed,
 )
+from superglm.links import stabilize_eta
 from superglm.reml import (
     REMLResult,
     _map_beta_between_bases,
@@ -108,11 +109,7 @@ def reml_w_correction(
     (e.g. Gamma with log link where dW/dη = 0 identically) or if the
     link/distribution does not provide the required second-order methods.
     """
-    eta = np.clip(
-        dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
-        -20,
-        20,
-    )
+    eta = stabilize_eta(dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr, link)
     mu = clip_mu(link.inverse(eta), distribution)
     dW_deta = compute_dW_deta(link, distribution, mu, eta, exposure)
 
@@ -185,7 +182,7 @@ def reml_laml_objective(
     Handles both known-scale families (Poisson, NB2 where φ=1) and
     estimated-scale families (Gamma, Tweedie) via φ-profiled REML.
     """
-    eta = np.clip(dm.matvec(result.beta) + result.intercept + offset_arr, -20, 20)
+    eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
     mu = clip_mu(link.inverse(eta), distribution)
     if XtWX is None:
         V = distribution.variance(mu)
@@ -927,7 +924,7 @@ def optimize_discrete_reml_cached_w(
                     best_lambdas[name] = float(np.clip(np.exp(rho_clipped_f[idx_j]), 1e-6, 1e10))
                 _edf = 1.0 + float(np.trace(XtWX_S_inv @ XtWX))
                 # Compute fresh deviance at analytical beta (O(n) data pass)
-                eta_f = np.clip(dm.matvec(warm_beta) + warm_intercept + offset_arr, -20, 20)
+                eta_f = stabilize_eta(dm.matvec(warm_beta) + warm_intercept + offset_arr, link)
                 mu_f = clip_mu(link.inverse(eta_f), distribution)
                 dev_f = float(np.sum(exposure * distribution.deviance_unit(y, mu_f)))
                 best_pirls = PIRLSResult(
@@ -1148,7 +1145,7 @@ def optimize_discrete_reml_cached_w(
                 for idx_j, name in enumerate(group_names):
                     best_lambdas[name] = float(np.clip(np.exp(rho_clipped[idx_j]), 1e-6, 1e10))
                 # Recompute deviance + objective at analytical beta + final lambdas
-                eta_f = np.clip(dm.matvec(warm_beta) + warm_intercept + offset_arr, -20, 20)
+                eta_f = stabilize_eta(dm.matvec(warm_beta) + warm_intercept + offset_arr, link)
                 mu_f = clip_mu(link.inverse(eta_f), distribution)
                 dev_f = float(np.sum(exposure * distribution.deviance_unit(y, mu_f)))
                 # H_inv from last inner FP iteration is at the final lambdas
@@ -1261,7 +1258,6 @@ def optimize_efs_reml(
     link: Any,
     groups: list[GroupSlice],
     penalty: Any,
-    anderson_memory: int,
     active_set: bool,
     y: NDArray,
     exposure: NDArray,
@@ -1309,13 +1305,15 @@ def optimize_efs_reml(
         groups=groups,
         penalty=penalty,
         offset=offset_arr,
-        anderson_memory=anderson_memory,
         active_set=active_set,
         lambda2=boot_lambdas,
     )
 
     # Compute W and X'WX from bootstrap fit
-    boot_eta = np.clip(dm.matvec(boot_result.beta) + boot_result.intercept + offset_arr, -20, 20)
+    boot_eta = stabilize_eta(
+        dm.matvec(boot_result.beta) + boot_result.intercept + offset_arr,
+        link,
+    )
     boot_mu = clip_mu(link.inverse(boot_eta), distribution)
     boot_V = distribution.variance(boot_mu)
     boot_dmu = link.deriv_inverse(boot_eta)
@@ -1394,7 +1392,6 @@ def optimize_efs_reml(
                 offset=offset_arr,
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
-                anderson_memory=anderson_memory,
                 active_set=active_set,
                 lambda2=lambdas,
             )
@@ -1403,7 +1400,7 @@ def optimize_efs_reml(
             last_pirls_iters = pirls_result.n_iter
 
             # Compute IRLS weights and cache X'WX
-            eta = np.clip(dm.matvec(beta) + intercept + offset_arr, -20, 20)
+            eta = stabilize_eta(dm.matvec(beta) + intercept + offset_arr, link)
             mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
@@ -1529,7 +1526,6 @@ def optimize_efs_reml(
         offset=offset_arr,
         beta_init=warm_beta,
         intercept_init=warm_intercept,
-        anderson_memory=anderson_memory,
         active_set=active_set,
         lambda2=lambdas,
     )
@@ -1567,7 +1563,6 @@ def run_reml_once(
     link: Any,
     groups: list[GroupSlice],
     penalty: Any,
-    anderson_memory: int,
     active_set: bool,
     y: NDArray,
     exposure: NDArray,
@@ -1632,7 +1627,7 @@ def run_reml_once(
             last_pirls_iters = pirls_result.n_iter
             cached_direct_xtwx = XtWX_full
 
-            eta = np.clip(dm.matvec(beta) + intercept + offset_arr, -20, 20)
+            eta = stabilize_eta(dm.matvec(beta) + intercept + offset_arr, link)
             mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
@@ -1652,7 +1647,6 @@ def run_reml_once(
                 offset=offset_arr,
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
-                anderson_memory=anderson_memory,
                 active_set=active_set,
                 lambda2=lambdas,
             )
@@ -1660,7 +1654,7 @@ def run_reml_once(
             intercept = pirls_result.intercept
             last_pirls_iters = pirls_result.n_iter
 
-            eta = np.clip(dm.matvec(beta) + intercept + offset_arr, -20, 20)
+            eta = stabilize_eta(dm.matvec(beta) + intercept + offset_arr, link)
             mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
@@ -1808,7 +1802,6 @@ def run_reml_once(
             offset=offset_arr,
             beta_init=warm_beta,
             intercept_init=warm_intercept,
-            anderson_memory=anderson_memory,
             active_set=active_set,
             lambda2=lambdas,
         )

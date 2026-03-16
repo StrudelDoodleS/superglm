@@ -280,6 +280,57 @@ def plot(
     )
 
 
+def term_importance(model, X, exposure=None, *, sample_weight=None):
+    """Weighted variance of each term's contribution to eta."""
+    from superglm.diagnostics import term_importance as _term_importance
+    from superglm.model.base import resolve_sample_weight_alias
+
+    exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="term_importance()")
+    return _term_importance(model, X, exposure)
+
+
+def term_drop_diagnostics(
+    model,
+    X,
+    y,
+    exposure=None,
+    offset=None,
+    *,
+    sample_weight=None,
+    mode="refit",
+    X_val=None,
+    y_val=None,
+):
+    """Drop-term diagnostics wrapper."""
+    from superglm.diagnostics import term_drop_diagnostics as _term_drop_diagnostics
+    from superglm.model.base import resolve_sample_weight_alias
+
+    exposure = resolve_sample_weight_alias(
+        exposure, sample_weight, method_name="term_drop_diagnostics()"
+    )
+    return _term_drop_diagnostics(
+        model,
+        X,
+        y,
+        exposure,
+        offset,
+        mode=mode,
+        X_val=X_val,
+        y_val=y_val,
+    )
+
+
+def spline_redundancy(model, X, exposure=None, *, sample_weight=None):
+    """Spline redundancy diagnostics."""
+    from superglm.diagnostics import spline_redundancy as _spline_redundancy
+    from superglm.model.base import resolve_sample_weight_alias
+
+    exposure = resolve_sample_weight_alias(
+        exposure, sample_weight, method_name="spline_redundancy()"
+    )
+    return _spline_redundancy(model, X, exposure)
+
+
 def discretization_impact(model, X, y, exposure=None, *, sample_weight=None, **kwargs):
     """Analyse the impact of discretizing spline/polynomial curves."""
     from superglm.discretize import discretization_impact as _disc_impact

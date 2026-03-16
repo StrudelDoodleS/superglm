@@ -369,6 +369,13 @@ class TestSummary:
         assert "x1" in text
         assert "x2" in text
 
+    def test_summary_str_contains_extended_ic(self, metrics_obj):
+        """ASCII output shows AICc/BIC/EBIC in the header."""
+        text = str(metrics_obj.summary())
+        assert "AICc" in text
+        assert "BIC" in text
+        assert "EBIC" in text
+
     def test_summary_html_output(self, metrics_obj):
         """_repr_html_ produces valid-looking HTML."""
         html = metrics_obj.summary()._repr_html_()

@@ -2,11 +2,65 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
 from numpy.typing import NDArray
 
 from superglm.types import GroupSlice
+
+
+def normalize_penalty_features(features: str | Iterable[str] | None) -> frozenset[str] | None:
+    """Normalize optional penalty feature filters.
+
+    Parameters
+    ----------
+    features
+        ``None`` for all groups, a single feature/group name, or an iterable of
+        names. Exact feature names (``group.feature_name``) and exact group names
+        (``group.name``) are both supported.
+    """
+    if features is None:
+        return None
+    if isinstance(features, str):
+        tokens = [features]
+    else:
+        tokens = list(features)
+    cleaned = [str(token).strip() for token in tokens if str(token).strip()]
+    return frozenset(cleaned) if cleaned else None
+
+
+def penalty_targets_group(penalty: object, group: GroupSlice) -> bool:
+    """Whether the lambda1-style penalty should apply to this group."""
+    if not group.penalized:
+        return False
+    features = getattr(penalty, "features", None)
+    if features is None:
+        return True
+    return group.feature_name in features or group.name in features
+
+
+def validate_penalty_features(
+    penalty: object,
+    groups: list[GroupSlice],
+) -> None:
+    """Raise on unknown penalty feature/group filters after DM construction."""
+    features = getattr(penalty, "features", None)
+    if features is None:
+        return
+    available = {g.feature_name for g in groups} | {g.name for g in groups}
+    missing = sorted(features - available)
+    if missing:
+        available_names = sorted(available)
+        raise ValueError(
+            "Unknown penalty feature/group filter(s): "
+            f"{missing}. Available names: {available_names}"
+        )
+
+
+def penalty_has_targets(penalty: object, groups: list[GroupSlice]) -> bool:
+    """Return True when the penalty applies to at least one fitted group."""
+    return any(penalty_targets_group(penalty, g) for g in groups)
 
 
 @runtime_checkable
@@ -23,6 +77,9 @@ class Penalty(Protocol):
 
     @property
     def flavor(self) -> Flavor | None: ...
+
+    @property
+    def features(self) -> frozenset[str] | None: ...
 
     def prox(self, beta: NDArray, groups: list[GroupSlice], step: float) -> NDArray:
         """Proximal operator: argmin_z  step * P(z) + 0.5 * ||beta - z||^2."""

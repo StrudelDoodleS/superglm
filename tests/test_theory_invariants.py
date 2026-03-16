@@ -5,10 +5,12 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
+from superglm.distributions import clip_mu
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
 from superglm.group_matrix import _block_xtwx
+from superglm.links import stabilize_eta
 
 
 def _final_working_problem(model, y, exposure=None, offset=None):
@@ -18,8 +20,8 @@ def _final_working_problem(model, y, exposure=None, offset=None):
     offset_arr = np.zeros_like(y) if offset is None else np.asarray(offset, dtype=np.float64)
 
     beta = model.result.beta
-    eta = np.clip(model._dm.matvec(beta) + model.result.intercept + offset_arr, -20, 20)
-    mu = np.clip(model._link.inverse(eta), 1e-7, 1e7)
+    eta = stabilize_eta(model._dm.matvec(beta) + model.result.intercept + offset_arr, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
     V = model._distribution.variance(mu)
     dmu_deta = model._link.deriv_inverse(eta)
     W = weights * dmu_deta**2 / np.maximum(V, 1e-10)

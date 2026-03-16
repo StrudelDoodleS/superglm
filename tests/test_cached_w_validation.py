@@ -15,8 +15,10 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
+from superglm.distributions import clip_mu
 from superglm.features.categorical import Categorical
 from superglm.features.spline import CubicRegressionSpline
+from superglm.links import stabilize_eta
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -85,8 +87,8 @@ def _fit_reml(family, features, discrete, df, y, w, **kwargs):
 
 def _predict_mu(model, df):
     """Get fitted mu values."""
-    eta = model._dm.matvec(model.result.beta) + model.result.intercept
-    return np.clip(model._link.inverse(eta), 1e-7, 1e7)
+    eta = stabilize_eta(model._dm.matvec(model.result.beta) + model.result.intercept, model._link)
+    return clip_mu(model._link.inverse(eta), model._distribution)
 
 
 # ══════════════════════════════════════════════════════════════════
