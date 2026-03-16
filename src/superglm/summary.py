@@ -280,6 +280,8 @@ class ModelSummary:
 
             if row.is_spline:
                 has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
+                kind = "linear" if row.subgroup_type == "linear" else "spline"
+                param_label = f"{row.n_params} params"
                 # Build detail line: edf, lambda, curve SE, monotone
                 detail_parts = []
                 detail_parts.append(f"rank={row.n_params}")
@@ -303,22 +305,21 @@ class ModelSummary:
                         df_str = f"{row.ref_df:.1f}"
                     else:
                         df_str = str(row.n_params)
-                    kind = "linear" if row.subgroup_type == "linear" else "spline"
-                    spline_text = f"[{kind}, chi2({df_str})={row.wald_chi2:.1f}, p={p_str}]"
+                    spline_text = (
+                        f"[{kind}, {param_label}, chi2({df_str})={row.wald_chi2:.1f}, p={p_str}]"
+                    )
                     prefix = f"{row.name:<{name_w}s}  {spline_text} "
                     pad = max(W - len(prefix) - 3, 0)
                     lines.append(_row(f"{prefix}{'':<{pad}s}{stars:<3s}"))
                     if detail_str:
                         lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
                 elif row.active:
-                    kind = "linear" if row.subgroup_type == "linear" else "spline"
-                    spline_text = f"[{kind}, active]"
+                    spline_text = f"[{kind}, {param_label}, active]"
                     lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
                     if detail_str:
                         lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
                 else:
-                    kind = "linear" if row.subgroup_type == "linear" else "spline"
-                    spline_text = f"[{kind}, inactive]"
+                    spline_text = f"[{kind}, {param_label}, inactive]"
                     lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
             elif row.coef is not None and row.se is not None and row.se > 0:
                 stars = _sig_stars(row.p)
@@ -465,6 +466,7 @@ class ModelSummary:
             if row.is_spline:
                 has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
                 kind = "linear" if row.subgroup_type == "linear" else "spline"
+                param_label = f"{row.n_params} params"
                 # Build detail suffix: edf, lambda, curve SE, monotone
                 detail_parts = []
                 detail_parts.append(f"rank={row.n_params}")
@@ -495,6 +497,7 @@ class ModelSummary:
                         df_str = str(row.n_params)
                     text = (
                         f"[{kind}, "
+                        f"{param_label}, "
                         f"&chi;&sup2;({df_str})={row.wald_chi2:.1f}, "
                         f"p={p_str}]{detail_html}"
                     )
@@ -507,7 +510,7 @@ class ModelSummary:
                         f"</tr>"
                     )
                 elif row.active:
-                    text = f"[{kind}, active]{detail_html}"
+                    text = f"[{kind}, {param_label}, active]{detail_html}"
                     parts.append(
                         f"<tr>"
                         f'<td style="{cell_l}">{row.name}</td>'
@@ -515,7 +518,7 @@ class ModelSummary:
                         f'font-style:italic;">{text}</td></tr>'
                     )
                 else:
-                    text = f"[{kind}, inactive]"
+                    text = f"[{kind}, {param_label}, inactive]"
                     parts.append(
                         f"<tr>"
                         f'<td style="{cell_l}">{row.name}</td>'
