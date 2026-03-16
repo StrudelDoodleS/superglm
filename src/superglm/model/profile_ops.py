@@ -8,7 +8,16 @@ logger = logging.getLogger(__name__)
 
 
 def estimate_p(
-    model, X, y, exposure=None, offset=None, *, sample_weight=None, fit_mode="fit", **kwargs
+    model,
+    X,
+    y,
+    exposure=None,
+    offset=None,
+    *,
+    sample_weight=None,
+    fit_mode="fit",
+    phi_method="pearson",
+    **kwargs,
 ):
     """Estimate Tweedie p via profile likelihood, refit, and return result."""
     from superglm.model.base import resolve_sample_weight_alias
@@ -33,7 +42,14 @@ def estimate_p(
         resolved_mode = "fit"
 
     result = estimate_tweedie_p(
-        model, X, y, exposure=exposure, offset=offset, fit_mode=resolved_mode, **kwargs
+        model,
+        X,
+        y,
+        exposure=exposure,
+        offset=offset,
+        fit_mode=resolved_mode,
+        phi_method=phi_method,
+        **kwargs,
     )
     model.tweedie_p = result.p_hat
     model._tweedie_profile_result = result

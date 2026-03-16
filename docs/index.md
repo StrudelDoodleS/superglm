@@ -16,7 +16,8 @@ Penalised GLMs for insurance pricing. SuperGLM supports standard penalised fits,
 
 Poisson frequency model on French MTPL2 (678k policies), REML smoothness selection.
 95% pointwise confidence bands with exposure-weighted density strip and interior knot positions.
+Click an image to open it at full size.
 
 | Vehicle Age (`quantile_rows` knots) | Bonus-Malus (`quantile_tempered`, α=0.2) |
 |:---:|:---:|
-| ![VehAge](images/readme_vehage.png) | ![BonusMalus](images/readme_bonusmalus.png) |
+| [![VehAge](images/readme_vehage.png)](images/readme_vehage.png) | [![BonusMalus](images/readme_bonusmalus.png)](images/readme_bonusmalus.png) |

@@ -39,6 +39,9 @@ class _CoefRow:
     spline_kind: str | None = None  # "BasisSpline", "NaturalSpline", etc.
     knot_strategy: str | None = None
     boundary: tuple[float, float] | None = None
+    # Monotonicity
+    monotone: str | None = None  # "increasing", "decreasing", or None
+    monotone_repaired: bool = False
 
 
 def _compute_coef_stats(
@@ -155,7 +158,9 @@ class ModelSummary:
             ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
             ("Scale (phi)", _fmt(info["phi"]), "Lambda1", _fmt(info["lambda1"])),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
-            ("Deviance", _fmt(info["deviance"]), "Converged", conv_str),
+            ("AICc", _fmt(info["aicc"]), "BIC", _fmt(info["bic"])),
+            ("EBIC", _fmt(info["ebic"]), "Converged", conv_str),
+            ("Deviance", _fmt(info["deviance"]), "", ""),
         ]
 
         # NB theta profile row
@@ -240,7 +245,8 @@ class ModelSummary:
 
         def _header_row(k1: str, v1: str, k2: str, v2: str) -> str:
             left = f"{k1 + ':':<20s}{v1:>{val_l}s}"
-            right = f"{k2 + ':':<20s}{v2:>{val_r}s}"
+            right_label = f"{k2 + ':':<20s}" if k2 else " " * 20
+            right = f"{right_label}{v2:>{val_r}s}"
             return _row(f"{left}  {right}")
 
         for k1, v1, k2, v2 in rows:
@@ -274,14 +280,22 @@ class ModelSummary:
 
             if row.is_spline:
                 has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
-                # Build detail line: edf, lambda, curve SE
+                kind = "linear" if row.subgroup_type == "linear" else "spline"
+                param_label = f"{row.n_params} params"
+                # Build detail line: edf, lambda, curve SE, monotone
                 detail_parts = []
+                detail_parts.append(f"rank={row.n_params}")
                 if row.edf is not None:
                     detail_parts.append(f"edf={row.edf:.1f}")
                 if row.smoothing_lambda is not None:
                     detail_parts.append(f"lam={row.smoothing_lambda:.2g}")
                 if has_test and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
                     detail_parts.append(f"curve SE: {row.curve_se_min:.2f}-{row.curve_se_max:.2f}")
+                if row.monotone is not None:
+                    mono_str = f"mono={row.monotone}"
+                    if row.monotone_repaired:
+                        mono_str += ", repaired"
+                    detail_parts.append(mono_str)
                 detail_str = ", ".join(detail_parts)
 
                 if has_test:
@@ -291,11 +305,8 @@ class ModelSummary:
                         df_str = f"{row.ref_df:.1f}"
                     else:
                         df_str = str(row.n_params)
-                    kind = "linear" if row.subgroup_type == "linear" else "spline"
                     spline_text = (
-                        f"[{kind}, {row.n_params} params, "
-                        f"chi2({df_str})={row.wald_chi2:.1f}, "
-                        f"p={p_str}]"
+                        f"[{kind}, {param_label}, chi2({df_str})={row.wald_chi2:.1f}, p={p_str}]"
                     )
                     prefix = f"{row.name:<{name_w}s}  {spline_text} "
                     pad = max(W - len(prefix) - 3, 0)
@@ -303,14 +314,12 @@ class ModelSummary:
                     if detail_str:
                         lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
                 elif row.active:
-                    kind = "linear" if row.subgroup_type == "linear" else "spline"
-                    spline_text = f"[{kind}, {row.n_params} params, active]"
+                    spline_text = f"[{kind}, {param_label}, active]"
                     lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
                     if detail_str:
                         lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
                 else:
-                    kind = "linear" if row.subgroup_type == "linear" else "spline"
-                    spline_text = f"[{kind}, {row.n_params} params, inactive]"
+                    spline_text = f"[{kind}, {param_label}, inactive]"
                     lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
             elif row.coef is not None and row.se is not None and row.se > 0:
                 stars = _sig_stars(row.p)
@@ -391,7 +400,9 @@ class ModelSummary:
             ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
             ("Scale (phi)", _fmt(info["phi"]), "Lambda1", _fmt(info["lambda1"])),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
-            ("Deviance", _fmt(info["deviance"]), "Converged", conv_str),
+            ("AICc", _fmt(info["aicc"]), "BIC", _fmt(info["bic"])),
+            ("EBIC", _fmt(info["ebic"]), "Converged", conv_str),
+            ("Deviance", _fmt(info["deviance"]), "", ""),
         ]
 
         # NB theta profile row
@@ -406,12 +417,13 @@ class ModelSummary:
             p_str = f"{info['tweedie_p']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
             header_rows.append(("Tweedie p", p_str, "Method", info["tweedie_p_method"]))
         for k1, v1, k2, v2 in header_rows:
+            right_label = f"{k2}:" if k2 else ""
             parts.append(
                 f"<tr>"
                 f'<td style="{label_style}">{k1}:</td>'
                 f'<td style="{cell}">{v1}</td>'
                 f'<td style="{cell}"></td>'
-                f'<td style="{label_style}">{k2}:</td>'
+                f'<td style="{label_style}">{right_label}</td>'
                 f'<td colspan="{ncols - 4}" style="{cell}">{v2}</td>'
                 f"</tr>"
             )
@@ -454,8 +466,10 @@ class ModelSummary:
             if row.is_spline:
                 has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
                 kind = "linear" if row.subgroup_type == "linear" else "spline"
-                # Build detail suffix: edf, lambda, curve SE
+                param_label = f"{row.n_params} params"
+                # Build detail suffix: edf, lambda, curve SE, monotone
                 detail_parts = []
+                detail_parts.append(f"rank={row.n_params}")
                 if row.edf is not None:
                     detail_parts.append(f"edf={row.edf:.1f}")
                 if row.smoothing_lambda is not None:
@@ -464,6 +478,11 @@ class ModelSummary:
                     detail_parts.append(
                         f"curve SE: {row.curve_se_min:.2f}&ndash;{row.curve_se_max:.2f}"
                     )
+                if row.monotone is not None:
+                    mono_str = f"mono={row.monotone}"
+                    if row.monotone_repaired:
+                        mono_str += ", repaired"
+                    detail_parts.append(mono_str)
                 detail_str = ", ".join(detail_parts)
                 detail_html = (
                     f"<br><span style='font-size:11px;'>{detail_str}</span>" if detail_str else ""
@@ -477,7 +496,8 @@ class ModelSummary:
                     else:
                         df_str = str(row.n_params)
                     text = (
-                        f"[{kind}, {row.n_params} params, "
+                        f"[{kind}, "
+                        f"{param_label}, "
                         f"&chi;&sup2;({df_str})={row.wald_chi2:.1f}, "
                         f"p={p_str}]{detail_html}"
                     )
@@ -490,7 +510,7 @@ class ModelSummary:
                         f"</tr>"
                     )
                 elif row.active:
-                    text = f"[{kind}, {row.n_params} params, active]{detail_html}"
+                    text = f"[{kind}, {param_label}, active]{detail_html}"
                     parts.append(
                         f"<tr>"
                         f'<td style="{cell_l}">{row.name}</td>'
@@ -498,7 +518,7 @@ class ModelSummary:
                         f'font-style:italic;">{text}</td></tr>'
                     )
                 else:
-                    text = f"[{kind}, {row.n_params} params, inactive]"
+                    text = f"[{kind}, {param_label}, inactive]"
                     parts.append(
                         f"<tr>"
                         f'<td style="{cell_l}">{row.name}</td>'

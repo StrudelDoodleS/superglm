@@ -342,6 +342,28 @@ class NegativeBinomialLink:
         return self.theta * e * (1 + e) / (1 - e) ** 3
 
 
+def stabilize_eta(eta: NDArray, link: Link) -> NDArray:
+    """Clip eta only where the inverse link needs protection.
+
+    The old implementation clipped every linear predictor to ``[-20, 20]``.
+    That is fine for log-like links, but it is wrong for the identity link
+    because it changes the fitted Gaussian mean. This helper keeps the old
+    numerical safeguards where they matter without distorting identity-link
+    models.
+    """
+    if isinstance(link, IdentityLink):
+        return eta
+    if isinstance(link, InverseLink | InverseSquaredLink):
+        return np.clip(eta, 1e-12, 1e12)
+    if isinstance(link, PowerLink):
+        if link.power == 1.0:
+            return eta
+        return np.clip(eta, 1e-12, 1e12)
+    if isinstance(link, NegativeBinomialLink):
+        return np.clip(eta, -30.0, -1e-10)
+    return np.clip(eta, -20.0, 20.0)
+
+
 _LINK_SHORTCUTS: dict[str, type] = {
     "log": LogLink,
     "identity": IdentityLink,

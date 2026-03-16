@@ -305,6 +305,20 @@ class TestEnrichedSummary:
         text = str(s)
         assert "lam=" in text
 
+    def test_spline_row_has_rank(self, sample_data):
+        X, y, exposure = sample_data
+        model = SuperGLM(
+            penalty="group_lasso",
+            lambda1=0.01,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "region": Categorical(base="first"),
+            },
+        )
+        model.fit(X, y, exposure=exposure)
+        text = str(model.metrics(X, y, exposure=exposure).summary())
+        assert "rank=" in text
+
     def test_non_spline_terms_unaffected(self, sample_data):
         X, y, exposure = sample_data
         model = SuperGLM(

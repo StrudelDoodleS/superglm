@@ -23,6 +23,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import digamma, gammaln, polygamma
 
+from superglm.distributions import clip_mu
+from superglm.links import stabilize_eta
 from superglm.solvers.pirls import fit_pirls
 
 
@@ -332,12 +334,10 @@ def estimate_nb_theta(
             intercept_init=warm_intercept,
         )
 
-        eta = np.clip(
-            dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
-            -20,
-            20,
+        eta = stabilize_eta(
+            dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr, link
         )
-        mu = np.maximum(link.inverse(eta), 1e-10)
+        mu = clip_mu(link.inverse(eta), dist)
         warm_beta = pirls_result.beta
         warm_intercept = pirls_result.intercept
 

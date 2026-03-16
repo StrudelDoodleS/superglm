@@ -39,10 +39,16 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.tabbed:
       alternate_style: true
+  - pymdownx.arithmatex:
+      generic: true
   - toc:
       permalink: true
   - attr_list
   - md_in_html
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
 plugins:
   - search
@@ -70,6 +76,7 @@ nav:
   - User Guide:
     - Feature Types: guide/features.md
     - Fitting Modes: guide/fitting.md
+    - REML & Solvers: guide/optimization.md
     - Families & Dispersion: guide/families.md
     - Interactions: guide/interactions.md
     - Inspecting Results: guide/results.md

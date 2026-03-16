@@ -23,8 +23,13 @@ from superglm.dm_builder import (
     should_discretize_tensor_interaction,
 )
 from superglm.group_matrix import DesignMatrix
-from superglm.links import Link
-from superglm.penalties.base import Penalty
+from superglm.links import Link, stabilize_eta
+from superglm.penalties.base import (
+    Penalty,
+    penalty_has_targets,
+    penalty_targets_group,
+    validate_penalty_features,
+)
 from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
@@ -42,21 +47,30 @@ _PENALTY_SHORTCUTS: dict[str, type[Penalty]] = {
 }
 
 
-def resolve_penalty(penalty: Penalty | str | None, lambda1: float | None) -> Penalty:
+def resolve_penalty(
+    penalty: Penalty | str | None,
+    lambda1: float | None,
+    penalty_features: str | list[str] | None = None,
+) -> Penalty:
     """Convert string shorthand / None to a Penalty object."""
     if penalty is None:
-        return GroupLasso(lambda1=lambda1)
+        return GroupLasso(lambda1=lambda1, features=penalty_features)
     if isinstance(penalty, str):
         if penalty not in _PENALTY_SHORTCUTS:
             raise ValueError(
                 f"Unknown penalty '{penalty}'. "
                 f"Use one of {list(_PENALTY_SHORTCUTS)} or pass a Penalty object."
             )
-        return _PENALTY_SHORTCUTS[penalty](lambda1=lambda1)
+        return _PENALTY_SHORTCUTS[penalty](lambda1=lambda1, features=penalty_features)
     if lambda1 is not None:
         raise ValueError(
             "Cannot set 'lambda1' when passing a Penalty object directly. "
             "Set lambda1 on the Penalty object instead."
+        )
+    if penalty_features is not None:
+        raise ValueError(
+            "Cannot set 'penalty_features' when passing a Penalty object directly. "
+            "Set features on the Penalty object instead."
         )
     return penalty
 
@@ -97,6 +111,7 @@ def init_model(
     penalty: Penalty | str | None = None,
     lambda1: float | None = None,
     lambda2: float = 0.1,
+    penalty_features: str | list[str] | None = None,
     tweedie_p: float | None = None,
     nb_theta: float | str | None = None,
     features: dict[str, FeatureSpec] | None = None,
@@ -106,7 +121,6 @@ def init_model(
     categorical_base: str = "most_exposed",
     standardize_numeric: bool = True,
     interactions: list[tuple[str, str]] | None = None,
-    anderson_memory: int = 0,
     active_set: bool = False,
     discrete: bool = False,
     n_bins: int | dict[str, int] = 256,
@@ -119,7 +133,7 @@ def init_model(
         )
     model.family = family
     model.link = link
-    model.penalty = resolve_penalty(penalty, lambda1)
+    model.penalty = resolve_penalty(penalty, lambda1, penalty_features)
     model.lambda2 = lambda2
     model.tweedie_p = tweedie_p
     model.nb_theta = nb_theta
@@ -128,7 +142,6 @@ def init_model(
     model._degree = degree
     model._categorical_base = categorical_base
     model._standardize_numeric = standardize_numeric
-    model._anderson_memory = anderson_memory
     model._active_set = active_set
     model._discrete = discrete
     model._n_bins = n_bins
@@ -146,6 +159,7 @@ def init_model(
     model._nb_profile_result = None
     model._tweedie_profile_result = None
     model._last_fit_meta: dict[str, Any] | None = None
+    model._monotone_repairs: dict = {}
 
     # Interaction support
     model._interaction_specs: dict[str, Any] = {}
@@ -192,8 +206,8 @@ def clone_without_features(
     else:
         lam1 = lambda1
 
-    # Create penalty of the same type
-    new_penalty = type(model.penalty)(lambda1=lam1)
+    new_penalty = copy.deepcopy(model.penalty)
+    new_penalty.lambda1 = lam1
 
     # Deep-copy specs so the new model doesn't share mutable state
     new_features = {n: copy.deepcopy(s) for n, s in keep_features.items()}
@@ -204,7 +218,6 @@ def clone_without_features(
         penalty=new_penalty,
         features=new_features,
         interactions=keep_interactions if keep_interactions else None,
-        anderson_memory=model._anderson_memory,
         active_set=model._active_set,
         discrete=model._discrete,
         n_bins=model._n_bins,
@@ -293,6 +306,7 @@ def model_build_design_matrix(
     model._distribution = result.distribution
     model._link = result.link
     model._groups = result.groups
+    validate_penalty_features(model.penalty, result.groups)
     model._dm = result.dm
     return result.y, result.exposure, result.offset
 
@@ -336,10 +350,15 @@ def compute_lambda_max(model, y, weights):
     n = model._dm.n
     lmax = 0.0
     for g in model._groups:
-        if not g.penalized:
+        if not penalty_targets_group(model.penalty, g):
             continue
         lmax = max(lmax, np.linalg.norm(grad[g.sl]) / g.weight)
     return lmax / n
+
+
+def model_has_lambda1_targets(model) -> bool:
+    """Whether the lambda1 penalty applies to any fitted group."""
+    return penalty_has_targets(model.penalty, model._groups)
 
 
 def rebuild_dm_with_lambdas(model, lambdas: dict[str, float], exposure: NDArray) -> DesignMatrix:
@@ -364,4 +383,5 @@ def predict(model, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
     eta = np.hstack(blocks) @ model.result.beta + model.result.intercept
     if offset is not None:
         eta = eta + np.asarray(offset, dtype=np.float64)
+    eta = stabilize_eta(eta, model._link)
     return clip_mu(model._link.inverse(eta), model._distribution)

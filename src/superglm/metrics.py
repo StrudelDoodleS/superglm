@@ -221,6 +221,7 @@ def build_coef_rows(
     lambda2: float | dict,
     n_obs: int,
     alpha: float = 0.05,
+    monotone_repairs: dict | None = None,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
 
@@ -329,6 +330,9 @@ def build_coef_rows(
             d["boundary"],
         )
 
+    # Monotone repair info
+    _mono_repairs = monotone_repairs or {}
+
     # Feature rows
     for g in groups:
         spec = specs.get(g.feature_name) or interaction_specs.get(g.feature_name)
@@ -338,6 +342,8 @@ def build_coef_rows(
 
         if isinstance(spec, _SplineBase):
             is_linear_subgroup = g.subgroup_type == "linear"
+            _mono_dir = getattr(spec, "monotone", None)
+            _mono_repaired = g.feature_name in _mono_repairs
             if active:
                 stat = float("nan")
                 p_val = float("nan")
@@ -395,6 +401,8 @@ def build_coef_rows(
                         spline_kind=s_kind,
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
+                        monotone=_mono_dir,
+                        monotone_repaired=_mono_repaired,
                     )
                 )
             else:
@@ -413,6 +421,8 @@ def build_coef_rows(
                         spline_kind=s_kind,
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
+                        monotone=_mono_dir,
+                        monotone_repaired=_mono_repaired,
                     )
                 )
 
@@ -754,11 +764,14 @@ class ModelMetrics:
         With offset: solves for b0 via Newton so that sum(w*(y-mu))=0
         where mu_i = link^{-1}(b0 + offset_i).
         """
-        from superglm.distributions import Binomial, clip_mu
+        from superglm.distributions import Binomial, Gaussian, clip_mu
+        from superglm.links import stabilize_eta
 
         y_bar = float(np.average(self._y, weights=self._weights))
         if isinstance(self._family, Binomial):
             y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
+        elif isinstance(self._family, Gaussian):
+            y_bar = float(y_bar)
         else:
             y_bar = max(y_bar, 1e-10)
 
@@ -770,9 +783,9 @@ class ModelMetrics:
             self._offset, weights=self._weights
         )
         for _ in range(25):
-            eta = b0 + self._offset
-            mu = clip_mu(self._link.inverse(np.clip(eta, -20, 20)), self._family)
-            dmu = self._link.deriv_inverse(np.clip(eta, -20, 20))
+            eta = stabilize_eta(b0 + self._offset, self._link)
+            mu = clip_mu(self._link.inverse(eta), self._family)
+            dmu = self._link.deriv_inverse(eta)
             score = np.sum(self._weights * (self._y - mu) * dmu / self._family.variance(mu))
             info = np.sum(self._weights * dmu**2 / self._family.variance(mu))
             step = score / max(info, 1e-10)
@@ -780,8 +793,8 @@ class ModelMetrics:
             if abs(step) < 1e-8:
                 break
 
-        eta = b0 + self._offset
-        return clip_mu(self._link.inverse(np.clip(eta, -20, 20)), self._family)
+        eta = stabilize_eta(b0 + self._offset, self._link)
+        return clip_mu(self._link.inverse(eta), self._family)
 
     @cached_property
     def null_log_likelihood(self) -> float:
@@ -888,7 +901,14 @@ class ModelMetrics:
         from scipy.stats import gamma as gamma_dist
         from scipy.stats import nbinom, norm, poisson
 
-        from superglm.distributions import Binomial, Gamma, NegativeBinomial, Poisson, Tweedie
+        from superglm.distributions import (
+            Binomial,
+            Gamma,
+            Gaussian,
+            NegativeBinomial,
+            Poisson,
+            Tweedie,
+        )
 
         y, mu = self._y, self._mu
         rng = np.random.default_rng(seed)
@@ -913,6 +933,8 @@ class ModelMetrics:
             shape = 1.0 / self.phi
             scale = mu * self.phi
             u = gamma_dist.cdf(y, a=shape, scale=scale)
+        elif isinstance(self._family, Gaussian):
+            u = norm.cdf(y, loc=mu, scale=np.sqrt(self.phi))
         elif isinstance(self._family, Tweedie):
             # Tweedie p in (1,2): compound Poisson-Gamma.
             # Y = sum_{j=1}^N X_j where N ~ Pois(lam), X_j ~ Gamma(alpha, scale).
@@ -1352,6 +1374,9 @@ class ModelMetrics:
             "deviance": self.deviance,
             "log_likelihood": self.log_likelihood,
             "aic": self.aic,
+            "aicc": self.aicc,
+            "bic": self.bic,
+            "ebic": self.ebic(),
             "converged": self._result.converged,
             "n_iter": self._result.n_iter,
         }

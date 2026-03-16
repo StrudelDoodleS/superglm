@@ -79,6 +79,37 @@ class Poisson:
         return float(np.sum(weights * (y * np.log(np.maximum(mu, 1e-300)) - mu - gammaln(y + 1))))
 
 
+class Gaussian:
+    """Gaussian distribution. V(mu) = 1."""
+
+    @property
+    def scale_known(self) -> bool:
+        return False
+
+    @property
+    def default_link(self) -> str:
+        return "identity"
+
+    def variance(self, mu: NDArray) -> NDArray:
+        """V(μ) = 1."""
+        return np.ones_like(mu)
+
+    def variance_derivative(self, mu: NDArray) -> NDArray:
+        """V'(μ) = 0."""
+        return np.zeros_like(mu)
+
+    def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
+        """Gaussian unit deviance: (y - μ)^2."""
+        return (y - mu) ** 2
+
+    def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
+        """Gaussian log-likelihood with dispersion φ = σ²."""
+        phi_safe = max(phi, 1e-300)
+        resid2 = (y - mu) ** 2
+        ll = -0.5 * (np.log(2 * np.pi * phi_safe) + resid2 / phi_safe)
+        return float(np.sum(weights * ll))
+
+
 class Gamma:
     """Gamma distribution. V(mu) = mu^2."""
 
@@ -253,6 +284,7 @@ class Tweedie:
 
 DISTRIBUTION_SHORTCUTS: dict[str, type] = {
     "poisson": Poisson,
+    "gaussian": Gaussian,
     "gamma": Gamma,
     "binomial": Binomial,
 }
@@ -277,7 +309,7 @@ def resolve_distribution(
             raise ValueError("NB distribution requires nb_theta=")
         return NegativeBinomial(theta=nb_theta)
     raise ValueError(
-        f"Unknown distribution '{family}'. Use 'poisson', 'gamma', 'binomial', "
+        f"Unknown distribution '{family}'. Use 'poisson', 'gaussian', 'gamma', 'binomial', "
         f"'tweedie', 'negative_binomial', or pass a Distribution object."
     )
 
@@ -307,11 +339,14 @@ def initial_mean(y: NDArray, weights: NDArray, family: Distribution) -> float:
 
     For positive-response families (Poisson, Gamma, NB, Tweedie), zeros in y
     are replaced with 0.1 before averaging to avoid log(0) in the initial
-    intercept.  For binomial, the raw weighted mean is clipped to (eps, 1-eps).
+    intercept. For binomial, the raw weighted mean is clipped to (eps, 1-eps).
+    For Gaussian, use the raw weighted mean with no positivity clipping.
     """
     if isinstance(family, Binomial):
         y_bar = float(np.average(y, weights=weights))
         return np.clip(y_bar, 1e-3, 1 - 1e-3)
+    if isinstance(family, Gaussian):
+        return float(np.average(y, weights=weights))
     # Positive-response families: guard against y=0 for log-link init
     y_safe = np.where(y > 0, y, 0.1)
     return max(float(np.average(y_safe, weights=weights)), 1e-10)
@@ -321,4 +356,6 @@ def clip_mu(mu: NDArray, family: Distribution) -> NDArray:
     """Clip predicted means to a valid range for the family."""
     if isinstance(family, Binomial):
         return np.clip(mu, 1e-7, 1 - 1e-7)
+    if isinstance(family, Gaussian):
+        return mu
     return np.clip(mu, 1e-7, 1e7)

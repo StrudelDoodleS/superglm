@@ -449,93 +449,6 @@ class TestBCDSolver:
         assert result.n_iter < 50
 
 
-class TestAndersonAcceleration:
-    """Tests for Anderson acceleration in the PIRLS solver."""
-
-    @pytest.fixture
-    def poisson_problem(self):
-        from superglm.links import LogLink
-
-        rng = np.random.default_rng(42)
-        n, p = 300, 8
-        X = rng.standard_normal((n, p))
-        beta_true = np.array([1.0, 0.5, 0.0, 0.0, -0.3, 0.0, 0.0, 0.2])
-        y = rng.poisson(np.exp(X @ beta_true)).astype(float)
-        y = np.maximum(y, 0.01)
-        weights = np.ones(n)
-        groups = [
-            GroupSlice("a", 0, 3, np.sqrt(3)),
-            GroupSlice("b", 3, 5, np.sqrt(2)),
-            GroupSlice("c", 5, 8, np.sqrt(3)),
-        ]
-        return X, y, weights, groups, Poisson(), LogLink()
-
-    def test_anderson_converges(self, poisson_problem):
-        """Anderson acceleration should converge to a solution."""
-        from superglm.solvers.pirls import fit_pirls
-
-        X, y, w, groups, family, link = poisson_problem
-        result = fit_pirls(
-            X,
-            y,
-            w,
-            family,
-            link,
-            groups,
-            GroupLasso(lambda1=0.05),
-            anderson_memory=5,
-        )
-        assert result.converged
-
-    def test_anderson_matches_baseline(self, poisson_problem):
-        """Anderson and non-Anderson should converge to the same solution."""
-        from superglm.solvers.pirls import fit_pirls
-
-        X, y, w, groups, family, link = poisson_problem
-        pen_args = dict(lambda1=0.05)
-
-        baseline = fit_pirls(
-            X,
-            y,
-            w,
-            family,
-            link,
-            groups,
-            GroupLasso(**pen_args),
-        )
-        anderson = fit_pirls(
-            X,
-            y,
-            w,
-            family,
-            link,
-            groups,
-            GroupLasso(**pen_args),
-            anderson_memory=5,
-        )
-        # Same solution (deviance should match closely)
-        assert anderson.deviance == pytest.approx(baseline.deviance, rel=1e-4)
-        np.testing.assert_allclose(anderson.beta, baseline.beta, atol=1e-3)
-
-    def test_anderson_memory_sizes(self, poisson_problem):
-        """Different memory sizes should all converge."""
-        from superglm.solvers.pirls import fit_pirls
-
-        X, y, w, groups, family, link = poisson_problem
-        for m in [1, 3, 5, 10]:
-            result = fit_pirls(
-                X,
-                y,
-                w,
-                family,
-                link,
-                groups,
-                GroupLasso(lambda1=0.05),
-                anderson_memory=m,
-            )
-            assert result.converged, f"anderson_memory={m} did not converge"
-
-
 class TestActiveSet:
     """Tests for active-set BCD optimization."""
 
@@ -602,34 +515,6 @@ class TestActiveSet:
         )
         assert active.deviance == pytest.approx(baseline.deviance, rel=1e-4)
         np.testing.assert_allclose(active.beta, baseline.beta, atol=1e-3)
-
-    def test_active_set_with_anderson(self, sparse_problem):
-        """Active-set + Anderson should converge and match baseline."""
-        from superglm.solvers.pirls import fit_pirls
-
-        X, y, w, groups, family, link = sparse_problem
-        baseline = fit_pirls(
-            X,
-            y,
-            w,
-            family,
-            link,
-            groups,
-            GroupLasso(lambda1=0.1),
-        )
-        combined = fit_pirls(
-            X,
-            y,
-            w,
-            family,
-            link,
-            groups,
-            GroupLasso(lambda1=0.1),
-            anderson_memory=5,
-            active_set=True,
-        )
-        assert combined.converged
-        assert combined.deviance == pytest.approx(baseline.deviance, rel=1e-4)
 
 
 # ── Knot governance ──────────────────────────────────────────────

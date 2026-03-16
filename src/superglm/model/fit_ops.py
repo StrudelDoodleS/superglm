@@ -13,7 +13,7 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
 )
-from superglm.links import Link
+from superglm.links import Link, stabilize_eta
 from superglm.reml_optimizer import (
     compute_dW_deta,
     optimize_direct_reml,
@@ -57,7 +57,7 @@ def _compute_fit_stats(
     phi: float,
 ) -> FitStats:
     """Compute scalar fit statistics from training arrays."""
-    from superglm.distributions import Binomial, clip_mu
+    from superglm.distributions import Binomial, Gaussian, clip_mu
 
     ll = distribution.log_likelihood(y, mu, weights, phi)
 
@@ -67,6 +67,8 @@ def _compute_fit_stats(
     y_bar = float(np.average(y, weights=weights))
     if isinstance(distribution, Binomial):
         y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
+    elif isinstance(distribution, Gaussian):
+        y_bar = float(y_bar)
     else:
         y_bar = max(y_bar, 1e-10)
 
@@ -75,9 +77,9 @@ def _compute_fit_stats(
     else:
         b0 = float(link.link(np.atleast_1d(y_bar))[0]) - float(np.average(offset, weights=weights))
         for _ in range(25):
-            eta_null = b0 + offset
-            mu_null = clip_mu(link.inverse(np.clip(eta_null, -20, 20)), distribution)
-            dmu = link.deriv_inverse(np.clip(eta_null, -20, 20))
+            eta_null = stabilize_eta(b0 + offset, link)
+            mu_null = clip_mu(link.inverse(eta_null), distribution)
+            dmu = link.deriv_inverse(eta_null)
             V = distribution.variance(mu_null)
             score = np.sum(weights * (y - mu_null) * dmu / V)
             info = np.sum(weights * dmu**2 / V)
@@ -85,8 +87,8 @@ def _compute_fit_stats(
             b0 += step
             if abs(step) < 1e-8:
                 break
-        eta_null = b0 + offset
-        null_mu = clip_mu(link.inverse(np.clip(eta_null, -20, 20)), distribution)
+        eta_null = stabilize_eta(b0 + offset, link)
+        null_mu = clip_mu(link.inverse(eta_null), distribution)
 
     null_ll = distribution.log_likelihood(y, null_mu, weights, phi)
     null_dev = float(np.sum(weights * distribution.deviance_unit(y, null_mu)))
@@ -125,7 +127,11 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
 
-    from superglm.model.base import compute_lambda_max, model_build_design_matrix
+    from superglm.model.base import (
+        compute_lambda_max,
+        model_build_design_matrix,
+        model_has_lambda1_targets,
+    )
 
     y, exposure, offset = model_build_design_matrix(model, X, y, exposure, offset)
 
@@ -142,6 +148,7 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
     # Auto-calibrate lambda1 if not set
     if model.penalty.lambda1 is None:
         model.penalty.lambda1 = compute_lambda_max(model, y, exposure) * 0.1
+    has_lambda1_targets = model_has_lambda1_targets(model)
 
     # Invalidate cached properties from previous fit
     model.__dict__.pop("_coef_covariance", None)
@@ -149,7 +156,9 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
     model.__dict__.pop("_group_edf", None)
 
     # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed)
-    if model.penalty.lambda1 is not None and model.penalty.lambda1 == 0:
+    if model.penalty.lambda1 is not None and (
+        model.penalty.lambda1 == 0 or not has_lambda1_targets
+    ):
         model._result, _ = fit_irls_direct(
             X=model._dm,
             y=y,
@@ -170,7 +179,6 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
             groups=model._groups,
             penalty=model.penalty,
             offset=offset,
-            anderson_memory=model._anderson_memory,
             active_set=model._active_set,
             lambda2=model.lambda2,
         )
@@ -191,6 +199,7 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
     eta = model._dm.matvec(model._result.beta) + model._result.intercept
     if offset is not None:
         eta = eta + offset
+    eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = _compute_fit_stats(
@@ -217,6 +226,7 @@ def fit_path(
     from superglm.model.base import (
         compute_lambda_max,
         model_build_design_matrix,
+        model_has_lambda1_targets,
         resolve_sample_weight_alias,
     )
 
@@ -229,6 +239,11 @@ def fit_path(
     model.__dict__.pop("_coef_covariance", None)
     model.__dict__.pop("_fit_active_info", None)
     model.__dict__.pop("_group_edf", None)
+    if not model_has_lambda1_targets(model):
+        raise ValueError(
+            "fit_path() requires at least one group targeted by the penalty. "
+            "Adjust penalty.features or use fit() / fit_reml() instead."
+        )
     lambda_max = compute_lambda_max(model, y, exposure)
 
     if lambda_seq is None:
@@ -261,7 +276,6 @@ def fit_path(
             offset=offset,
             beta_init=beta_warm,
             intercept_init=intercept_warm,
-            anderson_memory=model._anderson_memory,
             active_set=model._active_set,
             lambda2=model.lambda2,
         )
@@ -310,6 +324,7 @@ def fit_cv(
         auto_detect,
         compute_lambda_max,
         model_build_design_matrix,
+        model_has_lambda1_targets,
         resolve_sample_weight_alias,
     )
 
@@ -334,6 +349,11 @@ def fit_cv(
     model.__dict__.pop("_coef_covariance", None)
     model.__dict__.pop("_fit_active_info", None)
     model.__dict__.pop("_group_edf", None)
+    if not model_has_lambda1_targets(model):
+        raise ValueError(
+            "fit_cv() requires at least one group targeted by the penalty. "
+            "Adjust penalty.features or use fit() / fit_reml() instead."
+        )
 
     # Lambda sequence from full data
     lambda_max = compute_lambda_max(model, y, exposure)
@@ -359,7 +379,6 @@ def fit_cv(
         lambda_seq=lambda_seq,
         fold_indices=fold_indices,
         offset=offset,
-        anderson_memory=model._anderson_memory,
         active_set=model._active_set,
     )
 
@@ -579,7 +598,6 @@ def model_optimize_efs_reml(
         model._link,
         model._groups,
         model.penalty,
-        model._anderson_memory,
         model._active_set,
         y,
         exposure,
@@ -621,7 +639,6 @@ def model_run_reml_once(
         model._link,
         model._groups,
         model.penalty,
-        model._anderson_memory,
         model._active_set,
         y,
         exposure,
@@ -658,6 +675,7 @@ def fit_reml(
         auto_detect,
         compute_lambda_max,
         model_build_design_matrix,
+        model_has_lambda1_targets,
         resolve_sample_weight_alias,
     )
 
@@ -717,7 +735,6 @@ def fit_reml(
             groups=model._groups,
             penalty=model.penalty,
             offset=offset,
-            anderson_memory=model._anderson_memory,
             active_set=model._active_set,
             lambda2=model.lambda2,
         )
@@ -735,7 +752,9 @@ def fit_reml(
 
     # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed)
     offset_arr = offset if offset is not None else np.zeros(len(y))
-    use_direct = model.penalty.lambda1 is not None and model.penalty.lambda1 == 0
+    use_direct = model.penalty.lambda1 is not None and (
+        model.penalty.lambda1 == 0 or not model_has_lambda1_targets(model)
+    )
 
     if use_direct:
         best = model_optimize_direct_reml(
@@ -809,6 +828,7 @@ def fit_reml(
     eta = model._dm.matvec(model._result.beta) + model._result.intercept
     if offset is not None:
         eta = eta + offset
+    eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = _compute_fit_stats(

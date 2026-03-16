@@ -33,7 +33,7 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     _block_xtwx_rhs,
 )
-from superglm.links import Link
+from superglm.links import Link, stabilize_eta
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import GroupSlice
 
@@ -233,7 +233,7 @@ def fit_irls_direct(
     # Pre-compute initial eta/mu once — reused as the first iteration's
     # working quantities, then updated at the end of each iteration.
     # This eliminates one redundant matvec + link.inverse per iteration.
-    eta = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
+    eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
     mu = clip_mu(link.inverse(eta), family)
 
     for it in range(max_iter):
@@ -286,7 +286,7 @@ def fit_irls_direct(
         # Update eta/mu from new beta — reused as next iteration's working
         # quantities (no redundant matvec at the start of the loop).
         _t0 = time.perf_counter()
-        eta = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
+        eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
         mu = clip_mu(link.inverse(eta), family)
         dev = float(np.sum(weights * family.deviance_unit(y, mu)))
         _t_deviance += time.perf_counter() - _t0

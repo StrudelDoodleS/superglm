@@ -21,6 +21,8 @@ from numpy.typing import NDArray
 from scipy.optimize import minimize_scalar
 from scipy.special import wright_bessel
 
+from superglm.distributions import clip_mu
+from superglm.links import stabilize_eta
 from superglm.solvers.pirls import fit_pirls
 
 # ---------------------------------------------------------------------------
@@ -232,6 +234,45 @@ def estimate_phi(
     return numer / denom
 
 
+def _profile_phi(
+    y: NDArray,
+    mu: NDArray,
+    p: float,
+    *,
+    weights: NDArray | None = None,
+    df_resid: float | None = None,
+    phi_method: str = "pearson",
+) -> tuple[float, float]:
+    """Profile out phi and return ``(phi_hat, mean_nll)`` for fixed ``(mu, p)``."""
+    if phi_method == "pearson":
+        phi_hat = max(estimate_phi(y, mu, p, weights=weights, df_resid=df_resid), 1e-10)
+        ll = tweedie_logpdf(y, mu, phi_hat, p, weights=weights)
+        return phi_hat, float(-np.mean(ll))
+
+    if phi_method != "mle":
+        raise ValueError(
+            f"phi_method={phi_method!r} is not valid, expected one of ['mle', 'pearson']"
+        )
+
+    phi_init = max(estimate_phi(y, mu, p, weights=weights, df_resid=df_resid), 1e-10)
+    log_phi_init = float(np.log(phi_init))
+    log_lo = max(np.log(1e-12), log_phi_init - 8.0)
+    log_hi = min(np.log(1e12), log_phi_init + 8.0)
+
+    def objective(log_phi: float) -> float:
+        ll = tweedie_logpdf(y, mu, float(np.exp(log_phi)), p, weights=weights)
+        return float(-np.mean(ll))
+
+    opt = minimize_scalar(
+        objective,
+        bounds=(log_lo, log_hi),
+        method="bounded",
+        options={"xatol": 1e-3, "maxiter": 50},
+    )
+    phi_hat = float(np.exp(opt.x))
+    return phi_hat, float(opt.fun)
+
+
 # ---------------------------------------------------------------------------
 # Profile likelihood result
 # ---------------------------------------------------------------------------
@@ -392,6 +433,7 @@ def estimate_tweedie_p(
     maxiter: int = 30,
     verbose: bool = False,
     fit_mode: str = "fit",
+    phi_method: str = "pearson",
 ) -> TweedieProfileResult:
     """Estimate the Tweedie power parameter via profile likelihood.
 
@@ -429,6 +471,8 @@ def estimate_tweedie_p(
         Print progress.
     fit_mode : {"fit", "fit_reml"}
         Fitting regime for each candidate p evaluation.
+    phi_method : {"pearson", "mle"}
+        How to profile out ``phi`` at each candidate ``p``.
 
     Returns
     -------
@@ -447,6 +491,11 @@ def estimate_tweedie_p(
         raise ValueError(
             f"fit_mode={fit_mode!r} is not valid, expected one of {sorted(_VALID_FIT_MODES)}"
         )
+    _VALID_PHI_METHODS = {"pearson", "mle"}
+    if phi_method not in _VALID_PHI_METHODS:
+        raise ValueError(
+            f"phi_method={phi_method!r} is not valid, expected one of {sorted(_VALID_PHI_METHODS)}"
+        )
 
     if fit_mode == "fit_reml":
         return _estimate_tweedie_p_reml(
@@ -459,6 +508,7 @@ def estimate_tweedie_p(
             xatol=xatol,
             maxiter=maxiter,
             verbose=verbose,
+            phi_method=phi_method,
         )
 
     return _estimate_tweedie_p_fit(
@@ -471,6 +521,7 @@ def estimate_tweedie_p(
         xatol=xatol,
         maxiter=maxiter,
         verbose=verbose,
+        phi_method=phi_method,
     )
 
 
@@ -485,6 +536,7 @@ def _estimate_tweedie_p_fit(
     xatol,
     maxiter,
     verbose,
+    phi_method,
 ) -> TweedieProfileResult:
     """Profile p using fit_pirls (original path)."""
     from superglm.distributions import Tweedie
@@ -546,14 +598,18 @@ def _estimate_tweedie_p_fit(
             intercept_init=warm_intercept,
         )
 
-        eta = np.clip(dm.matvec(result.beta) + result.intercept + offset_arr, -20, 20)
-        mu = np.maximum(link.inverse(eta), 1e-10)
+        eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
+        mu = clip_mu(link.inverse(eta), dist)
         df_resid = max(len(y_arr) - float(result.effective_df), 1.0)
 
-        phi = max(estimate_phi(y_arr, mu, p, weights=w_arr, df_resid=df_resid), 1e-10)
-
-        ll = tweedie_logpdf(y_arr, mu, phi, p, weights=w_arr)
-        nll = -np.mean(ll)
+        phi, nll = _profile_phi(
+            y_arr,
+            mu,
+            p,
+            weights=w_arr,
+            df_resid=df_resid,
+            phi_method=phi_method,
+        )
 
         # Update warm starts for next evaluation
         warm_beta = result.beta
@@ -597,13 +653,20 @@ def _estimate_tweedie_p_fit(
             beta_init=warm_beta,
             intercept_init=warm_intercept,
         )
-        eta = np.clip(dm.matvec(final_result.beta) + final_result.intercept + offset_arr, -20, 20)
-        mu_final = np.maximum(link.inverse(eta), 1e-10)
+        eta = stabilize_eta(
+            dm.matvec(final_result.beta) + final_result.intercept + offset_arr, link
+        )
+        mu_final = clip_mu(link.inverse(eta), dist)
         edf_final = float(final_result.effective_df)
 
     df_resid_final = max(len(y_arr) - float(edf_final), 1.0)
-    phi_hat = max(
-        estimate_phi(y_arr, mu_final, p_hat, weights=w_arr, df_resid=df_resid_final), 1e-10
+    phi_hat, _ = _profile_phi(
+        y_arr,
+        mu_final,
+        p_hat,
+        weights=w_arr,
+        df_resid=df_resid_final,
+        phi_method=phi_method,
     )
 
     return TweedieProfileResult(
@@ -629,6 +692,7 @@ def _estimate_tweedie_p_reml(
     xatol,
     maxiter,
     verbose,
+    phi_method,
 ) -> TweedieProfileResult:
     """Profile p using fit_reml for each candidate."""
     y_np = np.asarray(y, dtype=np.float64)
@@ -652,10 +716,14 @@ def _estimate_tweedie_p_reml(
 
         mu = np.maximum(model.predict(X), 1e-10)
         df_resid = max(len(y_np) - float(model.result.effective_df), 1.0)
-        phi = max(estimate_phi(y_np, mu, p, weights=w_arr, df_resid=df_resid), 1e-10)
-
-        ll = tweedie_logpdf(y_np, mu, phi, p, weights=w_arr)
-        nll = -np.mean(ll)
+        phi, nll = _profile_phi(
+            y_np,
+            mu,
+            p,
+            weights=w_arr,
+            df_resid=df_resid,
+            phi_method=phi_method,
+        )
 
         last_p_eval = p
         last_mu = mu
@@ -686,7 +754,14 @@ def _estimate_tweedie_p_reml(
         last_edf = float(model.result.effective_df)
 
     df_resid_final = max(len(y_np) - float(last_edf), 1.0)
-    phi_hat = max(estimate_phi(y_np, last_mu, p_hat, weights=w_arr, df_resid=df_resid_final), 1e-10)
+    phi_hat, _ = _profile_phi(
+        y_np,
+        last_mu,
+        p_hat,
+        weights=w_arr,
+        df_resid=df_resid_final,
+        phi_method=phi_method,
+    )
 
     return TweedieProfileResult(
         p_hat=p_hat,

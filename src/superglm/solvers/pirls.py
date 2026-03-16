@@ -17,8 +17,8 @@ from superglm.group_matrix import (
     GroupMatrix,
     _block_xtwx,
 )
-from superglm.links import Link
-from superglm.penalties.base import Penalty
+from superglm.links import Link, stabilize_eta
+from superglm.penalties.base import Penalty, penalty_targets_group
 from superglm.types import GroupSlice
 
 logger = logging.getLogger(__name__)
@@ -63,48 +63,6 @@ def _compute_group_hessians(
     return L_groups, chol_groups
 
 
-class _AndersonAccelerator:
-    """Type-II Anderson acceleration for fixed-point iterations.
-
-    Stores the last m iterates and residuals, then finds the linear
-    combination that minimizes the residual norm.
-    """
-
-    def __init__(self, p: int, m: int = 5):
-        self.m = m
-        self._F_hist: list[NDArray] = []
-        self._X_hist: list[NDArray] = []
-        self._x_prev: NDArray | None = None
-
-    def step(self, x_new: NDArray) -> NDArray | None:
-        """Given x_{k+1} from BCD, return accelerated iterate or None."""
-        if self._x_prev is not None:
-            f = x_new - self._x_prev
-            self._F_hist.append(f)
-            self._X_hist.append(self._x_prev)
-            if len(self._F_hist) > self.m:
-                self._F_hist.pop(0)
-                self._X_hist.pop(0)
-
-        self._x_prev = x_new.copy()
-
-        k = len(self._F_hist)
-        if k < 2:
-            return None
-
-        F = np.column_stack(self._F_hist)
-        gram = F.T @ F
-        gram += np.eye(k) * 1e-10 * (np.trace(gram) + 1e-16)
-        try:
-            alpha = np.linalg.solve(gram, np.ones(k))
-            alpha /= alpha.sum()
-        except np.linalg.LinAlgError:
-            return None
-
-        X_arr = np.column_stack(self._X_hist)
-        return X_arr @ alpha + F @ alpha
-
-
 def _fit_pirls_inner(
     dm: DesignMatrix,
     y: NDArray,
@@ -119,7 +77,6 @@ def _fit_pirls_inner(
     max_iter_outer: int = 100,
     max_iter_inner: int = 5,
     tol: float = 1e-6,
-    anderson_memory: int = 0,
     active_set: bool = False,
     lambda2: float | dict[str, float] = 0.0,
 ) -> PIRLSResult:
@@ -149,8 +106,7 @@ def _fit_pirls_inner(
         t_outer_start = time.perf_counter()
 
         # Current predictions
-        eta = dm.matvec(beta) + intercept + offset
-        eta = np.clip(eta, -20, 20)
+        eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
         mu = clip_mu(link.inverse(eta), family)
 
         # Working weights and response (PIRLS)
@@ -167,9 +123,6 @@ def _fit_pirls_inner(
 
         # Initialize residual
         r = z - dm.matvec(beta) - intercept - offset
-
-        # Optional Anderson acceleration
-        aa = _AndersonAccelerator(p, anderson_memory) if anderson_memory > 0 else None
 
         # Active set: track which groups can be skipped.
         # A group is inactive if beta_g == 0 AND ||grad_g|| < lambda1 * w_g
@@ -218,6 +171,8 @@ def _fit_pirls_inner(
                 # Active set: check KKT for zeroed groups after the update
                 if active_set:
                     lam = penalty.lambda1 if penalty.lambda1 is not None else 0.0
+                    if not penalty_targets_group(penalty, g):
+                        lam = 0.0
                     if np.linalg.norm(bg_new) < 1e-12:
                         # Group is zero — check if gradient is below threshold
                         # Use the gradient *after* the update (recompute cheaply)
@@ -226,22 +181,6 @@ def _fit_pirls_inner(
                         group_active[gi] = np.linalg.norm(grad_after) >= kkt_thr
                     else:
                         group_active[gi] = True
-
-            # Optional Anderson acceleration
-            if aa is not None:
-                beta_acc = aa.step(beta)
-                if beta_acc is not None:
-                    for g, L_g in zip(groups, L_groups):
-                        beta_acc[g.sl] = penalty.prox_group(
-                            beta_acc[g.sl],
-                            g,
-                            1.0 / L_g,
-                        )
-                    beta = beta_acc
-                    r = z - dm.matvec(beta) - intercept - offset
-                    # Reset active set after acceleration (residual changed)
-                    if active_set:
-                        group_active = [True] * n_groups
 
             # Check inner convergence
             change = np.max(np.abs(beta - beta_before))
@@ -253,7 +192,7 @@ def _fit_pirls_inner(
         t_inner_total += time.perf_counter() - t_inner_start
 
         # Deviance for outer convergence
-        eta_new = np.clip(dm.matvec(beta) + intercept + offset, -20, 20)
+        eta_new = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
         mu_new = clip_mu(link.inverse(eta_new), family)
         dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
 
@@ -348,7 +287,7 @@ def _fit_pirls_inner(
             bg = beta[g.sl]
             norm_g = np.linalg.norm(bg)
             if norm_g > 1e-12:
-                if not g.penalized:
+                if not penalty_targets_group(penalty, g):
                     p_eff += g.size
                 else:
                     shrink = min(1.0, lam * g.weight / norm_g)
@@ -388,7 +327,6 @@ def fit_pirls(
     max_iter_outer: int = 100,
     max_iter_inner: int = 5,
     tol: float = 1e-6,
-    anderson_memory: int = 0,
     active_set: bool = False,
     lambda2: float | dict[str, float] = 0.0,
 ) -> PIRLSResult:
@@ -424,7 +362,6 @@ def fit_pirls(
         max_iter_outer,
         max_iter_inner,
         tol,
-        anderson_memory,
         active_set,
         lambda2=lambda2,
     )
@@ -448,7 +385,6 @@ def fit_pirls(
             max_iter_outer=max_iter_outer,
             max_iter_inner=max_iter_inner,
             tol=tol,
-            anderson_memory=anderson_memory,
             active_set=active_set,
             lambda2=lambda2,
         )

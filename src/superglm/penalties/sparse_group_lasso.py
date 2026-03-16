@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.penalties.base import Flavor
+from superglm.penalties.base import Flavor, normalize_penalty_features, penalty_targets_group
 from superglm.types import GroupSlice
 
 
@@ -31,14 +31,16 @@ class SparseGroupLasso:
         lambda1: float | None = None,
         alpha: float = 0.5,
         flavor: Flavor | None = None,
+        features: str | list[str] | None = None,
     ):
         self.lambda1 = lambda1
         self.alpha = alpha
         self.flavor = flavor
+        self.features = normalize_penalty_features(features)
 
     def prox_group(self, bg: NDArray, group: GroupSlice, step: float) -> NDArray:
         """L1 soft-threshold then group L2 prox for a single group."""
-        if not group.penalized:
+        if not penalty_targets_group(self, group):
             return bg
         lam = step * self.lambda1
 
@@ -65,7 +67,7 @@ class SparseGroupLasso:
         grp_val = 0.0
         l1_val = 0.0
         for g in groups:
-            if g.penalized:
+            if penalty_targets_group(self, g):
                 grp_val += g.weight * np.linalg.norm(beta[g.sl])
                 l1_val += np.sum(np.abs(beta[g.sl]))
         return self.lambda1 * ((1.0 - self.alpha) * grp_val + self.alpha * l1_val)

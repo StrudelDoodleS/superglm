@@ -11,6 +11,7 @@ from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.tweedie_profile import (
     TweedieProfileResult,
+    _profile_phi,
     estimate_phi,
     estimate_tweedie_p,
     generate_tweedie_cpg,
@@ -175,6 +176,16 @@ class TestEstimatePhi:
         phi_hat = estimate_phi(y, mu, p, weights=weights)
         np.testing.assert_allclose(phi_hat, phi_true, rtol=0.12)
 
+    def test_mle_phi_recovery(self):
+        rng = np.random.default_rng(456)
+        n = 20_000
+        mu = np.full(n, 10.0)
+        phi_true, p = 3.0, 1.6
+        y = generate_tweedie_cpg(n, mu=mu, phi=phi_true, p=p, rng=rng)
+
+        phi_hat, _ = _profile_phi(y, mu, p, phi_method="mle")
+        np.testing.assert_allclose(phi_hat, phi_true, rtol=0.12)
+
 
 # =====================================================================
 # TestProfileLikelihood
@@ -235,7 +246,8 @@ class TestProfileLikelihood:
         result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
 
-    def test_recovers_p_with_prior_weights(self):
+    @pytest.mark.parametrize("phi_method", ["pearson", "mle"])
+    def test_recovers_p_with_prior_weights(self, phi_method):
         """Profile likelihood should recover p when exposure acts through phi / w."""
         rng = np.random.default_rng(321)
         p_true = 1.6
@@ -253,7 +265,9 @@ class TestProfileLikelihood:
             features={"x1": Numeric()},
         )
 
-        result = estimate_tweedie_p(model, X, y, exposure=exposure, p_bounds=(1.1, 1.9))
+        result = estimate_tweedie_p(
+            model, X, y, exposure=exposure, p_bounds=(1.1, 1.9), phi_method=phi_method
+        )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
         np.testing.assert_allclose(result.phi_hat, phi_true, rtol=0.2)
 
@@ -441,6 +455,19 @@ class TestEstimatePFitMode:
         assert model._result is not None
         assert model._last_fit_meta["method"] == "fit"
 
+    def test_fit_mode_fit_recovers_p_mle_phi(self):
+        """fit_mode='fit' should also recover p with phi_method='mle'."""
+        X, y, p_true = _tweedie_data(n=2_000, seed=7)
+        model = SuperGLM(
+            family="tweedie",
+            lambda1=0,
+            features={"x1": Numeric()},
+        )
+        result = model.estimate_p(X, y, fit_mode="fit", phi_method="mle")
+        assert isinstance(result, TweedieProfileResult)
+        np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
+        assert model._last_fit_meta["method"] == "fit"
+
     def test_fit_mode_reml_recovers_p(self):
         """fit_mode='reml' should recover p using REML fits."""
         X, y, p_true = _tweedie_data()
@@ -456,6 +483,19 @@ class TestEstimatePFitMode:
         assert model.tweedie_p == result.p_hat
         assert model._last_fit_meta["method"] == "fit_reml"
         assert hasattr(model, "_reml_result")
+
+    def test_fit_mode_reml_recovers_p_mle_phi(self):
+        """fit_mode='reml' should support phi_method='mle'."""
+        X, y, p_true = _tweedie_data(n=1_500, seed=11)
+        model = SuperGLM(
+            family="tweedie",
+            lambda1=0,
+            features={"x1": Spline(n_knots=6, penalty="ssp")},
+        )
+        result = model.estimate_p(X, y, fit_mode="reml", phi_method="mle")
+        assert isinstance(result, TweedieProfileResult)
+        np.testing.assert_allclose(result.p_hat, p_true, atol=0.25)
+        assert model._last_fit_meta["method"] == "fit_reml"
 
     def test_fit_mode_inherit_from_fit(self):
         """After fit(), inherit should use the fit path."""
@@ -507,6 +547,13 @@ class TestEstimatePFitMode:
         model = SuperGLM(family="tweedie", lambda1=0, features={"x1": Numeric()})
         with pytest.raises(ValueError, match="fit_mode"):
             model.estimate_p(X, y, fit_mode="bogus")
+
+    def test_invalid_phi_method_raises(self):
+        """Invalid phi_method should raise immediately."""
+        X, y, _ = _tweedie_data()
+        model = SuperGLM(family="tweedie", lambda1=0, features={"x1": Numeric()})
+        with pytest.raises(ValueError, match="phi_method"):
+            model.estimate_p(X, y, phi_method="bogus")
 
     def test_wrong_family_raises(self):
         """Non-Tweedie model should raise immediately."""
