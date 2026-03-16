@@ -183,3 +183,157 @@ class TestRegressorPenaltyAliases:
         with pytest.raises(ValueError, match="spline_penalty.*lambda2"):
             m = SuperGLMRegressor(spline_penalty=0.2, lambda2=0.7)
             m.fit(pd.DataFrame({"x": [1, 2]}), np.array([1.0, 2.0]))
+
+
+# ── ndarray input ─────────────────────────────────────────────────
+
+
+class TestNdarrayInput:
+    @pytest.fixture
+    def array_data(self):
+        rng = np.random.default_rng(42)
+        n = 200
+        X = rng.standard_normal((n, 3))
+        y = rng.poisson(np.exp(0.5 * X[:, 0])).astype(float)
+        return X, y
+
+    def test_ndarray_with_feature_names(self, array_data):
+        X, y = array_data
+        m = SuperGLMRegressor(
+            selection_penalty=0.01,
+            feature_names=["a", "b", "c"],
+            spline_features=["a"],
+        )
+        m.fit(X, y)
+        preds = m.predict(X)
+        assert preds.shape == (len(X),)
+        assert list(m.feature_names_in_) == ["a", "b", "c"]
+
+    def test_ndarray_synthetic_names(self, array_data):
+        X, y = array_data
+        m = SuperGLMRegressor(selection_penalty=0.01)
+        m.fit(X, y)
+        assert list(m.feature_names_in_) == ["x0", "x1", "x2"]
+
+    def test_ndarray_integer_spline_features(self, array_data):
+        X, y = array_data
+        m = SuperGLMRegressor(selection_penalty=0.01, spline_features=[0])
+        m.fit(X, y)
+        assert "Spline" in m._feature_types["x0"]
+        preds = m.predict(X)
+        assert preds.shape == (len(X),)
+
+    def test_ndarray_string_ref_without_feature_names_raises(self, array_data):
+        X, y = array_data
+        m = SuperGLMRegressor(spline_features=["age"])
+        with pytest.raises(ValueError, match="string ref.*ndarray"):
+            m.fit(X, y)
+
+    def test_ndarray_explicit_categorical_numeric(self):
+        rng = np.random.default_rng(42)
+        n = 200
+        # col 0: numeric, col 1: category-like ints, col 2: numeric
+        X = np.column_stack(
+            [
+                rng.standard_normal(n),
+                rng.choice([1, 2, 3], n),
+                rng.standard_normal(n),
+            ]
+        )
+        y = rng.poisson(np.exp(0.3 * X[:, 0])).astype(float)
+        m = SuperGLMRegressor(
+            feature_names=["x", "cat", "z"],
+            categorical_features=["cat"],
+            numeric_features=["x"],
+            # z is unspecified → defaults to numeric
+        )
+        m.fit(X, y)
+        assert "Categorical" in m._feature_types["cat"]
+        assert "Numeric" in m._feature_types["x"]
+        assert "Numeric" in m._feature_types["z"]
+
+    def test_ndarray_offset_by_index(self):
+        rng = np.random.default_rng(42)
+        n = 200
+        X = np.column_stack(
+            [
+                rng.standard_normal(n),
+                rng.standard_normal(n),
+                rng.uniform(0.5, 1.5, n),  # offset col
+            ]
+        )
+        y = rng.poisson(np.exp(0.3 * X[:, 0])).astype(float)
+        m = SuperGLMRegressor(selection_penalty=0.01, offset=2)
+        m.fit(X, y)
+        assert m.n_features_in_ == 2  # offset excluded
+
+    def test_ndarray_predict_shape_matches(self, array_data):
+        X, y = array_data
+        m = SuperGLMRegressor(selection_penalty=0.01)
+        m.fit(X, y)
+        preds = m.predict(X)
+        assert preds.shape == y.shape
+
+    def test_feature_names_length_mismatch_raises(self, array_data):
+        X, y = array_data
+        m = SuperGLMRegressor(feature_names=["a", "b"])
+        with pytest.raises(ValueError, match="feature_names has 2.*3 columns"):
+            m.fit(X, y)
+
+
+# ── Penalty default behaviour ─────────────────────────────────────
+
+
+class TestPenaltyDefault:
+    def test_default_penalty_is_none(self):
+        m = SuperGLMRegressor()
+        assert m.penalty is None
+
+    def test_no_penalty_fits(self, sample_data):
+        """penalty=None with no selection_penalty → unpenalised fit."""
+        X, y, w = sample_data
+        m = SuperGLMRegressor()
+        m.fit(X, y, sample_weight=w)
+        assert m.coef_ is not None
+
+    def test_selection_penalty_auto_upgrades(self, sample_data):
+        """Positive selection_penalty with penalty=None → group_lasso."""
+        X, y, w = sample_data
+        m = SuperGLMRegressor(selection_penalty=0.05)
+        m.fit(X, y, sample_weight=w)
+        assert m._model.penalty.lambda1 == 0.05
+
+    def test_explicit_penalty_respected(self, sample_data):
+        X, y, w = sample_data
+        m = SuperGLMRegressor(penalty="ridge", selection_penalty=0.05)
+        m.fit(X, y, sample_weight=w)
+        assert type(m._model.penalty).__name__ == "Ridge"
+
+
+# ── sklearn clone / get_params ────────────────────────────────────
+
+
+class TestSklearnClone:
+    def test_clone(self, sample_data):
+        from sklearn.base import clone
+
+        m = SuperGLMRegressor(
+            selection_penalty=0.05,
+            spline_features=["age"],
+            feature_names=None,
+        )
+        m2 = clone(m)
+        params1 = m.get_params()
+        params2 = m2.get_params()
+        assert params1 == params2
+
+    def test_get_params_includes_new_fields(self):
+        m = SuperGLMRegressor(
+            categorical_features=["a"],
+            numeric_features=["b"],
+            feature_names=["a", "b", "c"],
+        )
+        p = m.get_params()
+        assert p["categorical_features"] == ["a"]
+        assert p["numeric_features"] == ["b"]
+        assert p["feature_names"] == ["a", "b", "c"]
