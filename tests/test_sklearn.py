@@ -252,6 +252,37 @@ class TestNdarrayInput:
         assert "Numeric" in m._feature_types["x"]
         assert "Numeric" in m._feature_types["z"]
 
+    def test_named_ndarray_unspecified_stays_numeric(self):
+        """Regression: named ndarray with categorical_features must not
+        auto-detect unspecified columns from DataFrame dtype.
+
+        When _normalize_X converts an ndarray to a DataFrame, the resulting
+        dtypes are artefacts of the conversion (e.g. all-float → float64,
+        mixed-type → object).  Only real DataFrames should use dtype
+        inference for unspecified columns.
+        """
+        rng = np.random.default_rng(42)
+        n = 200
+        # All float — col 1 is integer-coded categorical
+        X = np.column_stack(
+            [
+                rng.standard_normal(n),
+                rng.choice([1.0, 2.0, 3.0], n),
+                rng.standard_normal(n),
+            ]
+        )
+        y = rng.poisson(1.0, n).astype(float)
+        m = SuperGLMRegressor(
+            feature_names=["x", "cat", "z"],
+            categorical_features=["cat"],
+            selection_penalty=0.01,
+        )
+        m.fit(X, y)
+        assert "Categorical" in m._feature_types["cat"]
+        # z is unspecified — must default to Numeric (ndarray contract)
+        assert "Numeric" in m._feature_types["x"]
+        assert "Numeric" in m._feature_types["z"]
+
     def test_ndarray_offset_by_index(self):
         rng = np.random.default_rng(42)
         n = 200

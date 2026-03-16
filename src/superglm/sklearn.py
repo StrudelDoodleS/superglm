@@ -348,6 +348,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         sample_weight: NDArray | None = None,
     ) -> SuperGLMRegressor:
         # ── Normalise inputs ──────────────────────────────────────
+        input_is_dataframe = isinstance(X, pd.DataFrame)
         X_df, columns, synthetic = _normalize_X(
             X,
             feature_names=self.feature_names,
@@ -418,7 +419,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
             cat_base,
             self.standardize_numeric,
             force_explicit=force_explicit,
-            X_df=X_df if not synthetic else None,
+            X_df=X_df if input_is_dataframe else None,
         )
 
         # Build and fit core model
@@ -591,6 +592,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         from superglm.distributions import Binomial, validate_response
 
         # ── Normalise inputs ──────────────────────────────────────
+        input_is_dataframe = isinstance(X, pd.DataFrame)
         X_df, columns, synthetic = _normalize_X(
             X,
             feature_names=self.feature_names,
@@ -668,7 +670,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
             cat_base,
             self.standardize_numeric,
             force_explicit=force_explicit,
-            X_df=X_df if not synthetic else None,
+            X_df=X_df if input_is_dataframe else None,
         )
 
         # Build and fit core model
