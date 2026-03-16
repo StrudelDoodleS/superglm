@@ -33,6 +33,7 @@ sklearn-compatible API:
     model.fit(X, y, sample_weight=exposure)
 """
 
+from superglm.constraints import MonotoneRepairer, MonotoneRepairResult
 from superglm.cv import CVResult
 from superglm.davies import psum_chisq, satterthwaite
 from superglm.diagnostics import SplineRedundancyReport
@@ -152,6 +153,8 @@ __all__ = [
     "TermInference",
     "InteractionInference",
     "SplineMetadata",
+    "MonotoneRepairResult",
+    "MonotoneRepairer",
     "SplineRedundancyReport",
 ]
 __version__ = "0.1.0"
