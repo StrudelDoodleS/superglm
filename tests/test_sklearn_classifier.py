@@ -161,3 +161,24 @@ class TestClassifierPenaltyAliases:
         with pytest.raises(ValueError, match="spline_penalty.*lambda2"):
             clf = SuperGLMClassifier(spline_penalty=0.2, lambda2=0.7)
             clf.fit(X, y)
+
+
+class TestClassifierNdarrayInput:
+    def test_ndarray_fit_predict(self, binary_data):
+        X, y = binary_data
+        X_arr = X[["x1"]].values  # numeric only
+        clf = SuperGLMClassifier(lambda1=0)
+        clf.fit(X_arr, y)
+        preds = clf.predict(X_arr)
+        assert set(np.unique(preds)).issubset({0, 1})
+
+    def test_ndarray_with_feature_names(self, binary_data):
+        X, y = binary_data
+        X_arr = X[["x1"]].values
+        clf = SuperGLMClassifier(lambda1=0, feature_names=["signal"])
+        clf.fit(X_arr, y)
+        assert list(clf.feature_names_in_) == ["signal"]
+
+    def test_penalty_default_is_none(self):
+        clf = SuperGLMClassifier()
+        assert clf.penalty is None
