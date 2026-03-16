@@ -337,3 +337,77 @@ class TestSklearnClone:
         assert p["categorical_features"] == ["a"]
         assert p["numeric_features"] == ["b"]
         assert p["feature_names"] == ["a", "b", "c"]
+
+
+# ── Bug regression tests ────────────────────────────────────────
+
+
+class TestDataFrameDtypeAutoDetect:
+    """Regression: specifying categorical_features on a DataFrame must
+    not disable dtype auto-detection for unspecified string columns."""
+
+    def test_partial_categorical_preserves_auto_detect(self):
+        rng = np.random.default_rng(42)
+        n = 200
+        X = pd.DataFrame(
+            {
+                "x": rng.standard_normal(n),
+                "cat1": rng.choice(["A", "B"], n),
+                "cat2": rng.choice(["X", "Y", "Z"], n),
+            }
+        )
+        y = rng.poisson(1.0, n).astype(float)
+        # Only declare cat1 explicitly — cat2 should still be auto-detected
+        m = SuperGLMRegressor(categorical_features=["cat1"], selection_penalty=0.01)
+        m.fit(X, y)
+        assert "Categorical" in m._feature_types["cat1"]
+        assert "Categorical" in m._feature_types["cat2"]
+        assert "Numeric" in m._feature_types["x"]
+
+    def test_partial_numeric_preserves_auto_detect(self):
+        rng = np.random.default_rng(42)
+        n = 200
+        X = pd.DataFrame(
+            {
+                "x": rng.standard_normal(n),
+                "region": rng.choice(["A", "B"], n),
+                "z": rng.standard_normal(n),
+            }
+        )
+        y = rng.poisson(1.0, n).astype(float)
+        # Only declare x explicitly — region should still auto-detect as categorical
+        m = SuperGLMRegressor(numeric_features=["x"], selection_penalty=0.01)
+        m.fit(X, y)
+        assert "Categorical" in m._feature_types["region"]
+        assert "Numeric" in m._feature_types["x"]
+        assert "Numeric" in m._feature_types["z"]
+
+
+class TestSparseMatrixInput:
+    """Regression: sparse matrix input should be densified, not crash."""
+
+    def test_sparse_csr_fit_predict(self):
+        import scipy.sparse
+
+        rng = np.random.default_rng(42)
+        n = 200
+        X_dense = rng.standard_normal((n, 3))
+        X_sparse = scipy.sparse.csr_matrix(X_dense)
+        y = rng.poisson(np.exp(0.3 * X_dense[:, 0])).astype(float)
+        m = SuperGLMRegressor(selection_penalty=0.01)
+        m.fit(X_sparse, y)
+        preds = m.predict(X_sparse)
+        assert preds.shape == (n,)
+
+    def test_sparse_csc_fit_predict(self):
+        import scipy.sparse
+
+        rng = np.random.default_rng(42)
+        n = 200
+        X_dense = rng.standard_normal((n, 3))
+        X_sparse = scipy.sparse.csc_matrix(X_dense)
+        y = rng.poisson(np.exp(0.3 * X_dense[:, 0])).astype(float)
+        m = SuperGLMRegressor(selection_penalty=0.01)
+        m.fit(X_sparse, y)
+        preds = m.predict(X_sparse)
+        assert preds.shape == (n,)

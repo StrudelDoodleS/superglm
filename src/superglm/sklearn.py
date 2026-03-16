@@ -53,6 +53,12 @@ def _normalize_X(
         df = X.copy() if fitting else X
         return df, list(df.columns), False
 
+    # Densify sparse matrices (e.g. from ColumnTransformer)
+    import scipy.sparse
+
+    if scipy.sparse.issparse(X):
+        X = X.toarray()
+
     arr = np.asarray(X)
     if arr.ndim == 1:
         arr = arr.reshape(-1, 1)
@@ -192,14 +198,15 @@ def _build_features_or_splines(
     standardize_numeric: bool,
     *,
     force_explicit: bool,
+    X_df: pd.DataFrame | None = None,
 ) -> tuple[dict | None, list[str] | None]:
     """Build an explicit ``features`` dict or fall back to auto-detect.
 
     Returns ``(features_dict, splines_list)``.  Exactly one is non-None.
     When *force_explicit* is True (ndarray input or user provided explicit
     ``categorical_features`` / ``numeric_features``), all columns are
-    mapped to feature specs.  Otherwise, auto-detect mode is used and only
-    ``splines_list`` is populated.
+    mapped to feature specs.  Unspecified columns in DataFrame mode are
+    auto-detected from dtype; in ndarray mode they default to Numeric.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
@@ -233,8 +240,16 @@ def _build_features_or_splines(
         features[name] = BasisSpline(n_knots=nk_list[i], degree=degree)
     for name in cat_list:
         features[name] = Categorical(base=cat_base)
-    for name in num_list + unspecified:
+    for name in num_list:
         features[name] = Numeric(standardize=standardize_numeric)
+
+    # Unspecified columns: auto-detect from dtype when DataFrame is
+    # available, otherwise default to Numeric (ndarray mode).
+    for name in unspecified:
+        if X_df is not None and X_df[name].dtype.kind in ("O", "S", "U"):
+            features[name] = Categorical(base=cat_base)
+        else:
+            features[name] = Numeric(standardize=standardize_numeric)
 
     return features, None
 
@@ -403,6 +418,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
             cat_base,
             self.standardize_numeric,
             force_explicit=force_explicit,
+            X_df=X_df if not synthetic else None,
         )
 
         # Build and fit core model
@@ -652,6 +668,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
             cat_base,
             self.standardize_numeric,
             force_explicit=force_explicit,
+            X_df=X_df if not synthetic else None,
         )
 
         # Build and fit core model
