@@ -8,7 +8,7 @@ from superglm import SuperGLM
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
-from superglm.group_matrix import DiscretizedSSPGroupMatrix
+from superglm.group_matrix import DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix
 
 
 @pytest.fixture
@@ -708,3 +708,96 @@ class TestDiscretizedTensorInteraction:
             "age:bm:bilinear",
             "age:bm:wiggly",
         ]
+
+    def test_tensor_uses_discretized_tensor_group_matrix(self, tensor_interaction_data):
+        """Discrete tensor interaction must use DiscretizedTensorGroupMatrix subclass."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit(X, y)
+        gm_inter = model._dm.group_matrices[2]
+        assert isinstance(gm_inter, DiscretizedTensorGroupMatrix)
+        assert hasattr(gm_inter, "B1_unique_t")
+        assert hasattr(gm_inter, "B2_unique_t")
+        assert hasattr(gm_inter, "idx1")
+        assert hasattr(gm_inter, "idx2")
+        assert hasattr(gm_inter, "tensor_id")
+
+    def test_decomposed_tensor_shares_tensor_id(self, tensor_interaction_data):
+        """Decomposed discrete tensor subgroups must share the same tensor_id."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+        )
+        model._add_interaction("age", "bm", decompose=True)
+        model.fit(X, y)
+        tensor_gms = [
+            gm
+            for gm, g in zip(model._dm.group_matrices, model._groups)
+            if g.feature_name == "age:bm"
+        ]
+        assert len(tensor_gms) == 2
+        assert all(isinstance(gm, DiscretizedTensorGroupMatrix) for gm in tensor_gms)
+        assert tensor_gms[0].tensor_id == tensor_gms[1].tensor_id
+
+    def test_rebuild_design_matrix_preserves_tensor_type(self, tensor_interaction_data):
+        """rebuild_design_matrix_with_lambdas must preserve DiscretizedTensorGroupMatrix."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit_reml(X, y, max_reml_iter=3)
+
+        # After REML, the DM was rebuilt with updated lambdas
+        gm_inter = model._dm.group_matrices[2]
+        assert isinstance(gm_inter, DiscretizedTensorGroupMatrix)
+        assert gm_inter.B1_unique_t is not None
+        assert gm_inter.B2_unique_t is not None
+        assert gm_inter.idx1 is not None
+        assert gm_inter.idx2 is not None
+
+    def test_build_discrete_returns_dataclass(self):
+        """TensorInteraction.build_discrete() must return DiscreteTensorBuildResult."""
+        from superglm.features.interaction import TensorInteraction
+        from superglm.types import DiscreteTensorBuildResult
+
+        rng = np.random.default_rng(42)
+        n = 200
+        x1 = rng.uniform(0, 10, n)
+        x2 = rng.uniform(0, 10, n)
+        spec1 = Spline(n_knots=6, penalty="ssp")
+        spec2 = Spline(n_knots=5, penalty="ssp")
+        spec1.build(x1)
+        spec2.build(x2)
+
+        ti = TensorInteraction("s1", "s2")
+        result = ti.build_discrete(x1, x2, {"s1": spec1, "s2": spec2}, (64, 48))
+
+        assert isinstance(result, DiscreteTensorBuildResult)
+        assert result.B_joint.ndim == 2
+        assert result.pair_idx.shape == (n,)
+        assert result.B1_unique.ndim == 2
+        assert result.B2_unique.ndim == 2
+        assert result.idx1.shape == (n,)
+        assert result.idx2.shape == (n,)
