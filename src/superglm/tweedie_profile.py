@@ -450,7 +450,7 @@ def estimate_tweedie_p(
     ----------
     model : SuperGLM
         A configured but *unfitted* model with features already added.
-        Must have family="tweedie" or a Tweedie distribution instance.
+        Must have a Tweedie family (e.g. ``families.tweedie(p=1.5)``).
     X : DataFrame
         Feature matrix.
     y : array-like
@@ -482,9 +482,11 @@ def estimate_tweedie_p(
 
     # Validate family
     family = model.family
-    is_tweedie = (isinstance(family, str) and family == "tweedie") or isinstance(family, Tweedie)
-    if not is_tweedie:
-        raise ValueError(f"estimate_tweedie_p requires family='tweedie', got {family!r}")
+    if not isinstance(family, Tweedie):
+        raise ValueError(
+            f"estimate_tweedie_p requires a Tweedie family, got {family!r}. "
+            "Use families.tweedie(p=...) to create one."
+        )
 
     _VALID_FIT_MODES = {"fit", "fit_reml"}
     if fit_mode not in _VALID_FIT_MODES:
@@ -549,10 +551,10 @@ def _estimate_tweedie_p_fit(
 
     # Set a temporary p so _build_design_matrix can resolve the distribution.
     # The design matrix itself doesn't depend on p at all.
-    saved_p = model.tweedie_p
-    model.tweedie_p = 1.5  # midpoint, any valid value works
+    saved_family = model.family
+    model.family = Tweedie(p=1.5)  # midpoint, any valid value works
     y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, exposure, offset)
-    model.tweedie_p = saved_p
+    model.family = saved_family
 
     # Calibrate lambda1 once if not already set
     if model.penalty.lambda1 is None:
@@ -695,6 +697,8 @@ def _estimate_tweedie_p_reml(
     phi_method,
 ) -> TweedieProfileResult:
     """Profile p using fit_reml for each candidate."""
+    from superglm.distributions import Tweedie
+
     y_np = np.asarray(y, dtype=np.float64)
     w_arr = np.asarray(exposure, dtype=np.float64) if exposure is not None else np.ones(len(y_np))
 
@@ -711,7 +715,7 @@ def _estimate_tweedie_p_reml(
             return cache[key]
 
         # Set p and refit via REML
-        model.tweedie_p = p
+        model.family = Tweedie(p=p)
         model.fit_reml(X, y, exposure=exposure, offset=offset)
 
         mu = np.maximum(model.predict(X), 1e-10)
@@ -748,7 +752,7 @@ def _estimate_tweedie_p_reml(
 
     # Ensure we have mu at p_hat for phi
     if last_p_eval is None or round(last_p_eval, 6) != p_hat:
-        model.tweedie_p = p_hat
+        model.family = Tweedie(p=p_hat)
         model.fit_reml(X, y, exposure=exposure, offset=offset)
         last_mu = np.maximum(model.predict(X), 1e-10)
         last_edf = float(model.result.effective_df)

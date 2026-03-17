@@ -157,7 +157,7 @@ class InteractionInference:
 
     # For numeric×numeric: single product coefficient
     relativity_per_unit_unit: float | None = None
-    coef_original: float | None = None
+    coef: float | None = None
 
 
 # ── Covariance ────────────────────────────────────────────────────
@@ -284,10 +284,7 @@ def feature_se_from_cov(
         return se_all
 
     elif isinstance(spec, Numeric):
-        se_transformed = np.sqrt(max(Cov_g[0, 0], 0.0))
-        if spec.standardize:
-            return np.array([se_transformed / spec._std])
-        return np.array([se_transformed])
+        return np.array([np.sqrt(max(Cov_g[0, 0], 0.0))])
 
     else:
         return np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
@@ -592,7 +589,7 @@ def relativities(
 
         elif "relativity_per_unit_unit" in raw:
             # NumericInteraction: single product coefficient
-            b_orig = raw["coef_original"]
+            b_orig = raw["coef"]
             df = pd.DataFrame(
                 {
                     "label": ["per_unit_unit"],
@@ -1247,7 +1244,7 @@ def _interaction_inference(
             kind="numeric",
             active=active,
             relativity_per_unit_unit=raw["relativity_per_unit_unit"],
-            coef_original=raw["coef_original"],
+            coef=raw["coef"],
         )
 
     # Fallback (e.g. PolynomialInteraction 2D surface)

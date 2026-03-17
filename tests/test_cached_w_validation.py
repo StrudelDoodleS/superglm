@@ -7,7 +7,7 @@ Four test groups:
 4. Large-n stability smoke
 
 These tests ensure the fast cached-W path (used when discrete=True,
-lambda1=0) is trustworthy before merge.
+selection_penalty=0) is trustworthy before merge.
 """
 
 import numpy as np
@@ -80,7 +80,7 @@ _MTPL2_FEATURES = {
 
 
 def _fit_reml(family, features, discrete, df, y, w, **kwargs):
-    model = SuperGLM(family=family, lambda1=0, features=features, discrete=discrete)
+    model = SuperGLM(family=family, selection_penalty=0, features=features, discrete=discrete)
     model.fit_reml(df, y, exposure=w, max_reml_iter=30, **kwargs)
     return model
 
@@ -185,7 +185,9 @@ class TestRestartRobustness:
         assert large._reml_result.converged
 
         # Restart from returned lambdas
-        restart_model = SuperGLM(family=family, lambda1=0, features=_SPLINE_FEATURES, discrete=True)
+        restart_model = SuperGLM(
+            family=family, selection_penalty=0, features=_SPLINE_FEATURES, discrete=True
+        )
         # Seed the initial lambdas from baseline result
         baseline_lam = baseline._reml_lambdas
         avg_lam = float(np.mean(list(baseline_lam.values())))
@@ -249,7 +251,9 @@ class TestCachedWSensitivity:
             ("every_2", 2),
             ("default", 30),
         ]:
-            model = SuperGLM(family=family, lambda1=0, features=_SPLINE_FEATURES, discrete=True)
+            model = SuperGLM(
+                family=family, selection_penalty=0, features=_SPLINE_FEATURES, discrete=True
+            )
             model._max_analytical_per_w = max_anal
             model.fit_reml(df, y, exposure=w, max_reml_iter=50)
             assert model._reml_result.converged, f"{label} did not converge"
@@ -300,13 +304,17 @@ class TestLargeNStability:
         df, y, w = _make_mtpl2_style_data(50000)
 
         # First fit
-        m1 = SuperGLM(family="poisson", lambda1=0, features=_MTPL2_FEATURES, discrete=True)
+        m1 = SuperGLM(
+            family="poisson", selection_penalty=0, features=_MTPL2_FEATURES, discrete=True
+        )
         m1.fit_reml(df, y, exposure=w, max_reml_iter=30)
         assert m1._reml_result.converged
 
         # Second fit starting from returned lambdas
         avg_lam = float(np.mean(list(m1._reml_lambdas.values())))
-        m2 = SuperGLM(family="poisson", lambda1=0, features=_MTPL2_FEATURES, discrete=True)
+        m2 = SuperGLM(
+            family="poisson", selection_penalty=0, features=_MTPL2_FEATURES, discrete=True
+        )
         m2.fit_reml(df, y, exposure=w, max_reml_iter=30, lambda2_init=avg_lam)
         assert m2._reml_result.converged
 
@@ -333,7 +341,7 @@ class TestLargeNStability:
             df, y, w = _make_mtpl2_style_data(50000, seed=seed)
             model = SuperGLM(
                 family="poisson",
-                lambda1=0,
+                selection_penalty=0,
                 features=_MTPL2_FEATURES,
                 discrete=True,
             )

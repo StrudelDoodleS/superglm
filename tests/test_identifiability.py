@@ -46,7 +46,7 @@ class TestUnweightedMeanZero:
         df, y, exposure = data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp")},
         )
         model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
@@ -67,7 +67,7 @@ class TestUnweightedMeanZero:
         df, y, exposure = data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp")},
         )
         model.fit(df, y, exposure=exposure)
@@ -86,7 +86,7 @@ class TestUnweightedMeanZero:
         df, y, _ = _make_poisson_data()
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp")},
         )
         model.fit_reml(df, y, max_reml_iter=10)
@@ -107,7 +107,7 @@ class TestMultipleSplineMeanZero:
         df, y, exposure = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={
                 "x1": Spline(kind="bs", n_knots=10, penalty="ssp"),
                 "x2": Spline(kind="bs", n_knots=8, penalty="ssp"),
@@ -139,10 +139,10 @@ class TestExactVsDiscreteAgreement:
             "x1": Spline(kind=kind, n_knots=8, penalty="ssp", discrete=True, n_bins=256)
         }
 
-        m_exact = SuperGLM(family="poisson", lambda1=0.0, features=features_exact)
+        m_exact = SuperGLM(family="poisson", selection_penalty=0.0, features=features_exact)
         m_exact.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
 
-        m_disc = SuperGLM(family="poisson", lambda1=0.0, features=features_disc)
+        m_disc = SuperGLM(family="poisson", selection_penalty=0.0, features=features_disc)
         m_disc.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
 
         # Deviance should be close (within ~1% for 256 bins)
@@ -157,7 +157,7 @@ class TestExactVsDiscreteAgreement:
         df, y, exposure = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp", discrete=True, n_bins=256)},
         )
         model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
@@ -181,7 +181,7 @@ class TestSEBehavior:
         df, y, exposure = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp")},
         )
         model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
@@ -197,7 +197,7 @@ class TestSEBehavior:
         df, y, exposure = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp")},
         )
         model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
@@ -222,7 +222,7 @@ class TestInteractionCompatibility:
         df, y, exposure = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={
                 "x1": Spline(kind="bs", n_knots=8, penalty="ssp"),
                 "cat": Categorical(base="first"),
@@ -237,7 +237,7 @@ class TestInteractionCompatibility:
         df, y, exposure = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={
                 "x1": Spline(kind="bs", n_knots=8, penalty="ssp"),
                 "cat": Categorical(base="first"),

@@ -29,7 +29,7 @@ class TestDrop1Basic:
         X, y, exposure = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"strong": Numeric(), "noise": Numeric()},
         )
         model.fit(X, y, exposure=exposure)
@@ -45,7 +45,7 @@ class TestDrop1Basic:
         X, y, exposure = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"strong": Numeric(), "noise": Numeric()},
         )
         model.fit(X, y, exposure=exposure)
@@ -64,7 +64,7 @@ class TestDrop1Basic:
         X, y, exposure = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"strong": Numeric(), "noise": Numeric()},
         )
         model.fit(X, y, exposure=exposure)
@@ -94,7 +94,7 @@ class TestDrop1Spline:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Spline(n_knots=10, penalty="ssp")},
         )
         model.fit(X, y)
@@ -116,7 +116,7 @@ class TestDrop1FTest:
 
         model = SuperGLM(
             family="gamma",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         model.fit(X, y)
@@ -138,7 +138,7 @@ class TestDrop1Interactions:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={
                 "age": Spline(n_knots=5, penalty="ssp"),
                 "region": Categorical(base="first"),
@@ -167,15 +167,15 @@ class TestDrop1FractionalEdf:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0,
-            lambda2=10.0,  # strong smoothing → fractional edf
+            selection_penalty=0,
+            spline_penalty=10.0,  # strong smoothing → fractional edf
             features={"x1": Numeric(), "x2": Spline(n_knots=10, penalty="ssp")},
         )
         model.fit(X, y)
         result = model.drop1(X, y)
 
         x2_row = result[result["feature"] == "x2"].iloc[0]
-        # With strong smoothing (lambda2=10) on a weak effect, delta_df should be
+        # With strong smoothing (spline_penalty=10) on a weak effect, delta_df should be
         # fractional (between 0 and n_basis), reflecting the effective degrees of
         # freedom consumed by the smoothed spline.
         assert x2_row["delta_df"] > 0, "delta_df must be positive"

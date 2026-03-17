@@ -64,7 +64,7 @@ def resolve_penalty(
         return _PENALTY_SHORTCUTS[penalty](lambda1=lambda1, features=penalty_features)
     if lambda1 is not None:
         raise ValueError(
-            "Cannot set 'lambda1' when passing a Penalty object directly. "
+            "Cannot set 'selection_penalty' when passing a Penalty object directly. "
             "Set lambda1 on the Penalty object instead."
         )
     if penalty_features is not None:
@@ -112,14 +112,11 @@ def init_model(
     lambda1: float | None = None,
     lambda2: float = 0.1,
     penalty_features: str | list[str] | None = None,
-    tweedie_p: float | None = None,
-    nb_theta: float | str | None = None,
     features: dict[str, FeatureSpec] | None = None,
     splines: list[str] | None = None,
     n_knots: int | list[int] = 10,
     degree: int = 3,
     categorical_base: str = "most_exposed",
-    standardize_numeric: bool = True,
     interactions: list[tuple[str, str]] | None = None,
     active_set: bool = False,
     discrete: bool = False,
@@ -135,13 +132,10 @@ def init_model(
     model.link = link
     model.penalty = resolve_penalty(penalty, lambda1, penalty_features)
     model.lambda2 = lambda2
-    model.tweedie_p = tweedie_p
-    model.nb_theta = nb_theta
     model._splines = splines
     model._n_knots = n_knots
     model._degree = degree
     model._categorical_base = categorical_base
-    model._standardize_numeric = standardize_numeric
     model._active_set = active_set
     model._discrete = discrete
     model._n_bins = n_bins
@@ -254,7 +248,6 @@ def auto_detect(model, X: pd.DataFrame, exposure: NDArray | None) -> None:
         knots_map=knots_map,
         degree=model._degree,
         categorical_base=model._categorical_base,
-        standardize_numeric=model._standardize_numeric,
         specs=model._specs,
         feature_order=model._feature_order,
     )
@@ -292,8 +285,6 @@ def model_build_design_matrix(
         offset,
         family=model.family,
         link_spec=model.link,
-        nb_theta=model.nb_theta,
-        tweedie_p=model.tweedie_p,
         specs=model._specs,
         feature_order=model._feature_order,
         interaction_specs=model._interaction_specs,

@@ -146,14 +146,16 @@ class NegativeBinomial:
 
     Parameters
     ----------
-    theta : float
+    theta : float or "auto"
         Overdispersion parameter (>0). Larger theta = less overdispersion.
-        As theta -> inf, approaches Poisson.
+        As theta -> inf, approaches Poisson. Pass ``"auto"`` to estimate
+        theta via profile likelihood during ``fit()``.
     """
 
-    def __init__(self, theta: float):
-        if theta <= 0:
-            raise ValueError(f"NB theta must be > 0, got {theta}")
+    def __init__(self, theta: float | str):
+        if theta != "auto":
+            if theta <= 0:
+                raise ValueError(f"NB theta must be > 0, got {theta}")
         self.theta = theta
 
     @property
@@ -292,25 +294,28 @@ DISTRIBUTION_SHORTCUTS: dict[str, type] = {
 
 def resolve_distribution(
     family: str | Distribution,
-    tweedie_p: float | None = None,
-    nb_theta: float | None = None,
 ) -> Distribution:
-    """Convert string shorthand to distribution object, or pass through."""
+    """Convert string shorthand to distribution object, or pass through.
+
+    Parameter-free families can be specified as strings (``"poisson"``,
+    ``"gaussian"``, ``"gamma"``, ``"binomial"``).  Parameterized families
+    (Tweedie, NB2) must be passed as Distribution objects::
+
+        from superglm import families
+        resolve_distribution(families.tweedie(p=1.5))
+    """
     if not isinstance(family, str):
         return family
     if family in DISTRIBUTION_SHORTCUTS:
         return DISTRIBUTION_SHORTCUTS[family]()
-    if family == "tweedie":
-        if tweedie_p is None:
-            raise ValueError("Tweedie distribution requires tweedie_p=")
-        return Tweedie(p=tweedie_p)
-    if family == "negative_binomial":
-        if nb_theta is None:
-            raise ValueError("NB distribution requires nb_theta=")
-        return NegativeBinomial(theta=nb_theta)
+    if family in ("tweedie", "negative_binomial"):
+        raise ValueError(
+            f"'{family}' requires parameters.  "
+            f"Use families.tweedie(p=...) or families.nb2(theta=...) instead of a string."
+        )
     raise ValueError(
         f"Unknown distribution '{family}'. Use 'poisson', 'gaussian', 'gamma', 'binomial', "
-        f"'tweedie', 'negative_binomial', or pass a Distribution object."
+        f"or pass a Distribution object (e.g. families.tweedie(p=1.5))."
     )
 
 

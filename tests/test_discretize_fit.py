@@ -49,14 +49,14 @@ class TestDiscretizedFit:
 
         model_exact = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
         )
         model_exact.fit(X, y)
 
         model_disc = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             discrete=True,
             n_bins=256,
             features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
@@ -87,7 +87,7 @@ class TestDiscretizedFit:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             discrete=True,
             features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
         )
@@ -106,7 +106,7 @@ class TestDiscretizedFit:
         # Model-level discrete=False, but x1 is discrete=True
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             discrete=False,
             features={
                 "x1": Spline(n_knots=10, penalty="ssp", discrete=True, n_bins=128),
@@ -125,7 +125,7 @@ class TestDiscretizedFit:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             discrete=True,
             features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
         )
@@ -144,7 +144,7 @@ class TestDiscretizedFit:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             discrete=True,
             features={"cat": Categorical(base="first")},
         )
@@ -168,7 +168,7 @@ class TestDiscretizedSelect:
 
         model_exact = SuperGLM(
             family="poisson",
-            lambda1=0.05,
+            selection_penalty=0.05,
             features={
                 "signal": Spline(n_knots=10, penalty="ssp", select=True),
                 "noise": Spline(n_knots=10, penalty="ssp", select=True),
@@ -178,7 +178,7 @@ class TestDiscretizedSelect:
 
         model_disc = SuperGLM(
             family="poisson",
-            lambda1=0.05,
+            selection_penalty=0.05,
             discrete=True,
             features={
                 "signal": Spline(n_knots=10, penalty="ssp", select=True),
@@ -214,14 +214,14 @@ class TestDiscretizedREML:
 
         model_exact = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={"x": Spline(n_knots=10, penalty="ssp")},
         )
         model_exact.fit_reml(X, y)
 
         model_disc = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             discrete=True,
             features={"x": Spline(n_knots=10, penalty="ssp")},
         )
@@ -249,7 +249,7 @@ class TestDiscretizedREML:
 
         model_exact = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "x1": Spline(n_knots=10, penalty="ssp"),
                 "x2": Spline(n_knots=8, penalty="ssp"),
@@ -259,7 +259,7 @@ class TestDiscretizedREML:
 
         model_disc = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             discrete=True,
             features={
                 "x1": Spline(n_knots=10, penalty="ssp"),
@@ -279,7 +279,7 @@ class TestDiscretizedREML:
             )
 
     def test_freml_uses_pirls_not_direct(self):
-        """discrete=True + lambda1=0 should use PIRLS (not irls_direct) for REML."""
+        """discrete=True + selection_penalty=0 should use PIRLS (not irls_direct) for REML."""
         rng = np.random.default_rng(42)
         n = 500
         x = rng.uniform(0, 10, n)
@@ -289,7 +289,7 @@ class TestDiscretizedREML:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             discrete=True,
             features={"x": Spline(n_knots=10, penalty="ssp")},
         )
@@ -316,7 +316,7 @@ class TestDiscretizedREML:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             discrete=True,
             features={
                 "signal": Spline(n_knots=10, penalty="ssp", select=True),
@@ -338,7 +338,7 @@ class TestDiscretizedREML:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             discrete=True,
             n_bins={"x": 0},
             features={"x": Spline(n_knots=8, penalty="ssp")},
@@ -350,7 +350,7 @@ class TestDiscretizedREML:
 
 class TestDiscretizedIRLSDirect:
     def test_irls_direct_discrete(self):
-        """lambda1=0 uses irls_direct solver — should work with discretization."""
+        """selection_penalty=0 uses irls_direct solver — should work with discretization."""
         rng = np.random.default_rng(42)
         n = 1000
         x = rng.uniform(0, 10, n)
@@ -360,14 +360,14 @@ class TestDiscretizedIRLSDirect:
 
         model_exact = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={"x": Spline(n_knots=10, penalty="ssp")},
         )
         model_exact.fit(X, y)
 
         model_disc = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             discrete=True,
             features={"x": Spline(n_knots=10, penalty="ssp")},
         )
@@ -399,13 +399,13 @@ class TestConstrainedSplineDiscrete:
         X = pd.DataFrame({"x": x})
 
         model_exact = SuperGLM(
-            family="poisson", lambda1=0.01, features={"x": spline_cls(n_knots=10)}
+            family="poisson", selection_penalty=0.01, features={"x": spline_cls(n_knots=10)}
         )
         model_exact.fit(X, y)
 
         model_disc = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             discrete=True,
             features={"x": spline_cls(n_knots=10)},
         )
@@ -436,7 +436,7 @@ class TestConstrainedSplineDiscrete:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             discrete=True,
             features={"x": NaturalSpline(n_knots=10)},
         )
@@ -459,7 +459,7 @@ class TestModelLevelNBins:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             discrete=True,
             n_bins=64,
             features={"x": Spline(n_knots=10, penalty="ssp")},
@@ -481,7 +481,7 @@ class TestModelLevelNBins:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             discrete=True,
             n_bins={"x1": 64, "x2": 32},
             features={
@@ -507,7 +507,7 @@ class TestModelLevelNBins:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             discrete=True,
             n_bins=64,
             features={"x": Spline(n_knots=10, penalty="ssp", n_bins=128)},
@@ -528,7 +528,7 @@ class TestModelLevelNBins:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             discrete=True,
             features={"x": Spline(n_knots=10, penalty="ssp")},
         )
@@ -551,14 +551,14 @@ class TestLowUniqueCompression:
 
         model_exact = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={"age": Spline(n_knots=10, penalty="ssp")},
         )
         model_exact.fit(X, y)
 
         model_disc = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             discrete=True,
             n_bins=256,
             features={"age": Spline(n_knots=10, penalty="ssp")},
@@ -580,7 +580,7 @@ class TestDiscretizedTensorInteraction:
 
         model_exact = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={
                 "age": Spline(n_knots=10, penalty="ssp"),
                 "bm": Spline(n_knots=8, penalty="ssp"),
@@ -591,7 +591,7 @@ class TestDiscretizedTensorInteraction:
 
         model_disc = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             discrete=True,
             n_bins={"age": 64, "bm": 48},
             features={
@@ -617,7 +617,7 @@ class TestDiscretizedTensorInteraction:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             discrete=True,
             n_bins={"age": 32, "bm": 24},
             features={
@@ -655,7 +655,7 @@ class TestDiscretizedTensorInteraction:
 
         model_exact = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={
                 "age": Spline(n_knots=6, penalty="ssp"),
                 "bm": Spline(n_knots=5, penalty="ssp"),
@@ -666,7 +666,7 @@ class TestDiscretizedTensorInteraction:
 
         model_disc = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             discrete=True,
             n_bins={"age": 256, "bm": 256},
             features={
@@ -690,7 +690,7 @@ class TestDiscretizedTensorInteraction:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             discrete=True,
             n_bins={"age": 48, "bm": 36},
             features={

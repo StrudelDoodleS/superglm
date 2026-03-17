@@ -29,7 +29,7 @@ class TestRefitBasic:
         X, y, exposure = selection_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.5,  # high penalty to zero noise
+            selection_penalty=0.5,  # high penalty to zero noise
             features={"strong": Numeric(), "noise": Numeric()},
         )
         model.fit(X, y, exposure=exposure)
@@ -52,7 +52,7 @@ class TestRefitBasic:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=50.0,
+            selection_penalty=50.0,
             features={"strong": Numeric(), "noise_cat": Categorical(base="first")},
         )
         model.fit(X, y)
@@ -70,7 +70,7 @@ class TestRefitBasic:
         X, y, exposure = selection_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.5,
+            selection_penalty=0.5,
             features={"strong": Numeric(), "noise": Numeric()},
         )
         model.fit(X, y, exposure=exposure)
@@ -82,7 +82,7 @@ class TestRefitBasic:
         X, y, exposure = selection_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.1,  # moderate penalty — keeps strong but shrinks
+            selection_penalty=0.1,  # moderate penalty — keeps strong but shrinks
             features={"strong": Numeric(), "noise": Numeric()},
         )
         model.fit(X, y, exposure=exposure)
@@ -104,7 +104,7 @@ class TestRefitBasic:
             model.refit_unpenalised(X, np.array([1, 2, 3]))
 
     def test_keep_smoothing_false(self):
-        """keep_smoothing=False should set lambda2=0."""
+        """keep_smoothing=False should set spline_penalty=0."""
         rng = np.random.default_rng(42)
         n = 500
         x = rng.uniform(0, 10, n)
@@ -114,8 +114,8 @@ class TestRefitBasic:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
-            lambda2=0.5,
+            selection_penalty=0.01,
+            spline_penalty=0.5,
             features={"x": Spline(n_knots=10, penalty="ssp")},
         )
         model.fit(X, y)

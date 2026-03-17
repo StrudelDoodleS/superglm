@@ -74,7 +74,7 @@ class TestSplineAPIParams:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(monotone="increasing", monotone_mode="fit")},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         with pytest.raises(NotImplementedError, match="Fit-time monotone"):
             m.fit(X, y, sample_weight=exposure)
@@ -124,7 +124,7 @@ class TestApplyMonotonePostfit:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=15, monotone="increasing")},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=exposure)
 
@@ -142,7 +142,7 @@ class TestApplyMonotonePostfit:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=15, monotone="decreasing")},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=exposure)
         m.apply_monotone_postfit(X, sample_weight=exposure)
@@ -157,7 +157,7 @@ class TestApplyMonotonePostfit:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=15, monotone="increasing")},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=exposure)
         m.apply_monotone_postfit(X, sample_weight=exposure)
@@ -180,7 +180,7 @@ class TestApplyMonotonePostfit:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=15, monotone="increasing")},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=exposure)
         m.apply_monotone_postfit(X, sample_weight=exposure)
@@ -195,7 +195,7 @@ class TestApplyMonotonePostfit:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10)},  # no monotone
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=exposure)
         m.apply_monotone_postfit(X, sample_weight=exposure)
@@ -206,7 +206,7 @@ class TestApplyMonotonePostfit:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(monotone="increasing")},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         with pytest.raises(RuntimeError, match="must be fitted"):
             m.apply_monotone_postfit(X, sample_weight=exposure)
@@ -217,7 +217,7 @@ class TestApplyMonotonePostfit:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=15, monotone="increasing")},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=exposure)
         m.apply_monotone_postfit(X, sample_weight=exposure)
@@ -238,7 +238,7 @@ class TestSummaryMonotoneIntegration:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, monotone="increasing")},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=exposure)
         m.apply_monotone_postfit(X, sample_weight=exposure)
@@ -253,7 +253,7 @@ class TestSummaryMonotoneIntegration:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10)},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=exposure)
 

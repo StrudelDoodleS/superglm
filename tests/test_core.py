@@ -53,9 +53,10 @@ class TestNumeric:
         info = Numeric().build(np.array([1.0, 2.0, 3.0]))
         assert info.n_cols == 1
 
-    def test_standardized_mean_zero(self):
-        info = Numeric(standardize=True).build(np.arange(100.0))
-        assert abs(info.columns.mean()) < 1e-10
+    def test_passthrough_values(self):
+        x = np.arange(100.0)
+        info = Numeric().build(x)
+        np.testing.assert_array_equal(info.columns.ravel(), x)
 
     def test_no_penalty_matrix(self):
         assert Numeric().build(np.array([1.0, 2.0])).penalty_matrix is None
@@ -1124,7 +1125,7 @@ class TestBasisSplineOpenKnotVector:
         m = SuperGLM(
             family="poisson",
             features={"x": Spline(kind="bs", n_knots=10)},
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=15)
 

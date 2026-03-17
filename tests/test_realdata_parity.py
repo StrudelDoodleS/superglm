@@ -13,7 +13,7 @@ Tests are organized as:
 Fitting paths tested:
   1. fit_reml(discrete=False) — exact REML       [parity]
   2. fit_reml(discrete=True)  — fREML, 256 bins  [parity vs exact]
-  3. fit(lambda1=0)           — direct IRLS       [sanity]
+  3. fit(selection_penalty=0)           — direct IRLS       [sanity]
   4. fit(lambda1>0)           — group lasso BCD   [sanity]
 
 Data:
@@ -155,7 +155,7 @@ class TestNB2ExactREML:
         m = SuperGLM(
             features=_features(),
             family=NegativeBinomial(theta=NB2_THETA),
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, offset=offset, max_reml_iter=30)
         return m, df, y, offset
@@ -199,13 +199,13 @@ class TestNB2DiscreteREML:
         m_exact = SuperGLM(
             features=_features(),
             family=NegativeBinomial(theta=NB2_THETA),
-            lambda1=0,
+            selection_penalty=0,
         )
         m_exact.fit_reml(df, y, offset=offset, max_reml_iter=30)
         m_disc = SuperGLM(
             features=_features(discrete=True),
             family=NegativeBinomial(theta=NB2_THETA),
-            lambda1=0,
+            selection_penalty=0,
             discrete=True,
             n_bins=256,
         )
@@ -244,7 +244,7 @@ class TestNB2ThetaEstimation:
         m = SuperGLM(
             features=_features(),
             family=NegativeBinomial(theta=1.0),
-            lambda1=0,
+            selection_penalty=0,
         )
         result = m.estimate_theta(df, y, offset=offset, theta_bounds=(0.1, 100000))
         assert result.theta_hat > 100, f"Theta {result.theta_hat:.1f} should be >100 (near-Poisson)"
@@ -255,7 +255,7 @@ class TestNB2ThetaEstimation:
 
 @NB2_SKIP
 class TestNB2DirectFitSanity:
-    """NB2 fit(lambda1=0) — convergence and rough prediction check."""
+    """NB2 fit(selection_penalty=0) — convergence and rough prediction check."""
 
     @pytest.fixture(scope="class")
     def model(self):
@@ -263,8 +263,8 @@ class TestNB2DirectFitSanity:
         m = SuperGLM(
             features=_features(),
             family=NegativeBinomial(theta=NB2_THETA),
-            lambda1=0,
-            lambda2=1.0,
+            selection_penalty=0,
+            spline_penalty=1.0,
         )
         m.fit(df, y, offset=offset)
         return m, df, y
@@ -297,7 +297,7 @@ class TestNB2GroupLassoSanity:
             features=_features(),
             family=NegativeBinomial(theta=NB2_THETA),
             penalty="group_lasso",
-            lambda1=0.001,
+            selection_penalty=0.001,
         )
         m.fit(df, y, offset=offset)
         return m, df, y
@@ -335,7 +335,7 @@ class TestGammaExactREML:
     @pytest.fixture(scope="class")
     def model(self):
         df, y = _load_gamma_data()
-        m = SuperGLM(features=_features(), family="gamma", lambda1=0)
+        m = SuperGLM(features=_features(), family="gamma", selection_penalty=0)
         m.fit_reml(df, y, max_reml_iter=30)
         return m, df, y
 
@@ -396,12 +396,12 @@ class TestGammaDiscreteREML:
     @pytest.fixture(scope="class")
     def models(self):
         df, y = _load_gamma_data()
-        m_exact = SuperGLM(features=_features(), family="gamma", lambda1=0)
+        m_exact = SuperGLM(features=_features(), family="gamma", selection_penalty=0)
         m_exact.fit_reml(df, y, max_reml_iter=30)
         m_disc = SuperGLM(
             features=_features(discrete=True),
             family="gamma",
-            lambda1=0,
+            selection_penalty=0,
             discrete=True,
             n_bins=256,
         )
@@ -444,12 +444,12 @@ class TestGammaDiscreteREML:
 
 @GAMMA_SKIP
 class TestGammaDirectFitSanity:
-    """Gamma fit(lambda1=0) — convergence and rough prediction check."""
+    """Gamma fit(selection_penalty=0) — convergence and rough prediction check."""
 
     @pytest.fixture(scope="class")
     def model(self):
         df, y = _load_gamma_data()
-        m = SuperGLM(features=_features(), family="gamma", lambda1=0, lambda2=1.0)
+        m = SuperGLM(features=_features(), family="gamma", selection_penalty=0, spline_penalty=1.0)
         m.fit(df, y)
         return m, df, y
 
@@ -481,7 +481,7 @@ class TestGammaGroupLassoSanity:
             features=_features(),
             family="gamma",
             penalty="group_lasso",
-            lambda1=0.001,
+            selection_penalty=0.001,
         )
         m.fit(df, y)
         return m, df, y
