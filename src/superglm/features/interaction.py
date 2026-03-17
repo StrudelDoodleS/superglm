@@ -23,7 +23,7 @@ from scipy.interpolate import BSpline as BSpl
 
 from superglm.features.categorical import _validate_categorical_levels
 from superglm.group_matrix import _discretize_column
-from superglm.types import GroupInfo, TensorMarginalInfo
+from superglm.types import DiscreteTensorBuildResult, GroupInfo, TensorMarginalInfo
 
 # ── SplineCategorical ──────────────────────────────────────────
 
@@ -828,7 +828,7 @@ class TensorInteraction:
         parent_specs: dict,
         n_bins: tuple[int, int],
         exposure: NDArray | None = None,
-    ) -> tuple[GroupInfo | list[GroupInfo], NDArray, NDArray]:
+    ) -> DiscreteTensorBuildResult:
         """Build a discretized tensor basis on observed joint support pairs."""
         B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs)
         omega = np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
@@ -846,7 +846,15 @@ class TensorInteraction:
             B1_unique[observed_pairs[:, 0]],
             B2_unique[observed_pairs[:, 1]],
         )
-        return infos, B_joint, pair_idx.astype(np.intp)
+        return DiscreteTensorBuildResult(
+            infos=infos,
+            B_joint=B_joint,
+            pair_idx=pair_idx.astype(np.intp),
+            B1_unique=B1_unique,
+            B2_unique=B2_unique,
+            idx1=idx1.astype(np.intp),
+            idx2=idx2.astype(np.intp),
+        )
 
     def set_reparametrisation(self, R_inv: NDArray) -> None:
         self._R_inv = R_inv

@@ -127,6 +127,25 @@ class TensorMarginalInfo:
     degree: int  # B-spline degree (for basis eval at new points)
 
 
+# ── Discretized tensor build result ─────────────────────────────
+@dataclass
+class DiscreteTensorBuildResult:
+    """Return type for TensorInteraction.build_discrete().
+
+    Carries the materialized Kronecker product (for fallback compatibility)
+    alongside the factored marginal bases and bin indices (for the fast
+    DiscretizedTensorGroupMatrix path).
+    """
+
+    infos: GroupInfo | list[GroupInfo]
+    B_joint: NDArray  # (n_pairs, K1*K2) materialized Kronecker
+    pair_idx: NDArray  # (n,) observation → pair mapping
+    B1_unique: NDArray  # (n_bins1, K1) first marginal at bin centers
+    B2_unique: NDArray  # (n_bins2, K2) second marginal at bin centers
+    idx1: NDArray  # (n,) first marginal bin index
+    idx2: NDArray  # (n,) second marginal bin index
+
+
 # ── Fit statistics (summary without sample arrays) ────────────
 @dataclass(frozen=True)
 class FitStats:

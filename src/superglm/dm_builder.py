@@ -25,13 +25,14 @@ from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
     DiscretizedSSPGroupMatrix,
+    DiscretizedTensorGroupMatrix,
     GroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
     _discretize_column,
 )
 from superglm.links import Link, resolve_link
-from superglm.types import FeatureSpec, GroupInfo, GroupSlice
+from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, GroupSlice
 
 logger = logging.getLogger(__name__)
 
@@ -497,6 +498,7 @@ def build_design_matrix(
         ):
             add_interaction(pair[0], pair[1], specs, interaction_specs, interaction_order)
     pending_interactions.clear()
+    _next_tensor_id = 0
 
     for iname in interaction_order:
         ispec = interaction_specs[iname]
@@ -507,21 +509,28 @@ def build_design_matrix(
         B_unique_inter = None
         bin_idx_inter = None
         exposure_agg_inter = None
+        tensor_build: DiscreteTensorBuildResult | None = None
+        tensor_id = -1
         if use_discrete_tensor:
             n_bins1 = resolve_discrete_n_bins(p1, specs[p1], n_bins_config)
             n_bins2 = resolve_discrete_n_bins(p2, specs[p2], n_bins_config)
-            result, B_unique_inter, bin_idx_inter = ispec.build_discrete(
+            tensor_build = ispec.build_discrete(
                 x1,
                 x2,
                 specs,
                 (n_bins1, n_bins2),
                 exposure=exposure,
             )
+            result = tensor_build.infos
+            B_unique_inter = tensor_build.B_joint
+            bin_idx_inter = tensor_build.pair_idx
             exposure_agg_inter = np.bincount(
                 bin_idx_inter,
                 weights=exposure,
                 minlength=B_unique_inter.shape[0],
             )
+            tensor_id = _next_tensor_id
+            _next_tensor_id += 1
         else:
             result = ispec.build(x1, x2, specs, exposure=exposure)
 
@@ -543,9 +552,16 @@ def build_design_matrix(
                             R_inv_combined = P
                         r_inv_parts_i.append(R_inv_combined)
 
-                        if use_discrete_tensor:
-                            gm = DiscretizedSSPGroupMatrix(
-                                B_unique_inter, R_inv_combined, bin_idx_inter
+                        if use_discrete_tensor and tensor_build is not None:
+                            gm = DiscretizedTensorGroupMatrix(
+                                tensor_build.B1_unique,
+                                tensor_build.B2_unique,
+                                tensor_build.idx1,
+                                tensor_build.idx2,
+                                B_unique_inter,
+                                R_inv_combined,
+                                bin_idx_inter,
+                                tensor_id=tensor_id,
                             )
                             if info.penalty_matrix is not None:
                                 gm.omega = P @ info.penalty_matrix @ P.T
@@ -566,8 +582,17 @@ def build_design_matrix(
                         )
                         r_inv_parts_i.append(R_inv)
                         n_cols = R_inv.shape[1]
-                        if use_discrete_tensor:
-                            gm = DiscretizedSSPGroupMatrix(B_unique_inter, R_inv, bin_idx_inter)
+                        if use_discrete_tensor and tensor_build is not None:
+                            gm = DiscretizedTensorGroupMatrix(
+                                tensor_build.B1_unique,
+                                tensor_build.B2_unique,
+                                tensor_build.idx1,
+                                tensor_build.idx2,
+                                B_unique_inter,
+                                R_inv,
+                                bin_idx_inter,
+                                tensor_id=tensor_id,
+                            )
                             gm.omega = info.penalty_matrix
                         elif sp.issparse(info.columns):
                             gm = SparseSSPGroupMatrix(info.columns, R_inv)
@@ -576,11 +601,16 @@ def build_design_matrix(
                             gm = DenseGroupMatrix(info.columns @ R_inv)
                     else:
                         n_cols = info.n_cols
-                        if use_discrete_tensor:
-                            gm = DiscretizedSSPGroupMatrix(
+                        if use_discrete_tensor and tensor_build is not None:
+                            gm = DiscretizedTensorGroupMatrix(
+                                tensor_build.B1_unique,
+                                tensor_build.B2_unique,
+                                tensor_build.idx1,
+                                tensor_build.idx2,
                                 B_unique_inter,
                                 np.eye(info.n_cols, dtype=np.float64),
                                 bin_idx_inter,
+                                tensor_id=tensor_id,
                             )
                         elif sp.issparse(info.columns):
                             gm = SparseGroupMatrix(info.columns)
@@ -663,8 +693,17 @@ def build_design_matrix(
                 if hasattr(ispec, "set_reparametrisation"):
                     ispec.set_reparametrisation(R_inv)
                 n_cols = R_inv.shape[1]
-                if use_discrete_tensor:
-                    gm = DiscretizedSSPGroupMatrix(B_unique_inter, R_inv, bin_idx_inter)
+                if use_discrete_tensor and tensor_build is not None:
+                    gm = DiscretizedTensorGroupMatrix(
+                        tensor_build.B1_unique,
+                        tensor_build.B2_unique,
+                        tensor_build.idx1,
+                        tensor_build.idx2,
+                        B_unique_inter,
+                        R_inv,
+                        bin_idx_inter,
+                        tensor_id=tensor_id,
+                    )
                     gm.omega = info.penalty_matrix
                 elif sp.issparse(info.columns):
                     gm = SparseSSPGroupMatrix(info.columns, R_inv)
@@ -673,11 +712,16 @@ def build_design_matrix(
                     gm = DenseGroupMatrix(info.columns @ R_inv)
             else:
                 n_cols = info.n_cols
-                if use_discrete_tensor:
-                    gm = DiscretizedSSPGroupMatrix(
+                if use_discrete_tensor and tensor_build is not None:
+                    gm = DiscretizedTensorGroupMatrix(
+                        tensor_build.B1_unique,
+                        tensor_build.B2_unique,
+                        tensor_build.idx1,
+                        tensor_build.idx2,
                         B_unique_inter,
                         np.eye(info.n_cols, dtype=np.float64),
                         bin_idx_inter,
+                        tensor_id=tensor_id,
                     )
                 elif sp.issparse(info.columns):
                     gm = SparseGroupMatrix(info.columns)
@@ -742,6 +786,33 @@ def rebuild_design_matrix_with_lambdas(
             else:
                 R_inv_new = compute_R_inv(gm.B, omega, exposure, lam)
             new_gm = SparseSSPGroupMatrix(gm.B, R_inv_new)
+            new_gm.omega = omega
+            new_gm.projection = gm.projection
+            new_gms.append(new_gm)
+        elif isinstance(gm, DiscretizedTensorGroupMatrix) and g.name in lambdas:
+            omega = gm.omega
+            if omega is None:
+                new_gms.append(gm)
+                continue
+            lam = lambdas[g.name]
+            exposure_agg = np.bincount(gm.bin_idx, weights=exposure, minlength=gm.n_bins)
+            if gm.projection is not None:
+                P = gm.projection
+                omega_proj = P.T @ omega @ P
+                R_inv_local = compute_projected_R_inv(gm.B_unique, P, omega_proj, exposure_agg, lam)
+                R_inv_new = P @ R_inv_local
+            else:
+                R_inv_new = compute_R_inv(gm.B_unique, omega, exposure_agg, lam)
+            new_gm = DiscretizedTensorGroupMatrix(
+                gm.B1_unique_t,
+                gm.B2_unique_t,
+                gm.idx1,
+                gm.idx2,
+                gm.B_unique,
+                R_inv_new,
+                gm.bin_idx,
+                tensor_id=gm.tensor_id,
+            )
             new_gm.omega = omega
             new_gm.projection = gm.projection
             new_gms.append(new_gm)
