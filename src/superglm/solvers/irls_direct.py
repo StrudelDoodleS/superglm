@@ -270,15 +270,19 @@ def fit_irls_direct(
         rhs[1:] = XtWz
         _t_gram += time.perf_counter() - _t0
 
-        # Solve augmented system via eigh (tighter threshold for intercept+beta system)
+        # Solve augmented system — Cholesky (fast) with eigh fallback
         _t0 = time.perf_counter()
-        eigvals, eigvecs = np.linalg.eigh(M_aug)
-        threshold = 1e-10 * max(eigvals.max(), 1e-12)
-        with np.errstate(divide="ignore"):
-            inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
-        M_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
+        try:
+            L_aug = scipy.linalg.cholesky(M_aug, lower=True, check_finite=False)
+            beta_aug = scipy.linalg.cho_solve((L_aug, True), rhs)
+        except np.linalg.LinAlgError:
+            eigvals, eigvecs = np.linalg.eigh(M_aug)
+            threshold = 1e-10 * max(eigvals.max(), 1e-12)
+            with np.errstate(divide="ignore"):
+                inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
+            M_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
+            beta_aug = M_inv @ rhs
 
-        beta_aug = M_inv @ rhs  # (p+1,)
         intercept = float(beta_aug[0])
         beta = beta_aug[1:]
         _t_solve += time.perf_counter() - _t0
