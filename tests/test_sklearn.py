@@ -625,6 +625,69 @@ class TestNativeFeatures:
         assert set(p2["features"].keys()) == {"a", "b"}
         assert p2["selection_penalty"] == 0.0
 
+    def test_extra_columns_ignored(self, sample_data):
+        """Extra columns in X not in features= are ignored, not recorded."""
+        from superglm import Numeric, Spline
+
+        X, y, _ = sample_data
+        # X has age, region, density — only use age and density
+        m = SuperGLMRegressor(
+            features={
+                "age": Spline(kind="bs", k=10),
+                "density": Numeric(),
+            },
+            selection_penalty=0.0,
+        )
+        m.fit(X, y)
+        assert m.n_features_in_ == 2
+        assert list(m.feature_names_in_) == ["age", "density"]
+        # predict with same X (has extra "region") should work
+        preds = m.predict(X)
+        assert preds.shape == (len(X),)
+        # predict with only the needed columns should also work
+        X_slim = X[["age", "density"]]
+        preds2 = m.predict(X_slim)
+        np.testing.assert_array_equal(preds, preds2)
+
+    def test_ndarray_without_feature_names_raises(self):
+        """features= with ndarray and no feature_names gives clear error."""
+        from superglm import Numeric
+
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((100, 2))
+        y = rng.poisson(1.0, 100).astype(float)
+        m = SuperGLMRegressor(features={"age": Numeric(), "density": Numeric()})
+        with pytest.raises(ValueError, match="ndarray.*feature_names"):
+            m.fit(X, y)
+
+    def test_ndarray_with_feature_names_works(self):
+        """features= with ndarray + matching feature_names works."""
+        from superglm import Numeric
+
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((200, 2))
+        y = rng.poisson(np.exp(0.3 * X[:, 0])).astype(float)
+        m = SuperGLMRegressor(
+            features={"a": Numeric(), "b": Numeric()},
+            feature_names=["a", "b"],
+            selection_penalty=0.0,
+        )
+        m.fit(X, y)
+        assert m.n_features_in_ == 2
+        preds = m.predict(X)
+        assert preds.shape == (200,)
+
+    def test_missing_features_key_raises(self, sample_data):
+        """features= key not in X columns raises clear error."""
+        from superglm import Numeric
+
+        X, y, _ = sample_data
+        m = SuperGLMRegressor(
+            features={"age": Numeric(), "nonexistent": Numeric()},
+        )
+        with pytest.raises(ValueError, match="features= keys.*not found"):
+            m.fit(X, y)
+
 
 class TestNativeFeaturesClassifier:
     """Tests for features= on SuperGLMClassifier."""
@@ -654,6 +717,33 @@ class TestNativeFeaturesClassifier:
         proba = m.predict_proba(X)
         assert proba.shape == (n, 2)
         assert np.allclose(proba.sum(axis=1), 1.0)
+
+    def test_classifier_extra_columns_ignored(self):
+        """Extra columns in X not in features= are ignored for classifier."""
+        from superglm import Numeric
+
+        rng = np.random.default_rng(42)
+        n = 300
+        X = pd.DataFrame(
+            {
+                "x1": rng.standard_normal(n),
+                "x2": rng.standard_normal(n),
+                "junk": rng.standard_normal(n),
+            }
+        )
+        p = 1 / (1 + np.exp(-(0.5 * X["x1"])))
+        y = rng.binomial(1, p).astype(float)
+
+        m = SuperGLMClassifier(
+            features={"x1": Numeric(), "x2": Numeric()},
+            selection_penalty=0.0,
+        )
+        m.fit(X, y)
+        assert m.n_features_in_ == 2
+        assert list(m.feature_names_in_) == ["x1", "x2"]
+        # predict without junk column should work
+        preds = m.predict(X[["x1", "x2"]])
+        assert preds.shape == (n,)
 
     def test_classifier_mutual_exclusion(self):
         from superglm import Numeric

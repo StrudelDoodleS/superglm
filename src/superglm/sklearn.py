@@ -251,6 +251,37 @@ def _validate_wrapper_feature_config(
         )
 
 
+def _resolve_native_feature_cols(
+    features: dict,
+    columns: list[str],
+    offset_cols: list[str],
+    synthetic: bool,
+) -> list[str]:
+    """Validate and return feature columns for the native ``features=`` path.
+
+    Checks that every key in *features* exists in *columns* (after
+    excluding offset columns) and returns the keys in their original
+    dict order.
+    """
+    available = set(columns) - set(offset_cols)
+    missing = [k for k in features if k not in available]
+    if missing:
+        if synthetic:
+            raise ValueError(
+                f"features= keys {missing} not found in columns. "
+                f"X is an ndarray with auto-generated column names "
+                f"({', '.join(columns[:3])}, …). Pass feature_names= "
+                f"so column names match the features= keys, or use "
+                f"the synthetic names (x0, x1, …) as keys."
+            )
+        raise ValueError(
+            f"features= keys {missing} not found in X columns. "
+            f"Available (non-offset) columns: "
+            f"{sorted(available)}."
+        )
+    return list(features.keys())
+
+
 def _resolve_wrapper_penalty(
     penalty,
     selection_penalty,
@@ -458,7 +489,6 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
             fitting=True,
         )
         self._offset_cols_ = offset_cols
-        feature_cols = [c for c in columns if c not in offset_cols]
 
         # Resolve penalty
         penalty, resolved_sel, resolved_spl = _resolve_wrapper_penalty(
@@ -469,17 +499,26 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
 
         if self.features is not None:
             # ── Native features= path ────────────────────────────
-            features_dict = self.features
+            feature_cols = _resolve_native_feature_cols(
+                self.features,
+                columns,
+                offset_cols,
+                synthetic,
+            )
+            # Only feature + offset columns matter at predict time
+            self._resolved_columns_ = feature_cols + offset_cols
 
             model_kwargs: dict[str, Any] = dict(
                 family=self.family,
                 penalty=penalty,
                 selection_penalty=resolved_sel,
                 spline_penalty=resolved_spl,
-                features=features_dict,
+                features=self.features,
             )
         else:
             # ── Shorthand wrapper path ────────────────────────────
+            feature_cols = [c for c in columns if c not in offset_cols]
+
             spline_names = _resolve_refs(
                 self.spline_features,
                 columns,
@@ -720,7 +759,6 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
             fitting=True,
         )
         self._offset_cols_ = offset_cols
-        feature_cols = [c for c in columns if c not in offset_cols]
 
         # Resolve penalty
         penalty, resolved_sel, resolved_spl = _resolve_wrapper_penalty(
@@ -731,6 +769,15 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
 
         if self.features is not None:
             # ── Native features= path ────────────────────────────
+            feature_cols = _resolve_native_feature_cols(
+                self.features,
+                columns,
+                offset_cols,
+                synthetic,
+            )
+            # Only feature + offset columns matter at predict time
+            self._resolved_columns_ = feature_cols + offset_cols
+
             model_kwargs: dict[str, Any] = dict(
                 family="binomial",
                 penalty=penalty,
@@ -740,6 +787,8 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
             )
         else:
             # ── Shorthand wrapper path ────────────────────────────
+            feature_cols = [c for c in columns if c not in offset_cols]
+
             spline_names = _resolve_refs(
                 self.spline_features,
                 columns,
