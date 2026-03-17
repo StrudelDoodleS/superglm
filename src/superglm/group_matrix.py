@@ -102,6 +102,24 @@ def _fused_bincount_2(bin_idx, W, Wz, n_bins):
     return W_agg, Wz_agg
 
 
+@njit(cache=True)
+def _fused_2d_bincount_2(idx1, idx2, W, Wz, n_bins1, n_bins2):
+    """Fused dual 2D bincount for tensor gram_rmatvec.
+
+    Aggregates both W and Wz by (idx1, idx2) marginal bins in a single O(n) pass.
+    Returns (W_grid, Wz_grid), each (n_bins1, n_bins2).
+    """
+    n = len(idx1)
+    W_grid = np.zeros((n_bins1, n_bins2))
+    Wz_grid = np.zeros((n_bins1, n_bins2))
+    for i in range(n):
+        a = idx1[i]
+        b = idx2[i]
+        W_grid[a, b] += W[i]
+        Wz_grid[a, b] += Wz[i]
+    return W_grid, Wz_grid
+
+
 class DenseGroupMatrix:
     """Dense group matrix wrapper."""
 
@@ -304,8 +322,129 @@ class DiscretizedSSPGroupMatrix:
         return sub
 
 
+class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
+    """Discretized tensor interaction with factored Kronecker structure.
+
+    Like DiscretizedSSPGroupMatrix but stores the factored marginal bases
+    (B1_unique, B2_unique) and marginal bin indices (idx1, idx2) instead
+    of only the materialized Kronecker product B_joint.  Gram, matvec,
+    and rmatvec operations exploit the product structure for O(n_bins1 *
+    K1^2 * K2^2) instead of O(n_pairs * (K1*K2)^2).
+
+    The materialized B_joint is still kept as ``self.B_unique`` (inherited)
+    for fallback compatibility in any code path that doesn't know about
+    the factored representation.
+    """
+
+    __slots__ = (
+        "B1_unique_t",
+        "B2_unique_t",
+        "idx1",
+        "idx2",
+        "n_bins1",
+        "n_bins2",
+        "tensor_id",
+    )
+
+    def __init__(
+        self,
+        B1_unique: NDArray,
+        B2_unique: NDArray,
+        idx1: NDArray,
+        idx2: NDArray,
+        B_joint: NDArray,
+        R_inv: NDArray,
+        pair_idx: NDArray,
+        tensor_id: int,
+    ):
+        super().__init__(B_joint, R_inv, pair_idx)
+        self.B1_unique_t = np.asarray(B1_unique)
+        self.B2_unique_t = np.asarray(B2_unique)
+        self.idx1 = np.asarray(idx1, dtype=np.intp)
+        self.idx2 = np.asarray(idx2, dtype=np.intp)
+        self.n_bins1 = self.B1_unique_t.shape[0]
+        self.n_bins2 = self.B2_unique_t.shape[0]
+        self.tensor_id = tensor_id
+
+    def _factored_gram_raw(self, w_grid: NDArray) -> NDArray:
+        """Compute B_joint.T @ diag(w) @ B_joint via Kronecker factorization.
+
+        Given w_grid (n_bins1, n_bins2) = 2D weight histogram on marginal bins,
+        returns the raw (K1*K2, K1*K2) gram matrix in the centered marginal space.
+
+        Column ordering: j1 * K2 + j2, matching _row_kron_dense().
+        """
+        B1, B2 = self.B1_unique_t, self.B2_unique_t
+        K1, K2 = B1.shape[1], B2.shape[1]
+        n1 = B1.shape[0]
+
+        # Step 1: C[a, m, n] = sum_b w_grid[a,b] * B2[b,m] * B2[b,n]
+        #   = (B2.T @ diag(w_grid[a,:]) @ B2) per a — use batch BLAS
+        WB2 = w_grid[:, :, None] * B2[None, :, :]  # (n1, n2, K2)
+        C = WB2.transpose(0, 2, 1) @ B2[None, :, :]  # batch: (n1, K2, K2)
+
+        # Step 2: G[(j1,j3), (j2,j4)] = sum_a B1[a,j1]*B1[a,j3] * C[a,j2,j4]
+        #   = B1_outer_flat.T @ C_flat — single BLAS gemm
+        B1_outer = B1[:, :, None] * B1[:, None, :]  # (n1, K1, K1)
+        G_K1K1_K2K2 = B1_outer.reshape(n1, K1 * K1).T @ C.reshape(n1, K2 * K2)
+
+        # Reindex: G_K1K1_K2K2[j1*K1+j3, j2*K2+j4] → G[j1*K2+j2, j3*K2+j4]
+        return G_K1K1_K2K2.reshape(K1, K1, K2, K2).transpose(0, 2, 1, 3).reshape(K1 * K2, K1 * K2)
+
+    def gram(self, W: NDArray) -> NDArray:
+        w_grid = _disc_disc_2d_hist(self.idx1, self.idx2, W, self.n_bins1, self.n_bins2)
+        G_raw = self._factored_gram_raw(w_grid)
+        return self.R_inv.T @ G_raw @ self.R_inv
+
+    def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+        """Factored gram + rmatvec with shared 2D bincount."""
+        B1, B2 = self.B1_unique_t, self.B2_unique_t
+        w_grid, wz_grid = _fused_2d_bincount_2(
+            self.idx1, self.idx2, W, Wz, self.n_bins1, self.n_bins2
+        )
+        # Factored gram
+        G_raw = self._factored_gram_raw(w_grid)
+        gram = self.R_inv.T @ G_raw @ self.R_inv
+        # Factored rmatvec(W)
+        xtw = self.R_inv.T @ (B1.T @ w_grid @ B2).ravel()
+        # Factored rmatvec(Wz)
+        xtwz = self.R_inv.T @ (B1.T @ wz_grid @ B2).ravel()
+        return gram, xtw, xtwz
+
+    def matvec(self, v: NDArray) -> NDArray:
+        B1, B2 = self.B1_unique_t, self.B2_unique_t
+        K1, K2 = B1.shape[1], B2.shape[1]
+        u = (self.R_inv @ v).reshape(K1, K2)
+        B1u = B1 @ u  # (n_bins1, K2)
+        return np.sum(B1u[self.idx1] * B2[self.idx2], axis=1)
+
+    def rmatvec(self, w: NDArray) -> NDArray:
+        B1, B2 = self.B1_unique_t, self.B2_unique_t
+        w_grid = _disc_disc_2d_hist(self.idx1, self.idx2, w, self.n_bins1, self.n_bins2)
+        return self.R_inv.T @ (B1.T @ w_grid @ B2).ravel()
+
+    def row_subset(self, idx: NDArray) -> DiscretizedTensorGroupMatrix:
+        sub = DiscretizedTensorGroupMatrix(
+            self.B1_unique_t,
+            self.B2_unique_t,
+            self.idx1[idx],
+            self.idx2[idx],
+            self.B_unique,  # B_joint stays the same (covers all pairs)
+            self.R_inv,
+            self.bin_idx[idx],
+            tensor_id=self.tensor_id,
+        )
+        sub.omega = self.omega
+        sub.projection = self.projection
+        return sub
+
+
 GroupMatrix = (
-    DenseGroupMatrix | SparseGroupMatrix | SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix
+    DenseGroupMatrix
+    | SparseGroupMatrix
+    | SparseSSPGroupMatrix
+    | DiscretizedSSPGroupMatrix
+    | DiscretizedTensorGroupMatrix
 )
 
 _MAX_DISC_DISC_HIST_CELLS = 5_000_000
@@ -338,6 +477,59 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
     return _weighted_bincount_2d(bin_idx, W, X, n_bins)
 
 
+def _cross_gram_tensor_tensor(
+    gm_i: DiscretizedTensorGroupMatrix,
+    gm_j: DiscretizedTensorGroupMatrix,
+    W: NDArray,
+) -> NDArray:
+    """Cross-gram between two tensor groups sharing the same marginals.
+
+    Used for decomposed tensor subgroups (bilinear × wiggly) that share
+    the same B1_unique, B2_unique, idx1, idx2 but have different R_inv.
+    """
+    w_grid = _disc_disc_2d_hist(gm_i.idx1, gm_i.idx2, W, gm_i.n_bins1, gm_i.n_bins2)
+    G_raw = gm_i._factored_gram_raw(w_grid)
+    return gm_i.R_inv.T @ G_raw @ gm_j.R_inv
+
+
+def _cross_gram_tensor_main(
+    gm_tensor: DiscretizedTensorGroupMatrix,
+    gm_main: DiscretizedSSPGroupMatrix,
+    W: NDArray,
+) -> NDArray:
+    """Blocked cross-gram between a tensor and a main-effect discretized group.
+
+    Returns X_main.T @ diag(W) @ X_tensor in SSP space, shape (p_main, p_tensor).
+
+    Uses K2 passes through 2D histograms — O(n*K2) total observation passes
+    with O(n_bins_main * n_bins1) memory per pass.  No 3D histogram.
+
+    Column ordering: j1 * K2 + j2, matching _row_kron_dense().
+    """
+    B1 = gm_tensor.B1_unique_t
+    B2 = gm_tensor.B2_unique_t
+    B_main = gm_main.B_unique
+    K1, K2 = B1.shape[1], B2.shape[1]
+    K_main_raw = B_main.shape[1]
+
+    result_raw = np.zeros((K_main_raw, K1 * K2))
+    for j2 in range(K2):
+        # Weight observations by B2[idx2[obs], j2]
+        w_col = W * B2[gm_tensor.idx2, j2]
+        # 2D histogram: (n_bins_main, n_bins1)
+        H = _disc_disc_2d_hist(
+            gm_main.bin_idx,
+            gm_tensor.idx1,
+            w_col,
+            gm_main.n_bins,
+            gm_tensor.n_bins1,
+        )
+        # Contract: (K_main, n_bins_main) × (n_bins_main, n_bins1) × (n_bins1, K1)
+        result_raw[:, j2::K2] = B_main.T @ H @ B1
+
+    return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
+
+
 def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     """Compute X_i.T @ diag(W) @ X_j efficiently.
 
@@ -347,6 +539,28 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     sparse groups). Otherwise falls back to materializing the smaller group
     and using rmatvec on the larger.
     """
+    # Tensor × tensor (same marginals, e.g. decomposed bilinear/wiggly)
+    if (
+        isinstance(gm_i, DiscretizedTensorGroupMatrix)
+        and isinstance(gm_j, DiscretizedTensorGroupMatrix)
+        and gm_i.tensor_id == gm_j.tensor_id
+    ):
+        return _cross_gram_tensor_tensor(gm_i, gm_j, W)
+
+    # Tensor × discretized main-effect (not tensor × tensor with different ids)
+    if (
+        isinstance(gm_i, DiscretizedTensorGroupMatrix)
+        and isinstance(gm_j, DiscretizedSSPGroupMatrix)
+        and not isinstance(gm_j, DiscretizedTensorGroupMatrix)
+    ):
+        return _cross_gram_tensor_main(gm_i, gm_j, W).T
+    if (
+        isinstance(gm_j, DiscretizedTensorGroupMatrix)
+        and isinstance(gm_i, DiscretizedSSPGroupMatrix)
+        and not isinstance(gm_i, DiscretizedTensorGroupMatrix)
+    ):
+        return _cross_gram_tensor_main(gm_j, gm_i, W)
+
     if isinstance(gm_i, DiscretizedSSPGroupMatrix) and isinstance(gm_j, DiscretizedSSPGroupMatrix):
         n_joint = gm_i.n_bins * gm_j.n_bins
         if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
