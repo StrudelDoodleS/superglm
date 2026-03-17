@@ -341,6 +341,37 @@ class TestPenaltyDefault:
         assert type(m._model.penalty).__name__ == "Ridge"
 
 
+# ── Family validation ────────────────────────────────────────────
+
+
+class TestRegressorFamilyGuard:
+    def test_binomial_raises(self, sample_data):
+        X, y, _ = sample_data
+        m = SuperGLMRegressor(family="binomial")
+        with pytest.raises(ValueError, match="use SuperGLMClassifier"):
+            m.fit(X, y)
+
+    def test_unknown_family_raises(self, sample_data):
+        X, y, _ = sample_data
+        m = SuperGLMRegressor(family="laplace")
+        with pytest.raises(ValueError, match="Unknown family 'laplace'"):
+            m.fit(X, y)
+
+    def test_gaussian_fits(self, sample_data):
+        X, y, _ = sample_data
+        m = SuperGLMRegressor(family="gaussian")
+        m.fit(X, y)
+        assert m.coef_ is not None
+
+    def test_clone_binomial_is_constructable(self):
+        """clone() should work — error is deferred to fit()."""
+        from sklearn.base import clone
+
+        m = SuperGLMRegressor(family="binomial")
+        m2 = clone(m)
+        assert m2.family == "binomial"
+
+
 # ── sklearn clone / get_params ────────────────────────────────────
 
 
