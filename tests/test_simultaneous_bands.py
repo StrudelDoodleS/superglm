@@ -21,7 +21,7 @@ def spline_model():
 
     model = SuperGLM(
         family="poisson",
-        lambda1=0.001,
+        selection_penalty=0.001,
         features={"x": Spline(n_knots=10, penalty="ssp")},
     )
     model.fit(X, y)
@@ -76,7 +76,7 @@ class TestSimultaneousBands:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         model.fit(X, y)

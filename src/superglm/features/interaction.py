@@ -294,20 +294,12 @@ class NumericCategorical:
         self.num_name = num_name
         self.cat_name = cat_name
 
-        self._standardize: bool = False
-        self._mean: float = 0.0
-        self._std: float = 1.0
         self._non_base: list[str] = []
         self._base_level: str = ""
 
     @property
     def parent_names(self) -> tuple[str, str]:
         return (self.num_name, self.cat_name)
-
-    def _standardize_x(self, x: NDArray) -> NDArray:
-        if self._standardize:
-            return (x - self._mean) / self._std
-        return x
 
     def build(
         self,
@@ -326,20 +318,16 @@ class NumericCategorical:
         if not isinstance(cat_spec, Categorical):
             raise TypeError(f"Expected Categorical spec for {self.cat_name}")
 
-        self._standardize = num_spec.standardize
-        self._mean = num_spec._mean
-        self._std = num_spec._std
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
 
         x_num = np.asarray(x_num, dtype=np.float64).ravel()
         x_cat = np.asarray(x_cat).ravel()
-        x_s = self._standardize_x(x_num)
 
         cols = []
         for level in self._non_base:
             indicator = (x_cat == level).astype(np.float64)
-            cols.append(x_s * indicator)
+            cols.append(x_num * indicator)
 
         columns = np.column_stack(cols)
         return GroupInfo(columns=columns, n_cols=len(self._non_base))
@@ -350,12 +338,11 @@ class NumericCategorical:
         _validate_categorical_levels(
             x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
         )
-        x_s = self._standardize_x(x_num)
 
         cols = []
         for level in self._non_base:
             indicator = (x_cat == level).astype(np.float64)
-            cols.append(x_s * indicator)
+            cols.append(x_num * indicator)
         return np.column_stack(cols)
 
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
@@ -363,9 +350,8 @@ class NumericCategorical:
         rels_per_unit: dict[str, float] = {}
         for i, level in enumerate(self._non_base):
             b = float(beta[i])
-            b_orig = b / self._std if self._standardize else b
-            log_rels_per_unit[level] = b_orig
-            rels_per_unit[level] = float(np.exp(b_orig))
+            log_rels_per_unit[level] = b
+            rels_per_unit[level] = float(np.exp(b))
         return {
             "levels": self._non_base,
             "base_level": self._base_level,
@@ -490,20 +476,12 @@ class CategoricalInteraction:
 class NumericInteraction:
     """Product interaction between two numeric features.
 
-    Single group of 1 column: ``x1 * x2`` (after standardization if
-    the parent specs use it).
+    Single group of 1 column: ``x1 * x2``.
     """
 
     def __init__(self, num1_name: str, num2_name: str):
         self.num1_name = num1_name
         self.num2_name = num2_name
-
-        self._standardize1: bool = False
-        self._mean1: float = 0.0
-        self._std1: float = 1.0
-        self._standardize2: bool = False
-        self._mean2: float = 0.0
-        self._std2: float = 1.0
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -512,10 +490,6 @@ class NumericInteraction:
     def _prep(self, x1: NDArray, x2: NDArray) -> tuple[NDArray, NDArray]:
         x1 = np.asarray(x1, dtype=np.float64).ravel()
         x2 = np.asarray(x2, dtype=np.float64).ravel()
-        if self._standardize1:
-            x1 = (x1 - self._mean1) / self._std1
-        if self._standardize2:
-            x2 = (x2 - self._mean2) / self._std2
         return x1, x2
 
     def build(
@@ -534,9 +508,6 @@ class NumericInteraction:
         if not isinstance(s2, Numeric):
             raise TypeError(f"Expected Numeric spec for {self.num2_name}")
 
-        self._standardize1, self._mean1, self._std1 = s1.standardize, s1._mean, s1._std
-        self._standardize2, self._mean2, self._std2 = s2.standardize, s2._mean, s2._std
-
         x1s, x2s = self._prep(x1, x2)
         return GroupInfo(columns=(x1s * x2s).reshape(-1, 1), n_cols=1)
 
@@ -546,16 +517,9 @@ class NumericInteraction:
 
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
         b = float(beta[0])
-        scale = 1.0
-        if self._standardize1:
-            scale /= self._std1
-        if self._standardize2:
-            scale /= self._std2
-        b_orig = b * scale
         return {
-            "coef_transformed": b,
-            "coef_original": b_orig,
-            "relativity_per_unit_unit": float(np.exp(b_orig)),
+            "coef": b,
+            "relativity_per_unit_unit": float(np.exp(b)),
             "interaction": True,
         }
 

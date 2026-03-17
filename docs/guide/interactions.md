@@ -6,7 +6,7 @@ Interactions between features are specified via the `interactions` parameter. Th
 model = SuperGLM(
     features={"age": Spline(k=14), "region": Categorical()},
     interactions=[("age", "region")],
-    lambda1=0.01,
+    selection_penalty=0.01,
 )
 model.fit(df, y, sample_weight=exposure)
 ```

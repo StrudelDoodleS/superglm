@@ -10,7 +10,7 @@ from superglm import SuperGLM
 model = SuperGLM(
     family="poisson",
     penalty="group_lasso",
-    lambda1=0.01,
+    selection_penalty=0.01,
     splines=["DrivAge", "VehAge", "BonusMalus"],
     n_knots=10,
 )
@@ -23,18 +23,17 @@ predictions = model.predict(df)
 Full control over each feature:
 
 ```python
-from superglm import SuperGLM, Spline, Categorical, Numeric
+from superglm import SuperGLM, Spline, Categorical
 
 model = SuperGLM(
     family="poisson",
     penalty="group_lasso",
-    lambda1=0.01,
+    selection_penalty=0.01,
     features={
         "DrivAge": Spline(kind="bs", k=14),
         "VehAge": Spline(kind="cr", k=10),
         "BonusMalus": Spline(kind="ns", k=10),
         "Area": Categorical(base="most_exposed"),
-        "LogDensity": Numeric(),
     },
 )
 model.fit(df, y, sample_weight=exposure)

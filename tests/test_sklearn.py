@@ -25,7 +25,7 @@ def sample_data():
 class TestFitPredict:
     def test_basic(self, sample_data):
         X, y, exposure = sample_data
-        model = SuperGLMRegressor(spline_features=["age"], n_knots=10, lambda1=0.01)
+        model = SuperGLMRegressor(spline_features=["age"], n_knots=10, selection_penalty=0.01)
         model.fit(X, y, sample_weight=exposure)
         preds = model.predict(X)
         assert preds.shape == (len(X),)
@@ -33,7 +33,7 @@ class TestFitPredict:
 
     def test_sklearn_attributes(self, sample_data):
         X, y, exposure = sample_data
-        model = SuperGLMRegressor(spline_features=["age"], n_knots=10, lambda1=0.01)
+        model = SuperGLMRegressor(spline_features=["age"], n_knots=10, selection_penalty=0.01)
         model.fit(X, y, sample_weight=exposure)
         assert hasattr(model, "coef_")
         assert hasattr(model, "intercept_")
@@ -44,20 +44,20 @@ class TestFitPredict:
 class TestAutoDetect:
     def test_categorical_from_dtype(self, sample_data):
         X, y, _ = sample_data
-        model = SuperGLMRegressor(lambda1=0.01)
+        model = SuperGLMRegressor(selection_penalty=0.01)
         model.fit(X, y)
         assert "Categorical" in model._feature_types["region"]
 
     def test_numeric_default(self, sample_data):
         X, y, _ = sample_data
-        model = SuperGLMRegressor(lambda1=0.01)
+        model = SuperGLMRegressor(selection_penalty=0.01)
         model.fit(X, y)
         assert "Numeric" in model._feature_types["density"]
         assert "Numeric" in model._feature_types["age"]
 
     def test_spline_override(self, sample_data):
         X, y, _ = sample_data
-        model = SuperGLMRegressor(spline_features=["age"], n_knots=10, lambda1=0.01)
+        model = SuperGLMRegressor(spline_features=["age"], n_knots=10, selection_penalty=0.01)
         model.fit(X, y)
         assert "Spline" in model._feature_types["age"]
 
@@ -65,7 +65,9 @@ class TestAutoDetect:
 class TestNKnots:
     def test_int_broadcast(self, sample_data):
         X, y, _ = sample_data
-        model = SuperGLMRegressor(spline_features=["age", "density"], n_knots=12, lambda1=0.01)
+        model = SuperGLMRegressor(
+            spline_features=["age", "density"], n_knots=12, selection_penalty=0.01
+        )
         model.fit(X, y)
         assert "n_knots=12" in model._feature_types["age"]
         assert "n_knots=12" in model._feature_types["density"]
@@ -75,7 +77,7 @@ class TestNKnots:
         model = SuperGLMRegressor(
             spline_features=["age", "density"],
             n_knots=[10, 20],
-            lambda1=0.01,
+            selection_penalty=0.01,
         )
         model.fit(X, y)
         assert "n_knots=10" in model._feature_types["age"]
@@ -99,7 +101,7 @@ class TestOffset:
             spline_features=["age"],
             n_knots=10,
             offset="log_exp",
-            lambda1=0.01,
+            selection_penalty=0.01,
         )
         model.fit(X, y)
         assert "log_exp" not in model._feature_types
@@ -116,7 +118,7 @@ class TestOffset:
             spline_features=["age"],
             n_knots=10,
             offset=["off1", "off2"],
-            lambda1=0.01,
+            selection_penalty=0.01,
         )
         model.fit(X, y)
         assert "off1" not in model._feature_types
@@ -146,43 +148,15 @@ class TestSklearnContract:
 
     def test_sample_weight(self, sample_data):
         X, y, exposure = sample_data
-        model = SuperGLMRegressor(lambda1=0.01)
+        model = SuperGLMRegressor(selection_penalty=0.01)
         model.fit(X, y, sample_weight=exposure)
         assert model.coef_ is not None
 
     def test_no_sample_weight(self, sample_data):
         X, y, _ = sample_data
-        model = SuperGLMRegressor(lambda1=0.01)
+        model = SuperGLMRegressor(selection_penalty=0.01)
         model.fit(X, y)
         assert model.coef_ is not None
-
-
-class TestRegressorPenaltyAliases:
-    """Alias coverage for SuperGLMRegressor."""
-
-    def test_new_names(self, sample_data):
-        X, y, w = sample_data
-        m = SuperGLMRegressor(selection_penalty=0.05, spline_penalty=0.2, spline_features=["age"])
-        m.fit(X, y, sample_weight=w)
-        assert m._model.penalty.lambda1 == 0.05
-        assert m._model.lambda2 == 0.2
-
-    def test_old_names(self, sample_data):
-        X, y, w = sample_data
-        m = SuperGLMRegressor(lambda1=0.05, lambda2=0.2, spline_features=["age"])
-        m.fit(X, y, sample_weight=w)
-        assert m._model.penalty.lambda1 == 0.05
-        assert m._model.lambda2 == 0.2
-
-    def test_selection_penalty_lambda1_conflict(self):
-        with pytest.raises(ValueError, match="selection_penalty.*lambda1"):
-            m = SuperGLMRegressor(selection_penalty=0.05, lambda1=0.03)
-            m.fit(pd.DataFrame({"x": [1, 2]}), np.array([1.0, 2.0]))
-
-    def test_spline_penalty_lambda2_conflict(self):
-        with pytest.raises(ValueError, match="spline_penalty.*lambda2"):
-            m = SuperGLMRegressor(spline_penalty=0.2, lambda2=0.7)
-            m.fit(pd.DataFrame({"x": [1, 2]}), np.array([1.0, 2.0]))
 
 
 # ── ndarray input ─────────────────────────────────────────────────

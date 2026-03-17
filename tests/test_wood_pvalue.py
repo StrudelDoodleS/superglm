@@ -355,7 +355,7 @@ class TestWoodIntegration:
         X = pd.DataFrame({"x": x})
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x": Spline(n_knots=8, penalty="ssp")},
         )
         model.fit(X, y)
@@ -433,7 +433,7 @@ class TestWoodIntegration:
         X = pd.DataFrame({"x": x})
         model = SuperGLM(
             family="gamma",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x": Spline(n_knots=6, penalty="ssp")},
         )
         model.fit(X, y)
@@ -466,7 +466,7 @@ class TestWoodIntegration:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={
                 "x1": Spline(n_knots=8, penalty="ssp"),
                 "x2": Spline(n_knots=6, penalty="ssp"),

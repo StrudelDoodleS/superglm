@@ -370,13 +370,13 @@ class TestWarmStart:
 class TestSklearnShorthand:
     def test_string_group_lasso(self, sample_data):
         X, y, _ = sample_data
-        model = SuperGLMRegressor(penalty="group_lasso", lambda1=0.01)
+        model = SuperGLMRegressor(penalty="group_lasso", selection_penalty=0.01)
         model.fit(X, y)
         assert model.coef_ is not None
 
     def test_string_ridge(self, sample_data):
         X, y, _ = sample_data
-        model = SuperGLMRegressor(penalty="ridge", lambda1=0.01)
+        model = SuperGLMRegressor(penalty="ridge", selection_penalty=0.01)
         model.fit(X, y)
         assert model.coef_ is not None
         # Ridge never zeros — all coefficients non-zero
@@ -386,7 +386,7 @@ class TestSklearnShorthand:
         X, y, _ = sample_data
         model = SuperGLMRegressor(
             penalty="sparse_group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             spline_features=["age"],
             n_knots=10,
         )
@@ -407,7 +407,7 @@ class TestSklearnShorthand:
         X, y, _ = sample_data
         model = SuperGLMRegressor(
             penalty="group_elastic_net",
-            lambda1=0.01,
+            selection_penalty=0.01,
             spline_features=["age"],
             n_knots=10,
         )

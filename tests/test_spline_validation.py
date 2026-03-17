@@ -52,8 +52,8 @@ def test_spline_families_recover_known_smooth_poisson_rate(spec_cls):
 
     model = SuperGLM(
         family="poisson",
-        lambda1=0.0,
-        lambda2=0.03,
+        selection_penalty=0.0,
+        spline_penalty=0.03,
         features={"x": spec_cls(n_knots=12, penalty="ssp")},
     )
     model.fit(X, y, exposure=exposure, offset=offset)

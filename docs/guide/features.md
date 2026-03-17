@@ -76,9 +76,8 @@ Categorical(base="B")             # explicit base level
 
 ## Numeric
 
-Single continuous feature, standardised by default. Group size 1, so group lasso reduces to standard L1.
+Single continuous feature. Group size 1, so group lasso reduces to standard L1.
 
 ```python
-Numeric()                       # standardised (default)
-Numeric(standardize=False)      # raw scale
+Numeric()
 ```

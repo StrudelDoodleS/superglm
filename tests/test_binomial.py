@@ -130,7 +130,7 @@ class TestBinomialFit:
         X, y = binary_data
         m = SuperGLM(
             family="binomial",
-            lambda1=0,
+            selection_penalty=0,
             features={"x1": Numeric(), "x2": Categorical(base="first")},
         )
         m.fit(X, y)
@@ -141,7 +141,7 @@ class TestBinomialFit:
         X, y = binary_data
         m = SuperGLM(
             family="binomial",
-            lambda1=0,
+            selection_penalty=0,
             features={"x1": Numeric(), "x2": Categorical(base="first")},
         )
         m.fit(X, y)
@@ -154,7 +154,7 @@ class TestBinomialFit:
         X, y = binary_data
         m = SuperGLM(
             family="binomial",
-            lambda1=0,
+            selection_penalty=0,
             features={"x1": Numeric(), "x2": Categorical(base="first")},
         )
         m.fit(X, y)
@@ -164,7 +164,7 @@ class TestBinomialFit:
         X, y = binary_data
         m = SuperGLM(
             family="binomial",
-            lambda1=0,
+            selection_penalty=0,
             features={"x1": Numeric(), "x2": Categorical(base="first")},
         )
         m.fit(X, y)
@@ -172,7 +172,7 @@ class TestBinomialFit:
 
     def test_auto_detect_fit(self, binary_data):
         X, y = binary_data
-        m = SuperGLM(family="binomial", lambda1=0, splines=[])
+        m = SuperGLM(family="binomial", selection_penalty=0, splines=[])
         m.fit(X, y)
         proba = m.predict(X)
         assert np.all(proba > 0) and np.all(proba < 1)
@@ -181,7 +181,7 @@ class TestBinomialFit:
         X, y = binary_data
         m = SuperGLM(
             family="binomial",
-            lambda1=0,
+            selection_penalty=0,
             features={"x1": Spline(n_knots=5), "x2": Categorical(base="first")},
         )
         m.fit(X, y)
@@ -192,7 +192,7 @@ class TestBinomialFit:
         X, y = binary_data
         m = SuperGLM(
             family="binomial",
-            lambda1=0.05,
+            selection_penalty=0.05,
             features={"x1": Numeric(), "x2": Categorical(base="first")},
         )
         m.fit(X, y)
@@ -202,7 +202,7 @@ class TestBinomialFit:
     def test_invalid_y_raises(self, binary_data):
         X, _ = binary_data
         y_bad = np.random.default_rng(0).uniform(0, 5, len(X))
-        m = SuperGLM(family="binomial", lambda1=0, features={"x1": Numeric()})
+        m = SuperGLM(family="binomial", selection_penalty=0, features={"x1": Numeric()})
         with pytest.raises(ValueError, match="Binomial family requires y"):
             m.fit(X, y_bad)
 
@@ -214,7 +214,7 @@ class TestBinomialFit:
         m = SuperGLM(
             family="binomial",
             link=IdentityLink(),
-            lambda1=0,
+            selection_penalty=0,
             features={"x1": Numeric(), "x2": Categorical(base="first")},
         )
         m.fit(X, y)
@@ -242,8 +242,8 @@ class TestStatsmodelsParity:
 
         m = SuperGLM(
             family="binomial",
-            lambda1=0,
-            features={"x1": Numeric(standardize=False)},
+            selection_penalty=0,
+            features={"x1": Numeric()},
         )
         m.fit(X[["x1"]], y)
 
@@ -269,7 +269,7 @@ class TestBinomialMetrics:
         X, y = binary_data
         m = SuperGLM(
             family="binomial",
-            lambda1=0,
+            selection_penalty=0,
             features={"x1": Numeric(), "x2": Categorical(base="first")},
         )
         m.fit(X, y)
@@ -279,7 +279,7 @@ class TestBinomialMetrics:
         X, y = binary_data
         m = SuperGLM(
             family="binomial",
-            lambda1=0,
+            selection_penalty=0,
             features={"x1": Numeric(), "x2": Categorical(base="first")},
         )
         m.fit(X, y)
@@ -290,7 +290,7 @@ class TestBinomialMetrics:
         X, y = binary_data
         m = SuperGLM(
             family="binomial",
-            lambda1=0,
+            selection_penalty=0,
             features={"x1": Numeric(), "x2": Categorical(base="first")},
         )
         m.fit(X, y)

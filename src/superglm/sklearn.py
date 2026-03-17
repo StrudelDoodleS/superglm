@@ -18,8 +18,8 @@ Both accept **DataFrame** or **ndarray** input:
   explicitly.  Unspecified columns default to ``Numeric``.
 
 **Penalty default**: ``penalty=None`` means *no feature-selection penalty*.
-Set ``selection_penalty`` (or ``lambda1``) to a positive value and the
-wrapper auto-upgrades to ``"group_lasso"``.
+Set ``selection_penalty`` to a positive value and the wrapper auto-upgrades
+to ``"group_lasso"``.
 """
 
 from __future__ import annotations
@@ -32,16 +32,42 @@ from numpy.typing import NDArray
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
 
+from superglm.distributions import Distribution
 from superglm.model import SuperGLM
 from superglm.penalties.base import Penalty
 
 # ── Family validation ─────────────────────────────────────────────
 
-_REGRESSOR_FAMILIES = frozenset({"poisson", "gaussian", "gamma", "tweedie", "negative_binomial"})
+_REGRESSOR_FAMILIES = frozenset({"poisson", "gaussian", "gamma"})
+
+# Distribution types allowed for regression (resolved objects)
+_REGRESSOR_DISTRIBUTION_TYPES: tuple[type, ...] = ()  # populated lazily
 
 
-def _validate_regressor_family(family: str) -> None:
+def _validate_regressor_family(family) -> None:
     """Raise if *family* is not a valid regression family."""
+    from superglm.distributions import (
+        Binomial,
+        Distribution,
+        Gamma,
+        Gaussian,
+        NegativeBinomial,
+        Poisson,
+        Tweedie,
+    )
+
+    if isinstance(family, Distribution):
+        if isinstance(family, Binomial):
+            raise ValueError(
+                "Binomial family is not supported in SuperGLMRegressor; "
+                "use SuperGLMClassifier instead."
+            )
+        if isinstance(family, Poisson | Gaussian | Gamma | NegativeBinomial | Tweedie):
+            return
+        raise ValueError(
+            f"Unknown distribution type {type(family).__name__} for SuperGLMRegressor."
+        )
+    # String path
     if family == "binomial":
         raise ValueError(
             "family='binomial' is not supported in SuperGLMRegressor; "
@@ -50,7 +76,9 @@ def _validate_regressor_family(family: str) -> None:
     if family not in _REGRESSOR_FAMILIES:
         allowed = ", ".join(sorted(_REGRESSOR_FAMILIES))
         raise ValueError(
-            f"Unknown family '{family}' for SuperGLMRegressor. Allowed families: {allowed}."
+            f"Unknown family '{family}' for SuperGLMRegressor. "
+            f"String families: {allowed}. "
+            f"For parameterized families use families.tweedie(p=...) or families.nb2(theta=...)."
         )
 
 
@@ -173,38 +201,21 @@ def _resolve_wrapper_penalty(
     penalty,
     selection_penalty,
     spline_penalty,
-    lambda1,
-    lambda2,
 ):
     """Resolve penalty defaults with auto-upgrade.
 
-    When ``penalty is None`` and a positive ``selection_penalty`` (or
-    ``lambda1``) is given, the penalty is auto-upgraded to
-    ``"group_lasso"`` for convenience.  When neither is set, the wrapper
-    defaults to an unpenalised fit (``selection_penalty=0``).
+    When ``penalty is None`` and a positive ``selection_penalty`` is given,
+    the penalty is auto-upgraded to ``"group_lasso"`` for convenience.
+    When neither is set, the wrapper defaults to an unpenalised fit
+    (``selection_penalty=0``).
     """
-    from superglm.model.api import _resolve_penalty_alias
-
-    resolved_sel = _resolve_penalty_alias(
-        "selection_penalty",
-        selection_penalty,
-        "lambda1",
-        lambda1,
-    )
-    resolved_spl = _resolve_penalty_alias(
-        "spline_penalty",
-        spline_penalty,
-        "lambda2",
-        lambda2,
-    )
-
     if penalty is None:
-        if resolved_sel is not None and resolved_sel > 0:
+        if selection_penalty is not None and selection_penalty > 0:
             penalty = "group_lasso"
-        elif resolved_sel is None:
-            resolved_sel = 0.0
+        elif selection_penalty is None:
+            selection_penalty = 0.0
 
-    return penalty, resolved_sel, resolved_spl
+    return penalty, selection_penalty, spline_penalty
 
 
 def _build_features_or_splines(
@@ -215,7 +226,6 @@ def _build_features_or_splines(
     n_knots: int | list[int],
     degree: int,
     cat_base: str,
-    standardize_numeric: bool,
     *,
     force_explicit: bool,
     X_df: pd.DataFrame | None = None,
@@ -261,7 +271,7 @@ def _build_features_or_splines(
     for name in cat_list:
         features[name] = Categorical(base=cat_base)
     for name in num_list:
-        features[name] = Numeric(standardize=standardize_numeric)
+        features[name] = Numeric()
 
     # Unspecified columns: auto-detect from dtype when DataFrame is
     # available, otherwise default to Numeric (ndarray mode).
@@ -269,7 +279,7 @@ def _build_features_or_splines(
         if X_df is not None and X_df[name].dtype.kind in ("O", "S", "U"):
             features[name] = Categorical(base=cat_base)
         else:
-            features[name] = Numeric(standardize=standardize_numeric)
+            features[name] = Numeric()
 
     return features, None
 
@@ -285,21 +295,19 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
 
     Parameters
     ----------
-    family : str
-        Distribution family.  Must be one of ``"poisson"``, ``"gamma"``,
-        ``"gaussian"``, ``"tweedie"``, ``"negative_binomial"``.
+    family : str or Distribution
+        Distribution family.  Strings: ``"poisson"``, ``"gamma"``,
+        ``"gaussian"``.  For parameterized families use objects:
+        ``families.tweedie(p=1.5)``, ``families.nb2(theta=1.0)``.
         For binary classification use ``SuperGLMClassifier``.
-    tweedie_p, nb_theta : float or None
-        Family-specific parameters.
     penalty : str, Penalty, or None
         Penalty type.  ``None`` (default) means no feature-selection
         penalty.  Set ``selection_penalty`` to a positive value to
         auto-upgrade to ``"group_lasso"``.
     selection_penalty : float or None
-        Group penalty strength (feature selection).  Alias: ``lambda1``.
+        Group penalty strength (feature selection).
     spline_penalty : float or None
         Within-group spline smoothing.  Defaults to 0.1.
-        Alias: ``lambda2``.
     spline_features : list of str or int, or None
         Columns to treat as spline features (by name or index).
     categorical_features : list of str or int, or None
@@ -316,19 +324,13 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         B-spline degree (default 3).
     categorical_base : str
         Base level strategy (``"most_exposed"`` or ``"first"``).
-    standardize_numeric : bool
-        Whether to center and scale numeric features.
     offset : str, int, list, or None
         Offset column(s) by name or index.
-    lambda1, lambda2 : float or None
-        Deprecated aliases for ``selection_penalty`` / ``spline_penalty``.
     """
 
     def __init__(
         self,
-        family: str = "poisson",
-        tweedie_p: float | None = None,
-        nb_theta: float | str | None = None,
+        family: str | Distribution = "poisson",
         penalty: str | Penalty | None = None,
         selection_penalty: float | None = None,
         spline_penalty: float | None = None,
@@ -339,19 +341,12 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         n_knots: int | list[int] = 10,
         degree: int = 3,
         categorical_base: str = "most_exposed",
-        standardize_numeric: bool = True,
         offset: str | int | list[str | int] | None = None,
-        lambda1: float | None = None,
-        lambda2: float | None = None,
     ):
         self.family = family
-        self.tweedie_p = tweedie_p
-        self.nb_theta = nb_theta
         self.penalty = penalty
         self.selection_penalty = selection_penalty
         self.spline_penalty = spline_penalty
-        self.lambda1 = lambda1
-        self.lambda2 = lambda2
         self.spline_features = spline_features
         self.categorical_features = categorical_features
         self.numeric_features = numeric_features
@@ -359,7 +354,6 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         self.n_knots = n_knots
         self.degree = degree
         self.categorical_base = categorical_base
-        self.standardize_numeric = standardize_numeric
         self.offset = offset
 
     def fit(
@@ -419,8 +413,6 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
             self.penalty,
             self.selection_penalty,
             self.spline_penalty,
-            self.lambda1,
-            self.lambda2,
         )
 
         # Categorical base fallback
@@ -440,7 +432,6 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
             self.n_knots,
             self.degree,
             cat_base,
-            self.standardize_numeric,
             force_explicit=force_explicit,
             X_df=X_df if input_is_dataframe else None,
         )
@@ -451,12 +442,9 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
             penalty=penalty,
             selection_penalty=resolved_sel,
             spline_penalty=resolved_spl,
-            tweedie_p=self.tweedie_p,
-            nb_theta=self.nb_theta,
             n_knots=self.n_knots,
             degree=self.degree,
             categorical_base=cat_base,
-            standardize_numeric=self.standardize_numeric,
         )
         if features_dict is not None:
             model_kwargs["features"] = features_dict
@@ -491,7 +479,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
             elif type(spec).__name__ == "Categorical":
                 self._feature_types[name] = f"Categorical(base={spec.base})"
             else:
-                self._feature_types[name] = f"Numeric(standardize={spec.standardize})"
+                self._feature_types[name] = "Numeric()"
 
         return self
 
@@ -562,14 +550,10 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         B-spline degree.
     categorical_base : str
         Base level strategy.
-    standardize_numeric : bool
-        Whether to standardize numeric features.
     offset : str, int, list, or None
         Offset column(s).
     threshold : float
         Classification threshold for ``predict()`` (default 0.5).
-    lambda1, lambda2 : float or None
-        Deprecated aliases.
     """
 
     def __init__(
@@ -584,17 +568,12 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         n_knots: int | list[int] = 10,
         degree: int = 3,
         categorical_base: str = "most_exposed",
-        standardize_numeric: bool = True,
         offset: str | int | list[str | int] | None = None,
         threshold: float = 0.5,
-        lambda1: float | None = None,
-        lambda2: float | None = None,
     ):
         self.penalty = penalty
         self.selection_penalty = selection_penalty
         self.spline_penalty = spline_penalty
-        self.lambda1 = lambda1
-        self.lambda2 = lambda2
         self.spline_features = spline_features
         self.categorical_features = categorical_features
         self.numeric_features = numeric_features
@@ -602,7 +581,6 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         self.n_knots = n_knots
         self.degree = degree
         self.categorical_base = categorical_base
-        self.standardize_numeric = standardize_numeric
         self.offset = offset
         self.threshold = threshold
 
@@ -670,8 +648,6 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
             self.penalty,
             self.selection_penalty,
             self.spline_penalty,
-            self.lambda1,
-            self.lambda2,
         )
 
         # Categorical base fallback
@@ -691,7 +667,6 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
             self.n_knots,
             self.degree,
             cat_base,
-            self.standardize_numeric,
             force_explicit=force_explicit,
             X_df=X_df if input_is_dataframe else None,
         )
@@ -705,7 +680,6 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
             n_knots=self.n_knots,
             degree=self.degree,
             categorical_base=cat_base,
-            standardize_numeric=self.standardize_numeric,
         )
         if features_dict is not None:
             model_kwargs["features"] = features_dict

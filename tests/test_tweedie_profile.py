@@ -194,14 +194,14 @@ class TestEstimatePhi:
 
 def _make_intercept_model(p=1.6, lambda1=0.0):
     """Create a minimal intercept-only Tweedie model."""
-    m = SuperGLM(family="tweedie", penalty=GroupLasso(lambda1=lambda1))
+    m = SuperGLM(family=TweedieDistribution(p=1.5), penalty=GroupLasso(lambda1=lambda1))
     return m
 
 
 def _make_model_with_covariates(lambda1=0.0):
     """Create a Tweedie model with numeric covariates."""
     return SuperGLM(
-        family="tweedie",
+        family=TweedieDistribution(p=1.5),
         penalty=GroupLasso(lambda1=lambda1),
         features={"x1": Numeric(), "x2": Numeric()},
     )
@@ -219,9 +219,9 @@ class TestProfileLikelihood:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="tweedie",
+            family=TweedieDistribution(p=1.5),
             penalty=GroupLasso(lambda1=0.0),
-            features={"dummy": Numeric(standardize=False)},
+            features={"dummy": Numeric()},
         )
 
         result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
@@ -260,7 +260,7 @@ class TestProfileLikelihood:
         X = pd.DataFrame({"x1": x1})
 
         model = SuperGLM(
-            family="tweedie",
+            family=TweedieDistribution(p=1.5),
             penalty=GroupLasso(lambda1=0.0),
             features={"x1": Numeric()},
         )
@@ -292,7 +292,7 @@ class TestProfileLikelihood:
 
         X = pd.DataFrame({"x1": x1})
         model = SuperGLM(
-            family="tweedie",
+            family=TweedieDistribution(p=1.5),
             penalty=GroupLasso(lambda1=0.0),
             features={"x1": Numeric()},
         )
@@ -329,9 +329,9 @@ class TestProfileLikelihood:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="tweedie",
+            family=TweedieDistribution(p=1.5),
             penalty=GroupLasso(lambda1=0.0),
-            features={"dummy": Numeric(standardize=False)},
+            features={"dummy": Numeric()},
         )
 
         result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
@@ -388,7 +388,7 @@ class TestFitMetadata:
         rng = np.random.default_rng(42)
         X = pd.DataFrame({"x": rng.uniform(0, 1, 200)})
         y = rng.poisson(1.0, 200).astype(float)
-        model = SuperGLM(family="poisson", lambda1=0.01, features={"x": Numeric()})
+        model = SuperGLM(family="poisson", selection_penalty=0.01, features={"x": Numeric()})
         model.fit(X, y)
         assert model._last_fit_meta is not None
         assert model._last_fit_meta["method"] == "fit"
@@ -400,7 +400,7 @@ class TestFitMetadata:
         y = rng.poisson(1.0, 200).astype(float)
         model = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={"x": Spline(n_knots=6, penalty="ssp")},
         )
         model.fit_reml(X, y)
@@ -413,7 +413,7 @@ class TestFitMetadata:
         y = rng.poisson(1.0, 500).astype(float)
         model = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             discrete=True,
             features={"x": Spline(n_knots=6, penalty="ssp")},
         )
@@ -443,15 +443,15 @@ class TestEstimatePFitMode:
         """fit_mode='fit' (default) should recover p."""
         X, y, p_true = _tweedie_data()
         model = SuperGLM(
-            family="tweedie",
-            lambda1=0,
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
             features={"x1": Numeric()},
         )
         result = model.estimate_p(X, y, fit_mode="fit")
         assert isinstance(result, TweedieProfileResult)
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
         # Model should be refitted with estimated p
-        assert model.tweedie_p == result.p_hat
+        assert model.family.p == result.p_hat
         assert model._result is not None
         assert model._last_fit_meta["method"] == "fit"
 
@@ -459,8 +459,8 @@ class TestEstimatePFitMode:
         """fit_mode='fit' should also recover p with phi_method='mle'."""
         X, y, p_true = _tweedie_data(n=2_000, seed=7)
         model = SuperGLM(
-            family="tweedie",
-            lambda1=0,
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
             features={"x1": Numeric()},
         )
         result = model.estimate_p(X, y, fit_mode="fit", phi_method="mle")
@@ -472,15 +472,15 @@ class TestEstimatePFitMode:
         """fit_mode='reml' should recover p using REML fits."""
         X, y, p_true = _tweedie_data()
         model = SuperGLM(
-            family="tweedie",
-            lambda1=0,
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
         result = model.estimate_p(X, y, fit_mode="reml")
         assert isinstance(result, TweedieProfileResult)
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
         # Model should be refitted with REML
-        assert model.tweedie_p == result.p_hat
+        assert model.family.p == result.p_hat
         assert model._last_fit_meta["method"] == "fit_reml"
         assert hasattr(model, "_reml_result")
 
@@ -488,8 +488,8 @@ class TestEstimatePFitMode:
         """fit_mode='reml' should support phi_method='mle'."""
         X, y, p_true = _tweedie_data(n=1_500, seed=11)
         model = SuperGLM(
-            family="tweedie",
-            lambda1=0,
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
         result = model.estimate_p(X, y, fit_mode="reml", phi_method="mle")
@@ -501,9 +501,8 @@ class TestEstimatePFitMode:
         """After fit(), inherit should use the fit path."""
         X, y, p_true = _tweedie_data()
         model = SuperGLM(
-            family="tweedie",
-            lambda1=0,
-            tweedie_p=1.5,
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
             features={"x1": Numeric()},
         )
         model.fit(X, y)
@@ -517,9 +516,8 @@ class TestEstimatePFitMode:
         """After fit_reml(), inherit should use the REML path."""
         X, y, p_true = _tweedie_data()
         model = SuperGLM(
-            family="tweedie",
-            lambda1=0,
-            tweedie_p=1.5,
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
         model.fit_reml(X, y)
@@ -533,8 +531,8 @@ class TestEstimatePFitMode:
         """inherit with no prior fit falls back to 'fit'."""
         X, y, _ = _tweedie_data()
         model = SuperGLM(
-            family="tweedie",
-            lambda1=0,
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
             features={"x1": Numeric()},
         )
         assert model._last_fit_meta is None
@@ -544,14 +542,18 @@ class TestEstimatePFitMode:
     def test_invalid_fit_mode_raises(self):
         """Invalid fit_mode should raise immediately."""
         X, y, _ = _tweedie_data()
-        model = SuperGLM(family="tweedie", lambda1=0, features={"x1": Numeric()})
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
         with pytest.raises(ValueError, match="fit_mode"):
             model.estimate_p(X, y, fit_mode="bogus")
 
     def test_invalid_phi_method_raises(self):
         """Invalid phi_method should raise immediately."""
         X, y, _ = _tweedie_data()
-        model = SuperGLM(family="tweedie", lambda1=0, features={"x1": Numeric()})
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
         with pytest.raises(ValueError, match="phi_method"):
             model.estimate_p(X, y, phi_method="bogus")
 
@@ -559,7 +561,7 @@ class TestEstimatePFitMode:
         """Non-Tweedie model should raise immediately."""
         X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
         y = np.array([1.0, 2.0, 3.0])
-        model = SuperGLM(family="poisson", lambda1=0, features={"x": Numeric()})
+        model = SuperGLM(family="poisson", selection_penalty=0, features={"x": Numeric()})
         with pytest.raises(ValueError, match="tweedie"):
             model.estimate_p(X, y)
 
@@ -567,15 +569,15 @@ class TestEstimatePFitMode:
         """REML and fit paths should agree on p estimate for the same data."""
         X, y, p_true = _tweedie_data()
         model_fit = SuperGLM(
-            family="tweedie",
-            lambda1=0,
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
             features={"x1": Numeric()},
         )
         result_fit = model_fit.estimate_p(X, y, fit_mode="fit")
 
         model_reml = SuperGLM(
-            family="tweedie",
-            lambda1=0,
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
         result_reml = model_reml.estimate_p(X, y, fit_mode="reml")

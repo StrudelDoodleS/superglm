@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
+from superglm.distributions import NegativeBinomial
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
@@ -44,7 +45,7 @@ def spline_model():
     """Model with two splines and a categorical."""
     return SuperGLM(
         family="poisson",
-        lambda1=0.01,
+        selection_penalty=0.01,
         features={
             "x1": Spline(n_knots=8, penalty="ssp"),
             "x2": Spline(n_knots=8, penalty="ssp"),
@@ -63,7 +64,7 @@ class TestOmegaStored:
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x1": Spline(n_knots=8, penalty="ssp"), "x2": Numeric()},
         )
         model.fit(X[["x1", "x2"]], y, exposure=w)
@@ -79,7 +80,7 @@ class TestOmegaStored:
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x1": NaturalSpline(n_knots=8, penalty="ssp"), "x2": Numeric()},
         )
         model.fit(X[["x1", "x2"]], y, exposure=w)
@@ -92,7 +93,7 @@ class TestOmegaStored:
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x1": CubicRegressionSpline(n_knots=8, penalty="ssp"), "x2": Numeric()},
         )
         model.fit(X[["x1", "x2"]], y, exposure=w)
@@ -117,7 +118,7 @@ class TestPenalisedXtwxInvOmega:
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x1": CubicRegressionSpline(n_knots=6, penalty="ssp")},
         )
         model.fit(X[["x1"]], y, exposure=w)
@@ -140,7 +141,7 @@ class TestPenalisedXtwxInvOmega:
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "x1": Spline(n_knots=6, penalty="ssp"),
                 "x2": Spline(n_knots=6, penalty="ssp"),
@@ -170,7 +171,7 @@ class TestPenalisedXtwxInvOmega:
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "x1": Spline(n_knots=6, penalty="ssp"),
                 "x2": Spline(n_knots=6, penalty="ssp"),
@@ -207,7 +208,7 @@ class TestComputeRInvOverride:
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
         model.fit(X[["x1"]], y, exposure=w)
@@ -256,7 +257,7 @@ class TestMgcvStyleSmoothTestInput:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={
                 "DrivAge": Spline(n_knots=12, penalty="ssp"),
                 "VehAge": Spline(n_knots=12, penalty="ssp"),
@@ -303,7 +304,7 @@ class TestBetaMapping:
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
         model.fit(X[["x1"]], y, exposure=w)
@@ -371,7 +372,7 @@ class TestREMLMultistart:
         def build_model() -> SuperGLM:
             return SuperGLM(
                 family="poisson",
-                lambda1=0.0,
+                selection_penalty=0.0,
                 features={
                     "DrivAge": CubicRegressionSpline(n_knots=10, penalty="ssp"),
                     "VehAge": CubicRegressionSpline(n_knots=10, penalty="ssp"),
@@ -452,7 +453,7 @@ class TestREMLConvergence:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.005,
+            selection_penalty=0.005,
             features={
                 "x1": Spline(n_knots=10, penalty="ssp"),
                 "x2": Spline(n_knots=10, penalty="ssp"),
@@ -486,7 +487,7 @@ class TestREMLGroupLasso:
         # Fit with REML
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "x1": Spline(n_knots=6, penalty="ssp"),
                 "x2": Spline(n_knots=6, penalty="ssp"),
@@ -521,7 +522,7 @@ class TestREMLGroupLasso:
 
         model = SuperGLM(
             family="gamma",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "x1": Spline(n_knots=6, penalty="ssp"),
                 "x2": Spline(n_knots=6, penalty="ssp"),
@@ -555,17 +556,16 @@ class TestREMLFallbacks:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="negative_binomial",
-            nb_theta="auto",
-            lambda1=0.0,
-            features={"dummy": Numeric(standardize=False)},
+            family=NegativeBinomial(theta="auto"),
+            selection_penalty=0.0,
+            features={"dummy": Numeric()},
         )
         with caplog.at_level(logging.WARNING):
             model.fit_reml(X, y)
 
         assert "no REML-eligible groups found" in caplog.text
-        assert isinstance(model.nb_theta, float)
-        assert model.nb_theta > 0
+        assert isinstance(model.family.theta, float)
+        assert model.family.theta > 0
         assert model._nb_profile_result is not None
         assert model.result.converged
         assert not hasattr(model, "_reml_lambdas")
@@ -580,7 +580,7 @@ class TestREMLSelectTrue:
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
         )
         model.fit_reml(X[["x1"]], y, exposure=w, max_reml_iter=15)
@@ -594,7 +594,7 @@ class TestREMLSelectTrue:
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "x1": Spline(n_knots=8, penalty="ssp", select=True),
                 "x2": Spline(n_knots=8, penalty="ssp", select=True),
@@ -652,7 +652,7 @@ class TestREMLBackwardCompat:
             features={"x": CubicRegressionSpline(n_knots=6)},
             family="poisson",
             link=custom_link,
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=10)
         assert m._reml_result.converged
@@ -705,7 +705,7 @@ class TestREMLBackwardCompat:
         m = SuperGLM(
             features={"x": CubicRegressionSpline(n_knots=6)},
             family=custom_dist,
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=10)
         assert m._reml_result.converged
@@ -769,7 +769,7 @@ class TestREMLBackwardCompat:
             features={"x": CubicRegressionSpline(n_knots=6)},
             family=EnhancedPoisson(),
             link=EnhancedLogLink(),
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=10)
         assert m._reml_result.converged
@@ -854,7 +854,7 @@ class TestREMLMetrics:
         # Fit with global lambda2 (different model instance)
         model2 = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "x1": Spline(n_knots=8, penalty="ssp"),
                 "x2": Spline(n_knots=8, penalty="ssp"),
@@ -892,7 +892,7 @@ class TestREMLDiscreteRobustness:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "x1": CubicRegressionSpline(n_knots=8),
                 "x2": CubicRegressionSpline(n_knots=8),
@@ -921,10 +921,10 @@ class TestREMLDiscreteRobustness:
             "x2": CubicRegressionSpline(n_knots=8),
         }
 
-        exact = SuperGLM(family="poisson", lambda1=0, features=features, discrete=False)
+        exact = SuperGLM(family="poisson", selection_penalty=0, features=features, discrete=False)
         exact.fit_reml(df, y, exposure=w, max_reml_iter=30)
 
-        disc = SuperGLM(family="poisson", lambda1=0, features=features, discrete=True)
+        disc = SuperGLM(family="poisson", selection_penalty=0, features=features, discrete=True)
         disc.fit_reml(df, y, exposure=w, max_reml_iter=30)
 
         assert exact._reml_result.converged
@@ -968,10 +968,10 @@ class TestREMLDiscreteRobustness:
             "x2": CubicRegressionSpline(n_knots=8),
         }
 
-        exact = SuperGLM(family=family, lambda1=0, features=features, discrete=False)
+        exact = SuperGLM(family=family, selection_penalty=0, features=features, discrete=False)
         exact.fit_reml(df, y, exposure=w, max_reml_iter=30)
 
-        disc = SuperGLM(family=family, lambda1=0, features=features, discrete=True)
+        disc = SuperGLM(family=family, selection_penalty=0, features=features, discrete=True)
         disc.fit_reml(df, y, exposure=w, max_reml_iter=30)
 
         assert exact._reml_result.converged

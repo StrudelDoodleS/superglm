@@ -42,13 +42,13 @@ def select_data():
 # ── Basic solver tests ─────────────────────────────────────────
 class TestDirectSolverBasic:
     def test_matches_bcd_ridge(self, poisson_data):
-        """Direct solver with lambda1=0 should give similar deviance as BCD with tiny lambda1."""
+        """Direct solver with selection_penalty=0 should give similar deviance as BCD with tiny lambda1."""
         X, y, w = poisson_data
 
-        # Direct solver (lambda1=0)
+        # Direct solver (selection_penalty=0)
         m_direct = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "DrivAge": Spline(n_knots=10),
                 "Area": Categorical(),
@@ -59,7 +59,7 @@ class TestDirectSolverBasic:
         # BCD solver with near-zero lambda1 (effectively ridge)
         m_bcd = SuperGLM(
             family="poisson",
-            lambda1=1e-8,
+            selection_penalty=1e-8,
             features={
                 "DrivAge": Spline(n_knots=10),
                 "Area": Categorical(),
@@ -75,7 +75,7 @@ class TestDirectSolverBasic:
         X, y, w = poisson_data
         m = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "DrivAge": Spline(n_knots=8),
                 "Area": Categorical(),
@@ -92,7 +92,7 @@ class TestDirectSolverBasic:
         # Cold start
         m1 = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "DrivAge": Spline(n_knots=10),
                 "Area": Categorical(),
@@ -123,7 +123,7 @@ class TestDirectSolverBasic:
         X, y, w = poisson_data
         m = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "DrivAge": Spline(n_knots=10),
                 "Area": Categorical(),
@@ -140,7 +140,7 @@ class TestDirectSolverBasic:
         X, y, w = poisson_data
         m = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "DrivAge": Spline(n_knots=10),
                 "Area": Categorical(),
@@ -163,7 +163,7 @@ class TestDirectSolverSelect:
         X, y, w = select_data
         m = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "signal": Spline(n_knots=10, select=True),
                 "noise": Spline(n_knots=10, select=True),
@@ -178,7 +178,7 @@ class TestDirectSolverSelect:
 # ── REML + direct solver tests ────────────────────────────────
 class TestREMLDirect:
     def test_reml_direct_convergence(self):
-        """fit_reml() with lambda1=0 should converge using the direct solver."""
+        """fit_reml() with selection_penalty=0 should converge using the direct solver."""
         # Use data with strong nonlinearity so REML finds a finite lambda
         rng = np.random.default_rng(123)
         n = 2000
@@ -191,7 +191,7 @@ class TestREMLDirect:
 
         m = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={"DrivAge": Spline(n_knots=10)},
         )
         m.fit_reml(X, y, exposure=w, max_reml_iter=50)
@@ -200,11 +200,11 @@ class TestREMLDirect:
         assert m._reml_result.converged
 
     def test_reml_direct_select_true(self, select_data):
-        """REML + select=True + lambda1=0: should estimate both linear and spline lambdas."""
+        """REML + select=True + selection_penalty=0: should estimate both linear and spline lambdas."""
         X, y, w = select_data
         m = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "signal": Spline(n_knots=10, select=True),
                 "noise": Spline(n_knots=10, select=True),
@@ -226,7 +226,7 @@ class TestREMLDirect:
         X, y, w = select_data
         m = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "signal": Spline(n_knots=10, select=True),
                 "noise": Spline(n_knots=10, select=True),
@@ -247,7 +247,7 @@ class TestREMLDirect:
         X, y, w = poisson_data
         m = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "DrivAge": Spline(n_knots=10),
                 "Area": Categorical(),
@@ -267,7 +267,7 @@ class TestREMLDirect:
         X, y, w = poisson_data
         m = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={
                 "DrivAge": Spline(n_knots=10),
                 "Area": Categorical(),

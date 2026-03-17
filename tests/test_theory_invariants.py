@@ -43,11 +43,11 @@ class TestSolverTheoryInvariants:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
-            lambda2=0.0,
+            selection_penalty=0.0,
+            spline_penalty=0.0,
             features={
-                "x1": Numeric(standardize=False),
-                "x2": Numeric(standardize=False),
+                "x1": Numeric(),
+                "x2": Numeric(),
             },
         )
         model.fit(X, y)
@@ -73,11 +73,11 @@ class TestSolverTheoryInvariants:
 
         weighted = SuperGLM(
             family="poisson",
-            lambda1=0.0,
-            lambda2=0.0,
+            selection_penalty=0.0,
+            spline_penalty=0.0,
             features={
-                "x1": Numeric(standardize=False),
-                "x2": Numeric(standardize=False),
+                "x1": Numeric(),
+                "x2": Numeric(),
             },
         )
         weighted.fit(X, y, exposure=weights)
@@ -88,11 +88,11 @@ class TestSolverTheoryInvariants:
 
         replicated = SuperGLM(
             family="poisson",
-            lambda1=0.0,
-            lambda2=0.0,
+            selection_penalty=0.0,
+            spline_penalty=0.0,
             features={
-                "x1": Numeric(standardize=False),
-                "x2": Numeric(standardize=False),
+                "x1": Numeric(),
+                "x2": Numeric(),
             },
         )
         replicated.fit(X_rep, y_rep)
@@ -117,8 +117,8 @@ class TestSolverTheoryInvariants:
         lam = 20.0
         model = SuperGLM(
             family="poisson",
-            lambda1=lam,
-            lambda2=0.0,
+            selection_penalty=lam,
+            spline_penalty=0.0,
             features={
                 "x1": Numeric(),
                 "x2": Numeric(),
@@ -153,8 +153,8 @@ class TestSolverTheoryInvariants:
 
         model_a = SuperGLM(
             family="poisson",
-            lambda1=0.05,
-            lambda2=0.0,
+            selection_penalty=0.05,
+            spline_penalty=0.0,
             features={"x1": Numeric(), "cat": Categorical(base="first")},
         )
         model_a.fit(X, y, exposure=weights)
@@ -162,8 +162,8 @@ class TestSolverTheoryInvariants:
         perm = rng.permutation(n)
         model_b = SuperGLM(
             family="poisson",
-            lambda1=0.05,
-            lambda2=0.0,
+            selection_penalty=0.05,
+            spline_penalty=0.0,
             features={"x1": Numeric(), "cat": Categorical(base="first")},
         )
         model_b.fit(X.iloc[perm].reset_index(drop=True), y[perm], exposure=weights[perm])
@@ -195,7 +195,7 @@ class TestBackendLinearAlgebraInvariants:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             discrete=True,
             features={
                 "x_num": Numeric(),
@@ -227,7 +227,7 @@ class TestBackendLinearAlgebraInvariants:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.1,
+            selection_penalty=0.1,
             discrete=True,
             features={
                 "x_num": Numeric(),
@@ -263,7 +263,7 @@ class TestBackendLinearAlgebraInvariants:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             discrete=True,
             features={
                 "s1": Spline(n_knots=6, penalty="ssp"),
@@ -295,9 +295,9 @@ class TestPredictionTimeContracts:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
-            lambda2=0.0,
-            features={"x": Numeric(standardize=False), "cat": Categorical(base="first")},
+            selection_penalty=0.0,
+            spline_penalty=0.0,
+            features={"x": Numeric(), "cat": Categorical(base="first")},
         )
         model.fit(X_train, y)
 
@@ -323,7 +323,7 @@ class TestPredictionTimeContracts:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={
                 "age": Spline(n_knots=6, penalty="ssp"),
                 "region": Categorical(base="first"),
@@ -354,9 +354,9 @@ class TestPredictionTimeContracts:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
-            lambda2=0.0,
-            features={"x": Numeric(standardize=False), "cat": Categorical(base="first")},
+            selection_penalty=0.0,
+            spline_penalty=0.0,
+            features={"x": Numeric(), "cat": Categorical(base="first")},
         )
         model.fit(X_train, y)
 
@@ -390,7 +390,7 @@ class TestPredictionTimeContracts:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"x": Spline(n_knots=8, penalty="ssp")},
         )
         model.fit(X, y)
@@ -419,9 +419,9 @@ class TestPredictionTimeContracts:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
-            lambda2=0.0,
-            features={"x": Numeric(standardize=True), "z": Numeric(standardize=False)},
+            selection_penalty=0.0,
+            spline_penalty=0.0,
+            features={"x": Numeric(), "z": Numeric()},
         )
         model.fit(X, y)
 
@@ -431,10 +431,10 @@ class TestPredictionTimeContracts:
         assert np.all(np.isfinite(pred))
         assert np.all(pred > 0)
 
-        # Verify the standardized constant column is zeros
+        # Verify the constant column is passed through unchanged
         spec = model._specs["x"]
         col = spec.transform(np.array([5.0, 5.0, 5.0]))
-        np.testing.assert_allclose(col, 0.0, atol=1e-6)
+        np.testing.assert_allclose(col, 5.0, atol=1e-6)
 
     def test_constant_spline_predictor_contributes_no_variation(self):
         """A constant spline feature should not affect prediction variation.
@@ -449,7 +449,7 @@ class TestPredictionTimeContracts:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"x": Spline(n_knots=6, penalty="ssp"), "z": Numeric()},
         )
         model.fit(X, y)
@@ -482,7 +482,7 @@ class TestPredictionTimeContracts:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"x": spline_cls(n_knots=8)},
         )
         model.fit(X, y)
@@ -518,7 +518,7 @@ class TestREMLInteraction:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"age": Spline(n_knots=8, penalty="ssp"), "region": Categorical()},
             interactions=[("age", "region")],
         )
@@ -536,7 +536,7 @@ class TestREMLInteraction:
         # Deviance should decrease relative to main-effects-only model
         main_model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"age": Spline(n_knots=8, penalty="ssp"), "region": Categorical()},
         )
         main_model.fit_reml(X, y, max_reml_iter=15)
@@ -554,7 +554,7 @@ class TestREMLInteraction:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"age": Spline(n_knots=6, penalty="ssp"), "region": Categorical()},
             interactions=[("age", "region")],
         )
@@ -577,7 +577,7 @@ class TestREMLInteraction:
 
         interaction_model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"age": Spline(n_knots=6, penalty="ssp"), "region": Categorical()},
             interactions=[("age", "region")],
         )
@@ -585,7 +585,7 @@ class TestREMLInteraction:
 
         main_model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"age": Spline(n_knots=6, penalty="ssp"), "region": Categorical()},
         )
         main_model.fit_reml(X, y, max_reml_iter=15)

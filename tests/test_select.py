@@ -115,7 +115,7 @@ class TestSelectModel:
                 "signal": Spline(n_knots=10, select=True),
                 "noise": Spline(n_knots=10, select=True),
             },
-            lambda2=1.0,
+            spline_penalty=1.0,
         )
         m.fit(X, y, exposure=exposure)
         group_names = [g.name for g in m._groups]
@@ -131,7 +131,7 @@ class TestSelectModel:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
+            spline_penalty=1.0,
         )
         m.fit(X, y, exposure=exposure)
         for g in m._groups:
@@ -142,7 +142,7 @@ class TestSelectModel:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
+            spline_penalty=1.0,
         )
         m.fit(X, y, exposure=exposure)
         groups = m._feature_groups("signal")
@@ -156,8 +156,8 @@ class TestSelectModel:
         m1 = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=False)},
-            lambda2=1.0,
-            lambda1=0.01,
+            spline_penalty=1.0,
+            selection_penalty=0.01,
         )
         m1.fit(X, y, exposure=exposure)
         pred1 = m1.predict(X)
@@ -165,8 +165,8 @@ class TestSelectModel:
         m2 = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=0.01,
+            spline_penalty=1.0,
+            selection_penalty=0.01,
         )
         m2.fit(X, y, exposure=exposure)
         pred2 = m2.predict(X)
@@ -180,7 +180,7 @@ class TestSelectModel:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
+            spline_penalty=1.0,
         )
         m.fit(X, y, exposure=exposure)
         rec = m.reconstruct_feature("signal")
@@ -193,7 +193,7 @@ class TestSelectModel:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
+            spline_penalty=1.0,
         )
         m.fit(X, y, exposure=exposure)
         rels = m.relativities(with_se=True)
@@ -205,7 +205,7 @@ class TestSelectModel:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
+            spline_penalty=1.0,
         )
         m.fit(X, y, exposure=exposure)
         s = m.diagnostics()
@@ -220,8 +220,8 @@ class TestSelectSparsity:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=50.0,
+            spline_penalty=1.0,
+            selection_penalty=50.0,
         )
         m.fit(X, y, exposure=exposure)
         s = m.diagnostics()
@@ -232,7 +232,7 @@ class TestSelectSparsity:
         range_norm = s["signal:spline"]["group_norm"]
         linear_norm = s["signal:linear"]["group_norm"]
         assert linear_norm < 1e-10 or range_norm < 1e-10, (
-            f"Expected at least one subgroup zeroed at lambda1=50: "
+            f"Expected at least one subgroup zeroed at selection_penalty=50: "
             f"range={range_norm:.6f}, linear={linear_norm:.6f}"
         )
 
@@ -242,8 +242,8 @@ class TestSelectSparsity:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=1e6,
+            spline_penalty=1.0,
+            selection_penalty=1e6,
         )
         m.fit(X, y, exposure=exposure)
         s = m.diagnostics()
@@ -259,7 +259,7 @@ class TestSelectPath:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
+            spline_penalty=1.0,
         )
         path = m.fit_path(X, y, exposure=exposure, n_lambda=10)
         assert path.coef_path.shape[0] == 10
@@ -279,8 +279,8 @@ class TestSelectCovariance:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=0.1,
+            spline_penalty=1.0,
+            selection_penalty=0.1,
         )
         m.fit(X, y, exposure=exposure)
         metrics = m.metrics(X, y, exposure=exposure)
@@ -297,8 +297,8 @@ class TestSelectCovariance:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=0.1,
+            spline_penalty=1.0,
+            selection_penalty=0.1,
         )
         m.fit(X, y, exposure=exposure)
         metrics = m.metrics(X, y, exposure=exposure)
@@ -314,7 +314,7 @@ class TestSelectCovariance:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
+            spline_penalty=1.0,
         )
         m.fit(X, y, exposure=exposure)
         linear_g = next(g for g in m._groups if g.name == "signal:linear")
@@ -334,7 +334,7 @@ class TestSelectAdaptive:
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             penalty=pen,
-            lambda2=1.0,
+            spline_penalty=1.0,
         )
         m.fit(X, y, exposure=exposure)
         # Adaptive weights are applied during fit — must converge with valid result
@@ -360,7 +360,7 @@ class TestSelectAdaptive:
                 "noise": Spline(n_knots=10, select=True),
             },
             penalty=pen,
-            lambda2=1.0,
+            spline_penalty=1.0,
         )
         m.fit(X, y, exposure=exposure)
         noise_spline = next(g for g in m._groups if g.name == "noise:spline")
@@ -379,8 +379,8 @@ class TestSelectEffectiveDf:
                 "signal": Spline(n_knots=10, select=True),
                 "noise": Spline(n_knots=10, select=True),
             },
-            lambda2=1.0,
-            lambda1=1e6,
+            spline_penalty=1.0,
+            selection_penalty=1e6,
         )
         m.fit(X, y, exposure=exposure)
         # With double penalty, all groups are penalized and zeroed at extreme lambda
@@ -397,8 +397,8 @@ class TestSelectLambdaMax:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=1.0,  # set to prevent auto-calibration
+            spline_penalty=1.0,
+            selection_penalty=1.0,  # set to prevent auto-calibration
         )
         m.fit(X, y, exposure=exposure)
         lmax = m._compute_lambda_max(y.astype(np.float64), exposure)
@@ -418,8 +418,8 @@ class TestSelectSummaryOutput:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=1e6,
+            spline_penalty=1.0,
+            selection_penalty=1e6,
         )
         m.fit(X, y, exposure=exposure)
         metrics = m.metrics(X, y, exposure=exposure)
@@ -437,8 +437,8 @@ class TestSelectSummaryOutput:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=1e6,
+            spline_penalty=1.0,
+            selection_penalty=1e6,
         )
         m.fit(X, y, exposure=exposure)
         metrics = m.metrics(X, y, exposure=exposure)
@@ -454,7 +454,7 @@ class TestSelectFeatureSE:
     def test_feature_se_reml_select_nonlinear_dgp(self):
         """feature_se works with REML select=True when both subgroups are active.
 
-        Uses fit_reml() with lambda1=0 (direct solver, no BCD aliasing).
+        Uses fit_reml() with selection_penalty=0 (direct solver, no BCD aliasing).
         On a purely nonlinear DGP, REML drives the linear subgroup's lambda
         high (no signal) while keeping the spline lambda moderate (real signal).
         Both subgroups remain active (no L1 sparsity); the test verifies that
@@ -472,7 +472,7 @@ class TestSelectFeatureSE:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         m.fit_reml(X, y, exposure=exposure, max_reml_iter=20)
 
@@ -507,8 +507,8 @@ class TestSelectFeatureSE:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=1e6,  # extreme penalty → both subgroups zeroed
+            spline_penalty=1.0,
+            selection_penalty=1e6,  # extreme penalty → both subgroups zeroed
         )
         m.fit(X, y, exposure=exposure)
 
@@ -528,8 +528,8 @@ class TestSelectFeatureSE:
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=0.1,
+            spline_penalty=1.0,
+            selection_penalty=0.1,
         )
         m.fit(X, y, exposure=exposure)
         metrics = m.metrics(X, y, exposure=exposure)
@@ -559,7 +559,7 @@ class TestSelectNoiseSuppressionREML:
                 "noise": Spline(kind="bs", k=12, select=True, discrete=True),
             },
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             discrete=True,
             n_bins=256,
         )
@@ -619,7 +619,9 @@ class TestSplitLinearSnapWeakSignal:
             "noise": Spline(kind="bs", k=12, select=True, discrete=True),
         }
 
-        model = SuperGLM(family="poisson", lambda1=0, discrete=True, n_bins=256, features=features)
+        model = SuperGLM(
+            family="poisson", selection_penalty=0, discrete=True, n_bins=256, features=features
+        )
         model.fit_reml(
             X.iloc[:n_train],
             y[:n_train],
@@ -709,8 +711,8 @@ class TestCRSelect:
         m1 = SuperGLM(
             family="poisson",
             features={"x": Spline(kind="cr", n_knots=10, select=False)},
-            lambda2=1.0,
-            lambda1=0.01,
+            spline_penalty=1.0,
+            selection_penalty=0.01,
         )
         m1.fit(X, y)
         pred1 = m1.predict(X)
@@ -718,8 +720,8 @@ class TestCRSelect:
         m2 = SuperGLM(
             family="poisson",
             features={"x": Spline(kind="cr", n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=0.01,
+            spline_penalty=1.0,
+            selection_penalty=0.01,
         )
         m2.fit(X, y)
         pred2 = m2.predict(X)
@@ -742,7 +744,7 @@ class TestCRSelect:
                 "signal": Spline(kind="cr", n_knots=8, select=True),
                 "noise": Spline(kind="cr", n_knots=8, select=True),
             },
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(X, y, max_reml_iter=20)
 
@@ -790,8 +792,8 @@ class TestCardinalCRSelect:
         m = SuperGLM(
             family="poisson",
             features={"x": Spline(kind="cr_cardinal", n_knots=10, select=True)},
-            lambda2=1.0,
-            lambda1=0.01,
+            spline_penalty=1.0,
+            selection_penalty=0.01,
         )
         m.fit(X, y)
         pred = m.predict(X)
@@ -846,8 +848,8 @@ class TestCRSelectInteraction:
                 "cat": Categorical(),
             },
             interactions=[("x", "cat")],
-            lambda2=1.0,
-            lambda1=0.01,
+            spline_penalty=1.0,
+            selection_penalty=0.01,
         )
         m.fit(X, y)
         pred = m.predict(X)
@@ -884,8 +886,8 @@ class TestCRSelectInteraction:
                 "cat": Categorical(),
             },
             interactions=[("x", "cat")],
-            lambda2=1.0,
-            lambda1=0.01,
+            spline_penalty=1.0,
+            selection_penalty=0.01,
         )
         m.fit(X, y)
 
@@ -923,8 +925,8 @@ class TestCRSelectInteraction:
                 "cat": Categorical(),
             },
             interactions=[("x", "cat")],
-            lambda2=1.0,
-            lambda1=0.01,
+            spline_penalty=1.0,
+            selection_penalty=0.01,
         )
         m.fit(X, y)
 

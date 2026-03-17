@@ -38,7 +38,7 @@ class TestFeaturesDict:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "age": Spline(n_knots=10, penalty="ssp"),
                 "region": Categorical(base="first"),
@@ -68,7 +68,7 @@ class TestSplinesAutoDetect:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             splines=["age"],
             n_knots=10,
         )
@@ -80,7 +80,7 @@ class TestSplinesAutoDetect:
     def test_auto_detects_types(self, sample_data):
         X, y, exposure = sample_data
         model = SuperGLM(
-            lambda1=0.01,
+            selection_penalty=0.01,
             splines=["age"],
             n_knots=10,
         )
@@ -91,7 +91,7 @@ class TestSplinesAutoDetect:
 
     def test_empty_splines_all_auto(self, sample_data):
         X, y, _ = sample_data
-        model = SuperGLM(lambda1=0.01, splines=[])
+        model = SuperGLM(selection_penalty=0.01, splines=[])
         model.fit(X, y)
         # age and density are numeric, region is categorical
         assert isinstance(model._specs["region"], Categorical)
@@ -101,7 +101,7 @@ class TestSplinesAutoDetect:
     def test_knots_per_feature(self, sample_data):
         X, y, _ = sample_data
         model = SuperGLM(
-            lambda1=0.01,
+            selection_penalty=0.01,
             splines=["age", "density"],
             n_knots=[10, 20],
         )
@@ -112,7 +112,7 @@ class TestSplinesAutoDetect:
     def test_knots_broadcast_int(self, sample_data):
         X, y, _ = sample_data
         model = SuperGLM(
-            lambda1=0.01,
+            selection_penalty=0.01,
             splines=["age", "density"],
             n_knots=12,
         )
@@ -131,7 +131,7 @@ class TestSplinesAutoDetect:
     def test_categorical_base_no_exposure(self, sample_data):
         """Without exposure, most_exposed falls back to first."""
         X, y, _ = sample_data
-        model = SuperGLM(lambda1=0.01, splines=[])
+        model = SuperGLM(selection_penalty=0.01, splines=[])
         model.fit(X, y)
         # Should have used base="first" since no exposure
         assert model._specs["region"].base == "first"
@@ -145,20 +145,20 @@ class TestMutualExclusivity:
 
 class TestPenaltyResolution:
     def test_string_group_lasso(self):
-        model = SuperGLM(penalty="group_lasso", lambda1=0.05)
+        model = SuperGLM(penalty="group_lasso", selection_penalty=0.05)
         assert isinstance(model.penalty, GroupLasso)
         assert model.penalty.lambda1 == 0.05
 
     def test_string_sparse_group_lasso(self):
-        model = SuperGLM(penalty="sparse_group_lasso", lambda1=0.05)
+        model = SuperGLM(penalty="sparse_group_lasso", selection_penalty=0.05)
         assert isinstance(model.penalty, SparseGroupLasso)
 
     def test_string_ridge(self):
-        model = SuperGLM(penalty="ridge", lambda1=0.05)
+        model = SuperGLM(penalty="ridge", selection_penalty=0.05)
         assert isinstance(model.penalty, Ridge)
 
     def test_string_group_elastic_net(self):
-        model = SuperGLM(penalty="group_elastic_net", lambda1=0.05)
+        model = SuperGLM(penalty="group_elastic_net", selection_penalty=0.05)
         assert isinstance(model.penalty, GroupElasticNet)
         assert model.penalty.lambda1 == 0.05
         assert model.penalty.alpha == 0.5
@@ -172,9 +172,9 @@ class TestPenaltyResolution:
         model = SuperGLM(penalty=p)
         assert model.penalty is p
 
-    def test_object_with_lambda1_raises(self):
-        with pytest.raises(ValueError, match="Cannot set 'lambda1'"):
-            SuperGLM(penalty=GroupLasso(lambda1=0.01), lambda1=0.05)
+    def test_object_with_selection_penalty_raises(self):
+        with pytest.raises(ValueError, match="Cannot set 'selection_penalty'"):
+            SuperGLM(penalty=GroupLasso(lambda1=0.01), selection_penalty=0.05)
 
     def test_object_with_penalty_features_raises(self):
         with pytest.raises(ValueError, match="Cannot set 'penalty_features'"):
@@ -185,10 +185,10 @@ class TestPenaltyResolution:
             SuperGLM(penalty="lasso")
 
     def test_auto_calibrate(self, sample_data):
-        """lambda1=None should auto-calibrate at fit time."""
+        """selection_penalty=None should auto-calibrate at fit time."""
         X, y, exposure = sample_data
         model = SuperGLM(
-            lambda1=None,
+            selection_penalty=None,
             splines=["age"],
             n_knots=10,
         )
@@ -197,7 +197,7 @@ class TestPenaltyResolution:
         assert model.penalty.lambda1 > 0
 
     def test_string_penalty_features(self):
-        model = SuperGLM(penalty="group_lasso", lambda1=0.05, penalty_features=["region"])
+        model = SuperGLM(penalty="group_lasso", selection_penalty=0.05, penalty_features=["region"])
         assert isinstance(model.penalty, GroupLasso)
         assert model.penalty.features == frozenset({"region"})
 
@@ -205,7 +205,7 @@ class TestPenaltyResolution:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             penalty_features=["missing"],
             features={
                 "age": Spline(n_knots=10, penalty="ssp"),
@@ -222,7 +222,7 @@ class TestSampleWeightAlias:
         X, y, exposure = sample_data
         model_exposure = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "age": Spline(n_knots=10, penalty="ssp"),
                 "region": Categorical(),
@@ -231,7 +231,7 @@ class TestSampleWeightAlias:
         )
         model_sample_weight = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "age": Spline(n_knots=10, penalty="ssp"),
                 "region": Categorical(),
@@ -254,8 +254,8 @@ class TestSampleWeightAlias:
             "region": Categorical(),
             "density": Numeric(),
         }
-        model_exposure = SuperGLM(family="poisson", lambda1=0.0, features=features)
-        model_sample_weight = SuperGLM(family="poisson", lambda1=0.0, features=features)
+        model_exposure = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+        model_sample_weight = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
 
         model_exposure.fit_reml(X, y, exposure=exposure, max_reml_iter=10)
         model_sample_weight.fit_reml(X, y, sample_weight=exposure, max_reml_iter=10)
@@ -271,7 +271,7 @@ class TestSampleWeightAlias:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "age": Spline(n_knots=10, penalty="ssp"),
                 "region": Categorical(),
@@ -281,51 +281,3 @@ class TestSampleWeightAlias:
 
         with pytest.raises(TypeError, match="both 'exposure' and 'sample_weight'"):
             model.fit(X, y, exposure=exposure, sample_weight=exposure)
-
-
-class TestPenaltyAliases:
-    """Test selection_penalty/lambda1 and spline_penalty/lambda2 aliases."""
-
-    def test_selection_penalty_primary(self, sample_data):
-        X, y, exposure = sample_data
-        m = SuperGLM(selection_penalty=0.05, splines=["age"])
-        m.fit(X, y, sample_weight=exposure)
-        assert m.penalty.lambda1 == 0.05
-
-    def test_lambda1_alias(self, sample_data):
-        X, y, exposure = sample_data
-        m = SuperGLM(lambda1=0.05, splines=["age"])
-        m.fit(X, y, sample_weight=exposure)
-        assert m.penalty.lambda1 == 0.05
-
-    def test_selection_penalty_and_lambda1_conflict(self):
-        with pytest.raises(ValueError, match="Cannot set both 'selection_penalty' and 'lambda1'"):
-            SuperGLM(selection_penalty=0.05, lambda1=0.03)
-
-    def test_spline_penalty_primary(self, sample_data):
-        X, y, exposure = sample_data
-        m = SuperGLM(selection_penalty=0.05, spline_penalty=0.2, splines=["age"])
-        m.fit(X, y, sample_weight=exposure)
-        assert m.lambda2 == 0.2
-
-    def test_lambda2_alias(self, sample_data):
-        X, y, exposure = sample_data
-        m = SuperGLM(selection_penalty=0.05, lambda2=0.2, splines=["age"])
-        m.fit(X, y, sample_weight=exposure)
-        assert m.lambda2 == 0.2
-
-    def test_spline_penalty_and_lambda2_conflict(self):
-        with pytest.raises(ValueError, match="Cannot set both 'spline_penalty' and 'lambda2'"):
-            SuperGLM(spline_penalty=0.2, lambda2=0.7)
-
-    def test_spline_penalty_default(self):
-        m = SuperGLM(selection_penalty=0.05)
-        assert m.lambda2 == 0.1
-
-    def test_new_names_produce_same_fit(self, sample_data):
-        X, y, exposure = sample_data
-        m_old = SuperGLM(lambda1=0.05, lambda2=0.2, splines=["age"])
-        m_new = SuperGLM(selection_penalty=0.05, spline_penalty=0.2, splines=["age"])
-        m_old.fit(X, y, sample_weight=exposure)
-        m_new.fit(X, y, sample_weight=exposure)
-        np.testing.assert_allclose(m_old.predict(X), m_new.predict(X), atol=1e-10)

@@ -2,14 +2,14 @@
 
 ## 1. Standard penalised fit
 
-Use `fit()` when you want a fixed `lambda2` and a standard regularised GLM fit.
+Use `fit()` when you want a fixed `spline_penalty` and a standard regularised GLM fit.
 
 ```python
 model = SuperGLM(
     family="poisson",
     penalty="group_elastic_net",
-    lambda1=0.01,
-    lambda2=0.1,
+    selection_penalty=0.01,
+    spline_penalty=0.1,
     features=features,
 )
 model.fit(df, y, sample_weight=exposure)
@@ -17,10 +17,10 @@ model.fit(df, y, sample_weight=exposure)
 
 ## 2. Exact REML
 
-Use `fit_reml(discrete=False)` for the standard smoothness-selection path (`lambda1=0`).
+Use `fit_reml(discrete=False)` for the standard smoothness-selection path (`selection_penalty=0`).
 
 ```python
-model = SuperGLM(family="poisson", lambda1=0.0, features=features)
+model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
 model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
 ```
 
@@ -31,7 +31,7 @@ Use `fit_reml(discrete=True)` for large data. This is the fast path for spline-h
 ```python
 model = SuperGLM(
     family="poisson",
-    lambda1=0.0,
+    selection_penalty=0.0,
     discrete=True,
     n_bins=256,
     features=features,
@@ -42,12 +42,12 @@ model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
 ## 4. Shrinkage vs selection
 
 - `select=True` on a spline adds mgcv-style double-penalty shrinkage.
-- `lambda1 > 0` activates sparse/group penalties.
+- `selection_penalty > 0` activates sparse/group penalties.
 
 Those are different tools:
 
 - `select=True` is the more REML-aligned way to let smooth terms shrink toward zero.
-- `lambda1 > 0` is the sparse-additive path, best used for screening / compression rather than mgcv-style inference.
+- `selection_penalty > 0` is the sparse-additive path, best used for screening / compression rather than mgcv-style inference.
 
 ## Regularisation path
 

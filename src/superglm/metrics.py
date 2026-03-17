@@ -574,9 +574,6 @@ def build_coef_rows(
             for i, level in enumerate(spec._non_base):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
-                if spec._standardize:
-                    coef_val = coef_val / spec._std
-                    se_val = se_val / spec._std
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
                 rows.append(
                     _CoefRow(
@@ -648,14 +645,8 @@ def build_coef_rows(
                 )
 
         elif isinstance(spec, Numeric):
-            coef_internal = float(b_g[0])
-            se_internal = float(se_g[0])
-            if spec.standardize:
-                coef_display = coef_internal / spec._std
-                se_display = se_internal / spec._std
-            else:
-                coef_display = coef_internal
-                se_display = se_internal
+            coef_display = float(b_g[0])
+            se_display = float(se_g[0])
             z, p, ci_lo, ci_hi = _compute_coef_stats(coef_display, se_display, alpha)
             rows.append(
                 _CoefRow(
@@ -1188,7 +1179,7 @@ class ModelMetrics:
 
         For splines: returns ``{x, se_log_relativity}`` on a grid.
         For categoricals: returns ``{levels, se_log_relativity}`` per level.
-        For numerics: returns ``{se_coef}`` (unstandardized).
+        For numerics: returns ``{se_coef}``.
 
         Uses phi-scaled covariance (quasi-likelihood) when ``phi_scale=True``.
 
@@ -1273,12 +1264,7 @@ class ModelMetrics:
             }
 
         elif isinstance(spec, Numeric):
-            se_transformed = np.sqrt(max(Cov_g[0, 0], 0.0))
-            if spec.standardize:
-                se_original = se_transformed / spec._std
-            else:
-                se_original = se_transformed
-            return {"se_coef": float(se_original)}
+            return {"se_coef": float(np.sqrt(max(Cov_g[0, 0], 0.0)))}
 
         else:
             se = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))

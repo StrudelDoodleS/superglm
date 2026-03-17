@@ -130,8 +130,7 @@ class TestNB2PoissonLimit:
 
         # NB2 with large theta
         m_nb = SuperGLM(
-            family="negative_binomial",
-            nb_theta=1e6,
+            family=NegativeBinomial(theta=1e6),
             penalty=GroupLasso(lambda1=0.0),
             features={"x": Numeric()},
         )
@@ -158,8 +157,7 @@ class TestNB2FixedThetaFit:
         X = pd.DataFrame({"x": x})
 
         model = SuperGLM(
-            family="negative_binomial",
-            nb_theta=theta,
+            family=NegativeBinomial(theta=theta),
             penalty=GroupLasso(lambda1=0.0),
             features={"x": Numeric()},
         )
@@ -178,10 +176,9 @@ class TestNB2FixedThetaFit:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="negative_binomial",
-            nb_theta=theta,
+            family=NegativeBinomial(theta=theta),
             penalty=GroupLasso(lambda1=0.0),
-            features={"dummy": Numeric(standardize=False)},
+            features={"dummy": Numeric()},
         )
         model.fit(X, y)
 
@@ -206,8 +203,7 @@ class TestNB2ProfileTheta:
         X = pd.DataFrame({"x": x})
 
         model = SuperGLM(
-            family="negative_binomial",
-            nb_theta=1.0,  # initial guess
+            family=NegativeBinomial(theta=1.0),  # initial guess
             penalty=GroupLasso(lambda1=0.0),
             features={"x": Numeric()},
         )
@@ -228,10 +224,9 @@ class TestNB2ProfileTheta:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="negative_binomial",
-            nb_theta=1.0,
+            family=NegativeBinomial(theta=1.0),
             penalty=GroupLasso(lambda1=0.0),
-            features={"dummy": Numeric(standardize=False)},
+            features={"dummy": Numeric()},
         )
 
         result = estimate_nb_theta(model, X, y, theta_bounds=(0.5, 15.0))
@@ -244,7 +239,7 @@ class TestNB2ProfileTheta:
         )
         X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
         y = np.array([1.0, 2.0, 3.0])
-        with pytest.raises(ValueError, match="negative_binomial"):
+        with pytest.raises(ValueError, match="NegativeBinomial"):
             estimate_nb_theta(model, X, y)
 
 
@@ -258,16 +253,15 @@ class TestNB2AutoTheta:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="negative_binomial",
-            nb_theta="auto",
+            family=NegativeBinomial(theta="auto"),
             penalty=GroupLasso(lambda1=0.0),
-            features={"dummy": Numeric(standardize=False)},
+            features={"dummy": Numeric()},
         )
         model.fit(X, y)
 
-        # After fit, nb_theta should be a float
-        assert isinstance(model.nb_theta, float)
-        assert model.nb_theta > 0
+        # After fit, family.theta should be a float (estimated)
+        assert isinstance(model.family.theta, float)
+        assert model.family.theta > 0
         assert model.result.converged
 
 
@@ -287,10 +281,9 @@ class TestNB2QuantileResiduals:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="negative_binomial",
-            nb_theta=theta,
+            family=NegativeBinomial(theta=theta),
             penalty=GroupLasso(lambda1=0.0),
-            features={"dummy": Numeric(standardize=False)},
+            features={"dummy": Numeric()},
         )
         model.fit(X, y)
 
@@ -315,10 +308,9 @@ class TestNB2MetricsSummary:
         X = pd.DataFrame({"dummy": np.ones(n)})
 
         model = SuperGLM(
-            family="negative_binomial",
-            nb_theta=3.0,
+            family=NegativeBinomial(theta=3.0),
             penalty=GroupLasso(lambda1=0.0),
-            features={"dummy": Numeric(standardize=False)},
+            features={"dummy": Numeric()},
         )
         model.fit(X, y)
 
@@ -343,9 +335,8 @@ class TestNB2Sklearn:
         X = pd.DataFrame({"x": x})
 
         reg = SuperGLMRegressor(
-            family="negative_binomial",
-            nb_theta=5.0,
-            lambda1=0.0,
+            family=NegativeBinomial(theta=5.0),
+            selection_penalty=0.0,
         )
         reg.fit(X, y)
         pred = reg.predict(X)
@@ -370,13 +361,13 @@ class TestNB2InvalidTheta:
 
 
 class TestNB2ResolveDistribution:
-    def test_resolve_string(self):
-        dist = resolve_distribution("negative_binomial", nb_theta=5.0)
+    def test_resolve_object(self):
+        dist = resolve_distribution(NegativeBinomial(theta=5.0))
         assert isinstance(dist, NegativeBinomial)
         assert dist.theta == 5.0
 
     def test_resolve_missing_theta(self):
-        with pytest.raises(ValueError, match="nb_theta"):
+        with pytest.raises(ValueError, match="requires parameters"):
             resolve_distribution("negative_binomial")
 
     def test_resolve_passthrough(self):

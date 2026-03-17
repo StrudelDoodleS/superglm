@@ -27,11 +27,11 @@ def test_gaussian_unpenalized_fit_matches_ols_and_allows_negative_predictions():
     X = pd.DataFrame({"x1": x1, "x2": x2})
     model = SuperGLM(
         family="gaussian",
-        lambda1=0.0,
-        lambda2=0.0,
+        selection_penalty=0.0,
+        spline_penalty=0.0,
         features={
-            "x1": Numeric(standardize=False),
-            "x2": Numeric(standardize=False),
+            "x1": Numeric(),
+            "x2": Numeric(),
         },
     )
     model.fit(X, y)

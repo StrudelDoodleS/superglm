@@ -33,7 +33,7 @@ def fitted_model(sample_data):
     X, y, exposure = sample_data
     model = SuperGLM(
         penalty="group_lasso",
-        lambda1=0.01,
+        selection_penalty=0.01,
         features={
             "age": Spline(n_knots=10, penalty="ssp"),
             "region": Categorical(base="first"),

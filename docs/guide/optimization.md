@@ -4,7 +4,7 @@ If the optimization stack feels like too many acronyms piled on top of each othe
 
 - `IRLS` turns a nonlinear GLM problem into a sequence of weighted least-squares problems.
 - `PIRLS` is that same idea after adding penalties.
-- when `lambda1 > 0`, the penalized weighted least-squares subproblem is nonsmooth, so it needs an inner solver
+- when `selection_penalty > 0`, the penalized weighted least-squares subproblem is nonsmooth, so it needs an inner solver
 - this repo uses proximal Newton block coordinate descent for that inner solve
 - `REML` sits outside all of that and chooses the smoothing parameters
 
@@ -33,8 +33,8 @@ jump to the solver layer you care about.
 - [4. Why IRLS exists](#4-why-irls-exists)
 - [5. What PIRLS means here](#5-what-pirls-means-here)
 - [6. Why an inner solver is needed](#6-why-an-inner-solver-is-needed)
-    - [6.1 Smooth case: lambda1 = 0](#61-smooth-case-lambda1-0)
-    - [6.2 Nonsmooth case: lambda1 > 0](#62-nonsmooth-case-lambda1-0)
+    - [6.1 Smooth case: selection_penalty = 0](#61-smooth-case-selection_penalty-0)
+    - [6.2 Nonsmooth case: selection_penalty > 0](#62-nonsmooth-case-selection_penalty-0)
 - [7. What "proximal Newton BCD" means](#7-what-proximal-newton-bcd-means)
     - [7.1 Proximal](#71-proximal)
     - [7.2 Newton](#72-newton)
@@ -247,7 +247,7 @@ until λ stabilizes
     by reusing weighted summaries when the IRLS geometry has not changed much.
 
 !!! tip "Recommended workflow for spline-based GAM models"
-    Use `fit_reml()` with `select=True` on your spline terms. REML estimates a separate smoothing parameter per term, and `select=True` adds a double-penalty decomposition (linear + wiggly subgroups) that lets REML shrink irrelevant terms all the way to zero — mgcv-style automatic term selection without needing `lambda1 > 0`.
+    Use `fit_reml()` with `select=True` on your spline terms. REML estimates a separate smoothing parameter per term, and `select=True` adds a double-penalty decomposition (linear + wiggly subgroups) that lets REML shrink irrelevant terms all the way to zero — mgcv-style automatic term selection without needing `selection_penalty > 0`.
 
 So the rough historical ladder is:
 
@@ -340,7 +340,7 @@ That is why the repo has two inner paths:
 # ── PIRLS dispatch ─────────────────────────────────────────────
 # At fit time, the solver is chosen automatically:
 
-if λ₁ == 0:
+if selection_penalty == 0:
     # All penalties are quadratic (smoothing only)
     # → one dense (p+1)×(p+1) solve per IRLS iteration
     result, H⁻¹ = fit_irls_direct(X, y, W, S)
@@ -361,7 +361,7 @@ $$
 
 Now split by penalty type.
 
-### 6.1 Smooth case: lambda1 = 0
+### 6.1 Smooth case: selection_penalty = 0
 
 If there is no group lasso penalty, \(P(\boldsymbol{\beta}) = 0\) and the whole objective is quadratic. The solution is a single linear system:
 
@@ -397,7 +397,7 @@ for t in 1, 2, ...:
 
 The repo uses this in `src/superglm/solvers/irls_direct.py`. Typical iteration counts: 5-7 for Poisson/log, even with `select=True` double-penalty terms.
 
-### 6.2 Nonsmooth case: lambda1 > 0
+### 6.2 Nonsmooth case: selection_penalty > 0
 
 If \(\lambda_1 > 0\), the penalty includes a group lasso term:
 
@@ -726,7 +726,7 @@ with an optional first-order \(W(\boldsymbol{\rho})\) correction that accounts f
 
 ### 13.1 Direct REML (Newton)
 
-When `lambda1 = 0`, the inner problem is smooth. The repo uses direct IRLS plus a damped Newton outer loop on \(\boldsymbol{\rho} = \log\boldsymbol{\lambda}\), with Armijo line search.
+When `selection_penalty = 0`, the inner problem is smooth. The repo uses direct IRLS plus a damped Newton outer loop on \(\boldsymbol{\rho} = \log\boldsymbol{\lambda}\), with Armijo line search.
 
 That is `optimize_direct_reml()`.
 
@@ -818,7 +818,7 @@ In this repo: `src/superglm/reml_optimizer.py::optimize_discrete_reml_cached_w`.
 
 ### 13.3 EFS REML (Fellner-Schall for sparse models)
 
-When `lambda1 > 0`, the inner fit uses BCD and the active set can change. The repo uses the generalized Fellner-Schall (EFS) fixed-point update from Wood & Fasiolo (2017) instead of the exact Newton outer loop.
+When `selection_penalty > 0`, the inner fit uses BCD and the active set can change. The repo uses the generalized Fellner-Schall (EFS) fixed-point update from Wood & Fasiolo (2017) instead of the exact Newton outer loop.
 
 That is `optimize_efs_reml()`.
 
@@ -827,7 +827,7 @@ separate user-tunable acceleration setting on the PIRLS solver.
 
 ```
 # ── EFS REML: fixed-point with Anderson acceleration ──────────
-# Used when λ₁ > 0 (group lasso + REML smoothing)
+# Used when selection_penalty > 0 (group lasso + REML smoothing)
 
 for iter in 1, 2, ...:
     if large_change:

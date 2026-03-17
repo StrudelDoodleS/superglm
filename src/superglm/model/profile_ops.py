@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+from superglm.distributions import NegativeBinomial, Tweedie
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,7 +53,7 @@ def estimate_p(
         phi_method=phi_method,
         **kwargs,
     )
-    model.tweedie_p = result.p_hat
+    model.family = Tweedie(p=result.p_hat)
     model._tweedie_profile_result = result
 
     # Refit with the same regime used for profiling
@@ -70,7 +72,7 @@ def estimate_theta(model, X, y, exposure=None, offset=None, *, sample_weight=Non
     exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="estimate_theta()")
 
     result = estimate_nb_theta(model, X, y, exposure=exposure, offset=offset, **kwargs)
-    model.nb_theta = result.theta_hat
+    model.family = NegativeBinomial(theta=result.theta_hat)
     model._nb_profile_result = result
     model.fit(X, y, exposure=exposure, offset=offset)
     return result

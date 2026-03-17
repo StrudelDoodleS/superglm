@@ -36,7 +36,7 @@ def fitted_poisson(poisson_data):
     X, y, w = poisson_data
     model = SuperGLM(
         family="poisson",
-        lambda1=0.001,
+        selection_penalty=0.001,
         features={"x1": Numeric(), "x2": Numeric()},
     )
     model.fit(X, y, exposure=w)
@@ -138,7 +138,7 @@ class TestNullModel:
         y = rng.poisson(np.exp(eta)).astype(float)
         X = pd.DataFrame({"x": x})
 
-        model = SuperGLM(family="poisson", lambda1=0, features={"x": Numeric()})
+        model = SuperGLM(family="poisson", selection_penalty=0, features={"x": Numeric()})
         model.fit(X, y)
         m = model.metrics(X, y)
 
@@ -155,7 +155,7 @@ class TestNullModel:
         y = rng.poisson(np.exp(eta)).astype(float)
         X = pd.DataFrame({"x": x})
 
-        model = SuperGLM(family="poisson", lambda1=0, features={"x": Numeric()})
+        model = SuperGLM(family="poisson", selection_penalty=0, features={"x": Numeric()})
         model.fit(X, y, offset=offset)
         m = model.metrics(X, y, offset=offset)
 
@@ -228,7 +228,7 @@ class TestResiduals:
 
         model = SuperGLM(
             family="gamma",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         model.fit(X, y)
@@ -253,7 +253,7 @@ class TestResiduals:
 
         model = SuperGLM(
             family=Tweedie(p=1.5),
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         model.fit(X, y)
@@ -427,7 +427,7 @@ class TestSummaryMixedFeatures:
         X = pd.DataFrame({"x1": x1, "region": region, "age": age})
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={
                 "x1": Numeric(),
                 "region": Categorical(),
@@ -486,7 +486,7 @@ class TestSplineIntegration:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x": Spline(n_knots=8, penalty="ssp")},
         )
         model.fit(X, y, exposure=w)
@@ -569,7 +569,7 @@ class TestCoefficientSE:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.5,  # high penalty to zero out x2
+            selection_penalty=0.5,  # high penalty to zero out x2
             features={"x1": Numeric(), "x2": Numeric()},
         )
         model.fit(X, y)
@@ -611,7 +611,7 @@ class TestFeatureSE:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x": Spline(n_knots=8, penalty="ssp")},
         )
         model.fit(X, y, exposure=w)
@@ -638,7 +638,7 @@ class TestFeatureSE:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"region": Categorical()},
         )
         model.fit(X, y)
@@ -677,7 +677,7 @@ class TestRelativitiesWithSE:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x": Spline(n_knots=8, penalty="ssp")},
         )
         model.fit(X, y)
@@ -700,7 +700,7 @@ class TestRelativitiesWithSE:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"region": Categorical()},
         )
         model.fit(X, y)
@@ -723,7 +723,7 @@ class TestRelativitiesWithSE:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={
                 "x1": Spline(n_knots=8, penalty="ssp"),
                 "x2": Spline(n_knots=6, penalty="ssp"),
@@ -762,7 +762,7 @@ class TestRelativitiesWithSE:
 
         model = SuperGLM(
             family="gamma",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         model.fit(X, y)
@@ -793,7 +793,7 @@ class TestOffsetSEConsistency:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={"x": Spline(n_knots=8)},
         )
         model.fit(X, y, offset=offset)
@@ -822,7 +822,7 @@ class TestOffsetSEConsistency:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={"g": Categorical()},
         )
         model.fit(X, y, offset=offset)
@@ -859,7 +859,7 @@ class TestNBProfileSummary:
         X = pd.DataFrame({"x": x})
         model = SuperGLM(
             family=NegativeBinomial(theta=1.0),
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         model.estimate_theta(X, y)
@@ -884,9 +884,8 @@ class TestTweedieProfileSummary:
         y = generate_tweedie_cpg(n, mu, phi=1.0, p=1.5, rng=rng)
         X = pd.DataFrame({"x": x})
         model = SuperGLM(
-            family="tweedie",
-            tweedie_p=1.5,
-            lambda1=0.0,
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
             features={"x": Numeric()},
         )
         model.estimate_p(X, y, p_bounds=(1.1, 1.9))
@@ -908,7 +907,7 @@ class TestInactiveSummaryRendering:
         X = pd.DataFrame({"x": x})
         model = SuperGLM(
             family="poisson",
-            lambda1=1e6,
+            selection_penalty=1e6,
             features={"x": Spline(n_knots=8)},
         )
         model.fit(X, y)
@@ -929,7 +928,7 @@ class TestInactiveSummaryRendering:
         X = pd.DataFrame({"x1": x1, "x2": x2})
         model = SuperGLM(
             family="poisson",
-            lambda1=10.0,
+            selection_penalty=10.0,
             features={"x1": Numeric(), "x2": Numeric()},
         )
         model.fit(X, y)
@@ -956,7 +955,7 @@ class TestPolynomialCategoricalSummary:
         X = pd.DataFrame({"x": x, "cat": cat})
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"x": Polynomial(degree=2), "cat": Categorical()},
             interactions=[("x", "cat")],
         )
@@ -985,7 +984,7 @@ class TestPolynomialSummary:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"age": Polynomial(degree=3)},
         )
         model.fit(X, y, exposure=exposure)
@@ -1016,7 +1015,7 @@ class TestAICcEdgeCase:
         X = pd.DataFrame({"x": x})
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
+            selection_penalty=0.0,
             features={"x": Numeric()},
         )
         model.fit(X, y)
@@ -1051,8 +1050,8 @@ class TestNumericUnstandardizedSE:
         X = pd.DataFrame({"x": x})
         model = SuperGLM(
             family="poisson",
-            lambda1=0.0,
-            features={"x": Numeric(standardize=False)},
+            selection_penalty=0.0,
+            features={"x": Numeric()},
         )
         model.fit(X, y)
         m = model.metrics(X, y)
@@ -1077,7 +1076,7 @@ class TestModelSummaryAPI:
         X = pd.DataFrame({"x": x})
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x": Spline(n_knots=8, penalty="ssp")},
         )
         model.fit(X, y)
@@ -1182,7 +1181,7 @@ class TestModelSummaryAPI:
         X = pd.DataFrame({"x": x})
         model = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features={"x": Spline(n_knots=8, penalty="ssp")},
         )
         model.fit_reml(X, y)

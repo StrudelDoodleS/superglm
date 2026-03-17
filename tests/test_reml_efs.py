@@ -27,7 +27,7 @@ class TestEFSOptimizer:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "x1": Spline(n_knots=8, penalty="ssp"),
                 "x2": Spline(n_knots=8, penalty="ssp"),
@@ -54,7 +54,7 @@ class TestEFSOptimizer:
 
         model = SuperGLM(
             family="gamma",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "x1": Spline(n_knots=6, penalty="ssp"),
                 "x2": Spline(n_knots=6, penalty="ssp"),
@@ -82,7 +82,7 @@ class TestEFSOptimizer:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
         )
         model.fit_reml(X, y, max_reml_iter=20)
@@ -106,7 +106,7 @@ class TestEFSOptimizer:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
         model.fit_reml(X, y, max_reml_iter=20, verbose=True)
@@ -139,13 +139,13 @@ class TestEFSOptimizer:
         }
 
         # Baseline: default start
-        baseline = SuperGLM(family=family, lambda1=0.01, features=features)
+        baseline = SuperGLM(family=family, selection_penalty=0.01, features=features)
         baseline.fit_reml(X, y, max_reml_iter=30)
         assert baseline._reml_result.converged
 
         # Very small and very large lambda2_init
         for init_val in [1e-6, 1e5]:
-            m = SuperGLM(family=family, lambda1=0.01, features=features)
+            m = SuperGLM(family=family, selection_penalty=0.01, features=features)
             m.fit_reml(X, y, max_reml_iter=30, lambda2_init=init_val)
             assert m._reml_result.converged, f"{family} lambda2_init={init_val} did not converge"
 
@@ -169,7 +169,7 @@ class TestEFSOptimizer:
 
         model = SuperGLM(
             family="poisson",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"x1": Spline(n_knots=8, penalty="ssp")},
         )
         model.fit_reml(X, y, max_reml_iter=20)
@@ -200,7 +200,7 @@ class TestEFSOptimizer:
         )
 
     def test_efs_agrees_with_direct_at_lambda1_zero(self):
-        """When lambda1=0, EFS and direct paths should give similar results.
+        """When selection_penalty=0, EFS and direct paths should give similar results.
 
         This validates the EFS update formula produces correct REML estimates
         by comparing against the Newton-based direct solver.
@@ -214,12 +214,12 @@ class TestEFSOptimizer:
 
         features = {"x1": Spline(n_knots=8, penalty="ssp")}
 
-        # Direct path (lambda1=0)
-        m_direct = SuperGLM(family="poisson", lambda1=0, features=features)
+        # Direct path (selection_penalty=0)
+        m_direct = SuperGLM(family="poisson", selection_penalty=0, features=features)
         m_direct.fit_reml(X, y, max_reml_iter=20)
 
-        # EFS path (lambda1=tiny, to trigger BCD)
-        m_efs = SuperGLM(family="poisson", lambda1=1e-8, features=features)
+        # EFS path (selection_penalty=tiny, to trigger BCD)
+        m_efs = SuperGLM(family="poisson", selection_penalty=1e-8, features=features)
         m_efs.fit_reml(X, y, max_reml_iter=20)
 
         assert m_direct._reml_result.converged
