@@ -9,7 +9,12 @@ from superglm.distributions import clip_mu
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
-from superglm.group_matrix import _block_xtwx
+from superglm.group_matrix import (
+    DiscretizedSSPGroupMatrix,
+    DiscretizedTensorGroupMatrix,
+    _block_xtwx,
+    _cross_gram,
+)
 from superglm.links import stabilize_eta
 
 
@@ -278,6 +283,190 @@ class TestBackendLinearAlgebraInvariants:
         xtwx_dense = X_dense.T @ (X_dense * W[:, None])
 
         np.testing.assert_allclose(xtwx_block, xtwx_dense, atol=1e-10)
+
+    def test_tensor_gram_matches_dense_oracle(self):
+        """DiscretizedTensorGroupMatrix.gram() must match X.T @ diag(W) @ X."""
+        rng = np.random.default_rng(77)
+        n = 500
+        X = pd.DataFrame(
+            {
+                "s1": rng.uniform(0, 10, n),
+                "s2": rng.uniform(0, 10, n),
+            }
+        )
+        y = rng.poisson(np.exp(0.1 + 0.05 * X["s1"].to_numpy())).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "s1": Spline(n_knots=6, penalty="ssp"),
+                "s2": Spline(n_knots=5, penalty="ssp"),
+            },
+            interactions=[("s1", "s2")],
+        )
+        model.fit(X, y)
+
+        # Verify tensor group type
+        gm_tensor = model._dm.group_matrices[2]
+        assert isinstance(gm_tensor, DiscretizedTensorGroupMatrix)
+
+        W = rng.uniform(0.5, 2.0, n)
+        X_dense = gm_tensor.toarray()
+        gram_dense = X_dense.T @ (X_dense * W[:, None])
+        gram_factored = gm_tensor.gram(W)
+        np.testing.assert_allclose(gram_factored, gram_dense, atol=1e-10)
+
+    def test_tensor_cross_gram_main_matches_dense(self):
+        """Cross-gram between tensor and main-effect groups must match dense."""
+        rng = np.random.default_rng(88)
+        n = 500
+        X = pd.DataFrame(
+            {
+                "s1": rng.uniform(0, 10, n),
+                "s2": rng.uniform(0, 10, n),
+                "s3": rng.uniform(0, 10, n),
+            }
+        )
+        y = rng.poisson(np.exp(0.1 + 0.05 * X["s1"].to_numpy())).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "s1": Spline(n_knots=6, penalty="ssp"),
+                "s2": Spline(n_knots=5, penalty="ssp"),
+                "s3": Spline(n_knots=4, penalty="ssp"),
+            },
+            interactions=[("s1", "s2")],
+        )
+        model.fit(X, y)
+
+        gms = model._dm.group_matrices
+        gm_main = gms[0]  # s1 main effect
+        gm_tensor = gms[3]  # s1:s2 tensor
+        gm_other = gms[2]  # s3, non-parent of tensor
+        assert isinstance(gm_tensor, DiscretizedTensorGroupMatrix)
+        assert isinstance(gm_main, DiscretizedSSPGroupMatrix)
+
+        W = rng.uniform(0.5, 2.0, n)
+
+        # tensor × parent main effect
+        cross = _cross_gram(gm_main, gm_tensor, W)
+        X_main = gm_main.toarray()
+        X_tensor = gm_tensor.toarray()
+        cross_dense = X_main.T @ (X_tensor * W[:, None])
+        np.testing.assert_allclose(cross, cross_dense, atol=1e-9)
+
+        # tensor × non-parent main effect
+        cross2 = _cross_gram(gm_other, gm_tensor, W)
+        X_other = gm_other.toarray()
+        cross2_dense = X_other.T @ (X_tensor * W[:, None])
+        np.testing.assert_allclose(cross2, cross2_dense, atol=1e-9)
+
+    def test_tensor_full_xtwx_matches_dense(self):
+        """Full _block_xtwx with tensor interaction must match dense oracle."""
+        rng = np.random.default_rng(99)
+        n = 500
+        X = pd.DataFrame(
+            {
+                "s1": rng.uniform(0, 10, n),
+                "s2": rng.uniform(0, 10, n),
+                "s3": rng.uniform(0, 10, n),
+            }
+        )
+        y = rng.poisson(np.exp(0.1 + 0.05 * X["s1"].to_numpy())).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "s1": Spline(n_knots=6, penalty="ssp"),
+                "s2": Spline(n_knots=5, penalty="ssp"),
+                "s3": Spline(n_knots=4, penalty="ssp"),
+            },
+            interactions=[("s1", "s2")],
+        )
+        model.fit(X, y)
+
+        W = rng.uniform(0.5, 2.0, n)
+        xtwx_block = _block_xtwx(model._dm.group_matrices, model._groups, W)
+        X_dense = model._dm.toarray()
+        xtwx_dense = X_dense.T @ (X_dense * W[:, None])
+        np.testing.assert_allclose(xtwx_block, xtwx_dense, atol=1e-9)
+
+    def test_tensor_cross_gram_decomposed_matches_dense(self):
+        """Cross-gram between bilinear and wiggly tensor subgroups must match dense."""
+        rng = np.random.default_rng(55)
+        n = 500
+        X = pd.DataFrame(
+            {
+                "s1": rng.uniform(0, 10, n),
+                "s2": rng.uniform(0, 10, n),
+            }
+        )
+        y = rng.poisson(np.exp(0.1 + 0.05 * X["s1"].to_numpy())).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "s1": Spline(n_knots=6, penalty="ssp"),
+                "s2": Spline(n_knots=5, penalty="ssp"),
+            },
+        )
+        model._add_interaction("s1", "s2", decompose=True)
+        model.fit(X, y)
+
+        gms = model._dm.group_matrices
+        # Find bilinear and wiggly subgroups
+        tensor_gms = [gm for gm, g in zip(gms, model._groups) if g.feature_name == "s1:s2"]
+        assert len(tensor_gms) == 2
+        gm_bilin, gm_wiggly = tensor_gms
+        assert isinstance(gm_bilin, DiscretizedTensorGroupMatrix)
+        assert isinstance(gm_wiggly, DiscretizedTensorGroupMatrix)
+        assert gm_bilin.tensor_id == gm_wiggly.tensor_id
+
+        W = rng.uniform(0.5, 2.0, n)
+        cross = _cross_gram(gm_bilin, gm_wiggly, W)
+        X_b = gm_bilin.toarray()
+        X_w = gm_wiggly.toarray()
+        cross_dense = X_b.T @ (X_w * W[:, None])
+        np.testing.assert_allclose(cross, cross_dense, atol=1e-10)
+
+    def test_tensor_matvec_rmatvec_match_dense(self):
+        """DiscretizedTensorGroupMatrix matvec/rmatvec must match dense materialization."""
+        rng = np.random.default_rng(66)
+        n = 300
+        X = pd.DataFrame(
+            {
+                "s1": rng.uniform(0, 10, n),
+                "s2": rng.uniform(0, 10, n),
+            }
+        )
+        y = rng.poisson(np.exp(0.1 + 0.05 * X["s1"].to_numpy())).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "s1": Spline(n_knots=6, penalty="ssp"),
+                "s2": Spline(n_knots=5, penalty="ssp"),
+            },
+            interactions=[("s1", "s2")],
+        )
+        model.fit(X, y)
+
+        gm = model._dm.group_matrices[2]
+        assert isinstance(gm, DiscretizedTensorGroupMatrix)
+        X_dense = gm.toarray()
+        p_g = gm.shape[1]
+
+        v = rng.standard_normal(p_g)
+        np.testing.assert_allclose(gm.matvec(v), X_dense @ v, atol=1e-12)
+
+        w = rng.standard_normal(n)
+        np.testing.assert_allclose(gm.rmatvec(w), X_dense.T @ w, atol=1e-12)
 
 
 class TestPredictionTimeContracts:
