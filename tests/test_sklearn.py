@@ -1,11 +1,13 @@
 """Tests for the sklearn-compatible SuperGLMRegressor wrapper."""
 
+import pickle
+
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.utils.validation import check_is_fitted
 
-from superglm.sklearn import SuperGLMRegressor
+from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
 
 
 @pytest.fixture
@@ -447,3 +449,272 @@ class TestSparseMatrixInput:
         m.fit(X_sparse, y)
         preds = m.predict(X_sparse)
         assert preds.shape == (n,)
+
+
+# ── Native features= API ────────────────────────────────────────
+
+
+class TestNativeFeatures:
+    """Tests for features= parameter on sklearn wrappers."""
+
+    @pytest.fixture
+    def sample_data(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        age = rng.uniform(18, 85, n)
+        region = rng.choice(["A", "B", "C"], n, p=[0.3, 0.3, 0.4])
+        density = rng.normal(5, 2, n)
+        exposure = rng.uniform(0.3, 1.0, n)
+        mu = np.exp(-2.0 + 0.01 * (age - 50) ** 2 / 100 + (region == "A") * 0.3)
+        y = rng.poisson(mu * exposure).astype(float)
+        X = pd.DataFrame({"age": age, "region": region, "density": density})
+        return X, y, exposure
+
+    def test_heterogeneous_spline_configs(self, sample_data):
+        """Explicit features= with heterogeneous spline configs."""
+        from superglm import Categorical, Numeric, Spline
+
+        X, y, exposure = sample_data
+        m = SuperGLMRegressor(
+            features={
+                "age": Spline(kind="bs", k=12),
+                "region": Categorical(base="first"),
+                "density": Numeric(),
+            },
+            selection_penalty=0.0,
+        )
+        m.fit(X, y, sample_weight=exposure)
+        preds = m.predict(X)
+        assert preds.shape == (len(X),)
+        assert np.all(preds > 0)
+        assert m.n_features_in_ == 3
+
+    def test_features_with_offset(self, sample_data):
+        """features= works alongside offset=."""
+        from superglm import Categorical, Numeric, Spline
+
+        X, y, exposure = sample_data
+        X = X.copy()
+        X["log_exp"] = np.log(exposure)
+        m = SuperGLMRegressor(
+            features={
+                "age": Spline(kind="bs", k=10),
+                "region": Categorical(base="first"),
+                "density": Numeric(),
+            },
+            offset="log_exp",
+            selection_penalty=0.0,
+        )
+        m.fit(X, y)
+        assert m.n_features_in_ == 3
+        assert "log_exp" not in m._feature_types
+
+    def test_mutual_exclusion_spline_features(self, sample_data):
+        """features= + spline_features= raises."""
+        from superglm import Numeric
+
+        X, y, _ = sample_data
+        m = SuperGLMRegressor(
+            features={"age": Numeric()},
+            spline_features=["age"],
+        )
+        with pytest.raises(ValueError, match="Pass either features"):
+            m.fit(X, y)
+
+    def test_mutual_exclusion_categorical_features(self, sample_data):
+        """features= + categorical_features= raises."""
+        from superglm import Numeric
+
+        X, y, _ = sample_data
+        m = SuperGLMRegressor(
+            features={"age": Numeric()},
+            categorical_features=["region"],
+        )
+        with pytest.raises(ValueError, match="Pass either features"):
+            m.fit(X, y)
+
+    def test_mutual_exclusion_numeric_features(self, sample_data):
+        """features= + numeric_features= raises."""
+        from superglm import Numeric
+
+        X, y, _ = sample_data
+        m = SuperGLMRegressor(
+            features={"age": Numeric()},
+            numeric_features=["density"],
+        )
+        with pytest.raises(ValueError, match="Pass either features"):
+            m.fit(X, y)
+
+    def test_mutual_exclusion_n_knots(self, sample_data):
+        """features= + non-default n_knots raises."""
+        from superglm import Numeric
+
+        X, y, _ = sample_data
+        m = SuperGLMRegressor(
+            features={"age": Numeric()},
+            n_knots=20,
+        )
+        with pytest.raises(ValueError, match="Pass either features"):
+            m.fit(X, y)
+
+    def test_mutual_exclusion_degree(self, sample_data):
+        """features= + non-default degree raises."""
+        from superglm import Numeric
+
+        X, y, _ = sample_data
+        m = SuperGLMRegressor(
+            features={"age": Numeric()},
+            degree=5,
+        )
+        with pytest.raises(ValueError, match="Pass either features"):
+            m.fit(X, y)
+
+    def test_default_n_knots_degree_allowed(self, sample_data):
+        """features= with default n_knots/degree does NOT raise."""
+        from superglm import Numeric
+
+        X, y, _ = sample_data
+        m = SuperGLMRegressor(
+            features={"age": Numeric(), "density": Numeric()},
+            n_knots=10,
+            degree=3,
+        )
+        m.fit(X, y)
+        assert m.coef_ is not None
+
+    def test_pickle_roundtrip(self, sample_data):
+        """Pickle round-trip preserves predictions."""
+        from superglm import Categorical, Numeric, Spline
+
+        X, y, exposure = sample_data
+        m = SuperGLMRegressor(
+            features={
+                "age": Spline(kind="bs", k=10),
+                "region": Categorical(base="first"),
+                "density": Numeric(),
+            },
+            selection_penalty=0.0,
+        )
+        m.fit(X, y, sample_weight=exposure)
+        pred_before = m.predict(X)
+
+        data = pickle.dumps(m)
+        m2 = pickle.loads(data)
+        pred_after = m2.predict(X)
+        np.testing.assert_array_equal(pred_before, pred_after)
+
+    def test_get_params_includes_features(self):
+        """get_params() returns features= for clone compatibility."""
+        from superglm import Numeric
+
+        specs = {"a": Numeric(), "b": Numeric()}
+        m = SuperGLMRegressor(features=specs)
+        p = m.get_params()
+        assert p["features"] is specs
+
+    def test_clone_with_features(self):
+        """sklearn clone works with features=."""
+        from sklearn.base import clone
+
+        from superglm import Numeric, Spline
+
+        specs = {"a": Spline(kind="bs", k=10), "b": Numeric()}
+        m = SuperGLMRegressor(features=specs, selection_penalty=0.0)
+        m2 = clone(m)
+        p2 = m2.get_params()
+        assert set(p2["features"].keys()) == {"a", "b"}
+        assert p2["selection_penalty"] == 0.0
+
+
+class TestNativeFeaturesClassifier:
+    """Tests for features= on SuperGLMClassifier."""
+
+    def test_classifier_with_features(self):
+        from superglm import Numeric, Spline
+
+        rng = np.random.default_rng(42)
+        n = 300
+        X = pd.DataFrame(
+            {
+                "x1": rng.standard_normal(n),
+                "x2": rng.standard_normal(n),
+            }
+        )
+        p = 1 / (1 + np.exp(-(0.5 * X["x1"] - 0.3 * X["x2"])))
+        y = rng.binomial(1, p).astype(float)
+
+        m = SuperGLMClassifier(
+            features={
+                "x1": Spline(kind="bs", k=8),
+                "x2": Numeric(),
+            },
+            selection_penalty=0.0,
+        )
+        m.fit(X, y)
+        proba = m.predict_proba(X)
+        assert proba.shape == (n, 2)
+        assert np.allclose(proba.sum(axis=1), 1.0)
+
+    def test_classifier_mutual_exclusion(self):
+        from superglm import Numeric
+
+        m = SuperGLMClassifier(
+            features={"x": Numeric()},
+            spline_features=["x"],
+        )
+        X = pd.DataFrame({"x": [0.0, 1.0, 0.0, 1.0]})
+        y = np.array([0.0, 1.0, 0.0, 1.0])
+        with pytest.raises(ValueError, match="Pass either features"):
+            m.fit(X, y)
+
+
+class TestNativeFeaturesPipeline:
+    """Test features= works inside sklearn Pipeline."""
+
+    def test_pipeline_with_column_transformer(self):
+        from sklearn.compose import ColumnTransformer
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        from superglm import Numeric, Spline
+
+        rng = np.random.default_rng(42)
+        n = 300
+        df = pd.DataFrame(
+            {
+                "age": rng.uniform(18, 85, n),
+                "density": rng.normal(5, 2, n),
+                "log_exposure": rng.uniform(-1, 0, n),
+            }
+        )
+        y = rng.poisson(np.exp(-1.0 + 0.01 * df["age"])).astype(float)
+
+        pre = ColumnTransformer(
+            [
+                ("keep_age", "passthrough", ["age"]),
+                ("scale_density", StandardScaler(), ["density"]),
+                ("meta", "passthrough", ["log_exposure"]),
+            ]
+        ).set_output(transform="pandas")
+
+        pipe = Pipeline(
+            [
+                ("pre", pre),
+                (
+                    "model",
+                    SuperGLMRegressor(
+                        features={
+                            "keep_age__age": Spline(kind="bs", k=10),
+                            "scale_density__density": Numeric(),
+                        },
+                        offset="meta__log_exposure",
+                        selection_penalty=0.0,
+                    ),
+                ),
+            ]
+        )
+
+        pipe.fit(df, y)
+        preds = pipe.predict(df)
+        assert preds.shape == (n,)
+        assert np.all(preds > 0)
