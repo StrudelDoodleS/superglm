@@ -63,7 +63,7 @@ class TestMgcvParity:
         m = SuperGLM(
             features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=30)
 
@@ -86,7 +86,7 @@ class TestMgcvParity:
         m = SuperGLM(
             features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=30)
 
@@ -103,7 +103,7 @@ class TestMgcvParity:
         m = SuperGLM(
             features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=30)
 
@@ -126,7 +126,7 @@ class TestMgcvParity:
         m = SuperGLM(
             features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=30)
 
@@ -140,7 +140,7 @@ class TestMgcvParity:
         m = SuperGLM(
             features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
             family="gamma",
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=30)
 
@@ -158,7 +158,7 @@ class TestMgcvParity:
         m = SuperGLM(
             features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
             family="gamma",
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=30)
 
@@ -175,7 +175,7 @@ class TestMgcvParity:
         m = SuperGLM(
             features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
             family="gamma",
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=30)
 
@@ -192,7 +192,7 @@ class TestMgcvParity:
         m = SuperGLM(
             features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
             family="gamma",
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=30)
 
@@ -215,7 +215,7 @@ class TestMgcvParity:
         m = SuperGLM(
             features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
         )
         m.fit_reml(df, y, max_reml_iter=30)
 

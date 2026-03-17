@@ -31,7 +31,7 @@ from superglm import SuperGLM
 model = SuperGLM(
     family="poisson",
     penalty="group_lasso",
-    lambda1=0.01,
+    selection_penalty=0.01,
     splines=["DrivAge", "VehAge", "BonusMalus"],
     n_knots=10,
 )
@@ -47,7 +47,7 @@ from superglm import SuperGLM, Spline, Categorical, Numeric
 model = SuperGLM(
     family="poisson",
     penalty="group_lasso",
-    lambda1=0.01,
+    selection_penalty=0.01,
     features={
         "DrivAge": Spline(kind="bs", k=14),
         "VehAge": Spline(kind="cr", k=10),
@@ -77,14 +77,14 @@ model.fit(df, claim_rate, sample_weight=exposure)
 
 **1. Standard penalised fit**
 
-Use `fit()` when you want a fixed `lambda2` and a standard regularised GLM fit.
+Use `fit()` when you want a fixed `spline_penalty` and a standard regularised GLM fit.
 
 ```python
 model = SuperGLM(
     family="poisson",
     penalty="group_elastic_net",
-    lambda1=0.01,
-    lambda2=0.1,
+    selection_penalty=0.01,
+    spline_penalty=0.1,
     features=features,
 )
 model.fit(df, y, sample_weight=exposure)
@@ -92,10 +92,10 @@ model.fit(df, y, sample_weight=exposure)
 
 **2. Exact REML**
 
-Use `fit_reml(discrete=False)` for the standard smoothness-selection path (`lambda1=0`).
+Use `fit_reml(discrete=False)` for the standard smoothness-selection path (`selection_penalty=0`).
 
 ```python
-model = SuperGLM(family="poisson", lambda1=0.0, features=features)
+model = SuperGLM(family="poisson", selection_penalty=0, features=features)
 model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
 ```
 
@@ -106,7 +106,7 @@ Use `fit_reml(discrete=True)` for large data. This is the fast path for spline-h
 ```python
 model = SuperGLM(
     family="poisson",
-    lambda1=0.0,
+    selection_penalty=0,
     discrete=True,
     n_bins=256,
     features=features,
@@ -117,12 +117,12 @@ model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
 **4. Shrinkage vs selection**
 
 - `select=True` on a spline adds mgcv-style double-penalty shrinkage.
-- `lambda1 > 0` activates sparse/group penalties.
+- `selection_penalty > 0` activates sparse/group penalties.
 
 Those are different tools:
 
 - `select=True` is the more REML-aligned way to let smooth terms shrink toward zero.
-- `lambda1 > 0` is the sparse-additive path, best used for screening / compression rather than mgcv-style inference.
+- `selection_penalty > 0` is the sparse-additive path, best used for screening / compression rather than mgcv-style inference.
 
 ## Feature types
 
@@ -165,11 +165,10 @@ Categorical(base="first")         # base = alphabetically first level
 Categorical(base="B")             # explicit base level
 ```
 
-**Numeric** — Single continuous feature, standardised by default. Group size 1, so group lasso reduces to standard L1.
+**Numeric** — Single continuous feature passed through as-is. Group size 1, so group lasso reduces to standard L1.
 
 ```python
-Numeric()                       # standardised (default)
-Numeric(standardize=False)      # raw scale
+Numeric()                       # simple passthrough
 ```
 
 ## Interactions
@@ -180,7 +179,7 @@ Interactions between features are specified via the `interactions` parameter. Th
 model = SuperGLM(
     features={"age": Spline(k=14), "region": Categorical()},
     interactions=[("age", "region")],
-    lambda1=0.01,
+    selection_penalty=0.01,
 )
 model.fit(df, y, sample_weight=exposure)
 ```
@@ -208,7 +207,7 @@ Ridge(lambda1=0.01)                               # L2 shrinkage, no selection
 GroupLasso(lambda1=0.01, flavor=Adaptive())        # adaptive group lasso (two-stage)
 ```
 
-If `lambda1=None` (default), it is auto-calibrated to 10% of `lambda_max` at fit time.
+If `lambda1=None` (default in penalty objects), it is auto-calibrated to 10% of `lambda_max` at fit time.
 
 For spline-heavy models, `GroupElasticNet` is usually the smoother selection path than pure `GroupLasso`. `Ridge` is shrinkage only and does not remove terms.
 
@@ -286,7 +285,7 @@ model = SuperGLM(family=Tweedie(p=1.5), penalty=GroupLasso())
 Or estimate the power via profile likelihood:
 
 ```python
-model = SuperGLM(family="tweedie", penalty=GroupLasso(lambda1=0.01))
+model = SuperGLM(family=Tweedie(p=1.5), penalty=GroupLasso(lambda1=0.01))
 result = model.estimate_p(df, y, sample_weight=exposure, p_range=(1.1, 1.9))
 print(result.p_hat)  # estimated Tweedie power
 ```
@@ -316,7 +315,7 @@ from superglm import SuperGLM, Spline, Categorical
 
 model = SuperGLM(
     family="binomial",
-    lambda1=0,
+    selection_penalty=0,
     features={
         "age": Spline(k=10),
         "region": Categorical(base="first"),
@@ -331,7 +330,7 @@ The default link is logit. Alternative links (probit, cloglog, cauchit) can be p
 ```python
 from superglm import ProbitLink
 
-model = SuperGLM(family="binomial", link=ProbitLink(), lambda1=0)
+model = SuperGLM(family="binomial", link=ProbitLink(), selection_penalty=0)
 ```
 
 ## sklearn interface
@@ -344,7 +343,7 @@ from superglm import SuperGLMRegressor
 model = SuperGLMRegressor(
     family="poisson",
     penalty="group_lasso",
-    lambda1=0.01,
+    selection_penalty=0.01,
     spline_features=["DrivAge", "VehAge"],
     n_knots=10,
 )
@@ -357,7 +356,7 @@ model.predict(df)
 ```python
 from superglm import SuperGLMClassifier
 
-clf = SuperGLMClassifier(lambda1=0, spline_features=["age"])
+clf = SuperGLMClassifier(selection_penalty=0, spline_features=["age"])
 clf.fit(df, y)
 clf.predict(df)          # hard labels (0/1)
 clf.predict_proba(df)    # (n, 2) class probabilities

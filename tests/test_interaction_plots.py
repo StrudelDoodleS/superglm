@@ -50,7 +50,7 @@ def _fit_spline_cat(data):
     m = SuperGLM(
         features={"age": Spline(n_knots=5), "region": Categorical()},
         interactions=[("age", "region")],
-        lambda1=0.01,
+        selection_penalty=0.01,
     )
     m.fit(X, y)
     return m
@@ -61,7 +61,7 @@ def _fit_poly_cat(data):
     m = SuperGLM(
         features={"age": Polynomial(degree=2), "region": Categorical()},
         interactions=[("age", "region")],
-        lambda1=0.01,
+        selection_penalty=0.01,
     )
     m.fit(X, y)
     return m
@@ -72,7 +72,7 @@ def _fit_cat_cat(data):
     m = SuperGLM(
         features={"region": Categorical(), "type": Categorical()},
         interactions=[("region", "type")],
-        lambda1=0.01,
+        selection_penalty=0.01,
     )
     m.fit(X, y)
     return m
@@ -83,7 +83,7 @@ def _fit_num_cat(data):
     m = SuperGLM(
         features={"bm": Numeric(), "region": Categorical()},
         interactions=[("bm", "region")],
-        lambda1=0.01,
+        selection_penalty=0.01,
     )
     m.fit(X, y)
     return m
@@ -94,7 +94,7 @@ def _fit_num_num(data):
     m = SuperGLM(
         features={"bm": Numeric(), "density": Numeric()},
         interactions=[("bm", "density")],
-        lambda1=0.01,
+        selection_penalty=0.01,
     )
     m.fit(X, y)
     return m
@@ -105,7 +105,7 @@ def _fit_poly_poly(data):
     m = SuperGLM(
         features={"age": Polynomial(degree=2), "bm": Polynomial(degree=2)},
         interactions=[("age", "bm")],
-        lambda1=0.01,
+        selection_penalty=0.01,
     )
     m.fit(X, y)
     return m

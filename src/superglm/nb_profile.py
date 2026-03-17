@@ -254,7 +254,7 @@ def estimate_nb_theta(
     ----------
     model : SuperGLM
         A configured but *unfitted* model with features already added.
-        Must have family="negative_binomial" or a NegativeBinomial instance.
+        Must have a NegativeBinomial family (e.g. ``families.nb2(theta=1.0)``).
     X : DataFrame
         Feature matrix.
     y : array-like
@@ -282,11 +282,11 @@ def estimate_nb_theta(
 
     # Validate family
     family = model.family
-    is_nb = (isinstance(family, str) and family == "negative_binomial") or isinstance(
-        family, NegativeBinomial
-    )
-    if not is_nb:
-        raise ValueError(f"estimate_nb_theta requires family='negative_binomial', got {family!r}")
+    if not isinstance(family, NegativeBinomial):
+        raise ValueError(
+            f"estimate_nb_theta requires a NegativeBinomial family, got {family!r}. "
+            "Use families.nb2(theta=...) to create one."
+        )
 
     y = np.asarray(y, dtype=np.float64)
 
@@ -295,10 +295,12 @@ def estimate_nb_theta(
         model._auto_detect_features(X, exposure)
 
     # Temporary theta for _build_design_matrix (DM doesn't depend on theta)
-    saved_theta = model.nb_theta
-    model.nb_theta = 1.0
+    from superglm.distributions import NegativeBinomial
+
+    saved_family = model.family
+    model.family = NegativeBinomial(theta=1.0)
     y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, exposure, offset)
-    model.nb_theta = saved_theta
+    model.family = saved_family
 
     if model.penalty.lambda1 is None:
         model.penalty.lambda1 = model._compute_lambda_max(y_arr, w_arr) * 0.1

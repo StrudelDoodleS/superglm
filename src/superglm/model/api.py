@@ -16,27 +16,6 @@ from superglm.types import FeatureSpec
 
 from . import base, explain_ops, fit_ops, monotone_ops, profile_ops, state_ops
 
-
-def _resolve_penalty_alias(
-    primary_name: str,
-    primary_val: float | None,
-    alias_name: str,
-    alias_val: float | None,
-    default: float | None = None,
-) -> float | None:
-    """Resolve a primary/alias penalty pair, raising on conflicts."""
-    if primary_val is not None and alias_val is not None:
-        raise ValueError(
-            f"Cannot set both '{primary_name}' and '{alias_name}'. "
-            f"Use '{primary_name}' ('{alias_name}' is a deprecated alias)."
-        )
-    if alias_val is not None:
-        return alias_val
-    if primary_val is not None:
-        return primary_val
-    return default
-
-
 if TYPE_CHECKING:
     from superglm.discretize import DiscretizationResult
     from superglm.inference import InteractionInference, TermInference
@@ -61,16 +40,12 @@ class SuperGLM:
         selection_penalty: float | None = None,
         spline_penalty: float | None = None,
         penalty_features: str | list[str] | None = None,
-        tweedie_p: float | None = None,
-        # Feature configuration
-        nb_theta: float | str | None = None,
         # Feature configuration
         features: dict[str, FeatureSpec] | None = None,
         splines: list[str] | None = None,
         n_knots: int | list[int] = 10,
         degree: int = 3,
         categorical_base: str = "most_exposed",
-        standardize_numeric: bool = True,
         # Interactions
         interactions: list[tuple[str, str]] | None = None,
         # Solver options
@@ -78,18 +53,18 @@ class SuperGLM:
         # Discretization
         discrete: bool = False,
         n_bins: int | dict[str, int] = 256,
-        # Backward-compatible aliases
-        lambda1: float | None = None,
-        lambda2: float | None = None,
     ):
         """
         Parameters
         ----------
         family : str or Distribution
-            Response distribution. One of ``"poisson"``, ``"gaussian"``, ``"gamma"``,
-            ``"binomial"``, ``"tweedie"``, ``"negative_binomial"``, or a
-            Distribution object.  For ``"binomial"``, y must be in {0, 1}
-            and ``predict()`` returns probabilities.
+            Response distribution. Strings ``"poisson"``, ``"gaussian"``,
+            ``"gamma"``, ``"binomial"`` are accepted for parameter-free families.
+            For parameterized families use Distribution objects:
+            ``Tweedie(p=1.5)``, ``NegativeBinomial(theta=1.0)``, or
+            the ``families`` module (e.g. ``families.tweedie(p=1.5)``).
+            For ``"binomial"``, y must be in {0, 1} and ``predict()`` returns
+            probabilities.
         link : str or Link, optional
             Link function. Defaults to the family's configured default link.
         penalty : str or Penalty, optional
@@ -100,18 +75,12 @@ class SuperGLM:
             Regularisation strength for the group penalty (feature selection).
             ``None`` (default) auto-calibrates to 10% of lambda_max at fit
             time. Set to ``0.0`` for unpenalised / REML-only fits.
-            Alias: ``lambda1``.
         spline_penalty : float, optional
-            Within-group ridge shrinkage for spline smoothing. Defaults to
-            0.1 when neither ``spline_penalty`` nor ``lambda2`` is set.
-            Alias: ``lambda2``.
+            Within-group ridge shrinkage for spline smoothing.
+            Defaults to 0.1.
         penalty_features : str or list[str], optional
             Restrict the selection penalty to specific feature or group names.
             ``None`` (default) applies to all penalizable groups.
-        tweedie_p : float, optional
-            Power parameter for ``family="tweedie"``.  Must be in (1, 2).
-        nb_theta : float, optional
-            Overdispersion parameter for ``family="negative_binomial"``.
         features : dict[str, FeatureSpec], optional
             Explicit feature specifications mapping column names to feature
             objects (``Spline``, ``Categorical``, ``Numeric``, ``Polynomial``).
@@ -126,8 +95,6 @@ class SuperGLM:
             B-spline degree for auto-detect splines.
         categorical_base : str
             Base level strategy for auto-detected categoricals.
-        standardize_numeric : bool
-            Whether to standardize auto-detected numeric features.
         interactions : list[tuple[str, str]], optional
             Pairs of feature names to interact.  Interaction type is
             auto-detected from the parent feature specs.
@@ -137,41 +104,20 @@ class SuperGLM:
             Use discretized basis matrices for large-*n* REML (fREML-style).
         n_bins : int or dict[str, int]
             Number of discretization bins per feature when ``discrete=True``.
-        lambda1 : float, optional
-            Deprecated alias for ``selection_penalty``.
-        lambda2 : float, optional
-            Deprecated alias for ``spline_penalty``.
         """
-        resolved_lambda1 = _resolve_penalty_alias(
-            "selection_penalty",
-            selection_penalty,
-            "lambda1",
-            lambda1,
-        )
-        resolved_lambda2 = _resolve_penalty_alias(
-            "spline_penalty",
-            spline_penalty,
-            "lambda2",
-            lambda2,
-            default=0.1,
-        )
-
         base.init_model(
             self,
             family=family,
             link=link,
             penalty=penalty,
-            lambda1=resolved_lambda1,
-            lambda2=resolved_lambda2,
+            lambda1=selection_penalty,
+            lambda2=spline_penalty if spline_penalty is not None else 0.1,
             penalty_features=penalty_features,
-            tweedie_p=tweedie_p,
-            nb_theta=nb_theta,
             features=features,
             splines=splines,
             n_knots=n_knots,
             degree=degree,
             categorical_base=categorical_base,
-            standardize_numeric=standardize_numeric,
             interactions=interactions,
             active_set=active_set,
             discrete=discrete,
@@ -364,7 +310,7 @@ class SuperGLM:
     ) -> SuperGLM:
         """Fit with REML estimation of per-term smoothing parameters.
 
-        When ``lambda1=0``, the exact/direct path optimizes a Laplace
+        When ``selection_penalty=0``, the exact/direct path optimizes a Laplace
         approximate REML objective over log-lambdas. When group selection is
         also active, REML falls back to the existing Wood (2011) fixed-point
         outer loop around PIRLS.

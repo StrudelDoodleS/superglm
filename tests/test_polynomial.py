@@ -97,7 +97,7 @@ class TestPolynomialIntegration:
 
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "age": Polynomial(degree=3),
                 "region": Categorical(base="first"),
@@ -114,7 +114,7 @@ class TestPolynomialIntegration:
 
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "age": Polynomial(degree=2),
                 "region": Categorical(base="first"),
@@ -131,7 +131,7 @@ class TestPolynomialIntegration:
 
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "age": Polynomial(degree=2),
                 "region": Categorical(base="first"),

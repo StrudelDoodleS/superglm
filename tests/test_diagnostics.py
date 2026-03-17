@@ -38,7 +38,7 @@ def fitted_model(mixed_data):
             "region": Categorical(),
         },
         splines=None,
-        lambda1=0.0,
+        selection_penalty=0.0,
     )
     m.fit(X, y, sample_weight=exposure)
     return m, X, y, exposure
@@ -74,7 +74,7 @@ class TestTermImportance:
         m = SuperGLM(
             family="poisson",
             features={"strong": Spline(n_knots=10)},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         with pytest.raises(RuntimeError, match="must be fitted"):
             m.term_importance(X, sample_weight=exposure)
@@ -170,7 +170,7 @@ class TestSplineRedundancy:
         m = SuperGLM(
             family="poisson",
             features={"feat": Spline(n_knots=25)},
-            lambda1=0.0,
+            selection_penalty=0.0,
         )
         m.fit(X, y)
         result = m.spline_redundancy(X)

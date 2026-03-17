@@ -5,7 +5,7 @@ Core API (auto-detect):
     from superglm import SuperGLM
 
     model = SuperGLM(
-        penalty="group_lasso", lambda1=0.01,
+        penalty="group_lasso", selection_penalty=0.01,
         splines=["driver_age"],
     )
     model.fit(X, y, sample_weight=exposure)
@@ -14,7 +14,7 @@ Core API (explicit):
     from superglm import SuperGLM, Spline, Categorical, Numeric
 
     model = SuperGLM(
-        penalty="group_lasso", lambda1=0.01,
+        penalty="group_lasso", selection_penalty=0.01,
         features={
             "driver_age": Spline(kind="bs", k=14),
             "region": Categorical(base="most_exposed"),
@@ -27,12 +27,13 @@ sklearn-compatible API:
     from superglm import SuperGLMRegressor
 
     model = SuperGLMRegressor(
-        penalty="group_lasso", lambda1=0.01,
+        penalty="group_lasso", selection_penalty=0.01,
         spline_features=["driver_age"],
     )
     model.fit(X, y, sample_weight=exposure)
 """
 
+from superglm import families
 from superglm.constraints import MonotoneRepairer, MonotoneRepairResult
 from superglm.cv import CVResult
 from superglm.davies import psum_chisq, satterthwaite
@@ -93,6 +94,7 @@ from superglm.tweedie_profile import (
 from superglm.wood_pvalue import wood_test_smooth
 
 __all__ = [
+    "families",
     "SuperGLM",
     "PathResult",
     "CVResult",

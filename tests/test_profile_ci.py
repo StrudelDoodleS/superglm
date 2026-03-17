@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from superglm import SuperGLM
-from superglm.distributions import NegativeBinomial
+from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.features.numeric import Numeric
 from superglm.nb_profile import estimate_nb_theta, profile_ci_theta
 from superglm.tweedie_profile import estimate_tweedie_p
@@ -24,7 +24,7 @@ class TestNBThetaProfileCI:
 
         model = SuperGLM(
             family=NegativeBinomial(theta=1.0),
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         result = estimate_nb_theta(model, X, y)
@@ -45,7 +45,7 @@ class TestNBThetaProfileCI:
 
         model = SuperGLM(
             family=NegativeBinomial(theta=1.0),
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         result = estimate_nb_theta(model, X, y)
@@ -77,7 +77,7 @@ class TestNBThetaProfileCI:
 
         model = SuperGLM(
             family=NegativeBinomial(theta=1.0),
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         result = estimate_nb_theta(model, X, y)
@@ -104,7 +104,7 @@ class TestNBThetaProfileCI:
 
         model = SuperGLM(
             family=NegativeBinomial(theta=1.0),
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         result = estimate_nb_theta(model, X, y)
@@ -132,7 +132,7 @@ class TestNBThetaProfileCI:
 
         model = SuperGLM(
             family=NegativeBinomial(theta=1.0),
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         result = estimate_nb_theta(model, X, y)
@@ -159,8 +159,8 @@ class TestTweedieProfileCI:
         X = pd.DataFrame({"x": x})
 
         model = SuperGLM(
-            family="tweedie",
-            lambda1=0.001,
+            family=Tweedie(p=1.5),
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         result = estimate_tweedie_p(model, X, y)
@@ -190,8 +190,8 @@ class TestTweedieProfileCI:
         X = pd.DataFrame({"x": x})
 
         model = SuperGLM(
-            family="tweedie",
-            lambda1=0.001,
+            family=Tweedie(p=1.5),
+            selection_penalty=0.001,
             features={"x": Numeric()},
         )
         result = estimate_tweedie_p(model, X, y)

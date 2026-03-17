@@ -34,7 +34,7 @@ def fitted_model(sample_data):
     X, y, exposure = sample_data
     model = SuperGLM(
         penalty="group_lasso",
-        lambda1=0.01,
+        selection_penalty=0.01,
         features={
             "age": Spline(n_knots=10, penalty="ssp"),
             "region": Categorical(base="first"),
@@ -277,7 +277,7 @@ class TestEnrichedSummary:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "age": Spline(n_knots=10, penalty="ssp"),
                 "region": Categorical(base="first"),
@@ -293,7 +293,7 @@ class TestEnrichedSummary:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "age": Spline(n_knots=10, penalty="ssp"),
                 "region": Categorical(base="first"),
@@ -309,7 +309,7 @@ class TestEnrichedSummary:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "age": Spline(n_knots=10, penalty="ssp"),
                 "region": Categorical(base="first"),
@@ -323,7 +323,7 @@ class TestEnrichedSummary:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={
                 "age": Spline(n_knots=10, penalty="ssp"),
                 "region": Categorical(base="first"),
@@ -342,7 +342,7 @@ class TestEnrichedSummary:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"age": Spline(n_knots=10, penalty="ssp")},
         )
         model.fit(X, y, exposure=exposure)
@@ -407,7 +407,7 @@ class TestModelDiagnosticsSplineKeys:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"age": Spline(n_knots=10, penalty="ssp")},
         )
         model.fit(X, y, exposure=exposure)
@@ -433,7 +433,7 @@ class TestSplineKinds:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"age": Spline(kind=kind, n_knots=10, penalty="ssp")},
         )
         model.fit(X, y, exposure=exposure)
@@ -445,7 +445,7 @@ class TestSplineKinds:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"age": Spline(kind=kind, n_knots=10, penalty="ssp")},
         )
         model.fit(X, y, exposure=exposure)
@@ -461,7 +461,7 @@ class TestInteractionInference:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.001,
+            selection_penalty=0.001,
             features={
                 "age": Spline(n_knots=8, penalty="ssp"),
                 "region": Categorical(base="first"),
@@ -487,7 +487,7 @@ class TestCenteringMetadata:
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
-            lambda1=0.01,
+            selection_penalty=0.01,
             features={"age": Spline(n_knots=10, penalty="ssp")},
         )
         model.fit(X, y, exposure=exposure)

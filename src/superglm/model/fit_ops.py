@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution, clip_mu
+from superglm.distributions import Distribution, NegativeBinomial, clip_mu
 from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
@@ -119,11 +119,11 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
         auto_detect(model, X, exposure)
 
     # Auto-estimate NB theta if requested
-    if model.nb_theta == "auto":
+    if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
         from superglm.nb_profile import estimate_nb_theta
 
         nb_result = estimate_nb_theta(model, X, y, exposure=exposure, offset=offset)
-        model.nb_theta = nb_result.theta_hat
+        model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
 
@@ -333,11 +333,11 @@ def fit_cv(
     if model._splines is not None and not model._specs:
         auto_detect(model, X, exposure)
 
-    if model.nb_theta == "auto":
+    if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
         from superglm.nb_profile import estimate_nb_theta
 
         nb_result = estimate_nb_theta(model, X, y, exposure=exposure, offset=offset)
-        model.nb_theta = nb_result.theta_hat
+        model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
 
@@ -684,11 +684,11 @@ def fit_reml(
         auto_detect(model, X, exposure)
 
     # Auto-estimate NB theta if requested
-    if model.nb_theta == "auto":
+    if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
         from superglm.nb_profile import estimate_nb_theta
 
         nb_result = estimate_nb_theta(model, X, y, exposure=exposure, offset=offset)
-        model.nb_theta = nb_result.theta_hat
+        model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
 

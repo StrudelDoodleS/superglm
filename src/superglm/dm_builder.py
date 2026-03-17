@@ -147,7 +147,6 @@ def auto_detect_features(
     knots_map: dict[str, int],
     degree: int,
     categorical_base: str,
-    standardize_numeric: bool,
     specs: dict[str, FeatureSpec],
     feature_order: list[str],
 ) -> None:
@@ -176,10 +175,10 @@ def auto_detect_features(
             feature_order.append(col)
             lines.append(f"  {col:<20s} → Categorical(base={base})")
         else:
-            spec = Numeric(standardize=standardize_numeric)
+            spec = Numeric()
             specs[col] = spec
             feature_order.append(col)
-            lines.append(f"  {col:<20s} → Numeric(standardize={standardize_numeric})")
+            lines.append(f"  {col:<20s} → Numeric()")
     logger.info("\n".join(lines))
 
 
@@ -334,8 +333,6 @@ def build_design_matrix(
     *,
     family: str | Distribution,
     link_spec: str | Link | None,
-    nb_theta: float | str | None,
-    tweedie_p: float | None,
     specs: dict[str, FeatureSpec],
     feature_order: list[str],
     interaction_specs: dict[str, Any],
@@ -356,8 +353,7 @@ def build_design_matrix(
     exposure = np.ones(n) if exposure is None else np.asarray(exposure, dtype=np.float64)
     if offset is not None:
         offset = np.asarray(offset, dtype=np.float64)
-    resolved_nb_theta = nb_theta if isinstance(nb_theta, int | float) else None
-    distribution = resolve_distribution(family, tweedie_p=tweedie_p, nb_theta=resolved_nb_theta)
+    distribution = resolve_distribution(family)
     link = resolve_link(link_spec, distribution)
 
     group_matrices: list[GroupMatrix] = []
