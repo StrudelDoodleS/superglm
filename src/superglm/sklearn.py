@@ -2,7 +2,8 @@
 
 Two wrappers are provided:
 
-- ``SuperGLMRegressor`` — count / continuous regression (Poisson, Gamma, …)
+- ``SuperGLMRegressor`` — count / continuous regression (Poisson, Gamma, …).
+  Rejects ``family="binomial"``; use the classifier for that.
 - ``SuperGLMClassifier`` — binary classification (Binomial)
 
 Both accept **DataFrame** or **ndarray** input:
@@ -33,6 +34,25 @@ from sklearn.utils.validation import check_is_fitted
 
 from superglm.model import SuperGLM
 from superglm.penalties.base import Penalty
+
+# ── Family validation ─────────────────────────────────────────────
+
+_REGRESSOR_FAMILIES = frozenset({"poisson", "gaussian", "gamma", "tweedie", "negative_binomial"})
+
+
+def _validate_regressor_family(family: str) -> None:
+    """Raise if *family* is not a valid regression family."""
+    if family == "binomial":
+        raise ValueError(
+            "family='binomial' is not supported in SuperGLMRegressor; "
+            "use SuperGLMClassifier instead."
+        )
+    if family not in _REGRESSOR_FAMILIES:
+        allowed = ", ".join(sorted(_REGRESSOR_FAMILIES))
+        raise ValueError(
+            f"Unknown family '{family}' for SuperGLMRegressor. Allowed families: {allowed}."
+        )
+
 
 # ── Input normalisation helpers ───────────────────────────────────
 
@@ -266,8 +286,9 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
     Parameters
     ----------
     family : str
-        Distribution family (``"poisson"``, ``"gamma"``, ``"gaussian"``,
-        ``"tweedie"``, ``"negative_binomial"``).
+        Distribution family.  Must be one of ``"poisson"``, ``"gamma"``,
+        ``"gaussian"``, ``"tweedie"``, ``"negative_binomial"``.
+        For binary classification use ``SuperGLMClassifier``.
     tweedie_p, nb_theta : float or None
         Family-specific parameters.
     penalty : str, Penalty, or None
@@ -347,6 +368,8 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         y: NDArray,
         sample_weight: NDArray | None = None,
     ) -> SuperGLMRegressor:
+        _validate_regressor_family(self.family)
+
         # ── Normalise inputs ──────────────────────────────────────
         input_is_dataframe = isinstance(X, pd.DataFrame)
         X_df, columns, synthetic = _normalize_X(
