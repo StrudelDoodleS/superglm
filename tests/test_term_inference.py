@@ -121,8 +121,12 @@ class TestTermInferenceSpline:
         ti = fitted_model.term_inference("age")
         assert ti.absorbs_intercept is True
 
-    def test_centering_mode(self, fitted_model):
+    def test_centering_mode_default_mean(self, fitted_model):
         ti = fitted_model.term_inference("age")
+        assert ti.centering_mode == "mean"
+
+    def test_centering_mode_native(self, fitted_model):
+        ti = fitted_model.term_inference("age", centering="native")
         assert ti.centering_mode == "training_mean_zero_unweighted"
 
 
@@ -206,8 +210,12 @@ class TestTermInferenceCategorical:
         ti = fitted_model.term_inference("region")
         assert ti.x is None
 
-    def test_centering_mode(self, fitted_model):
+    def test_centering_mode_default_mean(self, fitted_model):
         ti = fitted_model.term_inference("region")
+        assert ti.centering_mode == "mean"
+
+    def test_centering_mode_native(self, fitted_model):
+        ti = fitted_model.term_inference("region", centering="native")
         assert ti.centering_mode == "base_level"
 
 
@@ -482,8 +490,8 @@ class TestInteractionInference:
 
 
 class TestCenteringMetadata:
-    def test_spline_training_mean_zero(self, sample_data):
-        """Verify that reported centering metadata matches actual mean-zero behavior."""
+    def test_spline_default_mean_centering(self, sample_data):
+        """Default centering='mean' reports centering_mode='mean' and has geo-mean 1."""
         X, y, exposure = sample_data
         model = SuperGLM(
             penalty="group_lasso",
@@ -492,12 +500,21 @@ class TestCenteringMetadata:
         )
         model.fit(X, y, exposure=exposure)
         ti = model.term_inference("age")
+        assert ti.centering_mode == "mean"
+        assert abs(np.mean(ti.log_relativity)) < 1e-10
+
+    def test_spline_native_training_mean_zero(self, sample_data):
+        """centering='native' preserves SSP training-mean-zero."""
+        X, y, exposure = sample_data
+        model = SuperGLM(
+            penalty="group_lasso",
+            selection_penalty=0.01,
+            features={"age": Spline(n_knots=10, penalty="ssp")},
+        )
+        model.fit(X, y, exposure=exposure)
+        ti = model.term_inference("age", centering="native")
         assert ti.centering_mode == "training_mean_zero_unweighted"
 
-        # The log-relativity curve evaluated at training points should
-        # have mean approximately zero (within tolerance of penalty shrinkage)
         raw = model.reconstruct_feature("age")
-        # The unweighted training mean of the reconstructed curve (at grid points)
-        # should be close to zero for an identifiable spline
         mean_log_rel = np.mean(raw["log_relativity"])
         assert abs(mean_log_rel) < 0.5  # relaxed tolerance for penalized fit

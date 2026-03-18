@@ -437,9 +437,20 @@ class SuperGLM:
             keep_smoothing=keep_smoothing,
         )
 
-    def relativities(self, with_se: bool = False) -> dict[str, pd.DataFrame]:
-        """Extract plot-ready relativity DataFrames for all features."""
-        return explain_ops.relativities(self, with_se)
+    def relativities(
+        self, with_se: bool = False, centering: str = "mean"
+    ) -> dict[str, pd.DataFrame]:
+        """Extract plot-ready relativity DataFrames for all features.
+
+        Parameters
+        ----------
+        centering : {"native", "mean"}
+            ``"native"`` preserves internal centering (SSP for splines,
+            base-level for categoricals). ``"mean"`` shifts so the geometric
+            mean of relativities = 1 across levels/grid — recommended for
+            underwriter-facing output where cross-feature comparability matters.
+        """
+        return explain_ops.relativities(self, with_se, centering=centering)
 
     def _feature_se_from_cov(self, name, Cov_active, active_groups, n_points=200):
         return explain_ops.model_feature_se_from_cov(
@@ -470,8 +481,17 @@ class SuperGLM:
         alpha: float = 0.05,
         n_sim: int = 10_000,
         seed: int = 42,
+        centering: str = "mean",
     ) -> TermInference | InteractionInference:
-        """Per-term inference: curve, uncertainty, and metadata in one object."""
+        """Per-term inference: curve, uncertainty, and metadata in one object.
+
+        Parameters
+        ----------
+        centering : {"native", "mean"}
+            ``"native"`` preserves internal centering. ``"mean"`` shifts so
+            geometric mean of relativities = 1. Recommended for cross-feature
+            comparison.
+        """
         return explain_ops.term_inference(
             self,
             name,
@@ -481,6 +501,7 @@ class SuperGLM:
             alpha=alpha,
             n_sim=n_sim,
             seed=seed,
+            centering=centering,
         )
 
     # ── Profile estimation ────────────────────────────────────────
@@ -554,6 +575,7 @@ class SuperGLM:
         alpha: float = 0.05,
         n_sim: int = 10_000,
         seed: int = 42,
+        centering: str = "mean",
         **kwargs,
     ):
         """Plot model terms.
@@ -619,6 +641,7 @@ class SuperGLM:
             alpha=alpha,
             n_sim=n_sim,
             seed=seed,
+            centering=centering,
             **kwargs,
         )
 

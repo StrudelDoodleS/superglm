@@ -221,6 +221,64 @@ def compute_coef_covariance(
     return result.phi * XtWX_S_inv, active_groups
 
 
+# ── Centering ─────────────────────────────────────────────────────
+
+_VALID_CENTERING = ("native", "mean")
+
+
+def _recenter_term(ti: TermInference, centering: str) -> TermInference:
+    """Apply mean centering to a TermInference if requested.
+
+    Shifts log-relativities so geometric mean of relativities = 1.
+    SEs are invariant (shift on log scale).  Numeric terms (single
+    value) are skipped since centering is meaningless.
+    """
+    if centering == "native" or ti.log_relativity is None:
+        return ti
+    log_rel = np.asarray(ti.log_relativity, dtype=float)
+    if log_rel.size <= 1:
+        return ti  # numeric: single value, skip
+    shift = float(np.mean(log_rel))
+    factor = np.exp(-shift)
+    new_log_rel = log_rel - shift
+    new_rel = np.exp(new_log_rel)
+    new_ci_lo = ti.ci_lower * factor if ti.ci_lower is not None else None
+    new_ci_hi = ti.ci_upper * factor if ti.ci_upper is not None else None
+    new_ci_lo_sim = (
+        ti.ci_lower_simultaneous * factor if ti.ci_lower_simultaneous is not None else None
+    )
+    new_ci_hi_sim = (
+        ti.ci_upper_simultaneous * factor if ti.ci_upper_simultaneous is not None else None
+    )
+
+    # Re-center smooth_curve if present
+    new_curve = ti.smooth_curve
+    if new_curve is not None:
+        new_curve = SmoothCurve(
+            x=new_curve.x,
+            log_relativity=np.asarray(new_curve.log_relativity, dtype=float) - shift,
+            relativity=np.asarray(new_curve.relativity, dtype=float) * factor,
+            level_x=new_curve.level_x,
+            se_log_relativity=new_curve.se_log_relativity,
+            ci_lower=new_curve.ci_lower * factor if new_curve.ci_lower is not None else None,
+            ci_upper=new_curve.ci_upper * factor if new_curve.ci_upper is not None else None,
+        )
+
+    from dataclasses import replace
+
+    return replace(
+        ti,
+        log_relativity=new_log_rel,
+        relativity=new_rel,
+        ci_lower=new_ci_lo,
+        ci_upper=new_ci_hi,
+        ci_lower_simultaneous=new_ci_lo_sim,
+        ci_upper_simultaneous=new_ci_hi_sim,
+        smooth_curve=new_curve,
+        centering_mode="mean",
+    )
+
+
 # ── Feature SEs ───────────────────────────────────────────────────
 
 
@@ -528,6 +586,7 @@ def relativities(
     *,
     with_se: bool = False,
     covariance_fn=None,
+    centering: str = "mean",
 ) -> dict[str, pd.DataFrame]:
     """Extract plot-ready relativity DataFrames for all features.
 
@@ -549,11 +608,19 @@ def relativities(
         If True, add ``se_log_relativity`` column. Requires *covariance_fn*.
     covariance_fn : callable, optional
         Zero-arg callable returning ``(Cov_active, active_groups)``.
+    centering : {"native", "mean"}
+        ``"native"`` (default) preserves the model's internal centering
+        (SSP sum-to-zero for splines, base-level for categoricals).
+        ``"mean"`` shifts log-relativities so the geometric mean of
+        relativities equals 1, giving a consistent "1.0 = average" scale
+        across all features. Recommended for underwriter-facing output.
 
     Returns
     -------
     dict[str, pd.DataFrame]
     """
+    if centering not in _VALID_CENTERING:
+        raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
     if with_se:
         Cov_active, active_groups = covariance_fn()
 
@@ -570,6 +637,17 @@ def relativities(
         raise KeyError(f"Feature not found: {name}")
 
     from superglm.features.ordered_categorical import OrderedCategorical
+
+    def _center_df(df: pd.DataFrame) -> pd.DataFrame:
+        """Apply mean centering to a relativity DataFrame if requested."""
+        if centering != "mean" or "log_relativity" not in df.columns:
+            return df
+        log_rel = df["log_relativity"].values.copy()
+        shift = float(np.mean(log_rel))
+        df = df.copy()
+        df["log_relativity"] = log_rel - shift
+        df["relativity"] = np.exp(df["log_relativity"])
+        return df
 
     out: dict[str, pd.DataFrame] = {}
     for name in feature_order:
@@ -596,7 +674,7 @@ def relativities(
                     specs,
                     interaction_specs,
                 )
-            out[name] = df
+            out[name] = _center_df(df)
             continue
 
         if "x" in raw:
@@ -619,7 +697,7 @@ def relativities(
                     interaction_specs,
                     n_points=len(raw["x"]),
                 )
-            out[name] = df
+            out[name] = _center_df(df)
         elif "levels" in raw:
             # Categorical
             levels = raw["levels"]
@@ -642,7 +720,7 @@ def relativities(
                     specs,
                     interaction_specs,
                 )
-            out[name] = df
+            out[name] = _center_df(df)
         elif "relativity_per_unit" in raw:
             # Numeric
             rel = raw["relativity_per_unit"]
@@ -964,6 +1042,7 @@ def term_inference(
     alpha: float = 0.05,
     n_sim: int = 10_000,
     seed: int = 42,
+    centering: str = "mean",
 ) -> TermInference | InteractionInference:
     """Build a per-term inference object.
 
@@ -997,11 +1076,17 @@ def term_inference(
         Number of simulations for simultaneous bands.
     seed : int
         Random seed for simultaneous bands.
+    centering : {"native", "mean"}
+        ``"native"`` (default) preserves internal centering.
+        ``"mean"`` shifts so geometric mean of relativities = 1.
 
     Returns
     -------
     TermInference or InteractionInference
     """
+    if centering not in _VALID_CENTERING:
+        raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
+
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
@@ -1106,22 +1191,25 @@ def term_inference(
                     level_x=level_x,
                 )
 
-            return TermInference(
-                name=name,
-                kind="categorical",
-                active=active,
-                levels=levels,
-                log_relativity=level_log_rels,
-                relativity=level_rels,
-                se_log_relativity=se,
-                ci_lower=ci_lo,
-                ci_upper=ci_hi,
-                absorbs_intercept=False,
-                centering_mode="base_level",
-                edf=edf,
-                smoothing_lambda=lam,
-                smooth_curve=curve,
-                alpha=alpha,
+            return _recenter_term(
+                TermInference(
+                    name=name,
+                    kind="categorical",
+                    active=active,
+                    levels=levels,
+                    log_relativity=level_log_rels,
+                    relativity=level_rels,
+                    se_log_relativity=se,
+                    ci_lower=ci_lo,
+                    ci_upper=ci_hi,
+                    absorbs_intercept=False,
+                    centering_mode="base_level",
+                    edf=edf,
+                    smoothing_lambda=lam,
+                    smooth_curve=curve,
+                    alpha=alpha,
+                ),
+                centering,
             )
         else:
             # Step mode: categorical-style output
@@ -1144,21 +1232,24 @@ def term_inference(
                 ci_lo = np.exp(log_rels - z_alpha * se)
                 ci_hi = np.exp(log_rels + z_alpha * se)
 
-            return TermInference(
-                name=name,
-                kind="categorical",
-                active=active,
-                levels=levels,
-                log_relativity=log_rels,
-                relativity=rels,
-                se_log_relativity=se,
-                ci_lower=ci_lo,
-                ci_upper=ci_hi,
-                absorbs_intercept=False,
-                centering_mode="base_level",
-                edf=edf,
-                smoothing_lambda=lam,
-                alpha=alpha,
+            return _recenter_term(
+                TermInference(
+                    name=name,
+                    kind="categorical",
+                    active=active,
+                    levels=levels,
+                    log_relativity=log_rels,
+                    relativity=rels,
+                    se_log_relativity=se,
+                    ci_lower=ci_lo,
+                    ci_upper=ci_hi,
+                    absorbs_intercept=False,
+                    centering_mode="base_level",
+                    edf=edf,
+                    smoothing_lambda=lam,
+                    alpha=alpha,
+                ),
+                centering,
             )
 
     # ── Spline ───────────────────────────────────────────────────
@@ -1206,26 +1297,29 @@ def term_inference(
 
         spline_meta = _build_spline_metadata(spec)
 
-        return TermInference(
-            name=name,
-            kind="spline",
-            active=active,
-            x=x_grid,
-            log_relativity=log_rel,
-            relativity=rel,
-            se_log_relativity=se,
-            ci_lower=ci_lo,
-            ci_upper=ci_hi,
-            ci_lower_simultaneous=ci_lo_sim,
-            ci_upper_simultaneous=ci_hi_sim,
-            critical_value_simultaneous=c_sim,
-            absorbs_intercept=spec.absorbs_intercept,
-            edf=edf,
-            smoothing_lambda=lam,
-            spline=spline_meta,
-            monotone=getattr(spec, "monotone", None),
-            monotone_repaired=False,  # caller can override if repairs exist
-            alpha=alpha,
+        return _recenter_term(
+            TermInference(
+                name=name,
+                kind="spline",
+                active=active,
+                x=x_grid,
+                log_relativity=log_rel,
+                relativity=rel,
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                ci_lower_simultaneous=ci_lo_sim,
+                ci_upper_simultaneous=ci_hi_sim,
+                critical_value_simultaneous=c_sim,
+                absorbs_intercept=spec.absorbs_intercept,
+                edf=edf,
+                smoothing_lambda=lam,
+                spline=spline_meta,
+                monotone=getattr(spec, "monotone", None),
+                monotone_repaired=False,  # caller can override if repairs exist
+                alpha=alpha,
+            ),
+            centering,
         )
 
     # ── Categorical ──────────────────────────────────────────────
@@ -1249,21 +1343,24 @@ def term_inference(
             ci_lo = np.exp(log_rels - z_alpha * se)
             ci_hi = np.exp(log_rels + z_alpha * se)
 
-        return TermInference(
-            name=name,
-            kind="categorical",
-            active=active,
-            levels=levels,
-            log_relativity=log_rels,
-            relativity=rels,
-            se_log_relativity=se,
-            ci_lower=ci_lo,
-            ci_upper=ci_hi,
-            absorbs_intercept=False,
-            centering_mode="base_level",
-            edf=edf,
-            smoothing_lambda=lam,
-            alpha=alpha,
+        return _recenter_term(
+            TermInference(
+                name=name,
+                kind="categorical",
+                active=active,
+                levels=levels,
+                log_relativity=log_rels,
+                relativity=rels,
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=False,
+                centering_mode="base_level",
+                edf=edf,
+                smoothing_lambda=lam,
+                alpha=alpha,
+            ),
+            centering,
         )
 
     # ── Polynomial ───────────────────────────────────────────────
@@ -1288,20 +1385,23 @@ def term_inference(
             ci_lo = np.exp(log_rel - z_alpha * se)
             ci_hi = np.exp(log_rel + z_alpha * se)
 
-        return TermInference(
-            name=name,
-            kind="polynomial",
-            active=active,
-            x=x_grid,
-            log_relativity=log_rel,
-            relativity=rel,
-            se_log_relativity=se,
-            ci_lower=ci_lo,
-            ci_upper=ci_hi,
-            absorbs_intercept=True,
-            edf=edf,
-            smoothing_lambda=lam,
-            alpha=alpha,
+        return _recenter_term(
+            TermInference(
+                name=name,
+                kind="polynomial",
+                active=active,
+                x=x_grid,
+                log_relativity=log_rel,
+                relativity=rel,
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=True,
+                edf=edf,
+                smoothing_lambda=lam,
+                alpha=alpha,
+            ),
+            centering,
         )
 
     # ── Numeric ──────────────────────────────────────────────────
@@ -1324,20 +1424,23 @@ def term_inference(
             ci_lo = np.exp(log_rel - z_alpha * se)
             ci_hi = np.exp(log_rel + z_alpha * se)
 
-        return TermInference(
-            name=name,
-            kind="numeric",
-            active=active,
-            log_relativity=log_rel,
-            relativity=rel,
-            se_log_relativity=se,
-            ci_lower=ci_lo,
-            ci_upper=ci_hi,
-            absorbs_intercept=False,
-            centering_mode="none",
-            edf=edf,
-            smoothing_lambda=lam,
-            alpha=alpha,
+        return _recenter_term(
+            TermInference(
+                name=name,
+                kind="numeric",
+                active=active,
+                log_relativity=log_rel,
+                relativity=rel,
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=False,
+                centering_mode="none",
+                edf=edf,
+                smoothing_lambda=lam,
+                alpha=alpha,
+            ),
+            centering,
         )
 
     else:
