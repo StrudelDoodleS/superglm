@@ -48,7 +48,7 @@ def refit_unpenalised(
     )
 
 
-def relativities(model, with_se=False):
+def relativities(model, with_se=False, centering="mean"):
     """Extract plot-ready relativity DataFrames for all features."""
     return _relativities(
         model._feature_order,
@@ -59,6 +59,7 @@ def relativities(model, with_se=False):
         model.result,
         with_se=with_se,
         covariance_fn=(lambda: model._coef_covariance) if with_se else None,
+        centering=centering,
     )
 
 
@@ -103,6 +104,7 @@ def term_inference(
     alpha=0.05,
     n_sim=10_000,
     seed=42,
+    centering="mean",
 ):
     """Per-term inference: curve, uncertainty, and metadata in one object."""
     if model._result is None:
@@ -123,6 +125,7 @@ def term_inference(
         alpha=alpha,
         n_sim=n_sim,
         seed=seed,
+        centering=centering,
     )
 
 
@@ -157,6 +160,7 @@ def plot(
     alpha=0.05,
     n_sim=10_000,
     seed=42,
+    centering="mean",
     **kwargs,
 ):
     """Plot model terms."""
@@ -248,6 +252,7 @@ def plot(
             alpha=alpha,
             n_sim=n_sim,
             seed=seed,
+            centering=centering,
         )
         for n in names
     ]
