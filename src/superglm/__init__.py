@@ -51,6 +51,7 @@ from superglm.features.interaction import (
     TensorInteraction,
 )
 from superglm.features.numeric import Numeric
+from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import (
     BasisSpline,
@@ -126,6 +127,7 @@ __all__ = [
     "NaturalSpline",
     "CubicRegressionSpline",
     "Categorical",
+    "OrderedCategorical",
     "Numeric",
     "Polynomial",
     "SplineCategorical",

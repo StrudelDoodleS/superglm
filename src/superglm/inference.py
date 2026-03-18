@@ -216,12 +216,57 @@ def feature_se_from_cov(
     """Compute feature-level SEs from a precomputed covariance matrix."""
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
+    from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
 
     beta = result.beta
     feature_groups = [g for g in groups if g.feature_name == name]
     spec = specs.get(name) or interaction_specs.get(name)
+
+    # OrderedCategorical: delegate to spline or categorical logic
+    if isinstance(spec, OrderedCategorical):
+        if spec.basis == "spline":
+            # Delegate to internal spline's SE computation
+            inner = spec._spline
+            beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
+            if np.linalg.norm(beta_combined) < 1e-12:
+                return np.zeros(n_points)
+            active_subs = [ag for ag in active_groups if ag.feature_name == name]
+            if not active_subs:
+                return np.zeros(n_points)
+            indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
+            Cov_g = Cov_active[np.ix_(indices, indices)]
+            x_grid = np.linspace(inner._lo, inner._hi, n_points)
+            B_grid = inner._raw_basis_matrix(x_grid)
+            M = B_grid @ inner._R_inv if inner._R_inv is not None else B_grid
+            active_cols = np.concatenate(
+                [
+                    np.arange(g.start, g.end) - feature_groups[0].start
+                    for g in feature_groups
+                    if any(ag.feature_name == name and ag.name == g.name for ag in active_subs)
+                ]
+            )
+            M = M[:, active_cols]
+            Q = M @ Cov_g
+            return np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
+        else:
+            # Step mode: same as Categorical
+            beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
+            if np.linalg.norm(beta_combined) < 1e-12:
+                return np.zeros(len(spec._ordered_levels))
+            active_subs = [ag for ag in active_groups if ag.feature_name == name]
+            if not active_subs:
+                return np.zeros(len(spec._ordered_levels))
+            indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
+            Cov_g = Cov_active[np.ix_(indices, indices)]
+            se_nonbase = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
+            se_all = np.zeros(len(spec._ordered_levels))
+            for i, lev in enumerate(spec._ordered_levels):
+                if lev != spec._base_level:
+                    idx = spec._non_base.index(lev)
+                    se_all[i] = se_nonbase[idx]
+            return se_all
 
     # Inactive feature: zeros (all subgroups zeroed)
     beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
@@ -880,6 +925,7 @@ def term_inference(
     """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
+    from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
 
@@ -923,6 +969,85 @@ def term_inference(
     lam = _resolve_term_lambda(name, feature_groups, reml_lambdas, lambda2)
 
     z_alpha = float(__import__("scipy").stats.norm.ppf(1.0 - alpha / 2.0))
+
+    # ── OrderedCategorical ────────────────────────────────────────
+    if isinstance(spec, OrderedCategorical):
+        if spec.basis == "spline":
+            # Spline mode: delegate to internal spline for curve
+            inner = spec._spline
+            raw = spec.reconstruct(beta_combined)
+            x_grid = raw["x"]
+            log_rel = raw["log_relativity"]
+            rel = raw["relativity"]
+
+            se = ci_lo = ci_hi = None
+            if with_se and active and Cov_active is not None:
+                se = feature_se_from_cov(
+                    name,
+                    Cov_active,
+                    active_groups_cov,
+                    result,
+                    groups,
+                    specs,
+                    interaction_specs,
+                    n_points=n_points,
+                )
+                ci_lo = np.exp(log_rel - z_alpha * se)
+                ci_hi = np.exp(log_rel + z_alpha * se)
+
+            return TermInference(
+                name=name,
+                kind="spline",
+                active=active,
+                x=x_grid,
+                log_relativity=log_rel,
+                relativity=rel,
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=inner.absorbs_intercept,
+                edf=edf,
+                smoothing_lambda=lam,
+                spline=_build_spline_metadata(inner),
+                alpha=alpha,
+            )
+        else:
+            # Step mode: categorical-style output
+            raw = spec.reconstruct(beta_combined)
+            levels = raw["levels"]
+            log_rels = np.array([raw["log_relativities"][lv] for lv in levels])
+            rels = np.array([raw["relativities"][lv] for lv in levels])
+
+            se = ci_lo = ci_hi = None
+            if with_se and active and Cov_active is not None:
+                se = feature_se_from_cov(
+                    name,
+                    Cov_active,
+                    active_groups_cov,
+                    result,
+                    groups,
+                    specs,
+                    interaction_specs,
+                )
+                ci_lo = np.exp(log_rels - z_alpha * se)
+                ci_hi = np.exp(log_rels + z_alpha * se)
+
+            return TermInference(
+                name=name,
+                kind="categorical",
+                active=active,
+                levels=levels,
+                log_relativity=log_rels,
+                relativity=rels,
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=False,
+                centering_mode="base_level",
+                edf=edf,
+                smoothing_lambda=lam,
+                alpha=alpha,
+            )
 
     # ── Spline ───────────────────────────────────────────────────
     if isinstance(spec, _SplineBase):

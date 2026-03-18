@@ -8,6 +8,7 @@ from superglm.features.interaction import (
     SplineCategorical,
 )
 from superglm.features.numeric import Numeric
+from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.spline import BasisSpline, CubicRegressionSpline, NaturalSpline, Spline
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "NaturalSpline",
     "CubicRegressionSpline",
     "Categorical",
+    "OrderedCategorical",
     "Numeric",
     "SplineCategorical",
     "PolynomialCategorical",
