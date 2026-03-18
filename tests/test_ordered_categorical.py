@@ -364,19 +364,21 @@ class TestIntegrationSpline:
         assert "relativity" in df.columns
 
     def test_term_inference(self, age_band_data):
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, exposure, midpoints, bands = age_band_data
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
         model.fit(X, y, exposure=exposure)
         ti = model.term_inference("age_band")
-        assert ti.kind == "spline"
-        assert ti.x is not None
-        assert ti.relativity is not None
+        # Primary output is categorical (K levels), not a continuous curve
+        assert ti.kind == "categorical"
+        assert ti.levels is not None
+        assert set(ti.levels) == set(bands)
+        assert len(ti.relativity) == len(bands)
 
-    def test_spline_se_numerically_reasonable(self, age_band_data):
-        """Spline mode SEs should be finite, positive, and sensibly sized."""
-        X, y, exposure, midpoints, _ = age_band_data
+    def test_spline_se_at_levels(self, age_band_data):
+        """Spline mode SEs should be at the K category positions, not on a grid."""
+        X, y, exposure, midpoints, bands = age_band_data
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
@@ -384,12 +386,44 @@ class TestIntegrationSpline:
         ti = model.term_inference("age_band")
         se = ti.se_log_relativity
         assert se is not None
+        # SE array should have K entries (one per level), not 200
+        assert len(se) == len(bands)
         assert np.all(np.isfinite(se))
         assert np.all(se >= 0)
-        # At least some SEs should be positive (curve is not flat)
         assert np.any(se > 0)
-        # SEs should be O(0.01-1) for this data, not huge
         assert np.max(se) < 5.0
+
+    def test_smooth_curve_for_plotting(self, age_band_data):
+        """Spline mode should provide a smooth_curve for plotting."""
+        X, y, exposure, midpoints, _ = age_band_data
+        model = SuperGLM(
+            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+        )
+        model.fit(X, y, exposure=exposure)
+        ti = model.term_inference("age_band")
+        curve = ti.smooth_curve
+        assert curve is not None
+        # Continuous grid (default 200 points)
+        assert len(curve.x) == 200
+        assert len(curve.relativity) == 200
+        assert curve.se_log_relativity is not None
+        assert len(curve.se_log_relativity) == 200
+        assert curve.ci_lower is not None
+        assert curve.ci_upper is not None
+
+    def test_relativities_per_level(self, age_band_data):
+        """relativities() should return per-level output, not a continuous curve."""
+        X, y, exposure, midpoints, bands = age_band_data
+        model = SuperGLM(
+            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+        )
+        model.fit(X, y, exposure=exposure)
+        rels = model.relativities(with_se=True)
+        df = rels["age_band"]
+        assert "level" in df.columns
+        assert len(df) == len(bands)
+        assert "se_log_relativity" in df.columns
+        assert np.all(np.isfinite(df["se_log_relativity"].values))
 
 
 class TestIntegrationStep:

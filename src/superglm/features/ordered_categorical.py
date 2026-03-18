@@ -37,6 +37,9 @@ class OrderedCategorical:
     basis : {"spline", "step"}
         "spline" maps categories to numeric values and builds a spline.
         "step" one-hot encodes with a first-difference penalty.
+    kind : str
+        Spline type (spline mode only). Passed to ``Spline(kind=...)``.
+        ``"bs"`` (default), ``"cr"``, ``"ns"``, etc.
     base : str
         Reference level selection for step mode and spline identifiability.
         "most_exposed" (default), "first", or a specific level name.
@@ -56,6 +59,7 @@ class OrderedCategorical:
         values: dict[str, float] | None = None,
         order: list[str] | None = None,
         basis: str = "spline",
+        kind: str = "bs",
         base: str = "most_exposed",
         n_knots: int = 5,
         degree: int = 3,
@@ -72,6 +76,7 @@ class OrderedCategorical:
             raise ValueError("select=True is not supported with basis='step'.")
 
         self.basis = basis
+        self.kind = kind
         self.base = base
         self.select = select
         self.penalty = penalty
@@ -104,7 +109,7 @@ class OrderedCategorical:
 
     def _init_spline(self) -> None:
         """Create the internal Spline object for spline mode."""
-        from superglm.features.spline import BasisSpline
+        from superglm.features.spline import Spline
 
         effective_n_knots = min(self.n_knots, self._n_levels - 1)
         if effective_n_knots < self.n_knots:
@@ -114,7 +119,8 @@ class OrderedCategorical:
                 UserWarning,
                 stacklevel=3,
             )
-        self._spline = BasisSpline(
+        self._spline = Spline(
+            kind=self.kind,
             n_knots=effective_n_knots,
             degree=self.degree,
             penalty=self.penalty,

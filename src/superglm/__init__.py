@@ -60,7 +60,7 @@ from superglm.features.spline import (
     Spline,
     n_knots_from_k,
 )
-from superglm.inference import InteractionInference, SplineMetadata, TermInference
+from superglm.inference import InteractionInference, SmoothCurve, SplineMetadata, TermInference
 from superglm.links import (
     CauchitLink,
     CloglogLink,
@@ -155,6 +155,7 @@ __all__ = [
     "wood_test_smooth",
     "n_knots_from_k",
     "TermInference",
+    "SmoothCurve",
     "InteractionInference",
     "SplineMetadata",
     "MonotoneRepairResult",

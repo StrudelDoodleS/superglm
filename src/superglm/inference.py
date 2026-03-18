@@ -40,6 +40,24 @@ class SplineMetadata:
 
 
 @dataclass(frozen=True)
+class SmoothCurve:
+    """Continuous fitted curve for plotting (not for rating tables).
+
+    Attached to ``TermInference.smooth_curve`` for features like
+    ``OrderedCategorical(basis="spline")`` where the underlying variable is
+    categorical but a smooth curve is fit through the level midpoints.
+    """
+
+    x: NDArray
+    log_relativity: NDArray
+    relativity: NDArray
+    level_x: NDArray | None = None  # numeric x positions of the K levels
+    se_log_relativity: NDArray | None = None
+    ci_lower: NDArray | None = None
+    ci_upper: NDArray | None = None
+
+
+@dataclass(frozen=True)
 class TermInference:
     """Per-term inference result.
 
@@ -79,6 +97,9 @@ class TermInference:
 
     # Spline-specific metadata
     spline: SplineMetadata | None = None
+
+    # Smooth curve for plotting (OrderedCategorical spline mode)
+    smooth_curve: SmoothCurve | None = None
 
     # Monotonicity
     monotone: str | None = None  # "increasing", "decreasing", or None
@@ -210,18 +231,29 @@ def _spline_se(
     feature_groups: list,
     active_groups: list,
     Cov_active: NDArray,
-    n_points: int,
+    n_points: int = 200,
+    x_eval: NDArray | None = None,
 ) -> NDArray:
-    """Shared spline SE computation for _SplineBase and OrderedCategorical(spline)."""
+    """Shared spline SE computation for _SplineBase and OrderedCategorical(spline).
+
+    Parameters
+    ----------
+    x_eval : array, optional
+        Evaluate SEs at these specific x positions instead of a linspace grid.
+        When provided, ``n_points`` is ignored.
+    """
+    n_out = len(x_eval) if x_eval is not None else n_points
     beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
     if np.linalg.norm(beta_combined) < 1e-12:
-        return np.zeros(n_points)
+        return np.zeros(n_out)
     active_subs = [ag for ag in active_groups if ag.feature_name == name]
     if not active_subs:
-        return np.zeros(n_points)
+        return np.zeros(n_out)
     indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
     Cov_g = Cov_active[np.ix_(indices, indices)]
-    x_grid = np.linspace(spline_spec._lo, spline_spec._hi, n_points)
+    x_grid = (
+        x_eval if x_eval is not None else np.linspace(spline_spec._lo, spline_spec._hi, n_points)
+    )
     B_grid = spline_spec._raw_basis_matrix(x_grid)
     M = B_grid @ spline_spec._R_inv if spline_spec._R_inv is not None else B_grid
     # For select=True: only use columns for active subgroups
@@ -261,6 +293,8 @@ def feature_se_from_cov(
     # OrderedCategorical: delegate to spline or categorical logic
     if isinstance(spec, OrderedCategorical):
         if spec.basis == "spline":
+            # SEs at the K category positions, not a continuous grid
+            level_values = np.array([spec._level_to_value[lev] for lev in spec._ordered_levels])
             return _spline_se(
                 spec._spline,
                 name,
@@ -268,7 +302,7 @@ def feature_se_from_cov(
                 feature_groups,
                 active_groups,
                 Cov_active,
-                n_points,
+                x_eval=level_values,
             )
         else:
             # Step mode: unwind reparametrisation for SEs
@@ -535,9 +569,36 @@ def relativities(
             return interaction_specs[name].reconstruct(beta_combined)
         raise KeyError(f"Feature not found: {name}")
 
+    from superglm.features.ordered_categorical import OrderedCategorical
+
     out: dict[str, pd.DataFrame] = {}
     for name in feature_order:
         raw = _reconstruct(name)
+        spec_cur = specs.get(name)
+
+        # OrderedCategorical(spline): per-level output (not continuous curve)
+        if isinstance(spec_cur, OrderedCategorical) and spec_cur.basis == "spline":
+            levels = raw["levels"]
+            df = pd.DataFrame(
+                {
+                    "level": levels,
+                    "relativity": [raw["level_relativities"][lv] for lv in levels],
+                    "log_relativity": [raw["level_log_relativities"][lv] for lv in levels],
+                }
+            )
+            if with_se:
+                df["se_log_relativity"] = feature_se_from_cov(
+                    name,
+                    Cov_active,
+                    active_groups,
+                    result,
+                    groups,
+                    specs,
+                    interaction_specs,
+                )
+            out[name] = df
+            continue
+
         if "x" in raw:
             # Spline or Polynomial
             df = pd.DataFrame(
@@ -991,14 +1052,17 @@ def term_inference(
     # ── OrderedCategorical ────────────────────────────────────────
     if isinstance(spec, OrderedCategorical):
         if spec.basis == "spline":
-            # Spline mode: delegate to internal spline for curve
+            # Spline mode: primary output is categorical (K levels with SEs),
+            # plus a smooth_curve for plotting the fitted spline.
             inner = spec._spline
             raw = spec.reconstruct(beta_combined)
-            x_grid = raw["x"]
-            log_rel = raw["log_relativity"]
-            rel = raw["relativity"]
+            levels = raw["levels"]
+            level_log_rels = np.array([raw["level_log_relativities"][lv] for lv in levels])
+            level_rels = np.array([raw["level_relativities"][lv] for lv in levels])
 
+            # Per-level SEs (at K category positions)
             se = ci_lo = ci_hi = None
+            curve = None
             if with_se and active and Cov_active is not None:
                 se = feature_se_from_cov(
                     name,
@@ -1008,25 +1072,55 @@ def term_inference(
                     groups,
                     specs,
                     interaction_specs,
+                )
+                ci_lo = np.exp(level_log_rels - z_alpha * se)
+                ci_hi = np.exp(level_log_rels + z_alpha * se)
+
+                # Continuous curve for plotting
+                level_x = np.array([raw["level_values"][lv] for lv in levels])
+                curve_se = _spline_se(
+                    inner,
+                    name,
+                    result.beta,
+                    feature_groups,
+                    active_groups_cov,
+                    Cov_active,
                     n_points=n_points,
                 )
-                ci_lo = np.exp(log_rel - z_alpha * se)
-                ci_hi = np.exp(log_rel + z_alpha * se)
+                curve = SmoothCurve(
+                    x=raw["x"],
+                    log_relativity=raw["log_relativity"],
+                    relativity=raw["relativity"],
+                    level_x=level_x,
+                    se_log_relativity=curve_se,
+                    ci_lower=np.exp(raw["log_relativity"] - z_alpha * curve_se),
+                    ci_upper=np.exp(raw["log_relativity"] + z_alpha * curve_se),
+                )
+            elif active:
+                # No SEs requested but still provide the curve shape
+                level_x = np.array([raw["level_values"][lv] for lv in levels])
+                curve = SmoothCurve(
+                    x=raw["x"],
+                    log_relativity=raw["log_relativity"],
+                    relativity=raw["relativity"],
+                    level_x=level_x,
+                )
 
             return TermInference(
                 name=name,
-                kind="spline",
+                kind="categorical",
                 active=active,
-                x=x_grid,
-                log_relativity=log_rel,
-                relativity=rel,
+                levels=levels,
+                log_relativity=level_log_rels,
+                relativity=level_rels,
                 se_log_relativity=se,
                 ci_lower=ci_lo,
                 ci_upper=ci_hi,
-                absorbs_intercept=inner.absorbs_intercept,
+                absorbs_intercept=False,
+                centering_mode="base_level",
                 edf=edf,
                 smoothing_lambda=lam,
-                spline=_build_spline_metadata(inner),
+                smooth_curve=curve,
                 alpha=alpha,
             )
         else:
