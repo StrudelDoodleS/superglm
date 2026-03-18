@@ -155,23 +155,6 @@ class SuperGLM:
     def _build_design_matrix(self, X, y, exposure, offset):
         return base.model_build_design_matrix(self, X, y, exposure, offset)
 
-    def _should_discretize(self, spec):
-        return base.model_should_discretize(self, spec)
-
-    def _should_discretize_tensor_interaction(self, ispec):
-        return base.model_should_discretize_tensor_interaction(self, ispec)
-
-    def _resolve_discrete_n_bins(self, name, spec):
-        return base.model_resolve_discrete_n_bins(self, name, spec)
-
-    def _compute_R_inv(self, B, omega, exposure, lambda2_override=None):
-        return base.model_compute_R_inv(self, B, omega, exposure, lambda2_override)
-
-    def _compute_projected_R_inv(self, B, projection, penalty_sub, exposure, lambda2_override=None):
-        return base.model_compute_projected_R_inv(
-            self, B, projection, penalty_sub, exposure, lambda2_override
-        )
-
     def _compute_lambda_max(self, y, weights):
         return base.compute_lambda_max(self, y, weights)
 
