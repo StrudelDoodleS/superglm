@@ -62,7 +62,7 @@ class TestREMLFiniteDifference:
                 eigv = np.linalg.eigvalsh(omega_ssp)
                 penalty_ranks[g.name] = float(np.sum(eigv > 1e-8 * max(eigv.max(), 1e-12)))
 
-        penalty_caches = build_penalty_caches(m._dm.group_matrices, m._groups, reml_groups)
+        penalty_caches = build_penalty_caches(m._dm.group_matrices, reml_groups)
 
         pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
             X=m._dm,

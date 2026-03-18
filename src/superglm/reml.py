@@ -45,7 +45,6 @@ class PenaltyCache:
 
 def build_penalty_caches(
     group_matrices: list,
-    groups: list,
     reml_groups: list[tuple[int, object]],
 ) -> dict[str, PenaltyCache]:
     """Build PenaltyCache for each REML-eligible group.
@@ -53,7 +52,6 @@ def build_penalty_caches(
     Parameters
     ----------
     group_matrices : list of GroupMatrix
-    groups : list of GroupSlice
     reml_groups : list of (group_index, GroupSlice) tuples
 
     Returns
