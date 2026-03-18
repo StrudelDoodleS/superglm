@@ -15,12 +15,7 @@ from superglm.dm_builder import (
     add_interaction,
     auto_detect_features,
     build_design_matrix,
-    compute_projected_R_inv,
-    compute_R_inv,
     rebuild_design_matrix_with_lambdas,
-    resolve_discrete_n_bins,
-    should_discretize,
-    should_discretize_tensor_interaction,
 )
 from superglm.group_matrix import DesignMatrix
 from superglm.links import Link, stabilize_eta
@@ -300,35 +295,6 @@ def model_build_design_matrix(
     validate_penalty_features(model.penalty, result.groups)
     model._dm = result.dm
     return result.y, result.exposure, result.offset
-
-
-def model_should_discretize(model, spec: FeatureSpec) -> bool:
-    """Check if a feature spec should use fit-time discretization."""
-    return should_discretize(spec, model._discrete)
-
-
-def model_should_discretize_tensor_interaction(model, ispec: Any) -> bool:
-    """Check if a tensor interaction should use fit-time discretization."""
-    return should_discretize_tensor_interaction(ispec, model._specs, model._discrete)
-
-
-def model_resolve_discrete_n_bins(model, name: str, spec: FeatureSpec) -> int:
-    """Resolve the requested bin count for a discretized feature."""
-    return resolve_discrete_n_bins(name, spec, model._n_bins)
-
-
-def model_compute_R_inv(model, B, omega, exposure, lambda2_override=None):
-    """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv."""
-    lam2 = lambda2_override if lambda2_override is not None else model.lambda2
-    return compute_R_inv(B, omega, exposure, lam2)
-
-
-def model_compute_projected_R_inv(
-    model, B, projection, penalty_sub, exposure, lambda2_override=None
-):
-    """Compute SSP R_inv within a projected subspace (linear-split range space)."""
-    lam2 = lambda2_override if lambda2_override is not None else model.lambda2
-    return compute_projected_R_inv(B, projection, penalty_sub, exposure, lam2)
 
 
 def compute_lambda_max(model, y, weights):

@@ -214,8 +214,10 @@ class TestComputeRInvOverride:
         model.fit(X[["x1"]], y, exposure=w)
 
         gm = model._dm.group_matrices[0]
-        R_inv_1 = model._compute_R_inv(gm.B, gm.omega, w, lambda2_override=0.01)
-        R_inv_2 = model._compute_R_inv(gm.B, gm.omega, w, lambda2_override=1.0)
+        from superglm.dm_builder import compute_R_inv
+
+        R_inv_1 = compute_R_inv(gm.B, gm.omega, w, 0.01)
+        R_inv_2 = compute_R_inv(gm.B, gm.omega, w, 1.0)
         assert not np.allclose(R_inv_1, R_inv_2, atol=1e-6)
 
 
@@ -299,7 +301,7 @@ class TestMgcvStyleSmoothTestInput:
 class TestBetaMapping:
     def test_roundtrip(self, poisson_data):
         """Mapping beta through old -> B-spline -> new preserves B-spline coefficients."""
-        from superglm.dm_builder import compute_projected_R_inv
+        from superglm.dm_builder import compute_projected_R_inv, compute_R_inv
 
         X, y, w = poisson_data
         model = SuperGLM(
@@ -319,7 +321,7 @@ class TestBetaMapping:
             R_inv_local = compute_projected_R_inv(gm_old.B, P, omega_proj, w, 0.5)
             R_inv_new = P @ R_inv_local
         else:
-            R_inv_new = model._compute_R_inv(gm_old.B, gm_old.omega, w, lambda2_override=0.5)
+            R_inv_new = compute_R_inv(gm_old.B, gm_old.omega, w, 0.5)
         gm_new = SparseSSPGroupMatrix(gm_old.B, R_inv_new)
         gm_new.omega = gm_old.omega
         gm_new.projection = P
