@@ -177,7 +177,7 @@ class TestEFSOptimizer:
 
         # Recompute objective with fresh caches from scratch
         reml_groups = [(i, g) for i, g in enumerate(model._groups) if g.penalized]
-        fresh_caches = build_penalty_caches(model._dm.group_matrices, model._groups, reml_groups)
+        fresh_caches = build_penalty_caches(model._dm.group_matrices, reml_groups)
         fresh_obj = reml_laml_objective(
             model._dm,
             model._distribution,

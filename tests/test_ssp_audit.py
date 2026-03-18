@@ -123,7 +123,7 @@ def _reml_metadata(dm: DesignMatrix, groups: list) -> tuple[list, dict[str, floa
         threshold = 1e-8 * max(eigvals.max(), 1e-12)
         penalty_ranks[g.name] = float(np.sum(eigvals > threshold))
         reml_groups.append((i, g))
-    penalty_caches = build_penalty_caches(dm.group_matrices, groups, reml_groups)
+    penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
     return reml_groups, penalty_ranks, penalty_caches
 
 

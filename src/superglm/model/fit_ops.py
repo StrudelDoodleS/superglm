@@ -747,7 +747,7 @@ def fit_reml(
     # Build penalty caches (eigenstructure computed once, reused across iterations)
     from superglm.reml import build_penalty_caches
 
-    penalty_caches = build_penalty_caches(model._dm.group_matrices, model._groups, reml_groups)
+    penalty_caches = build_penalty_caches(model._dm.group_matrices, reml_groups)
     penalty_ranks = {name: cache.rank for name, cache in penalty_caches.items()}
 
     # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed)
