@@ -313,6 +313,108 @@ def add_interaction(
 # ═══════════════════════════════════════════════════════════════════
 
 
+def _process_info(
+    info: GroupInfo,
+    *,
+    B_unique: NDArray | None = None,
+    bin_idx: NDArray | None = None,
+    exposure: NDArray,
+    exposure_agg: NDArray | None = None,
+    lambda2: float | dict,
+    tensor_build: DiscreteTensorBuildResult | None = None,
+    tensor_id: int = -1,
+) -> tuple[GroupMatrix, NDArray | None, int]:
+    """Compute R_inv and construct a GroupMatrix from a single GroupInfo.
+
+    Returns ``(group_matrix, r_inv_or_none, n_cols)`` where *r_inv_or_none*
+    is the R_inv column block (for collecting into combined R_inv) or None
+    if no reparametrization was applied.
+    """
+    use_discrete = B_unique is not None
+    use_tensor = tensor_build is not None
+    R_inv: NDArray | None = None
+
+    if info.projection is not None:
+        P = info.projection
+        if info.reparametrize and info.penalty_matrix is not None:
+            B_for = B_unique if use_discrete else info.columns
+            exp_for = exposure_agg if use_discrete else exposure
+            R_inv_local = compute_projected_R_inv(B_for, P, info.penalty_matrix, exp_for, lambda2)
+            R_inv = P @ R_inv_local
+        else:
+            R_inv = P
+        n_cols = R_inv.shape[1]
+        omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
+        if use_tensor:
+            gm: GroupMatrix = DiscretizedTensorGroupMatrix(
+                tensor_build.B1_unique,
+                tensor_build.B2_unique,
+                tensor_build.idx1,
+                tensor_build.idx2,
+                B_unique,
+                R_inv,
+                bin_idx,
+                tensor_id=tensor_id,
+            )
+        elif use_discrete:
+            gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
+        elif sp.issparse(info.columns):
+            gm = SparseSSPGroupMatrix(info.columns, R_inv)
+        else:
+            gm = DenseGroupMatrix(info.columns @ R_inv)
+        if omega_full is not None and hasattr(gm, "omega"):
+            gm.omega = omega_full
+        if hasattr(gm, "projection"):
+            gm.projection = P
+
+    elif info.reparametrize and info.penalty_matrix is not None:
+        B_for = B_unique if use_discrete else info.columns
+        exp_for = exposure_agg if use_discrete else exposure
+        R_inv = compute_R_inv(B_for, info.penalty_matrix, exp_for, lambda2)
+        n_cols = R_inv.shape[1]
+        if use_tensor:
+            gm = DiscretizedTensorGroupMatrix(
+                tensor_build.B1_unique,
+                tensor_build.B2_unique,
+                tensor_build.idx1,
+                tensor_build.idx2,
+                B_unique,
+                R_inv,
+                bin_idx,
+                tensor_id=tensor_id,
+            )
+            gm.omega = info.penalty_matrix
+        elif use_discrete:
+            gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
+            gm.omega = info.penalty_matrix
+        elif sp.issparse(info.columns):
+            gm = SparseSSPGroupMatrix(info.columns, R_inv)
+            gm.omega = info.penalty_matrix
+        else:
+            gm = DenseGroupMatrix(info.columns @ R_inv)
+
+    else:
+        n_cols = info.n_cols
+        R_inv = None
+        if use_tensor:
+            gm = DiscretizedTensorGroupMatrix(
+                tensor_build.B1_unique,
+                tensor_build.B2_unique,
+                tensor_build.idx1,
+                tensor_build.idx2,
+                B_unique,
+                np.eye(info.n_cols, dtype=np.float64),
+                bin_idx,
+                tensor_id=tensor_id,
+            )
+        elif sp.issparse(info.columns):
+            gm = SparseGroupMatrix(info.columns)
+        else:
+            gm = DenseGroupMatrix(info.columns)
+
+    return gm, R_inv, n_cols
+
+
 @dataclass
 class BuildResult:
     """Return value of build_design_matrix."""
@@ -416,79 +518,40 @@ def build_design_matrix(
             result = spec.build(x_col, exposure=exposure)
             infos = result if isinstance(result, list) else [result]
 
-        # Collect per-subgroup R_inv columns to set combined R_inv on the spec
+        # Build GroupMatrix + GroupSlice for each subgroup
         r_inv_parts: list[NDArray] = []
 
         for info in infos:
-            if info.projection is not None:
-                P = info.projection
-
-                if info.reparametrize and info.penalty_matrix is not None:
-                    B_for_rinv = B_unique if use_discrete else info.columns
-                    exp_for_rinv = exposure_agg if use_discrete else exposure
-                    R_inv_local = compute_projected_R_inv(
-                        B_for_rinv, P, info.penalty_matrix, exp_for_rinv, lambda2
-                    )
-                    R_inv_combined = P @ R_inv_local
-                else:
-                    R_inv_combined = P
-
-                r_inv_parts.append(R_inv_combined)
-
-                if use_discrete:
-                    gm: GroupMatrix = DiscretizedSSPGroupMatrix(B_unique, R_inv_combined, bin_idx)
-                    if info.penalty_matrix is not None:
-                        gm.omega = P @ info.penalty_matrix @ P.T
-                    gm.projection = P
-                elif sp.issparse(info.columns):
-                    gm = SparseSSPGroupMatrix(info.columns, R_inv_combined)
-                    if info.penalty_matrix is not None:
-                        gm.omega = P @ info.penalty_matrix @ P.T
-                    gm.projection = P
-                else:
-                    gm = DenseGroupMatrix(info.columns @ R_inv_combined)
-
-            elif info.reparametrize and info.penalty_matrix is not None:
-                if use_discrete:
-                    R_inv = compute_R_inv(B_unique, info.penalty_matrix, exposure_agg, lambda2)
-                    if hasattr(spec, "set_reparametrisation"):
-                        spec.set_reparametrisation(R_inv)
-                    gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
-                    gm.omega = info.penalty_matrix
-                else:
-                    R_inv = compute_R_inv(info.columns, info.penalty_matrix, exposure, lambda2)
-                    if hasattr(spec, "set_reparametrisation"):
-                        spec.set_reparametrisation(R_inv)
-                    if sp.issparse(info.columns):
-                        gm = SparseSSPGroupMatrix(info.columns, R_inv)
-                        gm.omega = info.penalty_matrix
-                    else:
-                        gm = DenseGroupMatrix(info.columns @ R_inv)
-            elif sp.issparse(info.columns):
-                gm = SparseGroupMatrix(info.columns)
-            else:
-                gm = DenseGroupMatrix(info.columns)
+            gm, r_inv, n_cols = _process_info(
+                info,
+                B_unique=B_unique,
+                bin_idx=bin_idx,
+                exposure=exposure,
+                exposure_agg=exposure_agg,
+                lambda2=lambda2,
+            )
+            if r_inv is not None:
+                r_inv_parts.append(r_inv)
 
             group_matrices.append(gm)
             subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
-            group_name = f"{name}{subgroup_suffix}"
-            weight = np.sqrt(info.n_cols)
             groups.append(
                 GroupSlice(
-                    name=group_name,
+                    name=f"{name}{subgroup_suffix}",
                     start=col_offset,
-                    end=col_offset + info.n_cols,
-                    weight=weight,
+                    end=col_offset + n_cols,
+                    weight=np.sqrt(n_cols),
                     penalized=info.penalized,
                     feature_name=name,
                     subgroup_type=info.subgroup_name,
                 )
             )
-            col_offset += info.n_cols
+            col_offset += n_cols
 
-        # Set combined R_inv on spec for transform/reconstruct
+        # Set R_inv on spec for transform/reconstruct
         if r_inv_parts and hasattr(spec, "set_reparametrisation"):
-            spec.set_reparametrisation(np.hstack(r_inv_parts))
+            combined = np.hstack(r_inv_parts) if len(r_inv_parts) > 1 else r_inv_parts[0]
+            spec.set_reparametrisation(combined)
 
     # ── Interactions ──────────────────────────────────────────
     # Resolve pending interactions from constructor
@@ -534,88 +597,24 @@ def build_design_matrix(
         else:
             result = ispec.build(x1, x2, specs, exposure=exposure)
 
+        pi_kwargs = dict(
+            B_unique=B_unique_inter,
+            bin_idx=bin_idx_inter,
+            exposure=exposure,
+            exposure_agg=exposure_agg_inter,
+            lambda2=lambda2,
+            tensor_build=tensor_build,
+            tensor_id=tensor_id,
+        )
+
         if isinstance(result, list):
             has_subgroups = any(info.subgroup_name is not None for info in result)
             if has_subgroups:
                 r_inv_parts_i: list[NDArray] = []
                 for info in result:
-                    if info.projection is not None:
-                        P = info.projection
-                        if info.reparametrize and info.penalty_matrix is not None:
-                            B_for_rinv = B_unique_inter if use_discrete_tensor else info.columns
-                            exp_for_rinv = exposure_agg_inter if use_discrete_tensor else exposure
-                            R_inv_local = compute_projected_R_inv(
-                                B_for_rinv, P, info.penalty_matrix, exp_for_rinv, lambda2
-                            )
-                            R_inv_combined = P @ R_inv_local
-                        else:
-                            R_inv_combined = P
-                        r_inv_parts_i.append(R_inv_combined)
-
-                        if use_discrete_tensor and tensor_build is not None:
-                            gm = DiscretizedTensorGroupMatrix(
-                                tensor_build.B1_unique,
-                                tensor_build.B2_unique,
-                                tensor_build.idx1,
-                                tensor_build.idx2,
-                                B_unique_inter,
-                                R_inv_combined,
-                                bin_idx_inter,
-                                tensor_id=tensor_id,
-                            )
-                            if info.penalty_matrix is not None:
-                                gm.omega = P @ info.penalty_matrix @ P.T
-                            gm.projection = P
-                        elif sp.issparse(info.columns):
-                            gm = SparseSSPGroupMatrix(info.columns, R_inv_combined)
-                            if info.penalty_matrix is not None:
-                                gm.omega = P @ info.penalty_matrix @ P.T
-                            gm.projection = P
-                        else:
-                            gm = DenseGroupMatrix(info.columns @ R_inv_combined)
-                        n_cols = R_inv_combined.shape[1]
-                    elif info.reparametrize and info.penalty_matrix is not None:
-                        B_for_rinv = B_unique_inter if use_discrete_tensor else info.columns
-                        exp_for_rinv = exposure_agg_inter if use_discrete_tensor else exposure
-                        R_inv = compute_R_inv(
-                            B_for_rinv, info.penalty_matrix, exp_for_rinv, lambda2
-                        )
-                        r_inv_parts_i.append(R_inv)
-                        n_cols = R_inv.shape[1]
-                        if use_discrete_tensor and tensor_build is not None:
-                            gm = DiscretizedTensorGroupMatrix(
-                                tensor_build.B1_unique,
-                                tensor_build.B2_unique,
-                                tensor_build.idx1,
-                                tensor_build.idx2,
-                                B_unique_inter,
-                                R_inv,
-                                bin_idx_inter,
-                                tensor_id=tensor_id,
-                            )
-                            gm.omega = info.penalty_matrix
-                        elif sp.issparse(info.columns):
-                            gm = SparseSSPGroupMatrix(info.columns, R_inv)
-                            gm.omega = info.penalty_matrix
-                        else:
-                            gm = DenseGroupMatrix(info.columns @ R_inv)
-                    else:
-                        n_cols = info.n_cols
-                        if use_discrete_tensor and tensor_build is not None:
-                            gm = DiscretizedTensorGroupMatrix(
-                                tensor_build.B1_unique,
-                                tensor_build.B2_unique,
-                                tensor_build.idx1,
-                                tensor_build.idx2,
-                                B_unique_inter,
-                                np.eye(info.n_cols, dtype=np.float64),
-                                bin_idx_inter,
-                                tensor_id=tensor_id,
-                            )
-                        elif sp.issparse(info.columns):
-                            gm = SparseGroupMatrix(info.columns)
-                        else:
-                            gm = DenseGroupMatrix(info.columns)
+                    gm, r_inv, n_cols = _process_info(info, **pi_kwargs)
+                    if r_inv is not None:
+                        r_inv_parts_i.append(r_inv)
 
                     group_matrices.append(gm)
                     subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
@@ -638,34 +637,9 @@ def build_design_matrix(
                 # Per-level groups (SplineCategorical, PolynomialCategorical)
                 r_inv_dict: dict[str, NDArray] = {}
                 for level, info in zip(ispec._non_base, result):
-                    if info.reparametrize and info.penalty_matrix is not None:
-                        if info.projection is not None:
-                            P = info.projection
-                            R_inv_local = compute_projected_R_inv(
-                                info.columns, P, info.penalty_matrix, exposure, lambda2
-                            )
-                            R_inv = P @ R_inv_local
-                        else:
-                            R_inv = compute_R_inv(
-                                info.columns, info.penalty_matrix, exposure, lambda2
-                            )
-                        r_inv_dict[level] = R_inv
-                        n_cols = R_inv.shape[1]
-                        if sp.issparse(info.columns):
-                            gm = SparseSSPGroupMatrix(info.columns, R_inv)
-                            if info.projection is not None:
-                                gm.omega = P @ info.penalty_matrix @ P.T
-                                gm.projection = P
-                            else:
-                                gm.omega = info.penalty_matrix
-                        else:
-                            gm = DenseGroupMatrix(info.columns @ R_inv)
-                    else:
-                        n_cols = info.n_cols
-                        if sp.issparse(info.columns):
-                            gm = SparseGroupMatrix(info.columns)
-                        else:
-                            gm = DenseGroupMatrix(info.columns)
+                    gm, r_inv, n_cols = _process_info(info, **pi_kwargs)
+                    if r_inv is not None:
+                        r_inv_dict[level] = r_inv
 
                     group_matrices.append(gm)
                     groups.append(
@@ -685,48 +659,9 @@ def build_design_matrix(
         else:
             # Single group (CategoricalInteraction, NumericCategorical,
             # NumericInteraction, PolynomialInteraction, TensorInteraction)
-            info = result
-            if info.reparametrize and info.penalty_matrix is not None:
-                B_for_rinv = B_unique_inter if use_discrete_tensor else info.columns
-                exp_for_rinv = exposure_agg_inter if use_discrete_tensor else exposure
-                R_inv = compute_R_inv(B_for_rinv, info.penalty_matrix, exp_for_rinv, lambda2)
-                if hasattr(ispec, "set_reparametrisation"):
-                    ispec.set_reparametrisation(R_inv)
-                n_cols = R_inv.shape[1]
-                if use_discrete_tensor and tensor_build is not None:
-                    gm = DiscretizedTensorGroupMatrix(
-                        tensor_build.B1_unique,
-                        tensor_build.B2_unique,
-                        tensor_build.idx1,
-                        tensor_build.idx2,
-                        B_unique_inter,
-                        R_inv,
-                        bin_idx_inter,
-                        tensor_id=tensor_id,
-                    )
-                    gm.omega = info.penalty_matrix
-                elif sp.issparse(info.columns):
-                    gm = SparseSSPGroupMatrix(info.columns, R_inv)
-                    gm.omega = info.penalty_matrix
-                else:
-                    gm = DenseGroupMatrix(info.columns @ R_inv)
-            else:
-                n_cols = info.n_cols
-                if use_discrete_tensor and tensor_build is not None:
-                    gm = DiscretizedTensorGroupMatrix(
-                        tensor_build.B1_unique,
-                        tensor_build.B2_unique,
-                        tensor_build.idx1,
-                        tensor_build.idx2,
-                        B_unique_inter,
-                        np.eye(info.n_cols, dtype=np.float64),
-                        bin_idx_inter,
-                        tensor_id=tensor_id,
-                    )
-                elif sp.issparse(info.columns):
-                    gm = SparseGroupMatrix(info.columns)
-                else:
-                    gm = DenseGroupMatrix(info.columns)
+            gm, r_inv, n_cols = _process_info(result, **pi_kwargs)
+            if r_inv is not None and hasattr(ispec, "set_reparametrisation"):
+                ispec.set_reparametrisation(r_inv)
 
             group_matrices.append(gm)
             groups.append(
