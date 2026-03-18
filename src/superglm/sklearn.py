@@ -40,9 +40,6 @@ from superglm.penalties.base import Penalty
 
 _REGRESSOR_FAMILIES = frozenset({"poisson", "gaussian", "gamma"})
 
-# Distribution types allowed for regression (resolved objects)
-_REGRESSOR_DISTRIBUTION_TYPES: tuple[type, ...] = ()  # populated lazily
-
 
 def _validate_regressor_family(family) -> None:
     """Raise if *family* is not a valid regression family."""
@@ -196,10 +193,6 @@ def _resolve_offset(
         arr += np.asarray(X[c], dtype=np.float64)
     return arr, resolved
 
-
-_SHORTHAND_FEATURE_PARAMS = frozenset(
-    {"spline_features", "categorical_features", "numeric_features"}
-)
 
 _SHORTHAND_TUNING_DEFAULTS = {"n_knots": 10, "degree": 3, "categorical_base": "most_exposed"}
 
@@ -369,6 +362,180 @@ def _build_features_or_splines(
     return features, None
 
 
+# ── Shared fit / predict helpers ─────────────────────────────────
+
+
+def _fit_common(
+    wrapper,
+    X,
+    y: NDArray,
+    sample_weight: NDArray | None,
+    *,
+    family: str | Distribution,
+) -> None:
+    """Shared fit logic for both wrapper classes.
+
+    Validates feature config, normalizes inputs, resolves offset/penalty/
+    features, instantiates and fits the core SuperGLM model, and sets
+    common sklearn fitted attributes on *wrapper*.
+    """
+    # ── Validate feature config ──────────────────────────────
+    _validate_wrapper_feature_config(
+        wrapper.features,
+        spline_features=wrapper.spline_features,
+        categorical_features=wrapper.categorical_features,
+        numeric_features=wrapper.numeric_features,
+        n_knots=wrapper.n_knots,
+        degree=wrapper.degree,
+        categorical_base=wrapper.categorical_base,
+    )
+
+    # ── Normalise inputs ──────────────────────────────────────
+    input_is_dataframe = isinstance(X, pd.DataFrame)
+    X_df, columns, synthetic = _normalize_X(
+        X,
+        feature_names=wrapper.feature_names,
+        resolved_columns=None,
+        fitting=True,
+    )
+    wrapper._resolved_columns_ = columns
+    wrapper._synthetic_names_ = synthetic
+
+    y = np.asarray(y, dtype=np.float64)
+
+    # Resolve offset
+    offset_array, offset_cols = _resolve_offset(
+        wrapper.offset,
+        X_df,
+        columns,
+        synthetic,
+        fitting=True,
+    )
+    wrapper._offset_cols_ = offset_cols
+
+    # Resolve penalty
+    penalty, resolved_sel, resolved_spl = _resolve_wrapper_penalty(
+        wrapper.penalty,
+        wrapper.selection_penalty,
+        wrapper.spline_penalty,
+    )
+
+    if wrapper.features is not None:
+        # ── Native features= path ────────────────────────────
+        feature_cols = _resolve_native_feature_cols(
+            wrapper.features,
+            columns,
+            offset_cols,
+            synthetic,
+        )
+
+        model_kwargs: dict[str, Any] = dict(
+            family=family,
+            penalty=penalty,
+            selection_penalty=resolved_sel,
+            spline_penalty=resolved_spl,
+            features=wrapper.features,
+        )
+    else:
+        # ── Shorthand wrapper path ────────────────────────────
+        feature_cols = [c for c in columns if c not in offset_cols]
+
+        spline_names = _resolve_refs(
+            wrapper.spline_features,
+            columns,
+            synthetic,
+            "spline_features",
+        )
+        cat_names = _resolve_refs(
+            wrapper.categorical_features,
+            columns,
+            synthetic,
+            "categorical_features",
+        )
+        num_names = _resolve_refs(
+            wrapper.numeric_features,
+            columns,
+            synthetic,
+            "numeric_features",
+        )
+
+        # Categorical base fallback
+        cat_base = wrapper.categorical_base
+        if cat_base == "most_exposed" and sample_weight is None:
+            cat_base = "first"
+
+        # Build features dict or use auto-detect
+        force_explicit = synthetic or (
+            wrapper.categorical_features is not None or wrapper.numeric_features is not None
+        )
+        features_dict, splines_list = _build_features_or_splines(
+            feature_cols,
+            spline_names,
+            cat_names,
+            num_names,
+            wrapper.n_knots,
+            wrapper.degree,
+            cat_base,
+            force_explicit=force_explicit,
+            X_df=X_df if input_is_dataframe else None,
+        )
+
+        model_kwargs = dict(
+            family=family,
+            penalty=penalty,
+            selection_penalty=resolved_sel,
+            spline_penalty=resolved_spl,
+            n_knots=wrapper.n_knots,
+            degree=wrapper.degree,
+            categorical_base=cat_base,
+        )
+        if features_dict is not None:
+            model_kwargs["features"] = features_dict
+        else:
+            model_kwargs["splines"] = splines_list or []
+
+    wrapper._model = SuperGLM(**model_kwargs)
+    wrapper._model.fit(
+        X_df[feature_cols],
+        y,
+        exposure=sample_weight,
+        offset=offset_array,
+    )
+
+    # sklearn attributes
+    wrapper.n_features_in_ = len(feature_cols)
+    wrapper.feature_names_in_ = np.array(feature_cols)
+    wrapper.intercept_ = wrapper._model.result.intercept
+    wrapper.coef_ = wrapper._model.result.beta
+
+
+def _prepare_predict(
+    wrapper,
+    X,
+) -> tuple[pd.DataFrame, list[str], NDArray | None]:
+    """Normalize X and resolve offset for prediction.
+
+    Returns ``(X_df, feature_cols, offset_array)``.
+    """
+    check_is_fitted(wrapper)
+    X_df, _, _ = _normalize_X(
+        X,
+        feature_names=wrapper.feature_names,
+        resolved_columns=wrapper._resolved_columns_,
+        fitting=False,
+    )
+    offset_array, _ = _resolve_offset(
+        wrapper.offset,
+        X_df,
+        wrapper._resolved_columns_,
+        False,
+        fitting=False,
+        stored_cols=wrapper._offset_cols_,
+    )
+    feature_cols = list(wrapper.feature_names_in_)
+    return X_df, feature_cols, offset_array
+
+
 # ── Regressor ─────────────────────────────────────────────────────
 
 
@@ -455,135 +622,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         sample_weight: NDArray | None = None,
     ) -> SuperGLMRegressor:
         _validate_regressor_family(self.family)
-
-        # ── Validate feature config ──────────────────────────────
-        _validate_wrapper_feature_config(
-            self.features,
-            spline_features=self.spline_features,
-            categorical_features=self.categorical_features,
-            numeric_features=self.numeric_features,
-            n_knots=self.n_knots,
-            degree=self.degree,
-            categorical_base=self.categorical_base,
-        )
-
-        # ── Normalise inputs ──────────────────────────────────────
-        input_is_dataframe = isinstance(X, pd.DataFrame)
-        X_df, columns, synthetic = _normalize_X(
-            X,
-            feature_names=self.feature_names,
-            resolved_columns=None,
-            fitting=True,
-        )
-        self._resolved_columns_ = columns
-        self._synthetic_names_ = synthetic
-
-        y = np.asarray(y, dtype=np.float64)
-
-        # Resolve offset
-        offset_array, offset_cols = _resolve_offset(
-            self.offset,
-            X_df,
-            columns,
-            synthetic,
-            fitting=True,
-        )
-        self._offset_cols_ = offset_cols
-
-        # Resolve penalty
-        penalty, resolved_sel, resolved_spl = _resolve_wrapper_penalty(
-            self.penalty,
-            self.selection_penalty,
-            self.spline_penalty,
-        )
-
-        if self.features is not None:
-            # ── Native features= path ────────────────────────────
-            feature_cols = _resolve_native_feature_cols(
-                self.features,
-                columns,
-                offset_cols,
-                synthetic,
-            )
-
-            model_kwargs: dict[str, Any] = dict(
-                family=self.family,
-                penalty=penalty,
-                selection_penalty=resolved_sel,
-                spline_penalty=resolved_spl,
-                features=self.features,
-            )
-        else:
-            # ── Shorthand wrapper path ────────────────────────────
-            feature_cols = [c for c in columns if c not in offset_cols]
-
-            spline_names = _resolve_refs(
-                self.spline_features,
-                columns,
-                synthetic,
-                "spline_features",
-            )
-            cat_names = _resolve_refs(
-                self.categorical_features,
-                columns,
-                synthetic,
-                "categorical_features",
-            )
-            num_names = _resolve_refs(
-                self.numeric_features,
-                columns,
-                synthetic,
-                "numeric_features",
-            )
-
-            # Categorical base fallback
-            cat_base = self.categorical_base
-            if cat_base == "most_exposed" and sample_weight is None:
-                cat_base = "first"
-
-            # Build features dict or use auto-detect
-            force_explicit = synthetic or (
-                self.categorical_features is not None or self.numeric_features is not None
-            )
-            features_dict, splines_list = _build_features_or_splines(
-                feature_cols,
-                spline_names,
-                cat_names,
-                num_names,
-                self.n_knots,
-                self.degree,
-                cat_base,
-                force_explicit=force_explicit,
-                X_df=X_df if input_is_dataframe else None,
-            )
-
-            model_kwargs = dict(
-                family=self.family,
-                penalty=penalty,
-                selection_penalty=resolved_sel,
-                spline_penalty=resolved_spl,
-                n_knots=self.n_knots,
-                degree=self.degree,
-                categorical_base=cat_base,
-            )
-            if features_dict is not None:
-                model_kwargs["features"] = features_dict
-            else:
-                model_kwargs["splines"] = splines_list or []
-
-        self._model = SuperGLM(**model_kwargs)
-        self._model.fit(
-            X_df[feature_cols],
-            y,
-            exposure=sample_weight,
-            offset=offset_array,
-        )
-
-        # sklearn attributes
-        self.n_features_in_ = len(feature_cols)
-        self.feature_names_in_ = np.array(feature_cols)
-        self.intercept_ = self._model.result.intercept
-        self.coef_ = self._model.result.beta
+        _fit_common(self, X, y, sample_weight, family=self.family)
 
         # Expose feature types for backward compat
         from superglm.features.spline import _SplineBase
@@ -604,22 +643,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         return self
 
     def predict(self, X) -> NDArray:
-        check_is_fitted(self)
-        X_df, _, _ = _normalize_X(
-            X,
-            feature_names=self.feature_names,
-            resolved_columns=self._resolved_columns_,
-            fitting=False,
-        )
-        offset_array, _ = _resolve_offset(
-            self.offset,
-            X_df,
-            self._resolved_columns_,
-            False,
-            fitting=False,
-            stored_cols=self._offset_cols_,
-        )
-        feature_cols = list(self.feature_names_in_)
+        X_df, feature_cols, offset_array = _prepare_predict(self, X)
         return self._model.predict(X_df[feature_cols], offset=offset_array)
 
     def diagnostics(self) -> dict[str, Any]:
@@ -717,28 +741,6 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
     ) -> SuperGLMClassifier:
         from superglm.distributions import Binomial, validate_response
 
-        # ── Validate feature config ──────────────────────────────
-        _validate_wrapper_feature_config(
-            self.features,
-            spline_features=self.spline_features,
-            categorical_features=self.categorical_features,
-            numeric_features=self.numeric_features,
-            n_knots=self.n_knots,
-            degree=self.degree,
-            categorical_base=self.categorical_base,
-        )
-
-        # ── Normalise inputs ──────────────────────────────────────
-        input_is_dataframe = isinstance(X, pd.DataFrame)
-        X_df, columns, synthetic = _normalize_X(
-            X,
-            feature_names=self.feature_names,
-            resolved_columns=None,
-            fitting=True,
-        )
-        self._resolved_columns_ = columns
-        self._synthetic_names_ = synthetic
-
         y = np.asarray(y, dtype=np.float64)
         validate_response(y, Binomial())
 
@@ -748,130 +750,12 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
                 f"SuperGLMClassifier requires both classes in y, but got only {self.classes_}."
             )
 
-        # Resolve offset
-        offset_array, offset_cols = _resolve_offset(
-            self.offset,
-            X_df,
-            columns,
-            synthetic,
-            fitting=True,
-        )
-        self._offset_cols_ = offset_cols
-
-        # Resolve penalty
-        penalty, resolved_sel, resolved_spl = _resolve_wrapper_penalty(
-            self.penalty,
-            self.selection_penalty,
-            self.spline_penalty,
-        )
-
-        if self.features is not None:
-            # ── Native features= path ────────────────────────────
-            feature_cols = _resolve_native_feature_cols(
-                self.features,
-                columns,
-                offset_cols,
-                synthetic,
-            )
-
-            model_kwargs: dict[str, Any] = dict(
-                family="binomial",
-                penalty=penalty,
-                selection_penalty=resolved_sel,
-                spline_penalty=resolved_spl,
-                features=self.features,
-            )
-        else:
-            # ── Shorthand wrapper path ────────────────────────────
-            feature_cols = [c for c in columns if c not in offset_cols]
-
-            spline_names = _resolve_refs(
-                self.spline_features,
-                columns,
-                synthetic,
-                "spline_features",
-            )
-            cat_names = _resolve_refs(
-                self.categorical_features,
-                columns,
-                synthetic,
-                "categorical_features",
-            )
-            num_names = _resolve_refs(
-                self.numeric_features,
-                columns,
-                synthetic,
-                "numeric_features",
-            )
-
-            # Categorical base fallback
-            cat_base = self.categorical_base
-            if cat_base == "most_exposed" and sample_weight is None:
-                cat_base = "first"
-
-            # Build features dict or use auto-detect
-            force_explicit = synthetic or (
-                self.categorical_features is not None or self.numeric_features is not None
-            )
-            features_dict, splines_list = _build_features_or_splines(
-                feature_cols,
-                spline_names,
-                cat_names,
-                num_names,
-                self.n_knots,
-                self.degree,
-                cat_base,
-                force_explicit=force_explicit,
-                X_df=X_df if input_is_dataframe else None,
-            )
-
-            model_kwargs = dict(
-                family="binomial",
-                penalty=penalty,
-                selection_penalty=resolved_sel,
-                spline_penalty=resolved_spl,
-                n_knots=self.n_knots,
-                degree=self.degree,
-                categorical_base=cat_base,
-            )
-            if features_dict is not None:
-                model_kwargs["features"] = features_dict
-            else:
-                model_kwargs["splines"] = splines_list or []
-
-        self._model = SuperGLM(**model_kwargs)
-        self._model.fit(
-            X_df[feature_cols],
-            y,
-            exposure=sample_weight,
-            offset=offset_array,
-        )
-
-        self.n_features_in_ = len(feature_cols)
-        self.feature_names_in_ = np.array(feature_cols)
-        self.intercept_ = self._model.result.intercept
-        self.coef_ = self._model.result.beta
-
+        _fit_common(self, X, y, sample_weight, family="binomial")
         return self
 
     def predict_proba(self, X) -> NDArray:
         """Return class probabilities, shape ``(n_samples, 2)``."""
-        check_is_fitted(self)
-        X_df, _, _ = _normalize_X(
-            X,
-            feature_names=self.feature_names,
-            resolved_columns=self._resolved_columns_,
-            fitting=False,
-        )
-        offset_array, _ = _resolve_offset(
-            self.offset,
-            X_df,
-            self._resolved_columns_,
-            False,
-            fitting=False,
-            stored_cols=self._offset_cols_,
-        )
-        feature_cols = list(self.feature_names_in_)
+        X_df, feature_cols, offset_array = _prepare_predict(self, X)
         p1 = self._model.predict(X_df[feature_cols], offset=offset_array)
         return np.column_stack([1 - p1, p1])
 
@@ -882,22 +766,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
 
     def decision_function(self, X) -> NDArray:
         """Return log-odds (linear predictor)."""
-        check_is_fitted(self)
-        X_df, _, _ = _normalize_X(
-            X,
-            feature_names=self.feature_names,
-            resolved_columns=self._resolved_columns_,
-            fitting=False,
-        )
-        offset_array, _ = _resolve_offset(
-            self.offset,
-            X_df,
-            self._resolved_columns_,
-            False,
-            fitting=False,
-            stored_cols=self._offset_cols_,
-        )
-        feature_cols = list(self.feature_names_in_)
+        X_df, feature_cols, offset_array = _prepare_predict(self, X)
         X_feat = X_df[feature_cols]
 
         blocks = []
