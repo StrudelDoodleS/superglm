@@ -764,6 +764,27 @@ class TestNativeFeaturesClassifier:
         preds = m.predict(X[["x1", "x2"]])
         assert preds.shape == (n,)
 
+    def test_classifier_ndarray_with_extra_columns(self):
+        """Classifier features= with ndarray + extra ignored columns."""
+        from superglm import Numeric
+
+        rng = np.random.default_rng(42)
+        n = 200
+        X = rng.standard_normal((n, 3))
+        y = (X[:, 0] > 0).astype(float)
+        m = SuperGLMClassifier(
+            features={"a": Numeric(), "b": Numeric()},
+            feature_names=["a", "b", "junk"],
+            selection_penalty=0.0,
+        )
+        m.fit(X, y)
+        assert m.n_features_in_ == 2
+        assert list(m.feature_names_in_) == ["a", "b"]
+        preds = m.predict(X)
+        assert preds.shape == (n,)
+        proba = m.predict_proba(X)
+        assert proba.shape == (n, 2)
+
     def test_classifier_mutual_exclusion(self):
         from superglm import Numeric
 
