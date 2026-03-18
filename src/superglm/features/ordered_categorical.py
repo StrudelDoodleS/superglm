@@ -121,11 +121,10 @@ class OrderedCategorical:
         )
 
     def _map_to_numeric(self, x: NDArray) -> NDArray:
-        """Map categorical values to their numeric representations."""
-        result = np.empty(len(x), dtype=np.float64)
-        for i, v in enumerate(x):
-            result[i] = self._level_to_value[v]
-        return result
+        """Map categorical values to their numeric representations (vectorized)."""
+        import pandas as pd
+
+        return pd.Series(x).map(self._level_to_value).values.astype(np.float64)
 
     def _choose_base(self, x: NDArray, exposure: NDArray | None) -> None:
         """Choose the base level (step mode)."""
@@ -171,7 +170,8 @@ class OrderedCategorical:
         """Step mode: one-hot with first-difference penalty."""
         self._choose_base(x, exposure)
         n = len(x)
-        n_cols = len(self._non_base)
+        K = self._n_levels
+        n_cols = len(self._non_base)  # K - 1
 
         # One-hot encode (excluding base) — sparse CSR
         rows = []
@@ -189,9 +189,20 @@ class OrderedCategorical:
         if n_cols <= 1:
             return GroupInfo(columns=columns, n_cols=n_cols)
 
-        # First-difference penalty: D1'D1
-        D1 = np.diff(np.eye(n_cols), n=1, axis=0)  # (n_cols-1, n_cols)
-        omega = D1.T @ D1  # (n_cols, n_cols)
+        # First-difference penalty on the FULL K-level ordering, then project
+        # to the (K-1)-dimensional non-base space via base-removal matrix Z.
+        # This ensures the penalty respects the original adjacency even when
+        # the base level is in the middle of the ordering.
+        base_idx = self._ordered_levels.index(self._base_level)
+        D1_full = np.diff(np.eye(K), n=1, axis=0)  # (K-1, K)
+        # Z: (K, K-1) inserts a zero row at base_idx position
+        Z = np.zeros((K, n_cols))
+        j = 0
+        for i in range(K):
+            if i != base_idx:
+                Z[i, j] = 1.0
+                j += 1
+        omega = Z.T @ D1_full.T @ D1_full @ Z  # (K-1, K-1)
 
         return GroupInfo(
             columns=columns,

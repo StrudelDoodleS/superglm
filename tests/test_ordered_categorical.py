@@ -183,23 +183,34 @@ class TestStepMode:
         assert info.n_cols == n_cols
         assert info.penalty_matrix.shape == (n_cols, n_cols)
 
-    def test_penalty_is_d1td1(self, ordinal_data):
-        """Penalty should be D1'D1 (first-difference penalty)."""
+    def test_penalty_is_projected_d1td1(self, ordinal_data):
+        """Penalty should be Z'D1'D1Z (projected first-difference)."""
         X, y, exposure, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step")
         info = spec.build(X["risk"].values, exposure=exposure)
-        n_cols = info.n_cols
-        D1 = np.diff(np.eye(n_cols), n=1, axis=0)
-        expected = D1.T @ D1
+        K = len(levels)
+        base_idx = spec._ordered_levels.index(spec._base_level)
+        D1 = np.diff(np.eye(K), n=1, axis=0)
+        Z = np.zeros((K, K - 1))
+        j = 0
+        for i in range(K):
+            if i != base_idx:
+                Z[i, j] = 1.0
+                j += 1
+        expected = Z.T @ D1.T @ D1 @ Z
         np.testing.assert_allclose(info.penalty_matrix, expected)
 
     def test_penalty_rank(self, ordinal_data):
-        """D1'D1 for K-1 columns should have rank K-2."""
+        """Projected D1 penalty on K-1 columns is full rank (K-1).
+
+        The base-to-neighbor difference makes the projected penalty full rank,
+        unlike naive D1 on K-1 columns which has rank K-2.
+        """
         X, y, exposure, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step")
         info = spec.build(X["risk"].values, exposure=exposure)
         rank = np.linalg.matrix_rank(info.penalty_matrix)
-        assert rank == len(levels) - 2  # K-2
+        assert rank == len(levels) - 1  # full rank in (K-1) space
 
     def test_reparametrize_flag(self, ordinal_data):
         X, y, exposure, levels = ordinal_data
@@ -257,15 +268,51 @@ class TestEdgeCases:
         assert info.penalty_matrix is None
         assert info.reparametrize is False
 
-    def test_k3_step_rank_deficient(self):
-        """K=3 step mode: D1 is (1,2), omega is (2,2) rank 1."""
+    def test_k3_step_full_rank(self):
+        """K=3 step mode: projected penalty is (2,2) full rank."""
         rng = np.random.default_rng(42)
         x = rng.choice(["A", "B", "C"], 200)
         spec = OrderedCategorical(order=["A", "B", "C"], basis="step")
         info = spec.build(x)
         assert info.n_cols == 2
         assert info.penalty_matrix.shape == (2, 2)
-        assert np.linalg.matrix_rank(info.penalty_matrix) == 1
+        assert np.linalg.matrix_rank(info.penalty_matrix) == 2  # full rank
+
+    def test_middle_base_penalty_respects_adjacency(self):
+        """D1 penalty with base in middle must still fuse original neighbours.
+
+        With levels [A, B, C, D] and base=B, _non_base=[A, C, D].
+        The penalty should fuse A↔B(=0), B(=0)↔C, C↔D — not A↔C directly.
+        """
+        rng = np.random.default_rng(42)
+        x = rng.choice(["A", "B", "C", "D"], 400)
+        spec = OrderedCategorical(order=["A", "B", "C", "D"], basis="step", base="B")
+        info = spec.build(x)
+        omega = info.penalty_matrix
+        # Build expected: Z'D1'D1Z where Z removes row 1 (base=B at index 1)
+        K = 4
+        D1 = np.diff(np.eye(K), n=1, axis=0)
+        Z = np.array([[1, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 1]])
+        expected = Z.T @ D1.T @ D1 @ Z
+        np.testing.assert_allclose(omega, expected)
+        # The (0,0) entry should be 1 (A↔B penalty), not 2 (which you'd get
+        # from naive D1 on [A,C,D] treating A↔C as adjacent)
+        assert omega[0, 0] == pytest.approx(1.0)
+
+    def test_endpoint_base_projected_penalty(self):
+        """When base is the first level, projected penalty includes A↔B difference."""
+        rng = np.random.default_rng(42)
+        x = rng.choice(["A", "B", "C", "D"], 400)
+        spec = OrderedCategorical(order=["A", "B", "C", "D"], basis="step", base="A")
+        info = spec.build(x)
+        # Z'D1'D1Z with base=A (index 0) should differ from naive:
+        # (0,0) = 2 (A↔B + B↔C), not 1 (only B↔C in naive)
+        K = 4
+        D1 = np.diff(np.eye(K), n=1, axis=0)
+        Z = np.zeros((K, K - 1))
+        Z[1, 0] = Z[2, 1] = Z[3, 2] = 1.0
+        expected = Z.T @ D1.T @ D1 @ Z
+        np.testing.assert_allclose(info.penalty_matrix, expected)
 
     def test_order_single_value_linspace(self):
         """Single level should produce value=0.0."""
@@ -368,6 +415,46 @@ class TestIntegrationStep:
         assert ti.kind == "categorical"
         assert ti.levels is not None
         assert ti.relativity is not None
+
+    def test_step_se_numerically_reasonable(self, ordinal_data):
+        """Step mode SEs should be finite, positive for non-base, and sensible size."""
+        X, y, exposure, levels = ordinal_data
+        model = SuperGLM(
+            features={"risk": OrderedCategorical(order=levels, basis="step")},
+        )
+        model.fit(X, y, exposure=exposure)
+        ti = model.term_inference("risk")
+        se = ti.se_log_relativity
+        assert se is not None
+        assert np.all(np.isfinite(se))
+        # Base level SE should be 0, non-base should be > 0
+        base_idx = levels.index(model._specs["risk"]._base_level)
+        assert se[base_idx] == 0.0
+        non_base_se = np.delete(se, base_idx)
+        assert np.all(non_base_se > 0)
+        # SEs should be O(0.01-1) for reasonable Poisson data, not huge
+        assert np.all(non_base_se < 5.0)
+
+    def test_step_middle_base_fit(self):
+        """Step mode with base in middle of ordering should fit correctly."""
+        rng = np.random.default_rng(42)
+        n = 2000
+        levels = ["A", "B", "C", "D", "E"]
+        x = rng.choice(levels, n)
+        exposure = rng.uniform(0.5, 1.0, n)
+        effect = {"A": 0.0, "B": 0.1, "C": 0.2, "D": 0.3, "E": 0.5}
+        mu = np.exp(-1.5 + np.array([effect[v] for v in x]))
+        y = rng.poisson(mu * exposure).astype(float)
+        X = pd.DataFrame({"cat": x})
+        model = SuperGLM(
+            features={"cat": OrderedCategorical(order=levels, basis="step", base="C")},
+        )
+        model.fit(X, y, exposure=exposure)
+        ti = model.term_inference("cat")
+        assert ti.active
+        # Relativities should be monotonically non-decreasing (true effect is monotone)
+        rels = np.array([ti.relativity[levels.index(lev)] for lev in levels])
+        assert rels[0] < rels[-1]  # first < last at minimum
 
 
 class TestIntegrationReml:

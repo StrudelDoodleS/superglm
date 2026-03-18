@@ -251,7 +251,7 @@ def feature_se_from_cov(
             Q = M @ Cov_g
             return np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
         else:
-            # Step mode: same as Categorical
+            # Step mode: unwind reparametrisation for SEs
             beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
             if np.linalg.norm(beta_combined) < 1e-12:
                 return np.zeros(len(spec._ordered_levels))
@@ -260,7 +260,12 @@ def feature_se_from_cov(
                 return np.zeros(len(spec._ordered_levels))
             indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
             Cov_g = Cov_active[np.ix_(indices, indices)]
-            se_nonbase = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
+            # Cov_g is in reparametrised space; map to original via R_inv
+            if spec._R_inv is not None:
+                Cov_orig = spec._R_inv @ Cov_g @ spec._R_inv.T
+            else:
+                Cov_orig = Cov_g
+            se_nonbase = np.sqrt(np.maximum(np.diag(Cov_orig), 0.0))
             se_all = np.zeros(len(spec._ordered_levels))
             for i, lev in enumerate(spec._ordered_levels):
                 if lev != spec._base_level:
