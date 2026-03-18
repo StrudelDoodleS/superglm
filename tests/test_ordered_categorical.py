@@ -53,11 +53,11 @@ def ordinal_data():
 
 class TestConstructor:
     def test_values_derive_ordering(self):
-        spec = OrderedCategorical(values={"C": 3.0, "A": 1.0, "B": 2.0}, basis="spline")
+        spec = OrderedCategorical(values={"C": 3.0, "A": 1.0, "B": 2.0}, basis="spline", n_knots=2)
         assert spec._ordered_levels == ["A", "B", "C"]
 
     def test_order_generates_linspace(self):
-        spec = OrderedCategorical(order=["X", "Y", "Z"], basis="spline")
+        spec = OrderedCategorical(order=["X", "Y", "Z"], basis="spline", n_knots=2)
         assert spec._level_to_value == {"X": 0.0, "Y": 0.5, "Z": 1.0}
 
     def test_mutual_exclusion_both(self):
@@ -373,6 +373,23 @@ class TestIntegrationSpline:
         assert ti.kind == "spline"
         assert ti.x is not None
         assert ti.relativity is not None
+
+    def test_spline_se_numerically_reasonable(self, age_band_data):
+        """Spline mode SEs should be finite, positive, and sensibly sized."""
+        X, y, exposure, midpoints, _ = age_band_data
+        model = SuperGLM(
+            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+        )
+        model.fit(X, y, exposure=exposure)
+        ti = model.term_inference("age_band")
+        se = ti.se_log_relativity
+        assert se is not None
+        assert np.all(np.isfinite(se))
+        assert np.all(se >= 0)
+        # At least some SEs should be positive (curve is not flat)
+        assert np.any(se > 0)
+        # SEs should be O(0.01-1) for this data, not huge
+        assert np.max(se) < 5.0
 
 
 class TestIntegrationStep:

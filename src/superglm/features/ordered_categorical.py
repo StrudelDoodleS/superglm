@@ -15,6 +15,7 @@ import warnings
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
@@ -122,8 +123,6 @@ class OrderedCategorical:
 
     def _map_to_numeric(self, x: NDArray) -> NDArray:
         """Map categorical values to their numeric representations (vectorized)."""
-        import pandas as pd
-
         return pd.Series(x).map(self._level_to_value).values.astype(np.float64)
 
     def _choose_base(self, x: NDArray, exposure: NDArray | None) -> None:
@@ -193,6 +192,12 @@ class OrderedCategorical:
         # to the (K-1)-dimensional non-base space via base-removal matrix Z.
         # This ensures the penalty respects the original adjacency even when
         # the base level is in the middle of the ordering.
+        #
+        # The projected penalty Z'D1'D1Z is full rank (K-1) — intentionally.
+        # In the treatment-contrast parameterisation (base=0), every direction
+        # is penalized including the absolute level of non-base categories
+        # relative to base.  This is correct: the constraint beta_base=0
+        # breaks the constant null space that a naive (K-2)-rank D1 would have.
         base_idx = self._ordered_levels.index(self._base_level)
         D1_full = np.diff(np.eye(K), n=1, axis=0)  # (K-1, K)
         # Z: (K, K-1) inserts a zero row at base_idx position

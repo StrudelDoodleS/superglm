@@ -203,6 +203,40 @@ def compute_coef_covariance(
 # ── Feature SEs ───────────────────────────────────────────────────
 
 
+def _spline_se(
+    spline_spec,
+    name: str,
+    beta: NDArray,
+    feature_groups: list,
+    active_groups: list,
+    Cov_active: NDArray,
+    n_points: int,
+) -> NDArray:
+    """Shared spline SE computation for _SplineBase and OrderedCategorical(spline)."""
+    beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
+    if np.linalg.norm(beta_combined) < 1e-12:
+        return np.zeros(n_points)
+    active_subs = [ag for ag in active_groups if ag.feature_name == name]
+    if not active_subs:
+        return np.zeros(n_points)
+    indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
+    Cov_g = Cov_active[np.ix_(indices, indices)]
+    x_grid = np.linspace(spline_spec._lo, spline_spec._hi, n_points)
+    B_grid = spline_spec._raw_basis_matrix(x_grid)
+    M = B_grid @ spline_spec._R_inv if spline_spec._R_inv is not None else B_grid
+    # For select=True: only use columns for active subgroups
+    active_cols = np.concatenate(
+        [
+            np.arange(g.start, g.end) - feature_groups[0].start
+            for g in feature_groups
+            if any(ag.feature_name == name and ag.name == g.name for ag in active_subs)
+        ]
+    )
+    M = M[:, active_cols]
+    Q = M @ Cov_g
+    return np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
+
+
 def feature_se_from_cov(
     name: str,
     Cov_active: NDArray,
@@ -227,29 +261,15 @@ def feature_se_from_cov(
     # OrderedCategorical: delegate to spline or categorical logic
     if isinstance(spec, OrderedCategorical):
         if spec.basis == "spline":
-            # Delegate to internal spline's SE computation
-            inner = spec._spline
-            beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
-            if np.linalg.norm(beta_combined) < 1e-12:
-                return np.zeros(n_points)
-            active_subs = [ag for ag in active_groups if ag.feature_name == name]
-            if not active_subs:
-                return np.zeros(n_points)
-            indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
-            Cov_g = Cov_active[np.ix_(indices, indices)]
-            x_grid = np.linspace(inner._lo, inner._hi, n_points)
-            B_grid = inner._raw_basis_matrix(x_grid)
-            M = B_grid @ inner._R_inv if inner._R_inv is not None else B_grid
-            active_cols = np.concatenate(
-                [
-                    np.arange(g.start, g.end) - feature_groups[0].start
-                    for g in feature_groups
-                    if any(ag.feature_name == name and ag.name == g.name for ag in active_subs)
-                ]
+            return _spline_se(
+                spec._spline,
+                name,
+                beta,
+                feature_groups,
+                active_groups,
+                Cov_active,
+                n_points,
             )
-            M = M[:, active_cols]
-            Q = M @ Cov_g
-            return np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
         else:
             # Step mode: unwind reparametrisation for SEs
             beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
@@ -301,22 +321,15 @@ def feature_se_from_cov(
     Cov_g = Cov_active[np.ix_(indices, indices)]
 
     if isinstance(spec, _SplineBase):
-        x_grid = np.linspace(spec._lo, spec._hi, n_points)
-        B_grid = spec._raw_basis_matrix(x_grid)
-        M = B_grid @ spec._R_inv if spec._R_inv is not None else B_grid
-
-        # For select=True: only use columns for active subgroups
-        active_cols = np.concatenate(
-            [
-                np.arange(g.start, g.end) - feature_groups[0].start
-                for g in feature_groups
-                if any(ag.feature_name == name and ag.name == g.name for ag in active_subs)
-            ]
+        return _spline_se(
+            spec,
+            name,
+            beta,
+            feature_groups,
+            active_groups,
+            Cov_active,
+            n_points,
         )
-        M = M[:, active_cols]
-
-        Q = M @ Cov_g
-        return np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
 
     elif isinstance(spec, Polynomial):
         x_grid = np.linspace(spec._lo, spec._hi, n_points)
