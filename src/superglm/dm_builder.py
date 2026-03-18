@@ -187,6 +187,7 @@ def _spec_kind(spec: FeatureSpec) -> str:
     """Classify a feature spec into one of the four canonical kinds."""
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
+    from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
 
@@ -198,6 +199,8 @@ def _spec_kind(spec: FeatureSpec) -> str:
         return "numeric"
     if isinstance(spec, Categorical):
         return "categorical"
+    if isinstance(spec, OrderedCategorical):
+        return "spline" if spec.basis == "spline" else "categorical"
     return type(spec).__name__
 
 

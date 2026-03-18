@@ -51,6 +51,7 @@ from superglm.features.interaction import (
     TensorInteraction,
 )
 from superglm.features.numeric import Numeric
+from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import (
     BasisSpline,
@@ -59,7 +60,7 @@ from superglm.features.spline import (
     Spline,
     n_knots_from_k,
 )
-from superglm.inference import InteractionInference, SplineMetadata, TermInference
+from superglm.inference import InteractionInference, SmoothCurve, SplineMetadata, TermInference
 from superglm.links import (
     CauchitLink,
     CloglogLink,
@@ -126,6 +127,7 @@ __all__ = [
     "NaturalSpline",
     "CubicRegressionSpline",
     "Categorical",
+    "OrderedCategorical",
     "Numeric",
     "Polynomial",
     "SplineCategorical",
@@ -153,6 +155,7 @@ __all__ = [
     "wood_test_smooth",
     "n_knots_from_k",
     "TermInference",
+    "SmoothCurve",
     "InteractionInference",
     "SplineMetadata",
     "MonotoneRepairResult",

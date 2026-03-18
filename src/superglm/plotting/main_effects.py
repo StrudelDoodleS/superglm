@@ -382,6 +382,19 @@ def plot_term(
             _plot_density_strip(ax_den, ti.name, X, exposure, x_grid, False, None)
             ax_den.set_ylabel(density_label, fontsize=8)
 
+    elif ti.kind == "categorical" and ti.smooth_curve is not None:
+        if figsize is None:
+            figsize = (max(6, len(ti.levels) * 0.9 + 1.5), 4.5)
+        fig, ax = plt.subplots(figsize=figsize)
+        _plot_ordered_spline_panel(
+            ax,
+            ti,
+            interval,
+            X=X,
+            exposure=exposure if has_density else None,
+            weight_label=weight_label,
+        )
+
     elif ti.kind == "categorical":
         if figsize is None:
             figsize = (max(5, len(ti.levels) * 0.9 + 1.5), 4.5)
@@ -496,6 +509,111 @@ def plot_term(
     return fig
 
 
+def _plot_ordered_spline_panel(
+    ax,
+    ti: TermInference,
+    interval: str | None,
+    *,
+    X: pd.DataFrame | None = None,
+    exposure: NDArray | None = None,
+    weight_label: str = "Weight",
+):
+    """Render an OrderedCategorical(spline) panel.
+
+    Levels at evenly-spaced integer positions with a smooth PCHIP
+    interpolation through the fitted relativities, plus per-level
+    error bars and exposure bars.
+    """
+    levels = list(ti.levels)
+    level_rel = np.asarray(ti.relativity)
+    n_levels = len(levels)
+    x_pos = np.arange(n_levels, dtype=float)
+
+    # Exposure bars in background
+    if exposure is not None and X is not None and ti.name in X.columns:
+        level_exp = (
+            pd.DataFrame({"level": X[ti.name], "exposure": exposure})
+            .groupby("level", sort=False)["exposure"]
+            .sum()
+        )
+        exp_vals = np.array([level_exp.get(lv, 0.0) for lv in levels])
+        ax2 = ax.twinx()
+        ax2.bar(
+            x_pos,
+            exp_vals,
+            width=0.6,
+            color=_EXP_FILL,
+            edgecolor=_EXP_EDGE,
+            linewidth=_EXP_EDGE_LW,
+            alpha=1.0,
+            zorder=0,
+            label=weight_label,
+        )
+        ymax = float(exp_vals.max()) if exp_vals.size else 0.0
+        ax2.set_ylim(0.0, ymax * 1.12 if ymax > 0 else 1.0)
+        ax2.set_ylabel(weight_label, color=_EXP_EDGE)
+        ax2.tick_params(axis="y", colors=_EXP_EDGE, labelsize=9)
+        ax2.spines["top"].set_visible(False)
+        ax2.spines["right"].set_color(_EXP_EDGE)
+        ax.set_zorder(ax2.get_zorder() + 1)
+        ax.patch.set_visible(False)
+
+    ax.axhline(1.0, linestyle="--", linewidth=_REF_LW, color=_REF_COLOR, zorder=0)
+
+    # Smooth interpolation through level relativities (PCHIP)
+    if n_levels >= 2:
+        from scipy.interpolate import PchipInterpolator
+
+        pchip = PchipInterpolator(x_pos, level_rel)
+        x_fine = np.linspace(x_pos[0], x_pos[-1], 200)
+        ax.plot(
+            x_fine,
+            pchip(x_fine),
+            color=_LINE_COLOR,
+            linewidth=_LINE_WIDTH,
+            alpha=0.6,
+            zorder=4,
+        )
+
+    # Per-level dots with error bars
+    if interval is not None and ti.ci_lower is not None:
+        ci_lo = np.asarray(ti.ci_lower)
+        ci_hi = np.asarray(ti.ci_upper)
+        ax.errorbar(
+            x_pos,
+            level_rel,
+            yerr=[level_rel - ci_lo, ci_hi - level_rel],
+            fmt="o",
+            color=_LINE_COLOR,
+            markersize=7,
+            ecolor="#333333",
+            elinewidth=1.2,
+            capsize=4,
+            label="Relativity",
+            zorder=5,
+        )
+    else:
+        ax.scatter(
+            x_pos,
+            level_rel,
+            color=_LINE_COLOR,
+            s=50,
+            zorder=5,
+            label="Relativity",
+        )
+
+    ax.set_xticks(x_pos)
+    rot = 45 if n_levels > 8 else 0
+    ha = "right" if rot else "center"
+    ax.set_xticklabels(levels, rotation=rot, ha=ha, fontsize=8)
+    ax.set_xlim(-0.5, n_levels - 0.5)
+    ax.set_ylabel("Relativity")
+    ax.set_title(ti.name, fontweight="bold")
+    ax.grid(alpha=0.22)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
 def _plot_categorical_panel_vertical(
     ax,
     ti: TermInference,
@@ -530,7 +648,7 @@ def _plot_categorical_panel_vertical(
             color=_EXP_FILL,
             edgecolor=_EXP_EDGE,
             linewidth=_EXP_EDGE_LW,
-            alpha=0.65,
+            alpha=1.0,
             zorder=0,
             label=weight_label,
         )
@@ -680,6 +798,16 @@ def _plot_relativities_new(
                 if idx % ncols == 0:
                     ax_den.set_ylabel(density_label, fontsize=8)
                 ax_den.set_xlabel("")
+
+        elif ti.kind == "categorical" and ti.smooth_curve is not None:
+            _plot_ordered_spline_panel(
+                ax,
+                ti,
+                interval,
+                X=X,
+                exposure=exposure if has_density else None,
+                weight_label=weight_label,
+            )
 
         elif ti.kind == "categorical":
             _plot_categorical_panel_vertical(
