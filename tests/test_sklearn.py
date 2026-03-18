@@ -677,6 +677,25 @@ class TestNativeFeatures:
         preds = m.predict(X)
         assert preds.shape == (200,)
 
+    def test_ndarray_with_extra_columns_fit_predict(self):
+        """features= with ndarray + feature_names that include extra ignored columns."""
+        from superglm import Numeric
+
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((200, 3))
+        y = rng.poisson(np.exp(0.3 * X[:, 0])).astype(float)
+        m = SuperGLMRegressor(
+            features={"a": Numeric(), "b": Numeric()},
+            feature_names=["a", "b", "junk"],
+            selection_penalty=0.0,
+        )
+        m.fit(X, y)
+        assert m.n_features_in_ == 2
+        assert list(m.feature_names_in_) == ["a", "b"]
+        # predict on same 3-column ndarray must work
+        preds = m.predict(X)
+        assert preds.shape == (200,)
+
     def test_missing_features_key_raises(self, sample_data):
         """features= key not in X columns raises clear error."""
         from superglm import Numeric

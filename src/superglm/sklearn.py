@@ -505,8 +505,6 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
                 offset_cols,
                 synthetic,
             )
-            # Only feature + offset columns matter at predict time
-            self._resolved_columns_ = feature_cols + offset_cols
 
             model_kwargs: dict[str, Any] = dict(
                 family=self.family,
@@ -775,8 +773,6 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
                 offset_cols,
                 synthetic,
             )
-            # Only feature + offset columns matter at predict time
-            self._resolved_columns_ = feature_cols + offset_cols
 
             model_kwargs: dict[str, Any] = dict(
                 family="binomial",
