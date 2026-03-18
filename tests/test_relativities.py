@@ -85,13 +85,18 @@ class TestRelativities:
         df = fitted_model.relativities()["age"]
         np.testing.assert_allclose(np.exp(df["log_relativity"]), df["relativity"], rtol=1e-10)
 
-    def test_categorical_base_level_is_one(self, fitted_model):
-        df = fitted_model.relativities()["region"]
+    def test_categorical_base_level_is_one_native(self, fitted_model):
+        df = fitted_model.relativities(centering="native")["region"]
         # base="first" → "A" is the base level (first alphabetically in the data)
         base_row = df[df["level"] == "A"]
         assert len(base_row) == 1
         assert base_row["relativity"].iloc[0] == pytest.approx(1.0)
         assert base_row["log_relativity"].iloc[0] == pytest.approx(0.0)
+
+    def test_mean_centering_geometric_mean_one(self, fitted_model):
+        df = fitted_model.relativities(centering="mean")["region"]
+        # geometric mean of relativities should be 1.0
+        assert np.mean(df["log_relativity"].values) == pytest.approx(0.0, abs=1e-10)
 
 
 class TestPlotRelativities:
