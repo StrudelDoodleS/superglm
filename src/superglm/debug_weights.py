@@ -119,26 +119,34 @@ def compare_irls_weights(
             freq_weights=freq_weights,
             offset=sm_offset,
         )
-        # Fit for a few iterations, capturing state
-        sm_result = sm_model.fit(maxiter=max_iter)
-
-        # After fit, compute final W
-        mu_final = sm_result.mu
-        w_family = sm_family.weights(mu_final)
-        W_final = freq_weights * w_family
-        rows.append(
-            {
-                "iter": "final",
-                "source": "statsmodels",
-                "W_min": float(W_final.min()),
-                "W_max": float(W_final.max()),
-                "W_ratio": float(W_final.max() / max(W_final.min(), 1e-300)),
-                "mu_min": float(mu_final.min()),
-                "mu_max": float(mu_final.max()),
-                "deviance": float(sm_result.deviance),
-                "converged": sm_result.converged,
-            }
-        )
+        # Per-iteration stats: fit with maxiter=1,2,...,max_iter
+        # and record W at each step. statsmodels doesn't expose
+        # per-iteration internals, so we re-fit with increasing
+        # maxiter and warm-start from the intercept-only model.
+        for it in range(1, max_iter + 1):
+            sm_result = sm_model.fit(maxiter=it, disp=0)
+            mu_it = sm_result.mu
+            w_family = sm_family.weights(mu_it)
+            W_it = freq_weights * w_family
+            n_sm = len(W_it)
+            k = min(5, n_sm)
+            top_idx = np.argpartition(W_it, -k)[-k:]
+            bot_idx = np.argpartition(W_it, k)[:k]
+            rows.append(
+                {
+                    "iter": it,
+                    "source": "statsmodels",
+                    "W_min": float(W_it.min()),
+                    "W_max": float(W_it.max()),
+                    "W_ratio": float(W_it.max() / max(W_it.min(), 1e-300)),
+                    "mu_min": float(mu_it.min()),
+                    "mu_max": float(mu_it.max()),
+                    "deviance": float(sm_result.deviance),
+                    "converged": sm_result.converged,
+                    "top_W_obs": list(top_idx[np.argsort(W_it[top_idx])[::-1]]),
+                    "bottom_W_obs": list(bot_idx[np.argsort(W_it[bot_idx])]),
+                }
+            )
     except Exception as e:
         rows.append(
             {
@@ -151,6 +159,8 @@ def compare_irls_weights(
                 "mu_max": np.nan,
                 "deviance": np.nan,
                 "converged": False,
+                "top_W_obs": [],
+                "bottom_W_obs": [],
                 "error": str(e),
             }
         )
@@ -169,25 +179,14 @@ def compare_irls_weights(
                     "mu_max": d.mu_max,
                     "deviance": d.deviance,
                     "converged": None,
+                    "top_W_obs": list(d.top_w_indices),
+                    "bottom_W_obs": list(d.bottom_w_indices),
                 }
             )
 
-    # Add superglm final state
-    rows.append(
-        {
-            "iter": "final",
-            "source": "superglm",
-            "W_min": None,
-            "W_max": None,
-            "W_ratio": None,
-            "mu_min": None,
-            "mu_max": None,
-            "deviance": model.result.deviance,
-            "converged": model.result.converged,
-        }
-    )
-
-    return pd.DataFrame(rows)
+    # Sort by source then iteration for easy comparison
+    df = pd.DataFrame(rows)
+    return df.sort_values(["iter", "source"]).reset_index(drop=True)
 
 
 def inspect_worst_observations(
