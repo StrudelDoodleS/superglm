@@ -280,7 +280,7 @@ model = SuperGLM(
     penalty="group_lasso",
     features=features,
 )
-cv = model.fit_cv(df, y, sample_weight=exposure, n_folds=5, rule="1se")
+cv = model.fit_cv(df, y, sample_weight=exposure, n_folds=5, rule="min")
 
 cv.best_lambda         # lambda at minimum mean CV deviance
 cv.best_lambda_1se     # most regularised lambda within 1 SE of minimum
@@ -288,7 +288,7 @@ cv.mean_cv_deviance    # (n_lambda,) mean test deviance per lambda
 cv.se_cv_deviance      # (n_lambda,) standard error across folds
 ```
 
-After `fit_cv` with `refit=True` (default), the model is refit on all data at `best_lambda_1se`, so `model.predict()` is ready to use.
+`rule` controls which lambda the model refits on: `"min"` uses `best_lambda` (lowest CV deviance), `"1se"` uses `best_lambda_1se` (most regularised within 1 SE of the minimum — usually the better default). With `refit=True` (default), the model is refit on all data at the selected lambda, so `model.predict()` is ready to use.
 
 ## Inspecting results
 
@@ -332,9 +332,9 @@ The `metrics()` path adds residuals, leverage, Cook's distance, and goodness-of-
 
 ```python
 m = model.metrics(df, y, sample_weight=exposure)
-print(m.summary())       # same table, richer object
-m.deviance_residuals     # array
-m.quantile_residuals     # array (uniform under correct model)
+print(m.summary())              # same table, richer object
+m.residuals("deviance")         # deviance residuals
+m.residuals("quantile")         # quantile residuals (uniform under correct model)
 ```
 
 ### Term-level output
