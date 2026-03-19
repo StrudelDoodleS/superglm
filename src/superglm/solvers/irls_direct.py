@@ -236,18 +236,18 @@ def fit_irls_direct(
     eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
     mu = clip_mu(link.inverse(eta), family)
 
+    max_halving = 5  # max step-halving attempts per iteration
     for it in range(max_iter):
+        # Save previous solution for step halving
+        beta_prev = beta.copy()
+        intercept_prev = intercept
+
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
         V = family.variance(mu)
         V = np.maximum(V, 1e-10)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
-        # Floor tiny W to prevent extreme condition numbers in Gram matrices.
-        # cond(X'WX) ≈ cond(W) * cond(X)²; keep cond(W) < 1e8 for Cholesky.
-        w_max = W.max()
-        if w_max > 0:
-            W = np.maximum(W, w_max * 1e-8)
         z = eta + (y - mu) / dmu_deta
         _t_working += time.perf_counter() - _t0
 
@@ -300,6 +300,27 @@ def fit_irls_direct(
         dev = float(np.sum(weights * family.deviance_unit(y, mu)))
         _t_deviance += time.perf_counter() - _t0
 
+        # Step halving: if deviance spiked dramatically (>2x), interpolate
+        # between previous and current solution.  Small deviance increases
+        # are normal in IRLS (especially non-canonical links) and don't
+        # warrant halving.
+        if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
+            for halving in range(max_halving):
+                beta = 0.5 * (beta + beta_prev)
+                intercept = 0.5 * (intercept + intercept_prev)
+                eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
+                mu = clip_mu(link.inverse(eta), family)
+                dev_h = float(np.sum(weights * family.deviance_unit(y, mu)))
+                if not np.isfinite(dev_h) or dev_h >= dev:
+                    break
+                dev = dev_h
+                logger.info(
+                    f"  irls_direct iter={it + 1}: step halving {halving + 1}, "
+                    f"dev={dev:.2e}"
+                )
+                if dev <= dev_prev:
+                    break
+
         logger.info(
             f"  irls_direct iter={it + 1:3d}  "
             f"dev={dev:12.1f}  delta={abs(dev - dev_prev) / (abs(dev_prev) + 1):10.2e}"
@@ -310,12 +331,6 @@ def fit_irls_direct(
                 f"IRLS direct non-finite deviance at iter={it + 1}: dev={dev:.2e}"
             )
             break
-
-        if dev > dev_prev * 10:
-            logger.info(
-                f"  IRLS direct iter={it + 1}: deviance spike "
-                f"(dev={dev:.2e}, prev={dev_prev:.2e}), continuing"
-            )
 
         if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
             converged = True

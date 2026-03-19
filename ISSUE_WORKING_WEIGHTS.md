@@ -86,27 +86,42 @@ statsmodels does **not** clip W, but:
 - Has no hard divergence abort — lets IRLS run to `maxiter`
 - For canonical links, uses `1 / (g'(μ)² * V(μ))` which simplifies cleanly (e.g. `W = μ` for Poisson/log)
 
+## Why W floor clipping is a bandaid
+
+An earlier attempt floored W at `W_max * 1e-8` (mirroring mgcv's Hessian diagonal floor). This stabilizes the solve but **changes the fitted model** when the natural W ratio exceeds 1e8 at convergence — which happens with realistic insurance data:
+
+- Observation A: `weight=1, μ=0.001` → `W = 0.001` (rare event, tiny policy)
+- Observation B: `weight=83000, μ=1000` → `W = 8.3e7` (high-frequency, large fleet)
+- Natural ratio: 8.3e10 — floor inflates observation A's weight by 830,000x
+
+For Tweedie specifically, `W = weights * μ^(2-p)`. With `p ∈ (1, 2)`, the exponent `2-p` is positive but < 1, so W still varies substantially with μ. The variance floor `V = max(V(μ), 1e-10)` can also break the natural cancellation between `dμ/dη²` and `V(μ)` when μ is very small, though this makes W *smaller* (conservative direction).
+
 ## Fix applied
 
-Two changes in both `pirls.py` and `irls_direct.py`:
+**Step halving** in both `pirls.py` and `irls_direct.py`. When deviance spikes dramatically (>2x previous), the solver interpolates between the previous and current solution, halving the step up to 5 times:
 
-1. **Relative W floor**: After computing `W = weights * (dμ/dη)² / V(μ)`, floor at `W_max * 1e-8`:
+```python
+if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
+    for halving in range(max_halving):
+        beta = 0.5 * (beta + beta_prev)
+        intercept = 0.5 * (intercept + intercept_prev)
+        # recompute dev...
+        if dev <= dev_prev:
+            break
+```
 
-   ```python
-   w_max = W.max()
-   if w_max > 0:
-       W = np.maximum(W, w_max * 1e-8)
-   ```
+This addresses the root cause: the positive feedback loop where a bad Newton step pushes η to extremes → extreme W ratios → worse Newton step → divergence. Step halving breaks the loop without modifying the working weights or the converged answer.
 
-   This mirrors mgcv's `gam.fit5` Hessian diagonal floor at `max(D) * sqrt(.Machine$double.eps) ≈ max(D) * 1.5e-8`. With `cond(W) ≤ 1e8` and typical spline bases (`cond(X) ~ 1e3`), `cond(X'WX) ~ 1e8 * 1e6 = 1e14` — tight but within double precision for Cholesky.
+The old hard divergence abort (`dev > dev_prev * 10` → break) is removed. The solver now only aborts on non-finite deviance.
 
-2. **Softened divergence check**: Changed `dev > dev_prev * 10` from a hard `break` to a logged info message. The solver now only aborts on non-finite deviance (NaN/Inf). This matches statsmodels behavior and allows early-iteration overshoots to recover.
+The threshold of 2x (not any increase) is important — small deviance increases between IRLS iterations are normal, especially for non-canonical links (NB2, Tweedie with log link). Halving on any increase prevents convergence.
 
 ## Future considerations
 
-- **`good` vector filtering**: mgcv drops zero-weight and non-finite observations from the WLS solve entirely. This is cleaner than flooring — we could adopt this too.
+- **`good` vector filtering**: mgcv drops zero-weight and non-finite observations from the WLS solve entirely, rather than including them with distorted weights.
 - **`use.wy` flag**: When `sqrt(W)` is poorly scaled, working with `W * z` directly instead of `sqrt(W) * z` avoids amplifying numerical errors. Not currently relevant since our solvers don't use the `sqrt(W)` form.
 - **Canonical link simplification**: For canonical links (Poisson/log, Binomial/logit), W simplifies to a well-behaved expression (e.g. `W = μ` for Poisson/log). Detecting canonical links and using the simplified form would avoid the `dmu_deta² / V` computation entirely, eliminating the cancellation that causes extreme ratios.
+- **QR-based solve**: Switching from Cholesky to QR decomposition of `sqrt(W) * X` would handle ill-conditioning more gracefully, as statsmodels does with `lstsq`/`qr`. mgcv's `pls_fit1` C routine auto-detects and switches to a stable path.
 
 ## References
 

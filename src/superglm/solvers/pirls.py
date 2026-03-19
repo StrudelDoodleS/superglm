@@ -102,8 +102,13 @@ def _fit_pirls_inner(
 
     dev_prev = np.inf
     converged = False
+    max_halving = 5  # max step-halving attempts per outer iteration
     for outer in range(max_iter_outer):
         t_outer_start = time.perf_counter()
+
+        # Save previous solution for step halving
+        beta_prev = beta.copy()
+        intercept_prev = intercept
 
         # Current predictions
         eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
@@ -114,15 +119,6 @@ def _fit_pirls_inner(
         V = np.maximum(V, 1e-10)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
-        # Floor tiny W to prevent extreme condition numbers in Gram matrices.
-        # Without this, transient eta values during early IRLS iterations can
-        # produce W ratios > 1e15, making X'WX too ill-conditioned for
-        # Cholesky.  cond(X'WX) ≈ cond(W) * cond(X)², so with spline bases
-        # (cond(X) ~ 1e3) we need cond(W) < ~1e8 to stay within double
-        # precision.  The floor is relative to the max so it adapts to scale.
-        w_max = W.max()
-        if w_max > 0:
-            W = np.maximum(W, w_max * 1e-8)
         z = eta + (y - mu) / dmu_deta
 
         # Per-group Hessians and Lipschitz constants
@@ -205,6 +201,30 @@ def _fit_pirls_inner(
         mu_new = clip_mu(link.inverse(eta_new), family)
         dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
 
+        # Step halving: if deviance spiked dramatically (>2x), interpolate
+        # between previous and current solution.  This prevents the positive
+        # feedback loop where a bad Newton step pushes eta to extremes,
+        # creating even worse working weights next iteration.  Small deviance
+        # increases are normal in IRLS (especially non-canonical links) and
+        # don't warrant halving.
+        if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
+            for halving in range(max_halving):
+                beta = 0.5 * (beta + beta_prev)
+                intercept = 0.5 * (intercept + intercept_prev)
+                eta_h = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
+                mu_h = clip_mu(link.inverse(eta_h), family)
+                dev_h = float(np.sum(weights * family.deviance_unit(y, mu_h)))
+                if not np.isfinite(dev_h) or dev_h >= dev:
+                    # No improvement — stop halving
+                    break
+                dev = dev_h
+                logger.info(
+                    f"  PIRLS outer={outer + 1}: step halving {halving + 1}, "
+                    f"dev={dev:.2e}"
+                )
+                if dev <= dev_prev:
+                    break
+
         # Warn on extreme working weight range (helps diagnose bad data)
         w_ratio = W.max() / max(W.min(), 1e-300)
         if w_ratio > 1e12:
@@ -225,15 +245,6 @@ def _fit_pirls_inner(
                 f"PIRLS non-finite deviance at outer={outer + 1}: dev={dev:.2e}"
             )
             break
-
-        if dev > dev_prev * 10:
-            # Deviance spike — log but continue; early IRLS iterations can
-            # overshoot before settling, and aborting here prevents convergence
-            # on datasets with extreme weight ranges.
-            logger.info(
-                f"  PIRLS outer={outer + 1}: deviance spike "
-                f"(dev={dev:.2e}, prev={dev_prev:.2e}), continuing"
-            )
 
         if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
             converged = True
