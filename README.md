@@ -189,9 +189,6 @@ from superglm import OrderedCategorical
 # Spline mode: map categories to numeric values, fit a spline through them
 OrderedCategorical(order=["A", "B", "C", "D", "E", "F"], basis="spline", n_knots=3)
 
-# Step mode: one-hot + first-difference penalty (soft fusion of adjacent levels)
-OrderedCategorical(order=["A", "B", "C", "D", "E", "F"], basis="step")
-
 # Explicit numeric values instead of auto-linspace
 OrderedCategorical(values={"A": 0.0, "B": 0.2, "C": 0.4, "D": 0.6, "E": 0.8, "F": 1.0}, basis="spline")
 ```
