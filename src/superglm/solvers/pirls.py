@@ -114,6 +114,13 @@ def _fit_pirls_inner(
         V = np.maximum(V, 1e-10)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
+        # Floor tiny W to prevent extreme condition numbers in Gram matrices.
+        # Without this, observations near boundary predictions (e.g. mu→0 in
+        # Poisson, mu→0/1 in Binomial) can produce W ratios > 1e15, causing
+        # divergence.  The floor is relative to the max so it adapts to scale.
+        w_max = W.max()
+        if w_max > 0:
+            W = np.maximum(W, w_max * 1e-12)
         z = eta + (y - mu) / dmu_deta
 
         # Per-group Hessians and Lipschitz constants
@@ -211,11 +218,20 @@ def _fit_pirls_inner(
             f"time={t_outer_elapsed:.3f}s"
         )
 
-        if not np.isfinite(dev) or dev > dev_prev * 10:
+        if not np.isfinite(dev):
             logger.warning(
-                f"PIRLS divergence at outer={outer + 1}: dev={dev:.2e}, prev={dev_prev:.2e}"
+                f"PIRLS non-finite deviance at outer={outer + 1}: dev={dev:.2e}"
             )
             break
+
+        if dev > dev_prev * 10:
+            # Deviance spike — log but continue; early IRLS iterations can
+            # overshoot before settling, and aborting here prevents convergence
+            # on datasets with extreme weight ranges.
+            logger.info(
+                f"  PIRLS outer={outer + 1}: deviance spike "
+                f"(dev={dev:.2e}, prev={dev_prev:.2e}), continuing"
+            )
 
         if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
             converged = True
