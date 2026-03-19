@@ -243,6 +243,10 @@ def fit_irls_direct(
         V = np.maximum(V, 1e-10)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
+        # Floor tiny W to prevent extreme condition numbers in Gram matrices.
+        w_max = W.max()
+        if w_max > 0:
+            W = np.maximum(W, w_max * 1e-12)
         z = eta + (y - mu) / dmu_deta
         _t_working += time.perf_counter() - _t0
 
@@ -300,11 +304,17 @@ def fit_irls_direct(
             f"dev={dev:12.1f}  delta={abs(dev - dev_prev) / (abs(dev_prev) + 1):10.2e}"
         )
 
-        if not np.isfinite(dev) or dev > dev_prev * 10:
+        if not np.isfinite(dev):
             logger.warning(
-                f"IRLS direct divergence at iter={it + 1}: dev={dev:.2e}, prev={dev_prev:.2e}"
+                f"IRLS direct non-finite deviance at iter={it + 1}: dev={dev:.2e}"
             )
             break
+
+        if dev > dev_prev * 10:
+            logger.info(
+                f"  IRLS direct iter={it + 1}: deviance spike "
+                f"(dev={dev:.2e}, prev={dev_prev:.2e}), continuing"
+            )
 
         if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
             converged = True
