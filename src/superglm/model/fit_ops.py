@@ -108,7 +108,7 @@ def _compute_fit_stats(
     )
 
 
-def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
+def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None, record_diagnostics=False):
     """Fit the model to data."""
     from superglm.model.base import resolve_sample_weight_alias
 
@@ -168,6 +168,7 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
             groups=model._groups,
             lambda2=model.lambda2,
             offset=offset,
+            record_diagnostics=record_diagnostics,
         )
     else:
         model._result = fit_pirls(
@@ -181,6 +182,7 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None):
             offset=offset,
             active_set=model._active_set,
             lambda2=model.lambda2,
+            record_diagnostics=record_diagnostics,
         )
 
     # Fix phi for known-scale families (Poisson): phi is always 1.0.
