@@ -6,7 +6,7 @@
 [![codecov](https://codecov.io/github/StrudelDoodleS/superglm/graph/badge.svg?token=2HO71TA2ZY)](https://codecov.io/github/StrudelDoodleS/superglm)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/StrudelDoodleS/superglm/actions/workflows/ci.yml)
 
-Penalised GLMs for insurance pricing. SuperGLM supports standard penalised fits, exact REML, large-`n` discrete/fREML-style REML, spline double-penalty shrinkage, group penalties, interactions, and statsmodels-style summaries for Poisson, Gamma, NB2, Tweedie, and Binomial models.
+Penalised GLMs for insurance pricing. SuperGLM supports standard penalised fits, exact REML, large-`n` discrete/fREML-style REML, spline double-penalty shrinkage, group penalties, interactions, and statsmodels-style summaries for Poisson, Gamma, NB2, Tweedie, Binomial, and Gaussian models.
 
 ## Installation
 
@@ -136,6 +136,7 @@ Spline(kind="ns", k=10)                   # 9-column natural spline (k-1 after i
 Spline(kind="cr", k=10)                   # 9-column cubic regression spline (k-1 after identifiability)
 Spline(kind="bs", k=14, select=True)       # mgcv double penalty: spline-vs-linear selection
 Spline(kind="cr", k=12, select=True)       # CR with double penalty selection
+Spline(kind="bs", k=14, monotone="increasing")  # post-fit isotonic monotone constraint
 ```
 
 | Kind | Basis | Penalty | Constraints | Built cols |
@@ -145,6 +146,15 @@ Spline(kind="cr", k=12, select=True)       # CR with double penalty selection
 | `"cr"` | B-spline | Integrated f'' squared | Natural + identifiability | `k - 1` |
 
 `k` matches mgcv's `k` for all kinds. The built column count is always `k - 1` because the identifiability constraint (unweighted sum-to-zero) removes one direction. mgcv absorbs this via a side constraint instead of physically removing the column.
+
+**Knot placement strategies** — controlled by `knot_strategy=`:
+
+| Strategy | Description |
+|----------|-------------|
+| `"uniform"` | Equally-spaced interior knots (default) |
+| `"quantile"` | Quantiles of unique values (mgcv style) |
+| `"quantile_rows"` | Quantiles of all rows (pd.qcut style) |
+| `"quantile_tempered"` | Weighted blend of quantile and uniform (`knot_alpha` controls mixing) |
 
 `select=True` (BS, CR, and CR cardinal) decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped. Not supported for NS (its constrained penalty has only 1 null eigenvalue).
 
@@ -171,6 +181,18 @@ Categorical(base="B")             # explicit base level
 Numeric()                       # simple passthrough
 ```
 
+**OrderedCategorical** — Ordered factor with a spline or step basis. For features with a natural ordering (e.g. policy year, damage severity grade) where you want smooth transitions between levels.
+
+```python
+from superglm import OrderedCategorical
+
+# Spline mode: map categories to numeric values, fit a spline through them
+OrderedCategorical(order=["A", "B", "C", "D", "E", "F"], basis="spline", n_knots=3)
+
+# Explicit numeric values instead of auto-linspace
+OrderedCategorical(values={"A": 0.0, "B": 0.2, "C": 0.4, "D": 0.6, "E": 0.8, "F": 1.0}, basis="spline")
+```
+
 ## Interactions
 
 Interactions between features are specified via the `interactions` parameter. The interaction type is auto-detected from the parent feature specs.
@@ -194,6 +216,7 @@ Auto-detected interaction types:
 | Categorical + Categorical | `CategoricalInteraction` | Single group with cross-level indicators |
 | Numeric + Numeric | `NumericInteraction` | Single group (product term) |
 | Polynomial + Polynomial | `PolynomialInteraction` | Single group (tensor product) |
+| Spline + Spline | `TensorInteraction` | ti()-style tensor product (interaction surface only) |
 
 ## Penalties
 
@@ -242,13 +265,78 @@ result = model.fit_path(df, y, sample_weight=exposure, lambda_seq=[1.0, 0.1, 0.0
 
 After `fit_path`, `model.predict()` uses the last (least-regularised) fit.
 
-## Inspecting results
+## Cross-validation
+
+Select lambda by K-fold cross-validation:
 
 ```python
-# Statsmodels-style summary table with SEs, p-values, and smooth tests
-m = model.metrics(df, y, sample_weight=exposure)
-print(m.summary())
+from superglm import SuperGLM, CVResult
 
+model = SuperGLM(
+    family="poisson",
+    penalty="group_lasso",
+    features=features,
+)
+cv = model.fit_cv(df, y, sample_weight=exposure, n_folds=5, rule="min")
+
+cv.best_lambda         # lambda at minimum mean CV deviance
+cv.best_lambda_1se     # most regularised lambda within 1 SE of minimum
+cv.mean_cv_deviance    # (n_lambda,) mean test deviance per lambda
+cv.se_cv_deviance      # (n_lambda,) standard error across folds
+```
+
+`rule` controls which lambda the model refits on: `"min"` uses `best_lambda` (lowest CV deviance), `"1se"` uses `best_lambda_1se` (most regularised within 1 SE of the minimum — usually the better default). With `refit=True` (default), the model is refit on all data at the selected lambda, so `model.predict()` is ready to use.
+
+## Inspecting results
+
+### Summary table
+
+`model.summary()` prints a statsmodels-style table with coefficient estimates, standard errors, p-values, and Wood (2013) smooth term tests. Parametric terms show Wald z-tests; smooth terms show the effective degrees of freedom, penalty strength, and a Bayesian chi-squared test.
+
+```python
+print(model.summary())
+```
+
+```
+╔══════════════════════════ SuperGLM Results ══════════════════════════╗
+║ Family:                   Poisson  No. Observations:            5000 ║
+║ Link:                         Log  Df (effective):             6.745 ║
+║ Method:                      REML  Penalty:              Group Lasso ║
+║ Scale (phi):                1.000  Lambda1:                        0 ║
+║ Log-Likelihood:           -2146.5  AIC:                       4306.5 ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                 coef   std err     z     P>|z|   [0.025   0.975]     ║
+╟──────────────────────────────────────────────────────────────────────╢
+║ Intercept    -2.0693    0.0371 -55.829   0.000   -2.142   -1.997 *** ║
+║                                                                      ║
+╠═════════════════════════════╡ DrivAge ╞══════════════════════════════╣
+║ DrivAge     [spline, 9 params, chi2(1.0)=18.8, p=<0.001]         *** ║
+║               rank=9, edf=1.0, lam=2.1e+04, curve SE: 0.01-0.07      ║
+║                                                                      ║
+╠══════════════════════════════╡ VehAge ╞══════════════════════════════╣
+║ VehAge      [spline, 7 params, chi2(2.1)=6.4, p=0.046]           *   ║
+║               rank=7, edf=1.7, lam=1.3e+02, curve SE: 0.03-0.10      ║
+║                                                                      ║
+╠═══════════════════════════════╡ Area ╞═══════════════════════════════╣
+║ Area[B]       0.2121    0.0718   2.956   0.003    0.071    0.353 **  ║
+║ Area[C]      -0.0793    0.0817  -0.971   0.332   -0.239    0.081     ║
+║ Area[D]       0.3012    0.0673   4.473   0.000    0.169    0.433 *** ║
+╚══════════════════════════════════════════════════════════════════════╝
+Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+```
+
+The `metrics()` path adds residuals, leverage, Cook's distance, and goodness-of-fit tests:
+
+```python
+m = model.metrics(df, y, sample_weight=exposure)
+print(m.summary())              # same table, richer object
+m.residuals("deviance")         # deviance residuals
+m.residuals("quantile")         # quantile residuals (standard normal under correct model)
+```
+
+### Term-level output
+
+```python
 # Per-term inference (TermInference dataclass)
 ti = model.term_inference("DrivAge")
 
@@ -258,8 +346,17 @@ model.plot("DrivAge", X=df, sample_weight=exposure)
 # Plot all terms in a grid
 model.plot(X=df, sample_weight=exposure, ci="both")
 
-# Relativity DataFrames (for manual access / export)
-rels = model.relativities(with_se=True)
+# Relativity DataFrames — centering="mean" shifts so geometric mean = 1
+rels = model.relativities(with_se=True, centering="mean")
+```
+
+### Diagnostics
+
+```python
+model.term_importance(df, sample_weight=exposure)     # weighted variance of each term's eta contribution
+model.knot_summary()                                  # knot metadata for all spline features
+model.spline_redundancy(df, sample_weight=exposure)   # knot spacing, basis correlation, rank
+model.diagnostics()                                   # per-group diagnostic dict
 ```
 
 ### Example: single-term relativity plots
@@ -271,6 +368,21 @@ Click an image to open it at full size.
 | Vehicle Age (`quantile_rows` knots) | Bonus-Malus (`quantile_tempered`, α=0.2) |
 |:---:|:---:|
 | [![VehAge](docs/images/readme_vehage.png)](docs/images/readme_vehage.png) | [![BonusMalus](docs/images/readme_bonusmalus.png)](docs/images/readme_bonusmalus.png) |
+
+## Monotone constraints
+
+Enforce monotonicity on spline terms via post-fit isotonic regression:
+
+```python
+# Declare the constraint at feature level
+features = {
+    "BonusMalus": Spline(kind="bs", k=14, monotone="increasing"),
+}
+
+# After fitting, apply the repair
+model.fit_reml(df, y, sample_weight=exposure)
+model.apply_monotone_postfit(df, sample_weight=exposure)  # modifies model in-place
+```
 
 ## Tweedie support
 
@@ -288,6 +400,8 @@ Or estimate the power via profile likelihood:
 model = SuperGLM(family=Tweedie(p=1.5), penalty=GroupLasso(lambda1=0.01))
 result = model.estimate_p(df, y, sample_weight=exposure, p_range=(1.1, 1.9))
 print(result.p_hat)  # estimated Tweedie power
+print(result.ci())   # profile likelihood CI
+result.profile_plot() # profile deviance curve
 ```
 
 ## Negative binomial (NB2) support
@@ -304,6 +418,8 @@ model.fit(df, y, sample_weight=exposure)
 # Profile estimate theta (MASS-style alternating GLM fit + Newton update)
 result = model.estimate_theta(df, y, sample_weight=exposure)
 print(result.theta_hat)  # estimated dispersion
+print(result.ci())       # profile likelihood CI
+result.profile_plot()    # profile deviance curve with CI region
 ```
 
 ## Binomial (binary classification)
@@ -374,6 +490,7 @@ Feature types are auto-detected: object/category columns become `Categorical`, c
 | `Gamma()` | V(mu) = mu^2 | log | Claim severity |
 | `Tweedie(p=1.5)` | V(mu) = mu^p | log | Pure premium (frequency x severity) |
 | `Binomial()` | V(mu) = mu(1-mu) | logit | Binary classification |
+| `Gaussian()` | V(mu) = 1 | identity | Continuous response (loss ratios, etc.) |
 
 ## Link functions
 
