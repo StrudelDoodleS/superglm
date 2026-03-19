@@ -381,7 +381,7 @@ features = {
 
 # After fitting, apply the repair
 model.fit_reml(df, y, sample_weight=exposure)
-repair = model.apply_monotone_postfit(df, sample_weight=exposure)
+model.apply_monotone_postfit(df, sample_weight=exposure)  # modifies model in-place
 ```
 
 ## Tweedie support
