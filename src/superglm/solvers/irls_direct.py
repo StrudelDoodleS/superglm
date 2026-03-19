@@ -34,7 +34,7 @@ from superglm.group_matrix import (
     _block_xtwx_rhs,
 )
 from superglm.links import Link, stabilize_eta
-from superglm.solvers.pirls import PIRLSResult
+from superglm.solvers.pirls import IterationDiagnostics, PIRLSResult
 from superglm.types import GroupSlice
 
 logger = logging.getLogger(__name__)
@@ -146,6 +146,7 @@ def fit_irls_direct(
     return_xtwx: bool = False,
     profile: dict | None = None,
     cache_out: dict | None = None,
+    record_diagnostics: bool = False,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -187,6 +188,8 @@ def fit_irls_direct(
         If True, also return the final weighted Gram matrix X'WX. Used by the
         REML outer loop to avoid rebuilding X'WX in cheap iterations when W is
         held fixed.
+    record_diagnostics : bool
+        If True, record per-iteration W/mu/eta stats on the result.
 
     Returns
     -------
@@ -235,6 +238,7 @@ def fit_irls_direct(
     # This eliminates one redundant matvec + link.inverse per iteration.
     eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
     mu = clip_mu(link.inverse(eta), family)
+    iteration_log: list[IterationDiagnostics] = [] if record_diagnostics else []
 
     max_halving = 5  # max step-halving attempts per iteration
     for it in range(max_iter):
@@ -304,6 +308,7 @@ def fit_irls_direct(
         # between previous and current solution.  Small deviance increases
         # are normal in IRLS (especially non-canonical links) and don't
         # warrant halving.
+        n_halvings = 0
         if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
             for halving in range(max_halving):
                 beta = 0.5 * (beta + beta_prev)
@@ -313,6 +318,7 @@ def fit_irls_direct(
                 dev_h = float(np.sum(weights * family.deviance_unit(y, mu)))
                 if not np.isfinite(dev_h) or dev_h >= dev:
                     break
+                n_halvings += 1
                 dev = dev_h
                 logger.info(
                     f"  irls_direct iter={it + 1}: step halving {halving + 1}, "
@@ -320,6 +326,30 @@ def fit_irls_direct(
                 )
                 if dev <= dev_prev:
                     break
+
+        # Record per-iteration diagnostics
+        if record_diagnostics:
+            w_ratio = W.max() / max(W.min(), 1e-300)
+            k = min(5, n)
+            top_idx = np.argpartition(W, -k)[-k:]
+            bot_idx = np.argpartition(W, k)[:k]
+            iteration_log.append(
+                IterationDiagnostics(
+                    iteration=it + 1,
+                    deviance=dev,
+                    w_min=float(W.min()),
+                    w_max=float(W.max()),
+                    w_ratio=w_ratio,
+                    mu_min=float(mu.min()),
+                    mu_max=float(mu.max()),
+                    eta_min=float(eta.min()),
+                    eta_max=float(eta.max()),
+                    intercept=intercept,
+                    step_halvings=n_halvings,
+                    top_w_indices=top_idx[np.argsort(W[top_idx])[::-1]],
+                    bottom_w_indices=bot_idx[np.argsort(W[bot_idx])],
+                )
+            )
 
         logger.info(
             f"  irls_direct iter={it + 1:3d}  "
@@ -386,6 +416,7 @@ def fit_irls_direct(
         converged=converged,
         phi=phi,
         effective_df=p_eff,
+        iteration_log=iteration_log if record_diagnostics else None,
     )
 
     if return_xtwx:

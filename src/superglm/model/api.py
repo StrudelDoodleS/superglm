@@ -171,6 +171,7 @@ class SuperGLM:
         offset: NDArray | None = None,
         *,
         sample_weight: NDArray | None = None,
+        record_diagnostics: bool = False,
     ) -> SuperGLM:
         """Fit the model to data.
 
@@ -209,13 +210,21 @@ class SuperGLM:
             Offset added to the linear predictor. For count models with
             exposure, use ``offset=np.log(exposure)`` so that the model
             estimates a rate rather than a raw count.
+        record_diagnostics : bool
+            If True, record per-iteration IRLS diagnostics (W range,
+            mu/eta range, step halvings, worst-observation indices) on
+            ``result.iteration_log``.  Useful for debugging convergence.
 
         Returns
         -------
         SuperGLM
             The fitted model (self).
         """
-        return fit_ops.fit(self, X, y, exposure, offset, sample_weight=sample_weight)
+        return fit_ops.fit(
+            self, X, y, exposure, offset,
+            sample_weight=sample_weight,
+            record_diagnostics=record_diagnostics,
+        )
 
     def fit_path(
         self,
@@ -366,6 +375,43 @@ class SuperGLM:
         return state_ops.group_edf(self)
 
     # ── Diagnostics & summary ─────────────────────────────────────
+
+    def iteration_diagnostics(self):
+        """Return per-iteration IRLS diagnostics as a DataFrame.
+
+        Only available if ``fit(record_diagnostics=True)`` was used.
+        Shows W range, mu/eta range, deviance, step halvings, and the
+        observation indices with the largest/smallest working weights
+        at each iteration.
+        """
+        import pandas as pd
+
+        log = self.result.iteration_log
+        if log is None:
+            raise RuntimeError(
+                "No iteration diagnostics recorded. "
+                "Refit with fit(record_diagnostics=True)."
+            )
+        rows = []
+        for d in log:
+            rows.append(
+                {
+                    "iter": d.iteration,
+                    "deviance": d.deviance,
+                    "W_min": d.w_min,
+                    "W_max": d.w_max,
+                    "W_ratio": d.w_ratio,
+                    "mu_min": d.mu_min,
+                    "mu_max": d.mu_max,
+                    "eta_min": d.eta_min,
+                    "eta_max": d.eta_max,
+                    "intercept": d.intercept,
+                    "step_halvings": d.step_halvings,
+                    "top_W_obs": list(d.top_w_indices),
+                    "bottom_W_obs": list(d.bottom_w_indices),
+                }
+            )
+        return pd.DataFrame(rows)
 
     def diagnostics(self) -> dict[str, Any]:
         """Per-group diagnostic dict for programmatic / audit access."""
