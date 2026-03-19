@@ -244,9 +244,10 @@ def fit_irls_direct(
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
         # Floor tiny W to prevent extreme condition numbers in Gram matrices.
+        # cond(X'WX) ≈ cond(W) * cond(X)²; keep cond(W) < 1e8 for Cholesky.
         w_max = W.max()
         if w_max > 0:
-            W = np.maximum(W, w_max * 1e-12)
+            W = np.maximum(W, w_max * 1e-8)
         z = eta + (y - mu) / dmu_deta
         _t_working += time.perf_counter() - _t0
 
