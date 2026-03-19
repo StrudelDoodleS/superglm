@@ -187,13 +187,13 @@ Numeric()                       # simple passthrough
 from superglm import OrderedCategorical
 
 # Spline mode: map categories to numeric values, fit a spline through them
-OrderedCategorical(order=["low", "med", "high"], basis="spline", k=5)
+OrderedCategorical(order=["A", "B", "C", "D", "E", "F"], basis="spline", n_knots=3)
 
 # Step mode: one-hot + first-difference penalty (soft fusion of adjacent levels)
-OrderedCategorical(order=["low", "med", "high"], basis="step")
+OrderedCategorical(order=["A", "B", "C", "D", "E", "F"], basis="step")
 
 # Explicit numeric values instead of auto-linspace
-OrderedCategorical(values={"low": 0.0, "med": 0.5, "high": 1.0}, basis="spline")
+OrderedCategorical(values={"A": 0.0, "B": 0.2, "C": 0.4, "D": 0.6, "E": 0.8, "F": 1.0}, basis="spline")
 ```
 
 ## Interactions
@@ -334,7 +334,7 @@ The `metrics()` path adds residuals, leverage, Cook's distance, and goodness-of-
 m = model.metrics(df, y, sample_weight=exposure)
 print(m.summary())              # same table, richer object
 m.residuals("deviance")         # deviance residuals
-m.residuals("quantile")         # quantile residuals (uniform under correct model)
+m.residuals("quantile")         # quantile residuals (standard normal under correct model)
 ```
 
 ### Term-level output
