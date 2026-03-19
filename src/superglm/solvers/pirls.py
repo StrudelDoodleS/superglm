@@ -115,12 +115,14 @@ def _fit_pirls_inner(
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
         # Floor tiny W to prevent extreme condition numbers in Gram matrices.
-        # Without this, observations near boundary predictions (e.g. mu→0 in
-        # Poisson, mu→0/1 in Binomial) can produce W ratios > 1e15, causing
-        # divergence.  The floor is relative to the max so it adapts to scale.
+        # Without this, transient eta values during early IRLS iterations can
+        # produce W ratios > 1e15, making X'WX too ill-conditioned for
+        # Cholesky.  cond(X'WX) ≈ cond(W) * cond(X)², so with spline bases
+        # (cond(X) ~ 1e3) we need cond(W) < ~1e8 to stay within double
+        # precision.  The floor is relative to the max so it adapts to scale.
         w_max = W.max()
         if w_max > 0:
-            W = np.maximum(W, w_max * 1e-12)
+            W = np.maximum(W, w_max * 1e-8)
         z = eta + (y - mu) / dmu_deta
 
         # Per-group Hessians and Lipschitz constants
