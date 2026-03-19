@@ -25,6 +25,26 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class IterationDiagnostics:
+    """Per-iteration IRLS diagnostics for debugging convergence issues."""
+
+    iteration: int
+    deviance: float
+    w_min: float
+    w_max: float
+    w_ratio: float
+    mu_min: float
+    mu_max: float
+    eta_min: float
+    eta_max: float
+    intercept: float
+    step_halvings: int
+    # Indices of the 5 observations with largest/smallest W
+    top_w_indices: NDArray  # (5,) int
+    bottom_w_indices: NDArray  # (5,) int
+
+
+@dataclass
 class PIRLSResult:
     beta: NDArray
     intercept: float
@@ -33,6 +53,7 @@ class PIRLSResult:
     converged: bool
     phi: float
     effective_df: float
+    iteration_log: list[IterationDiagnostics] | None = None
 
 
 def _compute_group_hessians(
@@ -79,10 +100,12 @@ def _fit_pirls_inner(
     tol: float = 1e-6,
     active_set: bool = False,
     lambda2: float | dict[str, float] = 0.0,
+    record_diagnostics: bool = False,
 ) -> PIRLSResult:
     """Single-pass PIRLS fit with proximal Newton BCD inner solver."""
     n, p = dm.shape
     beta = beta_init.copy() if beta_init is not None else np.zeros(p)
+    iteration_log: list[IterationDiagnostics] = [] if record_diagnostics else []
 
     # Initialize intercept
     if intercept_init is not None:
@@ -207,6 +230,7 @@ def _fit_pirls_inner(
         # creating even worse working weights next iteration.  Small deviance
         # increases are normal in IRLS (especially non-canonical links) and
         # don't warrant halving.
+        n_halvings = 0
         if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
             for halving in range(max_halving):
                 beta = 0.5 * (beta + beta_prev)
@@ -217,6 +241,7 @@ def _fit_pirls_inner(
                 if not np.isfinite(dev_h) or dev_h >= dev:
                     # No improvement — stop halving
                     break
+                n_halvings += 1
                 dev = dev_h
                 logger.info(
                     f"  PIRLS outer={outer + 1}: step halving {halving + 1}, "
@@ -231,6 +256,29 @@ def _fit_pirls_inner(
             logger.warning(
                 f"PIRLS outer={outer + 1}: extreme W ratio {w_ratio:.1e} "
                 f"(W range [{W.min():.2e}, {W.max():.2e}])"
+            )
+
+        # Record per-iteration diagnostics
+        if record_diagnostics:
+            k = min(5, n)
+            top_idx = np.argpartition(W, -k)[-k:]
+            bot_idx = np.argpartition(W, k)[:k]
+            iteration_log.append(
+                IterationDiagnostics(
+                    iteration=outer + 1,
+                    deviance=dev,
+                    w_min=float(W.min()),
+                    w_max=float(W.max()),
+                    w_ratio=w_ratio,
+                    mu_min=float(mu.min()),
+                    mu_max=float(mu.max()),
+                    eta_min=float(eta.min()),
+                    eta_max=float(eta.max()),
+                    intercept=intercept,
+                    step_halvings=n_halvings,
+                    top_w_indices=top_idx[np.argsort(W[top_idx])[::-1]],
+                    bottom_w_indices=bot_idx[np.argsort(W[bot_idx])],
+                )
             )
 
         t_outer_elapsed = time.perf_counter() - t_outer_start
@@ -332,6 +380,7 @@ def _fit_pirls_inner(
         converged=converged,
         phi=phi,
         effective_df=p_eff,
+        iteration_log=iteration_log if record_diagnostics else None,
     )
 
 
@@ -358,6 +407,7 @@ def fit_pirls(
     tol: float = 1e-6,
     active_set: bool = False,
     lambda2: float | dict[str, float] = 0.0,
+    record_diagnostics: bool = False,
 ) -> PIRLSResult:
     """Fit a penalised GLM via PIRLS with proximal Newton BCD.
 
@@ -393,6 +443,7 @@ def fit_pirls(
         tol,
         active_set,
         lambda2=lambda2,
+        record_diagnostics=record_diagnostics,
     )
 
     # Stage 2: if flavor, adjust weights and refit (warm-start both beta and intercept)
@@ -416,6 +467,7 @@ def fit_pirls(
             tol=tol,
             active_set=active_set,
             lambda2=lambda2,
+            record_diagnostics=record_diagnostics,
         )
 
     return result
