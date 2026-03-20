@@ -167,13 +167,19 @@ class ModelSummary:
         if "nb_theta" in info:
             ci = info["nb_theta_ci"]
             theta_str = f"{info['nb_theta']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
-            rows.append(("Theta", theta_str, "Method", info["nb_theta_method"]))
+            method = info["nb_theta_method"]
+            if "nb_profile_nll" in info:
+                method = f"{method}  NLL: {info['nb_profile_nll']:.4f}"
+            rows.append(("Theta", theta_str, "Method", method))
 
         # Tweedie p profile row
         if "tweedie_p" in info:
             ci = info["tweedie_p_ci"]
             p_str = f"{info['tweedie_p']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
-            rows.append(("Tweedie p", p_str, "Method", info["tweedie_p_method"]))
+            method = info["tweedie_p_method"]
+            if "tweedie_profile_nll" in info:
+                method = f"{method}  NLL: {info['tweedie_profile_nll']:.4f}"
+            rows.append(("Tweedie p", p_str, "Method", method))
 
         # Compute content width from coefficient columns AND header values
         #   coef table: name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4)
@@ -416,13 +422,19 @@ class ModelSummary:
         if "nb_theta" in info:
             ci = info["nb_theta_ci"]
             theta_str = f"{info['nb_theta']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
-            header_rows.append(("Theta", theta_str, "Method", info["nb_theta_method"]))
+            method = info["nb_theta_method"]
+            if "nb_profile_nll" in info:
+                method = f"{method}  NLL: {info['nb_profile_nll']:.4f}"
+            header_rows.append(("Theta", theta_str, "Method", method))
 
         # Tweedie p profile row
         if "tweedie_p" in info:
             ci = info["tweedie_p_ci"]
             p_str = f"{info['tweedie_p']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
-            header_rows.append(("Tweedie p", p_str, "Method", info["tweedie_p_method"]))
+            method = info["tweedie_p_method"]
+            if "tweedie_profile_nll" in info:
+                method = f"{method}  NLL: {info['tweedie_profile_nll']:.4f}"
+            header_rows.append(("Tweedie p", p_str, "Method", method))
         for k1, v1, k2, v2 in header_rows:
             right_label = f"{k2}:" if k2 else ""
             parts.append(
