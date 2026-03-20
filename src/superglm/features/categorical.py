@@ -65,6 +65,12 @@ class Categorical:
         self._base_level: str = ""
         self._non_base: list[str] = []
 
+    def __repr__(self) -> str:
+        n = len(self._levels)
+        if n:
+            return f"Categorical(base={self.base!r}, {n} levels, ref={self._base_level!r})"
+        return f"Categorical(base={self.base!r})"
+
     def build(
         self,
         x: NDArray,

@@ -82,6 +82,7 @@ class OrderedCategorical:
         self.penalty = penalty
         self.degree = degree
         self.n_knots = n_knots
+        self._ordered_levels: list[str] = []
 
         # Derive ordered levels and numeric values
         if values is not None:
@@ -106,6 +107,10 @@ class OrderedCategorical:
         self._spline = None
         if self.basis == "spline":
             self._init_spline()
+
+    def __repr__(self) -> str:
+        n = self._n_levels
+        return f"OrderedCategorical(basis={self.basis!r}, {n} levels, n_knots={self.n_knots})"
 
     def _init_spline(self) -> None:
         """Create the internal Spline object for spline mode."""

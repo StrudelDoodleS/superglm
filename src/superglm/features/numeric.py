@@ -17,6 +17,9 @@ class Numeric:
     The column is passed through without any transformation.
     """
 
+    def __repr__(self) -> str:
+        return "Numeric()"
+
     def build(
         self,
         x: NDArray[np.floating],

@@ -40,6 +40,9 @@ class Polynomial:
         self._lo: float = 0.0
         self._hi: float = 1.0
 
+    def __repr__(self) -> str:
+        return f"Polynomial(degree={self.degree})"
+
     def _scale(self, x: NDArray) -> NDArray:
         """Scale x to [-1, 1] using stored min/max."""
         span = self._hi - self._lo
