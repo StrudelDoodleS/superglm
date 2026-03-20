@@ -349,6 +349,7 @@ def estimate_nb_theta(
                 offset=offset_arr,
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
+                direct_solve=getattr(model, "_direct_solve", "auto"),
             )
         else:
             pirls_result = fit_pirls(
