@@ -298,18 +298,24 @@ class TweedieProfileResult:
     _objective: Any = field(default=None, repr=False)
     _ll_scale: float = field(default=0.0, repr=False)
 
+    _ci_cache: dict[float, tuple[float, float]] = field(default_factory=dict, repr=False)
+
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
         """Profile likelihood confidence interval for Tweedie p.
 
         Requires that the result was produced by ``estimate_tweedie_p``.
-        Each CI endpoint evaluation requires a PIRLS refit.
+        Results are cached so repeated calls (e.g. from summary()) are free.
         """
+        if alpha in self._ci_cache:
+            return self._ci_cache[alpha]
         if self._objective is None:
             raise RuntimeError(
                 "Profile CI requires the objective function. Use "
                 "estimate_tweedie_p() to produce this result."
             )
-        return profile_ci_p(self._objective, self.p_hat, self.nll, self._ll_scale, alpha=alpha)
+        result = profile_ci_p(self._objective, self.p_hat, self.nll, self._ll_scale, alpha=alpha)
+        self._ci_cache[alpha] = result
+        return result
 
     def profile_plot(
         self,
