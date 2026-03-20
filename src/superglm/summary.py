@@ -156,7 +156,7 @@ class ModelSummary:
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
             ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
             ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
-            ("Scale (phi)", _fmt(info["phi"]), "Lambda1", _fmt(info["lambda1"])),
+            ("Scale (phi)", _fmt(info["phi"]), "Selection Penalty", _fmt(info["lambda1"])),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
             ("AICc", _fmt(info["aicc"]), "BIC", _fmt(info["bic"])),
             ("EBIC", _fmt(info["ebic"]), "Converged", conv_str),
@@ -359,7 +359,14 @@ class ModelSummary:
         abbrevs = info.get("penalty_abbrevs", {})
         if abbrevs:
             lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
-        lines.append(_WALD_NOTE)
+        has_smooth = any(r.is_spline for r in self._coef_rows)
+        if has_smooth:
+            lines.append(_WALD_NOTE)
+        else:
+            lines.append(
+                "Parametric p-values are Wald approximations.\n"
+                "For borderline significance, use a likelihood ratio test."
+            )
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -398,7 +405,7 @@ class ModelSummary:
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
             ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
             ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
-            ("Scale (phi)", _fmt(info["phi"]), "Lambda1", _fmt(info["lambda1"])),
+            ("Scale (phi)", _fmt(info["phi"]), "Selection Penalty", _fmt(info["lambda1"])),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
             ("AICc", _fmt(info["aicc"]), "BIC", _fmt(info["bic"])),
             ("EBIC", _fmt(info["ebic"]), "Converged", conv_str),
@@ -560,10 +567,18 @@ class ModelSummary:
             f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
             f'color:#666;border:none;">{_SIG_LEGEND}</td></tr>'
         )
-        wald_html = _WALD_NOTE.replace("\n", "<br>")
+        has_smooth = any(r.is_spline for r in self._coef_rows)
+        if has_smooth:
+            note_text = _WALD_NOTE
+        else:
+            note_text = (
+                "Parametric p-values are Wald approximations.\n"
+                "For borderline significance, use a likelihood ratio test."
+            )
+        note_html = note_text.replace("\n", "<br>")
         parts.append(
             f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-            f'color:#888;font-style:italic;border:none;">{wald_html}</td></tr>'
+            f'color:#888;font-style:italic;border:none;">{note_html}</td></tr>'
         )
         parts.append("</table>")
         return "\n".join(parts)
