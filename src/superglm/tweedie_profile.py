@@ -218,6 +218,9 @@ def estimate_phi(
     of weights.
 
     where denom = df_resid if provided, else n_obs (i.e. no df correction).
+
+    Note: for frequency-weighted data, callers should pass
+    ``df_resid = sum(weights) - edf``, not ``n - edf``.
     """
     y = np.asarray(y, dtype=np.float64)
     mu = np.asarray(mu, dtype=np.float64)
@@ -602,7 +605,8 @@ def _estimate_tweedie_p_fit(
 
         eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
         mu = clip_mu(link.inverse(eta), dist)
-        df_resid = max(len(y_arr) - float(result.effective_df), 1.0)
+        # sum(weights) - edf for frequency-weighted data (matches statsmodels)
+        df_resid = max(float(np.sum(w_arr)) - float(result.effective_df), 1.0)
 
         phi, nll = _profile_phi(
             y_arr,
@@ -661,7 +665,7 @@ def _estimate_tweedie_p_fit(
         mu_final = clip_mu(link.inverse(eta), dist)
         edf_final = float(final_result.effective_df)
 
-    df_resid_final = max(len(y_arr) - float(edf_final), 1.0)
+    df_resid_final = max(float(np.sum(w_arr)) - float(edf_final), 1.0)
     phi_hat, _ = _profile_phi(
         y_arr,
         mu_final,
@@ -719,7 +723,7 @@ def _estimate_tweedie_p_reml(
         model.fit_reml(X, y, exposure=exposure, offset=offset)
 
         mu = np.maximum(model.predict(X), 1e-10)
-        df_resid = max(len(y_np) - float(model.result.effective_df), 1.0)
+        df_resid = max(float(np.sum(w_arr)) - float(model.result.effective_df), 1.0)
         phi, nll = _profile_phi(
             y_np,
             mu,
@@ -757,7 +761,7 @@ def _estimate_tweedie_p_reml(
         last_mu = np.maximum(model.predict(X), 1e-10)
         last_edf = float(model.result.effective_df)
 
-    df_resid_final = max(len(y_np) - float(last_edf), 1.0)
+    df_resid_final = max(float(np.sum(w_arr)) - float(last_edf), 1.0)
     phi_hat, _ = _profile_phi(
         y_np,
         last_mu,
