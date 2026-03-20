@@ -133,6 +133,16 @@ class SuperGLM:
             n_bins=n_bins,
         )
 
+    def __repr__(self) -> str:
+        family = type(self._distribution).__name__ if self._distribution else self.family
+        fitted = self._result is not None
+        if fitted:
+            n_params = int(self._result.effective_df)
+            dev = self._result.deviance
+            return f"SuperGLM(family={family}, fitted=True, {n_params} params, dev={dev:.1f})"
+        n_features = len(self._specs) if self._specs else "?"
+        return f"SuperGLM(family={family}, fitted=False, {n_features} features)"
+
     # ── Static / class helpers ────────────────────────────────────
 
     @staticmethod

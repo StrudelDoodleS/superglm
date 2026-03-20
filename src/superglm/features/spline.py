@@ -321,6 +321,15 @@ class _SplineBase:
         )
         self._n_basis = len(self._knots) - self.degree - 1
 
+    def __repr__(self) -> str:
+        cls = type(self).__name__
+        parts = [f"n_knots={self.n_knots}"]
+        if self.select:
+            parts.append("select=True")
+        if self.degree != 3:
+            parts.append(f"degree={self.degree}")
+        return f"{cls}({', '.join(parts)})"
+
     def _build_penalty(self) -> NDArray:
         """Return (K, K) penalty matrix. Subclasses must implement."""
         raise NotImplementedError
