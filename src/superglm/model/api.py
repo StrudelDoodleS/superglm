@@ -143,6 +143,11 @@ class SuperGLM:
         n_features = len(self._specs) if self._specs else "?"
         return f"SuperGLM(family={family}, fitted=False, {n_features} features)"
 
+    @property
+    def features(self) -> dict:
+        """Feature specs dict (column name → feature object)."""
+        return self._specs
+
     # ── Static / class helpers ────────────────────────────────────
 
     @staticmethod
