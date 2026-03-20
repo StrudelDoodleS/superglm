@@ -498,7 +498,7 @@ def _fit_common(
     wrapper._model.fit(
         X_df[feature_cols],
         y,
-        exposure=sample_weight,
+        sample_weight=sample_weight,
         offset=offset_array,
     )
 

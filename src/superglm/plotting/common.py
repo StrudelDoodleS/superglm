@@ -25,12 +25,12 @@ _KNOT_COLOR = "#006FDD"
 _CAT_BAR_COLOR = "#006FDD"
 
 
-def _exposure_kde(x_vals, exposure, grid, bw_factor=0.03):
-    """Weighted KDE for exposure distribution, returned on *grid*."""
+def _exposure_kde(x_vals, sample_weight, grid, bw_factor=0.03):
+    """Weighted KDE for sample_weight distribution, returned on *grid*."""
     bw = bw_factor * (grid[-1] - grid[0])
     diff = grid[:, None] - x_vals[None, :]
     kernel = np.exp(-0.5 * (diff / bw) ** 2)
-    density = kernel @ exposure
+    density = kernel @ sample_weight
     return density / density.max()  # normalise to [0, 1]
 
 

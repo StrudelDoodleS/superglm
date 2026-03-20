@@ -18,10 +18,12 @@ from superglm.group_matrix import (
 from superglm.links import stabilize_eta
 
 
-def _final_working_problem(model, y, exposure=None, offset=None):
+def _final_working_problem(model, y, sample_weight=None, offset=None):
     """Return the final PIRLS working weights/response residual."""
     y = np.asarray(y, dtype=np.float64)
-    weights = np.ones_like(y) if exposure is None else np.asarray(exposure, dtype=np.float64)
+    weights = (
+        np.ones_like(y) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    )
     offset_arr = np.zeros_like(y) if offset is None else np.asarray(offset, dtype=np.float64)
 
     beta = model.result.beta
@@ -85,7 +87,7 @@ class TestSolverTheoryInvariants:
                 "x2": Numeric(),
             },
         )
-        weighted.fit(X, y, exposure=weights)
+        weighted.fit(X, y, sample_weight=weights)
 
         idx = np.repeat(np.arange(len(X)), weights.astype(int))
         X_rep = X.iloc[idx].reset_index(drop=True)
@@ -162,7 +164,7 @@ class TestSolverTheoryInvariants:
             spline_penalty=0.0,
             features={"x1": Numeric(), "cat": Categorical(base="first")},
         )
-        model_a.fit(X, y, exposure=weights)
+        model_a.fit(X, y, sample_weight=weights)
 
         perm = rng.permutation(n)
         model_b = SuperGLM(
@@ -171,7 +173,7 @@ class TestSolverTheoryInvariants:
             spline_penalty=0.0,
             features={"x1": Numeric(), "cat": Categorical(base="first")},
         )
-        model_b.fit(X.iloc[perm].reset_index(drop=True), y[perm], exposure=weights[perm])
+        model_b.fit(X.iloc[perm].reset_index(drop=True), y[perm], sample_weight=weights[perm])
 
         np.testing.assert_allclose(model_a.result.intercept, model_b.result.intercept, atol=1e-10)
         np.testing.assert_allclose(model_a.result.beta, model_b.result.beta, atol=1e-10)

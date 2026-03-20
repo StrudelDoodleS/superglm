@@ -22,16 +22,16 @@ def sample_data():
     age = rng.uniform(18, 85, n)
     region = rng.choice(["A", "B", "C"], n, p=[0.3, 0.3, 0.4])
     density = rng.normal(5, 2, n)
-    exposure = rng.uniform(0.3, 1.0, n)
+    sample_weight = rng.uniform(0.3, 1.0, n)
     mu = np.exp(-2.0 + 0.01 * (age - 50) ** 2 / 100 + (region == "A") * 0.3)
-    y = rng.poisson(mu * exposure).astype(float)
+    y = rng.poisson(mu * sample_weight).astype(float)
     X = pd.DataFrame({"age": age, "region": region, "density": density})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 @pytest.fixture
 def fitted_model(sample_data):
-    X, y, exposure = sample_data
+    X, y, sample_weight = sample_data
     model = SuperGLM(
         penalty="group_lasso",
         selection_penalty=0.01,
@@ -41,7 +41,7 @@ def fitted_model(sample_data):
             "density": Numeric(),
         },
     )
-    model.fit(X, y, exposure=exposure)
+    model.fit(X, y, sample_weight=sample_weight)
     return model
 
 
@@ -282,7 +282,7 @@ class TestToDataFrame:
 
 class TestEnrichedSummary:
     def test_spline_row_has_edf(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
@@ -291,14 +291,14 @@ class TestEnrichedSummary:
                 "region": Categorical(base="first"),
             },
         )
-        model.fit(X, y, exposure=exposure)
-        m = model.metrics(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
+        m = model.metrics(X, y, sample_weight=sample_weight)
         s = m.summary()
         text = str(s)
         assert "edf=" in text
 
     def test_spline_row_has_lambda(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
@@ -307,14 +307,14 @@ class TestEnrichedSummary:
                 "region": Categorical(base="first"),
             },
         )
-        model.fit(X, y, exposure=exposure)
-        m = model.metrics(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
+        m = model.metrics(X, y, sample_weight=sample_weight)
         s = m.summary()
         text = str(s)
         assert "lam=" in text
 
     def test_spline_row_has_rank(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
@@ -323,12 +323,12 @@ class TestEnrichedSummary:
                 "region": Categorical(base="first"),
             },
         )
-        model.fit(X, y, exposure=exposure)
-        text = str(model.metrics(X, y, exposure=exposure).summary())
+        model.fit(X, y, sample_weight=sample_weight)
+        text = str(model.metrics(X, y, sample_weight=sample_weight).summary())
         assert "rank=" in text
 
     def test_non_spline_terms_unaffected(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
@@ -338,8 +338,8 @@ class TestEnrichedSummary:
                 "density": Numeric(),
             },
         )
-        model.fit(X, y, exposure=exposure)
-        m = model.metrics(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
+        m = model.metrics(X, y, sample_weight=sample_weight)
         s = m.summary()
         # Check that non-spline rows still have normal coef/se/z/p format
         text = str(s)
@@ -347,14 +347,14 @@ class TestEnrichedSummary:
         assert "density" in text
 
     def test_coef_rows_have_metadata(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
             features={"age": Spline(n_knots=10, penalty="ssp")},
         )
-        model.fit(X, y, exposure=exposure)
-        m = model.metrics(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
+        m = model.metrics(X, y, sample_weight=sample_weight)
         s = m.summary()
         spline_rows = [r for r in s._coef_rows if r.is_spline]
         assert len(spline_rows) >= 1
@@ -412,16 +412,16 @@ class TestModelDiagnosticsSplineKeys:
 
     def test_diagnostics_and_metrics_summary_agree(self, sample_data):
         """Both report the same edf/lambda for the same spline group."""
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
             features={"age": Spline(n_knots=10, penalty="ssp")},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
 
         diag = model.diagnostics()
-        rich = model.metrics(X, y, exposure=exposure).summary()
+        rich = model.metrics(X, y, sample_weight=sample_weight).summary()
         rich_row = next(r for r in rich._coef_rows if r.is_spline)
 
         assert diag["age"]["edf"] == rich_row.edf
@@ -438,25 +438,25 @@ class TestSplineKinds:
         [("bs", "BasisSpline"), ("ns", "NaturalSpline"), ("cr", "CubicRegressionSpline")],
     )
     def test_term_inference_spline_kind(self, sample_data, kind, expected_class):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
             features={"age": Spline(kind=kind, n_knots=10, penalty="ssp")},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("age")
         assert ti.spline.kind == expected_class
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
     def test_se_finite_all_kinds(self, sample_data, kind):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
             features={"age": Spline(kind=kind, n_knots=10, penalty="ssp")},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("age")
         assert np.all(np.isfinite(ti.se_log_relativity))
 
@@ -466,7 +466,7 @@ class TestSplineKinds:
 
 class TestInteractionInference:
     def test_spline_categorical_interaction(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.001,
@@ -476,7 +476,7 @@ class TestInteractionInference:
             },
             interactions=[("age", "region")],
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         ii = model.term_inference("age:region")
         assert isinstance(ii, InteractionInference)
         assert ii.kind == "spline_categorical"
@@ -492,26 +492,26 @@ class TestInteractionInference:
 class TestCenteringMetadata:
     def test_spline_default_mean_centering(self, sample_data):
         """Default centering='mean' reports centering_mode='mean' and has geo-mean 1."""
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
             features={"age": Spline(n_knots=10, penalty="ssp")},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("age")
         assert ti.centering_mode == "mean"
         assert abs(np.mean(ti.log_relativity)) < 1e-10
 
     def test_spline_native_training_mean_zero(self, sample_data):
         """centering='native' preserves SSP training-mean-zero."""
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
             features={"age": Spline(n_knots=10, penalty="ssp")},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("age", centering="native")
         assert ti.centering_mode == "training_mean_zero_unweighted"
 

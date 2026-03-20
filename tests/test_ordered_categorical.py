@@ -16,7 +16,7 @@ def age_band_data():
     n = 2000
     bands = ["18-25", "26-35", "36-45", "46-55", "56-65", "65+"]
     x = rng.choice(bands, n, p=[0.15, 0.25, 0.25, 0.20, 0.10, 0.05])
-    exposure = rng.uniform(0.3, 1.0, n)
+    sample_weight = rng.uniform(0.3, 1.0, n)
     midpoints = {
         "18-25": 21.5,
         "26-35": 30.5,
@@ -27,9 +27,9 @@ def age_band_data():
     }
     x_numeric = np.array([midpoints[v] for v in x])
     mu = np.exp(-2.0 + 0.01 * (x_numeric - 45) ** 2 / 100)
-    y = rng.poisson(mu * exposure).astype(float)
+    y = rng.poisson(mu * sample_weight).astype(float)
     X = pd.DataFrame({"age_band": x})
-    return X, y, exposure, midpoints, bands
+    return X, y, sample_weight, midpoints, bands
 
 
 @pytest.fixture
@@ -39,13 +39,13 @@ def ordinal_data():
     n = 1000
     levels = ["Low", "Medium", "High", "Very High"]
     x = rng.choice(levels, n, p=[0.3, 0.3, 0.25, 0.15])
-    exposure = rng.uniform(0.5, 1.0, n)
+    sample_weight = rng.uniform(0.5, 1.0, n)
     # True effect: monotone increasing
     effect = {"Low": 0.0, "Medium": 0.2, "High": 0.5, "Very High": 0.8}
     mu = np.exp(-1.5 + np.array([effect[v] for v in x]))
-    y = rng.poisson(mu * exposure).astype(float)
+    y = rng.poisson(mu * sample_weight).astype(float)
     X = pd.DataFrame({"risk": x})
-    return X, y, exposure, levels
+    return X, y, sample_weight, levels
 
 
 # ── Constructor Tests ─────────────────────────────────────────────
@@ -82,9 +82,9 @@ class TestConstructor:
 
 class TestSplineMode:
     def test_build_returns_groupinfo(self, age_band_data):
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         spec = OrderedCategorical(values=midpoints, basis="spline", n_knots=3)
-        result = spec.build(X["age_band"].values, exposure=exposure)
+        result = spec.build(X["age_band"].values, sample_weight=sample_weight)
         # Should return GroupInfo (not a list when select=False)
         from superglm.types import GroupInfo
 
@@ -93,26 +93,26 @@ class TestSplineMode:
         assert result.penalty_matrix is not None
 
     def test_build_select_returns_list(self, age_band_data):
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         spec = OrderedCategorical(values=midpoints, basis="spline", n_knots=3, select=True)
-        result = spec.build(X["age_band"].values, exposure=exposure)
+        result = spec.build(X["age_band"].values, sample_weight=sample_weight)
         assert isinstance(result, list)
         assert len(result) == 2  # linear + spline subgroups
 
     def test_transform_shape(self, age_band_data):
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         spec = OrderedCategorical(values=midpoints, basis="spline", n_knots=3)
-        spec.build(X["age_band"].values, exposure=exposure)
+        spec.build(X["age_band"].values, sample_weight=sample_weight)
         T = spec.transform(X["age_band"].values)
         assert T.shape[0] == len(X)
 
     def test_reconstruct_has_level_annotations(self, age_band_data):
-        X, y, exposure, midpoints, bands = age_band_data
+        X, y, sample_weight, midpoints, bands = age_band_data
         # Use full model pipeline so R_inv is set correctly
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         spec = model._specs["age_band"]
         beta_combined = model._result.beta[model._groups[0].sl]
         raw = spec.reconstruct(beta_combined)
@@ -128,9 +128,9 @@ class TestSplineMode:
         assert set(raw["levels"]) == set(bands)
 
     def test_unseen_level_raises(self, age_band_data):
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         spec = OrderedCategorical(values=midpoints, basis="spline")
-        spec.build(X["age_band"].values, exposure=exposure)
+        spec.build(X["age_band"].values, sample_weight=sample_weight)
         with pytest.raises(ValueError, match="unseen"):
             spec.transform(np.array(["UNKNOWN"]))
 
@@ -144,17 +144,17 @@ class TestSplineMode:
         """Spline mode should produce the same result as manual Spline on midpoints."""
         from superglm.features.spline import BasisSpline
 
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         x_vals = X["age_band"].values
         x_numeric = np.array([midpoints[v] for v in x_vals])
 
         # Manual spline
         manual_spline = BasisSpline(n_knots=3, degree=3, penalty="ssp")
-        manual_info = manual_spline.build(x_numeric, exposure=exposure)
+        manual_info = manual_spline.build(x_numeric, sample_weight=sample_weight)
 
         # OrderedCategorical
         spec = OrderedCategorical(values=midpoints, basis="spline", n_knots=3)
-        ocat_info = spec.build(x_vals, exposure=exposure)
+        ocat_info = spec.build(x_vals, sample_weight=sample_weight)
 
         # Same penalty matrix
         np.testing.assert_allclose(ocat_info.penalty_matrix, manual_info.penalty_matrix)
@@ -167,17 +167,17 @@ class TestSplineMode:
 
 class TestStepMode:
     def test_build_returns_groupinfo(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, exposure=exposure)
+        info = spec.build(X["risk"].values, sample_weight=sample_weight)
         from superglm.types import GroupInfo
 
         assert isinstance(info, GroupInfo)
 
     def test_penalty_shape(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, exposure=exposure)
+        info = spec.build(X["risk"].values, sample_weight=sample_weight)
         # K=4, base excluded → K-1=3 columns
         n_cols = len(levels) - 1
         assert info.n_cols == n_cols
@@ -185,9 +185,9 @@ class TestStepMode:
 
     def test_penalty_is_projected_d1td1(self, ordinal_data):
         """Penalty should be Z'D1'D1Z (projected first-difference)."""
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, exposure=exposure)
+        info = spec.build(X["risk"].values, sample_weight=sample_weight)
         K = len(levels)
         base_idx = spec._ordered_levels.index(spec._base_level)
         D1 = np.diff(np.eye(K), n=1, axis=0)
@@ -206,30 +206,30 @@ class TestStepMode:
         The base-to-neighbor difference makes the projected penalty full rank,
         unlike naive D1 on K-1 columns which has rank K-2.
         """
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, exposure=exposure)
+        info = spec.build(X["risk"].values, sample_weight=sample_weight)
         rank = np.linalg.matrix_rank(info.penalty_matrix)
         assert rank == len(levels) - 1  # full rank in (K-1) space
 
     def test_reparametrize_flag(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, exposure=exposure)
+        info = spec.build(X["risk"].values, sample_weight=sample_weight)
         assert info.reparametrize is True
         assert info.penalized is True
 
     def test_transform_shape(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step")
-        spec.build(X["risk"].values, exposure=exposure)
+        spec.build(X["risk"].values, sample_weight=sample_weight)
         T = spec.transform(X["risk"].values)
         assert T.shape == (len(X), len(levels) - 1)
 
     def test_reconstruct_format(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, exposure=exposure)
+        info = spec.build(X["risk"].values, sample_weight=sample_weight)
         beta = np.zeros(info.n_cols)
         raw = spec.reconstruct(beta)
         assert "base_level" in raw
@@ -239,16 +239,16 @@ class TestStepMode:
         assert set(raw["levels"]) == set(levels)
 
     def test_base_level_most_exposed(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step", base="most_exposed")
-        spec.build(X["risk"].values, exposure=exposure)
-        # Should pick the level with highest total exposure
+        spec.build(X["risk"].values, sample_weight=sample_weight)
+        # Should pick the level with highest total sample_weight
         assert spec._base_level in levels
 
     def test_base_level_explicit(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step", base="High")
-        spec.build(X["risk"].values, exposure=exposure)
+        spec.build(X["risk"].values, sample_weight=sample_weight)
         assert spec._base_level == "High"
 
 
@@ -321,9 +321,9 @@ class TestEdgeCases:
         assert spec._level_to_value == {"Only": 0.0}
 
     def test_unseen_level_at_predict(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         spec = OrderedCategorical(order=levels, basis="step")
-        spec.build(X["risk"].values, exposure=exposure)
+        spec.build(X["risk"].values, sample_weight=sample_weight)
         with pytest.raises(ValueError, match="unseen"):
             spec.transform(np.array(["UNKNOWN"]))
 
@@ -333,42 +333,42 @@ class TestEdgeCases:
 
 class TestIntegrationSpline:
     def test_fit_predict(self, age_band_data):
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         preds = model.predict(X)
         assert preds.shape == (len(X),)
         assert np.all(preds > 0)
 
     def test_summary(self, age_band_data):
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         s = model.summary()
         text = str(s)
         assert "age_band" in text
 
     def test_relativities(self, age_band_data):
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         rels = model.relativities()
         assert "age_band" in rels
         df = rels["age_band"]
         assert "relativity" in df.columns
 
     def test_term_inference(self, age_band_data):
-        X, y, exposure, midpoints, bands = age_band_data
+        X, y, sample_weight, midpoints, bands = age_band_data
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("age_band")
         # Primary output is categorical (K levels), not a continuous curve
         assert ti.kind == "categorical"
@@ -378,11 +378,11 @@ class TestIntegrationSpline:
 
     def test_spline_se_at_levels(self, age_band_data):
         """Spline mode SEs should be at the K category positions, not on a grid."""
-        X, y, exposure, midpoints, bands = age_band_data
+        X, y, sample_weight, midpoints, bands = age_band_data
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("age_band")
         se = ti.se_log_relativity
         assert se is not None
@@ -395,11 +395,11 @@ class TestIntegrationSpline:
 
     def test_smooth_curve_for_plotting(self, age_band_data):
         """Spline mode should provide a smooth_curve for plotting."""
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("age_band")
         curve = ti.smooth_curve
         assert curve is not None
@@ -413,11 +413,11 @@ class TestIntegrationSpline:
 
     def test_relativities_per_level(self, age_band_data):
         """relativities() should return per-level output, not a continuous curve."""
-        X, y, exposure, midpoints, bands = age_band_data
+        X, y, sample_weight, midpoints, bands = age_band_data
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         rels = model.relativities(with_se=True)
         df = rels["age_band"]
         assert "level" in df.columns
@@ -428,40 +428,40 @@ class TestIntegrationSpline:
 
 class TestIntegrationStep:
     def test_fit_predict(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         model = SuperGLM(
             features={"risk": OrderedCategorical(order=levels, basis="step")},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         preds = model.predict(X)
         assert preds.shape == (len(X),)
         assert np.all(preds > 0)
 
     def test_summary(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         model = SuperGLM(
             features={"risk": OrderedCategorical(order=levels, basis="step")},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         s = model.summary()
         text = str(s)
         assert "risk" in text
 
     def test_relativities(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         model = SuperGLM(
             features={"risk": OrderedCategorical(order=levels, basis="step")},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         rels = model.relativities()
         assert "risk" in rels
 
     def test_term_inference(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         model = SuperGLM(
             features={"risk": OrderedCategorical(order=levels, basis="step")},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("risk")
         assert ti.kind == "categorical"
         assert ti.levels is not None
@@ -469,11 +469,11 @@ class TestIntegrationStep:
 
     def test_step_se_numerically_reasonable(self, ordinal_data):
         """Step mode SEs should be finite, positive for non-base, and sensible size."""
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         model = SuperGLM(
             features={"risk": OrderedCategorical(order=levels, basis="step")},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("risk")
         se = ti.se_log_relativity
         assert se is not None
@@ -492,15 +492,15 @@ class TestIntegrationStep:
         n = 2000
         levels = ["A", "B", "C", "D", "E"]
         x = rng.choice(levels, n)
-        exposure = rng.uniform(0.5, 1.0, n)
+        sample_weight = rng.uniform(0.5, 1.0, n)
         effect = {"A": 0.0, "B": 0.1, "C": 0.2, "D": 0.3, "E": 0.5}
         mu = np.exp(-1.5 + np.array([effect[v] for v in x]))
-        y = rng.poisson(mu * exposure).astype(float)
+        y = rng.poisson(mu * sample_weight).astype(float)
         X = pd.DataFrame({"cat": x})
         model = SuperGLM(
             features={"cat": OrderedCategorical(order=levels, basis="step", base="C")},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("cat")
         assert ti.active
         # Relativities should be monotonically non-decreasing (true effect is monotone)
@@ -510,11 +510,11 @@ class TestIntegrationStep:
 
 class TestIntegrationReml:
     def test_fit_reml_spline(self, age_band_data):
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
-        model.fit_reml(X, y, exposure=exposure)
+        model.fit_reml(X, y, sample_weight=sample_weight)
         assert model._reml_result is not None
         assert model._reml_result.converged
         assert len(model._reml_result.lambdas) > 0
@@ -522,18 +522,18 @@ class TestIntegrationReml:
         assert np.all(preds > 0)
 
     def test_fit_reml_step(self, ordinal_data):
-        X, y, exposure, levels = ordinal_data
+        X, y, sample_weight, levels = ordinal_data
         model = SuperGLM(
             features={"risk": OrderedCategorical(order=levels, basis="step")},
         )
-        model.fit_reml(X, y, exposure=exposure)
+        model.fit_reml(X, y, sample_weight=sample_weight)
         assert model._reml_result is not None
         assert model._reml_result.converged
         preds = model.predict(X)
         assert np.all(preds > 0)
 
     def test_fit_reml_select(self, age_band_data):
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         model = SuperGLM(
             features={
                 "age_band": OrderedCategorical(
@@ -541,7 +541,7 @@ class TestIntegrationReml:
                 )
             },
         )
-        model.fit_reml(X, y, exposure=exposure)
+        model.fit_reml(X, y, sample_weight=sample_weight)
         assert model._reml_result is not None
         assert model._reml_result.converged
 
@@ -549,7 +549,7 @@ class TestIntegrationReml:
 class TestIntegrationMixed:
     def test_ocat_with_other_features(self, age_band_data):
         """OrderedCategorical works alongside other feature types."""
-        X, y, exposure, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, _ = age_band_data
         rng = np.random.default_rng(42)
         X = X.copy()
         X["region"] = rng.choice(["A", "B", "C"], len(X))
@@ -559,7 +559,7 @@ class TestIntegrationMixed:
                 "region": Categorical(base="first"),
             },
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         preds = model.predict(X)
         assert preds.shape == (len(X),)
         assert np.all(preds > 0)

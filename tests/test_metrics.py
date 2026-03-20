@@ -39,7 +39,7 @@ def fitted_poisson(poisson_data):
         selection_penalty=0.001,
         features={"x1": Numeric(), "x2": Numeric()},
     )
-    model.fit(X, y, exposure=w)
+    model.fit(X, y, sample_weight=w)
     return model, X, y, w
 
 
@@ -47,7 +47,7 @@ def fitted_poisson(poisson_data):
 def metrics_obj(fitted_poisson):
     """ModelMetrics from the fitted Poisson model."""
     model, X, y, w = fitted_poisson
-    return model.metrics(X, y, exposure=w)
+    return model.metrics(X, y, sample_weight=w)
 
 
 # ── Log-likelihood ────────────────────────────────────────────────
@@ -489,8 +489,8 @@ class TestSplineIntegration:
             selection_penalty=0.01,
             features={"x": Spline(n_knots=8, penalty="ssp")},
         )
-        model.fit(X, y, exposure=w)
-        m = model.metrics(X, y, exposure=w)
+        model.fit(X, y, sample_weight=w)
+        m = model.metrics(X, y, sample_weight=w)
 
         # All properties should be accessible without error
         assert np.isfinite(m.aic)
@@ -517,7 +517,7 @@ class TestConvenienceAccessor:
     def test_model_metrics_method(self, fitted_poisson):
         """SuperGLM.metrics() returns a ModelMetrics object."""
         model, X, y, w = fitted_poisson
-        m = model.metrics(X, y, exposure=w)
+        m = model.metrics(X, y, sample_weight=w)
         assert isinstance(m, ModelMetrics)
 
 
@@ -551,7 +551,7 @@ class TestCoefficientSE:
     def test_se_reasonable_magnitude(self, fitted_poisson):
         """SEs should be much smaller than coefficients for well-determined params."""
         model, X, y, w = fitted_poisson
-        m = model.metrics(X, y, exposure=w)
+        m = model.metrics(X, y, sample_weight=w)
         for name in ["x1", "x2"]:
             se = m.coefficient_se[name][0]
             coef = abs(model.result.beta[next(g for g in model._groups if g.name == name).sl][0])
@@ -595,7 +595,7 @@ class TestFeatureSE:
     def test_numeric_feature_se(self, fitted_poisson):
         """feature_se for numeric returns a scalar SE."""
         model, X, y, w = fitted_poisson
-        m = model.metrics(X, y, exposure=w)
+        m = model.metrics(X, y, sample_weight=w)
         result = m.feature_se("x1")
         assert "se_coef" in result
         assert result["se_coef"] > 0
@@ -614,8 +614,8 @@ class TestFeatureSE:
             selection_penalty=0.01,
             features={"x": Spline(n_knots=8, penalty="ssp")},
         )
-        model.fit(X, y, exposure=w)
-        m = model.metrics(X, y, exposure=w)
+        model.fit(X, y, sample_weight=w)
+        m = model.metrics(X, y, sample_weight=w)
 
         result = m.feature_se("x", n_points=100)
         assert "x" in result
@@ -976,10 +976,10 @@ class TestPolynomialSummary:
         rng = np.random.default_rng(123)
         n = 400
         age = rng.uniform(18, 90, n)
-        exposure = rng.uniform(0.3, 1.0, n)
+        sample_weight = rng.uniform(0.3, 1.0, n)
         age_s = (age - 50.0) / 20.0
         mu = np.exp(-1.8 + 0.35 * age_s - 0.25 * age_s**2 + 0.08 * age_s**3)
-        y = rng.poisson(mu * exposure).astype(float)
+        y = rng.poisson(mu * sample_weight).astype(float)
         X = pd.DataFrame({"age": age})
 
         model = SuperGLM(
@@ -987,7 +987,7 @@ class TestPolynomialSummary:
             selection_penalty=0.001,
             features={"age": Polynomial(degree=3)},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
 
         text = str(model.summary())
         html = model.summary()._repr_html_()
@@ -1153,7 +1153,7 @@ class TestModelSummaryAPI:
             model.summary()
 
     def test_summary_immune_to_caller_mutation(self, fitted):
-        """Mutating caller's y/exposure after fit must not change summary."""
+        """Mutating caller's y/sample_weight after fit must not change summary."""
         model, X, y = fitted
         ll_before = model.summary()["information_criteria"]["log_likelihood"]
 

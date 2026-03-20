@@ -41,7 +41,7 @@ model.fit(df, y, sample_weight=exposure)
 
 ## Weights and offsets
 
-`sample_weight=` is interpreted as **exposure / frequency weight** in insurance settings, not inverse-variance weight. The older `exposure=` keyword is still accepted as a backward-compatible alias.
+`sample_weight=` is interpreted as **exposure / frequency weight** in insurance settings, not inverse-variance weight. The `exposure=` alias has been removed — use `sample_weight=` only.
 
 Two common patterns for count models:
 

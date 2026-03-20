@@ -23,7 +23,7 @@ class Numeric:
     def build(
         self,
         x: NDArray[np.floating],
-        exposure: NDArray[np.floating] | None = None,
+        sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
         """Build a single-column design matrix."""
         x = np.asarray(x, dtype=np.float64).ravel()

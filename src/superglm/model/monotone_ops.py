@@ -8,10 +8,9 @@ import numpy as np
 def apply_monotone_postfit(
     model,
     X,
-    exposure=None,
+    sample_weight=None,
     offset=None,
     *,
-    sample_weight=None,
     n_grid: int = 500,
 ):
     """Find all monotone-annotated splines, repair them, store results.
@@ -25,7 +24,7 @@ def apply_monotone_postfit(
         A fitted model.
     X : DataFrame
         Training data (used for grid weight computation).
-    exposure, sample_weight : array-like, optional
+    sample_weight, sample_weight : array-like, optional
         Frequency weights.
     offset : array-like, optional
         Offset term.
@@ -39,11 +38,6 @@ def apply_monotone_postfit(
     """
     from superglm.constraints import MonotoneRepairer
     from superglm.features.spline import _SplineBase
-    from superglm.model.base import resolve_sample_weight_alias
-
-    exposure = resolve_sample_weight_alias(
-        exposure, sample_weight, method_name="apply_monotone_postfit()"
-    )
 
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling apply_monotone_postfit().")

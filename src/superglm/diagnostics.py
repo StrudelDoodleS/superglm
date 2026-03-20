@@ -22,8 +22,6 @@ if TYPE_CHECKING:
 def term_importance(
     model,
     X: pd.DataFrame,
-    exposure: NDArray | None = None,
-    *,
     sample_weight: NDArray | None = None,
 ) -> pd.DataFrame:
     """Weighted variance of each term's contribution to eta.
@@ -38,7 +36,7 @@ def term_importance(
         A fitted model.
     X : DataFrame
         Data to evaluate on (typically training data).
-    exposure, sample_weight : array-like, optional
+    sample_weight, sample_weight : array-like, optional
         Frequency weights for weighted variance.
 
     Returns
@@ -48,15 +46,12 @@ def term_importance(
         edf, lambda, group_norm.
     """
     from superglm.features.spline import _SplineBase
-    from superglm.model.base import resolve_sample_weight_alias
-
-    exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="term_importance()")
 
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling term_importance().")
 
     beta = model.result.beta
-    weights = exposure if exposure is not None else np.ones(len(X))
+    weights = sample_weight if sample_weight is not None else np.ones(len(X))
     w_sum = np.sum(weights)
     group_edf = model._group_edf or {}
     reml_lam = getattr(model, "_reml_lambdas", None) or {}
@@ -135,10 +130,9 @@ def term_drop_diagnostics(
     model,
     X: pd.DataFrame,
     y: NDArray,
-    exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
     offset: NDArray | None = None,
     *,
-    sample_weight: NDArray | None = None,
     mode: str = "refit",
     X_val: pd.DataFrame | None = None,
     y_val: NDArray | None = None,
@@ -152,26 +146,21 @@ def term_drop_diagnostics(
         ``"holdout"``: zeros each term's contribution on validation set,
         computes loss delta without refitting.
     """
-    from superglm.model.base import resolve_sample_weight_alias
-
-    exposure = resolve_sample_weight_alias(
-        exposure, sample_weight, method_name="term_drop_diagnostics()"
-    )
 
     if mode == "refit":
-        return _drop_term_refit(model, X, y, exposure, offset)
+        return _drop_term_refit(model, X, y, sample_weight, offset)
     elif mode == "holdout":
         if X_val is None or y_val is None:
             raise ValueError("mode='holdout' requires X_val and y_val.")
-        return _drop_term_holdout(model, X_val, y_val, exposure)
+        return _drop_term_holdout(model, X_val, y_val, sample_weight)
     else:
         raise ValueError(f"mode must be 'refit' or 'holdout', got {mode!r}")
 
 
-def _drop_term_refit(model, X, y, exposure, offset) -> pd.DataFrame:
+def _drop_term_refit(model, X, y, sample_weight, offset) -> pd.DataFrame:
     """Refit-based drop-term diagnostics using drop1()."""
 
-    drop1_df = model.drop1(X, y, exposure=exposure, offset=offset)
+    drop1_df = model.drop1(X, y, offset=offset)
 
     # Compute IC deltas
     full_ll = model._fit_stats.log_likelihood if model._fit_stats else 0.0
@@ -190,7 +179,7 @@ def _drop_term_refit(model, X, y, exposure, offset) -> pd.DataFrame:
     return result
 
 
-def _drop_term_holdout(model, X_val, y_val, exposure) -> pd.DataFrame:
+def _drop_term_holdout(model, X_val, y_val, sample_weight) -> pd.DataFrame:
     """Holdout-based drop-term diagnostics (zero each term, compute loss delta)."""
 
     if model._result is None:
@@ -199,7 +188,7 @@ def _drop_term_holdout(model, X_val, y_val, exposure) -> pd.DataFrame:
     beta = model.result.beta.copy()
     mu_full = model.predict(X_val)
     dist = model._distribution
-    w = exposure if exposure is not None else np.ones(len(y_val))
+    w = sample_weight if sample_weight is not None else np.ones(len(y_val))
 
     # Full model deviance
     y_arr = np.asarray(y_val, dtype=np.float64)
@@ -267,8 +256,6 @@ class SplineRedundancyReport:
 def spline_redundancy(
     model,
     X: pd.DataFrame,
-    exposure: NDArray | None = None,
-    *,
     sample_weight: NDArray | None = None,
 ) -> dict[str, SplineRedundancyReport]:
     """Spline redundancy diagnostics for all spline features.
@@ -276,11 +263,6 @@ def spline_redundancy(
     Diagnostic-only. No auto-pruning. Interpretation: "try lower k and refit".
     """
     from superglm.features.spline import _SplineBase
-    from superglm.model.base import resolve_sample_weight_alias
-
-    exposure = resolve_sample_weight_alias(
-        exposure, sample_weight, method_name="spline_redundancy()"
-    )
 
     if model._result is None:
         raise RuntimeError("Model must be fitted.")

@@ -41,7 +41,7 @@ def _setup(family, seed=42):
     )
     m.fit(df, y)
 
-    exposure = np.ones(n)
+    sample_weight = np.ones(n)
     offset_arr = np.zeros(n)
     lambdas = {"x1": 10.0, "x2": 0.5}
 
@@ -58,7 +58,7 @@ def _setup(family, seed=42):
     pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
         X=m._dm,
         y=y,
-        weights=exposure,
+        weights=sample_weight,
         family=m._distribution,
         link=m._link,
         groups=m._groups,
@@ -78,7 +78,7 @@ def _setup(family, seed=42):
     return (
         m,
         y,
-        exposure,
+        sample_weight,
         offset_arr,
         lambdas,
         reml_groups,
@@ -96,7 +96,7 @@ def _setup(family, seed=42):
 def _full_outer_fd_hessian(
     m,
     y,
-    exposure,
+    sample_weight,
     offset_arr,
     lambdas,
     reml_groups,
@@ -120,7 +120,7 @@ def _full_outer_fd_hessian(
             r_pert, inv_pert, xtwx_pert = fit_irls_direct(
                 X=m._dm,
                 y=y,
-                weights=exposure,
+                weights=sample_weight,
                 family=m._distribution,
                 link=m._link,
                 groups=m._groups,
@@ -156,7 +156,7 @@ class TestIFTHessian:
         (
             m,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             lambdas,
             reml_groups,
@@ -193,7 +193,7 @@ class TestIFTHessian:
         fd_hess = _full_outer_fd_hessian(
             m,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             lambdas,
             reml_groups,
@@ -213,7 +213,7 @@ class TestIFTHessian:
         (
             m,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             lambdas,
             reml_groups,
@@ -250,7 +250,7 @@ class TestIFTHessian:
         fd_hess = _full_outer_fd_hessian(
             m,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             lambdas,
             reml_groups,

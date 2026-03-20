@@ -237,7 +237,7 @@ def fit_irls_direct(
     y : (n,) array
         Response variable.
     weights : (n,) array
-        Frequency weights / exposure.
+        Frequency weights / sample_weight.
     family : Distribution
         GLM family (Poisson, Gamma, NB2, etc.).
     link : Link

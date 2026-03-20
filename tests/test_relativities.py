@@ -21,16 +21,16 @@ def sample_data():
     age = rng.uniform(18, 85, n)
     region = rng.choice(["A", "B", "C"], n, p=[0.3, 0.3, 0.4])
     density = rng.normal(5, 2, n)
-    exposure = rng.uniform(0.3, 1.0, n)
+    sample_weight = rng.uniform(0.3, 1.0, n)
     mu = np.exp(-2.0 + 0.01 * (age - 50) ** 2 / 100 + (region == "A") * 0.3)
-    y = rng.poisson(mu * exposure).astype(float)
+    y = rng.poisson(mu * sample_weight).astype(float)
     X = pd.DataFrame({"age": age, "region": region, "density": density})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 @pytest.fixture
 def fitted_model(sample_data):
-    X, y, exposure = sample_data
+    X, y, sample_weight = sample_data
     model = SuperGLM(
         penalty="group_lasso",
         selection_penalty=0.01,
@@ -40,7 +40,7 @@ def fitted_model(sample_data):
             "density": Numeric(),
         },
     )
-    model.fit(X, y, exposure=exposure)
+    model.fit(X, y, sample_weight=sample_weight)
     return model
 
 
@@ -49,15 +49,15 @@ def polynomial_model():
     rng = np.random.default_rng(123)
     n = 400
     age = rng.uniform(18, 90, n)
-    exposure = rng.uniform(0.4, 1.2, n)
+    sample_weight = rng.uniform(0.4, 1.2, n)
     age_s = (age - 50.0) / 20.0
     mu = np.exp(-1.8 + 0.35 * age_s - 0.25 * age_s**2)
-    y = rng.poisson(mu * exposure).astype(float)
+    y = rng.poisson(mu * sample_weight).astype(float)
     X = pd.DataFrame({"age": age})
 
     model = SuperGLM(features={"age": Polynomial(degree=2)})
-    model.fit(X, y, exposure=exposure)
-    return X, exposure, model
+    model.fit(X, y, sample_weight=sample_weight)
+    return X, sample_weight, model
 
 
 class TestRelativities:
@@ -144,8 +144,8 @@ class TestPlotRelativities:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        X, y, exposure = sample_data
-        fig = fitted_model.plot(X=X, sample_weight=exposure)
+        X, y, sample_weight = sample_data
+        fig = fitted_model.plot(X=X, sample_weight=sample_weight)
         assert isinstance(fig, Figure)
         # Twin axes created for spline (age) and categorical (region) → extra axes
         all_axes = fig.get_axes()
@@ -157,9 +157,9 @@ class TestPlotRelativities:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         terms = [fitted_model.term_inference(n) for n in ("age", "region", "density")]
-        fig = plot_relativities(terms, X=X, exposure=exposure)
+        fig = plot_relativities(terms, X=X, sample_weight=sample_weight)
         assert isinstance(fig, Figure)
 
     def test_empty_list(self):
@@ -291,10 +291,10 @@ class TestPlotRelativitiesNew:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         fig = fitted_model.plot(
             X=X,
-            sample_weight=exposure,
+            sample_weight=sample_weight,
             show_density=True,
         )
         assert isinstance(fig, Figure)
@@ -342,14 +342,14 @@ class TestPlotRelativitiesNew:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         # fitted_model has spline (age), categorical (region), numeric (density)
-        fig = fitted_model.plot(X=X, sample_weight=exposure, show_density=True)
+        fig = fitted_model.plot(X=X, sample_weight=sample_weight, show_density=True)
         assert isinstance(fig, Figure)
 
         visible = [ax for ax in fig.get_axes() if ax.get_visible()]
         # Spline (age): main + density strip = 2
-        # Categorical (region): main + twin exposure axis = 2 (spans both grid rows)
+        # Categorical (region): main + twin sample_weight axis = 2 (spans both grid rows)
         # Numeric (density): main + density strip = 2
         # + 1 hidden unused grid cell
         assert len(visible) >= 5, f"Expected >= 5 visible axes, got {len(visible)}"
@@ -441,8 +441,8 @@ class TestPlotRelativity:
 
         matplotlib.use("Agg")
 
-        X, y, exposure = sample_data
-        fig = fitted_model.plot("age", X=X, sample_weight=exposure)
+        X, y, sample_weight = sample_data
+        fig = fitted_model.plot("age", X=X, sample_weight=sample_weight)
         # Main panel + density strip = 2 axes
         assert len(fig.get_axes()) >= 2
 
@@ -464,16 +464,16 @@ class TestPlotRelativity:
 
         matplotlib.use("Agg")
 
-        X, y, exposure = sample_data
-        fig = fitted_model.plot("region", X=X, sample_weight=exposure)
-        # Twin axis for exposure bars → 2 axes total
+        X, y, sample_weight = sample_data
+        fig = fitted_model.plot("region", X=X, sample_weight=sample_weight)
+        # Twin axis for sample_weight bars → 2 axes total
         assert len(fig.get_axes()) >= 2
         ax2 = fig.get_axes()[1]
         assert ax2.get_ylabel() == "Weight"
         assert len(ax2.get_yticks()) > 0
         ti = fitted_model.term_inference("region")
         expected = (
-            pd.DataFrame({"level": X["region"], "weight": exposure})
+            pd.DataFrame({"level": X["region"], "weight": sample_weight})
             .groupby("level", sort=False)["weight"]
             .sum()
         )
@@ -495,9 +495,9 @@ class TestPlotRelativity:
 
         matplotlib.use("Agg")
 
-        X, y, exposure = sample_data
-        fig = fitted_model.plot("density", X=X, sample_weight=exposure)
-        # Twin axis for exposure histogram → 2 axes total
+        X, y, sample_weight = sample_data
+        fig = fitted_model.plot("density", X=X, sample_weight=sample_weight)
+        # Twin axis for sample_weight histogram → 2 axes total
         assert len(fig.get_axes()) >= 2
 
     def test_standalone_plot_term(self, fitted_model):
@@ -516,8 +516,8 @@ class TestPlotRelativity:
         matplotlib.use("Agg")
         from matplotlib.figure import Figure
 
-        X, exposure, model = polynomial_model
-        fig = model.plot("age", X=X, sample_weight=exposure)
+        X, sample_weight, model = polynomial_model
+        fig = model.plot("age", X=X, sample_weight=sample_weight)
         assert isinstance(fig, Figure)
 
     def test_polynomial_term_inference_matches_grid(self, polynomial_model):

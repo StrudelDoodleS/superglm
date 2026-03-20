@@ -234,7 +234,7 @@ def estimate_nb_theta(
     model,
     X,
     y,
-    exposure=None,
+    sample_weight=None,
     offset=None,
     *,
     theta_bounds: tuple[float, float] = (0.1, 50.0),
@@ -259,10 +259,10 @@ def estimate_nb_theta(
         Feature matrix.
     y : array-like
         Response variable (counts).
-    exposure : array-like, optional
-        Frequency weights (exposure). Must be frequency weights, not
+    sample_weight : array-like, optional
+        Frequency weights (sample_weight). Must be frequency weights, not
         variance weights — theta estimation assumes each observation's
-        log-likelihood contribution is scaled by its exposure.
+        log-likelihood contribution is scaled by its sample_weight.
     offset : array-like, optional
         Offset added to the linear predictor.
     theta_bounds : tuple
@@ -292,14 +292,14 @@ def estimate_nb_theta(
 
     # --- One-time setup: build design matrix and calibrate lambda ---
     if model._splines is not None and not model._specs:
-        model._auto_detect_features(X, exposure)
+        model._auto_detect_features(X, sample_weight)
 
     # Temporary theta for _build_design_matrix (DM doesn't depend on theta)
     from superglm.distributions import NegativeBinomial
 
     saved_family = model.family
     model.family = NegativeBinomial(theta=1.0)
-    y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, exposure, offset)
+    y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, sample_weight, offset)
     model.family = saved_family
 
     if model.penalty.lambda1 is None:

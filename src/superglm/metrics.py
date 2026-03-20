@@ -42,7 +42,7 @@ def _penalised_xtwx_inv(
     Parameters
     ----------
     beta : (p,) array — full coefficient vector.
-    W : (n,) array — working weights (dmu_deta² / V, exposure-scaled).
+    W : (n,) array — working weights (dmu_deta² / V, sample_weight-scaled).
     group_matrices : list of GroupMatrix — design matrices per group.
     groups : list of GroupSlice — slices into beta for each group.
     lambda2 : float or dict[str, float]
@@ -692,8 +692,8 @@ class ModelMetrics:
         Feature matrix used for fitting (or evaluation).
     y : array-like
         Response variable.
-    exposure : array-like, optional
-        Observation weights / exposure.
+    sample_weight : array-like, optional
+        Observation weights / sample_weight.
     offset : array-like, optional
         Offset term.
     """
@@ -703,7 +703,7 @@ class ModelMetrics:
         model: SuperGLM,
         X=None,
         y=None,
-        exposure=None,
+        sample_weight=None,
         offset=None,
         *,
         _mu: NDArray | None = None,
@@ -717,7 +717,9 @@ class ModelMetrics:
 
         self._y = np.asarray(y, dtype=np.float64)
         n = len(self._y)
-        self._weights = np.ones(n) if exposure is None else np.asarray(exposure, dtype=np.float64)
+        self._weights = (
+            np.ones(n) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+        )
         self._offset = np.zeros(n) if offset is None else np.asarray(offset, dtype=np.float64)
 
         if _mu is not None:

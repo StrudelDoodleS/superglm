@@ -136,15 +136,17 @@ class OrderedCategorical:
         """Map categorical values to their numeric representations (vectorized)."""
         return pd.Series(x).map(self._level_to_value).values.astype(np.float64)
 
-    def _choose_base(self, x: NDArray, exposure: NDArray | None) -> None:
+    def _choose_base(self, x: NDArray, sample_weight: NDArray | None) -> None:
         """Choose the base level (step mode)."""
         if self._base_level and self._base_level in self._ordered_levels:
             return
 
-        if self.base == "most_exposed" and exposure is not None:
-            exp_by_level = {lev: float(exposure[x == lev].sum()) for lev in self._ordered_levels}
+        if self.base == "most_exposed" and sample_weight is not None:
+            exp_by_level = {
+                lev: float(sample_weight[x == lev].sum()) for lev in self._ordered_levels
+            }
             self._base_level = max(exp_by_level, key=exp_by_level.get)
-        elif self.base == "most_exposed" and exposure is None:
+        elif self.base == "most_exposed" and sample_weight is None:
             self._base_level = self._ordered_levels[0]
         elif self.base == "first":
             self._base_level = self._ordered_levels[0]
@@ -160,25 +162,27 @@ class OrderedCategorical:
     def build(
         self,
         x: NDArray,
-        exposure: NDArray[np.floating] | None = None,
+        sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo | list[GroupInfo]:
         """Build design columns from ordered categorical data."""
         x = np.asarray(x).ravel()
         _validate_categorical_levels(x, self._known_levels)
 
         if self.basis == "spline":
-            return self._build_spline(x, exposure)
+            return self._build_spline(x, sample_weight)
         else:
-            return self._build_step(x, exposure)
+            return self._build_step(x, sample_weight)
 
-    def _build_spline(self, x: NDArray, exposure: NDArray | None) -> GroupInfo | list[GroupInfo]:
+    def _build_spline(
+        self, x: NDArray, sample_weight: NDArray | None
+    ) -> GroupInfo | list[GroupInfo]:
         """Spline mode: map to numeric, delegate to internal Spline."""
         x_numeric = self._map_to_numeric(x)
-        return self._spline.build(x_numeric, exposure=exposure)
+        return self._spline.build(x_numeric)
 
-    def _build_step(self, x: NDArray, exposure: NDArray | None) -> GroupInfo:
+    def _build_step(self, x: NDArray, sample_weight: NDArray | None) -> GroupInfo:
         """Step mode: one-hot with first-difference penalty."""
-        self._choose_base(x, exposure)
+        self._choose_base(x, sample_weight)
         n = len(x)
         K = self._n_levels
         n_cols = len(self._non_base)  # K - 1

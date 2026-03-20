@@ -13,19 +13,15 @@ def estimate_p(
     model,
     X,
     y,
-    exposure=None,
+    sample_weight=None,
     offset=None,
     *,
-    sample_weight=None,
     fit_mode="fit",
     phi_method="pearson",
     **kwargs,
 ):
     """Estimate Tweedie p via profile likelihood, refit, and return result."""
-    from superglm.model.base import resolve_sample_weight_alias
     from superglm.tweedie_profile import estimate_tweedie_p
-
-    exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="estimate_p()")
 
     # Resolve to internal method name: "fit" or "fit_reml"
     _VALID_FIT_MODES = {"fit", "reml", "inherit"}
@@ -47,7 +43,7 @@ def estimate_p(
         model,
         X,
         y,
-        exposure=exposure,
+        sample_weight=sample_weight,
         offset=offset,
         fit_mode=resolved_mode,
         phi_method=phi_method,
@@ -58,9 +54,9 @@ def estimate_p(
 
     # Refit with the same regime used for profiling
     if resolved_mode == "fit_reml":
-        model.fit_reml(X, y, exposure=exposure, offset=offset)
+        model.fit_reml(X, y, offset=offset)
     else:
-        model.fit(X, y, exposure=exposure, offset=offset)
+        model.fit(X, y, offset=offset)
 
     # Use the profiler's phi so summary LL/AIC/BIC are consistent with
     # the profile NLL (both evaluate the density at the same dispersion).
@@ -83,15 +79,12 @@ def estimate_p(
     return result
 
 
-def estimate_theta(model, X, y, exposure=None, offset=None, *, sample_weight=None, **kwargs):
+def estimate_theta(model, X, y, sample_weight=None, offset=None, **kwargs):
     """Estimate NB theta via profile likelihood, refit, and return result."""
-    from superglm.model.base import resolve_sample_weight_alias
     from superglm.nb_profile import estimate_nb_theta
 
-    exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="estimate_theta()")
-
-    result = estimate_nb_theta(model, X, y, exposure=exposure, offset=offset, **kwargs)
+    result = estimate_nb_theta(model, X, y, offset=offset, **kwargs)
     model.family = NegativeBinomial(theta=result.theta_hat)
     model._nb_profile_result = result
-    model.fit(X, y, exposure=exposure, offset=offset)
+    model.fit(X, y, offset=offset)
     return result

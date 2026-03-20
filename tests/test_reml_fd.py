@@ -49,7 +49,7 @@ class TestREMLFiniteDifference:
         )
         m.fit(df, y)
 
-        exposure = np.ones(n)
+        sample_weight = np.ones(n)
         offset_arr = np.zeros(n)
         lambdas = {"x1": 10.0, "x2": 0.5}
 
@@ -67,7 +67,7 @@ class TestREMLFiniteDifference:
         pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
             X=m._dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=m._distribution,
             link=m._link,
             groups=m._groups,
@@ -87,7 +87,7 @@ class TestREMLFiniteDifference:
         return (
             m,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             lambdas,
             reml_groups,
@@ -106,7 +106,7 @@ class TestREMLFiniteDifference:
         (
             m,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             lambdas,
             reml_groups,
@@ -140,7 +140,7 @@ class TestREMLFiniteDifference:
                 y,
                 pirls_result,
                 lam_p,
-                exposure,
+                sample_weight,
                 offset_arr,
                 XtWX=XtWX,
                 penalty_caches=penalty_caches,
@@ -149,7 +149,7 @@ class TestREMLFiniteDifference:
                 y,
                 pirls_result,
                 lam_m,
-                exposure,
+                sample_weight,
                 offset_arr,
                 XtWX=XtWX,
                 penalty_caches=penalty_caches,
@@ -174,7 +174,7 @@ class TestREMLFiniteDifference:
         (
             m,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             lambdas,
             reml_groups,
@@ -224,7 +224,7 @@ class TestREMLFiniteDifference:
                 result_pert, inv_pert, xtwx_pert = fit_irls_direct(
                     X=m._dm,
                     y=y,
-                    weights=exposure,
+                    weights=sample_weight,
                     family=m._distribution,
                     link=m._link,
                     groups=m._groups,
@@ -292,7 +292,7 @@ class TestREMLFiniteDifference:
         (
             m,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             lambdas,
             reml_groups,
@@ -322,7 +322,7 @@ class TestREMLFiniteDifference:
             lambdas,
             reml_groups,
             penalty_caches,
-            exposure,
+            sample_weight,
             offset_arr,
         )
         if w_corr is not None:
@@ -344,7 +344,7 @@ class TestREMLFiniteDifference:
                 r_pert, _, xtwx_pert = fit_irls_direct(
                     X=m._dm,
                     y=y,
-                    weights=exposure,
+                    weights=sample_weight,
                     family=m._distribution,
                     link=m._link,
                     groups=m._groups,
@@ -358,7 +358,7 @@ class TestREMLFiniteDifference:
                     y,
                     r_pert,
                     lam_pert,
-                    exposure,
+                    sample_weight,
                     offset_arr,
                     XtWX=xtwx_pert,
                     penalty_caches=penalty_caches,
@@ -383,7 +383,7 @@ class TestREMLFiniteDifference:
         (
             m,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             lambdas,
             reml_groups,
@@ -402,7 +402,7 @@ class TestREMLFiniteDifference:
             lambdas,
             reml_groups,
             penalty_caches,
-            exposure,
+            sample_weight,
             offset_arr,
         )
         assert result is None, "Gamma/log should have zero W correction"
@@ -412,7 +412,7 @@ class TestREMLFiniteDifference:
         (
             m,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             lambdas,
             reml_groups,
@@ -431,7 +431,7 @@ class TestREMLFiniteDifference:
             lambdas,
             reml_groups,
             penalty_caches,
-            exposure,
+            sample_weight,
             offset_arr,
         )
         assert result is not None, "Poisson/log should have nonzero W correction"
@@ -457,7 +457,7 @@ class TestREMLFiniteDifference:
         (
             m,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             lambdas,
             reml_groups,
@@ -485,7 +485,7 @@ class TestREMLFiniteDifference:
             lambdas,
             reml_groups,
             penalty_caches,
-            exposure,
+            sample_weight,
             offset_arr,
         )
         dH_extra = w_corr[1] if w_corr is not None else None
@@ -536,7 +536,7 @@ class TestREMLFiniteDifference:
                 result_pert, inv_pert, xtwx_pert = fit_irls_direct(
                     X=m._dm,
                     y=y,
-                    weights=exposure,
+                    weights=sample_weight,
                     family=m._distribution,
                     link=m._link,
                     groups=m._groups,
@@ -568,7 +568,7 @@ class TestREMLFiniteDifference:
                     lam_pert,
                     reml_groups,
                     penalty_caches,
-                    exposure,
+                    sample_weight,
                     offset_arr,
                 )
                 if w_corr_pert is not None:

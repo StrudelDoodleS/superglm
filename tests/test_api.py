@@ -24,18 +24,18 @@ def sample_data():
     age = rng.uniform(18, 85, n)
     region = rng.choice(["A", "B", "C"], n, p=[0.3, 0.3, 0.4])
     density = rng.normal(5, 2, n)
-    exposure = rng.uniform(0.3, 1.0, n)
+    sample_weight = rng.uniform(0.3, 1.0, n)
     mu = np.exp(-2.0 + 0.01 * (age - 50) ** 2 / 100 + (region == "A") * 0.3)
-    y = rng.poisson(mu * exposure).astype(float)
+    y = rng.poisson(mu * sample_weight).astype(float)
     X = pd.DataFrame({"age": age, "region": region, "density": density})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 class TestFeaturesDict:
     """Test explicit features={...} constructor."""
 
     def test_basic_fit_predict(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
@@ -45,7 +45,7 @@ class TestFeaturesDict:
                 "density": Numeric(),
             },
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         preds = model.predict(X)
         assert preds.shape == (len(X),)
         assert np.all(preds > 0)
@@ -65,26 +65,26 @@ class TestSplinesAutoDetect:
     """Test splines=[...] auto-detect constructor."""
 
     def test_basic_fit_predict(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
             splines=["age"],
             n_knots=10,
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         preds = model.predict(X)
         assert preds.shape == (len(X),)
         assert np.all(preds > 0)
 
     def test_auto_detects_types(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             selection_penalty=0.01,
             splines=["age"],
             n_knots=10,
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         assert isinstance(model._specs["age"], BasisSpline)
         assert isinstance(model._specs["region"], Categorical)
         assert isinstance(model._specs["density"], Numeric)
@@ -129,11 +129,11 @@ class TestSplinesAutoDetect:
             )
 
     def test_categorical_base_no_exposure(self, sample_data):
-        """Without exposure, most_exposed falls back to first."""
+        """Without sample_weight, most_exposed falls back to first."""
         X, y, _ = sample_data
         model = SuperGLM(selection_penalty=0.01, splines=[])
         model.fit(X, y)
-        # Should have used base="first" since no exposure
+        # Should have used base="first" since no sample_weight
         assert model._specs["region"].base == "first"
 
 
@@ -186,13 +186,13 @@ class TestPenaltyResolution:
 
     def test_auto_calibrate(self, sample_data):
         """selection_penalty=None should auto-calibrate at fit time."""
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             selection_penalty=None,
             splines=["age"],
             n_knots=10,
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         assert model.penalty.lambda1 is not None
         assert model.penalty.lambda1 > 0
 
@@ -202,7 +202,7 @@ class TestPenaltyResolution:
         assert model.penalty.features == frozenset({"region"})
 
     def test_unknown_penalty_feature_raises_at_fit(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
             selection_penalty=0.01,
@@ -214,70 +214,4 @@ class TestPenaltyResolution:
             },
         )
         with pytest.raises(ValueError, match="Unknown penalty feature/group filter"):
-            model.fit(X, y, exposure=exposure)
-
-
-class TestSampleWeightAlias:
-    def test_fit_accepts_sample_weight_alias(self, sample_data):
-        X, y, exposure = sample_data
-        model_exposure = SuperGLM(
-            penalty="group_lasso",
-            selection_penalty=0.01,
-            features={
-                "age": Spline(n_knots=10, penalty="ssp"),
-                "region": Categorical(),
-                "density": Numeric(),
-            },
-        )
-        model_sample_weight = SuperGLM(
-            penalty="group_lasso",
-            selection_penalty=0.01,
-            features={
-                "age": Spline(n_knots=10, penalty="ssp"),
-                "region": Categorical(),
-                "density": Numeric(),
-            },
-        )
-
-        model_exposure.fit(X, y, exposure=exposure)
-        model_sample_weight.fit(X, y, sample_weight=exposure)
-
-        np.testing.assert_allclose(
-            model_exposure.predict(X), model_sample_weight.predict(X), atol=1e-10
-        )
-        assert model_exposure.result.deviance == pytest.approx(model_sample_weight.result.deviance)
-
-    def test_fit_reml_accepts_sample_weight_alias(self, sample_data):
-        X, y, exposure = sample_data
-        features = {
-            "age": Spline(n_knots=10, penalty="ssp"),
-            "region": Categorical(),
-            "density": Numeric(),
-        }
-        model_exposure = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
-        model_sample_weight = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
-
-        model_exposure.fit_reml(X, y, exposure=exposure, max_reml_iter=10)
-        model_sample_weight.fit_reml(X, y, sample_weight=exposure, max_reml_iter=10)
-
-        np.testing.assert_allclose(
-            model_exposure.predict(X), model_sample_weight.predict(X), atol=1e-10
-        )
-        assert model_exposure.result.effective_df == pytest.approx(
-            model_sample_weight.result.effective_df
-        )
-
-    def test_passing_both_exposure_and_sample_weight_raises(self, sample_data):
-        X, y, exposure = sample_data
-        model = SuperGLM(
-            penalty="group_lasso",
-            selection_penalty=0.01,
-            features={
-                "age": Spline(n_knots=10, penalty="ssp"),
-                "region": Categorical(),
-                "density": Numeric(),
-            },
-        )
-
-        with pytest.raises(TypeError, match="both 'exposure' and 'sample_weight'"):
-            model.fit(X, y, exposure=exposure, sample_weight=exposure)
+            model.fit(X, y, sample_weight=sample_weight)

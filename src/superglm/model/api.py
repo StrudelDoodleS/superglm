@@ -158,10 +158,6 @@ class SuperGLM:
         return base.resolve_knots(self, spline_cols)
 
     @staticmethod
-    def _resolve_sample_weight_alias(exposure, sample_weight, *, method_name):
-        return base.resolve_sample_weight_alias(exposure, sample_weight, method_name=method_name)
-
-    @staticmethod
     def _resolve_ci(ci):
         return explain_ops.resolve_ci(ci)
 
@@ -170,20 +166,20 @@ class SuperGLM:
     def _clone_without_features(self, drop, *, lambda1=..., lambda2=...):
         return base.clone_without_features(self, drop, lambda1=lambda1, lambda2=lambda2)
 
-    def _auto_detect_features(self, X, exposure=None):
-        return base.auto_detect(self, X, exposure)
+    def _auto_detect_features(self, X, sample_weight=None):
+        return base.auto_detect(self, X, sample_weight)
 
     def _add_interaction(self, feat1, feat2, name=None, **kwargs):
         return base.model_add_interaction(self, feat1, feat2, name=name, **kwargs)
 
-    def _build_design_matrix(self, X, y, exposure, offset):
-        return base.model_build_design_matrix(self, X, y, exposure, offset)
+    def _build_design_matrix(self, X, y, sample_weight, offset):
+        return base.model_build_design_matrix(self, X, y, sample_weight, offset)
 
     def _compute_lambda_max(self, y, weights):
         return base.compute_lambda_max(self, y, weights)
 
-    def _rebuild_design_matrix_with_lambdas(self, lambdas, exposure):
-        return base.rebuild_dm_with_lambdas(self, lambdas, exposure)
+    def _rebuild_design_matrix_with_lambdas(self, lambdas, sample_weight):
+        return base.rebuild_dm_with_lambdas(self, lambdas, sample_weight)
 
     # ── Fit ───────────────────────────────────────────────────────
 
@@ -191,10 +187,9 @@ class SuperGLM:
         self,
         X: pd.DataFrame,
         y: NDArray,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
-        sample_weight: NDArray | None = None,
         record_diagnostics: bool = False,
     ) -> SuperGLM:
         """Fit the model to data.
@@ -205,21 +200,21 @@ class SuperGLM:
             Feature matrix with columns matching registered features.
         y : array-like
             Response variable.
-        exposure : array-like, optional
+        sample_weight : array-like, optional
             Backward-compatible alias for ``sample_weight``.
         sample_weight : array-like, optional
-            **Frequency weights** (prior weights), typically policy exposure
+            **Frequency weights** (prior weights), typically policy sample_weight
             in insurance applications. Defaults to 1 for all observations.
 
             Exposure is a frequency weight: it represents the amount of risk
-            observed, not observation precision. A policy with exposure=0.5
+            observed, not observation precision. A policy with sample_weight=0.5
             (6 months on risk) contributes half as much information as one with
-            exposure=1.0 (12 months). The standard assumption is that the
-            expected response scales linearly with exposure:
+            sample_weight=1.0 (12 months). The standard assumption is that the
+            expected response scales linearly with sample_weight:
             ``E[Y_i] = exposure_i * lambda_i``.
 
             For Poisson and Gamma models this only affects dispersion and
-            standard errors. For Negative Binomial and Tweedie, exposure
+            standard errors. For Negative Binomial and Tweedie, sample_weight
             enters the profile likelihood for theta/p estimation, so the
             distinction between frequency and variance weights matters.
 
@@ -232,7 +227,7 @@ class SuperGLM:
             2016); Renshaw (1994) ASTIN Bulletin 24(2).
         offset : array-like, optional
             Offset added to the linear predictor. For count models with
-            exposure, use ``offset=np.log(exposure)`` so that the model
+            sample_weight, use ``offset=np.log(sample_weight)`` so that the model
             estimates a rate rather than a raw count.
         record_diagnostics : bool
             If True, record per-iteration IRLS diagnostics (W range,
@@ -248,9 +243,8 @@ class SuperGLM:
             self,
             X,
             y,
-            exposure,
+            sample_weight,
             offset,
-            sample_weight=sample_weight,
             record_diagnostics=record_diagnostics,
         )
 
@@ -258,10 +252,9 @@ class SuperGLM:
         self,
         X: pd.DataFrame,
         y: NDArray,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
-        sample_weight: NDArray | None = None,
         n_lambda: int = 50,
         lambda_ratio: float = 1e-3,
         lambda_seq: NDArray | None = None,
@@ -274,9 +267,8 @@ class SuperGLM:
             self,
             X,
             y,
-            exposure,
+            sample_weight,
             offset,
-            sample_weight=sample_weight,
             n_lambda=n_lambda,
             lambda_ratio=lambda_ratio,
             lambda_seq=lambda_seq,
@@ -286,10 +278,9 @@ class SuperGLM:
         self,
         X: pd.DataFrame,
         y: NDArray,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
-        sample_weight: NDArray | None = None,
         n_folds: int = 5,
         n_lambda: int = 50,
         lambda_ratio: float = 1e-3,
@@ -303,9 +294,8 @@ class SuperGLM:
             self,
             X,
             y,
-            exposure,
+            sample_weight,
             offset,
-            sample_weight=sample_weight,
             n_folds=n_folds,
             n_lambda=n_lambda,
             lambda_ratio=lambda_ratio,
@@ -319,10 +309,9 @@ class SuperGLM:
         self,
         X: pd.DataFrame,
         y: NDArray,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
-        sample_weight: NDArray | None = None,
         max_reml_iter: int = 20,
         reml_tol: float = 1e-4,
         lambda2_init: float | None = None,
@@ -345,10 +334,10 @@ class SuperGLM:
             Feature matrix.
         y : array-like
             Response variable.
-        exposure : array-like, optional
+        sample_weight : array-like, optional
             Backward-compatible alias for ``sample_weight``.
         sample_weight : array-like, optional
-            Frequency/exposure weights.
+            Frequency/sample_weight weights.
         offset : array-like, optional
             Offset term.
         max_reml_iter : int
@@ -369,9 +358,8 @@ class SuperGLM:
             self,
             X,
             y,
-            exposure,
+            sample_weight,
             offset,
-            sample_weight=sample_weight,
             max_reml_iter=max_reml_iter,
             reml_tol=reml_tol,
             lambda2_init=lambda2_init,
@@ -468,37 +456,31 @@ class SuperGLM:
         self,
         X: pd.DataFrame,
         y: NDArray,
-        exposure: NDArray | None = None,
-        offset: NDArray | None = None,
-        *,
         sample_weight: NDArray | None = None,
+        offset: NDArray | None = None,
     ) -> ModelMetrics:
         """Compute comprehensive diagnostics for the fitted model."""
-        return explain_ops.metrics(self, X, y, exposure, offset, sample_weight=sample_weight)
+        return explain_ops.metrics(self, X, y, sample_weight, offset)
 
     def drop1(
         self,
         X: pd.DataFrame,
         y: NDArray,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
-        sample_weight: NDArray | None = None,
         test: str = "Chisq",
     ) -> pd.DataFrame:
         """Drop-one deviance analysis for each feature."""
-        return explain_ops.drop1(
-            self, X, y, exposure, offset, sample_weight=sample_weight, test=test
-        )
+        return explain_ops.drop1(self, X, y, sample_weight, offset, test=test)
 
     def refit_unpenalised(
         self,
         X: pd.DataFrame,
         y: NDArray,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
-        sample_weight: NDArray | None = None,
         keep_smoothing: bool = True,
     ) -> SuperGLM:
         """Refit with only active features and no selection penalty."""
@@ -506,9 +488,8 @@ class SuperGLM:
             self,
             X,
             y,
-            exposure,
+            sample_weight,
             offset,
-            sample_weight=sample_weight,
             keep_smoothing=keep_smoothing,
         )
 
@@ -585,10 +566,9 @@ class SuperGLM:
         self,
         X: pd.DataFrame,
         y: NDArray,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
-        sample_weight: NDArray | None = None,
         fit_mode: str = "fit",
         phi_method: str = "pearson",
         **kwargs,
@@ -608,9 +588,8 @@ class SuperGLM:
             self,
             X,
             y,
-            exposure,
+            sample_weight,
             offset,
-            sample_weight=sample_weight,
             fit_mode=fit_mode,
             phi_method=phi_method,
             **kwargs,
@@ -620,16 +599,12 @@ class SuperGLM:
         self,
         X: pd.DataFrame,
         y: NDArray,
-        exposure: NDArray | None = None,
-        offset: NDArray | None = None,
-        *,
         sample_weight: NDArray | None = None,
+        offset: NDArray | None = None,
         **kwargs,
     ):
         """Estimate NB theta via profile likelihood, refit, and return result."""
-        return profile_ops.estimate_theta(
-            self, X, y, exposure, offset, sample_weight=sample_weight, **kwargs
-        )
+        return profile_ops.estimate_theta(self, X, y, sample_weight, offset, **kwargs)
 
     # ── Plotting ──────────────────────────────────────────────────
 
@@ -671,9 +646,9 @@ class SuperGLM:
         X : DataFrame, optional
             Training data for density overlays.
         sample_weight : array-like, optional
-            Frequency weights / exposure for density overlays.
+            Frequency weights / sample_weight for density overlays.
         show_density : bool
-            Show exposure/observation density (strip for continuous,
+            Show sample_weight/observation density (strip for continuous,
             bars for categorical).  Default True.
         show_knots : bool
             Show interior knot ticks (spline terms only).
@@ -745,10 +720,9 @@ class SuperGLM:
     def apply_monotone_postfit(
         self,
         X: pd.DataFrame,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
-        sample_weight: NDArray | None = None,
         n_grid: int = 500,
     ) -> SuperGLM:
         """Apply post-fit monotone repair to splines with ``monotone`` set.
@@ -763,7 +737,7 @@ class SuperGLM:
         ----------
         X : DataFrame
             Training data (used to compute density-based grid weights).
-        exposure, sample_weight : array-like, optional
+        sample_weight, sample_weight : array-like, optional
             Frequency weights.
         offset : array-like, optional
             Offset term (unused, reserved for deviance computation).
@@ -775,17 +749,13 @@ class SuperGLM:
         SuperGLM
             The model (self), with monotone repairs stored.
         """
-        return monotone_ops.apply_monotone_postfit(
-            self, X, exposure, offset, sample_weight=sample_weight, n_grid=n_grid
-        )
+        return monotone_ops.apply_monotone_postfit(self, X, sample_weight, offset, n_grid=n_grid)
 
     # ── Diagnostics ───────────────────────────────────────────────
 
     def term_importance(
         self,
         X: pd.DataFrame,
-        exposure: NDArray | None = None,
-        *,
         sample_weight: NDArray | None = None,
     ) -> pd.DataFrame:
         """Weighted variance of each term's contribution to eta.
@@ -794,16 +764,15 @@ class SuperGLM:
         ``subgroup_type``, ``variance_eta``, ``sd_eta``, ``edf``,
         ``lambda``, ``group_norm``.
         """
-        return explain_ops.term_importance(self, X, exposure, sample_weight=sample_weight)
+        return explain_ops.term_importance(self, X, sample_weight)
 
     def term_drop_diagnostics(
         self,
         X: pd.DataFrame,
         y: NDArray,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
-        sample_weight: NDArray | None = None,
         mode: str = "refit",
         X_val: pd.DataFrame | None = None,
         y_val: NDArray | None = None,
@@ -822,9 +791,8 @@ class SuperGLM:
             self,
             X,
             y,
-            exposure,
+            sample_weight,
             offset,
-            sample_weight=sample_weight,
             mode=mode,
             X_val=X_val,
             y_val=y_val,
@@ -833,12 +801,10 @@ class SuperGLM:
     def spline_redundancy(
         self,
         X: pd.DataFrame,
-        exposure: NDArray | None = None,
-        *,
         sample_weight: NDArray | None = None,
     ) -> dict:
         """Spline redundancy diagnostics: knot spacing, basis correlation, effective rank."""
-        return explain_ops.spline_redundancy(self, X, exposure, sample_weight=sample_weight)
+        return explain_ops.spline_redundancy(self, X, sample_weight)
 
     # ── Discretization ────────────────────────────────────────────
 
@@ -846,23 +812,26 @@ class SuperGLM:
         self,
         X: pd.DataFrame,
         y: NDArray,
-        exposure: NDArray | None = None,
-        *,
         sample_weight: NDArray | None = None,
         **kwargs,
     ) -> DiscretizationResult:
         """Analyse the impact of discretizing spline/polynomial curves."""
-        return explain_ops.discretization_impact(
-            self, X, y, exposure, sample_weight=sample_weight, **kwargs
-        )
+        return explain_ops.discretization_impact(self, X, y, sample_weight, **kwargs)
 
     # ── REML adapter methods (used by reml_optimizer) ─────────────
 
-    def _compute_dW_deta(self, mu, eta, exposure):
-        return fit_ops.model_compute_dW_deta(self, mu, eta, exposure)
+    def _compute_dW_deta(self, mu, eta, sample_weight):
+        return fit_ops.model_compute_dW_deta(self, mu, eta, sample_weight)
 
     def _reml_w_correction(
-        self, pirls_result, XtWX_S_inv, lambdas, reml_groups, penalty_caches, exposure, offset_arr
+        self,
+        pirls_result,
+        XtWX_S_inv,
+        lambdas,
+        reml_groups,
+        penalty_caches,
+        sample_weight,
+        offset_arr,
     ):
         return fit_ops.model_reml_w_correction(
             self,
@@ -871,15 +840,15 @@ class SuperGLM:
             lambdas,
             reml_groups,
             penalty_caches,
-            exposure,
+            sample_weight,
             offset_arr,
         )
 
     def _reml_laml_objective(
-        self, y, result, lambdas, exposure, offset_arr, XtWX=None, penalty_caches=None
+        self, y, result, lambdas, sample_weight, offset_arr, XtWX=None, penalty_caches=None
     ):
         return fit_ops.model_reml_laml_objective(
-            self, y, result, lambdas, exposure, offset_arr, XtWX, penalty_caches
+            self, y, result, lambdas, sample_weight, offset_arr, XtWX, penalty_caches
         )
 
     def _reml_direct_gradient(
@@ -919,7 +888,7 @@ class SuperGLM:
     def _optimize_direct_reml(
         self,
         y,
-        exposure,
+        sample_weight,
         offset_arr,
         reml_groups,
         penalty_ranks,
@@ -934,7 +903,7 @@ class SuperGLM:
         return fit_ops.model_optimize_direct_reml(
             self,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             reml_groups,
             penalty_ranks,
@@ -949,7 +918,7 @@ class SuperGLM:
     def _optimize_discrete_reml_cached_w(
         self,
         y,
-        exposure,
+        sample_weight,
         offset_arr,
         reml_groups,
         penalty_ranks,
@@ -964,7 +933,7 @@ class SuperGLM:
         return fit_ops.model_optimize_discrete_reml_cached_w(
             self,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             reml_groups,
             penalty_ranks,
@@ -979,7 +948,7 @@ class SuperGLM:
     def _optimize_efs_reml(
         self,
         y,
-        exposure,
+        sample_weight,
         offset_arr,
         reml_groups,
         penalty_ranks,
@@ -993,7 +962,7 @@ class SuperGLM:
         return fit_ops.model_optimize_efs_reml(
             self,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             reml_groups,
             penalty_ranks,
@@ -1007,7 +976,7 @@ class SuperGLM:
     def _run_reml_once(
         self,
         y,
-        exposure,
+        sample_weight,
         offset_arr,
         reml_groups,
         penalty_ranks,
@@ -1022,7 +991,7 @@ class SuperGLM:
         return fit_ops.model_run_reml_once(
             self,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             reml_groups,
             penalty_ranks,

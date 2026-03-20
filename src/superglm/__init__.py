@@ -8,7 +8,7 @@ Core API (auto-detect):
         penalty="group_lasso", selection_penalty=0.01,
         splines=["driver_age"],
     )
-    model.fit(X, y, sample_weight=exposure)
+    model.fit(X, y, sample_weight=weights)
 
 Core API (explicit):
     from superglm import SuperGLM, Spline, Categorical, Numeric
@@ -21,7 +21,7 @@ Core API (explicit):
             "density": Numeric(),
         },
     )
-    model.fit(X, y, sample_weight=exposure)
+    model.fit(X, y, sample_weight=weights)
 
 sklearn-compatible API:
     from superglm import SuperGLMRegressor
@@ -30,7 +30,7 @@ sklearn-compatible API:
         penalty="group_lasso", selection_penalty=0.01,
         spline_features=["driver_age"],
     )
-    model.fit(X, y, sample_weight=exposure)
+    model.fit(X, y, sample_weight=weights)
 """
 
 from superglm import families
@@ -162,4 +162,4 @@ __all__ = [
     "MonotoneRepairer",
     "SplineRedundancyReport",
 ]
-__version__ = "0.2.0"
+__version__ = "0.3.0"

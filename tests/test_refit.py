@@ -18,23 +18,23 @@ def selection_data():
     x_strong = rng.standard_normal(n)
     x_noise = rng.standard_normal(n)
     mu = np.exp(0.5 + 0.5 * x_strong)
-    exposure = np.ones(n)
-    y = rng.poisson(mu * exposure).astype(float)
+    sample_weight = np.ones(n)
+    y = rng.poisson(mu * sample_weight).astype(float)
     X = pd.DataFrame({"strong": x_strong, "noise": x_noise})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 class TestRefitBasic:
     def test_returns_new_model(self, selection_data):
-        X, y, exposure = selection_data
+        X, y, sample_weight = selection_data
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.5,  # high penalty to zero noise
             features={"strong": Numeric(), "noise": Numeric()},
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
 
-        refitted = model.refit_unpenalised(X, y, exposure=exposure)
+        refitted = model.refit_unpenalised(X, y, sample_weight=sample_weight)
         assert refitted is not model
         assert isinstance(refitted, SuperGLM)
         assert refitted._result is not None
@@ -67,26 +67,26 @@ class TestRefitBasic:
         assert "noise_cat" not in refitted._specs
 
     def test_lambda1_is_zero(self, selection_data):
-        X, y, exposure = selection_data
+        X, y, sample_weight = selection_data
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.5,
             features={"strong": Numeric(), "noise": Numeric()},
         )
-        model.fit(X, y, exposure=exposure)
-        refitted = model.refit_unpenalised(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
+        refitted = model.refit_unpenalised(X, y, sample_weight=sample_weight)
 
         assert refitted.penalty.lambda1 == 0.0
 
     def test_refitted_coefficients_differ(self, selection_data):
-        X, y, exposure = selection_data
+        X, y, sample_weight = selection_data
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.1,  # moderate penalty — keeps strong but shrinks
             features={"strong": Numeric(), "noise": Numeric()},
         )
-        model.fit(X, y, exposure=exposure)
-        refitted = model.refit_unpenalised(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
+        refitted = model.refit_unpenalised(X, y, sample_weight=sample_weight)
 
         # Refitted coefficients should generally differ (less shrinkage)
         if "strong" in refitted._specs:

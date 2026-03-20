@@ -19,7 +19,7 @@ def plot_interaction(
     colormap: str | None = None,
     show_contours: bool = True,
     X: pd.DataFrame | None = None,
-    exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
 ):
     """Plot an interaction surface/effect.
 
@@ -41,10 +41,10 @@ def plot_interaction(
         For surface plots: show iso-relativity contour lines on the surface
         (default True).
     X : DataFrame, optional
-        Training data. When provided with *exposure*, overlays an
-        exposure-weighted density on surface plots (projected on the floor
+        Training data. When provided with *sample_weight*, overlays an
+        sample_weight-weighted density on surface plots (projected on the floor
         for 3D plotly, contour overlay for matplotlib).
-    exposure : array-like, optional
+    sample_weight : array-like, optional
         Exposure weights corresponding to rows of *X*.
 
     Returns
@@ -61,10 +61,10 @@ def plot_interaction(
     parent_names = ispec.parent_names
 
     density_data = None
-    if X is not None and exposure is None:
-        exposure = np.ones(len(X), dtype=np.float64)
-    if X is not None and exposure is not None:
-        exposure = np.asarray(exposure, dtype=np.float64)
+    if X is not None and sample_weight is None:
+        sample_weight = np.ones(len(X), dtype=np.float64)
+    if X is not None and sample_weight is not None:
+        sample_weight = np.asarray(sample_weight, dtype=np.float64)
         p0, p1 = parent_names[0], parent_names[1]
         if (
             p0 in X.columns
@@ -75,7 +75,7 @@ def plot_interaction(
             density_data = (
                 np.asarray(X[p0], dtype=np.float64),
                 np.asarray(X[p1], dtype=np.float64),
-                exposure,
+                sample_weight,
             )
 
     if engine == "matplotlib":

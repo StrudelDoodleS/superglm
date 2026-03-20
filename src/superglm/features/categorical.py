@@ -54,7 +54,7 @@ class Categorical:
     ----------
     base : str
         How to choose the reference level.
-        'most_exposed' - level with highest total exposure (default, best for insurance)
+        'most_exposed' - level with highest total sample_weight (default, best for insurance)
         'first'        - alphabetically first level
         Or pass a specific level name as a string.
     """
@@ -74,7 +74,7 @@ class Categorical:
     def build(
         self,
         x: NDArray,
-        exposure: NDArray[np.floating] | None = None,
+        sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
         """Build sparse one-hot design columns, choosing the base level from *x*."""
         x = np.asarray(x).ravel()
@@ -86,10 +86,10 @@ class Categorical:
         # Choose base level (reuse from prior fit if already determined)
         if self._base_level and self._base_level in self._levels:
             pass
-        elif self.base == "most_exposed" and exposure is not None:
-            exp_by_level = {lev: float(exposure[x == lev].sum()) for lev in self._levels}
+        elif self.base == "most_exposed" and sample_weight is not None:
+            exp_by_level = {lev: float(sample_weight[x == lev].sum()) for lev in self._levels}
             self._base_level = max(exp_by_level, key=exp_by_level.get)
-        elif self.base == "most_exposed" and exposure is None:
+        elif self.base == "most_exposed" and sample_weight is None:
             self._base_level = self._levels[0]
         elif self.base == "first":
             self._base_level = self._levels[0]

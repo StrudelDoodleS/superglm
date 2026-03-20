@@ -58,7 +58,7 @@ class Polynomial:
     def build(
         self,
         x: NDArray[np.floating],
-        exposure: NDArray[np.floating] | None = None,
+        sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
         """Build Legendre basis columns after learning min/max from *x*."""
         x = np.asarray(x, dtype=np.float64).ravel()

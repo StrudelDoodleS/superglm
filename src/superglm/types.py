@@ -28,7 +28,7 @@ class FeatureSpec(Protocol):
     def build(
         self,
         x: NDArray[np.floating],
-        exposure: NDArray[np.floating] | None = None,
+        sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo | list[GroupInfo]: ...
 
     def transform(self, x: NDArray[np.floating]) -> NDArray[np.floating]: ...

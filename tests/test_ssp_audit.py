@@ -43,7 +43,7 @@ def _setup_poisson_spline_model(seed: int = 123):
     x2 = rng.uniform(0.0, 1.0, n)
     eta = 0.3 + 0.8 * np.sin(2 * np.pi * x1) - 0.5 * np.cos(2 * np.pi * x2)
     y = rng.poisson(np.exp(eta)).astype(float)
-    exposure = np.ones(n)
+    sample_weight = np.ones(n)
     offset = np.zeros(n)
 
     df = pd.DataFrame({"x1": x1, "x2": x2})
@@ -56,10 +56,10 @@ def _setup_poisson_spline_model(seed: int = 123):
             "x2": CubicRegressionSpline(n_knots=8, penalty="ssp"),
         },
     )
-    model.fit(df, y, exposure=exposure)
+    model.fit(df, y, sample_weight=sample_weight)
 
     assert all(isinstance(gm, SparseSSPGroupMatrix) for gm in model._dm.group_matrices)
-    return model, y, exposure, offset
+    return model, y, sample_weight, offset
 
 
 def _orthogonal_matrix(dim: int, seed: int) -> np.ndarray:
@@ -73,7 +73,7 @@ def _orthogonal_matrix(dim: int, seed: int) -> np.ndarray:
 
 def _equivalent_ssp_dm(
     dm: DesignMatrix,
-    exposure: np.ndarray,
+    sample_weight: np.ndarray,
     *,
     basis_lambda: float | None = None,
     rotate_seed: int | None = None,
@@ -94,12 +94,12 @@ def _equivalent_ssp_dm(
                     gm.B,
                     projection,
                     omega_proj,
-                    exposure,
+                    sample_weight,
                     basis_lambda,
                 )
                 r_inv_new = projection @ r_inv_local
             else:
-                r_inv_new = compute_R_inv(gm.B, gm.omega, exposure, basis_lambda)
+                r_inv_new = compute_R_inv(gm.B, gm.omega, sample_weight, basis_lambda)
 
         if rotate_seed is not None:
             q = _orthogonal_matrix(r_inv_new.shape[1], rotate_seed + idx)
@@ -130,14 +130,14 @@ def _reml_metadata(dm: DesignMatrix, groups: list) -> tuple[list, dict[str, floa
 class TestSSPAudit:
     def test_direct_irls_fit_is_invariant_under_ssp_rotation(self):
         """Equivalent orthogonal SSP bases should give the same fitted spline."""
-        model, y, exposure, offset = _setup_poisson_spline_model()
-        dm_rot = _equivalent_ssp_dm(model._dm, exposure, rotate_seed=77)
+        model, y, sample_weight, offset = _setup_poisson_spline_model()
+        dm_rot = _equivalent_ssp_dm(model._dm, sample_weight, rotate_seed=77)
         lambdas = {"x1": 0.7, "x2": 2.5}
 
         result_ref, _, _ = fit_irls_direct(
             X=model._dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=model._distribution,
             link=model._link,
             groups=model._groups,
@@ -148,7 +148,7 @@ class TestSSPAudit:
         result_rot, _, _ = fit_irls_direct(
             X=dm_rot,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=model._distribution,
             link=model._link,
             groups=model._groups,
@@ -172,14 +172,14 @@ class TestSSPAudit:
 
     def test_reml_quantities_are_invariant_to_ssp_preconditioner_choice(self):
         """REML objective pieces should not care which valid SSP basis is used."""
-        model, y, exposure, offset = _setup_poisson_spline_model()
-        dm_alt = _equivalent_ssp_dm(model._dm, exposure, basis_lambda=8.0)
+        model, y, sample_weight, offset = _setup_poisson_spline_model()
+        dm_alt = _equivalent_ssp_dm(model._dm, sample_weight, basis_lambda=8.0)
         lambdas = {"x1": 1.3, "x2": 0.4}
 
         result_ref, inv_ref, xtwx_ref = fit_irls_direct(
             X=model._dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=model._distribution,
             link=model._link,
             groups=model._groups,
@@ -190,7 +190,7 @@ class TestSSPAudit:
         result_alt, inv_alt, xtwx_alt = fit_irls_direct(
             X=dm_alt,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=model._distribution,
             link=model._link,
             groups=model._groups,
@@ -214,7 +214,7 @@ class TestSSPAudit:
             y,
             result_ref,
             lambdas,
-            exposure,
+            sample_weight,
             offset,
             XtWX=xtwx_ref,
             penalty_caches=penalty_caches_ref,
@@ -227,7 +227,7 @@ class TestSSPAudit:
             y,
             result_alt,
             lambdas,
-            exposure,
+            sample_weight,
             offset,
             XtWX=xtwx_alt,
             penalty_caches=penalty_caches_alt,

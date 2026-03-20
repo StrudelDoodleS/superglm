@@ -12,37 +12,25 @@ from superglm.inference import simultaneous_bands as _simultaneous_bands
 from superglm.inference import term_inference as _term_inference
 
 
-def metrics(model, X, y, exposure=None, offset=None, *, sample_weight=None):
+def metrics(model, X, y, sample_weight=None, offset=None):
     """Compute comprehensive diagnostics for the fitted model."""
     from superglm.metrics import ModelMetrics
-    from superglm.model.base import resolve_sample_weight_alias
 
-    exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="metrics()")
-    return ModelMetrics(model, X, y, exposure, offset)
+    return ModelMetrics(model, X, y, sample_weight, offset)
 
 
-def drop1(model, X, y, exposure=None, offset=None, *, sample_weight=None, test="Chisq"):
+def drop1(model, X, y, sample_weight=None, offset=None, test="Chisq"):
     """Drop-one deviance analysis for each feature."""
-    from superglm.model.base import resolve_sample_weight_alias
-
-    exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="drop1()")
-    return _drop1(model, X, y, exposure=exposure, offset=offset, test=test)
+    return _drop1(model, X, y, offset=offset, test=test)
 
 
-def refit_unpenalised(
-    model, X, y, exposure=None, offset=None, *, sample_weight=None, keep_smoothing=True
-):
+def refit_unpenalised(model, X, y, sample_weight=None, offset=None, keep_smoothing=True):
     """Refit with only active features and no selection penalty."""
-    from superglm.model.base import resolve_sample_weight_alias
-
-    exposure = resolve_sample_weight_alias(
-        exposure, sample_weight, method_name="refit_unpenalised()"
-    )
     return _refit_unpenalised(
         model,
         X,
         y,
-        exposure=exposure,
+        sample_weight=sample_weight,
         offset=offset,
         keep_smoothing=keep_smoothing,
     )
@@ -232,7 +220,7 @@ def plot(
             with_ci=(interval is not None),
             figsize=figsize,
             X=X,
-            exposure=sample_weight,
+            sample_weight=sample_weight,
             **kwargs,
         )
 
@@ -261,7 +249,7 @@ def plot(
         return plot_term(
             ti_list[0],
             X=X,
-            exposure=sample_weight,
+            sample_weight=sample_weight,
             interval=interval,
             show_exposure=show_density,
             show_knots=show_knots,
@@ -274,7 +262,7 @@ def plot(
     return plot_relativities(
         ti_list,
         X=X,
-        exposure=sample_weight,
+        sample_weight=sample_weight,
         interval=interval,
         show_exposure=show_density,
         show_knots=show_knots,
@@ -285,39 +273,32 @@ def plot(
     )
 
 
-def term_importance(model, X, exposure=None, *, sample_weight=None):
+def term_importance(model, X, sample_weight=None):
     """Weighted variance of each term's contribution to eta."""
     from superglm.diagnostics import term_importance as _term_importance
-    from superglm.model.base import resolve_sample_weight_alias
 
-    exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="term_importance()")
-    return _term_importance(model, X, exposure)
+    return _term_importance(model, X, sample_weight)
 
 
 def term_drop_diagnostics(
     model,
     X,
     y,
-    exposure=None,
+    sample_weight=None,
     offset=None,
     *,
-    sample_weight=None,
     mode="refit",
     X_val=None,
     y_val=None,
 ):
     """Drop-term diagnostics wrapper."""
     from superglm.diagnostics import term_drop_diagnostics as _term_drop_diagnostics
-    from superglm.model.base import resolve_sample_weight_alias
 
-    exposure = resolve_sample_weight_alias(
-        exposure, sample_weight, method_name="term_drop_diagnostics()"
-    )
     return _term_drop_diagnostics(
         model,
         X,
         y,
-        exposure,
+        sample_weight,
         offset,
         mode=mode,
         X_val=X_val,
@@ -325,23 +306,15 @@ def term_drop_diagnostics(
     )
 
 
-def spline_redundancy(model, X, exposure=None, *, sample_weight=None):
+def spline_redundancy(model, X, sample_weight=None):
     """Spline redundancy diagnostics."""
     from superglm.diagnostics import spline_redundancy as _spline_redundancy
-    from superglm.model.base import resolve_sample_weight_alias
 
-    exposure = resolve_sample_weight_alias(
-        exposure, sample_weight, method_name="spline_redundancy()"
-    )
-    return _spline_redundancy(model, X, exposure)
+    return _spline_redundancy(model, X, sample_weight)
 
 
-def discretization_impact(model, X, y, exposure=None, *, sample_weight=None, **kwargs):
+def discretization_impact(model, X, y, sample_weight=None, **kwargs):
     """Analyse the impact of discretizing spline/polynomial curves."""
     from superglm.discretize import discretization_impact as _disc_impact
-    from superglm.model.base import resolve_sample_weight_alias
 
-    exposure = resolve_sample_weight_alias(
-        exposure, sample_weight, method_name="discretization_impact()"
-    )
-    return _disc_impact(model, X, y, exposure, **kwargs)
+    return _disc_impact(model, X, y, sample_weight, **kwargs)

@@ -105,7 +105,7 @@ def tweedie_logpdf(
     p : float
         Power parameter in (1, 2).
     weights : array of shape (n,), optional
-        Observation weights (e.g. exposure). Effective phi = phi / w.
+        Observation weights (e.g. sample_weight). Effective phi = phi / w.
     t_arg_limit : float
         Switch to saddlepoint when wright_bessel argument t >= this.
 
@@ -430,7 +430,7 @@ def estimate_tweedie_p(
     model,
     X,
     y,
-    exposure=None,
+    sample_weight=None,
     offset=None,
     *,
     p_bounds: tuple[float, float] = (1.05, 1.95),
@@ -460,8 +460,8 @@ def estimate_tweedie_p(
         Feature matrix.
     y : array-like
         Response variable.
-    exposure : array-like, optional
-        Frequency weights (exposure). Must be frequency weights, not
+    sample_weight : array-like, optional
+        Frequency weights (sample_weight). Must be frequency weights, not
         variance weights — phi estimation and the profile likelihood
         for p assume frequency weight scaling.
     offset : array-like, optional
@@ -509,7 +509,7 @@ def estimate_tweedie_p(
             model,
             X,
             y,
-            exposure,
+            sample_weight,
             offset,
             p_bounds=p_bounds,
             xatol=xatol,
@@ -522,7 +522,7 @@ def estimate_tweedie_p(
         model,
         X,
         y,
-        exposure,
+        sample_weight,
         offset,
         p_bounds=p_bounds,
         xatol=xatol,
@@ -536,7 +536,7 @@ def _estimate_tweedie_p_fit(
     model,
     X,
     y,
-    exposure,
+    sample_weight,
     offset,
     *,
     p_bounds,
@@ -552,13 +552,13 @@ def _estimate_tweedie_p_fit(
 
     # --- One-time setup: build design matrix and calibrate lambda ---
     if model._splines is not None and not model._specs:
-        model._auto_detect_features(X, exposure)
+        model._auto_detect_features(X, sample_weight)
 
     # Set a temporary p so _build_design_matrix can resolve the distribution.
     # The design matrix itself doesn't depend on p at all.
     saved_family = model.family
     model.family = Tweedie(p=1.5)  # midpoint, any valid value works
-    y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, exposure, offset)
+    y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, sample_weight, offset)
     model.family = saved_family
 
     # Calibrate lambda1 once if not already set
@@ -727,7 +727,7 @@ def _estimate_tweedie_p_reml(
     model,
     X,
     y,
-    exposure,
+    sample_weight,
     offset,
     *,
     p_bounds,
@@ -740,7 +740,11 @@ def _estimate_tweedie_p_reml(
     from superglm.distributions import Tweedie
 
     y_np = np.asarray(y, dtype=np.float64)
-    w_arr = np.asarray(exposure, dtype=np.float64) if exposure is not None else np.ones(len(y_np))
+    w_arr = (
+        np.asarray(sample_weight, dtype=np.float64)
+        if sample_weight is not None
+        else np.ones(len(y_np))
+    )
 
     cache: dict[float, float] = {}
     n_evals = 0
@@ -756,7 +760,7 @@ def _estimate_tweedie_p_reml(
 
         # Set p and refit via REML
         model.family = Tweedie(p=p)
-        model.fit_reml(X, y, exposure=exposure, offset=offset)
+        model.fit_reml(X, y, offset=offset)
 
         mu = np.maximum(model.predict(X), 1e-10)
         df_resid = max(float(np.sum(w_arr)) - float(model.result.effective_df), 1.0)
@@ -793,7 +797,7 @@ def _estimate_tweedie_p_reml(
     # Ensure we have mu at p_hat for phi
     if last_p_eval is None or round(last_p_eval, 6) != p_hat:
         model.family = Tweedie(p=p_hat)
-        model.fit_reml(X, y, exposure=exposure, offset=offset)
+        model.fit_reml(X, y, offset=offset)
         last_mu = np.maximum(model.predict(X), 1e-10)
         last_edf = float(model.result.effective_df)
 

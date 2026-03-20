@@ -20,9 +20,9 @@ def poisson_data():
     area_effect = {"A": 0.0, "B": 0.2, "C": -0.1, "D": 0.3}
     mu = np.exp(-0.5 + 0.01 * (x1 - 40) ** 2 / 100 + np.array([area_effect[a] for a in area]))
     y = rng.poisson(mu)
-    exposure = np.ones(n)
+    sample_weight = np.ones(n)
     X = pd.DataFrame({"DrivAge": x1, "Area": area})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 @pytest.fixture
@@ -34,9 +34,9 @@ def select_data():
     x2 = rng.uniform(0, 10, n)  # noise
     mu = np.exp(-0.5 + 0.01 * (x1 - 40) ** 2 / 100)
     y = rng.poisson(mu)
-    exposure = np.ones(n)
+    sample_weight = np.ones(n)
     X = pd.DataFrame({"signal": x1, "noise": x2})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 # ── Basic solver tests ─────────────────────────────────────────
@@ -54,7 +54,7 @@ class TestDirectSolverBasic:
                 "Area": Categorical(),
             },
         )
-        m_direct.fit(X, y, exposure=w)
+        m_direct.fit(X, y, sample_weight=w)
 
         # BCD solver with near-zero lambda1 (effectively ridge)
         m_bcd = SuperGLM(
@@ -65,7 +65,7 @@ class TestDirectSolverBasic:
                 "Area": Categorical(),
             },
         )
-        m_bcd.fit(X, y, exposure=w)
+        m_bcd.fit(X, y, sample_weight=w)
 
         # Deviances should be very close
         assert abs(m_direct.result.deviance - m_bcd.result.deviance) / m_bcd.result.deviance < 0.01
@@ -81,7 +81,7 @@ class TestDirectSolverBasic:
                 "Area": Categorical(),
             },
         )
-        m.fit(X, y, exposure=w)
+        m.fit(X, y, sample_weight=w)
         assert m.result.converged
         assert m.result.deviance < np.sum(y) * 10  # reasonable deviance
 
@@ -98,7 +98,7 @@ class TestDirectSolverBasic:
                 "Area": Categorical(),
             },
         )
-        m1.fit(X, y, exposure=w)
+        m1.fit(X, y, sample_weight=w)
 
         # Warm start via re-fit (same model object, beta is reused internally)
         # We can't easily warm-start through .fit(), so test via direct solver import
@@ -129,7 +129,7 @@ class TestDirectSolverBasic:
                 "Area": Categorical(),
             },
         )
-        m.fit(X, y, exposure=w)
+        m.fit(X, y, sample_weight=w)
 
         # edf should be between 1 (intercept-only) and total params + 1
         total_params = sum(g.size for g in m._groups) + 1
@@ -146,7 +146,7 @@ class TestDirectSolverBasic:
                 "Area": Categorical(),
             },
         )
-        m.fit(X, y, exposure=w)
+        m.fit(X, y, sample_weight=w)
 
         mu_hat = m.predict(X)
         assert mu_hat.shape == y.shape
@@ -169,7 +169,7 @@ class TestDirectSolverSelect:
                 "noise": Spline(n_knots=10, select=True),
             },
         )
-        m.fit(X, y, exposure=w)
+        m.fit(X, y, sample_weight=w)
         # Direct solver: no BCD aliasing → should converge fast
         assert m.result.n_iter <= 10
         assert m.result.converged
@@ -194,7 +194,7 @@ class TestREMLDirect:
             selection_penalty=0,
             features={"DrivAge": Spline(n_knots=10)},
         )
-        m.fit_reml(X, y, exposure=w, max_reml_iter=50)
+        m.fit_reml(X, y, sample_weight=w, max_reml_iter=50)
 
         assert hasattr(m, "_reml_lambdas")
         assert m._reml_result.converged
@@ -210,7 +210,7 @@ class TestREMLDirect:
                 "noise": Spline(n_knots=10, select=True),
             },
         )
-        m.fit_reml(X, y, exposure=w, max_reml_iter=15)
+        m.fit_reml(X, y, sample_weight=w, max_reml_iter=15)
 
         assert hasattr(m, "_reml_lambdas")
         lambdas = m._reml_lambdas
@@ -232,7 +232,7 @@ class TestREMLDirect:
                 "noise": Spline(n_knots=10, select=True),
             },
         )
-        m.fit_reml(X, y, exposure=w, max_reml_iter=15)
+        m.fit_reml(X, y, sample_weight=w, max_reml_iter=15)
 
         lambdas = m._reml_lambdas
         # 1-col linear subgroups should have been estimated (not stuck at initial value)
@@ -253,7 +253,7 @@ class TestREMLDirect:
                 "Area": Categorical(),
             },
         )
-        m.fit_reml(X, y, exposure=w, max_reml_iter=10)
+        m.fit_reml(X, y, sample_weight=w, max_reml_iter=10)
 
         mu_hat = m.predict(X)
         assert mu_hat.shape == y.shape
@@ -278,7 +278,7 @@ class TestREMLDirect:
             raise AssertionError("Direct REML should not rebuild the design matrix")
 
         monkeypatch.setattr(m, "_rebuild_design_matrix_with_lambdas", fail_rebuild)
-        m.fit_reml(X, y, exposure=w, max_reml_iter=20)
+        m.fit_reml(X, y, sample_weight=w, max_reml_iter=20)
 
         assert hasattr(m, "_reml_lambdas")
         assert "DrivAge" in m._reml_lambdas

@@ -546,7 +546,9 @@ class _SplineBase:
             ),
         ]
 
-    def build(self, x: NDArray, exposure: NDArray | None = None) -> GroupInfo | list[GroupInfo]:
+    def build(
+        self, x: NDArray, sample_weight: NDArray | None = None
+    ) -> GroupInfo | list[GroupInfo]:
         """Build B-spline basis and penalty matrix."""
         if self.monotone is not None and self.monotone_mode == "fit":
             raise NotImplementedError(
@@ -573,7 +575,7 @@ class _SplineBase:
         )
 
     def build_knots_and_penalty(
-        self, x: NDArray, exposure: NDArray | None = None
+        self, x: NDArray, sample_weight: NDArray | None = None
     ) -> tuple[NDArray, int, NDArray | None]:
         """Place knots and return penalty info, without building the full basis.
 
