@@ -367,7 +367,10 @@ def _fit_pirls_inner(
                     shrink = min(1.0, lam * g.weight / norm_g)
                     p_eff += g.size - (g.size - 1) * shrink
 
-    phi = dev / max(n - p_eff, 1)
+    # Pearson-based phi for estimated-scale families (Tweedie, Gamma, NB2).
+    V_final = np.maximum(family.variance(mu_new), 1e-10)
+    pearson_chi2 = float(np.sum(weights * (y - mu_new) ** 2 / V_final))
+    phi = pearson_chi2 / max(n - p_eff, 1)
 
     return PIRLSResult(
         beta=beta,
