@@ -42,6 +42,9 @@ class IterationDiagnostics:
     # Indices of the 5 observations with largest/smallest W
     top_w_indices: NDArray  # (5,) int
     bottom_w_indices: NDArray  # (5,) int
+    # Condition estimate and SVD fallback flag (direct solver only)
+    cond_estimate: float | None = None
+    used_svd_fallback: bool | None = None
 
 
 @dataclass
@@ -225,11 +228,10 @@ def _fit_pirls_inner(
         dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
 
         # Step halving: if deviance spiked dramatically (>2x), interpolate
-        # between previous and current solution.  This prevents the positive
-        # feedback loop where a bad Newton step pushes eta to extremes,
-        # creating even worse working weights next iteration.  Small deviance
-        # increases are normal in IRLS (especially non-canonical links) and
-        # don't warrant halving.
+        # between previous and current solution.  Small deviance increases
+        # are normal in IRLS (especially non-canonical links) and don't
+        # warrant halving.  The per-group Hessian regularisation (eps =
+        # 1e-4 * L_g) is the primary defense in the BCD inner solve.
         n_halvings = 0
         if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
             for halving in range(max_halving):
@@ -243,10 +245,7 @@ def _fit_pirls_inner(
                     break
                 n_halvings += 1
                 dev = dev_h
-                logger.info(
-                    f"  PIRLS outer={outer + 1}: step halving {halving + 1}, "
-                    f"dev={dev:.2e}"
-                )
+                logger.info(f"  PIRLS outer={outer + 1}: step halving {halving + 1}, dev={dev:.2e}")
                 if dev <= dev_prev:
                     break
 
@@ -289,9 +288,7 @@ def _fit_pirls_inner(
         )
 
         if not np.isfinite(dev):
-            logger.warning(
-                f"PIRLS non-finite deviance at outer={outer + 1}: dev={dev:.2e}"
-            )
+            logger.warning(f"PIRLS non-finite deviance at outer={outer + 1}: dev={dev:.2e}")
             break
 
         if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:

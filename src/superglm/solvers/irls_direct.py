@@ -40,6 +40,49 @@ from superglm.types import GroupSlice
 logger = logging.getLogger(__name__)
 
 
+def _robust_solve(
+    M: NDArray, rhs: NDArray, cond_threshold: float = 1e10
+) -> tuple[NDArray, float, bool]:
+    """Solve ``M @ x = rhs`` with Cholesky primary path, SVD fallback.
+
+    The SVD fallback activates when Cholesky fails *or* the estimated condition
+    number exceeds *cond_threshold*.  With 16-digit doubles a threshold of 1e10
+    guarantees >=6 accurate digits — matching the IRLS convergence tolerance.
+
+    Parameters
+    ----------
+    M : (k, k) ndarray, symmetric positive (semi-)definite
+    rhs : (k,) ndarray
+    cond_threshold : float
+        If the Cholesky-estimated condition number exceeds this, fall back to
+        truncated SVD.
+
+    Returns
+    -------
+    x : (k,) ndarray
+    cond_est : float
+        Estimated condition number (from Cholesky diag or SVD singular values).
+    used_svd : bool
+        True if the SVD path was taken.
+    """
+    try:
+        L = scipy.linalg.cholesky(M, lower=True, check_finite=False)
+        diag_L = np.diag(L)
+        cond_est = float((diag_L.max() / max(diag_L.min(), 1e-300)) ** 2)
+        if cond_est < cond_threshold:
+            return scipy.linalg.cho_solve((L, True), rhs), cond_est, False
+    except np.linalg.LinAlgError:
+        cond_est = np.inf
+
+    # SVD fallback — backward-stable for any condition number
+    U, s, Vh = np.linalg.svd(M, full_matrices=False)
+    thresh = s[0] * 1e-10
+    inv_s = np.where(s > thresh, 1.0 / s, 0.0)
+    x = (Vh.T * inv_s) @ (U.T @ rhs)
+    cond_est = float(s[0] / max(s[-1], 1e-300))
+    return x, cond_est, True
+
+
 def _build_penalty_matrix(
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
@@ -85,47 +128,53 @@ def _invert_xtwx_plus_penalty(
     return H_inv
 
 
-def _safe_decompose_H(H: NDArray) -> tuple[NDArray, float, bool]:
+def _safe_decompose_H(H: NDArray, cond_threshold: float = 1e10) -> tuple[NDArray, float, bool]:
     """Decompose H = X'WX + S, returning its inverse and log-determinant.
 
-    Attempts a fast, numerically stable Cholesky decomposition first.
-    Falls back to a thresholded eigendecomposition if H is rank-deficient
-    (e.g., due to collinear unpenalized categoricals or extreme IRLS weights).
+    Attempts a fast Cholesky decomposition first.  If Cholesky fails *or* the
+    estimated condition number exceeds *cond_threshold*, falls back to a
+    truncated SVD pseudo-inverse.  This prevents garbage solutions from
+    near-singular systems (cond ~1e14) that Cholesky technically succeeds on
+    but produces ~0 accurate digits.
 
     Parameters
     ----------
     H : (p, p) ndarray
         The matrix to invert (typically X'WX + S).
+    cond_threshold : float
+        Maximum acceptable Cholesky condition estimate (default 1e10).
 
     Returns
     -------
     H_inv : (p, p) ndarray
         The inverse (or pseudo-inverse) of H.
     log_det_H : float
-        log|H| (from Cholesky diagonal) or log|H|₊ (from positive eigenvalues).
+        log|H| (from Cholesky diagonal) or log|H|₊ (from positive SVD values).
     cholesky_ok : bool
-        True if the Cholesky path succeeded.
+        True if the Cholesky path succeeded (without condition issues).
     """
     p = H.shape[0]
 
-    # === Primary path: Fast Cholesky ===
+    # === Primary path: Fast Cholesky with condition check ===
     try:
         L = scipy.linalg.cholesky(H, lower=True, check_finite=False)
-        log_det_H = 2.0 * float(np.sum(np.log(np.diag(L))))
-        H_inv = scipy.linalg.cho_solve((L, True), np.eye(p))
-        return H_inv, log_det_H, True
+        diag_L = np.diag(L)
+        cond_est = (diag_L.max() / max(diag_L.min(), 1e-300)) ** 2
+        if cond_est < cond_threshold:
+            log_det_H = 2.0 * float(np.sum(np.log(diag_L)))
+            H_inv = scipy.linalg.cho_solve((L, True), np.eye(p))
+            return H_inv, log_det_H, True
     except np.linalg.LinAlgError:
         pass
 
-    # === Fallback: Thresholded Eigendecomposition ===
-    eigvals, eigvecs = np.linalg.eigh(H)
-    threshold = 1e-6 * max(eigvals.max(), 1e-12)
-    with np.errstate(divide="ignore"):
-        inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
-    H_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
+    # === Fallback: Truncated SVD (backward-stable for any condition) ===
+    U, s, Vh = np.linalg.svd(H, full_matrices=False)
+    thresh = s[0] * 1e-10
+    inv_s = np.where(s > thresh, 1.0 / s, 0.0)
+    H_inv = (Vh.T * inv_s) @ (Vh)  # symmetric: Vh.T @ diag(inv_s) @ Vh
 
-    pos_eigvals = eigvals[eigvals > threshold]
-    log_det_H = float(np.sum(np.log(pos_eigvals))) if pos_eigvals.size > 0 else 0.0
+    pos_s = s[s > thresh]
+    log_det_H = float(np.sum(np.log(pos_s))) if pos_s.size > 0 else 0.0
 
     return H_inv, log_det_H, False
 
@@ -279,18 +328,10 @@ def fit_irls_direct(
         rhs[1:] = XtWz
         _t_gram += time.perf_counter() - _t0
 
-        # Solve augmented system — Cholesky (fast) with eigh fallback
+        # Solve augmented system — Cholesky with SVD fallback for
+        # ill-conditioned systems (Tweedie/NB2 near convergence).
         _t0 = time.perf_counter()
-        try:
-            L_aug = scipy.linalg.cholesky(M_aug, lower=True, check_finite=False)
-            beta_aug = scipy.linalg.cho_solve((L_aug, True), rhs)
-        except np.linalg.LinAlgError:
-            eigvals, eigvecs = np.linalg.eigh(M_aug)
-            threshold = 1e-10 * max(eigvals.max(), 1e-12)
-            with np.errstate(divide="ignore"):
-                inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
-            M_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
-            beta_aug = M_inv @ rhs
+        beta_aug, _cond_est, _used_svd = _robust_solve(M_aug, rhs)
 
         intercept = float(beta_aug[0])
         beta = beta_aug[1:]
@@ -307,7 +348,8 @@ def fit_irls_direct(
         # Step halving: if deviance spiked dramatically (>2x), interpolate
         # between previous and current solution.  Small deviance increases
         # are normal in IRLS (especially non-canonical links) and don't
-        # warrant halving.
+        # warrant halving.  The SVD fallback in _robust_solve() is the
+        # primary defense against ill-conditioned overshoots.
         n_halvings = 0
         if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
             for halving in range(max_halving):
@@ -321,8 +363,7 @@ def fit_irls_direct(
                 n_halvings += 1
                 dev = dev_h
                 logger.info(
-                    f"  irls_direct iter={it + 1}: step halving {halving + 1}, "
-                    f"dev={dev:.2e}"
+                    f"  irls_direct iter={it + 1}: step halving {halving + 1}, dev={dev:.2e}"
                 )
                 if dev <= dev_prev:
                     break
@@ -348,6 +389,8 @@ def fit_irls_direct(
                     step_halvings=n_halvings,
                     top_w_indices=top_idx[np.argsort(W[top_idx])[::-1]],
                     bottom_w_indices=bot_idx[np.argsort(W[bot_idx])],
+                    cond_estimate=_cond_est,
+                    used_svd_fallback=_used_svd,
                 )
             )
 
@@ -357,9 +400,7 @@ def fit_irls_direct(
         )
 
         if not np.isfinite(dev):
-            logger.warning(
-                f"IRLS direct non-finite deviance at iter={it + 1}: dev={dev:.2e}"
-            )
+            logger.warning(f"IRLS direct non-finite deviance at iter={it + 1}: dev={dev:.2e}")
             break
 
         if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
