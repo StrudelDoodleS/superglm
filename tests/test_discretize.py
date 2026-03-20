@@ -28,7 +28,7 @@ def fitted_model():
     x_poly = rng.uniform(0, 10, n)
     eta = 0.02 * (x_spline - 40) ** 2 / 400 - 0.3 * (x_cat == "B") + 0.1 * x_num
     y = rng.poisson(np.exp(eta)).astype(float)
-    exposure = rng.uniform(0.5, 2.0, n)
+    sample_weight = rng.uniform(0.5, 2.0, n)
     df = pd.DataFrame(
         {
             "age": x_spline,
@@ -48,22 +48,29 @@ def fitted_model():
             "density": Polynomial(degree=3),
         },
     )
-    m.fit(df, y, exposure=exposure)
-    return m, df, y, exposure
+    m.fit(df, y, sample_weight=sample_weight)
+    return m, df, y, sample_weight
 
 
 class TestRatingTableSchema:
     def test_correct_columns(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, n_bins=10)
-        expected_cols = {"bin_from", "bin_to", "relativity", "log_relativity", "n_obs", "exposure"}
+        result = m.discretization_impact(df, y, sample_weight=w, n_bins=10)
+        expected_cols = {
+            "bin_from",
+            "bin_to",
+            "relativity",
+            "log_relativity",
+            "n_obs",
+            "sample_weight",
+        }
         for name, table in result.tables.items():
             assert set(table.columns) == expected_cols, f"Wrong columns for {name}"
 
     def test_n_bins_rows(self, fitted_model):
         m, df, y, w = fitted_model
         for n_bins in [5, 10, 20]:
-            result = m.discretization_impact(df, y, exposure=w, n_bins=n_bins)
+            result = m.discretization_impact(df, y, sample_weight=w, n_bins=n_bins)
             for name, table in result.tables.items():
                 assert len(table) <= n_bins, (
                     f"Feature {name}: got {len(table)} rows for n_bins={n_bins}"
@@ -74,7 +81,7 @@ class TestRatingTableSchema:
 class TestFeatureFiltering:
     def test_non_spline_features_excluded(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w)
+        result = m.discretization_impact(df, y, sample_weight=w)
         # Only spline and polynomial features should appear
         assert "region" not in result.tables
         assert "score" not in result.tables
@@ -84,24 +91,24 @@ class TestFeatureFiltering:
 
     def test_features_param_restricts(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, features=["age"])
+        result = m.discretization_impact(df, y, sample_weight=w, features=["age"])
         assert list(result.tables.keys()) == ["age"]
 
     def test_invalid_feature_raises(self, fitted_model):
         m, df, y, w = fitted_model
         with pytest.raises(ValueError, match="Unknown feature"):
-            m.discretization_impact(df, y, exposure=w, features=["nonexistent"])
+            m.discretization_impact(df, y, sample_weight=w, features=["nonexistent"])
 
     def test_non_continuous_feature_raises(self, fitted_model):
         m, df, y, w = fitted_model
         with pytest.raises(ValueError, match="not a spline or polynomial"):
-            m.discretization_impact(df, y, exposure=w, features=["region"])
+            m.discretization_impact(df, y, sample_weight=w, features=["region"])
 
 
 class TestBinCoverage:
     def test_bins_span_data_range(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, n_bins=10)
+        result = m.discretization_impact(df, y, sample_weight=w, n_bins=10)
         for name, table in result.tables.items():
             x_vals = df[name].values
             assert table["bin_from"].iloc[0] <= x_vals.min() + 1e-10
@@ -109,7 +116,7 @@ class TestBinCoverage:
 
     def test_no_gaps_between_bins(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, n_bins=10)
+        result = m.discretization_impact(df, y, sample_weight=w, n_bins=10)
         for name, table in result.tables.items():
             if len(table) > 1:
                 # Each bin_from should equal the previous bin_to
@@ -120,7 +127,7 @@ class TestBinCoverage:
 
     def test_all_observations_assigned(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, n_bins=10)
+        result = m.discretization_impact(df, y, sample_weight=w, n_bins=10)
         n = len(df)
         for name, table in result.tables.items():
             assert table["n_obs"].sum() == n, (
@@ -131,19 +138,19 @@ class TestBinCoverage:
 class TestPredictions:
     def test_predictions_shape(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w)
+        result = m.discretization_impact(df, y, sample_weight=w)
         assert result.predictions.shape == (len(df),)
         assert result.original_predictions.shape == (len(df),)
 
     def test_predictions_positive(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w)
+        result = m.discretization_impact(df, y, sample_weight=w)
         assert np.all(result.predictions > 0)
         assert np.all(result.original_predictions > 0)
 
     def test_original_matches_model_predict(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w)
+        result = m.discretization_impact(df, y, sample_weight=w)
         expected = m.predict(df)
         np.testing.assert_allclose(result.original_predictions, expected, rtol=1e-10)
 
@@ -151,7 +158,7 @@ class TestPredictions:
 class TestMetrics:
     def test_all_metric_keys_present(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w)
+        result = m.discretization_impact(df, y, sample_weight=w)
         expected_keys = {
             "deviance_original",
             "deviance_discretized",
@@ -165,7 +172,7 @@ class TestMetrics:
 
     def test_deviance_change_consistent(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w)
+        result = m.discretization_impact(df, y, sample_weight=w)
         expected_change = (
             result.metrics["deviance_discretized"] - result.metrics["deviance_original"]
         )
@@ -173,42 +180,42 @@ class TestMetrics:
 
     def test_high_correlation(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, n_bins=20)
+        result = m.discretization_impact(df, y, sample_weight=w, n_bins=20)
         assert result.metrics["prediction_correlation"] > 0.95
 
 
 class TestSmallImpactAtHighBinCount:
     def test_tiny_deviance_change_at_50_bins(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, n_bins=50)
+        result = m.discretization_impact(df, y, sample_weight=w, n_bins=50)
         assert abs(result.metrics["deviance_change_pct"]) < 1.0, (
             f"Deviance change {result.metrics['deviance_change_pct']:.4f}% too large at 50 bins"
         )
 
     def test_high_correlation_at_50_bins(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, n_bins=50)
+        result = m.discretization_impact(df, y, sample_weight=w, n_bins=50)
         assert result.metrics["prediction_correlation"] > 0.99
 
 
 class TestConvenienceMethod:
     def test_model_method_matches_function(self, fitted_model):
         m, df, y, w = fitted_model
-        r1 = m.discretization_impact(df, y, exposure=w, n_bins=10)
-        r2 = discretization_impact(m, df, y, exposure=w, n_bins=10)
+        r1 = m.discretization_impact(df, y, sample_weight=w, n_bins=10)
+        r2 = discretization_impact(m, df, y, sample_weight=w, n_bins=10)
         np.testing.assert_array_equal(r1.predictions, r2.predictions)
         assert r1.metrics == r2.metrics
 
     def test_returns_discretization_result(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w)
+        result = m.discretization_impact(df, y, sample_weight=w)
         assert isinstance(result, DiscretizationResult)
 
 
 class TestBinStrategy:
     def test_uniform_equal_width(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, n_bins=10, bin_strategy="uniform")
+        result = m.discretization_impact(df, y, sample_weight=w, n_bins=10, bin_strategy="uniform")
         for name, table in result.tables.items():
             widths = (table["bin_to"] - table["bin_from"]).values
             # All bins should have the same width
@@ -218,13 +225,15 @@ class TestBinStrategy:
 
     def test_uniform_produces_result(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, n_bins=10, bin_strategy="uniform")
+        result = m.discretization_impact(df, y, sample_weight=w, n_bins=10, bin_strategy="uniform")
         assert isinstance(result, DiscretizationResult)
         assert result.predictions.shape == (len(df),)
 
     def test_winsorized_structure(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, n_bins=10, bin_strategy="winsorized")
+        result = m.discretization_impact(
+            df, y, sample_weight=w, n_bins=10, bin_strategy="winsorized"
+        )
         for name, table in result.tables.items():
             x_vals = df[name].values
             # First bin starts at data min, last ends at data max
@@ -239,19 +248,21 @@ class TestBinStrategy:
 
     def test_winsorized_produces_result(self, fitted_model):
         m, df, y, w = fitted_model
-        result = m.discretization_impact(df, y, exposure=w, n_bins=10, bin_strategy="winsorized")
+        result = m.discretization_impact(
+            df, y, sample_weight=w, n_bins=10, bin_strategy="winsorized"
+        )
         assert isinstance(result, DiscretizationResult)
 
     def test_invalid_strategy_raises(self, fitted_model):
         m, df, y, w = fitted_model
         with pytest.raises(ValueError, match="Unknown bin_strategy"):
-            m.discretization_impact(df, y, exposure=w, bin_strategy="bogus")
+            m.discretization_impact(df, y, sample_weight=w, bin_strategy="bogus")
 
     def test_default_is_exposure_quantile(self, fitted_model):
         m, df, y, w = fitted_model
-        r_default = m.discretization_impact(df, y, exposure=w, n_bins=10)
+        r_default = m.discretization_impact(df, y, sample_weight=w, n_bins=10)
         r_explicit = m.discretization_impact(
-            df, y, exposure=w, n_bins=10, bin_strategy="exposure_quantile"
+            df, y, sample_weight=w, n_bins=10, bin_strategy="exposure_quantile"
         )
         np.testing.assert_array_equal(r_default.predictions, r_explicit.predictions)
 
@@ -259,7 +270,9 @@ class TestBinStrategy:
         m, df, y, w = fitted_model
         n = len(df)
         for strategy in ["exposure_quantile", "uniform", "winsorized"]:
-            result = m.discretization_impact(df, y, exposure=w, n_bins=10, bin_strategy=strategy)
+            result = m.discretization_impact(
+                df, y, sample_weight=w, n_bins=10, bin_strategy=strategy
+            )
             for name, table in result.tables.items():
                 assert table["n_obs"].sum() == n, f"strategy={strategy}, {name}: n_obs sum != {n}"
 

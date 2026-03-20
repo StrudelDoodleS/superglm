@@ -17,15 +17,15 @@ def cv_data():
     x2 = rng.choice(["A", "B", "C"], n)
     mu = np.exp(-1.0 + 0.01 * x1 + 0.3 * (x2 == "B") + 0.5 * (x2 == "C"))
     y = rng.poisson(mu).astype(float)
-    exposure = rng.uniform(0.5, 2.0, n)
+    sample_weight = rng.uniform(0.5, 2.0, n)
     df = pd.DataFrame({"x1": x1, "x2": x2})
-    return df, y, exposure
+    return df, y, sample_weight
 
 
 class TestFitCV:
     def test_smoke(self, cv_data):
         """fit_cv runs and returns CVResult with correct fields."""
-        df, y, exposure = cv_data
+        df, y, sample_weight = cv_data
         model = SuperGLM(
             family="poisson",
             penalty=GroupLasso(lambda1=0.01),
@@ -34,7 +34,7 @@ class TestFitCV:
         result = model.fit_cv(
             df[["x1"]],
             y,
-            exposure=exposure,
+            sample_weight=sample_weight,
             n_folds=3,
             n_lambda=10,
             random_state=42,
@@ -51,7 +51,7 @@ class TestFitCV:
 
     def test_1se_more_regularised(self, cv_data):
         """best_lambda_1se >= best_lambda (more regularised)."""
-        df, y, exposure = cv_data
+        df, y, sample_weight = cv_data
         model = SuperGLM(
             family="poisson",
             penalty=GroupLasso(),
@@ -60,7 +60,7 @@ class TestFitCV:
         result = model.fit_cv(
             df[["x1"]],
             y,
-            exposure=exposure,
+            sample_weight=sample_weight,
             n_folds=3,
             n_lambda=20,
             rule="min",
@@ -71,7 +71,7 @@ class TestFitCV:
 
     def test_refit_true(self, cv_data):
         """After fit_cv(refit=True), predict works."""
-        df, y, exposure = cv_data
+        df, y, sample_weight = cv_data
         model = SuperGLM(
             family="poisson",
             penalty=GroupLasso(),
@@ -80,7 +80,7 @@ class TestFitCV:
         model.fit_cv(
             df[["x1"]],
             y,
-            exposure=exposure,
+            sample_weight=sample_weight,
             n_folds=3,
             n_lambda=10,
             refit=True,
@@ -92,7 +92,7 @@ class TestFitCV:
 
     def test_refit_false(self, cv_data):
         """After fit_cv(refit=False), model is not fitted."""
-        df, y, exposure = cv_data
+        df, y, sample_weight = cv_data
         model = SuperGLM(
             family="poisson",
             penalty=GroupLasso(),
@@ -101,7 +101,7 @@ class TestFitCV:
         model.fit_cv(
             df[["x1"]],
             y,
-            exposure=exposure,
+            sample_weight=sample_weight,
             n_folds=3,
             n_lambda=10,
             refit=False,
@@ -112,7 +112,7 @@ class TestFitCV:
 
     def test_rule_min_vs_1se(self, cv_data):
         """rule='min' and rule='1se' may select different lambdas."""
-        df, y, exposure = cv_data
+        df, y, sample_weight = cv_data
         model_min = SuperGLM(
             family="poisson",
             penalty=GroupLasso(),
@@ -121,7 +121,7 @@ class TestFitCV:
         result_min = model_min.fit_cv(
             df[["x1"]],
             y,
-            exposure=exposure,
+            sample_weight=sample_weight,
             n_folds=3,
             n_lambda=20,
             rule="min",
@@ -135,7 +135,7 @@ class TestFitCV:
         result_1se = model_1se.fit_cv(
             df[["x1"]],
             y,
-            exposure=exposure,
+            sample_weight=sample_weight,
             n_folds=3,
             n_lambda=20,
             rule="1se",
@@ -146,7 +146,7 @@ class TestFitCV:
 
     def test_custom_lambda_seq(self, cv_data):
         """Explicit lambda_seq is respected."""
-        df, y, exposure = cv_data
+        df, y, sample_weight = cv_data
         lam_seq = np.array([1.0, 0.5, 0.1, 0.05, 0.01])
         model = SuperGLM(
             family="poisson",
@@ -156,7 +156,7 @@ class TestFitCV:
         result = model.fit_cv(
             df[["x1"]],
             y,
-            exposure=exposure,
+            sample_weight=sample_weight,
             n_folds=3,
             lambda_seq=lam_seq,
             random_state=42,
@@ -166,7 +166,7 @@ class TestFitCV:
 
     def test_reproducibility(self, cv_data):
         """Same random_state gives same result."""
-        df, y, exposure = cv_data
+        df, y, sample_weight = cv_data
         results = []
         for _ in range(2):
             model = SuperGLM(
@@ -177,7 +177,7 @@ class TestFitCV:
             r = model.fit_cv(
                 df[["x1"]],
                 y,
-                exposure=exposure,
+                sample_weight=sample_weight,
                 n_folds=3,
                 n_lambda=10,
                 refit=False,
@@ -189,7 +189,7 @@ class TestFitCV:
 
     def test_deviance_finite(self, cv_data):
         """All CV deviance values are finite and positive."""
-        df, y, exposure = cv_data
+        df, y, sample_weight = cv_data
         model = SuperGLM(
             family="poisson",
             penalty=GroupLasso(),
@@ -198,7 +198,7 @@ class TestFitCV:
         result = model.fit_cv(
             df[["x1"]],
             y,
-            exposure=exposure,
+            sample_weight=sample_weight,
             n_folds=3,
             n_lambda=10,
             refit=False,

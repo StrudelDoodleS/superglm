@@ -84,21 +84,6 @@ def resolve_knots(model, spline_cols: list[str]) -> dict[str, int]:
     return dict(zip(spline_cols, model._n_knots))
 
 
-def resolve_sample_weight_alias(
-    exposure: NDArray | None,
-    sample_weight: NDArray | None,
-    *,
-    method_name: str,
-) -> NDArray | None:
-    """Resolve the public sample_weight alias for exposure/frequency weights."""
-    if exposure is not None and sample_weight is not None:
-        raise TypeError(
-            f"{method_name} received both 'exposure' and 'sample_weight'. "
-            "Use only 'sample_weight'; 'exposure' is a backward-compatible alias."
-        )
-    return sample_weight if sample_weight is not None else exposure
-
-
 def init_model(
     model,
     family: str | Distribution = "poisson",
@@ -237,13 +222,13 @@ def clone_without_features(
     return new_model
 
 
-def auto_detect(model, X: pd.DataFrame, exposure: NDArray | None) -> None:
+def auto_detect(model, X: pd.DataFrame, sample_weight: NDArray | None) -> None:
     """Auto-detect feature types from DataFrame columns."""
     spline_cols = model._splines or []
     knots_map = resolve_knots(model, spline_cols)
     auto_detect_features(
         X,
-        exposure,
+        sample_weight,
         spline_cols=spline_cols,
         knots_map=knots_map,
         degree=model._degree,
@@ -270,18 +255,18 @@ def model_build_design_matrix(
     model,
     X: pd.DataFrame,
     y: NDArray,
-    exposure: NDArray,
+    sample_weight: NDArray,
     offset: NDArray | None,
 ) -> tuple[NDArray, NDArray, NDArray | None]:
     """Build features, groups, design matrix.
 
     Sets model._dm, model._groups, model._distribution, model._link.
-    Returns (y, exposure, offset) as float64 arrays.
+    Returns (y, sample_weight, offset) as float64 arrays.
     """
     result = build_design_matrix(
         X,
         y,
-        exposure,
+        sample_weight,
         offset,
         family=model.family,
         link_spec=model.link,
@@ -299,7 +284,7 @@ def model_build_design_matrix(
     model._groups = result.groups
     validate_penalty_features(model.penalty, result.groups)
     model._dm = result.dm
-    return result.y, result.exposure, result.offset
+    return result.y, result.sample_weight, result.offset
 
 
 def compute_lambda_max(model, y, weights):
@@ -323,10 +308,12 @@ def model_has_lambda1_targets(model) -> bool:
     return penalty_has_targets(model.penalty, model._groups)
 
 
-def rebuild_dm_with_lambdas(model, lambdas: dict[str, float], exposure: NDArray) -> DesignMatrix:
+def rebuild_dm_with_lambdas(
+    model, lambdas: dict[str, float], sample_weight: NDArray
+) -> DesignMatrix:
     """Rebuild design matrix with per-group smoothing lambdas."""
     return rebuild_design_matrix_with_lambdas(
-        model._dm, model._groups, lambdas, exposure, model.lambda2
+        model._dm, model._groups, lambdas, sample_weight, model.lambda2
     )
 
 

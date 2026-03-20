@@ -248,15 +248,15 @@ class TestProfileLikelihood:
 
     @pytest.mark.parametrize("phi_method", ["pearson", "mle"])
     def test_recovers_p_with_prior_weights(self, phi_method):
-        """Profile likelihood should recover p when exposure acts through phi / w."""
+        """Profile likelihood should recover p when sample_weight acts through phi / w."""
         rng = np.random.default_rng(321)
         p_true = 1.6
         phi_true = 3.0
         n = 4_000
         x1 = rng.normal(0, 1, n)
-        exposure = rng.uniform(0.5, 2.0, n)
+        sample_weight = rng.uniform(0.5, 2.0, n)
         mu = np.exp(1.5 + 0.25 * x1)
-        y = _generate_weighted_tweedie(mu, phi_true, p_true, exposure, rng)
+        y = _generate_weighted_tweedie(mu, phi_true, p_true, sample_weight, rng)
         X = pd.DataFrame({"x1": x1})
 
         model = SuperGLM(
@@ -266,29 +266,29 @@ class TestProfileLikelihood:
         )
 
         result = estimate_tweedie_p(
-            model, X, y, exposure=exposure, p_bounds=(1.1, 1.9), phi_method=phi_method
+            model, X, y, sample_weight=sample_weight, p_bounds=(1.1, 1.9), phi_method=phi_method
         )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
         np.testing.assert_allclose(result.phi_hat, phi_true, rtol=0.2)
 
     @pytest.mark.slow
     def test_insurance_like(self):
-        """Insurance-like data with exposure and high zero rate."""
+        """Insurance-like data with sample_weight and high zero rate."""
         import pandas as pd
 
         rng = np.random.default_rng(77)
         p_true = 1.85
         n = 20_000
-        exposure = rng.uniform(0.5, 1.5, n)
+        sample_weight = rng.uniform(0.5, 1.5, n)
         x1 = rng.normal(0, 1, n)
         log_mu = np.log(300) + 0.1 * x1
-        mu = np.exp(log_mu) * exposure
+        mu = np.exp(log_mu) * sample_weight
         y = generate_tweedie_cpg(n, mu=mu, phi=20_000.0, p=p_true, rng=rng)
 
         # Scale down for numerical stability
         scale = 1000.0
         y_scaled = y / scale
-        exposure_scaled = exposure  # exposure is unitless
+        exposure_scaled = sample_weight  # sample_weight is unitless
 
         X = pd.DataFrame({"x1": x1})
         model = SuperGLM(
@@ -301,8 +301,8 @@ class TestProfileLikelihood:
             model,
             X,
             y_scaled,
-            exposure=exposure_scaled,
-            offset=np.log(exposure),
+            sample_weight=exposure_scaled,
+            offset=np.log(sample_weight),
             p_bounds=(1.2, 1.95),
         )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)

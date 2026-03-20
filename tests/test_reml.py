@@ -67,7 +67,7 @@ class TestOmegaStored:
             selection_penalty=0.01,
             features={"x1": Spline(n_knots=8, penalty="ssp"), "x2": Numeric()},
         )
-        model.fit(X[["x1", "x2"]], y, exposure=w)
+        model.fit(X[["x1", "x2"]], y, sample_weight=w)
         gm = model._dm.group_matrices[0]
         assert isinstance(gm, SparseSSPGroupMatrix)
         assert gm.omega is not None
@@ -83,7 +83,7 @@ class TestOmegaStored:
             selection_penalty=0.01,
             features={"x1": NaturalSpline(n_knots=8, penalty="ssp"), "x2": Numeric()},
         )
-        model.fit(X[["x1", "x2"]], y, exposure=w)
+        model.fit(X[["x1", "x2"]], y, sample_weight=w)
         gm = model._dm.group_matrices[0]
         assert isinstance(gm, SparseSSPGroupMatrix)
         assert gm.omega is not None
@@ -96,7 +96,7 @@ class TestOmegaStored:
             selection_penalty=0.01,
             features={"x1": CubicRegressionSpline(n_knots=8, penalty="ssp"), "x2": Numeric()},
         )
-        model.fit(X[["x1", "x2"]], y, exposure=w)
+        model.fit(X[["x1", "x2"]], y, sample_weight=w)
         gm = model._dm.group_matrices[0]
         assert isinstance(gm, SparseSSPGroupMatrix)
         assert gm.omega is not None
@@ -121,7 +121,7 @@ class TestPenalisedXtwxInvOmega:
             selection_penalty=0.001,
             features={"x1": CubicRegressionSpline(n_knots=6, penalty="ssp")},
         )
-        model.fit(X[["x1"]], y, exposure=w)
+        model.fit(X[["x1"]], y, sample_weight=w)
 
         # The stored omega on the group matrix should be the CRS penalty,
         # not _second_diff_penalty. Check the penalty contribution differs.
@@ -147,7 +147,7 @@ class TestPenalisedXtwxInvOmega:
                 "x2": Spline(n_knots=6, penalty="ssp"),
             },
         )
-        model.fit(X[["x1", "x2"]], y, exposure=w)
+        model.fit(X[["x1", "x2"]], y, sample_weight=w)
 
         beta = model.result.beta
         mu = model.predict(X[["x1", "x2"]])
@@ -178,7 +178,7 @@ class TestPenalisedXtwxInvOmega:
                 "x3": Categorical(),
             },
         )
-        model.fit(X, y, exposure=w)
+        model.fit(X, y, sample_weight=w)
 
         beta = model.result.beta
         mu = model.predict(X)
@@ -211,7 +211,7 @@ class TestComputeRInvOverride:
             selection_penalty=0.01,
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
-        model.fit(X[["x1"]], y, exposure=w)
+        model.fit(X[["x1"]], y, sample_weight=w)
 
         gm = model._dm.group_matrices[0]
         from superglm.dm_builder import compute_R_inv
@@ -309,7 +309,7 @@ class TestBetaMapping:
             selection_penalty=0.01,
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
-        model.fit(X[["x1"]], y, exposure=w)
+        model.fit(X[["x1"]], y, sample_weight=w)
 
         gm_old = model._dm.group_matrices[0]
         beta_old = model.result.beta.copy()
@@ -433,7 +433,7 @@ class TestREMLConvergence:
     def test_reml_convergence_small(self, poisson_data, spline_model):
         """REML should converge on a small dataset."""
         X, y, w = poisson_data
-        spline_model.fit_reml(X, y, exposure=w, max_reml_iter=20)
+        spline_model.fit_reml(X, y, sample_weight=w, max_reml_iter=20)
 
         assert hasattr(spline_model, "_reml_lambdas")
         assert hasattr(spline_model, "_reml_result")
@@ -585,7 +585,7 @@ class TestREMLSelectTrue:
             selection_penalty=0.01,
             features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
         )
-        model.fit_reml(X[["x1"]], y, exposure=w, max_reml_iter=15)
+        model.fit_reml(X[["x1"]], y, sample_weight=w, max_reml_iter=15)
         assert model._reml_result.converged
         # Both linear and spline subgroups should have REML lambdas
         assert "x1:linear" in model._reml_lambdas
@@ -602,7 +602,7 @@ class TestREMLSelectTrue:
                 "x2": Spline(n_knots=8, penalty="ssp", select=True),
             },
         )
-        model.fit_reml(X[["x1", "x2"]], y, exposure=w, max_reml_iter=15)
+        model.fit_reml(X[["x1", "x2"]], y, sample_weight=w, max_reml_iter=15)
         # Should have 4 REML lambdas: x1:linear, x1:spline, x2:linear, x2:spline
         assert len(model._reml_lambdas) == 4
 
@@ -614,7 +614,7 @@ class TestREMLBackwardCompat:
     def test_fit_unchanged(self, poisson_data, spline_model):
         """fit() with global lambda2 should work unchanged after REML code added."""
         X, y, w = poisson_data
-        spline_model.fit(X, y, exposure=w)
+        spline_model.fit(X, y, sample_weight=w)
         assert spline_model.result is not None
         assert not hasattr(spline_model, "_reml_lambdas") or spline_model._reml_lambdas is None
 
@@ -809,7 +809,7 @@ class TestREMLPredict:
     def test_reml_predict_after_fit(self, poisson_data, spline_model):
         """predict/reconstruct should work after fit_reml."""
         X, y, w = poisson_data
-        spline_model.fit_reml(X, y, exposure=w, max_reml_iter=10)
+        spline_model.fit_reml(X, y, sample_weight=w, max_reml_iter=10)
 
         # predict
         mu = spline_model.predict(X)
@@ -831,9 +831,9 @@ class TestREMLMetrics:
     def test_reml_metrics_ses(self, poisson_data, spline_model):
         """summary/SEs should work after fit_reml (using per-group lambdas)."""
         X, y, w = poisson_data
-        spline_model.fit_reml(X, y, exposure=w, max_reml_iter=10)
+        spline_model.fit_reml(X, y, sample_weight=w, max_reml_iter=10)
 
-        met = spline_model.metrics(X, y, exposure=w)
+        met = spline_model.metrics(X, y, sample_weight=w)
         assert met.n_obs == len(y)
         assert met.deviance > 0
         assert met.effective_df > 0
@@ -850,7 +850,7 @@ class TestREMLMetrics:
         X, y, w = poisson_data
 
         # Fit with REML
-        spline_model.fit_reml(X, y, exposure=w, max_reml_iter=10)
+        spline_model.fit_reml(X, y, sample_weight=w, max_reml_iter=10)
         cov_reml, groups_reml = spline_model._coef_covariance
 
         # Fit with global lambda2 (different model instance)
@@ -863,7 +863,7 @@ class TestREMLMetrics:
                 "x3": Categorical(),
             },
         )
-        model2.fit(X, y, exposure=w)
+        model2.fit(X, y, sample_weight=w)
         cov_global, groups_global = model2._coef_covariance
 
         # They should differ (different lambdas → different penalty → different cov)
@@ -901,7 +901,7 @@ class TestREMLDiscreteRobustness:
             },
             discrete=True,
         )
-        model.fit_reml(df, y, exposure=w, max_reml_iter=50, lambda2_init=1e5)
+        model.fit_reml(df, y, sample_weight=w, max_reml_iter=50, lambda2_init=1e5)
 
         assert model._reml_result.converged
         assert model._reml_result.n_reml_iter <= 30
@@ -924,10 +924,10 @@ class TestREMLDiscreteRobustness:
         }
 
         exact = SuperGLM(family="poisson", selection_penalty=0, features=features, discrete=False)
-        exact.fit_reml(df, y, exposure=w, max_reml_iter=30)
+        exact.fit_reml(df, y, sample_weight=w, max_reml_iter=30)
 
         disc = SuperGLM(family="poisson", selection_penalty=0, features=features, discrete=True)
-        disc.fit_reml(df, y, exposure=w, max_reml_iter=30)
+        disc.fit_reml(df, y, sample_weight=w, max_reml_iter=30)
 
         assert exact._reml_result.converged
         assert disc._reml_result.converged
@@ -971,10 +971,10 @@ class TestREMLDiscreteRobustness:
         }
 
         exact = SuperGLM(family=family, selection_penalty=0, features=features, discrete=False)
-        exact.fit_reml(df, y, exposure=w, max_reml_iter=30)
+        exact.fit_reml(df, y, sample_weight=w, max_reml_iter=30)
 
         disc = SuperGLM(family=family, selection_penalty=0, features=features, discrete=True)
-        disc.fit_reml(df, y, exposure=w, max_reml_iter=30)
+        disc.fit_reml(df, y, sample_weight=w, max_reml_iter=30)
 
         assert exact._reml_result.converged
         assert disc._reml_result.converged

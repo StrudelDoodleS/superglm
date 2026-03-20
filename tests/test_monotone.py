@@ -24,9 +24,9 @@ def increasing_poisson_data():
     log_rate += 0.5 * np.sin(x)
     y = rng.poisson(np.exp(log_rate))
     y = np.maximum(y, 0)
-    exposure = np.ones(n)
+    sample_weight = np.ones(n)
     X = pd.DataFrame({"signal": x})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 @pytest.fixture
@@ -39,9 +39,9 @@ def decreasing_poisson_data():
     log_rate += 0.5 * np.sin(x)
     y = rng.poisson(np.exp(log_rate))
     y = np.maximum(y, 0)
-    exposure = np.ones(n)
+    sample_weight = np.ones(n)
     X = pd.DataFrame({"signal": x})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 # ── Phase 1: Spline API tests ──────────────────────────────────
@@ -70,14 +70,14 @@ class TestSplineAPIParams:
             Spline(monotone="increasing", monotone_mode="invalid")
 
     def test_monotone_fit_mode_raises(self, increasing_poisson_data):
-        X, y, exposure = increasing_poisson_data
+        X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(monotone="increasing", monotone_mode="fit")},
             selection_penalty=0.0,
         )
         with pytest.raises(NotImplementedError, match="Fit-time monotone"):
-            m.fit(X, y, sample_weight=exposure)
+            m.fit(X, y, sample_weight=sample_weight)
 
     def test_monotone_ns_rejected(self):
         with pytest.raises(NotImplementedError, match="monotone is not supported for kind='ns'"):
@@ -120,16 +120,16 @@ class TestMonotoneRepairer:
 
 class TestApplyMonotonePostfit:
     def test_increasing_repair(self, increasing_poisson_data):
-        X, y, exposure = increasing_poisson_data
+        X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=15, monotone="increasing")},
             selection_penalty=0.0,
         )
-        m.fit(X, y, sample_weight=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
 
         # Apply repair
-        m.apply_monotone_postfit(X, sample_weight=exposure)
+        m.apply_monotone_postfit(X, sample_weight=sample_weight)
 
         assert "signal" in m._monotone_repairs
         repair = m._monotone_repairs["signal"]
@@ -138,14 +138,14 @@ class TestApplyMonotonePostfit:
         assert repair.max_violation_after < 0.01
 
     def test_decreasing_repair(self, decreasing_poisson_data):
-        X, y, exposure = decreasing_poisson_data
+        X, y, sample_weight = decreasing_poisson_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=15, monotone="decreasing")},
             selection_penalty=0.0,
         )
-        m.fit(X, y, sample_weight=exposure)
-        m.apply_monotone_postfit(X, sample_weight=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        m.apply_monotone_postfit(X, sample_weight=sample_weight)
 
         assert "signal" in m._monotone_repairs
         repair = m._monotone_repairs["signal"]
@@ -153,14 +153,14 @@ class TestApplyMonotonePostfit:
         assert repair.max_violation_after < 0.01
 
     def test_prediction_monotone_after_repair(self, increasing_poisson_data):
-        X, y, exposure = increasing_poisson_data
+        X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=15, monotone="increasing")},
             selection_penalty=0.0,
         )
-        m.fit(X, y, sample_weight=exposure)
-        m.apply_monotone_postfit(X, sample_weight=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        m.apply_monotone_postfit(X, sample_weight=sample_weight)
 
         # Predict on sorted grid
         x_sorted = np.linspace(0.5, 9.5, 100)
@@ -176,51 +176,51 @@ class TestApplyMonotonePostfit:
         assert violations < 15
 
     def test_idempotency(self, increasing_poisson_data):
-        X, y, exposure = increasing_poisson_data
+        X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=15, monotone="increasing")},
             selection_penalty=0.0,
         )
-        m.fit(X, y, sample_weight=exposure)
-        m.apply_monotone_postfit(X, sample_weight=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        m.apply_monotone_postfit(X, sample_weight=sample_weight)
         beta_after_first = m.result.beta.copy()
 
         # Second call should be no-op
-        m.apply_monotone_postfit(X, sample_weight=exposure)
+        m.apply_monotone_postfit(X, sample_weight=sample_weight)
         np.testing.assert_array_equal(m.result.beta, beta_after_first)
 
     def test_no_monotone_specs_noop(self, increasing_poisson_data):
-        X, y, exposure = increasing_poisson_data
+        X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10)},  # no monotone
             selection_penalty=0.0,
         )
-        m.fit(X, y, sample_weight=exposure)
-        m.apply_monotone_postfit(X, sample_weight=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        m.apply_monotone_postfit(X, sample_weight=sample_weight)
         assert len(m._monotone_repairs) == 0
 
     def test_not_fitted_raises(self, increasing_poisson_data):
-        X, y, exposure = increasing_poisson_data
+        X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(monotone="increasing")},
             selection_penalty=0.0,
         )
         with pytest.raises(RuntimeError, match="must be fitted"):
-            m.apply_monotone_postfit(X, sample_weight=exposure)
+            m.apply_monotone_postfit(X, sample_weight=sample_weight)
 
     def test_reconstruct_after_repair(self, increasing_poisson_data):
         """Reconstruct should use repaired beta."""
-        X, y, exposure = increasing_poisson_data
+        X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=15, monotone="increasing")},
             selection_penalty=0.0,
         )
-        m.fit(X, y, sample_weight=exposure)
-        m.apply_monotone_postfit(X, sample_weight=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        m.apply_monotone_postfit(X, sample_weight=sample_weight)
 
         recon = m.reconstruct_feature("signal")
         log_rel = recon["log_relativity"]
@@ -234,14 +234,14 @@ class TestApplyMonotonePostfit:
 
 class TestSummaryMonotoneIntegration:
     def test_summary_shows_monotone_annotation(self, increasing_poisson_data):
-        X, y, exposure = increasing_poisson_data
+        X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, monotone="increasing")},
             selection_penalty=0.0,
         )
-        m.fit(X, y, sample_weight=exposure)
-        m.apply_monotone_postfit(X, sample_weight=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        m.apply_monotone_postfit(X, sample_weight=sample_weight)
 
         summary = m.summary()
         text = str(summary)
@@ -249,13 +249,13 @@ class TestSummaryMonotoneIntegration:
         assert "repaired" in text
 
     def test_summary_no_monotone_no_annotation(self, increasing_poisson_data):
-        X, y, exposure = increasing_poisson_data
+        X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10)},
             selection_penalty=0.0,
         )
-        m.fit(X, y, sample_weight=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
 
         summary = m.summary()
         text = str(summary)

@@ -17,26 +17,26 @@ def sample_data():
     age = rng.uniform(18, 85, n)
     region = rng.choice(["A", "B", "C"], n, p=[0.3, 0.3, 0.4])
     density = rng.normal(5, 2, n)
-    exposure = rng.uniform(0.3, 1.0, n)
+    sample_weight = rng.uniform(0.3, 1.0, n)
     mu = np.exp(-2.0 + 0.01 * (age - 50) ** 2 / 100 + (region == "A") * 0.3)
-    y = rng.poisson(mu * exposure).astype(float)
+    y = rng.poisson(mu * sample_weight).astype(float)
     X = pd.DataFrame({"age": age, "region": region, "density": density})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 class TestFitPredict:
     def test_basic(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLMRegressor(spline_features=["age"], n_knots=10, selection_penalty=0.01)
-        model.fit(X, y, sample_weight=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         preds = model.predict(X)
         assert preds.shape == (len(X),)
         assert np.all(preds > 0)
 
     def test_sklearn_attributes(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLMRegressor(spline_features=["age"], n_knots=10, selection_penalty=0.01)
-        model.fit(X, y, sample_weight=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         assert hasattr(model, "coef_")
         assert hasattr(model, "intercept_")
         assert model.n_features_in_ == 3
@@ -96,9 +96,9 @@ class TestNKnots:
 
 class TestOffset:
     def test_single_col(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         X = X.copy()
-        X["log_exp"] = np.log(exposure)
+        X["log_exp"] = np.log(sample_weight)
         model = SuperGLMRegressor(
             spline_features=["age"],
             n_knots=10,
@@ -112,10 +112,10 @@ class TestOffset:
         assert preds.shape == (len(X),)
 
     def test_multi_col(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         X = X.copy()
-        X["off1"] = np.log(exposure) * 0.5
-        X["off2"] = np.log(exposure) * 0.5
+        X["off1"] = np.log(sample_weight) * 0.5
+        X["off2"] = np.log(sample_weight) * 0.5
         model = SuperGLMRegressor(
             spline_features=["age"],
             n_knots=10,
@@ -149,9 +149,9 @@ class TestSklearnContract:
             check_is_fitted(model)
 
     def test_sample_weight(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLMRegressor(selection_penalty=0.01)
-        model.fit(X, y, sample_weight=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         assert model.coef_ is not None
 
     def test_no_sample_weight(self, sample_data):
@@ -464,17 +464,17 @@ class TestNativeFeatures:
         age = rng.uniform(18, 85, n)
         region = rng.choice(["A", "B", "C"], n, p=[0.3, 0.3, 0.4])
         density = rng.normal(5, 2, n)
-        exposure = rng.uniform(0.3, 1.0, n)
+        sample_weight = rng.uniform(0.3, 1.0, n)
         mu = np.exp(-2.0 + 0.01 * (age - 50) ** 2 / 100 + (region == "A") * 0.3)
-        y = rng.poisson(mu * exposure).astype(float)
+        y = rng.poisson(mu * sample_weight).astype(float)
         X = pd.DataFrame({"age": age, "region": region, "density": density})
-        return X, y, exposure
+        return X, y, sample_weight
 
     def test_heterogeneous_spline_configs(self, sample_data):
         """Explicit features= with heterogeneous spline configs."""
         from superglm import Categorical, Numeric, Spline
 
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         m = SuperGLMRegressor(
             features={
                 "age": Spline(kind="bs", k=12),
@@ -483,7 +483,7 @@ class TestNativeFeatures:
             },
             selection_penalty=0.0,
         )
-        m.fit(X, y, sample_weight=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         preds = m.predict(X)
         assert preds.shape == (len(X),)
         assert np.all(preds > 0)
@@ -493,9 +493,9 @@ class TestNativeFeatures:
         """features= works alongside offset=."""
         from superglm import Categorical, Numeric, Spline
 
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         X = X.copy()
-        X["log_exp"] = np.log(exposure)
+        X["log_exp"] = np.log(sample_weight)
         m = SuperGLMRegressor(
             features={
                 "age": Spline(kind="bs", k=10),
@@ -586,7 +586,7 @@ class TestNativeFeatures:
         """Pickle round-trip preserves predictions."""
         from superglm import Categorical, Numeric, Spline
 
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         m = SuperGLMRegressor(
             features={
                 "age": Spline(kind="bs", k=10),
@@ -595,7 +595,7 @@ class TestNativeFeatures:
             },
             selection_penalty=0.0,
         )
-        m.fit(X, y, sample_weight=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         pred_before = m.predict(X)
 
         data = pickle.dumps(m)

@@ -28,7 +28,7 @@ class DiscretizationResult:
     ----------
     tables : dict[str, DataFrame]
         Per-feature rating tables with columns: bin_from, bin_to,
-        relativity, log_relativity, n_obs, exposure.
+        relativity, log_relativity, n_obs, sample_weight.
     predictions : NDArray
         Predictions using discretized (binned) curves.
     original_predictions : NDArray
@@ -43,11 +43,11 @@ class DiscretizationResult:
     metrics: dict[str, float]
 
 
-def _exposure_weighted_quantile_edges(x: NDArray, exposure: NDArray, n_bins: int) -> NDArray:
-    """Compute bin edges so each bin has roughly equal total exposure."""
+def _exposure_weighted_quantile_edges(x: NDArray, sample_weight: NDArray, n_bins: int) -> NDArray:
+    """Compute bin edges so each bin has roughly equal total sample_weight."""
     order = np.argsort(x)
     x_sorted = x[order]
-    exp_sorted = exposure[order]
+    exp_sorted = sample_weight[order]
     cum_exp = np.cumsum(exp_sorted)
     total = cum_exp[-1]
 
@@ -69,24 +69,24 @@ def _uniform_edges(x: NDArray, n_bins: int) -> NDArray:
     return np.linspace(x.min(), x.max(), n_bins + 1)
 
 
-def _winsorized_edges(x: NDArray, exposure: NDArray, n_bins: int) -> NDArray:
+def _winsorized_edges(x: NDArray, sample_weight: NDArray, n_bins: int) -> NDArray:
     """Exposure-quantile binning on [p5, p95] interior, with tail bins."""
     if n_bins < 3:
-        # Not enough bins for tail+interior+tail, fall back to exposure quantile
-        return _exposure_weighted_quantile_edges(x, exposure, n_bins)
+        # Not enough bins for tail+interior+tail, fall back to sample_weight quantile
+        return _exposure_weighted_quantile_edges(x, sample_weight, n_bins)
 
     p5, p95 = np.percentile(x, [5, 95])
     x_min, x_max = x.min(), x.max()
 
     # If percentiles collapse (very little spread), fall back
     if p5 >= p95:
-        return _exposure_weighted_quantile_edges(x, exposure, n_bins)
+        return _exposure_weighted_quantile_edges(x, sample_weight, n_bins)
 
-    # Interior: exposure-quantile on observations within [p5, p95]
+    # Interior: sample_weight-quantile on observations within [p5, p95]
     interior_mask = (x >= p5) & (x <= p95)
     n_interior = n_bins - 2
     interior_edges = _exposure_weighted_quantile_edges(
-        x[interior_mask], exposure[interior_mask], n_interior
+        x[interior_mask], sample_weight[interior_mask], n_interior
     )
 
     # Assemble: [x_min, p5, ...interior..., p95, x_max]
@@ -95,14 +95,14 @@ def _winsorized_edges(x: NDArray, exposure: NDArray, n_bins: int) -> NDArray:
     return edges
 
 
-def _compute_edges(x: NDArray, exposure: NDArray, n_bins: int, strategy: str) -> NDArray:
+def _compute_edges(x: NDArray, sample_weight: NDArray, n_bins: int, strategy: str) -> NDArray:
     """Dispatch to the appropriate binning strategy."""
     if strategy == "exposure_quantile":
-        return _exposure_weighted_quantile_edges(x, exposure, n_bins)
+        return _exposure_weighted_quantile_edges(x, sample_weight, n_bins)
     elif strategy == "uniform":
         return _uniform_edges(x, n_bins)
     elif strategy == "winsorized":
-        return _winsorized_edges(x, exposure, n_bins)
+        return _winsorized_edges(x, sample_weight, n_bins)
     else:
         raise ValueError(
             f"Unknown bin_strategy: {strategy!r}. "
@@ -122,7 +122,7 @@ def discretization_impact(
     model: SuperGLM,
     X: pd.DataFrame,
     y: NDArray,
-    exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
     *,
     n_bins: int = 100,
     bin_strategy: str = "exposure_quantile",
@@ -131,7 +131,7 @@ def discretization_impact(
     """Analyse the impact of discretizing smooth spline/polynomial curves.
 
     For each spline/polynomial feature, the smooth per-observation
-    log-relativity is replaced with an exposure-weighted bin average.
+    log-relativity is replaced with an sample_weight-weighted bin average.
     Predictions are recomputed and compared to the originals.
 
     Parameters
@@ -142,14 +142,14 @@ def discretization_impact(
         Data used for analysis (typically training data).
     y : NDArray
         Response variable.
-    exposure : NDArray, optional
+    sample_weight : NDArray, optional
         Exposure weights. Defaults to ones.
     n_bins : int
         Number of bins per feature (default 100).
     bin_strategy : str
         Binning strategy: ``"exposure_quantile"`` (default) places bin
-        edges so each bin has equal total exposure; ``"uniform"`` uses
-        equal-width bins; ``"winsorized"`` uses exposure-quantile on the
+        edges so each bin has equal total sample_weight; ``"uniform"`` uses
+        equal-width bins; ``"winsorized"`` uses sample_weight-quantile on the
         interior [p5, p95] with dedicated tail bins.
     features : list[str], optional
         Subset of spline/polynomial feature names to discretize.
@@ -161,7 +161,9 @@ def discretization_impact(
     """
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
-    exposure = np.ones(n) if exposure is None else np.asarray(exposure, dtype=np.float64)
+    sample_weight = (
+        np.ones(n) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    )
 
     result = model.result  # raises if not fitted
     beta = result.beta
@@ -211,7 +213,7 @@ def discretization_impact(
         log_rel_smooth = design_block @ beta[g.sl]
 
         # Compute bin edges using the selected strategy
-        edges = _compute_edges(x_raw, exposure, n_bins, bin_strategy)
+        edges = _compute_edges(x_raw, sample_weight, n_bins, bin_strategy)
         actual_n_bins = len(edges) - 1
 
         # Assign observations to bins
@@ -219,7 +221,7 @@ def discretization_impact(
         # digitize returns 1-based; clip to valid range
         bin_idx = np.clip(bin_idx, 1, actual_n_bins) - 1
 
-        # Compute exposure-weighted mean log-relativity per bin
+        # Compute sample_weight-weighted mean log-relativity per bin
         bin_log_rel = np.zeros(actual_n_bins)
         bin_exposure = np.zeros(actual_n_bins)
         bin_n_obs = np.zeros(actual_n_bins, dtype=int)
@@ -227,7 +229,7 @@ def discretization_impact(
         for b in range(actual_n_bins):
             mask = bin_idx == b
             if np.any(mask):
-                w = exposure[mask]
+                w = sample_weight[mask]
                 bin_exposure[b] = w.sum()
                 bin_n_obs[b] = mask.sum()
                 bin_log_rel[b] = np.average(log_rel_smooth[mask], weights=w)
@@ -242,7 +244,7 @@ def discretization_impact(
                     "relativity": np.exp(bin_log_rel[b]),
                     "log_relativity": bin_log_rel[b],
                     "n_obs": bin_n_obs[b],
-                    "exposure": bin_exposure[b],
+                    "sample_weight": bin_exposure[b],
                 }
             )
         tables[name] = pd.DataFrame(table_rows)
@@ -259,8 +261,8 @@ def discretization_impact(
     dist = model._distribution
     dev_orig_unit = dist.deviance_unit(y, original_predictions)
     dev_disc_unit = dist.deviance_unit(y, predictions)
-    deviance_original = float(np.sum(exposure * dev_orig_unit))
-    deviance_discretized = float(np.sum(exposure * dev_disc_unit))
+    deviance_original = float(np.sum(sample_weight * dev_orig_unit))
+    deviance_discretized = float(np.sum(sample_weight * dev_disc_unit))
     deviance_change = deviance_discretized - deviance_original
     deviance_change_pct = (
         100.0 * deviance_change / deviance_original if deviance_original > 0 else 0.0

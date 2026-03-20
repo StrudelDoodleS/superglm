@@ -41,7 +41,6 @@ def plot_relativities(
     terms: list[TermInference],
     *,
     X: pd.DataFrame | None = None,
-    exposure: NDArray | None = None,
     sample_weight: NDArray | None = None,
     ncols: int = 2,
     figsize: tuple[float, float] | None = None,
@@ -59,11 +58,11 @@ def plot_relativities(
     terms : list[TermInference]
         Per-term inference objects from :meth:`SuperGLM.term_inference`.
     X : DataFrame, optional
-        Training data for exposure density overlays.
-    exposure : array-like, optional
+        Training data for sample_weight density overlays.
+    sample_weight : array-like, optional
         Exposure / frequency weights.
     sample_weight : array-like, optional
-        Alias for *exposure*.
+        Alias for *sample_weight*.
     ncols : int
         Number of subplot columns (default 2).
     figsize : tuple, optional
@@ -78,7 +77,7 @@ def plot_relativities(
         For categorical/numeric terms, ``"simultaneous"`` and ``"both"``
         silently fall back to pointwise CI.
     show_exposure : bool
-        Show exposure density strip below continuous panels (default *True*).
+        Show sample_weight density strip below continuous panels (default *True*).
     show_knots : bool
         Show interior knot positions as minor x-axis ticks (default *False*).
     title, subtitle : str, optional
@@ -88,21 +87,13 @@ def plot_relativities(
     -------
     matplotlib.figure.Figure
     """
-    if exposure is not None and sample_weight is not None:
-        raise TypeError(
-            "plot_relativities() received both 'exposure' and 'sample_weight'. "
-            "Use only 'sample_weight'; 'exposure' is a backward-compatible alias."
-        )
-    if sample_weight is not None:
-        exposure = sample_weight
-
     if not with_ci:
         interval = None
 
     return _plot_relativities_new(
         terms,
         X=X,
-        exposure=exposure,
+        sample_weight=sample_weight,
         ncols=ncols,
         figsize=figsize,
         interval=interval,
@@ -211,14 +202,14 @@ def _plot_density_strip(
     ax_d,
     feature_name: str,
     X: pd.DataFrame,
-    exposure: NDArray,
+    sample_weight: NDArray,
     x_grid: NDArray,
     show_knots: bool,
     knots: NDArray | None,
 ):
-    """Render the exposure density strip beneath a spline panel."""
+    """Render the sample_weight density strip beneath a spline panel."""
     x_vals = X[feature_name].to_numpy(dtype=np.float64)
-    density = _exposure_kde(x_vals, exposure, x_grid)
+    density = _exposure_kde(x_vals, sample_weight, x_grid)
 
     ax_d.fill_between(x_grid, 0.0, density, color=_EXP_FILL, alpha=0.95, linewidth=0)
     ax_d.plot(x_grid, density, color=_EXP_EDGE, linewidth=_EXP_EDGE_LW)
@@ -304,7 +295,7 @@ def plot_term(
     ti: TermInference,
     *,
     X: pd.DataFrame | None = None,
-    exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
     interval: str | None = "pointwise",
     show_exposure: bool = True,
     show_knots: bool = False,
@@ -322,13 +313,13 @@ def plot_term(
     ti : TermInference
         Inference result from :meth:`SuperGLM.term_inference`.
     X : DataFrame, optional
-        Training data for exposure overlays.
-    exposure : array-like, optional
+        Training data for sample_weight overlays.
+    sample_weight : array-like, optional
         Exposure / frequency weights.
     interval : {"pointwise", "simultaneous", "both", None}
         Band style.  For categoricals, simultaneous/both fall back to pointwise.
     show_exposure : bool
-        Show exposure distribution (density strip for continuous, vertical
+        Show sample_weight distribution (density strip for continuous, vertical
         bars for categorical).
     show_knots : bool
         Show interior knot ticks (spline only).
@@ -343,17 +334,17 @@ def plot_term(
     """
     import matplotlib.pyplot as plt
 
-    weighted = exposure is not None
-    if exposure is not None:
-        exposure = np.asarray(exposure, dtype=np.float64)
+    weighted = sample_weight is not None
+    if sample_weight is not None:
+        sample_weight = np.asarray(sample_weight, dtype=np.float64)
     elif X is not None and show_exposure:
         # Fall back to uniform weights (observation counts) when no
         # sample_weight is provided.
-        exposure = np.ones(len(X), dtype=np.float64)
+        sample_weight = np.ones(len(X), dtype=np.float64)
 
     density_label = "Weight\ndensity" if weighted else "Obs.\ndensity"
     weight_label = "Weight" if weighted else "Count"
-    has_density = show_exposure and X is not None and exposure is not None
+    has_density = show_exposure and X is not None and sample_weight is not None
 
     if ti.kind in ("spline", "polynomial"):
         needs_strip = has_density and ti.name in X.columns
@@ -364,7 +355,7 @@ def plot_term(
 
         if ax_den is not None:
             knots = ti.spline.interior_knots if ti.spline is not None else None
-            _plot_density_strip(ax_den, ti.name, X, exposure, ti.x, show_knots, knots)
+            _plot_density_strip(ax_den, ti.name, X, sample_weight, ti.x, show_knots, knots)
             ax_den.set_ylabel(density_label, fontsize=8)
 
     elif ti.kind == "numeric":
@@ -379,7 +370,7 @@ def plot_term(
         _plot_numeric_panel_continuous(ax, ti, interval, x_grid)
 
         if ax_den is not None:
-            _plot_density_strip(ax_den, ti.name, X, exposure, x_grid, False, None)
+            _plot_density_strip(ax_den, ti.name, X, sample_weight, x_grid, False, None)
             ax_den.set_ylabel(density_label, fontsize=8)
 
     elif ti.kind == "categorical" and ti.smooth_curve is not None:
@@ -391,7 +382,7 @@ def plot_term(
             ti,
             interval,
             X=X,
-            exposure=exposure if has_density else None,
+            sample_weight=sample_weight if has_density else None,
             weight_label=weight_label,
         )
 
@@ -404,7 +395,7 @@ def plot_term(
             ti,
             interval,
             X=X,
-            exposure=exposure if has_density else None,
+            sample_weight=sample_weight if has_density else None,
             weight_label=weight_label,
         )
 
@@ -515,14 +506,14 @@ def _plot_ordered_spline_panel(
     interval: str | None,
     *,
     X: pd.DataFrame | None = None,
-    exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
     weight_label: str = "Weight",
 ):
     """Render an OrderedCategorical(spline) panel.
 
     Levels at evenly-spaced integer positions with a smooth PCHIP
     interpolation through the fitted relativities, plus per-level
-    error bars and exposure bars.
+    error bars and sample_weight bars.
     """
     levels = list(ti.levels)
     level_rel = np.asarray(ti.relativity)
@@ -530,10 +521,10 @@ def _plot_ordered_spline_panel(
     x_pos = np.arange(n_levels, dtype=float)
 
     # Exposure bars in background
-    if exposure is not None and X is not None and ti.name in X.columns:
+    if sample_weight is not None and X is not None and ti.name in X.columns:
         level_exp = (
-            pd.DataFrame({"level": X[ti.name], "exposure": exposure})
-            .groupby("level", sort=False)["exposure"]
+            pd.DataFrame({"level": X[ti.name], "sample_weight": sample_weight})
+            .groupby("level", sort=False)["sample_weight"]
             .sum()
         )
         exp_vals = np.array([level_exp.get(lv, 0.0) for lv in levels])
@@ -620,12 +611,12 @@ def _plot_categorical_panel_vertical(
     interval: str | None,
     *,
     X: pd.DataFrame | None = None,
-    exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
     weight_label: str = "Weight",
 ):
     """Render a categorical panel with vertical orientation.
 
-    Levels on x-axis, relativity on y-axis.  Optional exposure bars
+    Levels on x-axis, relativity on y-axis.  Optional sample_weight bars
     in the background.
     """
     levels = list(ti.levels)
@@ -633,10 +624,10 @@ def _plot_categorical_panel_vertical(
     x_pos = np.arange(len(levels))
 
     # Exposure bars in background
-    if exposure is not None and X is not None and ti.name in X.columns:
+    if sample_weight is not None and X is not None and ti.name in X.columns:
         level_exp = (
-            pd.DataFrame({"level": X[ti.name], "exposure": exposure})
-            .groupby("level", sort=False)["exposure"]
+            pd.DataFrame({"level": X[ti.name], "sample_weight": sample_weight})
+            .groupby("level", sort=False)["sample_weight"]
             .sum()
         )
         exp_vals = np.array([level_exp.get(lv, 0.0) for lv in levels])
@@ -696,7 +687,7 @@ def _plot_relativities_new(
     terms: list[TermInference],
     *,
     X: pd.DataFrame | None = None,
-    exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
     ncols: int = 2,
     figsize: tuple[float, float] | None = None,
     interval: str | None = "pointwise",
@@ -714,18 +705,18 @@ def _plot_relativities_new(
         fig, _ = plt.subplots()
         return fig
 
-    weighted = exposure is not None
-    if exposure is not None:
-        exposure = np.asarray(exposure, dtype=np.float64)
+    weighted = sample_weight is not None
+    if sample_weight is not None:
+        sample_weight = np.asarray(sample_weight, dtype=np.float64)
     elif X is not None and show_exposure:
-        exposure = np.ones(len(X), dtype=np.float64)
+        sample_weight = np.ones(len(X), dtype=np.float64)
 
     density_label = "Weight\ndensity" if weighted else "Obs.\ndensity"
     weight_label = "Weight" if weighted else "Count"
     ncols = min(ncols, n)
     nrows = math.ceil(n / ncols)
 
-    has_density = show_exposure and X is not None and exposure is not None
+    has_density = show_exposure and X is not None and sample_weight is not None
     _CONTINUOUS_KINDS = ("spline", "polynomial", "numeric")
     any_density = has_density and any(
         ti.kind in _CONTINUOUS_KINDS and ti.name in X.columns for ti in terms
@@ -794,7 +785,7 @@ def _plot_relativities_new(
 
             if ax_den is not None:
                 knots = ti.spline.interior_knots if ti.spline is not None else None
-                _plot_density_strip(ax_den, ti.name, X, exposure, ti.x, show_knots, knots)
+                _plot_density_strip(ax_den, ti.name, X, sample_weight, ti.x, show_knots, knots)
                 if idx % ncols == 0:
                     ax_den.set_ylabel(density_label, fontsize=8)
                 ax_den.set_xlabel("")
@@ -805,7 +796,7 @@ def _plot_relativities_new(
                 ti,
                 interval,
                 X=X,
-                exposure=exposure if has_density else None,
+                sample_weight=sample_weight if has_density else None,
                 weight_label=weight_label,
             )
 
@@ -815,7 +806,7 @@ def _plot_relativities_new(
                 ti,
                 interval,
                 X=X,
-                exposure=exposure if has_density else None,
+                sample_weight=sample_weight if has_density else None,
                 weight_label=weight_label,
             )
 
@@ -830,7 +821,7 @@ def _plot_relativities_new(
                 ax.set_ylabel("Relativity")
 
             if ax_den is not None:
-                _plot_density_strip(ax_den, ti.name, X, exposure, x_grid, False, None)
+                _plot_density_strip(ax_den, ti.name, X, sample_weight, x_grid, False, None)
                 if idx % ncols == 0:
                     ax_den.set_ylabel(density_label, fontsize=8)
                 ax_den.set_xlabel("")

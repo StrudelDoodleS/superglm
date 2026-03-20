@@ -20,9 +20,9 @@ def simple_data():
     x2 = rng.uniform(0, 10, n)  # noise
     mu = np.exp(-0.5 + 0.01 * (x1 - 40) ** 2 / 100)
     y = rng.poisson(mu)
-    exposure = np.ones(n)
+    sample_weight = np.ones(n)
     X = pd.DataFrame({"signal": x1, "noise": x2})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 # ── Build-time tests ──────────────────────────────────────────
@@ -108,7 +108,7 @@ class TestSelectDefaults:
 class TestSelectModel:
     def test_select_creates_two_groups(self, simple_data):
         """Model with select=True spline creates 2 groups per feature."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={
@@ -117,7 +117,7 @@ class TestSelectModel:
             },
             spline_penalty=1.0,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         group_names = [g.name for g in m._groups]
         assert "signal:linear" in group_names
         assert "signal:spline" in group_names
@@ -127,24 +127,24 @@ class TestSelectModel:
 
     def test_select_feature_name(self, simple_data):
         """All subgroups have correct feature_name."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         for g in m._groups:
             assert g.feature_name == "signal"
 
     def test_feature_groups_helper(self, simple_data):
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         groups = m._feature_groups("signal")
         assert len(groups) == 2
         assert groups[0].name == "signal:linear"
@@ -152,14 +152,14 @@ class TestSelectModel:
 
     def test_select_predict_matches_no_select(self, simple_data):
         """Predictions with select=True should be close to select=False."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m1 = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=False)},
             spline_penalty=1.0,
             selection_penalty=0.01,
         )
-        m1.fit(X, y, exposure=exposure)
+        m1.fit(X, y, sample_weight=sample_weight)
         pred1 = m1.predict(X)
 
         m2 = SuperGLM(
@@ -168,7 +168,7 @@ class TestSelectModel:
             spline_penalty=1.0,
             selection_penalty=0.01,
         )
-        m2.fit(X, y, exposure=exposure)
+        m2.fit(X, y, sample_weight=sample_weight)
         pred2 = m2.predict(X)
 
         # Not numerically identical (different parameterization), but close.
@@ -176,38 +176,38 @@ class TestSelectModel:
         np.testing.assert_allclose(pred1, pred2, rtol=0.2)
 
     def test_select_reconstruct(self, simple_data):
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         rec = m.reconstruct_feature("signal")
         assert "x" in rec
         assert "relativity" in rec
         assert len(rec["x"]) == 200
 
     def test_select_relativities(self, simple_data):
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         rels = m.relativities(with_se=True)
         assert "signal" in rels
         assert "se_log_relativity" in rels["signal"].columns
 
     def test_select_summary_dict(self, simple_data):
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         s = m.diagnostics()
         assert "signal:linear" in s
         assert "signal:spline" in s
@@ -216,14 +216,14 @@ class TestSelectModel:
 class TestSelectSparsity:
     def test_high_lambda_zeros_range(self, simple_data):
         """At high lambda, the range (wiggly) space should be zeroed first."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
             selection_penalty=50.0,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         s = m.diagnostics()
         # At high lambda1, group lasso selection should be happening.
         # The 1-col linear subgroup (weight ∝ sqrt(1)) gets zeroed at a lower lambda
@@ -238,14 +238,14 @@ class TestSelectSparsity:
 
     def test_very_high_lambda_zeros_both(self, simple_data):
         """At very high lambda, both linear and spline subgroups are zeroed (double penalty)."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
             selection_penalty=1e6,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         s = m.diagnostics()
         # Both subgroups are penalized — zeroed at very high lambda
         assert s["signal:linear"]["group_norm"] < 1e-10
@@ -255,13 +255,13 @@ class TestSelectSparsity:
 class TestSelectPath:
     def test_fit_path(self, simple_data):
         """Regularization path with select=True should work."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
         )
-        path = m.fit_path(X, y, exposure=exposure, n_lambda=10)
+        path = m.fit_path(X, y, sample_weight=sample_weight, n_lambda=10)
         assert path.coef_path.shape[0] == 10
         # null(1) + range(K-2) = K-1 columns
         assert path.coef_path.shape[1] == 1 + (m._specs["signal"]._n_basis - 2)
@@ -275,15 +275,15 @@ class TestSelectCovariance:
 
     def test_active_info_sizes(self, simple_data):
         """_active_info produces correctly-sized covariance and active_groups."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
             selection_penalty=0.1,
         )
-        m.fit(X, y, exposure=exposure)
-        metrics = m.metrics(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        metrics = m.metrics(X, y, sample_weight=sample_weight)
         X_a, W, XtWX_inv, active_groups = metrics._active_info
 
         # Covariance should be square, matching total active columns
@@ -293,15 +293,15 @@ class TestSelectCovariance:
 
     def test_penalized_linear_in_active_groups(self, simple_data):
         """Penalized :linear subgroups appear in active_groups with penalized=True (double penalty)."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
             selection_penalty=0.1,
         )
-        m.fit(X, y, exposure=exposure)
-        metrics = m.metrics(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        metrics = m.metrics(X, y, sample_weight=sample_weight)
         _, _, _, active_groups = metrics._active_info
 
         linear_ags = [ag for ag in active_groups if ag.subgroup_type == "linear"]
@@ -310,13 +310,13 @@ class TestSelectCovariance:
 
     def test_subgroup_type_propagated(self, simple_data):
         """GroupSlice.subgroup_type is set correctly on fitted model groups."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         linear_g = next(g for g in m._groups if g.name == "signal:linear")
         spline_g = next(g for g in m._groups if g.name == "signal:spline")
         assert linear_g.subgroup_type == "linear"
@@ -328,7 +328,7 @@ class TestSelectAdaptive:
 
     def test_adaptive_select_finite_weights(self, simple_data):
         """Adaptive(expon=2) with select=True produces finite weights."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         pen = GroupLasso(lambda1=1.0, flavor=Adaptive(expon=2))
         m = SuperGLM(
             family="poisson",
@@ -336,7 +336,7 @@ class TestSelectAdaptive:
             penalty=pen,
             spline_penalty=1.0,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         # Adaptive weights are applied during fit — must converge with valid result
         assert m.result.converged, (
             f"Adaptive split-linear fit failed to converge in {m.result.n_iter} iters"
@@ -351,7 +351,7 @@ class TestSelectAdaptive:
 
     def test_adaptive_select_noise_zeroed(self, simple_data):
         """At moderate lambda with Adaptive(expon=2), noise spline should be zeroed."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         pen = GroupLasso(lambda1=10.0, flavor=Adaptive(expon=2))
         m = SuperGLM(
             family="poisson",
@@ -362,7 +362,7 @@ class TestSelectAdaptive:
             penalty=pen,
             spline_penalty=1.0,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         noise_spline = next(g for g in m._groups if g.name == "noise:spline")
         assert np.linalg.norm(m.result.beta[noise_spline.sl]) < 1e-10
 
@@ -372,7 +372,7 @@ class TestSelectEffectiveDf:
 
     def test_high_lambda_edf_minimal(self, simple_data):
         """At very high lambda, all subgroups (including linear) are zeroed — only intercept remains."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={
@@ -382,7 +382,7 @@ class TestSelectEffectiveDf:
             spline_penalty=1.0,
             selection_penalty=1e6,
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
         # With double penalty, all groups are penalized and zeroed at extreme lambda
         # edf should be approximately 1 (intercept only)
         assert m.result.effective_df == pytest.approx(1.0, abs=0.5)
@@ -393,15 +393,15 @@ class TestSelectLambdaMax:
 
     def test_lambda_max_all_penalized(self, simple_data):
         """With double penalty, all groups (including :linear) are penalized."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
             selection_penalty=1.0,  # set to prevent auto-calibration
         )
-        m.fit(X, y, exposure=exposure)
-        lmax = m._compute_lambda_max(y.astype(np.float64), exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        lmax = m._compute_lambda_max(y.astype(np.float64), sample_weight)
         # lambda_max should be finite and positive
         assert np.isfinite(lmax)
         assert lmax > 0
@@ -414,15 +414,15 @@ class TestSelectSummaryOutput:
 
     def test_summary_linear_active_spline_inactive(self, simple_data):
         """When :spline is zeroed but :linear is active, summary shows correct labels."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
             selection_penalty=1e6,
         )
-        m.fit(X, y, exposure=exposure)
-        metrics = m.metrics(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        metrics = m.metrics(X, y, sample_weight=sample_weight)
         summary = metrics.summary()
         text = str(summary)
         # Linear subgroup should show as active with chi2 test
@@ -433,15 +433,15 @@ class TestSelectSummaryOutput:
 
     def test_summary_html_subgroup_labels(self, simple_data):
         """HTML summary also uses correct linear/spline labels."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
             selection_penalty=1e6,
         )
-        m.fit(X, y, exposure=exposure)
-        metrics = m.metrics(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        metrics = m.metrics(X, y, sample_weight=sample_weight)
         summary = metrics.summary()
         html = summary._repr_html_()
         assert "[linear, 1 params" in html
@@ -467,14 +467,14 @@ class TestSelectFeatureSE:
         eta = -0.5 + 0.4 * np.sin(x)  # purely nonlinear
         y = rng.poisson(np.exp(eta)).astype(float)
         X = pd.DataFrame({"signal": x})
-        exposure = np.ones(n)
+        sample_weight = np.ones(n)
 
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             selection_penalty=0.0,
         )
-        m.fit_reml(X, y, exposure=exposure, max_reml_iter=20)
+        m.fit_reml(X, y, sample_weight=sample_weight, max_reml_iter=20)
 
         # Spline subgroup should have captured the nonlinear signal
         spline_g = next(g for g in m._groups if g.name == "signal:spline")
@@ -482,7 +482,7 @@ class TestSelectFeatureSE:
             "Expected spline subgroup to be active for nonlinear DGP"
         )
 
-        metrics = m.metrics(X, y, exposure=exposure)
+        metrics = m.metrics(X, y, sample_weight=sample_weight)
         fse = metrics.feature_se("signal")
         assert "x" in fse
         assert "se_log_relativity" in fse
@@ -502,7 +502,7 @@ class TestSelectFeatureSE:
         x = rng.uniform(0, 10, n)
         y = rng.poisson(1.0, n).astype(float)  # pure noise, no x effect
         X = pd.DataFrame({"signal": x})
-        exposure = np.ones(n)
+        sample_weight = np.ones(n)
 
         m = SuperGLM(
             family="poisson",
@@ -510,13 +510,13 @@ class TestSelectFeatureSE:
             spline_penalty=1.0,
             selection_penalty=1e6,  # extreme penalty → both subgroups zeroed
         )
-        m.fit(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
 
         # Precondition: both subgroups zeroed
         for g in m._groups:
             assert np.linalg.norm(m.result.beta[g.sl]) < 1e-10
 
-        metrics = m.metrics(X, y, exposure=exposure)
+        metrics = m.metrics(X, y, sample_weight=sample_weight)
         fse = metrics.feature_se("signal")
         se = fse["se_log_relativity"]
         assert np.all(np.isfinite(se))
@@ -524,15 +524,15 @@ class TestSelectFeatureSE:
 
     def test_feature_se_both_active(self, simple_data):
         """feature_se works when both :linear and :spline are active."""
-        X, y, exposure = simple_data
+        X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
             selection_penalty=0.1,
         )
-        m.fit(X, y, exposure=exposure)
-        metrics = m.metrics(X, y, exposure=exposure)
+        m.fit(X, y, sample_weight=sample_weight)
+        metrics = m.metrics(X, y, sample_weight=sample_weight)
         fse = metrics.feature_se("signal")
         se = fse["se_log_relativity"]
         assert np.all(np.isfinite(se))

@@ -45,9 +45,9 @@ def test_spline_families_recover_known_smooth_poisson_rate(spec_cls):
 
     x = rng.uniform(0.0, 1.0, n)
     eta = 0.2 + 0.6 * np.sin(2.0 * np.pi * x) - 0.2 * np.cos(4.0 * np.pi * x)
-    exposure = np.full(n, 100.0)
-    offset = np.log(exposure)
-    y = rng.poisson(exposure * np.exp(eta)).astype(float)
+    sample_weight = np.full(n, 100.0)
+    offset = np.log(sample_weight)
+    y = rng.poisson(sample_weight * np.exp(eta)).astype(float)
     X = pd.DataFrame({"x": x})
 
     model = SuperGLM(
@@ -56,7 +56,7 @@ def test_spline_families_recover_known_smooth_poisson_rate(spec_cls):
         spline_penalty=0.03,
         features={"x": spec_cls(n_knots=12, penalty="ssp")},
     )
-    model.fit(X, y, exposure=exposure, offset=offset)
+    model.fit(X, y, sample_weight=sample_weight, offset=offset)
 
     x_grid = np.linspace(0.0, 1.0, 300)
     X_grid = pd.DataFrame({"x": x_grid})
