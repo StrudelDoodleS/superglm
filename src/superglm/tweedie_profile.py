@@ -768,7 +768,7 @@ def _estimate_tweedie_p_reml(
 
         # Set p and refit via REML
         model.family = Tweedie(p=p)
-        model.fit_reml(X, y, offset=offset)
+        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
 
         mu = np.maximum(model.predict(X), 1e-10)
         df_resid = max(float(np.sum(w_arr)) - float(model.result.effective_df), 1.0)
@@ -805,7 +805,7 @@ def _estimate_tweedie_p_reml(
     # Ensure we have mu at p_hat for phi
     if last_p_eval is None or round(last_p_eval, 6) != p_hat:
         model.family = Tweedie(p=p_hat)
-        model.fit_reml(X, y, offset=offset)
+        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
         last_mu = np.maximum(model.predict(X), 1e-10)
         last_edf = float(model.result.effective_df)
 

@@ -54,9 +54,9 @@ def estimate_p(
 
     # Refit with the same regime used for profiling
     if resolved_mode == "fit_reml":
-        model.fit_reml(X, y, offset=offset)
+        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
     else:
-        model.fit(X, y, offset=offset)
+        model.fit(X, y, sample_weight=sample_weight, offset=offset)
 
     # Use the profiler's phi so summary LL/AIC/BIC are consistent with
     # the profile NLL (both evaluate the density at the same dispersion).
@@ -83,8 +83,8 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, **kwargs):
     """Estimate NB theta via profile likelihood, refit, and return result."""
     from superglm.nb_profile import estimate_nb_theta
 
-    result = estimate_nb_theta(model, X, y, offset=offset, **kwargs)
+    result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset, **kwargs)
     model.family = NegativeBinomial(theta=result.theta_hat)
     model._nb_profile_result = result
-    model.fit(X, y, offset=offset)
+    model.fit(X, y, sample_weight=sample_weight, offset=offset)
     return result
