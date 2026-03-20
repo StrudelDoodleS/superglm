@@ -159,6 +159,7 @@ def summary(model, alpha: float = 0.05):
         model_info["nb_theta"] = nb_pr.theta_hat
         model_info["nb_theta_ci"] = ci
         model_info["nb_theta_method"] = "Profile (exact)"
+        model_info["nb_profile_nll"] = nb_pr.nll
 
     # Tweedie p profile info
     tw_pr = getattr(model, "_tweedie_profile_result", None)
@@ -168,6 +169,7 @@ def summary(model, alpha: float = 0.05):
         model_info["tweedie_p_ci"] = ci
         model_info["tweedie_phi"] = tw_pr.phi_hat
         model_info["tweedie_p_method"] = "Profile (exact)"
+        model_info["tweedie_profile_nll"] = tw_pr.nll
 
     # Coef rows from shared builder
     X_a, W, XtWX_inv, active_groups = model._fit_active_info
