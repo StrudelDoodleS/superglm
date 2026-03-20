@@ -61,6 +61,25 @@ def estimate_p(
         model.fit_reml(X, y, exposure=exposure, offset=offset)
     else:
         model.fit(X, y, exposure=exposure, offset=offset)
+
+    # Use the profiler's phi so summary LL/AIC/BIC are consistent with
+    # the profile NLL (both evaluate the density at the same dispersion).
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+    from superglm.model.fit_ops import _compute_fit_stats
+
+    model._result.phi = result.phi_hat
+    # Recompute fit stats (LL, AIC inputs) at the profiler's phi
+    eta = model._dm.matvec(model._result.beta) + model._result.intercept
+    offset_arr = model._fit_offset
+    if offset_arr is not None:
+        eta = eta + offset_arr
+    eta = stabilize_eta(eta, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    weights = model._fit_weights
+    model._fit_stats = _compute_fit_stats(
+        y, mu, weights, offset_arr, model._distribution, model._link, result.phi_hat
+    )
     return result
 
 
