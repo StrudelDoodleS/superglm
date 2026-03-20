@@ -169,6 +169,7 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None, record_d
             lambda2=model.lambda2,
             offset=offset,
             record_diagnostics=record_diagnostics,
+            direct_solve=model._direct_solve,
         )
     else:
         model._result = fit_pirls(
@@ -536,6 +537,7 @@ def model_optimize_direct_reml(
         profile=profile,
         max_analytical_per_w=getattr(model, "_max_analytical_per_w", 30),
         select_snap=getattr(model, "_select_snap", True),
+        direct_solve=getattr(model, "_direct_solve", "auto"),
     )
 
 
@@ -654,6 +656,7 @@ def model_run_reml_once(
         use_direct=use_direct,
         penalty_caches=penalty_caches,
         rebuild_dm=lambda lambdas, exposure: rebuild_dm_with_lambdas(model, lambdas, exposure),
+        direct_solve=getattr(model, "_direct_solve", "auto"),
     )
     model._dm = dm
     return result

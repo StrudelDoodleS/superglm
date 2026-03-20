@@ -86,3 +86,17 @@ class TestTweedieConvergence:
         preds = model.predict(df)
         assert np.all(np.isfinite(preds))
         assert np.all(preds > 0)
+
+    def test_qr_direct_solver_converges(self, tweedie_data):
+        """QR-based direct IRLS converges on Tweedie with zeros."""
+        df, y = tweedie_data
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x1": Numeric(), "x2": Numeric()},
+            direct_solve="qr",
+        )
+        model.fit(df, y)
+        assert model._result.converged
+        assert np.isfinite(model._result.deviance)
+        assert model._result.deviance > 0
