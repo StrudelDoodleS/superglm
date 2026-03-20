@@ -41,38 +41,44 @@ logger = logging.getLogger(__name__)
 
 
 def _robust_solve(
-    M: NDArray, rhs: NDArray, cond_threshold: float = 1e10
+    M: NDArray, rhs: NDArray, residual_tol: float = 1e-6
 ) -> tuple[NDArray, float, bool]:
     """Solve ``M @ x = rhs`` with Cholesky primary path, SVD fallback.
 
-    The SVD fallback activates when Cholesky fails *or* the estimated condition
-    number exceeds *cond_threshold*.  With 16-digit doubles a threshold of 1e10
-    guarantees >=6 accurate digits — matching the IRLS convergence tolerance.
+    After Cholesky, the solution quality is verified via the relative residual
+    ``||Mx - rhs|| / ||rhs||``.  If this exceeds *residual_tol* (indicating
+    the system is too ill-conditioned for Cholesky to produce accurate digits),
+    the solver falls back to truncated SVD.  This catches near-singular systems
+    (cond ~1e14) where Cholesky technically succeeds but returns garbage.
 
     Parameters
     ----------
     M : (k, k) ndarray, symmetric positive (semi-)definite
     rhs : (k,) ndarray
-    cond_threshold : float
-        If the Cholesky-estimated condition number exceeds this, fall back to
-        truncated SVD.
+    residual_tol : float
+        Maximum acceptable relative residual from the Cholesky solve.
 
     Returns
     -------
     x : (k,) ndarray
     cond_est : float
-        Estimated condition number (from Cholesky diag or SVD singular values).
+        Estimated condition number (Cholesky diagonal heuristic, or SVD-based).
     used_svd : bool
         True if the SVD path was taken.
     """
     try:
         L = scipy.linalg.cholesky(M, lower=True, check_finite=False)
-        diag_L = np.diag(L)
-        cond_est = float((diag_L.max() / max(diag_L.min(), 1e-300)) ** 2)
-        if cond_est < cond_threshold:
-            return scipy.linalg.cho_solve((L, True), rhs), cond_est, False
+        x = scipy.linalg.cho_solve((L, True), rhs)
+        # Verify solution quality — catches ill-conditioned systems where
+        # Cholesky succeeds but the solve loses all significant digits.
+        rhs_norm = np.linalg.norm(rhs)
+        rel_residual = np.linalg.norm(M @ x - rhs) / max(rhs_norm, 1e-300)
+        if rel_residual < residual_tol:
+            diag_L = np.diag(L)
+            cond_est = float((diag_L.max() / max(diag_L.min(), 1e-300)) ** 2)
+            return x, cond_est, False
     except np.linalg.LinAlgError:
-        cond_est = np.inf
+        pass
 
     # SVD fallback — backward-stable for any condition number
     U, s, Vh = np.linalg.svd(M, full_matrices=False)
@@ -128,21 +134,21 @@ def _invert_xtwx_plus_penalty(
     return H_inv
 
 
-def _safe_decompose_H(H: NDArray, cond_threshold: float = 1e10) -> tuple[NDArray, float, bool]:
+def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, float, bool]:
     """Decompose H = X'WX + S, returning its inverse and log-determinant.
 
-    Attempts a fast Cholesky decomposition first.  If Cholesky fails *or* the
-    estimated condition number exceeds *cond_threshold*, falls back to a
-    truncated SVD pseudo-inverse.  This prevents garbage solutions from
-    near-singular systems (cond ~1e14) that Cholesky technically succeeds on
-    but produces ~0 accurate digits.
+    Attempts a fast Cholesky decomposition first.  After computing the inverse,
+    verifies quality via a spot-check: ``||H @ H_inv[:, 0] - e_0||``.  If the
+    residual exceeds *residual_tol*, falls back to truncated SVD.  This catches
+    near-singular systems (cond ~1e14) where Cholesky succeeds but the inverse
+    is garbage.
 
     Parameters
     ----------
     H : (p, p) ndarray
         The matrix to invert (typically X'WX + S).
-    cond_threshold : float
-        Maximum acceptable Cholesky condition estimate (default 1e10).
+    residual_tol : float
+        Maximum acceptable residual from the Cholesky inverse spot-check.
 
     Returns
     -------
@@ -151,18 +157,21 @@ def _safe_decompose_H(H: NDArray, cond_threshold: float = 1e10) -> tuple[NDArray
     log_det_H : float
         log|H| (from Cholesky diagonal) or log|H|₊ (from positive SVD values).
     cholesky_ok : bool
-        True if the Cholesky path succeeded (without condition issues).
+        True if the Cholesky path succeeded with acceptable quality.
     """
     p = H.shape[0]
 
-    # === Primary path: Fast Cholesky with condition check ===
+    # === Primary path: Fast Cholesky with quality spot-check ===
     try:
         L = scipy.linalg.cholesky(H, lower=True, check_finite=False)
-        diag_L = np.diag(L)
-        cond_est = (diag_L.max() / max(diag_L.min(), 1e-300)) ** 2
-        if cond_est < cond_threshold:
+        H_inv = scipy.linalg.cho_solve((L, True), np.eye(p))
+        # Spot-check: verify first column of the inverse (O(p²), not O(p³))
+        e0 = np.zeros(p)
+        e0[0] = 1.0
+        residual = np.linalg.norm(H @ H_inv[:, 0] - e0)
+        if residual < residual_tol:
+            diag_L = np.diag(L)
             log_det_H = 2.0 * float(np.sum(np.log(diag_L)))
-            H_inv = scipy.linalg.cho_solve((L, True), np.eye(p))
             return H_inv, log_det_H, True
     except np.linalg.LinAlgError:
         pass
@@ -171,7 +180,7 @@ def _safe_decompose_H(H: NDArray, cond_threshold: float = 1e10) -> tuple[NDArray
     U, s, Vh = np.linalg.svd(H, full_matrices=False)
     thresh = s[0] * 1e-10
     inv_s = np.where(s > thresh, 1.0 / s, 0.0)
-    H_inv = (Vh.T * inv_s) @ (Vh)  # symmetric: Vh.T @ diag(inv_s) @ Vh
+    H_inv = (Vh.T * inv_s) @ Vh  # symmetric: Vh.T @ diag(inv_s) @ Vh
 
     pos_s = s[s > thresh]
     log_det_H = float(np.sum(np.log(pos_s))) if pos_s.size > 0 else 0.0

@@ -221,7 +221,11 @@ class SuperGLM:
             The fitted model (self).
         """
         return fit_ops.fit(
-            self, X, y, exposure, offset,
+            self,
+            X,
+            y,
+            exposure,
+            offset,
             sample_weight=sample_weight,
             record_diagnostics=record_diagnostics,
         )
@@ -389,8 +393,7 @@ class SuperGLM:
         log = self.result.iteration_log
         if log is None:
             raise RuntimeError(
-                "No iteration diagnostics recorded. "
-                "Refit with fit(record_diagnostics=True)."
+                "No iteration diagnostics recorded. Refit with fit(record_diagnostics=True)."
             )
         rows = []
         for d in log:
@@ -409,6 +412,8 @@ class SuperGLM:
                     "step_halvings": d.step_halvings,
                     "top_W_obs": list(d.top_w_indices),
                     "bottom_W_obs": list(d.bottom_w_indices),
+                    "cond_estimate": d.cond_estimate,
+                    "used_svd_fallback": d.used_svd_fallback,
                 }
             )
         return pd.DataFrame(rows)
