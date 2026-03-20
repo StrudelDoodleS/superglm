@@ -119,7 +119,7 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
         from superglm.nb_profile import estimate_nb_theta
 
-        nb_result = estimate_nb_theta(model, X, y, offset=offset)
+        nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
@@ -330,7 +330,7 @@ def fit_cv(
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
         from superglm.nb_profile import estimate_nb_theta
 
-        nb_result = estimate_nb_theta(model, X, y, offset=offset)
+        nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
@@ -387,7 +387,7 @@ def fit_cv(
     path_result = None
     if refit:
         model.penalty.lambda1 = best_lambda
-        model.fit(X, y, offset=offset)
+        model.fit(X, y, sample_weight=sample_weight, offset=offset)
 
     return CVResult(
         lambda_seq=lambda_seq,
@@ -684,7 +684,7 @@ def fit_reml(
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
         from superglm.nb_profile import estimate_nb_theta
 
-        nb_result = estimate_nb_theta(model, X, y, offset=offset)
+        nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
