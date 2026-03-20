@@ -25,6 +25,8 @@ from scipy.special import digamma, gammaln, polygamma
 
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
+from superglm.penalties.base import penalty_has_targets
+from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 
 
@@ -43,16 +45,23 @@ class NBProfileResult:
     _mu: NDArray | None = field(default=None, repr=False)
     _weights: NDArray | None = field(default=None, repr=False)
 
+    _ci_cache: dict[float, tuple[float, float]] = field(default_factory=dict, repr=False)
+
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
         """Profile likelihood confidence interval for theta.
 
         Requires that the result was produced by ``estimate_nb_theta``.
+        Results are cached so repeated calls (e.g. from summary()) are free.
         """
+        if alpha in self._ci_cache:
+            return self._ci_cache[alpha]
         if self._y is None or self._mu is None or self._weights is None:
             raise RuntimeError(
                 "Profile CI requires fitted mu. Use estimate_nb_theta() to produce this result."
             )
-        return profile_ci_theta(self._y, self._mu, self._weights, self.theta_hat, alpha=alpha)
+        result = profile_ci_theta(self._y, self._mu, self._weights, self.theta_hat, alpha=alpha)
+        self._ci_cache[alpha] = result
+        return result
 
     def profile_plot(
         self,
@@ -313,6 +322,11 @@ def estimate_nb_theta(
     link = model._link
     penalty = model.penalty
 
+    # Use direct solver when lambda1=0 (no L1 penalty → no BCD needed)
+    _use_direct = penalty.lambda1 is not None and (
+        penalty.lambda1 == 0 or not penalty_has_targets(penalty, groups)
+    )
+
     # --- Alternating estimation ---
     theta = 1.0  # initial value (MASS also starts simple)
     warm_beta = None
@@ -323,18 +337,33 @@ def estimate_nb_theta(
     for iteration in range(maxiter):
         # Step 1: Fit GLM at current theta (warm-started after first iter)
         dist = NegativeBinomial(theta)
-        pirls_result = fit_pirls(
-            X=dm,
-            y=y_arr,
-            weights=w_arr,
-            family=dist,
-            link=link,
-            groups=groups,
-            penalty=penalty,
-            offset=offset_arr,
-            beta_init=warm_beta,
-            intercept_init=warm_intercept,
-        )
+        if _use_direct:
+            pirls_result, _ = fit_irls_direct(
+                X=dm,
+                y=y_arr,
+                weights=w_arr,
+                family=dist,
+                link=link,
+                groups=groups,
+                lambda2=model.lambda2,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+                direct_solve=getattr(model, "_direct_solve", "auto"),
+            )
+        else:
+            pirls_result = fit_pirls(
+                X=dm,
+                y=y_arr,
+                weights=w_arr,
+                family=dist,
+                link=link,
+                groups=groups,
+                penalty=penalty,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+            )
 
         eta = stabilize_eta(
             dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr, link

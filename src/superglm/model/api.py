@@ -201,17 +201,15 @@ class SuperGLM:
         y : array-like
             Response variable.
         sample_weight : array-like, optional
-            Backward-compatible alias for ``sample_weight``.
-        sample_weight : array-like, optional
-            **Frequency weights** (prior weights), typically policy sample_weight
+            **Frequency weights** (prior weights), typically policy exposure
             in insurance applications. Defaults to 1 for all observations.
 
-            Exposure is a frequency weight: it represents the amount of risk
+            This is a frequency weight: it represents the amount of risk
             observed, not observation precision. A policy with sample_weight=0.5
             (6 months on risk) contributes half as much information as one with
             sample_weight=1.0 (12 months). The standard assumption is that the
             expected response scales linearly with sample_weight:
-            ``E[Y_i] = exposure_i * lambda_i``.
+            ``E[Y_i] = sample_weight_i * lambda_i``.
 
             For Poisson and Gamma models this only affects dispersion and
             standard errors. For Negative Binomial and Tweedie, sample_weight
@@ -335,9 +333,7 @@ class SuperGLM:
         y : array-like
             Response variable.
         sample_weight : array-like, optional
-            Backward-compatible alias for ``sample_weight``.
-        sample_weight : array-like, optional
-            Frequency/sample_weight weights.
+            Frequency weights.
         offset : array-like, optional
             Offset term.
         max_reml_iter : int
@@ -737,7 +733,7 @@ class SuperGLM:
         ----------
         X : DataFrame
             Training data (used to compute density-based grid weights).
-        sample_weight, sample_weight : array-like, optional
+        sample_weight : array-like, optional
             Frequency weights.
         offset : array-like, optional
             Offset term (unused, reserved for deviance computation).

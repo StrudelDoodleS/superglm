@@ -298,18 +298,24 @@ class TweedieProfileResult:
     _objective: Any = field(default=None, repr=False)
     _ll_scale: float = field(default=0.0, repr=False)
 
+    _ci_cache: dict[float, tuple[float, float]] = field(default_factory=dict, repr=False)
+
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
         """Profile likelihood confidence interval for Tweedie p.
 
         Requires that the result was produced by ``estimate_tweedie_p``.
-        Each CI endpoint evaluation requires a PIRLS refit.
+        Results are cached so repeated calls (e.g. from summary()) are free.
         """
+        if alpha in self._ci_cache:
+            return self._ci_cache[alpha]
         if self._objective is None:
             raise RuntimeError(
                 "Profile CI requires the objective function. Use "
                 "estimate_tweedie_p() to produce this result."
             )
-        return profile_ci_p(self._objective, self.p_hat, self.nll, self._ll_scale, alpha=alpha)
+        result = profile_ci_p(self._objective, self.p_hat, self.nll, self._ll_scale, alpha=alpha)
+        self._ci_cache[alpha] = result
+        return result
 
     def profile_plot(
         self,
@@ -610,6 +616,7 @@ def _estimate_tweedie_p_fit(
                 offset=offset_arr,
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
+                direct_solve=getattr(model, "_direct_solve", "auto"),
             )
         else:
             result = fit_pirls(
@@ -681,6 +688,7 @@ def _estimate_tweedie_p_fit(
                 offset=offset_arr,
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
+                direct_solve=getattr(model, "_direct_solve", "auto"),
             )
         else:
             final_result = fit_pirls(
@@ -760,7 +768,7 @@ def _estimate_tweedie_p_reml(
 
         # Set p and refit via REML
         model.family = Tweedie(p=p)
-        model.fit_reml(X, y, offset=offset)
+        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
 
         mu = np.maximum(model.predict(X), 1e-10)
         df_resid = max(float(np.sum(w_arr)) - float(model.result.effective_df), 1.0)
@@ -797,7 +805,7 @@ def _estimate_tweedie_p_reml(
     # Ensure we have mu at p_hat for phi
     if last_p_eval is None or round(last_p_eval, 6) != p_hat:
         model.family = Tweedie(p=p_hat)
-        model.fit_reml(X, y, offset=offset)
+        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
         last_mu = np.maximum(model.predict(X), 1e-10)
         last_edf = float(model.result.effective_df)
 

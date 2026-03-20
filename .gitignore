@@ -41,3 +41,9 @@ tests/fixtures/mtpl2_sev_merged.csv
 
 # MkDocs build output
 site/
+
+AGENTS.md
+ROADMAP.md
+TESTING_AUDIT_PLAN.md
+ISSUE_WORKING_WEIGHTS.md
+REML_IMPLEMENTATION_PLAN.md
