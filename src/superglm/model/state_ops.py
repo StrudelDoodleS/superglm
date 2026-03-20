@@ -101,7 +101,11 @@ def summary(model, alpha: float = 0.05):
     link_name = type(model._link).__name__
     if link_name.endswith("Link"):
         link_name = link_name[:-4]
-    penalty_name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", type(penalty).__name__)
+    lam1 = penalty.lambda1
+    if lam1 is not None and lam1 == 0:
+        penalty_name = "None"
+    else:
+        penalty_name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", type(penalty).__name__)
 
     # Append "+ SEL" if any select=True splines are present
     has_select = any(g.subgroup_type is not None for g in model._groups)
@@ -126,7 +130,6 @@ def summary(model, alpha: float = 0.05):
         method_parts.append("discrete")
     method_str = ", ".join(method_parts)
 
-    lam1 = penalty.lambda1
     model_info = {
         "family": {"NegativeBinomial": "Neg. Binomial"}.get(
             type(model._distribution).__name__, type(model._distribution).__name__
