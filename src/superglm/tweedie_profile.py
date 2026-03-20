@@ -23,6 +23,8 @@ from scipy.special import wright_bessel
 
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
+from superglm.penalties.base import penalty_has_targets
+from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 
 # ---------------------------------------------------------------------------
@@ -572,6 +574,12 @@ def _estimate_tweedie_p_fit(
     link = model._link
     penalty = model.penalty
 
+    # Use direct solver when lambda1=0 (no L1 penalty → no BCD needed),
+    # matching the dispatcher in fit_ops.fit().
+    _use_direct = penalty.lambda1 is not None and (
+        penalty.lambda1 == 0 or not penalty_has_targets(penalty, groups)
+    )
+
     # Warm-start state (updated across Brent evaluations)
     warm_beta = None
     warm_intercept = None
@@ -590,18 +598,32 @@ def _estimate_tweedie_p_fit(
             return cache[key]
 
         dist = Tweedie(p)
-        result = fit_pirls(
-            X=dm,
-            y=y_arr,
-            weights=w_arr,
-            family=dist,
-            link=link,
-            groups=groups,
-            penalty=penalty,
-            offset=offset_arr,
-            beta_init=warm_beta,
-            intercept_init=warm_intercept,
-        )
+        if _use_direct:
+            result, _ = fit_irls_direct(
+                X=dm,
+                y=y_arr,
+                weights=w_arr,
+                family=dist,
+                link=link,
+                groups=groups,
+                lambda2=model.lambda2,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+            )
+        else:
+            result = fit_pirls(
+                X=dm,
+                y=y_arr,
+                weights=w_arr,
+                family=dist,
+                link=link,
+                groups=groups,
+                penalty=penalty,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+            )
 
         eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
         mu = clip_mu(link.inverse(eta), dist)
@@ -647,18 +669,32 @@ def _estimate_tweedie_p_fit(
         edf_final = last_edf
     else:
         dist = Tweedie(p_hat)
-        final_result = fit_pirls(
-            X=dm,
-            y=y_arr,
-            weights=w_arr,
-            family=dist,
-            link=link,
-            groups=groups,
-            penalty=penalty,
-            offset=offset_arr,
-            beta_init=warm_beta,
-            intercept_init=warm_intercept,
-        )
+        if _use_direct:
+            final_result, _ = fit_irls_direct(
+                X=dm,
+                y=y_arr,
+                weights=w_arr,
+                family=dist,
+                link=link,
+                groups=groups,
+                lambda2=model.lambda2,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+            )
+        else:
+            final_result = fit_pirls(
+                X=dm,
+                y=y_arr,
+                weights=w_arr,
+                family=dist,
+                link=link,
+                groups=groups,
+                penalty=penalty,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+            )
         eta = stabilize_eta(
             dm.matvec(final_result.beta) + final_result.intercept + offset_arr, link
         )
