@@ -333,8 +333,6 @@ class SuperGLM:
         y : array-like
             Response variable.
         sample_weight : array-like, optional
-            Backward-compatible alias for ``sample_weight``.
-        sample_weight : array-like, optional
             Frequency weights.
         offset : array-like, optional
             Offset term.
@@ -735,7 +733,7 @@ class SuperGLM:
         ----------
         X : DataFrame
             Training data (used to compute density-based grid weights).
-        sample_weight, sample_weight : array-like, optional
+        sample_weight : array-like, optional
             Frequency weights.
         offset : array-like, optional
             Offset term (unused, reserved for deviance computation).
