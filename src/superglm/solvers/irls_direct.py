@@ -120,6 +120,19 @@ def _build_penalty_matrix(
     return S
 
 
+def _sqrt_penalty_augmented(S: NDArray, p: int) -> NDArray:
+    """Build (p+1, p+1) augmented sqrt-penalty for QR solver.
+
+    Returns L_aug where L_aug.T @ L_aug has S in the [1:, 1:] block and
+    zeros in the intercept row/column.
+    """
+    eigvals, eigvecs = np.linalg.eigh(S)
+    eigvals = np.maximum(eigvals, 0.0)
+    L_aug = np.zeros((p + 1, p + 1))
+    L_aug[1:, 1:] = (eigvecs * np.sqrt(eigvals)) @ eigvecs.T
+    return L_aug
+
+
 def _invert_xtwx_plus_penalty(
     XtWX: NDArray,
     group_matrices: list[GroupMatrix],
@@ -205,6 +218,7 @@ def fit_irls_direct(
     profile: dict | None = None,
     cache_out: dict | None = None,
     record_diagnostics: bool = False,
+    direct_solve: str = "auto",
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -280,6 +294,20 @@ def fit_irls_direct(
     # Build penalty matrix S (p×p, block-diagonal)
     S = _build_penalty_matrix(gms, groups, lambda2, p)
 
+    # QR pre-computation: materialise full design matrix once
+    _use_qr = direct_solve == "qr"
+    if _use_qr:
+        has_disc = any(isinstance(gm, DiscretizedSSPGroupMatrix) for gm in gms)
+        if has_disc:
+            logger.warning(
+                "direct_solve='qr' with discretized groups materialises the full "
+                "(n, p) design matrix, defeating the O(n_bins) discretization "
+                "benefit.  Consider direct_solve='auto' for large-n discrete fits."
+            )
+        _X_full = np.hstack([gm.toarray() for gm in gms])  # (n, p)
+        _X_qr_aug = np.hstack([np.ones((n, 1)), _X_full])  # (n, p+1)
+        _L_aug = _sqrt_penalty_augmented(S, p)  # (p+1, p+1)
+
     t_start = time.perf_counter()
     dev_prev = np.inf
     converged = False
@@ -299,6 +327,7 @@ def fit_irls_direct(
     iteration_log: list[IterationDiagnostics] = [] if record_diagnostics else []
 
     max_halving = 5  # max step-halving attempts per iteration
+    _consecutive_svd = 0  # for auto-mode warning
     for it in range(max_iter):
         # Save previous solution for step halving
         beta_prev = beta.copy()
@@ -313,38 +342,69 @@ def fit_irls_direct(
         z = eta + (y - mu) / dmu_deta
         _t_working += time.perf_counter() - _t0
 
-        # Form augmented normal equations via gram-based operations.
-        # M_aug = [[sum(W), X'W], [X'W, X'WX]] + S_aug
-        # No full (n, p) matrix materialisation needed.
-        _t0 = time.perf_counter()
-        z_off = z - offset
-        Wz = W * z_off
-        sum_W = float(np.sum(W))
+        if _use_qr:
+            # QR path: solve via QR on [sqrt(W)·X_aug; sqrt(S_aug)].
+            # No normal equations — backward-stable for any condition.
+            _t0 = time.perf_counter()
+            sqrtW = np.sqrt(W)
+            z_off = z - offset
+            A = np.vstack([sqrtW[:, None] * _X_qr_aug, _L_aug])
+            rhs_qr = np.concatenate([sqrtW * z_off, np.zeros(p + 1)])
+            Q, R = np.linalg.qr(A, mode="reduced")
+            # Truncated SVD on R for near-singular truncation
+            U_r, s_r, Vh_r = np.linalg.svd(R, full_matrices=False)
+            thresh = s_r[0] * 1e-10
+            inv_s = np.where(s_r > thresh, 1.0 / s_r, 0.0)
+            beta_aug = (Vh_r.T * inv_s) @ (U_r.T @ (Q.T @ rhs_qr))
+            _cond_est = float(s_r[0] / max(s_r[-1], 1e-300))
+            # Report whether SVD truncation actually dropped any directions
+            _used_svd = bool(np.any(s_r <= thresh))
+            intercept = float(beta_aug[0])
+            beta = beta_aug[1:]
+            _t_solve += time.perf_counter() - _t0
+        else:
+            # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
+            _t0 = time.perf_counter()
+            z_off = z - offset
+            Wz = W * z_off
+            sum_W = float(np.sum(W))
 
-        # Combined gram + rmatvec: shares O(n) bincount for discretized groups
-        XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz)
+            # Combined gram + rmatvec: shares O(n) bincount for discretized groups
+            XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz)
 
-        # Build augmented system (p+1, p+1)
-        M_aug = np.empty((p + 1, p + 1))
-        M_aug[0, 0] = sum_W
-        M_aug[0, 1:] = XtW1
-        M_aug[1:, 0] = XtW1
-        M_aug[1:, 1:] = XtWX + S
+            # Build augmented system (p+1, p+1)
+            M_aug = np.empty((p + 1, p + 1))
+            M_aug[0, 0] = sum_W
+            M_aug[0, 1:] = XtW1
+            M_aug[1:, 0] = XtW1
+            M_aug[1:, 1:] = XtWX + S
 
-        # RHS: X_aug' W (z - offset)
-        rhs = np.empty(p + 1)
-        rhs[0] = float(np.sum(Wz))
-        rhs[1:] = XtWz
-        _t_gram += time.perf_counter() - _t0
+            # RHS: X_aug' W (z - offset)
+            rhs = np.empty(p + 1)
+            rhs[0] = float(np.sum(Wz))
+            rhs[1:] = XtWz
+            _t_gram += time.perf_counter() - _t0
 
-        # Solve augmented system — Cholesky with SVD fallback for
-        # ill-conditioned systems (Tweedie/NB2 near convergence).
-        _t0 = time.perf_counter()
-        beta_aug, _cond_est, _used_svd = _robust_solve(M_aug, rhs)
+            # Solve — Cholesky with SVD fallback
+            _t0 = time.perf_counter()
+            beta_aug, _cond_est, _used_svd = _robust_solve(M_aug, rhs)
 
-        intercept = float(beta_aug[0])
-        beta = beta_aug[1:]
-        _t_solve += time.perf_counter() - _t0
+            intercept = float(beta_aug[0])
+            beta = beta_aug[1:]
+            _t_solve += time.perf_counter() - _t0
+
+            # Warning for auto mode: suggest QR after repeated SVD fallbacks
+            if _used_svd:
+                _consecutive_svd += 1
+            else:
+                _consecutive_svd = 0
+            if direct_solve == "auto" and _consecutive_svd == 3:
+                logger.warning(
+                    "fit_irls_direct: %d consecutive SVD fallbacks (cond ~%.1e). "
+                    "Consider direct_solve='qr' for near-collinear data.",
+                    _consecutive_svd,
+                    _cond_est,
+                )
 
         # Update eta/mu from new beta — reused as next iteration's working
         # quantities (no redundant matvec at the start of the loop).
@@ -429,6 +489,13 @@ def fit_irls_direct(
         profile["irls_total_s"] = profile.get("irls_total_s", 0.0) + t_elapsed
         profile["irls_calls"] = profile.get("irls_calls", 0) + 1
         profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
+
+    # QR path: compute gram quantities once at convergence for REML/edf/cache.
+    if _use_qr:
+        z_off = z - offset
+        Wz = W * z_off
+        sum_W = float(np.sum(W))
+        XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz)
 
     # Cache final-iteration RHS quantities for the cached-W fREML optimizer.
     # These allow re-solving the augmented system with a new penalty matrix S

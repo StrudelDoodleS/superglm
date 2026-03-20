@@ -1,8 +1,19 @@
-"""Tests for _robust_solve() and _safe_decompose_H() residual-checked solvers."""
+"""Tests for _robust_solve(), _safe_decompose_H(), and QR solver path."""
+
+import logging
 
 import numpy as np
+import pandas as pd
+import pytest
 
+from superglm import SuperGLM
+from superglm.distributions import Tweedie
+from superglm.features.categorical import Categorical
+from superglm.features.numeric import Numeric
+from superglm.features.spline import Spline
+from superglm.penalties.group_lasso import GroupLasso
 from superglm.solvers.irls_direct import _robust_solve, _safe_decompose_H
+from superglm.tweedie_profile import generate_tweedie_cpg
 
 
 class TestRobustSolve:
@@ -153,3 +164,128 @@ class TestSafeDecomposeH:
 
         expected = np.sum(np.log([100.0, 10.0, 1.0, 0.1]))
         np.testing.assert_allclose(log_det, expected, atol=1.0)
+
+
+class TestQRSolverPath:
+    """Tests for the QR-based direct solver (direct_solve='qr')."""
+
+    @pytest.fixture()
+    def small_tweedie_data(self):
+        """5k Tweedie dataset for QR tests (small n only)."""
+        rng = np.random.default_rng(2026)
+        n = 5000
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = -1.0 + 0.5 * x1 - 0.3 * x2
+        mu = np.exp(eta)
+        y = generate_tweedie_cpg(n, mu=mu, phi=2.0, p=1.5, rng=rng)
+        return pd.DataFrame({"x1": x1, "x2": x2}), y
+
+    def test_qr_matches_gram_well_conditioned(self, small_tweedie_data):
+        """QR and gram produce identical beta on well-conditioned data."""
+        df, y = small_tweedie_data
+
+        m_gram = SuperGLM(
+            family=Tweedie(p=1.5),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x1": Numeric(), "x2": Numeric()},
+            direct_solve="gram",
+        )
+        m_gram.fit(df, y)
+
+        m_qr = SuperGLM(
+            family=Tweedie(p=1.5),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x1": Numeric(), "x2": Numeric()},
+            direct_solve="qr",
+        )
+        m_qr.fit(df, y)
+
+        np.testing.assert_allclose(m_qr._result.beta, m_gram._result.beta, atol=1e-10)
+        np.testing.assert_allclose(m_qr._result.intercept, m_gram._result.intercept, atol=1e-10)
+        np.testing.assert_allclose(m_qr._result.deviance, m_gram._result.deviance, rtol=1e-10)
+
+    def test_qr_tweedie_convergence(self, small_tweedie_data):
+        """QR path converges on Tweedie with zeros."""
+        df, y = small_tweedie_data
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x1": Spline(n_knots=8), "x2": Spline(n_knots=8)},
+            direct_solve="qr",
+        )
+        model.fit(df, y)
+        assert model._result.converged
+        assert np.isfinite(model._result.deviance)
+
+    def test_auto_warning_on_repeated_svd(self, caplog):
+        """'auto' mode logs warning after 3 consecutive SVD fallbacks."""
+        rng = np.random.default_rng(42)
+        n = 5000
+        # Nested categoricals → near-collinearity → SVD fallback every iter
+        region = rng.choice(10, n)
+        sub_region = region * 3 + rng.choice(3, n)
+        age = rng.uniform(18, 80, n)
+        eta = -2.0 + rng.standard_normal(10)[region] * 0.3
+        eta += rng.standard_normal(30)[sub_region] * 0.1
+        mu = np.exp(eta)
+        y = generate_tweedie_cpg(n, mu=mu, phi=2.0, p=1.5, rng=rng)
+
+        df = pd.DataFrame(
+            {
+                "region": pd.Categorical(region),
+                "sub_region": pd.Categorical(sub_region),
+                "age": age,
+            }
+        )
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            penalty=GroupLasso(lambda1=0.0),
+            features={
+                "region": Categorical(),
+                "sub_region": Categorical(),
+                "age": Numeric(),
+            },
+            direct_solve="auto",
+        )
+        with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+            model.fit(df, y)
+        assert any("consecutive SVD fallbacks" in r.message for r in caplog.records)
+
+    def test_gram_no_warning(self, caplog):
+        """'gram' mode suppresses SVD fallback warnings."""
+        rng = np.random.default_rng(42)
+        n = 5000
+        region = rng.choice(10, n)
+        sub_region = region * 3 + rng.choice(3, n)
+        age = rng.uniform(18, 80, n)
+        eta = -2.0 + rng.standard_normal(10)[region] * 0.3
+        eta += rng.standard_normal(30)[sub_region] * 0.1
+        mu = np.exp(eta)
+        y = generate_tweedie_cpg(n, mu=mu, phi=2.0, p=1.5, rng=rng)
+
+        df = pd.DataFrame(
+            {
+                "region": pd.Categorical(region),
+                "sub_region": pd.Categorical(sub_region),
+                "age": age,
+            }
+        )
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            penalty=GroupLasso(lambda1=0.0),
+            features={
+                "region": Categorical(),
+                "sub_region": Categorical(),
+                "age": Numeric(),
+            },
+            direct_solve="gram",
+        )
+        with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+            model.fit(df, y)
+        assert not any("consecutive SVD fallbacks" in r.message for r in caplog.records)
+
+    def test_invalid_direct_solve_raises(self):
+        """Invalid direct_solve value raises ValueError."""
+        with pytest.raises(ValueError, match="direct_solve"):
+            SuperGLM(direct_solve="invalid")
