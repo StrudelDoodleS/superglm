@@ -524,12 +524,13 @@ def fit_irls_direct(
         profile["irls_finalize_s"] = profile.get("irls_finalize_s", 0.0) + _t_finalize
 
     # Pearson-based phi for estimated-scale families (Tweedie, Gamma, NB2).
-    # The deviance-based estimator (dev / df_resid) is biased; the Pearson
-    # estimator matches statsmodels and is standard in GLM theory.
-    # For known-scale families (Poisson), fit_ops forces phi=1.0 afterward.
+    # Denominator uses sum(weights) - edf when frequency weights are provided,
+    # matching statsmodels: df_resid = sum(freq_weights) - p.  For unit weights
+    # this equals n - edf.
     V_final = np.maximum(family.variance(mu), 1e-10)
     pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
-    phi = pearson_chi2 / max(n - p_eff, 1)
+    df_resid = max(float(np.sum(weights)) - p_eff, 1)
+    phi = pearson_chi2 / df_resid
 
     result = PIRLSResult(
         beta=beta,

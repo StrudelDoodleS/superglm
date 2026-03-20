@@ -197,6 +197,7 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None, record_d
             converged=model._result.converged,
             phi=1.0,
             effective_df=model._result.effective_df,
+            iteration_log=model._result.iteration_log,
         )
 
     eta = model._dm.matvec(model._result.beta) + model._result.intercept

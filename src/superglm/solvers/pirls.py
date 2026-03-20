@@ -368,9 +368,11 @@ def _fit_pirls_inner(
                     p_eff += g.size - (g.size - 1) * shrink
 
     # Pearson-based phi for estimated-scale families (Tweedie, Gamma, NB2).
+    # Denominator uses sum(weights) - edf for frequency-weighted data.
     V_final = np.maximum(family.variance(mu_new), 1e-10)
     pearson_chi2 = float(np.sum(weights * (y - mu_new) ** 2 / V_final))
-    phi = pearson_chi2 / max(n - p_eff, 1)
+    df_resid = max(float(np.sum(weights)) - p_eff, 1)
+    phi = pearson_chi2 / df_resid
 
     return PIRLSResult(
         beta=beta,
