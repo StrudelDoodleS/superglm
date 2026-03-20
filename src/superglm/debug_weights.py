@@ -181,6 +181,8 @@ def compare_irls_weights(
                     "converged": None,
                     "top_W_obs": list(d.top_w_indices),
                     "bottom_W_obs": list(d.bottom_w_indices),
+                    "cond_estimate": d.cond_estimate,
+                    "used_svd_fallback": d.used_svd_fallback,
                 }
             )
 
@@ -219,9 +221,7 @@ def inspect_worst_observations(
     """
     log = model.result.iteration_log
     if log is None:
-        raise RuntimeError(
-            "No iteration diagnostics. Refit with fit(record_diagnostics=True)."
-        )
+        raise RuntimeError("No iteration diagnostics. Refit with fit(record_diagnostics=True).")
 
     # Find the requested iteration
     entry = None
@@ -231,9 +231,7 @@ def inspect_worst_observations(
             break
     if entry is None:
         available = [d.iteration for d in log]
-        raise ValueError(
-            f"Iteration {iteration} not found. Available: {available}"
-        )
+        raise ValueError(f"Iteration {iteration} not found. Available: {available}")
 
     top_idx = entry.top_w_indices
     bot_idx = entry.bottom_w_indices

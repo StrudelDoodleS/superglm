@@ -1,4 +1,4 @@
-"""Tests for _robust_solve() and _safe_decompose_H() condition-aware solvers."""
+"""Tests for _robust_solve() and _safe_decompose_H() residual-checked solvers."""
 
 import numpy as np
 
@@ -18,68 +18,77 @@ class TestRobustSolve:
         x, cond_est, used_svd = _robust_solve(M, rhs)
 
         assert not used_svd
-        assert cond_est < 1e10
         np.testing.assert_allclose(M @ x, rhs, atol=1e-10)
 
-    def test_ill_conditioned_uses_svd(self):
-        """System with cond ~1e14 should trigger SVD fallback."""
-        # Build a matrix with prescribed condition number ~1e14
-        rng = np.random.default_rng(123)
+    def test_ill_conditioned_diagonal_cholesky_exact(self):
+        """Diagonal system: Cholesky is exact even at cond ~1e14 (no roundoff)."""
         n = 20
-        U, _, Vt = np.linalg.svd(rng.standard_normal((n, n)))
-        s = np.logspace(0, -14, n)  # cond = 1e14
-        M = (U * s) @ U.T  # symmetric
+        s = np.logspace(0, -14, n)
+        M = np.diag(s)
+        rhs = np.ones(n)
+
+        x, cond_est, used_svd = _robust_solve(M, rhs)
+
+        # Cholesky on diagonal is element-wise sqrt → cho_solve is exact
+        assert not used_svd
+        np.testing.assert_allclose(M @ x, rhs, atol=1e-10)
+
+    def test_ill_conditioned_dense_uses_svd(self):
+        """Dense (non-diagonal) SPD with cond ~1e14 must trigger SVD fallback.
+
+        The Cholesky diagonal ratio can underreport condition by orders of
+        magnitude on non-diagonal matrices.  The residual check catches this.
+        """
+        rng = np.random.default_rng(123)
+        n = 10
+        # Random orthogonal basis — off-diagonal structure means diag(L)
+        # does NOT reflect the true eigenvalues.
+        Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+        s = np.logspace(0, -14, n)
+        M = (Q * s) @ Q.T  # symmetric, cond = 1e14
         rhs = rng.standard_normal(n)
 
         x, cond_est, used_svd = _robust_solve(M, rhs)
 
-        assert used_svd
-        # SVD truncates near-zero singular values, so the residual in the
-        # well-conditioned subspace should be small
-        residual = M @ x - rhs
-        assert np.linalg.norm(residual) < np.linalg.norm(rhs)
+        assert used_svd, (
+            f"Expected SVD fallback for cond~1e14 dense matrix, "
+            f"but Cholesky was used (cond_est={cond_est:.1e})"
+        )
         assert np.all(np.isfinite(x))
 
     def test_singular_system_pseudo_inverse(self):
         """Exactly singular system should still return a solution via SVD."""
         n = 10
-        # Rank-deficient: last eigenvalue is 0
         rng = np.random.default_rng(99)
         U, _, _ = np.linalg.svd(rng.standard_normal((n, n)))
         s = np.ones(n)
-        s[-1] = 0.0  # exactly singular
+        s[-1] = 0.0
         M = (U * s) @ U.T
         rhs = rng.standard_normal(n)
 
         x, cond_est, used_svd = _robust_solve(M, rhs)
 
         assert used_svd
-        # Solution should be in the column space of M
         residual = M @ x - rhs
-        # The component in the range space should be solved exactly
-        # (residual is only in the null space)
         assert np.linalg.norm(residual) < np.linalg.norm(rhs)
 
-    def test_threshold_boundary(self):
-        """Custom threshold: cond just below threshold uses Cholesky."""
+    def test_moderate_condition_uses_cholesky(self):
+        """Moderate condition (~1e4) should stay on Cholesky — solve is accurate."""
         rng = np.random.default_rng(42)
-        n = 5
-        U, _, _ = np.linalg.svd(rng.standard_normal((n, n)))
-        s = np.array([1e4, 1e3, 1e2, 1e1, 1.0])  # cond = 1e4
-        M = (U * s) @ U.T
+        n = 10
+        Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+        s = np.logspace(0, -4, n)  # cond = 1e4
+        M = (Q * s) @ Q.T
         rhs = rng.standard_normal(n)
 
-        # With threshold 1e5 (> cond 1e4) → Cholesky
-        _, _, used_svd = _robust_solve(M, rhs, cond_threshold=1e5)
-        assert not used_svd
+        x, _, used_svd = _robust_solve(M, rhs)
 
-        # With threshold 1e3 (< cond 1e4) → SVD
-        _, _, used_svd = _robust_solve(M, rhs, cond_threshold=1e3)
-        assert used_svd
+        assert not used_svd
+        np.testing.assert_allclose(M @ x, rhs, atol=1e-6)
 
 
 class TestSafeDecomposeH:
-    """Tests for _safe_decompose_H with condition-aware SVD fallback."""
+    """Tests for _safe_decompose_H with residual-checked SVD fallback."""
 
     def test_well_conditioned_cholesky_path(self):
         """Well-conditioned H should use Cholesky and return correct inverse."""
@@ -93,16 +102,29 @@ class TestSafeDecomposeH:
         np.testing.assert_allclose(H_inv @ H, np.eye(8), atol=1e-10)
         np.testing.assert_allclose(log_det, np.log(np.linalg.det(H)), rtol=1e-10)
 
-    def test_ill_conditioned_svd_fallback(self):
-        """Ill-conditioned H should fall back to SVD and still produce usable inverse."""
-        # Use diagonal matrix so condition number is exact and predictable
+    def test_ill_conditioned_diagonal_cholesky_exact(self):
+        """Diagonal H: Cholesky inverse is exact even at cond ~1e14."""
         n = 10
-        s = np.logspace(0, -14, n)  # cond = 1e14 >> 1e10 threshold
+        s = np.logspace(0, -14, n)
         H = np.diag(s)
 
         H_inv, log_det, cholesky_ok = _safe_decompose_H(H)
 
-        assert not cholesky_ok
+        # Cholesky on diagonal is exact — residual check passes
+        assert cholesky_ok
+        np.testing.assert_allclose(np.diag(H_inv), 1.0 / s, rtol=1e-10)
+
+    def test_ill_conditioned_dense_svd_fallback(self):
+        """Dense H with cond ~1e14 must trigger SVD (catches diagonal heuristic bug)."""
+        rng = np.random.default_rng(123)
+        n = 10
+        Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+        s = np.logspace(0, -14, n)
+        H = (Q * s) @ Q.T
+
+        H_inv, log_det, cholesky_ok = _safe_decompose_H(H)
+
+        assert not cholesky_ok, "Expected SVD fallback for cond~1e14 dense matrix"
         assert np.all(np.isfinite(H_inv))
         assert np.isfinite(log_det)
 
@@ -110,8 +132,8 @@ class TestSafeDecomposeH:
         """Rank-deficient H (Cholesky fails) should fall back to SVD."""
         n = 8
         rng = np.random.default_rng(77)
-        A = rng.standard_normal((n, n - 2))  # rank n-2
-        H = A @ A.T  # rank-deficient
+        A = rng.standard_normal((n, n - 2))
+        H = A @ A.T
 
         H_inv, log_det, cholesky_ok = _safe_decompose_H(H)
 
@@ -129,6 +151,5 @@ class TestSafeDecomposeH:
 
         _, log_det, _ = _safe_decompose_H(H)
 
-        # Only the first 4 eigenvalues should contribute
         expected = np.sum(np.log([100.0, 10.0, 1.0, 0.1]))
         np.testing.assert_allclose(log_det, expected, atol=1.0)
