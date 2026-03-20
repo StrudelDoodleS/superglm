@@ -59,7 +59,7 @@ class SplineCategorical:
         x_spline: NDArray,
         x_cat: NDArray,
         parent_specs: dict,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
     ) -> list[GroupInfo]:
         from superglm.features.categorical import Categorical
         from superglm.features.spline import _SplineBase
@@ -213,7 +213,7 @@ class PolynomialCategorical:
         x_poly: NDArray,
         x_cat: NDArray,
         parent_specs: dict,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
     ) -> list[GroupInfo]:
         from superglm.features.categorical import Categorical
         from superglm.features.polynomial import Polynomial
@@ -306,7 +306,7 @@ class NumericCategorical:
         x_num: NDArray,
         x_cat: NDArray,
         parent_specs: dict,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
     ) -> GroupInfo:
         from superglm.features.categorical import Categorical
         from superglm.features.numeric import Numeric
@@ -390,7 +390,7 @@ class CategoricalInteraction:
         x_cat1: NDArray,
         x_cat2: NDArray,
         parent_specs: dict,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
     ) -> GroupInfo:
         from superglm.features.categorical import Categorical
 
@@ -497,7 +497,7 @@ class NumericInteraction:
         x1: NDArray,
         x2: NDArray,
         parent_specs: dict,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
     ) -> GroupInfo:
         from superglm.features.numeric import Numeric
 
@@ -580,7 +580,7 @@ class PolynomialInteraction:
         x1: NDArray,
         x2: NDArray,
         parent_specs: dict,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
     ) -> GroupInfo:
         from superglm.features.polynomial import Polynomial
 
@@ -804,7 +804,7 @@ class TensorInteraction:
         x1: NDArray,
         x2: NDArray,
         parent_specs: dict,
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
     ) -> GroupInfo | list[GroupInfo]:
         B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs)
 
@@ -827,7 +827,7 @@ class TensorInteraction:
         x2: NDArray,
         parent_specs: dict,
         n_bins: tuple[int, int],
-        exposure: NDArray | None = None,
+        sample_weight: NDArray | None = None,
     ) -> DiscreteTensorBuildResult:
         """Build a discretized tensor basis on observed joint support pairs."""
         B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs)

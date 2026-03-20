@@ -14,16 +14,16 @@ def sample_data():
     age = rng.uniform(18, 85, n)
     region = rng.choice(["A", "B", "C"], n, p=[0.3, 0.3, 0.4])
     density = rng.normal(5, 2, n)
-    exposure = rng.uniform(0.3, 1.0, n)
+    sample_weight = rng.uniform(0.3, 1.0, n)
     mu = np.exp(-2.0 + 0.01 * (age - 50) ** 2 / 100 + (region == "A") * 0.3)
-    y = rng.poisson(mu * exposure).astype(float)
+    y = rng.poisson(mu * sample_weight).astype(float)
     X = pd.DataFrame({"age": age, "region": region, "density": density})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 @pytest.fixture
 def fitted_model(sample_data):
-    X, y, exposure = sample_data
+    X, y, sample_weight = sample_data
     model = SuperGLM(
         penalty="group_lasso",
         selection_penalty=0.01,
@@ -33,13 +33,13 @@ def fitted_model(sample_data):
             "density": Numeric(),
         },
     )
-    model.fit(X, y, exposure=exposure)
+    model.fit(X, y, sample_weight=sample_weight)
     return model
 
 
 @pytest.fixture
 def interaction_model(sample_data):
-    X, y, exposure = sample_data
+    X, y, sample_weight = sample_data
     model = SuperGLM(
         selection_penalty=0.01,
         features={
@@ -48,7 +48,7 @@ def interaction_model(sample_data):
         },
         interactions=[("age", "region")],
     )
-    model.fit(X, y, exposure=exposure)
+    model.fit(X, y, sample_weight=sample_weight)
     return model
 
 
@@ -247,8 +247,8 @@ class TestDensity:
 
         matplotlib.use("Agg")
 
-        X, y, exposure = sample_data
-        fig = fitted_model.plot("age", X=X, sample_weight=exposure, show_density=True)
+        X, y, sample_weight = sample_data
+        fig = fitted_model.plot("age", X=X, sample_weight=sample_weight, show_density=True)
         assert len(fig.get_axes()) >= 2
 
     def test_density_without_sample_weight(self, sample_data, fitted_model):
@@ -267,8 +267,8 @@ class TestDensity:
 
         matplotlib.use("Agg")
 
-        X, y, exposure = sample_data
-        fig = fitted_model.plot("age", X=X, sample_weight=exposure, show_density=True)
+        X, y, sample_weight = sample_data
+        fig = fitted_model.plot("age", X=X, sample_weight=sample_weight, show_density=True)
         ylabels = [ax.get_ylabel() for ax in fig.get_axes()]
         assert any("Weight" in lbl for lbl in ylabels)
 
@@ -304,8 +304,8 @@ class TestDensity:
 
         matplotlib.use("Agg")
 
-        X, y, exposure = sample_data
-        fig = fitted_model.plot("age", X=X, sample_weight=exposure, show_density=False)
+        X, y, sample_weight = sample_data
+        fig = fitted_model.plot("age", X=X, sample_weight=sample_weight, show_density=False)
         # No density strip → single axis
         assert len(fig.get_axes()) == 1
 

@@ -85,14 +85,14 @@ class TestPolynomialIntegration:
         n = 500
         age = rng.uniform(18, 85, n)
         region = rng.choice(["A", "B", "C"], n, p=[0.3, 0.3, 0.4])
-        exposure = rng.uniform(0.3, 1.0, n)
+        sample_weight = rng.uniform(0.3, 1.0, n)
         mu = np.exp(-2.0 + 0.01 * (age - 50) ** 2 / 100 + (region == "A") * 0.3)
-        y = rng.poisson(mu * exposure).astype(float)
+        y = rng.poisson(mu * sample_weight).astype(float)
         X = pd.DataFrame({"age": age, "region": region})
-        return X, y, exposure
+        return X, y, sample_weight
 
     def test_fit_predict(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         from superglm.features.categorical import Categorical
 
         model = SuperGLM(
@@ -103,13 +103,13 @@ class TestPolynomialIntegration:
                 "region": Categorical(base="first"),
             },
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         preds = model.predict(X)
         assert preds.shape == (len(X),)
         assert np.all(preds > 0)
 
     def test_reconstruct_feature(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         from superglm.features.categorical import Categorical
 
         model = SuperGLM(
@@ -120,13 +120,13 @@ class TestPolynomialIntegration:
                 "region": Categorical(base="first"),
             },
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         rec = model.reconstruct_feature("age")
         assert "x" in rec
         assert "relativity" in rec
 
     def test_summary_shows_polynomial(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         from superglm.features.categorical import Categorical
 
         model = SuperGLM(
@@ -137,7 +137,7 @@ class TestPolynomialIntegration:
                 "region": Categorical(base="first"),
             },
         )
-        model.fit(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         s = model.diagnostics()
         assert "age" in s
         assert s["age"]["n_params"] == 2

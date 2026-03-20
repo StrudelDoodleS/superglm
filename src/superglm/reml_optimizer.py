@@ -56,7 +56,7 @@ def compute_dW_deta(
     distribution: Any,
     mu: NDArray,
     eta: NDArray,
-    exposure: NDArray,
+    sample_weight: NDArray,
 ) -> NDArray | None:
     """Derivative of IRLS weights w.r.t. the linear predictor.
 
@@ -77,7 +77,7 @@ def compute_dW_deta(
     g2 = link.deriv2_inverse(eta)  # d²μ/dη²
     V = np.maximum(distribution.variance(mu), 1e-10)
     Vp = distribution.variance_derivative(mu)
-    return exposure * (g1 / V) * (2.0 * g2 - g1**2 * Vp / V)
+    return sample_weight * (g1 / V) * (2.0 * g2 - g1**2 * Vp / V)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -94,7 +94,7 @@ def reml_w_correction(
     lambdas: dict[str, float],
     reml_groups: list[tuple[int, GroupSlice]],
     penalty_caches: dict | None,
-    exposure: NDArray,
+    sample_weight: NDArray,
     offset_arr: NDArray,
     distribution: Any,
 ) -> tuple[NDArray, dict[int, NDArray]] | None:
@@ -111,7 +111,7 @@ def reml_w_correction(
     """
     eta = stabilize_eta(dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr, link)
     mu = clip_mu(link.inverse(eta), distribution)
-    dW_deta = compute_dW_deta(link, distribution, mu, eta, exposure)
+    dW_deta = compute_dW_deta(link, distribution, mu, eta, sample_weight)
 
     if dW_deta is None:
         return None  # Custom link/distribution without second-order methods
@@ -172,7 +172,7 @@ def reml_laml_objective(
     y: NDArray,
     result: PIRLSResult,
     lambdas: dict[str, float],
-    exposure: NDArray,
+    sample_weight: NDArray,
     offset_arr: NDArray,
     XtWX: NDArray | None = None,
     penalty_caches: dict | None = None,
@@ -187,7 +187,7 @@ def reml_laml_objective(
     if XtWX is None:
         V = distribution.variance(mu)
         dmu_deta = link.deriv_inverse(eta)
-        W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
+        W = sample_weight * dmu_deta**2 / np.maximum(V, 1e-10)
         XtWX = _block_xtwx(dm.group_matrices, groups, W)
 
     p = XtWX.shape[0]
@@ -222,7 +222,7 @@ def reml_laml_objective(
         scale_term = 0.5 * max(n - M_p, 1.0) * np.log(d_plus_pq)
         return float(0.5 * (logdet_m - logdet_s) + scale_term)
 
-    nll = -distribution.log_likelihood(y, mu, exposure, phi=1.0)
+    nll = -distribution.log_likelihood(y, mu, sample_weight, phi=1.0)
     return float(nll + 0.5 * (penalty_quad + logdet_m - logdet_s))
 
 
@@ -339,7 +339,7 @@ def optimize_direct_reml(
     groups: list[GroupSlice],
     discrete: bool,
     y: NDArray,
-    exposure: NDArray,
+    sample_weight: NDArray,
     offset_arr: NDArray,
     reml_groups: list[tuple[int, GroupSlice]],
     penalty_ranks: dict[str, float],
@@ -372,7 +372,7 @@ def optimize_direct_reml(
             link,
             groups,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             reml_groups,
             penalty_ranks,
@@ -422,7 +422,7 @@ def optimize_direct_reml(
     boot_result, boot_inv, boot_xtwx = fit_irls_direct(
         X=dm,
         y=y,
-        weights=exposure,
+        weights=sample_weight,
         family=distribution,
         link=link,
         groups=groups,
@@ -481,7 +481,7 @@ def optimize_direct_reml(
         pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
             X=dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=distribution,
             link=link,
             groups=groups,
@@ -506,7 +506,7 @@ def optimize_direct_reml(
             y,
             pirls_result,
             cand_lambdas,
-            exposure,
+            sample_weight,
             offset_arr,
             XtWX=XtWX,
             penalty_caches=penalty_caches,
@@ -546,7 +546,7 @@ def optimize_direct_reml(
                 cand_lambdas,
                 reml_groups,
                 penalty_caches,
-                exposure,
+                sample_weight,
                 offset_arr,
                 distribution,
             )
@@ -669,7 +669,7 @@ def optimize_direct_reml(
             trial_result, trial_inv, trial_xtwx = fit_irls_direct(
                 X=dm,
                 y=y,
-                weights=exposure,
+                weights=sample_weight,
                 family=distribution,
                 link=link,
                 groups=groups,
@@ -690,7 +690,7 @@ def optimize_direct_reml(
                 y,
                 trial_result,
                 trial_lambdas,
-                exposure,
+                sample_weight,
                 offset_arr,
                 XtWX=trial_xtwx,
                 penalty_caches=penalty_caches,
@@ -751,7 +751,7 @@ def optimize_discrete_reml_cached_w(
     link: Any,
     groups: list[GroupSlice],
     y: NDArray,
-    exposure: NDArray,
+    sample_weight: NDArray,
     offset_arr: NDArray,
     reml_groups: list[tuple[int, GroupSlice]],
     penalty_ranks: dict[str, float],
@@ -806,7 +806,7 @@ def optimize_discrete_reml_cached_w(
     boot_result, boot_inv, boot_xtwx = fit_irls_direct(
         X=dm,
         y=y,
-        weights=exposure,
+        weights=sample_weight,
         family=distribution,
         link=link,
         groups=groups,
@@ -933,7 +933,7 @@ def optimize_discrete_reml_cached_w(
                 # Compute fresh deviance at analytical beta (O(n) data pass)
                 eta_f = stabilize_eta(dm.matvec(warm_beta) + warm_intercept + offset_arr, link)
                 mu_f = clip_mu(link.inverse(eta_f), distribution)
-                dev_f = float(np.sum(exposure * distribution.deviance_unit(y, mu_f)))
+                dev_f = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_f)))
                 best_pirls = PIRLSResult(
                     beta=warm_beta.copy(),
                     intercept=warm_intercept,
@@ -951,7 +951,7 @@ def optimize_discrete_reml_cached_w(
                     y,
                     best_pirls,
                     best_lambdas,
-                    exposure,
+                    sample_weight,
                     offset_arr,
                     XtWX=XtWX,
                     penalty_caches=penalty_caches,
@@ -967,7 +967,7 @@ def optimize_discrete_reml_cached_w(
         pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
             X=dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=distribution,
             link=link,
             groups=groups,
@@ -998,7 +998,7 @@ def optimize_discrete_reml_cached_w(
             y,
             pirls_result,
             cand_lambdas,
-            exposure,
+            sample_weight,
             offset_arr,
             XtWX=XtWX,
             penalty_caches=penalty_caches,
@@ -1155,7 +1155,7 @@ def optimize_discrete_reml_cached_w(
                 # Recompute deviance + objective at analytical beta + final lambdas
                 eta_f = stabilize_eta(dm.matvec(warm_beta) + warm_intercept + offset_arr, link)
                 mu_f = clip_mu(link.inverse(eta_f), distribution)
-                dev_f = float(np.sum(exposure * distribution.deviance_unit(y, mu_f)))
+                dev_f = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_f)))
                 # H_inv from last inner FP iteration is at the final lambdas
                 _edf = 1.0 + float(np.trace(H_inv @ XtWX))
                 best_pirls = PIRLSResult(
@@ -1175,7 +1175,7 @@ def optimize_discrete_reml_cached_w(
                     y,
                     best_pirls,
                     best_lambdas,
-                    exposure,
+                    sample_weight,
                     offset_arr,
                     XtWX=XtWX,
                     penalty_caches=penalty_caches,
@@ -1196,7 +1196,7 @@ def optimize_discrete_reml_cached_w(
         final_result, final_inv, final_xtwx = fit_irls_direct(
             X=dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=distribution,
             link=link,
             groups=groups,
@@ -1218,7 +1218,7 @@ def optimize_discrete_reml_cached_w(
             y,
             final_result,
             final_lambdas,
-            exposure,
+            sample_weight,
             offset_arr,
             XtWX=final_xtwx,
             penalty_caches=penalty_caches,
@@ -1269,7 +1269,7 @@ def optimize_efs_reml(
     penalty: Any,
     active_set: bool,
     y: NDArray,
-    exposure: NDArray,
+    sample_weight: NDArray,
     offset_arr: NDArray,
     reml_groups: list[tuple[int, GroupSlice]],
     penalty_ranks: dict[str, float],
@@ -1308,7 +1308,7 @@ def optimize_efs_reml(
     boot_result = fit_pirls(
         X=dm,
         y=y,
-        weights=exposure,
+        weights=sample_weight,
         family=distribution,
         link=link,
         groups=groups,
@@ -1326,7 +1326,7 @@ def optimize_efs_reml(
     boot_mu = clip_mu(link.inverse(boot_eta), distribution)
     boot_V = distribution.variance(boot_mu)
     boot_dmu = link.deriv_inverse(boot_eta)
-    boot_W = exposure * boot_dmu**2 / np.maximum(boot_V, 1e-10)
+    boot_W = sample_weight * boot_dmu**2 / np.maximum(boot_V, 1e-10)
     boot_xtwx = _block_xtwx(dm.group_matrices, groups, boot_W)
 
     # Estimate phi for estimated-scale families
@@ -1358,7 +1358,7 @@ def optimize_efs_reml(
 
     # Rebuild DM with bootstrapped lambdas
     old_gms = dm.group_matrices
-    dm = rebuild_dm(lambdas, exposure)
+    dm = rebuild_dm(lambdas, sample_weight)
     penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
     penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
     warm_beta = _map_beta_between_bases(boot_result.beta, old_gms, dm.group_matrices, groups)
@@ -1393,7 +1393,7 @@ def optimize_efs_reml(
             pirls_result = fit_pirls(
                 X=dm,
                 y=y,
-                weights=exposure,
+                weights=sample_weight,
                 family=distribution,
                 link=link,
                 groups=groups,
@@ -1413,7 +1413,7 @@ def optimize_efs_reml(
             mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
-            W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
+            W = sample_weight * dmu_deta**2 / np.maximum(V, 1e-10)
 
             cached_xtwx = _block_xtwx(dm.group_matrices, groups, W)
 
@@ -1505,7 +1505,7 @@ def optimize_efs_reml(
         if max_change > cheap_threshold:
             # Full: rebuild DM (R_inv depends on lambda) + PIRLS
             old_gms = dm.group_matrices
-            dm = rebuild_dm(lambdas_new, exposure)
+            dm = rebuild_dm(lambdas_new, sample_weight)
             warm_beta = _map_beta_between_bases(beta, old_gms, dm.group_matrices, groups)
             warm_intercept = intercept
             # R_inv changed → recompute penalty caches (omega_ssp etc.)
@@ -1520,14 +1520,14 @@ def optimize_efs_reml(
 
     # ── Final refit ───────────────────────────────────────────────
     if cheap_iter and converged:
-        dm = rebuild_dm(lambdas, exposure)
+        dm = rebuild_dm(lambdas, sample_weight)
         # R_inv changed → refresh caches for the objective computation
         penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
 
     final_result = fit_pirls(
         X=dm,
         y=y,
-        weights=exposure,
+        weights=sample_weight,
         family=distribution,
         link=link,
         groups=groups,
@@ -1553,7 +1553,7 @@ def optimize_efs_reml(
             y,
             final_result,
             lambdas,
-            exposure,
+            sample_weight,
             offset_arr,
             penalty_caches=penalty_caches,
         ),
@@ -1574,7 +1574,7 @@ def run_reml_once(
     penalty: Any,
     active_set: bool,
     y: NDArray,
-    exposure: NDArray,
+    sample_weight: NDArray,
     offset_arr: NDArray,
     reml_groups: list[tuple[int, GroupSlice]],
     penalty_ranks: dict[str, float],
@@ -1622,7 +1622,7 @@ def run_reml_once(
             pirls_result, XtWX_S_inv_full, XtWX_full = fit_irls_direct(
                 X=dm,
                 y=y,
-                weights=exposure,
+                weights=sample_weight,
                 family=distribution,
                 link=link,
                 groups=groups,
@@ -1642,7 +1642,7 @@ def run_reml_once(
             mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
-            W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
+            W = sample_weight * dmu_deta**2 / np.maximum(V, 1e-10)
 
             active_groups = list(groups)
             XtWX_S_inv = XtWX_S_inv_full
@@ -1650,7 +1650,7 @@ def run_reml_once(
             pirls_result = fit_pirls(
                 X=dm,
                 y=y,
-                weights=exposure,
+                weights=sample_weight,
                 family=distribution,
                 link=link,
                 groups=groups,
@@ -1669,7 +1669,7 @@ def run_reml_once(
             mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
-            W = exposure * dmu_deta**2 / np.maximum(V, 1e-10)
+            W = sample_weight * dmu_deta**2 / np.maximum(V, 1e-10)
 
         if use_direct and cheap_iter:
             if cached_direct_xtwx is None:
@@ -1776,7 +1776,7 @@ def run_reml_once(
             cheap_iter = max_change <= direct_cheap_threshold
         elif max_change > bcd_cheap_threshold:
             old_gms = dm.group_matrices
-            dm = rebuild_dm(lambdas_new, exposure)
+            dm = rebuild_dm(lambdas_new, sample_weight)
             warm_beta = _map_beta_between_bases(beta, old_gms, dm.group_matrices, groups)
             warm_intercept = intercept
             cheap_iter = False
@@ -1786,13 +1786,13 @@ def run_reml_once(
         lambdas = lambdas_new
 
     if cheap_iter and converged and not use_direct:
-        dm = rebuild_dm(lambdas, exposure)
+        dm = rebuild_dm(lambdas, sample_weight)
 
     if use_direct:
         final_result, _ = fit_irls_direct(
             X=dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=distribution,
             link=link,
             groups=groups,
@@ -1806,7 +1806,7 @@ def run_reml_once(
         final_result = fit_pirls(
             X=dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=distribution,
             link=link,
             groups=groups,
@@ -1833,7 +1833,7 @@ def run_reml_once(
             y,
             final_result,
             lambdas,
-            exposure,
+            sample_weight,
             offset_arr,
             penalty_caches=final_caches,
         ),

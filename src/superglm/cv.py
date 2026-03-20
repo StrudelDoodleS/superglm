@@ -61,7 +61,7 @@ class CVResult:
 def _fit_cv_folds(
     dm: DesignMatrix,
     y: NDArray,
-    exposure: NDArray,
+    sample_weight: NDArray,
     groups: list[GroupSlice],
     family: Distribution,
     link: Link,
@@ -92,7 +92,7 @@ def _fit_cv_folds(
         dm_test = dm.row_subset(test_idx)
 
         y_train, y_test = y[train_idx], y[test_idx]
-        exp_train, exp_test = exposure[train_idx], exposure[test_idx]
+        exp_train, exp_test = sample_weight[train_idx], sample_weight[test_idx]
         off_train = offset[train_idx] if offset is not None else None
         off_test = offset[test_idx] if offset is not None else None
 

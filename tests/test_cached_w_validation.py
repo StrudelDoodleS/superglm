@@ -60,10 +60,10 @@ def _make_mtpl2_style_data(n, seed=42):
         + np.array([area_effect[a] for a in area])
     )
     mu = np.exp(eta)
-    exposure = rng.uniform(0.1, 1.0, n)
-    y_freq = rng.poisson(mu * exposure).astype(float) / exposure
+    sample_weight = rng.uniform(0.1, 1.0, n)
+    y_freq = rng.poisson(mu * sample_weight).astype(float) / sample_weight
     df = pd.DataFrame({"DrivAge": driv_age, "VehAge": veh_age, "BonusMalus": bonus, "Area": area})
-    return df, y_freq, exposure
+    return df, y_freq, sample_weight
 
 
 _SPLINE_FEATURES = {
@@ -81,7 +81,7 @@ _MTPL2_FEATURES = {
 
 def _fit_reml(family, features, discrete, df, y, w, **kwargs):
     model = SuperGLM(family=family, selection_penalty=0, features=features, discrete=discrete)
-    model.fit_reml(df, y, exposure=w, max_reml_iter=30, **kwargs)
+    model.fit_reml(df, y, sample_weight=w, max_reml_iter=30, **kwargs)
     return model
 
 
@@ -191,7 +191,7 @@ class TestRestartRobustness:
         # Seed the initial lambdas from baseline result
         baseline_lam = baseline._reml_lambdas
         avg_lam = float(np.mean(list(baseline_lam.values())))
-        restart_model.fit_reml(df, y, exposure=w, max_reml_iter=30, lambda2_init=avg_lam)
+        restart_model.fit_reml(df, y, sample_weight=w, max_reml_iter=30, lambda2_init=avg_lam)
         assert restart_model._reml_result.converged
 
         # All should agree on deviance within 1e-4
@@ -255,7 +255,7 @@ class TestCachedWSensitivity:
                 family=family, selection_penalty=0, features=_SPLINE_FEATURES, discrete=True
             )
             model._max_analytical_per_w = max_anal
-            model.fit_reml(df, y, exposure=w, max_reml_iter=50)
+            model.fit_reml(df, y, sample_weight=w, max_reml_iter=50)
             assert model._reml_result.converged, f"{label} did not converge"
             results[label] = model
 
@@ -307,7 +307,7 @@ class TestLargeNStability:
         m1 = SuperGLM(
             family="poisson", selection_penalty=0, features=_MTPL2_FEATURES, discrete=True
         )
-        m1.fit_reml(df, y, exposure=w, max_reml_iter=30)
+        m1.fit_reml(df, y, sample_weight=w, max_reml_iter=30)
         assert m1._reml_result.converged
 
         # Second fit starting from returned lambdas
@@ -315,7 +315,7 @@ class TestLargeNStability:
         m2 = SuperGLM(
             family="poisson", selection_penalty=0, features=_MTPL2_FEATURES, discrete=True
         )
-        m2.fit_reml(df, y, exposure=w, max_reml_iter=30, lambda2_init=avg_lam)
+        m2.fit_reml(df, y, sample_weight=w, max_reml_iter=30, lambda2_init=avg_lam)
         assert m2._reml_result.converged
 
         # Should agree exactly (same data, warm start near optimum)
@@ -345,7 +345,7 @@ class TestLargeNStability:
                 features=_MTPL2_FEATURES,
                 discrete=True,
             )
-            model.fit_reml(df, y, exposure=w, max_reml_iter=30)
+            model.fit_reml(df, y, sample_weight=w, max_reml_iter=30)
             assert model._reml_result.converged
 
             deviances.append(model.result.deviance)

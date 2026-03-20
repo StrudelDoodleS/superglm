@@ -18,22 +18,22 @@ def poisson_data():
     x_strong = rng.standard_normal(n)
     x_noise = rng.standard_normal(n)
     mu = np.exp(0.5 + 0.5 * x_strong)
-    exposure = np.ones(n)
-    y = rng.poisson(mu * exposure).astype(float)
+    sample_weight = np.ones(n)
+    y = rng.poisson(mu * sample_weight).astype(float)
     X = pd.DataFrame({"strong": x_strong, "noise": x_noise})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 class TestDrop1Basic:
     def test_returns_dataframe(self, poisson_data):
-        X, y, exposure = poisson_data
+        X, y, sample_weight = poisson_data
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.001,
             features={"strong": Numeric(), "noise": Numeric()},
         )
-        model.fit(X, y, exposure=exposure)
-        result = model.drop1(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
+        result = model.drop1(X, y, sample_weight=sample_weight)
 
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 2
@@ -42,14 +42,14 @@ class TestDrop1Basic:
         assert "delta_deviance" in result.columns
 
     def test_strong_feature_significant(self, poisson_data):
-        X, y, exposure = poisson_data
+        X, y, sample_weight = poisson_data
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.001,
             features={"strong": Numeric(), "noise": Numeric()},
         )
-        model.fit(X, y, exposure=exposure)
-        result = model.drop1(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
+        result = model.drop1(X, y, sample_weight=sample_weight)
 
         strong_row = result[result["feature"] == "strong"].iloc[0]
         noise_row = result[result["feature"] == "noise"].iloc[0]
@@ -61,14 +61,14 @@ class TestDrop1Basic:
         assert noise_row["p_value"] > 0.01
 
     def test_sorted_by_p_value(self, poisson_data):
-        X, y, exposure = poisson_data
+        X, y, sample_weight = poisson_data
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.001,
             features={"strong": Numeric(), "noise": Numeric()},
         )
-        model.fit(X, y, exposure=exposure)
-        result = model.drop1(X, y, exposure=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
+        result = model.drop1(X, y, sample_weight=sample_weight)
 
         p_values = result["p_value"].values
         assert np.all(p_values[:-1] <= p_values[1:])

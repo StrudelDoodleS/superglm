@@ -108,21 +108,18 @@ def _compute_fit_stats(
     )
 
 
-def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None, record_diagnostics=False):
+def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
     """Fit the model to data."""
-    from superglm.model.base import resolve_sample_weight_alias
-
-    exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="fit()")
     if model._splines is not None and not model._specs:
         from superglm.model.base import auto_detect
 
-        auto_detect(model, X, exposure)
+        auto_detect(model, X, sample_weight)
 
     # Auto-estimate NB theta if requested
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
         from superglm.nb_profile import estimate_nb_theta
 
-        nb_result = estimate_nb_theta(model, X, y, exposure=exposure, offset=offset)
+        nb_result = estimate_nb_theta(model, X, y, offset=offset)
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
@@ -133,21 +130,21 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None, record_d
         model_has_lambda1_targets,
     )
 
-    y, exposure, offset = model_build_design_matrix(model, X, y, exposure, offset)
+    y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
 
     # Validate response for the resolved distribution
     from superglm.distributions import validate_response
 
     validate_response(y, model._distribution)
 
-    model._fit_weights = np.array(exposure)
+    model._fit_weights = np.array(sample_weight)
     model._fit_offset = np.array(offset) if offset is not None else None
-    exposure = model._fit_weights
+    sample_weight = model._fit_weights
     offset = model._fit_offset
 
     # Auto-calibrate lambda1 if not set
     if model.penalty.lambda1 is None:
-        model.penalty.lambda1 = compute_lambda_max(model, y, exposure) * 0.1
+        model.penalty.lambda1 = compute_lambda_max(model, y, sample_weight) * 0.1
     has_lambda1_targets = model_has_lambda1_targets(model)
 
     # Invalidate cached properties from previous fit
@@ -162,7 +159,7 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None, record_d
         model._result, _ = fit_irls_direct(
             X=model._dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=model._distribution,
             link=model._link,
             groups=model._groups,
@@ -175,7 +172,7 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None, record_d
         model._result = fit_pirls(
             X=model._dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=model._distribution,
             link=model._link,
             groups=model._groups,
@@ -207,7 +204,7 @@ def fit(model, X, y, exposure=None, offset=None, *, sample_weight=None, record_d
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = _compute_fit_stats(
-        y, mu, exposure, offset, model._distribution, model._link, model._result.phi
+        y, mu, sample_weight, offset, model._distribution, model._link, model._result.phi
     )
 
     model._last_fit_meta = {"method": "fit", "discrete": model._discrete}
@@ -218,10 +215,9 @@ def fit_path(
     model,
     X,
     y,
-    exposure=None,
+    sample_weight=None,
     offset=None,
     *,
-    sample_weight=None,
     n_lambda=50,
     lambda_ratio=1e-3,
     lambda_seq=None,
@@ -231,14 +227,12 @@ def fit_path(
         compute_lambda_max,
         model_build_design_matrix,
         model_has_lambda1_targets,
-        resolve_sample_weight_alias,
     )
 
-    exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="fit_path()")
-    y, exposure, offset = model_build_design_matrix(model, X, y, exposure, offset)
-    model._fit_weights = np.array(exposure)
+    y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
+    model._fit_weights = np.array(sample_weight)
     model._fit_offset = np.array(offset) if offset is not None else None
-    exposure = model._fit_weights
+    sample_weight = model._fit_weights
     offset = model._fit_offset
     model.__dict__.pop("_coef_covariance", None)
     model.__dict__.pop("_fit_active_info", None)
@@ -248,7 +242,7 @@ def fit_path(
             "fit_path() requires at least one group targeted by the penalty. "
             "Adjust penalty.features or use fit() / fit_reml() instead."
         )
-    lambda_max = compute_lambda_max(model, y, exposure)
+    lambda_max = compute_lambda_max(model, y, sample_weight)
 
     if lambda_seq is None:
         lambda_seq = np.geomspace(lambda_max, lambda_max * lambda_ratio, n_lambda)
@@ -272,7 +266,7 @@ def fit_path(
         result = fit_pirls(
             X=model._dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=model._distribution,
             link=model._link,
             groups=model._groups,
@@ -310,10 +304,9 @@ def fit_cv(
     model,
     X,
     y,
-    exposure=None,
+    sample_weight=None,
     offset=None,
     *,
-    sample_weight=None,
     n_folds=5,
     n_lambda=50,
     lambda_ratio=1e-3,
@@ -329,26 +322,23 @@ def fit_cv(
         compute_lambda_max,
         model_build_design_matrix,
         model_has_lambda1_targets,
-        resolve_sample_weight_alias,
     )
 
-    exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="fit_cv()")
-
     if model._splines is not None and not model._specs:
-        auto_detect(model, X, exposure)
+        auto_detect(model, X, sample_weight)
 
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
         from superglm.nb_profile import estimate_nb_theta
 
-        nb_result = estimate_nb_theta(model, X, y, exposure=exposure, offset=offset)
+        nb_result = estimate_nb_theta(model, X, y, offset=offset)
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
 
-    y, exposure, offset = model_build_design_matrix(model, X, y, exposure, offset)
-    model._fit_weights = np.array(exposure)
+    y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
+    model._fit_weights = np.array(sample_weight)
     model._fit_offset = np.array(offset) if offset is not None else None
-    exposure = model._fit_weights
+    sample_weight = model._fit_weights
     offset = model._fit_offset
     model.__dict__.pop("_coef_covariance", None)
     model.__dict__.pop("_fit_active_info", None)
@@ -360,7 +350,7 @@ def fit_cv(
         )
 
     # Lambda sequence from full data
-    lambda_max = compute_lambda_max(model, y, exposure)
+    lambda_max = compute_lambda_max(model, y, sample_weight)
     if lambda_seq is None:
         lambda_seq = np.geomspace(lambda_max, lambda_max * lambda_ratio, n_lambda)
     else:
@@ -375,7 +365,7 @@ def fit_cv(
     fold_deviance = _fit_cv_folds(
         dm=model._dm,
         y=y,
-        exposure=exposure,
+        sample_weight=sample_weight,
         groups=model._groups,
         family=model._distribution,
         link=model._link,
@@ -397,7 +387,7 @@ def fit_cv(
     path_result = None
     if refit:
         model.penalty.lambda1 = best_lambda
-        model.fit(X, y, exposure=exposure, offset=offset)
+        model.fit(X, y, offset=offset)
 
     return CVResult(
         lambda_seq=lambda_seq,
@@ -415,13 +405,13 @@ def fit_cv(
 # ── REML adapter helpers ─────────────────────────────────────────
 
 
-def model_compute_dW_deta(model, mu, eta, exposure):
+def model_compute_dW_deta(model, mu, eta, sample_weight):
     """Derivative of IRLS weights w.r.t. the linear predictor."""
-    return compute_dW_deta(model._link, model._distribution, mu, eta, exposure)
+    return compute_dW_deta(model._link, model._distribution, mu, eta, sample_weight)
 
 
 def model_reml_w_correction(
-    model, pirls_result, XtWX_S_inv, lambdas, reml_groups, penalty_caches, exposure, offset_arr
+    model, pirls_result, XtWX_S_inv, lambdas, reml_groups, penalty_caches, sample_weight, offset_arr
 ):
     """First-order W(ρ) correction for REML derivatives."""
     return reml_w_correction(
@@ -433,14 +423,14 @@ def model_reml_w_correction(
         lambdas,
         reml_groups,
         penalty_caches,
-        exposure,
+        sample_weight,
         offset_arr,
         model._distribution,
     )
 
 
 def model_reml_laml_objective(
-    model, y, result, lambdas, exposure, offset_arr, XtWX=None, penalty_caches=None
+    model, y, result, lambdas, sample_weight, offset_arr, XtWX=None, penalty_caches=None
 ):
     """Laplace REML/LAML objective up to additive constants."""
     return reml_laml_objective(
@@ -451,7 +441,7 @@ def model_reml_laml_objective(
         y,
         result,
         lambdas,
-        exposure,
+        sample_weight,
         offset_arr,
         XtWX=XtWX,
         penalty_caches=penalty_caches,
@@ -506,7 +496,7 @@ def model_reml_direct_hessian(
 def model_optimize_direct_reml(
     model,
     y,
-    exposure,
+    sample_weight,
     offset_arr,
     reml_groups,
     penalty_ranks,
@@ -526,7 +516,7 @@ def model_optimize_direct_reml(
         model._groups,
         model._discrete,
         y,
-        exposure,
+        sample_weight,
         offset_arr,
         reml_groups,
         penalty_ranks,
@@ -545,7 +535,7 @@ def model_optimize_direct_reml(
 def model_optimize_discrete_reml_cached_w(
     model,
     y,
-    exposure,
+    sample_weight,
     offset_arr,
     reml_groups,
     penalty_ranks,
@@ -566,7 +556,7 @@ def model_optimize_discrete_reml_cached_w(
         model._link,
         model._groups,
         y,
-        exposure,
+        sample_weight,
         offset_arr,
         reml_groups,
         penalty_ranks,
@@ -583,7 +573,7 @@ def model_optimize_discrete_reml_cached_w(
 def model_optimize_efs_reml(
     model,
     y,
-    exposure,
+    sample_weight,
     offset_arr,
     reml_groups,
     penalty_ranks,
@@ -605,7 +595,7 @@ def model_optimize_efs_reml(
         model.penalty,
         model._active_set,
         y,
-        exposure,
+        sample_weight,
         offset_arr,
         reml_groups,
         penalty_ranks,
@@ -614,7 +604,9 @@ def model_optimize_efs_reml(
         reml_tol=reml_tol,
         verbose=verbose,
         penalty_caches=penalty_caches,
-        rebuild_dm=lambda lambdas, exposure: rebuild_dm_with_lambdas(model, lambdas, exposure),
+        rebuild_dm=lambda lambdas, sample_weight: rebuild_dm_with_lambdas(
+            model, lambdas, sample_weight
+        ),
     )
     model._dm = dm
     return result
@@ -623,7 +615,7 @@ def model_optimize_efs_reml(
 def model_run_reml_once(
     model,
     y,
-    exposure,
+    sample_weight,
     offset_arr,
     reml_groups,
     penalty_ranks,
@@ -646,7 +638,7 @@ def model_run_reml_once(
         model.penalty,
         model._active_set,
         y,
-        exposure,
+        sample_weight,
         offset_arr,
         reml_groups,
         penalty_ranks,
@@ -656,7 +648,9 @@ def model_run_reml_once(
         verbose=verbose,
         use_direct=use_direct,
         penalty_caches=penalty_caches,
-        rebuild_dm=lambda lambdas, exposure: rebuild_dm_with_lambdas(model, lambdas, exposure),
+        rebuild_dm=lambda lambdas, sample_weight: rebuild_dm_with_lambdas(
+            model, lambdas, sample_weight
+        ),
         direct_solve=getattr(model, "_direct_solve", "auto"),
     )
     model._dm = dm
@@ -667,10 +661,9 @@ def fit_reml(
     model,
     X,
     y,
-    exposure=None,
+    sample_weight=None,
     offset=None,
     *,
-    sample_weight=None,
     max_reml_iter=20,
     reml_tol=1e-4,
     lambda2_init=None,
@@ -682,18 +675,16 @@ def fit_reml(
         compute_lambda_max,
         model_build_design_matrix,
         model_has_lambda1_targets,
-        resolve_sample_weight_alias,
     )
 
-    exposure = resolve_sample_weight_alias(exposure, sample_weight, method_name="fit_reml()")
     if model._splines is not None and not model._specs:
-        auto_detect(model, X, exposure)
+        auto_detect(model, X, sample_weight)
 
     # Auto-estimate NB theta if requested
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
         from superglm.nb_profile import estimate_nb_theta
 
-        nb_result = estimate_nb_theta(model, X, y, exposure=exposure, offset=offset)
+        nb_result = estimate_nb_theta(model, X, y, offset=offset)
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
@@ -704,12 +695,12 @@ def fit_reml(
     _profile: dict = {}
 
     _t0 = _time.perf_counter()
-    y, exposure, offset = model_build_design_matrix(model, X, y, exposure, offset)
+    y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
     _profile["dm_build_s"] = _time.perf_counter() - _t0
 
-    model._fit_weights = np.array(exposure)
+    model._fit_weights = np.array(sample_weight)
     model._fit_offset = np.array(offset) if offset is not None else None
-    exposure = model._fit_weights
+    sample_weight = model._fit_weights
     offset = model._fit_offset
     model.__dict__.pop("_coef_covariance", None)
     model.__dict__.pop("_fit_active_info", None)
@@ -717,7 +708,7 @@ def fit_reml(
 
     # Auto-calibrate lambda1 if not set
     if model.penalty.lambda1 is None:
-        model.penalty.lambda1 = compute_lambda_max(model, y, exposure) * 0.1
+        model.penalty.lambda1 = compute_lambda_max(model, y, sample_weight) * 0.1
 
     # Identify REML-eligible groups: penalized SSP groups with stored omega
     reml_groups: list[tuple[int, GroupSlice]] = []
@@ -735,7 +726,7 @@ def fit_reml(
         model._result = fit_pirls(
             X=model._dm,
             y=y,
-            weights=exposure,
+            weights=sample_weight,
             family=model._distribution,
             link=model._link,
             groups=model._groups,
@@ -766,7 +757,7 @@ def fit_reml(
         best = model_optimize_direct_reml(
             model,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             reml_groups,
             penalty_ranks,
@@ -781,7 +772,7 @@ def fit_reml(
         best = model_optimize_efs_reml(
             model,
             y,
-            exposure,
+            sample_weight,
             offset_arr,
             reml_groups,
             penalty_ranks,
@@ -838,7 +829,7 @@ def fit_reml(
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = _compute_fit_stats(
-        y, mu, exposure, offset, model._distribution, model._link, model._result.phi
+        y, mu, sample_weight, offset, model._distribution, model._link, model._result.phi
     )
 
     model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}

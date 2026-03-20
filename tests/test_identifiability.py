@@ -16,19 +16,19 @@ from superglm.features.spline import BasisSpline, Spline
 
 
 def _make_poisson_data(n=2000, seed=42):
-    """Generate synthetic Poisson data with known exposure."""
+    """Generate synthetic Poisson data with known sample_weight."""
     rng = np.random.default_rng(seed)
     x1 = rng.uniform(18, 90, n)
     x2 = rng.uniform(0, 20, n)
     cat = rng.choice(["A", "B", "C", "D"], n)
-    exposure = rng.uniform(0.1, 1.0, n)
+    sample_weight = rng.uniform(0.1, 1.0, n)
     eta = -2.0 + 0.01 * (x1 - 40) ** 2 / 100 - 0.05 * x2
-    mu = exposure * np.exp(eta)
+    mu = sample_weight * np.exp(eta)
     y = rng.poisson(mu).astype(np.float64)
     import pandas as pd
 
     df = pd.DataFrame({"x1": x1, "x2": x2, "cat": cat})
-    return df, y, exposure
+    return df, y, sample_weight
 
 
 # ── Acceptance criterion 1: unweighted mean ≈ 0 ──────────────────
@@ -43,13 +43,13 @@ class TestUnweightedMeanZero:
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
     def test_unweighted_mean_zero_reml(self, data, kind):
-        df, y, exposure = data
+        df, y, sample_weight = data
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp")},
         )
-        model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
+        model.fit_reml(df, y, sample_weight=sample_weight, max_reml_iter=10)
 
         spec = model._specs["x1"]
         fgroups = [g for g in model._groups if g.feature_name == "x1"]
@@ -64,13 +64,13 @@ class TestUnweightedMeanZero:
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
     def test_unweighted_mean_zero_fit(self, data, kind):
         """Also works with plain fit() (no REML)."""
-        df, y, exposure = data
+        df, y, sample_weight = data
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp")},
         )
-        model.fit(df, y, exposure=exposure)
+        model.fit(df, y, sample_weight=sample_weight)
 
         spec = model._specs["x1"]
         fgroups = [g for g in model._groups if g.feature_name == "x1"]
@@ -82,7 +82,7 @@ class TestUnweightedMeanZero:
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
     def test_no_exposure_model(self, kind):
-        """Identifiability works without exposure too."""
+        """Identifiability works without sample_weight too."""
         df, y, _ = _make_poisson_data()
         model = SuperGLM(
             family="poisson",
@@ -104,7 +104,7 @@ class TestMultipleSplineMeanZero:
     """Unweighted mean ≈ 0 for each term in a multi-spline model."""
 
     def test_multi_spline_unweighted_mean(self):
-        df, y, exposure = _make_poisson_data(n=3000)
+        df, y, sample_weight = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
@@ -114,7 +114,7 @@ class TestMultipleSplineMeanZero:
                 "cat": Categorical(base="first"),
             },
         )
-        model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
+        model.fit_reml(df, y, sample_weight=sample_weight, max_reml_iter=10)
 
         for name in ["x1", "x2"]:
             spec = model._specs[name]
@@ -133,17 +133,17 @@ class TestExactVsDiscreteAgreement:
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
     def test_deviance_agreement(self, kind):
-        df, y, exposure = _make_poisson_data(n=3000)
+        df, y, sample_weight = _make_poisson_data(n=3000)
         features_exact = {"x1": Spline(kind=kind, n_knots=8, penalty="ssp", discrete=False)}
         features_disc = {
             "x1": Spline(kind=kind, n_knots=8, penalty="ssp", discrete=True, n_bins=256)
         }
 
         m_exact = SuperGLM(family="poisson", selection_penalty=0.0, features=features_exact)
-        m_exact.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
+        m_exact.fit_reml(df, y, sample_weight=sample_weight, max_reml_iter=10)
 
         m_disc = SuperGLM(family="poisson", selection_penalty=0.0, features=features_disc)
-        m_disc.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
+        m_disc.fit_reml(df, y, sample_weight=sample_weight, max_reml_iter=10)
 
         # Deviance should be close (within ~1% for 256 bins)
         dev_exact = m_exact.result.deviance
@@ -154,13 +154,13 @@ class TestExactVsDiscreteAgreement:
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
     def test_discrete_unweighted_mean_zero(self, kind):
         """Discretized path also has unweighted mean ≈ 0."""
-        df, y, exposure = _make_poisson_data(n=3000)
+        df, y, sample_weight = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp", discrete=True, n_bins=256)},
         )
-        model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
+        model.fit_reml(df, y, sample_weight=sample_weight, max_reml_iter=10)
 
         spec = model._specs["x1"]
         fgroups = [g for g in model._groups if g.feature_name == "x1"]
@@ -178,13 +178,13 @@ class TestSEBehavior:
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
     def test_se_finite_and_small(self, kind):
-        df, y, exposure = _make_poisson_data(n=3000)
+        df, y, sample_weight = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp")},
         )
-        model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
+        model.fit_reml(df, y, sample_weight=sample_weight, max_reml_iter=10)
         rels = model.relativities(with_se=True)
         se = rels["x1"]["se_log_relativity"].to_numpy()
         assert np.all(np.isfinite(se)), f"SEs contain non-finite values for kind={kind}"
@@ -194,13 +194,13 @@ class TestSEBehavior:
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
     def test_simultaneous_bands_finite(self, kind):
-        df, y, exposure = _make_poisson_data(n=3000)
+        df, y, sample_weight = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
             features={"x1": Spline(kind=kind, n_knots=8, penalty="ssp")},
         )
-        model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
+        model.fit_reml(df, y, sample_weight=sample_weight, max_reml_iter=10)
         bands = model.simultaneous_bands("x1")
         assert np.all(np.isfinite(bands["se"].to_numpy()))
         assert np.all(np.isfinite(bands["ci_lower_simultaneous"].to_numpy()))
@@ -219,7 +219,7 @@ class TestInteractionCompatibility:
     """SplineCategorical should work with identifiability constraint."""
 
     def test_spline_categorical_interaction_fits(self):
-        df, y, exposure = _make_poisson_data(n=3000)
+        df, y, sample_weight = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
@@ -229,12 +229,12 @@ class TestInteractionCompatibility:
             },
             interactions=[("x1", "cat")],
         )
-        model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
+        model.fit_reml(df, y, sample_weight=sample_weight, max_reml_iter=10)
         assert model.result is not None
         assert model.result.deviance > 0
 
     def test_spline_categorical_relativities(self):
-        df, y, exposure = _make_poisson_data(n=3000)
+        df, y, sample_weight = _make_poisson_data(n=3000)
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
@@ -244,7 +244,7 @@ class TestInteractionCompatibility:
             },
             interactions=[("x1", "cat")],
         )
-        model.fit_reml(df, y, exposure=exposure, max_reml_iter=10)
+        model.fit_reml(df, y, sample_weight=sample_weight, max_reml_iter=10)
         rels = model.relativities()
         # Per-level curves should exist for non-base levels
         for level in ["B", "C", "D"]:

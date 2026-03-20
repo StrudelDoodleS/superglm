@@ -52,15 +52,15 @@ def _resolve_lambda2(lambda2: float | dict) -> float:
 def compute_R_inv(
     B: sp.spmatrix | NDArray,
     omega: NDArray,
-    exposure: NDArray,
+    sample_weight: NDArray,
     lambda2: float | dict,
 ) -> NDArray:
     """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv."""
     lam2 = _resolve_lambda2(lambda2)
     if sp.issparse(B):
-        G = np.asarray((B.multiply(exposure[:, None]).T @ B).todense()) / np.sum(exposure)
+        G = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / np.sum(sample_weight)
     else:
-        G = (B * exposure[:, None]).T @ B / np.sum(exposure)
+        G = (B * sample_weight[:, None]).T @ B / np.sum(sample_weight)
     M = G + lam2 * omega + np.eye(omega.shape[0]) * 1e-8
     R = np.linalg.cholesky(M).T
     return np.linalg.inv(R)
@@ -70,15 +70,17 @@ def compute_projected_R_inv(
     B: sp.spmatrix | NDArray,
     projection: NDArray,
     penalty_sub: NDArray,
-    exposure: NDArray,
+    sample_weight: NDArray,
     lambda2: float | dict,
 ) -> NDArray:
     """Compute SSP R_inv within a projected subspace (linear-split range space)."""
     lam2 = _resolve_lambda2(lambda2)
     if sp.issparse(B):
-        G_full = np.asarray((B.multiply(exposure[:, None]).T @ B).todense()) / np.sum(exposure)
+        G_full = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / np.sum(
+            sample_weight
+        )
     else:
-        G_full = (B * exposure[:, None]).T @ B / np.sum(exposure)
+        G_full = (B * sample_weight[:, None]).T @ B / np.sum(sample_weight)
     G_sub = projection.T @ G_full @ projection
     n_sub = penalty_sub.shape[0]
     M_sub = G_sub + lam2 * penalty_sub + np.eye(n_sub) * 1e-8
@@ -142,7 +144,7 @@ def resolve_discrete_n_bins(
 
 def auto_detect_features(
     X: pd.DataFrame,
-    exposure: NDArray | None,
+    sample_weight: NDArray | None,
     *,
     spline_cols: list[str],
     knots_map: dict[str, int],
@@ -169,7 +171,7 @@ def auto_detect_features(
             lines.append(f"  {col:<20s} → Spline(n_knots={nk}, degree={degree})")
         elif X[col].dtype.kind in ("O", "U") or isinstance(X[col].dtype, pd.CategoricalDtype):
             base = categorical_base
-            if base == "most_exposed" and exposure is None:
+            if base == "most_exposed" and sample_weight is None:
                 base = "first"
             spec = Categorical(base=base)
             specs[col] = spec
@@ -321,7 +323,7 @@ def _process_info(
     *,
     B_unique: NDArray | None = None,
     bin_idx: NDArray | None = None,
-    exposure: NDArray,
+    sample_weight: NDArray,
     exposure_agg: NDArray | None = None,
     lambda2: float | dict,
     tensor_build: DiscreteTensorBuildResult | None = None,
@@ -341,7 +343,7 @@ def _process_info(
         P = info.projection
         if info.reparametrize and info.penalty_matrix is not None:
             B_for = B_unique if use_discrete else info.columns
-            exp_for = exposure_agg if use_discrete else exposure
+            exp_for = exposure_agg if use_discrete else sample_weight
             R_inv_local = compute_projected_R_inv(B_for, P, info.penalty_matrix, exp_for, lambda2)
             R_inv = P @ R_inv_local
         else:
@@ -372,7 +374,7 @@ def _process_info(
 
     elif info.reparametrize and info.penalty_matrix is not None:
         B_for = B_unique if use_discrete else info.columns
-        exp_for = exposure_agg if use_discrete else exposure
+        exp_for = exposure_agg if use_discrete else sample_weight
         R_inv = compute_R_inv(B_for, info.penalty_matrix, exp_for, lambda2)
         n_cols = R_inv.shape[1]
         if use_tensor:
@@ -427,14 +429,14 @@ class BuildResult:
     distribution: Distribution
     link: Link
     y: NDArray
-    exposure: NDArray
+    sample_weight: NDArray
     offset: NDArray | None
 
 
 def build_design_matrix(
     X: pd.DataFrame,
     y: NDArray,
-    exposure: NDArray | None,
+    sample_weight: NDArray | None,
     offset: NDArray | None,
     *,
     family: str | Distribution,
@@ -456,7 +458,9 @@ def build_design_matrix(
     """
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
-    exposure = np.ones(n) if exposure is None else np.asarray(exposure, dtype=np.float64)
+    sample_weight = (
+        np.ones(n) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    )
     if offset is not None:
         offset = np.asarray(offset, dtype=np.float64)
     distribution = resolve_distribution(family)
@@ -478,12 +482,12 @@ def build_design_matrix(
 
         if use_discrete:
             omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
-                x_col, exposure
+                x_col, sample_weight
             )
             n_bins_feat = resolve_discrete_n_bins(name, spec, n_bins_config)
             bin_centers, bin_idx = _discretize_column(x_col, n_bins_feat)
             B_unique = spec._raw_basis_matrix(bin_centers)
-            exposure_agg = np.bincount(bin_idx, weights=exposure, minlength=len(bin_centers))
+            exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
 
             if getattr(spec, "select", False):
                 n_null = 1
@@ -518,7 +522,7 @@ def build_design_matrix(
                     )
                 ]
         else:
-            result = spec.build(x_col, exposure=exposure)
+            result = spec.build(x_col, sample_weight=sample_weight)
             infos = result if isinstance(result, list) else [result]
 
         # Build GroupMatrix + GroupSlice for each subgroup
@@ -529,7 +533,7 @@ def build_design_matrix(
                 info,
                 B_unique=B_unique,
                 bin_idx=bin_idx,
-                exposure=exposure,
+                sample_weight=sample_weight,
                 exposure_agg=exposure_agg,
                 lambda2=lambda2,
             )
@@ -585,25 +589,25 @@ def build_design_matrix(
                 x2,
                 specs,
                 (n_bins1, n_bins2),
-                exposure=exposure,
+                sample_weight=sample_weight,
             )
             result = tensor_build.infos
             B_unique_inter = tensor_build.B_joint
             bin_idx_inter = tensor_build.pair_idx
             exposure_agg_inter = np.bincount(
                 bin_idx_inter,
-                weights=exposure,
+                weights=sample_weight,
                 minlength=B_unique_inter.shape[0],
             )
             tensor_id = _next_tensor_id
             _next_tensor_id += 1
         else:
-            result = ispec.build(x1, x2, specs, exposure=exposure)
+            result = ispec.build(x1, x2, specs, sample_weight=sample_weight)
 
         pi_kwargs = dict(
             B_unique=B_unique_inter,
             bin_idx=bin_idx_inter,
-            exposure=exposure,
+            sample_weight=sample_weight,
             exposure_agg=exposure_agg_inter,
             lambda2=lambda2,
             tensor_build=tensor_build,
@@ -686,7 +690,7 @@ def build_design_matrix(
         distribution=distribution,
         link=link,
         y=y,
-        exposure=exposure,
+        sample_weight=sample_weight,
         offset=offset,
     )
 
@@ -700,7 +704,7 @@ def rebuild_design_matrix_with_lambdas(
     dm: DesignMatrix,
     groups: list[GroupSlice],
     lambdas: dict[str, float],
-    exposure: NDArray,
+    sample_weight: NDArray,
     lambda2: float | dict,
 ) -> DesignMatrix:
     """Rebuild design matrix with per-group smoothing lambdas.
@@ -719,10 +723,10 @@ def rebuild_design_matrix_with_lambdas(
             if gm.projection is not None:
                 P = gm.projection
                 omega_proj = P.T @ omega @ P
-                R_inv_local = compute_projected_R_inv(gm.B, P, omega_proj, exposure, lam)
+                R_inv_local = compute_projected_R_inv(gm.B, P, omega_proj, sample_weight, lam)
                 R_inv_new = P @ R_inv_local
             else:
-                R_inv_new = compute_R_inv(gm.B, omega, exposure, lam)
+                R_inv_new = compute_R_inv(gm.B, omega, sample_weight, lam)
             new_gm = SparseSSPGroupMatrix(gm.B, R_inv_new)
             new_gm.omega = omega
             new_gm.projection = gm.projection
@@ -733,7 +737,7 @@ def rebuild_design_matrix_with_lambdas(
                 new_gms.append(gm)
                 continue
             lam = lambdas[g.name]
-            exposure_agg = np.bincount(gm.bin_idx, weights=exposure, minlength=gm.n_bins)
+            exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
             if gm.projection is not None:
                 P = gm.projection
                 omega_proj = P.T @ omega @ P
@@ -760,7 +764,7 @@ def rebuild_design_matrix_with_lambdas(
                 new_gms.append(gm)
                 continue
             lam = lambdas[g.name]
-            exposure_agg = np.bincount(gm.bin_idx, weights=exposure, minlength=gm.n_bins)
+            exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
             if gm.projection is not None:
                 P = gm.projection
                 omega_proj = P.T @ omega @ P

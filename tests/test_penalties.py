@@ -26,11 +26,11 @@ def sample_data():
     age = rng.uniform(18, 85, n)
     region = rng.choice(["A", "B", "C"], n, p=[0.3, 0.3, 0.4])
     density = rng.normal(5, 2, n)
-    exposure = rng.uniform(0.3, 1.0, n)
+    sample_weight = rng.uniform(0.3, 1.0, n)
     mu = np.exp(-2.0 + 0.01 * (age - 50) ** 2 / 100 + (region == "A") * 0.3)
-    y = rng.poisson(mu * exposure).astype(float)
+    y = rng.poisson(mu * sample_weight).astype(float)
     X = pd.DataFrame({"age": age, "region": region, "density": density})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 class TestGroupLasso:
@@ -355,13 +355,13 @@ class TestAdaptive:
 class TestWarmStart:
     def test_adaptive_flavor_runs(self, sample_data):
         """End-to-end: GroupLasso with Adaptive flavor should fit."""
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLMRegressor(
             spline_features=["age"],
             n_knots=10,
             penalty=GroupLasso(lambda1=0.01, flavor=Adaptive()),
         )
-        model.fit(X, y, sample_weight=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         preds = model.predict(X)
         assert preds.shape == (len(X),)
         assert np.all(preds > 0)
@@ -394,13 +394,13 @@ class TestSklearnShorthand:
         assert model.coef_ is not None
 
     def test_object_penalty(self, sample_data):
-        X, y, exposure = sample_data
+        X, y, sample_weight = sample_data
         model = SuperGLMRegressor(
             penalty=GroupLasso(lambda1=0.01, flavor=Adaptive()),
             spline_features=["age"],
             n_knots=10,
         )
-        model.fit(X, y, sample_weight=exposure)
+        model.fit(X, y, sample_weight=sample_weight)
         assert model.coef_ is not None
 
     def test_string_group_elastic_net(self, sample_data):

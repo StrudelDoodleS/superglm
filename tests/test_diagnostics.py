@@ -23,14 +23,14 @@ def mixed_data():
 
     log_rate = 0.5 * np.sin(x_strong) + 0.01 * x_weak + np.array([region_effect[r] for r in region])
     y = rng.poisson(np.exp(log_rate))
-    exposure = np.ones(n)
+    sample_weight = np.ones(n)
     X = pd.DataFrame({"strong": x_strong, "weak": x_weak, "region": region})
-    return X, y, exposure
+    return X, y, sample_weight
 
 
 @pytest.fixture
 def fitted_model(mixed_data):
-    X, y, exposure = mixed_data
+    X, y, sample_weight = mixed_data
     m = SuperGLM(
         family="poisson",
         features={
@@ -40,8 +40,8 @@ def fitted_model(mixed_data):
         splines=None,
         selection_penalty=0.0,
     )
-    m.fit(X, y, sample_weight=exposure)
-    return m, X, y, exposure
+    m.fit(X, y, sample_weight=sample_weight)
+    return m, X, y, sample_weight
 
 
 # ── Phase 7: Term importance tests ──────────────────────────────
@@ -49,35 +49,35 @@ def fitted_model(mixed_data):
 
 class TestTermImportance:
     def test_returns_dataframe(self, fitted_model):
-        m, X, y, exposure = fitted_model
-        df = m.term_importance(X, sample_weight=exposure)
+        m, X, y, sample_weight = fitted_model
+        df = m.term_importance(X, sample_weight=sample_weight)
         assert isinstance(df, pd.DataFrame)
         assert "term" in df.columns
         assert "feature" in df.columns
         assert "variance_eta" in df.columns
 
     def test_contains_all_groups(self, fitted_model):
-        m, X, y, exposure = fitted_model
-        df = m.term_importance(X, sample_weight=exposure)
+        m, X, y, sample_weight = fitted_model
+        df = m.term_importance(X, sample_weight=sample_weight)
         group_names = {g.name for g in m._groups}
         assert set(df["term"]) == group_names
 
     def test_strong_feature_higher_variance(self, fitted_model):
-        m, X, y, exposure = fitted_model
-        df = m.term_importance(X, sample_weight=exposure)
+        m, X, y, sample_weight = fitted_model
+        df = m.term_importance(X, sample_weight=sample_weight)
         strong_var = df.loc[df["feature"] == "strong", "variance_eta"].sum()
         region_var = df.loc[df["feature"] == "region", "variance_eta"].sum()
         assert strong_var > region_var * 0.5  # strong signal should dominate
 
     def test_not_fitted_raises(self, mixed_data):
-        X, y, exposure = mixed_data
+        X, y, sample_weight = mixed_data
         m = SuperGLM(
             family="poisson",
             features={"strong": Spline(n_knots=10)},
             selection_penalty=0.0,
         )
         with pytest.raises(RuntimeError, match="must be fitted"):
-            m.term_importance(X, sample_weight=exposure)
+            m.term_importance(X, sample_weight=sample_weight)
 
 
 # ── Phase 8: Drop-term diagnostics tests ────────────────────────
@@ -85,17 +85,17 @@ class TestTermImportance:
 
 class TestDropTermDiagnostics:
     def test_refit_mode_returns_dataframe(self, fitted_model):
-        m, X, y, exposure = fitted_model
-        df = m.term_drop_diagnostics(X, y, sample_weight=exposure, mode="refit")
+        m, X, y, sample_weight = fitted_model
+        df = m.term_drop_diagnostics(X, y, sample_weight=sample_weight, mode="refit")
         assert isinstance(df, pd.DataFrame)
 
     def test_holdout_mode_returns_dataframe(self, fitted_model):
-        m, X, y, exposure = fitted_model
+        m, X, y, sample_weight = fitted_model
         # Use training data as "validation" for simplicity
         df = m.term_drop_diagnostics(
             X,
             y,
-            sample_weight=exposure,
+            sample_weight=sample_weight,
             mode="holdout",
             X_val=X,
             y_val=y,
@@ -105,11 +105,11 @@ class TestDropTermDiagnostics:
         assert "delta_deviance" in df.columns
 
     def test_holdout_positive_delta_for_strong(self, fitted_model):
-        m, X, y, exposure = fitted_model
+        m, X, y, sample_weight = fitted_model
         df = m.term_drop_diagnostics(
             X,
             y,
-            sample_weight=exposure,
+            sample_weight=sample_weight,
             mode="holdout",
             X_val=X,
             y_val=y,
@@ -118,14 +118,14 @@ class TestDropTermDiagnostics:
         assert strong_delta > 0  # dropping strong feature should increase deviance
 
     def test_holdout_requires_validation_data(self, fitted_model):
-        m, X, y, exposure = fitted_model
+        m, X, y, sample_weight = fitted_model
         with pytest.raises(ValueError, match="X_val and y_val"):
-            m.term_drop_diagnostics(X, y, sample_weight=exposure, mode="holdout")
+            m.term_drop_diagnostics(X, y, sample_weight=sample_weight, mode="holdout")
 
     def test_invalid_mode(self, fitted_model):
-        m, X, y, exposure = fitted_model
+        m, X, y, sample_weight = fitted_model
         with pytest.raises(ValueError, match="mode must be"):
-            m.term_drop_diagnostics(X, y, sample_weight=exposure, mode="invalid")
+            m.term_drop_diagnostics(X, y, sample_weight=sample_weight, mode="invalid")
 
 
 # ── Phase 9: Spline redundancy diagnostics tests ────────────────
@@ -133,14 +133,14 @@ class TestDropTermDiagnostics:
 
 class TestSplineRedundancy:
     def test_returns_dict(self, fitted_model):
-        m, X, y, exposure = fitted_model
-        result = m.spline_redundancy(X, sample_weight=exposure)
+        m, X, y, sample_weight = fitted_model
+        result = m.spline_redundancy(X, sample_weight=sample_weight)
         assert isinstance(result, dict)
         assert "strong" in result
 
     def test_report_fields(self, fitted_model):
-        m, X, y, exposure = fitted_model
-        result = m.spline_redundancy(X, sample_weight=exposure)
+        m, X, y, sample_weight = fitted_model
+        result = m.spline_redundancy(X, sample_weight=sample_weight)
         report = result["strong"]
         assert report.feature_name == "strong"
         assert report.n_knots > 0
@@ -150,14 +150,14 @@ class TestSplineRedundancy:
         assert report.effective_rank > 0
 
     def test_support_mass_sums_roughly_to_one(self, fitted_model):
-        m, X, y, exposure = fitted_model
-        result = m.spline_redundancy(X, sample_weight=exposure)
+        m, X, y, sample_weight = fitted_model
+        result = m.spline_redundancy(X, sample_weight=sample_weight)
         total_mass = np.sum(result["strong"].support_mass)
         assert 0.8 < total_mass < 1.2  # approximate
 
     def test_non_spline_excluded(self, fitted_model):
-        m, X, y, exposure = fitted_model
-        result = m.spline_redundancy(X, sample_weight=exposure)
+        m, X, y, sample_weight = fitted_model
+        result = m.spline_redundancy(X, sample_weight=sample_weight)
         assert "region" not in result  # categorical, not spline
 
     def test_over_specified_spline(self):

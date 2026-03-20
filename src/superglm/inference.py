@@ -816,7 +816,7 @@ def drop1(
     model,
     X: pd.DataFrame,
     y: NDArray,
-    exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
     offset: NDArray | None = None,
     *,
     test: str = "Chisq",
@@ -850,7 +850,7 @@ def drop1(
         Feature matrix (same as used for fitting).
     y : array-like
         Response variable.
-    exposure : array-like, optional
+    sample_weight : array-like, optional
         Frequency weights.
     offset : array-like, optional
         Offset added to the linear predictor.
@@ -895,8 +895,8 @@ def drop1(
             y_arr = np.asarray(y, dtype=np.float64)
             w = (
                 np.ones(n, dtype=np.float64)
-                if exposure is None
-                else np.asarray(exposure, dtype=np.float64)
+                if sample_weight is None
+                else np.asarray(sample_weight, dtype=np.float64)
             )
             y_mean = float(np.average(y_arr, weights=w))
             if isinstance(model._distribution, Binomial):
@@ -919,7 +919,7 @@ def drop1(
             edf_reduced = 1.0  # intercept only
         else:
             reduced = model._clone_without_features(drop_set)
-            reduced.fit(X, y, exposure=exposure, offset=offset)
+            reduced.fit(X, y, offset=offset)
             dev_reduced = reduced.result.deviance
             edf_reduced = reduced.result.effective_df
         delta_dev = dev_reduced - dev_full
@@ -955,7 +955,7 @@ def refit_unpenalised(
     model,
     X: pd.DataFrame,
     y: NDArray,
-    exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
     offset: NDArray | None = None,
     *,
     keep_smoothing: bool = True,
@@ -978,7 +978,7 @@ def refit_unpenalised(
         Feature matrix.
     y : array-like
         Response variable.
-    exposure : array-like, optional
+    sample_weight : array-like, optional
         Frequency weights.
     offset : array-like, optional
         Offset added to the linear predictor.
@@ -1018,7 +1018,7 @@ def refit_unpenalised(
         lam2 = ...  # sentinel: use original lambda2 / REML lambdas
 
     new_model = model._clone_without_features(inactive, lambda1=0.0, lambda2=lam2)
-    new_model.fit(X, y, exposure=exposure, offset=offset)
+    new_model.fit(X, y, offset=offset)
     return new_model
 
 

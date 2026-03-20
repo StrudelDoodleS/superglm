@@ -142,6 +142,7 @@ def summary(model, alpha: float = 0.05):
         "effective_df": edf,
         "lambda1": lam1,
         "phi": res.phi,
+        "pearson_chi2": fs.pearson_chi2,
         "deviance": res.deviance,
         "log_likelihood": ll,
         "aic": aic,

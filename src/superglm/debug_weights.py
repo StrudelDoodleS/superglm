@@ -5,11 +5,11 @@ Usage (at work, where you have the data):
     from superglm.debug_weights import compare_irls_weights
 
     # After fitting your superglm model:
-    report = compare_irls_weights(model, X, y, exposure=exposure)
+    report = compare_irls_weights(model, X, y)
     print(report)
 
     # Or just inspect superglm's iteration log:
-    model.fit(X, y, exposure=exposure, record_diagnostics=True)
+    model.fit(X, y, record_diagnostics=True)
     print(model.iteration_diagnostics())
 """
 
@@ -28,7 +28,7 @@ def compare_irls_weights(
     model,
     X: pd.DataFrame,
     y: NDArray,
-    exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
     offset: NDArray | None = None,
     max_iter: int = 5,
 ) -> pd.DataFrame:
@@ -46,8 +46,8 @@ def compare_irls_weights(
         Feature data used for fitting.
     y : array-like
         Response variable.
-    exposure : array-like, optional
-        Frequency weights / exposure.
+    sample_weight : array-like, optional
+        Frequency weights / sample_weight.
     offset : array-like, optional
         Offset term.
     max_iter : int
@@ -107,7 +107,7 @@ def compare_irls_weights(
     # Use the raw X columns as numeric features
     X_sm = sm.add_constant(X.select_dtypes(include=[np.number]).values)
 
-    freq_weights = exposure if exposure is not None else np.ones(len(y))
+    freq_weights = sample_weight if sample_weight is not None else np.ones(len(y))
     sm_offset = offset if offset is not None else None
 
     rows = []
@@ -195,7 +195,7 @@ def inspect_worst_observations(
     model,
     X: pd.DataFrame,
     y: NDArray,
-    exposure: NDArray | None = None,
+    sample_weight: NDArray | None = None,
     iteration: int = 1,
 ) -> pd.DataFrame:
     """Show the observations with extreme working weights at a given iteration.
@@ -208,7 +208,7 @@ def inspect_worst_observations(
         Original feature data.
     y : array-like
         Response variable.
-    exposure : array-like, optional
+    sample_weight : array-like, optional
         Frequency weights.
     iteration : int
         Which IRLS iteration to inspect (1-based).
@@ -217,7 +217,7 @@ def inspect_worst_observations(
     -------
     DataFrame
         Rows for the top-5 and bottom-5 W observations, showing their
-        feature values, y, exposure, and which end of W they're on.
+        feature values, y, sample_weight, and which end of W they're on.
     """
     log = model.result.iteration_log
     if log is None:
@@ -238,9 +238,9 @@ def inspect_worst_observations(
     all_idx = np.concatenate([top_idx, bot_idx])
 
     rows = []
-    exp = exposure if exposure is not None else np.ones(len(y))
+    exp = sample_weight if sample_weight is not None else np.ones(len(y))
     for i in all_idx:
-        row = {"obs_index": int(i), "y": float(y[i]), "exposure": float(exp[i])}
+        row = {"obs_index": int(i), "y": float(y[i]), "sample_weight": float(exp[i])}
         # Add feature values
         for col in X.columns:
             row[col] = X.iloc[i][col]
