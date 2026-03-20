@@ -352,6 +352,7 @@ def optimize_direct_reml(
     profile: dict | None = None,
     max_analytical_per_w: int = 30,
     select_snap: bool = True,
+    direct_solve: str = "auto",
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
 
@@ -383,6 +384,7 @@ def optimize_direct_reml(
             profile=profile,
             max_analytical_per_w=max_analytical_per_w,
             select_snap=select_snap,
+            direct_solve=direct_solve,
         )
 
     scale_known = getattr(distribution, "scale_known", True)
@@ -428,6 +430,7 @@ def optimize_direct_reml(
         offset=offset_arr,
         return_xtwx=True,
         profile=profile,
+        direct_solve=direct_solve,
     )
     _t_pirls += _time.perf_counter() - _t0
     warm_beta = boot_result.beta.copy()
@@ -488,6 +491,7 @@ def optimize_direct_reml(
             intercept_init=warm_intercept,
             return_xtwx=True,
             profile=profile,
+            direct_solve=direct_solve,
         )
         _t_pirls += _time.perf_counter() - _t0
         warm_beta = pirls_result.beta.copy()
@@ -675,6 +679,7 @@ def optimize_direct_reml(
                 intercept_init=warm_intercept,
                 return_xtwx=True,
                 profile=profile,
+                direct_solve=direct_solve,
             )
 
             trial_obj = reml_laml_objective(
@@ -759,6 +764,7 @@ def optimize_discrete_reml_cached_w(
     profile: dict | None = None,
     max_analytical_per_w: int = 30,
     select_snap: bool = True,
+    direct_solve: str = "auto",
 ) -> REMLResult:
     """Cached-W fREML optimizer for the discrete path.
 
@@ -809,6 +815,7 @@ def optimize_discrete_reml_cached_w(
         return_xtwx=True,
         profile=profile,
         cache_out=cache,
+        direct_solve=direct_solve,
     )
     _t_pirls += _time.perf_counter() - _t0
     warm_beta = boot_result.beta.copy()
@@ -971,6 +978,7 @@ def optimize_discrete_reml_cached_w(
             return_xtwx=True,
             profile=profile,
             cache_out=cache,
+            direct_solve=direct_solve,
         )
         _t_pirls += _time.perf_counter() - _t0
         warm_beta = pirls_result.beta.copy()
@@ -1198,6 +1206,7 @@ def optimize_discrete_reml_cached_w(
             intercept_init=warm_intercept,
             return_xtwx=True,
             profile=profile,
+            direct_solve=direct_solve,
         )
         _t_pirls += _time.perf_counter() - _t0
         _t0 = _time.perf_counter()
@@ -1577,6 +1586,7 @@ def run_reml_once(
     use_direct: bool,
     penalty_caches: dict | None = None,
     rebuild_dm: Any = None,
+    direct_solve: str = "auto",
 ) -> tuple[REMLResult, DesignMatrix]:
     """Run a single REML fixed-point outer loop from a chosen initial lambda scale.
 
@@ -1621,6 +1631,7 @@ def run_reml_once(
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
                 return_xtwx=True,
+                direct_solve=direct_solve,
             )
             beta = pirls_result.beta
             intercept = pirls_result.intercept
@@ -1789,6 +1800,7 @@ def run_reml_once(
             offset=offset_arr,
             beta_init=warm_beta,
             intercept_init=warm_intercept,
+            direct_solve=direct_solve,
         )
     else:
         final_result = fit_pirls(

@@ -50,6 +50,7 @@ class SuperGLM:
         interactions: list[tuple[str, str]] | None = None,
         # Solver options
         active_set: bool = False,
+        direct_solve: str = "auto",
         # Discretization
         discrete: bool = False,
         n_bins: int | dict[str, int] = 256,
@@ -100,6 +101,13 @@ class SuperGLM:
             auto-detected from the parent feature specs.
         active_set : bool
             Use active-set cycling in the BCD solver.
+        direct_solve : {"auto", "gram", "qr"}
+            Strategy for the direct IRLS solver (lambda1=0).
+            ``"auto"`` uses gram-based Cholesky with residual-checked SVD
+            fallback, warning after repeated fallbacks.  ``"gram"`` forces
+            the gram path without warnings.  ``"qr"`` uses QR on the
+            materialised weighted design matrix — backward-stable but
+            O(n·p²) per iteration.  Intended for smaller datasets.
         discrete : bool
             Use discretized basis matrices for large-*n* REML (fREML-style).
         n_bins : int or dict[str, int]
@@ -120,6 +128,7 @@ class SuperGLM:
             categorical_base=categorical_base,
             interactions=interactions,
             active_set=active_set,
+            direct_solve=direct_solve,
             discrete=discrete,
             n_bins=n_bins,
         )

@@ -114,6 +114,7 @@ def init_model(
     categorical_base: str = "most_exposed",
     interactions: list[tuple[str, str]] | None = None,
     active_set: bool = False,
+    direct_solve: str = "auto",
     discrete: bool = False,
     n_bins: int | dict[str, int] = 256,
 ):
@@ -132,6 +133,9 @@ def init_model(
     model._degree = degree
     model._categorical_base = categorical_base
     model._active_set = active_set
+    if direct_solve not in ("auto", "gram", "qr"):
+        raise ValueError(f"direct_solve must be 'auto', 'gram', or 'qr', got {direct_solve!r}")
+    model._direct_solve = direct_solve
     model._discrete = discrete
     model._n_bins = n_bins
 
@@ -208,6 +212,7 @@ def clone_without_features(
         features=new_features,
         interactions=keep_interactions if keep_interactions else None,
         active_set=model._active_set,
+        direct_solve=model._direct_solve,
         discrete=model._discrete,
         n_bins=model._n_bins,
     )
