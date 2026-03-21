@@ -297,6 +297,21 @@ class TestBackendLinearAlgebraInvariants:
         xtwx_block = _block_xtwx([sub], groups, W)
         np.testing.assert_allclose(xtwx_tabmat, xtwx_block, atol=1e-12)
 
+    def test_categorical_cross_gram_matches_dense_oracle(self):
+        """Categorical × categorical cross-gram must match dense weighted one-hot."""
+        from superglm.group_matrix import CategoricalGroupMatrix
+
+        codes_i = np.array([-1, 0, 1, -1, 1, 0], dtype=np.intp)
+        codes_j = np.array([0, -1, 1, 1, -1, 0], dtype=np.intp)
+        gm_i = CategoricalGroupMatrix(codes_i, 2)
+        gm_j = CategoricalGroupMatrix(codes_j, 2)
+        W = np.array([1.0, -2.0, 0.5, 3.0, 4.0, -1.0])
+
+        cross = _cross_gram(gm_i, gm_j, W)
+        dense = (W[:, None] * gm_i.toarray()).T @ gm_j.toarray()
+
+        np.testing.assert_allclose(cross, dense, atol=1e-12)
+
     def test_two_discretized_spline_cross_gram(self):
         """Cross-gram between two DiscretizedSSPGroupMatrix groups should match dense."""
         rng = np.random.default_rng(9)
