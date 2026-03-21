@@ -1,4 +1,4 @@
-"""Fitting logic: fit(), fit_path(), fit_cv(), fit_reml(), and REML helpers."""
+"""Fitting logic: fit(), fit_path(), fit_reml(), and REML helpers."""
 
 from __future__ import annotations
 
@@ -301,108 +301,6 @@ def fit_path(
         n_iter_path=n_iter_path,
         converged_path=converged_path,
         edf_path=edf_path,
-    )
-
-
-def fit_cv(
-    model,
-    X,
-    y,
-    sample_weight=None,
-    offset=None,
-    *,
-    n_folds=5,
-    n_lambda=50,
-    lambda_ratio=1e-3,
-    lambda_seq=None,
-    rule="1se",
-    refit=True,
-    random_state=None,
-):
-    """Select lambda by K-fold cross-validation."""
-    from superglm.cv import CVResult, _fit_cv_folds, _select_lambda
-    from superglm.model.base import (
-        auto_detect,
-        compute_lambda_max,
-        model_build_design_matrix,
-        model_has_lambda1_targets,
-    )
-
-    if model._splines is not None and not model._specs:
-        auto_detect(model, X, sample_weight)
-
-    if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
-        from superglm.nb_profile import estimate_nb_theta
-
-        nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
-        model.family = NegativeBinomial(theta=nb_result.theta_hat)
-        model._nb_profile_result = nb_result
-        logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
-
-    y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
-    model._fit_weights = np.array(sample_weight)
-    model._fit_offset = np.array(offset) if offset is not None else None
-    sample_weight = model._fit_weights
-    offset = model._fit_offset
-    model.__dict__.pop("_coef_covariance", None)
-    model.__dict__.pop("_fit_active_info", None)
-    model.__dict__.pop("_group_edf", None)
-    if not model_has_lambda1_targets(model):
-        raise ValueError(
-            "fit_cv() requires at least one group targeted by the penalty. "
-            "Adjust penalty.features or use fit() / fit_reml() instead."
-        )
-
-    # Lambda sequence from full data
-    lambda_max = compute_lambda_max(model, y, sample_weight)
-    if lambda_seq is None:
-        lambda_seq = np.geomspace(lambda_max, lambda_max * lambda_ratio, n_lambda)
-    else:
-        lambda_seq = np.asarray(lambda_seq, dtype=np.float64)
-
-    # Create fold indices
-    rng = np.random.default_rng(random_state)
-    indices = rng.permutation(len(y))
-    fold_indices = [arr for arr in np.array_split(indices, n_folds)]
-
-    # Run CV
-    fold_deviance = _fit_cv_folds(
-        dm=model._dm,
-        y=y,
-        sample_weight=sample_weight,
-        groups=model._groups,
-        family=model._distribution,
-        link=model._link,
-        penalty=model.penalty,
-        lambda_seq=lambda_seq,
-        fold_indices=fold_indices,
-        offset=offset,
-        active_set=model._active_set,
-    )
-
-    mean_cv = fold_deviance.mean(axis=0)
-    se_cv = fold_deviance.std(axis=0) / np.sqrt(n_folds)
-
-    best_lambda, best_lambda_1se, best_idx, idx_1se = _select_lambda(
-        lambda_seq, mean_cv, se_cv, rule
-    )
-
-    # Refit on full data with selected lambda
-    path_result = None
-    if refit:
-        model.penalty.lambda1 = best_lambda
-        model.fit(X, y, sample_weight=sample_weight, offset=offset)
-
-    return CVResult(
-        lambda_seq=lambda_seq,
-        mean_cv_deviance=mean_cv,
-        se_cv_deviance=se_cv,
-        best_lambda=best_lambda,
-        best_lambda_1se=best_lambda_1se,
-        best_index=best_idx,
-        best_index_1se=idx_1se,
-        fold_deviance=fold_deviance,
-        path_result=path_result,
     )
 
 
