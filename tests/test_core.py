@@ -74,8 +74,19 @@ class TestCategorical:
 
     def test_dummy_row_sums(self):
         info = Categorical(base="first").build(np.array(["A", "B", "C"] * 10))
-        sums = np.asarray(info.columns.sum(axis=1)).ravel()
-        assert np.all((sums == 0) | (sums == 1))
+        # cat_codes: base=-1, non-base=0..K-1; each row is either base or one level
+        assert info.cat_codes is not None
+        assert np.all((info.cat_codes >= -1) & (info.cat_codes < info.n_cols))
+
+    def test_missing_values_rejected_at_build(self):
+        """NaN/None in categorical input must raise at build time, not silently encode."""
+        import pytest
+
+        # Object arrays with real None/NaN (as produced by pandas with missing categoricals)
+        with pytest.raises(ValueError, match="missing values"):
+            Categorical(base="first").build(np.array(["A", "B", np.nan, "A"], dtype=object))
+        with pytest.raises(ValueError, match="missing values"):
+            Categorical(base="first").build(np.array(["A", None, "B"], dtype=object))
 
     def test_base_relativity_one(self):
         spec = Categorical(base="first")

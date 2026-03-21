@@ -22,6 +22,7 @@ from numpy.typing import NDArray
 
 from superglm.distributions import Distribution, resolve_distribution
 from superglm.group_matrix import (
+    CategoricalGroupMatrix,
     DenseGroupMatrix,
     DesignMatrix,
     DiscretizedSSPGroupMatrix,
@@ -412,6 +413,8 @@ def _process_info(
                 bin_idx,
                 tensor_id=tensor_id,
             )
+        elif info.cat_codes is not None:
+            gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
         elif sp.issparse(info.columns):
             gm = SparseGroupMatrix(info.columns)
         else:
