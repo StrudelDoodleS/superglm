@@ -897,6 +897,7 @@ def optimize_discrete_reml_cached_w(
         print(f"  REML bootstrap: lambdas=[{boot_lam_str}]")
 
     # === POI loop: one PIRLS step + one Newton lambda step ===
+    prev_obj = np.inf
     for poi_iter in range(max_reml_iter):
         rho_clipped = np.clip(rho, log_lo, log_hi)
         cand_lambdas = lambdas.copy()
@@ -956,6 +957,7 @@ def optimize_discrete_reml_cached_w(
             M_p = sum(c.rank for c in penalty_caches.values())
             phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
         _t_objective += _time.perf_counter() - _t0
+        prev_obj = obj
 
         if obj < best_obj:
             best_obj = obj
@@ -1024,12 +1026,16 @@ def optimize_discrete_reml_cached_w(
                 c_sum_Wz,
             )
 
-            # Evaluate REML at trial point.  reml_laml_objective computes
-            # eta/mu/deviance internally — no need to duplicate here.
+            # Evaluate REML at trial point.  Must compute deviance here
+            # because reml_laml_objective reads result.deviance for
+            # estimated-scale families (Gamma, Tweedie).
+            eta_trial = stabilize_eta(dm.matvec(beta_trial) + intercept_trial + offset_arr, link)
+            mu_trial = clip_mu(link.inverse(eta_trial), distribution)
+            dev_trial = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_trial)))
             trial_pirls = PIRLSResult(
                 beta=beta_trial,
                 intercept=intercept_trial,
-                deviance=0.0,  # placeholder, recomputed inside objective
+                deviance=dev_trial,
                 n_iter=0,
                 converged=True,
                 phi=phi_hat,
@@ -1087,7 +1093,9 @@ def optimize_discrete_reml_cached_w(
                 f"|∇|={proj_grad_norm:.6f}  Δρ={rho_change:.4f}  [{lam_str}]"
             )
 
-        if poi_iter >= 2 and (proj_grad_norm < grad_tol or rho_change < 0.01):
+        obj_change = abs(obj - prev_obj) if poi_iter > 0 else np.inf
+        obj_scale = max(abs(obj), 1.0)
+        if poi_iter >= 2 and proj_grad_norm < grad_tol and obj_change < reml_tol * obj_scale:
             converged = True
             break
 
@@ -1145,7 +1153,7 @@ def optimize_discrete_reml_cached_w(
         profile["reml_hessian_newton_s"] = _t_newton
         profile["reml_linesearch_s"] = _t_linesearch
         profile["reml_fp_update_s"] = 0.0
-        profile["reml_n_linesearch_evals"] = _n_linesearch_evals
+        profile["reml_n_linesearch_fits"] = _n_linesearch_evals
         profile["reml_n_outer_iter"] = poi_iter + 1
         profile["reml_n_analytical_iters"] = _n_newton_steps
 
