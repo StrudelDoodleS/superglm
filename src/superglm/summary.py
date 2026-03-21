@@ -150,11 +150,21 @@ class ModelSummary:
         half = self._alpha / 2.0
         _fmt = self._fmt_scalar
 
+        # Compute EDF breakdown from coef rows
+        smooth_edf = sum(r.edf for r in self._coef_rows if r.is_spline and r.edf is not None)
+        parametric_edf = sum(
+            r.edf for r in self._coef_rows if not r.is_spline and r.edf is not None
+        )
+        total_edf = info["effective_df"]
+        edf_str = _fmt(total_edf)
+        if smooth_edf > 0 or parametric_edf > 0:
+            edf_str = f"{_fmt(total_edf)} ({_fmt(smooth_edf)} smooth)"
+
         # Build header rows first (needed to compute minimum width)
         conv_str = f"{info['converged']} ({info['n_iter']} iter)"
         rows = [
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
-            ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
+            ("Link", info["link"], "Df (effective)", edf_str),
             ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
             ("Scale (phi)", _fmt(info["phi"]), "Pearson chi2", _fmt(info.get("pearson_chi2", ""))),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
