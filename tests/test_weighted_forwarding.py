@@ -11,6 +11,7 @@ import pytest
 from superglm import SuperGLM
 from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.features.numeric import Numeric
+from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
 
 
@@ -167,3 +168,74 @@ class TestCICache:
         ci1 = result.ci(alpha=0.05)
         ci2 = result.ci(alpha=0.05)
         assert ci1 is ci2  # exact same object = cached
+
+
+class TestStaleProfileClear:
+    """Verify fit() clears stale profile results from previous estimate_p/estimate_theta."""
+
+    def test_fit_clears_tweedie_profile(self):
+        """fit() at fixed p should not show profile results in summary."""
+        rng = np.random.default_rng(42)
+        n = 500
+        from superglm.tweedie_profile import generate_tweedie_cpg
+
+        x = rng.uniform(0, 1, n)
+        y = generate_tweedie_cpg(n, mu=np.exp(0.5 * x), phi=1.5, p=1.5, rng=rng)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        model.fit(df, y)
+        model.estimate_p(df, y, phi_method="mle")
+        assert model._tweedie_profile_result is not None
+
+        # Refit at fixed p — should clear the stale profile result
+        model.fit(df, y)
+        assert model._tweedie_profile_result is None
+
+    def test_fit_clears_nb_profile(self):
+        """fit() at fixed theta should not show profile results in summary."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 1, n)
+        mu = np.exp(0.5 + 0.3 * x)
+        y = rng.negative_binomial(5, 5 / (mu + 5), size=n).astype(float)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        model.fit(df, y)
+        model.estimate_theta(df, y)
+        assert model._nb_profile_result is not None
+
+        # Refit at fixed theta — should clear the stale profile result
+        model.fit(df, y)
+        assert model._nb_profile_result is None
+
+    def test_fit_reml_clears_tweedie_profile(self):
+        """fit_reml() should also clear stale profile results."""
+        rng = np.random.default_rng(42)
+        n = 500
+        from superglm.tweedie_profile import generate_tweedie_cpg
+
+        x = rng.uniform(0, 1, n)
+        y = generate_tweedie_cpg(n, mu=np.exp(0.5 * x), phi=1.5, p=1.5, rng=rng)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Spline(n_knots=5)},
+        )
+        model.fit(df, y)
+        model.estimate_p(df, y, phi_method="mle")
+        assert model._tweedie_profile_result is not None
+
+        model.fit_reml(df, y)
+        assert model._tweedie_profile_result is None
