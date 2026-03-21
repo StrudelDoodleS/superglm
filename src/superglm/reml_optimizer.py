@@ -800,9 +800,10 @@ def optimize_discrete_reml_cached_w(
     verbose: bool,
     penalty_caches: dict | None = None,
     profile: dict | None = None,
+    direct_solve: str = "auto",
+    # Legacy kwargs accepted but ignored (removed in POI rewrite)
     max_analytical_per_w: int = 30,
     select_snap: bool = True,
-    direct_solve: str = "auto",
 ) -> REMLResult:
     """POI fREML optimizer for the discrete path.
 
@@ -839,6 +840,7 @@ def optimize_discrete_reml_cached_w(
     _t_linesearch = 0.0
     _n_pirls_steps = 0
     _n_newton_steps = 0
+    _n_linesearch_evals = 0
 
     # === Bootstrap: one FP step from minimal penalty ===
     boot_lambdas = {name: 1e-4 for name in lambdas}
@@ -1022,21 +1024,16 @@ def optimize_discrete_reml_cached_w(
                 c_sum_Wz,
             )
 
-            # Evaluate REML at trial point
-            H_trial_inv, log_det_trial, _ = _safe_decompose_H(XtWX + S_trial)
-            edf_trial = 1.0 + float(np.trace(H_trial_inv @ XtWX))
-            # Compute deviance at trial beta (O(n) data pass)
-            eta_trial = stabilize_eta(dm.matvec(beta_trial) + intercept_trial + offset_arr, link)
-            mu_trial = clip_mu(link.inverse(eta_trial), distribution)
-            dev_trial = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_trial)))
+            # Evaluate REML at trial point.  reml_laml_objective computes
+            # eta/mu/deviance internally — no need to duplicate here.
             trial_pirls = PIRLSResult(
                 beta=beta_trial,
                 intercept=intercept_trial,
-                deviance=dev_trial,
+                deviance=0.0,  # placeholder, recomputed inside objective
                 n_iter=0,
                 converged=True,
                 phi=phi_hat,
-                effective_df=edf_trial,
+                effective_df=0.0,
             )
             trial_obj = reml_laml_objective(
                 dm,
@@ -1052,14 +1049,11 @@ def optimize_discrete_reml_cached_w(
                 penalty_caches=penalty_caches,
             )
 
+            _n_linesearch_evals += 1
             if trial_obj < obj:
                 rho = rho_trial
                 warm_beta = beta_trial.copy()
                 warm_intercept = intercept_trial
-                if trial_obj < best_obj:
-                    best_obj = trial_obj
-                    best_lambdas = trial_lambdas.copy()
-                    best_pirls = trial_pirls
                 accepted = True
                 break
 
@@ -1134,14 +1128,13 @@ def optimize_discrete_reml_cached_w(
         penalty_caches=penalty_caches,
     )
     _t_objective += _time.perf_counter() - _t0
-    if final_obj < best_obj:
-        best_obj = final_obj
-        best_lambdas = final_lambdas.copy()
-        best_pirls = final_result
+    # Always use the final refit — it is the authoritative result from
+    # full IRLS convergence at the converged lambdas.  The working-model
+    # surrogates from the POI loop (n_iter=0) must not leak out.
+    best_obj = final_obj
+    best_lambdas = final_lambdas.copy()
+    best_pirls = final_result
     lambda_history.append(final_lambdas.copy())
-
-    if best_pirls is None:
-        raise RuntimeError("Discrete REML POI did not evaluate any candidates")
 
     if profile is not None:
         profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
@@ -1152,7 +1145,7 @@ def optimize_discrete_reml_cached_w(
         profile["reml_hessian_newton_s"] = _t_newton
         profile["reml_linesearch_s"] = _t_linesearch
         profile["reml_fp_update_s"] = 0.0
-        profile["reml_n_linesearch_fits"] = 0
+        profile["reml_n_linesearch_evals"] = _n_linesearch_evals
         profile["reml_n_outer_iter"] = poi_iter + 1
         profile["reml_n_analytical_iters"] = _n_newton_steps
 
