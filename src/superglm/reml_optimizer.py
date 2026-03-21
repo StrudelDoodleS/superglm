@@ -820,8 +820,8 @@ def optimize_discrete_reml_cached_w(
     slightly different REML stationary point than the old Fellner-Schall
     fixed-point path.  The REML surface is flat in noise-feature
     directions, and Newton settles at a nearby minimum where noise
-    lambdas are large but not maximally penalized.  Typical deviance
-    drift is <0.01% relative.
+    lambdas are large but not maximally penalized.  Deviance drift is
+    typically <0.1% relative (guarded by test_wide_poisson_poi_quality).
     """
     scale_known = getattr(distribution, "scale_known", True)
     group_names = [g.name for _, g in reml_groups]

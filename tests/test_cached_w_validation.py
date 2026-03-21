@@ -155,6 +155,7 @@ class TestExactVsDiscreteAgreement:
         corr = float(np.corrcoef(mu_exact, mu_disc)[0, 1])
         assert corr >= 0.999, f"Gamma n={n} mu corr {corr:.6f}"
 
+    @pytest.mark.slow
     def test_wide_poisson_poi_quality(self):
         """Wide model (20 features, 17 noise): POI deviance within 0.1% of exact.
 
