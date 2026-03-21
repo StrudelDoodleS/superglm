@@ -76,6 +76,7 @@ from superglm.links import (
 )
 from superglm.metrics import ModelMetrics
 from superglm.model import PathResult, SuperGLM
+from superglm.model_selection import CrossValidationResult, cross_validate
 from superglm.nb_profile import NBProfileResult, estimate_nb_theta
 from superglm.penalties.flavors import Adaptive
 from superglm.penalties.group_elastic_net import GroupElasticNet
@@ -161,5 +162,7 @@ __all__ = [
     "MonotoneRepairResult",
     "MonotoneRepairer",
     "SplineRedundancyReport",
+    "cross_validate",
+    "CrossValidationResult",
 ]
 __version__ = "0.3.1"
