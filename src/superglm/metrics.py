@@ -311,6 +311,18 @@ def build_coef_rows(
                 _influence_edf = (edf, edf1)
         return _influence_edf
 
+    # Per-group EDF map: sum of per-coefficient edf within each group's columns
+    _group_edf_cache: dict[str, float] | None = None
+
+    def _get_group_edf_map() -> dict[str, float]:
+        nonlocal _group_edf_cache
+        if _group_edf_cache is None:
+            edf, _ = _get_influence_edf()
+            _group_edf_cache = {}
+            for ag in active_groups:
+                _group_edf_cache[ag.name] = float(np.sum(edf[ag.sl]))
+        return _group_edf_cache
+
     def _curve_se_range(feature_name):
         """Compute curve SE min/max for a spline feature."""
         scale = phi if not known_scale else 1.0
@@ -321,7 +333,7 @@ def build_coef_rows(
         return float(np.min(se_curve)), float(np.max(se_curve))
 
     def _spline_enrichment(g_name, spec):
-        d = spline_group_enrichment(g_name, spec, group_edf_map, reml_lambdas, lambda2)
+        d = spline_group_enrichment(g_name, spec, _get_group_edf_map(), reml_lambdas, lambda2)
         return (
             d["edf"],
             d["smoothing_lambda"],
@@ -427,6 +439,8 @@ def build_coef_rows(
                 )
 
         elif isinstance(spec, Categorical):
+            gedf = _get_group_edf_map()
+            cat_edf = gedf.get(g.name, float(g.size))
             for i, level in enumerate(spec._non_base):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
@@ -441,6 +455,7 @@ def build_coef_rows(
                         p=p,
                         ci_low=ci_lo,
                         ci_high=ci_hi,
+                        edf=cat_edf if i == 0 else None,  # report group edf on first row
                     )
                 )
 
@@ -645,6 +660,7 @@ def build_coef_rows(
                 )
 
         elif isinstance(spec, Numeric):
+            gedf = _get_group_edf_map()
             coef_display = float(b_g[0])
             se_display = float(se_g[0])
             z, p, ci_lo, ci_hi = _compute_coef_stats(coef_display, se_display, alpha)
@@ -655,6 +671,7 @@ def build_coef_rows(
                     coef=coef_display,
                     se=se_display,
                     z=z,
+                    edf=gedf.get(g.name, 1.0),
                     p=p,
                     ci_low=ci_lo,
                     ci_high=ci_hi,

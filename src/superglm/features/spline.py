@@ -945,6 +945,22 @@ class CubicRegressionSpline(_SplineBase):
         )
         self._Z: NDArray | None = None
 
+    def _assemble_knot_vector(self, interior: NDArray) -> None:
+        """Clamped knot vector with exact boundary knots (no padding).
+
+        CRS applies f''=0 constraints at the boundary, so the boundary
+        knots must be exactly at the data range — not offset by an
+        epsilon like the base-class default.
+        """
+        self._knots = np.concatenate(
+            [
+                np.repeat(self._lo, self.degree + 1),
+                interior,
+                np.repeat(self._hi, self.degree + 1),
+            ]
+        )
+        self._n_basis = len(self._knots) - self.degree - 1
+
     def _build_penalty(self) -> NDArray:
         """Integrated f'' squared penalty: omega_ij = int B_i''(x) B_j''(x) dx.
 
