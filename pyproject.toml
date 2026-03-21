@@ -1,6 +1,6 @@
 [project]
 name = "superglm"
-version = "0.3.1"
+version = "0.4.0"
 description = "Penalised GLMs for insurance pricing: group lasso, P-splines, Tweedie"
 readme = "README.md"
 requires-python = ">=3.10"
