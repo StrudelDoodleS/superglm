@@ -50,13 +50,15 @@ def estimate_p(
         **kwargs,
     )
     model.family = Tweedie(p=result.p_hat)
-    model._tweedie_profile_result = result
 
-    # Refit with the same regime used for profiling
+    # Refit with the same regime used for profiling (clears stale profile results)
     if resolved_mode == "fit_reml":
         model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
     else:
         model.fit(X, y, sample_weight=sample_weight, offset=offset)
+
+    # Set after refit so the clear in fit() doesn't wipe it
+    model._tweedie_profile_result = result
 
     # Use the profiler's phi so summary LL/AIC/BIC are consistent with
     # the profile NLL (both evaluate the density at the same dispersion).
@@ -85,6 +87,6 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, **kwargs):
 
     result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset, **kwargs)
     model.family = NegativeBinomial(theta=result.theta_hat)
-    model._nb_profile_result = result
     model.fit(X, y, sample_weight=sample_weight, offset=offset)
+    model._nb_profile_result = result  # after refit so fit()'s clear doesn't wipe it
     return result

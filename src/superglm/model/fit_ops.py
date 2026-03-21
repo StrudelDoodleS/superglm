@@ -115,6 +115,10 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
 
         auto_detect(model, X, sample_weight)
 
+    # Clear stale profile results from previous fit
+    model._nb_profile_result = None
+    model._tweedie_profile_result = None
+
     # Auto-estimate NB theta if requested
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
         from superglm.nb_profile import estimate_nb_theta
@@ -577,6 +581,10 @@ def fit_reml(
 
     if model._splines is not None and not model._specs:
         auto_detect(model, X, sample_weight)
+
+    # Clear stale profile results from previous fit
+    model._nb_profile_result = None
+    model._tweedie_profile_result = None
 
     # Auto-estimate NB theta if requested
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
