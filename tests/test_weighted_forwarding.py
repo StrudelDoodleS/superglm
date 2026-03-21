@@ -106,28 +106,6 @@ class TestWeightedTweedieP:
         np.testing.assert_allclose(model._fit_weights, w)
 
 
-class TestWeightedCV:
-    """Verify sample_weight flows through fit_cv refit."""
-
-    def test_cv_refit_uses_weights(self, weighted_poisson_data):
-        """fit_cv(refit=True) should produce the same result as manual fit with weights."""
-        df, y, w = weighted_poisson_data
-        model_cv = SuperGLM(
-            penalty=GroupLasso(lambda1=0.1),
-            features={"x": Numeric()},
-        )
-        cv_result = model_cv.fit_cv(df, y, sample_weight=w, n_lambda=5, refit=True)
-
-        # Manual refit at the same lambda with weights
-        model_manual = SuperGLM(
-            penalty=GroupLasso(lambda1=cv_result.best_lambda),
-            features={"x": Numeric()},
-        )
-        model_manual.fit(df, y, sample_weight=w)
-
-        np.testing.assert_allclose(model_cv._result.beta, model_manual._result.beta, atol=1e-8)
-
-
 class TestCICache:
     """Verify profile CI caching avoids recomputation."""
 

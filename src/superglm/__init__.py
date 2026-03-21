@@ -35,7 +35,6 @@ sklearn-compatible API:
 
 from superglm import families
 from superglm.constraints import MonotoneRepairer, MonotoneRepairResult
-from superglm.cv import CVResult
 from superglm.davies import psum_chisq, satterthwaite
 from superglm.diagnostics import SplineRedundancyReport
 from superglm.discretize import DiscretizationResult, discretization_impact
@@ -99,7 +98,6 @@ __all__ = [
     "families",
     "SuperGLM",
     "PathResult",
-    "CVResult",
     "DiscretizationResult",
     "discretization_impact",
     "ModelMetrics",
