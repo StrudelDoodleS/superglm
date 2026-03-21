@@ -155,6 +155,45 @@ class TestExactVsDiscreteAgreement:
         corr = float(np.corrcoef(mu_exact, mu_disc)[0, 1])
         assert corr >= 0.999, f"Gamma n={n} mu corr {corr:.6f}"
 
+    def test_wide_poisson_poi_quality(self):
+        """Wide model (20 features, 17 noise): POI deviance within 0.1% of exact.
+
+        The POI Newton optimizer may settle at a slightly different REML
+        stationary point than the exact Newton path, especially when many
+        features are noise (flat REML surface).  This test encodes the
+        accepted tolerance: deviance within 0.1% relative, predictions
+        correlated >= 0.999.
+        """
+        from superglm.features.spline import CubicRegressionSpline
+
+        rng = np.random.default_rng(123)
+        n = 50_000
+        X = pd.DataFrame({f"x{i}": rng.uniform(0, 1, n) for i in range(20)})
+        eta = (
+            0.2
+            + 0.8 * np.sin(2 * np.pi * X["x0"])
+            + 0.6 * np.cos(2 * np.pi * X["x1"])
+            + 0.4 * (X["x2"] - 0.5)
+        )
+        y = rng.poisson(np.exp(eta)).astype(float)
+        features = {f"x{i}": CubicRegressionSpline(n_knots=20) for i in range(20)}
+
+        exact = _fit_reml("poisson", features, False, X, y, np.ones(n))
+        disc = _fit_reml("poisson", features, True, X, y, np.ones(n))
+
+        assert exact._reml_result.converged
+        assert disc._reml_result.converged
+
+        # Deviance: within 0.1% relative (POI may find nearby stationary point)
+        dev_rel = abs(exact.result.deviance - disc.result.deviance) / abs(exact.result.deviance)
+        assert dev_rel <= 1e-3, f"Wide Poisson deviance rel diff {dev_rel:.6f}"
+
+        # Predictions: corr >= 0.999
+        mu_exact = _predict_mu(exact, X)
+        mu_disc = _predict_mu(disc, X)
+        corr = float(np.corrcoef(mu_exact, mu_disc)[0, 1])
+        assert corr >= 0.999, f"Wide Poisson mu corr {corr:.6f}"
+
 
 # ══════════════════════════════════════════════════════════════════
 # Group 2: Restart / Bad-Start Robustness

@@ -814,6 +814,14 @@ def optimize_discrete_reml_cached_w(
 
     Typically converges in 5-15 total iterations instead of the old
     nested architecture's 200+ analytical iterations.
+
+    Note: this is a faster approximate optimizer.  On models with many
+    noise features (p >> n_signal), Newton-POI may converge to a
+    slightly different REML stationary point than the old Fellner-Schall
+    fixed-point path.  The REML surface is flat in noise-feature
+    directions, and Newton settles at a nearby minimum where noise
+    lambdas are large but not maximally penalized.  Typical deviance
+    drift is <0.01% relative.
     """
     scale_known = getattr(distribution, "scale_known", True)
     group_names = [g.name for _, g in reml_groups]
