@@ -1097,13 +1097,18 @@ class TestBasisSplineOpenKnotVector:
 
     def test_ns_and_cr_still_use_clamped(self):
         """NaturalSpline and CRS should NOT use the open knot vector."""
-        for cls in [NaturalSpline, CubicRegressionSpline]:
-            sp = cls(n_knots=8)
-            sp.build(np.linspace(10.0, 90.0, 500))
-            # Clamped: first degree+1 knots are nearly equal (repeated boundary)
-            pad = (90.0 - 10.0) * 1e-6
-            for i in range(sp.degree + 1):
-                np.testing.assert_allclose(sp._knots[i], 10.0 - pad, atol=1e-10)
+        # NaturalSpline: clamped with small padding (base-class default)
+        sp_ns = NaturalSpline(n_knots=8)
+        sp_ns.build(np.linspace(10.0, 90.0, 500))
+        pad = (90.0 - 10.0) * 1e-6
+        for i in range(sp_ns.degree + 1):
+            np.testing.assert_allclose(sp_ns._knots[i], 10.0 - pad, atol=1e-10)
+
+        # CRS: clamped with exact boundary (f''=0 constraint requires it)
+        sp_cr = CubicRegressionSpline(n_knots=8)
+        sp_cr.build(np.linspace(10.0, 90.0, 500))
+        for i in range(sp_cr.degree + 1):
+            np.testing.assert_allclose(sp_cr._knots[i], 10.0, atol=1e-10)
 
     def test_boundary_param_still_works(self):
         """boundary= freezes the public boundary with open knot vector."""

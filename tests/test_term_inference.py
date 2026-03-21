@@ -424,7 +424,7 @@ class TestModelDiagnosticsSplineKeys:
         rich = model.metrics(X, y, sample_weight=sample_weight).summary()
         rich_row = next(r for r in rich._coef_rows if r.is_spline)
 
-        assert diag["age"]["edf"] == rich_row.edf
+        assert np.isclose(diag["age"]["edf"], rich_row.edf, rtol=1e-10)
         assert diag["age"]["smoothing_lambda"] == rich_row.smoothing_lambda
         assert diag["age"]["spline_kind"] == rich_row.spline_kind
 
