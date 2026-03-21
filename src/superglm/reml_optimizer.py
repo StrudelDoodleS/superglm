@@ -149,7 +149,7 @@ def reml_w_correction(
         a_j = dW_deta * deta_j
 
         # C_j = X'diag(a_j)X — the dW contribution to dH/dρ_j
-        C_j = _block_xtwx_signed(gms, groups, a_j)
+        C_j = _block_xtwx_signed(gms, groups, a_j, tabmat_split=dm.tabmat_split)
 
         # Gradient correction: ½ tr(H⁻¹ C_j)
         grad_correction[i] = 0.5 * float(np.sum(XtWX_S_inv * C_j))
@@ -188,7 +188,7 @@ def reml_laml_objective(
         V = distribution.variance(mu)
         dmu_deta = link.deriv_inverse(eta)
         W = sample_weight * dmu_deta**2 / np.maximum(V, 1e-10)
-        XtWX = _block_xtwx(dm.group_matrices, groups, W)
+        XtWX = _block_xtwx(dm.group_matrices, groups, W, tabmat_split=dm.tabmat_split)
 
     p = XtWX.shape[0]
     S = _build_penalty_matrix(dm.group_matrices, groups, lambdas, p)
@@ -1327,7 +1327,7 @@ def optimize_efs_reml(
     boot_V = distribution.variance(boot_mu)
     boot_dmu = link.deriv_inverse(boot_eta)
     boot_W = sample_weight * boot_dmu**2 / np.maximum(boot_V, 1e-10)
-    boot_xtwx = _block_xtwx(dm.group_matrices, groups, boot_W)
+    boot_xtwx = _block_xtwx(dm.group_matrices, groups, boot_W, tabmat_split=dm.tabmat_split)
 
     # Estimate phi for estimated-scale families
     boot_inv_phi = 1.0
@@ -1415,7 +1415,7 @@ def optimize_efs_reml(
             dmu_deta = link.deriv_inverse(eta)
             W = sample_weight * dmu_deta**2 / np.maximum(V, 1e-10)
 
-            cached_xtwx = _block_xtwx(dm.group_matrices, groups, W)
+            cached_xtwx = _block_xtwx(dm.group_matrices, groups, W, tabmat_split=dm.tabmat_split)
 
         # ── Compute H⁻¹ = (X'WX + S)⁻¹ ──────────────────────────
         p = dm.p

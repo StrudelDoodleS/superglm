@@ -120,6 +120,20 @@ def _fused_2d_bincount_2(idx1, idx2, W, Wz, n_bins1, n_bins2):
     return W_grid, Wz_grid
 
 
+@njit(cache=True)
+def _cat_weighted_bincount(codes, bin_idx, W, n_bins, n_levels):
+    """Scatter W into (n_bins, n_levels) by (bin_idx, codes) simultaneously.
+
+    Base-level observations have codes == n_levels (sink bin) and are skipped.
+    """
+    result = np.zeros((n_bins, n_levels))
+    for i in range(len(codes)):
+        c = codes[i]
+        if c < n_levels:
+            result[bin_idx[i], c] += W[i]
+    return result
+
+
 class DenseGroupMatrix:
     """Dense group matrix wrapper."""
 
@@ -173,6 +187,56 @@ class SparseGroupMatrix:
 
     def row_subset(self, idx: NDArray) -> SparseGroupMatrix:
         return SparseGroupMatrix(self.M[idx])
+
+
+class CategoricalGroupMatrix:
+    """One-hot categorical stored as integer codes — no scipy overhead.
+
+    For a categorical with K non-base levels and n observations, stores
+    codes (n,) with values in {0, ..., K} where K is the "sink" bin for
+    the base level (absorbed into intercept).  All operations use a full
+    bincount of K+1 bins and discard the last bin — no boolean masking.
+    """
+
+    __slots__ = ("codes", "n_levels", "shape")
+
+    def __init__(self, codes: NDArray, n_levels: int):
+        # Remap -1 (base level) → n_levels so bincount/indexing is mask-free
+        c = np.asarray(codes, dtype=np.intp)
+        c = np.where(c == -1, n_levels, c)
+        self.codes = c
+        self.n_levels = n_levels
+        self.shape = (len(codes), n_levels)
+
+    def matvec(self, v: NDArray) -> NDArray:
+        """X @ v: scatter v[codes] to observations, base level → 0."""
+        # Pad v with 0 for the sink bin, then pure fancy-index
+        v_ext = np.empty(self.n_levels + 1)
+        v_ext[: self.n_levels] = v
+        v_ext[self.n_levels] = 0.0
+        return v_ext[self.codes]
+
+    def rmatvec(self, w: NDArray) -> NDArray:
+        """X.T @ w: aggregate w by level via bincount, discard sink bin."""
+        return np.bincount(self.codes, weights=w, minlength=self.n_levels + 1)[: self.n_levels]
+
+    def gram(self, W: NDArray) -> NDArray:
+        """X.T @ diag(W) @ X: diagonal for one-hot encoding."""
+        diag = np.bincount(self.codes, weights=W, minlength=self.n_levels + 1)[: self.n_levels]
+        return np.diag(diag)
+
+    def toarray(self) -> NDArray:
+        """Materialize to dense (n, K) one-hot matrix."""
+        out = np.zeros(self.shape, dtype=np.float64)
+        mask = self.codes < self.n_levels
+        out[np.where(mask)[0], self.codes[mask]] = 1.0
+        return out
+
+    def row_subset(self, idx: NDArray) -> CategoricalGroupMatrix:
+        # Must pass original -1-coded form to __init__ for re-remapping
+        c = self.codes[idx].copy()
+        c[c == self.n_levels] = -1
+        return CategoricalGroupMatrix(c, self.n_levels)
 
 
 class SparseSSPGroupMatrix:
@@ -442,6 +506,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
 GroupMatrix = (
     DenseGroupMatrix
     | SparseGroupMatrix
+    | CategoricalGroupMatrix
     | SparseSSPGroupMatrix
     | DiscretizedSSPGroupMatrix
     | DiscretizedTensorGroupMatrix
@@ -458,6 +523,8 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
     - SparseSSPGroupMatrix: CSR kernel in B-spline space + R_inv transform
     - DenseGroupMatrix / other: fused dense kernel (avoids W-broadcast alloc)
     """
+    if isinstance(gm, CategoricalGroupMatrix):
+        return _cat_weighted_bincount(gm.codes, bin_idx, W, n_bins, gm.n_levels)
     if isinstance(gm, SparseGroupMatrix):
         return _csr_weighted_bincount(
             np.asarray(gm.M.data, dtype=np.float64),
@@ -604,17 +671,22 @@ def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
     """
     if isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
         return gm.gram(W)
+    if isinstance(gm, CategoricalGroupMatrix):
+        return gm.gram(W)  # bincount-based diagonal, handles any-sign W
     X = gm.toarray()
     return (W[:, None] * X).T @ X
 
 
-def _block_xtwx(gms: list[GroupMatrix], groups: list, W: NDArray) -> NDArray:
+def _block_xtwx(gms: list[GroupMatrix], groups: list, W: NDArray, *, tabmat_split=None) -> NDArray:
     """Compute X.T @ diag(W) @ X block-by-block.
 
     Uses gm.gram(W) for diagonal blocks (O(n_bins) for discretized groups)
     and _cross_gram for off-diagonal blocks (2D histogram for disc-disc pairs).
     Avoids materializing the full (n, p_total) matrix.
+    When *tabmat_split* is provided, delegates to tabmat.SplitMatrix.sandwich.
     """
+    if tabmat_split is not None:
+        return np.asarray(tabmat_split.sandwich(W))
     p_total = sum(g.end - g.start for g in groups)
     XtWX = np.zeros((p_total, p_total))
 
@@ -636,14 +708,20 @@ def _block_xtwx(gms: list[GroupMatrix], groups: list, W: NDArray) -> NDArray:
 
 
 def _block_xtwx_rhs(
-    gms: list[GroupMatrix], groups: list, W: NDArray, Wz: NDArray
+    gms: list[GroupMatrix], groups: list, W: NDArray, Wz: NDArray, *, tabmat_split=None
 ) -> tuple[NDArray, NDArray, NDArray]:
     """Compute X'WX, X'W, and X'Wz in a single pass over the data.
 
     For DiscretizedSSPGroupMatrix, shares the O(n) bincount between gram and
     rmatvec operations.  Returns (XtWX, XtW1, XtWz) where XtW1 = X.T @ W
     and XtWz = X.T @ Wz.
+    When *tabmat_split* is provided, delegates to tabmat.SplitMatrix.
     """
+    if tabmat_split is not None:
+        XtWX = np.asarray(tabmat_split.sandwich(W))
+        XtW1 = np.asarray(tabmat_split.transpose_matvec(W))
+        XtWz_out = np.asarray(tabmat_split.transpose_matvec(Wz))
+        return XtWX, XtW1, XtWz_out
     p_total = sum(g.end - g.start for g in groups)
     XtWX = np.zeros((p_total, p_total))
     XtW1 = np.zeros(p_total)
@@ -674,12 +752,18 @@ def _block_xtwx_rhs(
     return XtWX, XtW1, XtWz_out
 
 
-def _block_xtwx_signed(gms: list[GroupMatrix], groups: list, W: NDArray) -> NDArray:
+def _block_xtwx_signed(
+    gms: list[GroupMatrix], groups: list, W: NDArray, *, tabmat_split=None
+) -> NDArray:
     """Like _block_xtwx but safe for arbitrary-sign weights.
 
     Uses _gram_any_sign for diagonal blocks (avoids sqrt(W) in Dense/Sparse
     groups) and _cross_gram for off-diagonals (already sign-safe).
+    When *tabmat_split* is provided, delegates to tabmat.SplitMatrix.sandwich
+    (which handles any-sign weights natively).
     """
+    if tabmat_split is not None:
+        return np.asarray(tabmat_split.sandwich(W))
     p_total = sum(g.end - g.start for g in groups)
     XtWX = np.zeros((p_total, p_total))
 
@@ -698,6 +782,56 @@ def _block_xtwx_signed(gms: list[GroupMatrix], groups: list, W: NDArray) -> NDAr
     return XtWX
 
 
+def _build_tabmat_split(gms: list[GroupMatrix]):
+    """Build a tabmat SplitMatrix from non-discrete group matrices.
+
+    Returns None if any group is discretized (tabmat can't handle binned ops).
+    Uses native tabmat types to avoid unnecessary densification:
+      - CategoricalGroupMatrix → tabmat.CategoricalMatrix (codes only, no dense)
+      - SparseGroupMatrix → tabmat.SparseMatrix (CSR, no dense)
+      - SparseSSPGroupMatrix → tabmat.DenseMatrix (must materialize B @ R_inv)
+      - DenseGroupMatrix → tabmat.DenseMatrix (already dense)
+    """
+    import tabmat
+
+    if any(isinstance(gm, DiscretizedSSPGroupMatrix) for gm in gms):
+        return None
+
+    matrices = []
+    for gm in gms:
+        if isinstance(gm, CategoricalGroupMatrix):
+            if gm.n_levels > 100:
+                # High-cardinality: use native CategoricalMatrix to avoid
+                # O(n × n_levels) dense allocation.  Remap to tabmat
+                # convention: base=0, non-base j→j+1, drop_first=True.
+                codes = gm.codes.copy().astype(np.int32)
+                base_mask = codes == gm.n_levels
+                codes[~base_mask] += 1  # non-base: 0..K-1 → 1..K
+                codes[base_mask] = 0  # base: K → 0
+                # Pin the full category universe so row subsets (CV folds)
+                # preserve column count even when some levels are absent.
+                categories = np.arange(gm.n_levels + 1)
+                matrices.append(
+                    tabmat.CategoricalMatrix(codes, categories=categories, drop_first=True)
+                )
+            else:
+                # Low-cardinality: DenseMatrix is faster for sandwich
+                # (uniform BLAS, no categorical cross-term overhead).
+                matrices.append(tabmat.DenseMatrix(gm.toarray()))
+        elif isinstance(gm, SparseGroupMatrix):
+            matrices.append(tabmat.SparseMatrix(gm.M))
+        elif isinstance(gm, SparseSSPGroupMatrix):
+            # Factored B @ R_inv — must materialize (no tabmat equivalent)
+            matrices.append(tabmat.DenseMatrix(gm.toarray()))
+        else:
+            # DenseGroupMatrix
+            arr = gm.toarray()
+            if arr.ndim == 1:
+                arr = arr[:, None]
+            matrices.append(tabmat.DenseMatrix(arr))
+    return tabmat.SplitMatrix(matrices)
+
+
 class DesignMatrix:
     """Container for per-group matrices. Provides full-matrix operations."""
 
@@ -706,6 +840,16 @@ class DesignMatrix:
         self.n = n
         self.p = p
         self.shape = (n, p)
+        self._tabmat_split = None  # lazily built
+        self._tabmat_built = False
+
+    @property
+    def tabmat_split(self):
+        """Lazily build a tabmat SplitMatrix for non-discrete paths."""
+        if not self._tabmat_built:
+            self._tabmat_split = _build_tabmat_split(self.group_matrices)
+            self._tabmat_built = True
+        return self._tabmat_split
 
     def matvec(self, beta: NDArray) -> NDArray:
         """X @ beta via per-group matvecs."""

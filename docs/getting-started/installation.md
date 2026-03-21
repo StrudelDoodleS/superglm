@@ -9,10 +9,10 @@ pip install git+https://github.com/StrudelDoodleS/superglm.git
 ## With optional dependencies
 
 ```bash
-# scikit-learn compatible estimator
-pip install "superglm[sklearn] @ git+https://github.com/StrudelDoodleS/superglm.git"
+# Benchmarking (glum, statsmodels, pyarrow)
+pip install "superglm[bench] @ git+https://github.com/StrudelDoodleS/superglm.git"
 
-# Everything (dev, sklearn, plotting, interactions)
+# Everything (dev, bench, interactions)
 pip install "superglm[all] @ git+https://github.com/StrudelDoodleS/superglm.git"
 ```
 

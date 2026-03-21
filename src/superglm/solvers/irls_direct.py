@@ -308,6 +308,11 @@ def fit_irls_direct(
         _X_qr_aug = np.hstack([np.ones((n, 1)), _X_full])  # (n, p+1)
         _L_aug = _sqrt_penalty_augmented(S, p)  # (p+1, p+1)
 
+    # tabmat acceleration: build SplitMatrix once for non-discrete paths.
+    # R_inv is constant within a single fit_irls_direct call, so the
+    # materialized X is valid for all IRLS iterations.
+    _tabmat_split = dm.tabmat_split if not _use_qr else None
+
     t_start = time.perf_counter()
     dev_prev = np.inf
     converged = False
@@ -370,7 +375,7 @@ def fit_irls_direct(
             sum_W = float(np.sum(W))
 
             # Combined gram + rmatvec: shares O(n) bincount for discretized groups
-            XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz)
+            XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz, tabmat_split=_tabmat_split)
 
             # Build augmented system (p+1, p+1)
             M_aug = np.empty((p + 1, p + 1))
@@ -495,7 +500,7 @@ def fit_irls_direct(
         z_off = z - offset
         Wz = W * z_off
         sum_W = float(np.sum(W))
-        XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz)
+        XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz, tabmat_split=_tabmat_split)
 
     # Cache final-iteration RHS quantities for the cached-W fREML optimizer.
     # These allow re-solving the augmented system with a new penalty matrix S

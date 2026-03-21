@@ -51,6 +51,7 @@ class GroupInfo:
     penalty_matrix: NDArray | None = None  # (p_g, p_g) for SSP, else None
     reparametrize: bool = False  # whether to apply SSP transform
     penalized: bool = True  # whether this group is subject to the penalty
+    cat_codes: NDArray | None = None  # (n,) integer codes for categorical features
     # select=True subgroup support (mgcv-style double penalty)
     subgroup_name: str | None = None  # "linear" or "spline"
     projection: NDArray | None = None  # (K, n_cols) projection from B-spline basis

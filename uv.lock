@@ -3474,30 +3474,35 @@ name = "superglm"
 version = "0.4.0"
 source = { editable = "." }
 dependencies = [
-    { name = "glum" },
     { name = "matplotlib" },
     { name = "numba" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "pyarrow" },
+    { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scikit-learn", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "statsmodels" },
+    { name = "tabmat" },
 ]
 
 [package.optional-dependencies]
 all = [
+    { name = "glum" },
     { name = "interpret" },
-    { name = "matplotlib" },
     { name = "mypy" },
     { name = "pre-commit" },
+    { name = "pyarrow" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
-    { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scikit-learn", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "statsmodels" },
+]
+bench = [
+    { name = "glum" },
+    { name = "pyarrow" },
+    { name = "statsmodels" },
 ]
 dev = [
     { name = "mypy" },
@@ -3509,13 +3514,6 @@ dev = [
 interactions = [
     { name = "interpret" },
 ]
-plot = [
-    { name = "matplotlib" },
-]
-sklearn = [
-    { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scikit-learn", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-]
 
 [package.dev-dependencies]
 docs = [
@@ -3525,25 +3523,25 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "glum", specifier = ">=3.0" },
+    { name = "glum", marker = "extra == 'bench'", specifier = ">=3.0" },
     { name = "interpret", marker = "extra == 'interactions'", specifier = ">=0.7" },
     { name = "matplotlib", specifier = ">=3.7" },
-    { name = "matplotlib", marker = "extra == 'plot'", specifier = ">=3.7" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "numba", specifier = ">=0.57" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "pre-commit", marker = "extra == 'dev'" },
-    { name = "pyarrow", specifier = ">=10.0" },
+    { name = "pyarrow", marker = "extra == 'bench'", specifier = ">=10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
-    { name = "scikit-learn", marker = "extra == 'sklearn'", specifier = ">=1.3" },
+    { name = "scikit-learn", specifier = ">=1.3" },
     { name = "scipy", specifier = ">=1.10" },
-    { name = "statsmodels", specifier = ">=0.14" },
-    { name = "superglm", extras = ["dev", "sklearn", "plot", "interactions"], marker = "extra == 'all'" },
+    { name = "statsmodels", marker = "extra == 'bench'", specifier = ">=0.14" },
+    { name = "superglm", extras = ["dev", "bench", "interactions"], marker = "extra == 'all'" },
+    { name = "tabmat", specifier = ">=4.0" },
 ]
-provides-extras = ["dev", "sklearn", "plot", "interactions", "all"]
+provides-extras = ["dev", "bench", "interactions", "all"]
 
 [package.metadata.requires-dev]
 docs = [

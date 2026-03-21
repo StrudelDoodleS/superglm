@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm.types import GroupInfo
@@ -77,8 +76,19 @@ class Categorical:
         sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
         """Build sparse one-hot design columns, choosing the base level from *x*."""
+        import pandas as pd
+
         x = np.asarray(x).ravel()
-        self._levels = sorted(np.unique(x).tolist())
+
+        # Single-pass O(n) factorize — avoids O(n log n) sort + O(n * levels) loop
+        codes, uniques = pd.factorize(x, sort=True)
+
+        # pd.factorize encodes NaN/None as -1 in codes. Reject them here
+        # so they don't silently corrupt the design matrix.
+        if (codes == -1).any():
+            raise ValueError("Categorical column contains missing values (NaN or None).")
+
+        self._levels = uniques.tolist()
 
         if len(self._levels) < 2:
             raise ValueError(f"Categorical needs >= 2 levels, got {len(self._levels)}")
@@ -87,8 +97,11 @@ class Categorical:
         if self._base_level and self._base_level in self._levels:
             pass
         elif self.base == "most_exposed" and sample_weight is not None:
-            exp_by_level = {lev: float(sample_weight[x == lev].sum()) for lev in self._levels}
-            self._base_level = max(exp_by_level, key=exp_by_level.get)
+            # O(n) bincount instead of O(n * levels) dict comprehension
+            exposure_per_level = np.bincount(
+                codes, weights=sample_weight, minlength=len(self._levels)
+            )
+            self._base_level = self._levels[int(np.argmax(exposure_per_level))]
         elif self.base == "most_exposed" and sample_weight is None:
             self._base_level = self._levels[0]
         elif self.base == "first":
@@ -100,21 +113,21 @@ class Categorical:
 
         self._non_base = [lev for lev in self._levels if lev != self._base_level]
 
-        # One-hot encode (excluding base) — sparse CSR
-        n = len(x)
+        # Remap codes: drop base level, produce 0-based codes for non-base levels.
+        # Base-level observations are excluded from the design matrix entirely
+        # (absorbed into the intercept), so we encode them as -1.
+        base_idx = self._levels.index(self._base_level)
         n_levels = len(self._non_base)
-        rows = []
-        cols = []
-        for j, lev in enumerate(self._non_base):
-            mask = np.where(x == lev)[0]
-            rows.append(mask)
-            cols.append(np.full(len(mask), j))
-        rows = np.concatenate(rows)
-        cols = np.concatenate(cols)
-        data = np.ones(len(rows), dtype=np.float64)
-        columns = sp.csr_matrix((data, (rows, cols)), shape=(n, n_levels))
+        remap = np.empty(len(self._levels), dtype=np.intp)
+        remap[base_idx] = -1
+        col = 0
+        for i in range(len(self._levels)):
+            if i != base_idx:
+                remap[i] = col
+                col += 1
+        cat_codes = remap[codes]
 
-        return GroupInfo(columns=columns, n_cols=len(self._non_base))
+        return GroupInfo(columns=None, n_cols=n_levels, cat_codes=cat_codes)
 
     def transform(self, x: NDArray) -> NDArray:
         """One-hot encode using levels learned during build()."""

@@ -256,6 +256,47 @@ class TestBackendLinearAlgebraInvariants:
         w = rng.standard_normal(len(idx))
         np.testing.assert_allclose(dm_sub.rmatvec(w), X_sub_dense.T @ w, atol=1e-12)
 
+    def test_high_cardinality_tabmat_subset_preserves_width(self):
+        """tabmat CategoricalMatrix must preserve full column count on row subsets.
+
+        Regression test for 8422dbe: without pinning the category universe,
+        tabmat infers categories from the observed subset only, shrinking
+        the sandwich output and breaking XtWX assembly.
+        """
+        from superglm.group_matrix import CategoricalGroupMatrix, _block_xtwx, _build_tabmat_split
+
+        rng = np.random.default_rng(42)
+        n = 2000
+        n_levels = 150  # > 100 threshold for CategoricalMatrix path
+        codes = rng.integers(-1, n_levels, size=n).astype(np.intp)
+        gm = CategoricalGroupMatrix(codes, n_levels)
+
+        # Subset that drops many levels
+        idx = np.arange(40)
+        sub = gm.row_subset(idx)
+        n_unique = len(np.unique(sub.codes[sub.codes < sub.n_levels]))
+        assert n_unique < n_levels, "subset should drop some levels"
+        assert sub.shape == (40, n_levels), "group shape must preserve full width"
+
+        # tabmat split on subset must also preserve width
+        split = _build_tabmat_split([sub])
+        assert split is not None
+        assert split.shape == (40, n_levels), (
+            f"tabmat split shape {split.shape} != (40, {n_levels})"
+        )
+
+        # sandwich must produce full-width XtWX
+        W = rng.uniform(0.5, 2.0, 40)
+        xtwx_tabmat = np.asarray(split.sandwich(W))
+        assert xtwx_tabmat.shape == (n_levels, n_levels)
+
+        # Match dense oracle
+        from superglm.types import GroupSlice
+
+        groups = [GroupSlice("cat", 0, n_levels)]
+        xtwx_block = _block_xtwx([sub], groups, W)
+        np.testing.assert_allclose(xtwx_tabmat, xtwx_block, atol=1e-12)
+
     def test_two_discretized_spline_cross_gram(self):
         """Cross-gram between two DiscretizedSSPGroupMatrix groups should match dense."""
         rng = np.random.default_rng(9)
