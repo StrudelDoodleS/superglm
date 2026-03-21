@@ -134,6 +134,22 @@ def _cat_weighted_bincount(codes, bin_idx, W, n_bins, n_levels):
     return result
 
 
+@njit(cache=True)
+def _cat_cat_weighted_crosstab(codes_i, codes_j, W, n_levels_i, n_levels_j):
+    """Weighted crosstab: X_i.T @ diag(W) @ X_j for two categoricals.
+
+    Sink-bin observations (codes == n_levels) are excluded from both sides.
+    Result is (n_levels_i, n_levels_j).
+    """
+    result = np.zeros((n_levels_i, n_levels_j))
+    for k in range(len(W)):
+        ci = codes_i[k]
+        cj = codes_j[k]
+        if ci < n_levels_i and cj < n_levels_j:
+            result[ci, cj] += W[k]
+    return result
+
+
 class DenseGroupMatrix:
     """Dense group matrix wrapper."""
 
@@ -650,6 +666,10 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     ):
         WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins)
         return (gm_j.R_inv.T @ (gm_j.B_unique.T @ WX_agg)).T
+
+    # Cat × cat: weighted crosstab — O(n) with no dense allocation.
+    if isinstance(gm_i, CategoricalGroupMatrix) and isinstance(gm_j, CategoricalGroupMatrix):
+        return _cat_cat_weighted_crosstab(gm_i.codes, gm_j.codes, W, gm_i.n_levels, gm_j.n_levels)
 
     # Non-disc × non-disc: materialize smaller side, rmatvec larger side.
     if gm_i.shape[1] <= gm_j.shape[1]:
