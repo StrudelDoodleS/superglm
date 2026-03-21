@@ -29,7 +29,7 @@ class SuperGLM:
 
     Supports Poisson, Gaussian, Gamma, NB2, Tweedie, and Binomial families with group
     lasso, sparse group lasso, or ridge penalties.  Smoothing parameters can
-    be estimated via REML (``fit_reml``) or cross-validation (``fit_cv``).
+    be estimated via REML (``fit_reml``) or cross-validation (``cross_validate``).
     """
 
     def __init__(
@@ -270,37 +270,6 @@ class SuperGLM:
             n_lambda=n_lambda,
             lambda_ratio=lambda_ratio,
             lambda_seq=lambda_seq,
-        )
-
-    def fit_cv(
-        self,
-        X: pd.DataFrame,
-        y: NDArray,
-        sample_weight: NDArray | None = None,
-        offset: NDArray | None = None,
-        *,
-        n_folds: int = 5,
-        n_lambda: int = 50,
-        lambda_ratio: float = 1e-3,
-        lambda_seq: NDArray | None = None,
-        rule: str = "1se",
-        refit: bool = True,
-        random_state: int | None = None,
-    ):
-        """Select lambda by K-fold cross-validation."""
-        return fit_ops.fit_cv(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset,
-            n_folds=n_folds,
-            n_lambda=n_lambda,
-            lambda_ratio=lambda_ratio,
-            lambda_seq=lambda_seq,
-            rule=rule,
-            refit=refit,
-            random_state=random_state,
         )
 
     def fit_reml(

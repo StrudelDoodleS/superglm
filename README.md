@@ -267,25 +267,31 @@ After `fit_path`, `model.predict()` uses the last (least-regularised) fit.
 
 ## Cross-validation
 
-Select lambda by K-fold cross-validation:
+Evaluate model performance with K-fold cross-validation using any sklearn-compatible splitter:
 
 ```python
-from superglm import SuperGLM, CVResult
+from sklearn.model_selection import KFold
+from superglm import SuperGLM, cross_validate
 
 model = SuperGLM(
     family="poisson",
-    penalty="group_lasso",
+    selection_penalty=0.0,
     features=features,
 )
-cv = model.fit_cv(df, y, sample_weight=exposure, n_folds=5, rule="min")
+result = cross_validate(
+    model, df, y,
+    cv=KFold(5, shuffle=True, random_state=42),
+    sample_weight=exposure,
+    scoring=("deviance", "nll"),
+    return_oof=True,
+)
 
-cv.best_lambda         # lambda at minimum mean CV deviance
-cv.best_lambda_1se     # most regularised lambda within 1 SE of minimum
-cv.mean_cv_deviance    # (n_lambda,) mean test deviance per lambda
-cv.se_cv_deviance      # (n_lambda,) standard error across folds
+result.mean_scores     # {"deviance": ..., "nll": ...}
+result.fold_scores     # DataFrame with per-fold metrics and timing
+result.oof_predictions # out-of-fold predictions (response scale)
 ```
 
-`rule` controls which lambda the model refits on: `"min"` uses `best_lambda` (lowest CV deviance), `"1se"` uses `best_lambda_1se` (most regularised within 1 SE of the minimum — usually the better default). With `refit=True` (default), the model is refit on all data at the selected lambda, so `model.predict()` is ready to use.
+`cross_validate` clones the model per fold (the input model is never mutated), supports `fit_mode="fit_reml"` for REML fits, and accepts custom callable scorers.
 
 ## Inspecting results
 
