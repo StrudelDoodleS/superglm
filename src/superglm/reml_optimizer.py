@@ -957,7 +957,6 @@ def optimize_discrete_reml_cached_w(
             M_p = sum(c.rank for c in penalty_caches.values())
             phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
         _t_objective += _time.perf_counter() - _t0
-        prev_obj = obj
 
         if obj < best_obj:
             best_obj = obj
@@ -1095,6 +1094,7 @@ def optimize_discrete_reml_cached_w(
 
         obj_change = abs(obj - prev_obj) if poi_iter > 0 else np.inf
         obj_scale = max(abs(obj), 1.0)
+        prev_obj = obj
         if poi_iter >= 2 and proj_grad_norm < grad_tol and obj_change < reml_tol * obj_scale:
             converged = True
             break
