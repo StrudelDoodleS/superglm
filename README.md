@@ -14,10 +14,9 @@ Penalised GLMs for insurance pricing. SuperGLM supports standard penalised fits,
 pip install git+https://github.com/StrudelDoodleS/superglm.git
 ```
 
-With optional dependencies:
+With all optional dependencies (benchmarks, interactions):
 
 ```bash
-pip install "superglm[sklearn] @ git+https://github.com/StrudelDoodleS/superglm.git"
 pip install "superglm[all] @ git+https://github.com/StrudelDoodleS/superglm.git"
 ```
 
