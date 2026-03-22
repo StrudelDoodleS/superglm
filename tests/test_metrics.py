@@ -1208,3 +1208,164 @@ class TestModelSummaryAPI:
         assert "standard_errors" in s
         assert "coefficient_se" in s["standard_errors"]
         assert "coefficient_se_raw" in s["standard_errors"]
+
+
+class TestSummaryInferenceCache:
+    """Tests for the shared fit-inference cache used by summary()."""
+
+    def test_second_summary_does_not_recompute_gram(self, fitted_poisson):
+        """Second summary() call should reuse cached inference info."""
+        model, X, y, _ = fitted_poisson
+        # First call populates caches
+        s1 = model.summary()
+
+        # Monkeypatch the gram path to raise if called again
+        import unittest.mock
+
+        with unittest.mock.patch(
+            "superglm.model.state_ops.fit_inference_info",
+            side_effect=AssertionError("inference recomputed"),
+        ):
+            s2 = model.summary()
+
+        # Both summaries should have identical coef rows
+        for r1, r2 in zip(s1._coef_rows, s2._coef_rows):
+            assert r1.name == r2.name
+            if r1.se is not None:
+                assert r1.se == pytest.approx(r2.se)
+
+    def test_group_edf_matches_inference_cache(self, fitted_poisson):
+        """_group_edf should return the same values as _fit_inference_info."""
+        model, _, _, _ = fitted_poisson
+        gedf = model._group_edf
+        inf = model._fit_inference_info
+        assert gedf == inf["group_edf_map"]
+
+    def test_cache_invalidated_after_refit(self, fitted_poisson):
+        """Refitting should clear cached inference info."""
+        model, X, y, _ = fitted_poisson
+        _ = model._fit_inference_info  # populate cache
+        assert "_fit_inference_info" in model.__dict__
+
+        # Refit with different penalty
+        model.fit(X, y, sample_weight=np.ones(len(y)))
+        assert "_fit_inference_info" not in model.__dict__
+
+    def test_summary_rank_deficient_active_system(self):
+        """summary() must not crash when active columns are aliased."""
+        rng = np.random.default_rng(77)
+        n = 300
+        x1 = rng.standard_normal(n)
+        X = pd.DataFrame({"x1": x1, "x2": x1})  # exact duplicate
+        y = rng.poisson(np.exp(0.5 + 0.3 * x1)).astype(float)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        model.fit(X, y)
+        # Must not raise LinAlgError
+        s = model.summary()
+        assert len(s._coef_rows) > 0
+
+        # EDF should sum to ~1 (one effective parameter, aliased)
+        coef_edfs = [r.edf for r in s._coef_rows if r.edf is not None and r.name != "Intercept"]
+        total_edf = sum(coef_edfs)
+        assert total_edf < 1.5, f"Aliased columns should share ~1 EDF, got {total_edf}"
+
+    def test_summary_rank_deficient_smooth_term(self):
+        """Pseudo-R fallback must produce valid Wood test results for smooth terms.
+
+        Regression test for the path: singular XtWX → eigendecomposition pseudo-R
+        (state_ops.py) → wood_test_smooth (metrics.py). Two identical splines on
+        the same data force XtWX to be rank-deficient in the active system.
+        """
+        rng = np.random.default_rng(99)
+        n = 400
+        x = rng.uniform(0, 10, n)
+        X = pd.DataFrame({"x": x, "x_dup": x})
+        y = rng.poisson(np.exp(0.5 + 0.3 * np.sin(x))).astype(float)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=8), "x_dup": Spline(n_knots=8)},
+        )
+        model.fit(X, y)
+
+        # Must not raise LinAlgError
+        s = model.summary()
+        smooth_rows = [r for r in s._coef_rows if r.is_spline and r.active]
+        assert len(smooth_rows) >= 1
+
+        # Wood test p-values should be finite (not NaN/Inf)
+        for r in smooth_rows:
+            assert r.wald_p is not None, f"{r.name}: p-value is None"
+            assert np.isfinite(r.wald_p), f"{r.name}: p-value is {r.wald_p}"
+            assert 0.0 <= r.wald_p <= 1.0, f"{r.name}: p-value out of range: {r.wald_p}"
+
+    def test_summary_near_aliased_edf_matches_metrics(self):
+        """Near-aliased EDF from model.summary() should match model.metrics()."""
+        rng = np.random.default_rng(88)
+        n = 500
+        x1 = rng.standard_normal(n)
+        x2 = x1 + 1e-6 * rng.standard_normal(n)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        y = rng.poisson(np.exp(0.5 + 0.3 * x1)).astype(float)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        model.fit(X, y)
+
+        s = model.summary()
+        met = model.metrics(X, y)
+        met_rows = met._build_coef_rows()
+
+        for sr, mr in zip(s._coef_rows, met_rows):
+            if sr.edf is not None and mr.edf is not None:
+                np.testing.assert_allclose(
+                    sr.edf,
+                    mr.edf,
+                    atol=0.05,
+                    err_msg=f"EDF mismatch for {sr.name}",
+                )
+
+    def test_metrics_summary_uses_own_edf_not_fit_cache(self):
+        """ModelMetrics.summary() must compute EDF from its own weights, not fit cache."""
+        rng = np.random.default_rng(123)
+        n = 400
+        x = rng.uniform(0, 10, n)
+        y = rng.poisson(np.exp(0.5 + 0.3 * np.sin(x))).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+        w_fit = np.ones(n)
+        model.fit_reml(X, y, sample_weight=w_fit)
+
+        # Different weights — EDF should differ from fit-time values
+        w_alt = rng.uniform(0.5, 2.0, n)
+        met = model.metrics(X, y, sample_weight=w_alt)
+
+        # Get the spline EDF from metrics' own influence diagonal
+        edf_met, _ = met._influence_edf
+        _, _, _, _, active_groups_met = met._active_info
+        ag = active_groups_met[0]
+        met_edf = float(np.sum(edf_met[ag.sl]))
+
+        # Get the spline EDF from the summary coef row
+        coef_rows = met._build_coef_rows()
+        spline_row = next(r for r in coef_rows if r.is_spline)
+        summary_edf = spline_row.edf
+
+        # Summary EDF must match metrics' own EDF, not fit-time _group_edf
+        np.testing.assert_allclose(
+            summary_edf, met_edf, rtol=1e-10, err_msg="ModelMetrics.summary() used fit-time EDF"
+        )

@@ -172,26 +172,33 @@ def summary(model, alpha: float = 0.05):
         model_info["tweedie_p_method"] = "Profile (exact)"
         model_info["tweedie_profile_nll"] = tw_pr.nll
 
-    # Coef rows from shared builder
-    X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = model._fit_active_info
+    # Coef rows from shared builder — use precomputed inference info.
+    # Only touches _fit_inference_info (gram path, O(p³)), never _fit_active_info.
+    inf = model._fit_inference_info
+    XtWX_inv = inf["XtWX_inv"]
+    XtWX_inv_aug = inf["XtWX_inv_aug"]
+    active_groups = inf["active_groups"]
     known_scale = getattr(model._distribution, "scale_known", True)
     coef_rows = build_coef_rows(
         groups=model._groups,
         specs=model._specs,
         interaction_specs=model._interaction_specs,
         result=res,
-        X_a=X_a,
-        W=W,
+        X_a=np.empty((0, 0)),  # unused with precomputed values
+        W=inf["W"],
         XtWX_inv=XtWX_inv,
         XtWX_inv_aug=XtWX_inv_aug,
         active_groups=active_groups,
         known_scale=known_scale,
-        group_edf_map=model._group_edf,
+        group_edf_map=inf["group_edf_map"],
         reml_lambdas=getattr(model, "_reml_lambdas", None),
         lambda2=model.lambda2,
         n_obs=n,
         alpha=alpha,
         monotone_repairs=getattr(model, "_monotone_repairs", None),
+        precomputed_R_a=inf["R_a"],
+        precomputed_edf=inf["edf"],
+        precomputed_edf1=inf["edf1"],
     )
 
     # Standard errors for backward compat dict access (use augmented inverse)
@@ -305,17 +312,32 @@ def fit_active_info(model):
     return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
 
 
-def group_edf(model) -> dict[str, float] | None:
-    """Per-group effective degrees of freedom via F = (X'WX+S)^{-1} X'WX."""
+def fit_inference_info(model):
+    """All coefficient-space inference quantities for model.summary().
+
+    Self-contained: computes working weights W, then uses the gram path
+    (per-group gram blocks + p³ inversion) instead of materialising the
+    full n×p active design matrix.  This makes model.summary() O(n + p³)
+    instead of O(n·p²).
+
+    Returns a dict with:
+        W : (n,) working weights
+        XtWX_inv : (p_active, p_active) = (X'WX + S)^{-1}
+        XtWX_inv_aug : (p_active+1, p_active+1) augmented inverse incl. intercept
+        active_groups : list of GroupSlice re-indexed to active columns
+        R_a : (p_active, p_active) upper-triangular Cholesky factor of X'WX
+        edf : per-coefficient EDF vector
+        edf1 : Wood's alternative EDF vector
+        group_edf_map : per-group summed EDF dict
+    """
+    import scipy.linalg
+
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
-    from superglm.metrics import _penalised_xtwx_inv
+    from superglm.metrics import _penalised_xtwx_inv_gram
 
-    if model._dm is None or model._result is None:
-        return None
-
-    beta = model._result.beta
-    eta = model._dm.matvec(beta) + model._result.intercept
+    # Compute working weights — one O(n) pass
+    eta = model._dm.matvec(model.result.beta) + model.result.intercept
     if model._fit_offset is not None:
         eta = eta + model._fit_offset
     eta = stabilize_eta(eta, model._link)
@@ -325,18 +347,61 @@ def group_edf(model) -> dict[str, float] | None:
     W = model._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
-    X_a, XtWX_S_inv, _, active_groups, _ = _penalised_xtwx_inv(
-        beta, W, model._dm.group_matrices, model._groups, lam2
+
+    # Gram path: per-group gram + cross-gram blocks, then invert.
+    # O(n·p_g² per block + p³) — avoids the full n×p QR.
+    # Returns XtWX and S directly so we don't need to recover them
+    # from the (possibly truncated) pseudo-inverse.
+    XtWX_inv, XtWX_inv_aug, active_groups, XtWX, S = _penalised_xtwx_inv_gram(
+        model.result.beta, W, model._dm.group_matrices, model._groups, lam2
     )
 
-    if X_a.shape[1] == 0:
-        return {}
+    p_a = XtWX_inv.shape[0]
+    if p_a == 0:
+        return {
+            "W": W,
+            "XtWX_inv": XtWX_inv,
+            "XtWX_inv_aug": XtWX_inv_aug,
+            "active_groups": active_groups,
+            "R_a": np.empty((0, 0)),
+            "edf": np.array([]),
+            "edf1": np.array([]),
+            "group_edf_map": {},
+        }
 
-    XtWX = X_a.T @ (X_a * W[:, None])
-    F = XtWX_S_inv @ XtWX
-    edf_vec = np.diag(F)
+    # EDF: F = (X'WX+S)^{-1} X'WX — use XtWX directly from the gram path,
+    # which is correct even when XtWX_inv is a truncated pseudo-inverse.
+    F = XtWX_inv @ XtWX
+    edf = np.diag(F)
+    edf1 = 2.0 * edf - np.sum(F * F, axis=1)
 
-    out: dict[str, float] = {}
+    # R factor via Cholesky of X'WX (O(p³) instead of O(n·p²) QR)
+    try:
+        R_a = scipy.linalg.cholesky(XtWX, lower=False, check_finite=False)
+    except np.linalg.LinAlgError:
+        # Near-singular: eigendecompose and build pseudo-R
+        eigvals, eigvecs = np.linalg.eigh(XtWX)
+        eigvals = np.maximum(eigvals, 0.0)
+        R_a = (eigvecs * np.sqrt(eigvals)).T  # p×p, R'R = XtWX
+
+    group_edf_map: dict[str, float] = {}
     for ag in active_groups:
-        out[ag.name] = float(np.sum(edf_vec[ag.sl]))
-    return out
+        group_edf_map[ag.name] = float(np.sum(edf[ag.sl]))
+
+    return {
+        "W": W,
+        "XtWX_inv": XtWX_inv,
+        "XtWX_inv_aug": XtWX_inv_aug,
+        "active_groups": active_groups,
+        "R_a": R_a,
+        "edf": edf,
+        "edf1": edf1,
+        "group_edf_map": group_edf_map,
+    }
+
+
+def group_edf(model) -> dict[str, float] | None:
+    """Per-group effective degrees of freedom via F = (X'WX+S)^{-1} X'WX."""
+    if model._dm is None or model._result is None:
+        return None
+    return model._fit_inference_info["group_edf_map"]

@@ -90,7 +90,7 @@ def apply_monotone_postfit(
 
     # Invalidate cached properties if any repair was done
     if repaired_any:
-        for attr in ("_coef_covariance", "_fit_active_info", "_group_edf"):
+        for attr in ("_coef_covariance", "_fit_active_info", "_fit_inference_info", "_group_edf"):
             try:
                 delattr(model, attr)
             except AttributeError:

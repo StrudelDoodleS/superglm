@@ -154,7 +154,7 @@ def _penalised_xtwx_inv_gram(
     group_matrices: list,
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
-) -> tuple[NDArray, NDArray, list[GroupSlice]]:
+) -> tuple[NDArray, NDArray, list[GroupSlice], NDArray | None, NDArray | None]:
     """Fast (X'WX + S)^{-1} via per-group gram matrices.
 
     Same result as ``_penalised_xtwx_inv`` but avoids forming the dense
@@ -171,6 +171,8 @@ def _penalised_xtwx_inv_gram(
     XtWX_S_inv_aug : (p_active+1, p_active+1) inverse of augmented system
         including intercept row/column.
     active_groups : list of GroupSlice re-indexed to active columns.
+    XtWX : (p_active, p_active) X'WX gram matrix, or None if p_active == 0.
+    S : (p_active, p_active) penalty matrix, or None if p_active == 0.
     """
     # Identify active groups
     active_gms: list = []
@@ -199,7 +201,7 @@ def _penalised_xtwx_inv_gram(
     if p_a == 0:
         w_sum = float(np.sum(W))
         aug_inv = np.array([[1.0 / w_sum]]) if w_sum > 0 else np.array([[0.0]])
-        return np.empty((0, 0)), aug_inv, []
+        return np.empty((0, 0)), aug_inv, [], None, None
 
     # Build X'WX block-by-block: gram for diagonal, cross_gram for off-diagonal.
     # For discretized groups this is O(n_bins) per block instead of O(n·p²).
@@ -225,7 +227,8 @@ def _penalised_xtwx_inv_gram(
     M = XtWX + S
     eigvals, eigvecs = np.linalg.eigh(M)
     threshold = 1e-6 * max(eigvals.max(), 1e-12)
-    inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
+    with np.errstate(divide="ignore"):
+        inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
     XtWX_S_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
 
     # Augmented (p+1)×(p+1) inverse including intercept row/column.
@@ -242,10 +245,11 @@ def _penalised_xtwx_inv_gram(
     M_aug[1:, 1:] = M  # XtWX + S
     eigvals_aug, eigvecs_aug = np.linalg.eigh(M_aug)
     threshold_aug = 1e-6 * max(eigvals_aug.max(), 1e-12)
-    inv_eigvals_aug = np.where(eigvals_aug > threshold_aug, 1.0 / eigvals_aug, 0.0)
+    with np.errstate(divide="ignore"):
+        inv_eigvals_aug = np.where(eigvals_aug > threshold_aug, 1.0 / eigvals_aug, 0.0)
     XtWX_S_inv_aug = (eigvecs_aug * inv_eigvals_aug[None, :]) @ eigvecs_aug.T
 
-    return XtWX_S_inv, XtWX_S_inv_aug, active_groups_out
+    return XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, XtWX, S
 
 
 def build_coef_rows(
@@ -266,6 +270,10 @@ def build_coef_rows(
     n_obs: int,
     alpha: float = 0.05,
     monotone_repairs: dict | None = None,
+    # Precomputed inference quantities (avoids recomputing QR/EDF)
+    precomputed_R_a: NDArray | None = None,
+    precomputed_edf: NDArray | None = None,
+    precomputed_edf1: NDArray | None = None,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
 
@@ -337,9 +345,12 @@ def build_coef_rows(
         )
     )
 
-    # Lazily computed R factor and influence edf (only needed for smooth tests)
-    _R_factor = None
+    # Lazily computed R factor and influence edf (only needed for smooth tests).
+    # When precomputed values are provided, use them directly.
+    _R_factor = precomputed_R_a
     _influence_edf = None
+    if precomputed_edf is not None and precomputed_edf1 is not None:
+        _influence_edf = (precomputed_edf, precomputed_edf1)
 
     def _get_R_factor():
         nonlocal _R_factor
@@ -363,8 +374,8 @@ def build_coef_rows(
                 _influence_edf = (edf, edf1)
         return _influence_edf
 
-    # Per-group EDF map: sum of per-coefficient edf within each group's columns
-    _group_edf_cache: dict[str, float] | None = None
+    # Per-group EDF map: use precomputed group_edf_map when provided.
+    _group_edf_cache: dict[str, float] | None = group_edf_map
 
     def _get_group_edf_map() -> dict[str, float]:
         nonlocal _group_edf_cache
@@ -1394,7 +1405,10 @@ class ModelMetrics:
             XtWX_inv_aug=XtWX_inv_aug,
             active_groups=active_groups,
             known_scale=self._known_scale,
-            group_edf_map=getattr(self._model, "_group_edf", None),
+            # Pass None so build_coef_rows computes EDF from this
+            # ModelMetrics instance's own active info (which may use
+            # different weights/data than the fit).
+            group_edf_map=None,
             reml_lambdas=getattr(self._model, "_reml_lambdas", None),
             lambda2=self._model.lambda2,
             n_obs=self.n_obs,
