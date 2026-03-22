@@ -428,6 +428,62 @@ class TestModelDiagnosticsSplineKeys:
         assert diag["age"]["smoothing_lambda"] == rich_row.smoothing_lambda
         assert diag["age"]["spline_kind"] == rich_row.spline_kind
 
+    def test_inactive_groups_report_zero_edf(self):
+        """Groups zeroed by group lasso must report edf=0, not n_levels or 1."""
+        from superglm.features.categorical import Categorical
+        from superglm.features.numeric import Numeric
+
+        rng = np.random.default_rng(99)
+        n = 500
+        X = pd.DataFrame(
+            {
+                "x": rng.standard_normal(n),
+                "cat": rng.choice(["a", "b", "c"], n),
+            }
+        )
+        y = rng.poisson(1.0, n).astype(float)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=100.0,  # heavy penalty to zero out groups
+            features={"x": Numeric(), "cat": Categorical(base="first")},
+        )
+        model.fit(X, y)
+
+        s = model.summary()
+        for row in s._coef_rows:
+            if row.name == "x" or (row.group == "cat" and row.edf is not None):
+                assert row.edf == 0.0, f"{row.name} should have edf=0 when inactive, got {row.edf}"
+
+    def test_edf_header_ascii_html_parity(self):
+        """ASCII and HTML summaries must show the same EDF breakdown."""
+        rng = np.random.default_rng(42)
+        n = 300
+        X = pd.DataFrame({"x": rng.uniform(0, 10, n)})
+        y = rng.poisson(np.exp(0.5 + 0.3 * np.sin(X["x"].values))).astype(float)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+        model.fit_reml(X, y)
+        s = model.summary()
+
+        ascii_out = str(s)
+        html_out = s._repr_html_()
+
+        # Both should contain the smooth EDF breakdown
+        import re
+
+        ascii_match = re.search(r"Df \(effective\).*?(\d+\.\d+).*?\((\d+\.\d+) smooth\)", ascii_out)
+        html_match = re.search(r"Df \(effective\).*?(\d+\.\d+).*?\((\d+\.\d+) smooth\)", html_out)
+
+        assert ascii_match is not None, "ASCII summary missing EDF breakdown"
+        assert html_match is not None, "HTML summary missing EDF breakdown"
+        assert ascii_match.group(1) == html_match.group(1), "Total EDF mismatch"
+        assert ascii_match.group(2) == html_match.group(2), "Smooth EDF mismatch"
+
 
 # ── Phase 5: Spline kinds ───────────────────────────────────────
 
