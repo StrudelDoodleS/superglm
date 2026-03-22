@@ -315,8 +315,7 @@ def build_coef_rows(
     icpt_var = float(XtWX_inv_aug[0, 0])
     if icpt_var > 0:
         icpt_se = (
-            float(np.sqrt(icpt_var)) if known_scale
-            else float(np.sqrt(max(phi, 0.0) * icpt_var))
+            float(np.sqrt(icpt_var)) if known_scale else float(np.sqrt(max(phi, 0.0) * icpt_var))
         )
     else:
         icpt_se = 0.0
@@ -418,7 +417,12 @@ def build_coef_rows(
                 curve_se_max = float("nan")
 
                 ag = next(a for a in active_groups if a.name == g.name)
-                V_b_j = XtWX_inv[ag.sl, ag.sl] if known_scale else phi * XtWX_inv[ag.sl, ag.sl]
+                aug_sl = slice(1 + ag.start, 1 + ag.end)
+                V_b_j = (
+                    XtWX_inv_aug[aug_sl, aug_sl]
+                    if known_scale
+                    else phi * XtWX_inv_aug[aug_sl, aug_sl]
+                )
 
                 if is_linear_subgroup:
                     from scipy.stats import chi2 as chi2_dist
@@ -520,7 +524,12 @@ def build_coef_rows(
                 ref_df = float(g.size)
 
                 ag = next(a for a in active_groups if a.name == g.name)
-                V_b_j = XtWX_inv[ag.sl, ag.sl] if known_scale else phi * XtWX_inv[ag.sl, ag.sl]
+                aug_sl = slice(1 + ag.start, 1 + ag.end)
+                V_b_j = (
+                    XtWX_inv_aug[aug_sl, aug_sl]
+                    if known_scale
+                    else phi * XtWX_inv_aug[aug_sl, aug_sl]
+                )
 
                 from superglm.wood_pvalue import wood_test_smooth
 
@@ -586,7 +595,12 @@ def build_coef_rows(
                 ref_df = float(g.size)
 
                 ag = next(a for a in active_groups if a.name == g.name)
-                V_b_j = XtWX_inv[ag.sl, ag.sl] if known_scale else phi * XtWX_inv[ag.sl, ag.sl]
+                aug_sl = slice(1 + ag.start, 1 + ag.end)
+                V_b_j = (
+                    XtWX_inv_aug[aug_sl, aug_sl]
+                    if known_scale
+                    else phi * XtWX_inv_aug[aug_sl, aug_sl]
+                )
 
                 from scipy.stats import chi2 as chi2_dist
 
@@ -680,7 +694,12 @@ def build_coef_rows(
                 p_val = float("nan")
                 ref_df = float(g.size)
                 ag = next(a for a in active_groups if a.name == g.name)
-                V_b_j = XtWX_inv[ag.sl, ag.sl] if known_scale else phi * XtWX_inv[ag.sl, ag.sl]
+                aug_sl = slice(1 + ag.start, 1 + ag.end)
+                V_b_j = (
+                    XtWX_inv_aug[aug_sl, aug_sl]
+                    if known_scale
+                    else phi * XtWX_inv_aug[aug_sl, aug_sl]
+                )
                 from scipy.stats import chi2 as chi2_dist
 
                 try:

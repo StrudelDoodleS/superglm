@@ -278,12 +278,13 @@ class TestMgcvStyleSmoothTestInput:
 
         row = next(r for r in metrics._build_coef_rows() if r.name == "Noise2")
 
-        X_a, W, XtWX_inv, _, active_groups = metrics._active_info
+        X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = metrics._active_info
         R_a = metrics._active_R_factor
         _, edf1 = metrics._influence_edf
         ag = next(a for a in active_groups if a.name == "Noise2")
         beta_g = model.result.beta[ag.sl]
-        V_b_j = XtWX_inv[ag.sl, ag.sl]
+        aug_sl = slice(1 + ag.start, 1 + ag.end)
+        V_b_j = XtWX_inv_aug[aug_sl, aug_sl]
         edf1_j = float(np.sum(edf1[ag.sl]))
 
         np.testing.assert_allclose(R_a.T @ R_a, X_a.T @ (X_a * W[:, None]), atol=1e-8)
