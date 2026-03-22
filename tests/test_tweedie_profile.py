@@ -319,8 +319,8 @@ class TestProfileLikelihood:
         with pytest.raises(ValueError, match="tweedie"):
             estimate_tweedie_p(model, X, y)
 
-    def test_result_has_cache(self):
-        """Cache should be populated with >= 3 entries from Brent."""
+    def test_result_has_search_trace(self):
+        """search_trace should be populated with >= 3 entries from Brent."""
         import pandas as pd
 
         rng = np.random.default_rng(42)
@@ -335,7 +335,9 @@ class TestProfileLikelihood:
         )
 
         result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
-        assert len(result.cache) >= 3
+        assert len(result.search_trace) >= 3
+        assert result.method == "brent"
+        assert result.phi_method == "pearson"
 
 
 # =====================================================================
@@ -585,3 +587,283 @@ class TestEstimatePFitMode:
         # Both should land near p_true; allow wider tolerance since
         # different model flexibility may shift the estimate slightly
         np.testing.assert_allclose(result_fit.p_hat, result_reml.p_hat, atol=0.3)
+
+
+# =====================================================================
+# Search methods
+# =====================================================================
+
+
+class TestSearchMethods:
+    """Tests for grid, grid_refine, and profile_opt search methods."""
+
+    def test_grid_recovers_p(self):
+        """method='grid' should recover p from synthetic data."""
+        X, y, p_true = _tweedie_data()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = estimate_tweedie_p(model, X, y, method="grid", n_grid=20, p_bounds=(1.1, 1.9))
+        assert isinstance(result, TweedieProfileResult)
+        assert result.method == "grid"
+        np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
+
+    def test_grid_explicit_grid(self):
+        """User-supplied grid array should be used."""
+        X, y, p_true = _tweedie_data()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        grid = np.array([1.3, 1.5, 1.6, 1.7, 1.9])
+        result = estimate_tweedie_p(model, X, y, method="grid", grid=grid)
+        assert len(result.search_trace) == len(grid)
+        assert result.p_hat in grid
+
+    def test_grid_refine_recovers_p(self):
+        """method='grid_refine' should recover p."""
+        X, y, p_true = _tweedie_data()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = estimate_tweedie_p(
+            model, X, y, method="grid_refine", n_grid_coarse=10, p_bounds=(1.1, 1.9)
+        )
+        assert result.method == "grid_refine"
+        np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
+
+    def test_profile_opt_recovers_p(self):
+        """method='profile_opt' should recover p."""
+        X, y, p_true = _tweedie_data()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = estimate_tweedie_p(model, X, y, method="profile_opt", p_bounds=(1.1, 1.9))
+        assert result.method == "profile_opt"
+        np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
+
+    def test_profile_opt_powell(self):
+        """optimizer='Powell' should also recover p."""
+        X, y, p_true = _tweedie_data()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = estimate_tweedie_p(
+            model, X, y, method="profile_opt", optimizer="Powell", p_bounds=(1.1, 1.9)
+        )
+        assert result.method == "profile_opt"
+        np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
+
+    def test_grid_with_weights(self):
+        """Grid search should forward sample_weight correctly."""
+        rng = np.random.default_rng(321)
+        p_true, phi_true = 1.6, 3.0
+        n = 3_000
+        x1 = rng.normal(0, 1, n)
+        sample_weight = rng.uniform(0.5, 2.0, n)
+        mu = np.exp(1.5 + 0.25 * x1)
+        y = _generate_weighted_tweedie(mu, phi_true, p_true, sample_weight, rng)
+        X = pd.DataFrame({"x1": x1})
+
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = estimate_tweedie_p(
+            model, X, y, sample_weight=sample_weight, method="grid", n_grid=15, p_bounds=(1.1, 1.9)
+        )
+        np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
+
+    def test_grid_with_reml(self):
+        """method='grid' should work with fit_mode='fit_reml'."""
+        X, y, p_true = _tweedie_data()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Spline(n_knots=6, penalty="ssp")},
+        )
+        result = estimate_tweedie_p(
+            model, X, y, method="grid", n_grid=10, fit_mode="fit_reml", p_bounds=(1.1, 1.9)
+        )
+        assert result.method == "grid"
+        np.testing.assert_allclose(result.p_hat, p_true, atol=0.25)
+
+    def test_invalid_method_raises(self):
+        """Invalid method should raise ValueError."""
+        X, y, _ = _tweedie_data()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
+        with pytest.raises(ValueError, match="method"):
+            estimate_tweedie_p(model, X, y, method="bogus")
+
+    def test_invalid_optimizer_raises(self):
+        """Invalid optimizer should raise ValueError."""
+        X, y, _ = _tweedie_data()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
+        with pytest.raises(ValueError, match="optimizer"):
+            estimate_tweedie_p(model, X, y, method="profile_opt", optimizer="bogus")
+
+    def test_joint_ml_not_implemented(self):
+        """method='joint_ml' should raise NotImplementedError."""
+        X, y, _ = _tweedie_data()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
+        with pytest.raises(NotImplementedError, match="joint_ml"):
+            estimate_tweedie_p(model, X, y, method="joint_ml")
+
+    def test_integrated_not_implemented(self):
+        """method='integrated' should raise NotImplementedError."""
+        X, y, _ = _tweedie_data()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
+        with pytest.raises(NotImplementedError, match="integrated"):
+            estimate_tweedie_p(model, X, y, method="integrated")
+
+
+# =====================================================================
+# Search trace
+# =====================================================================
+
+
+class TestSearchTrace:
+    """Tests for search_trace output across methods."""
+
+    def test_brent_has_trace(self):
+        """Brent should produce a trace with expected columns."""
+        X, y, _ = _tweedie_data(n=2000, seed=7)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
+        trace = result.search_trace
+        assert isinstance(trace, pd.DataFrame)
+        expected_cols = {"step", "p", "phi", "nll", "n_iter", "fit_converged", "source"}
+        assert set(trace.columns) == expected_cols
+        assert len(trace) >= 3
+        assert (trace["source"] == "brent").all()
+
+    def test_grid_trace_len_matches_n_grid(self):
+        """Grid trace should have exactly n_grid rows."""
+        X, y, _ = _tweedie_data(n=2000, seed=7)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        n_grid = 12
+        result = estimate_tweedie_p(model, X, y, method="grid", n_grid=n_grid, p_bounds=(1.1, 1.9))
+        assert len(result.search_trace) == n_grid
+        assert (result.search_trace["source"] == "grid").all()
+
+    def test_grid_refine_trace_has_both_sources(self):
+        """Grid-refine trace should have coarse and refine sources."""
+        X, y, _ = _tweedie_data(n=2000, seed=7)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = estimate_tweedie_p(
+            model, X, y, method="grid_refine", n_grid_coarse=8, p_bounds=(1.1, 1.9)
+        )
+        sources = set(result.search_trace["source"].unique())
+        assert "grid_coarse" in sources
+        assert "brent_refine" in sources
+
+    def test_profile_opt_trace_has_init(self):
+        """Profile-opt trace should have init source (optimizer evals may be cached)."""
+        X, y, _ = _tweedie_data(n=2000, seed=7)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = estimate_tweedie_p(model, X, y, method="profile_opt", p_bounds=(1.1, 1.9))
+        sources = set(result.search_trace["source"].unique())
+        assert "init" in sources
+        # Optimizer evals may hit cached init points, so "optimizer" source
+        # is not guaranteed but trace should have >= 3 init rows
+        assert len(result.search_trace) >= 3
+
+    def test_result_has_method_field(self):
+        """All results should have method and phi_method set."""
+        X, y, _ = _tweedie_data(n=2000, seed=7)
+        for method in ("brent", "grid", "grid_refine", "profile_opt"):
+            m = SuperGLM(
+                family=TweedieDistribution(p=1.5),
+                selection_penalty=0,
+                features={"x1": Numeric()},
+            )
+            result = estimate_tweedie_p(m, X, y, method=method, p_bounds=(1.1, 1.9))
+            assert result.method == method
+            assert result.phi_method == "pearson"
+
+
+# =====================================================================
+# Method agreement
+# =====================================================================
+
+
+class TestMethodAgreement:
+    """Cross-method agreement tests on clean synthetic data."""
+
+    def test_brent_vs_grid_agree(self):
+        """Brent and grid should agree within tolerance."""
+        X, y, _ = _tweedie_data(n=3000)
+
+        m1 = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
+        r1 = estimate_tweedie_p(m1, X, y, method="brent", p_bounds=(1.1, 1.9))
+
+        m2 = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
+        r2 = estimate_tweedie_p(m2, X, y, method="grid", n_grid=30, p_bounds=(1.1, 1.9))
+
+        np.testing.assert_allclose(r1.p_hat, r2.p_hat, atol=0.1)
+
+    def test_grid_refine_vs_brent_agree(self):
+        """Grid-refine and Brent should agree within tolerance."""
+        X, y, _ = _tweedie_data(n=3000)
+
+        m1 = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
+        r1 = estimate_tweedie_p(m1, X, y, method="brent", p_bounds=(1.1, 1.9))
+
+        m2 = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
+        r2 = estimate_tweedie_p(
+            m2, X, y, method="grid_refine", n_grid_coarse=10, p_bounds=(1.1, 1.9)
+        )
+
+        np.testing.assert_allclose(r1.p_hat, r2.p_hat, atol=0.1)
+
+    @pytest.mark.parametrize("method", ["brent", "grid", "grid_refine", "profile_opt"])
+    def test_all_methods_recover_p(self, method):
+        """All profile methods should recover p from clean synthetic data."""
+        X, y, p_true = _tweedie_data(n=3000)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
+        result = estimate_tweedie_p(model, X, y, method=method, p_bounds=(1.1, 1.9))
+        np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)

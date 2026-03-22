@@ -1,8 +1,17 @@
 """Tweedie profile likelihood — estimate p from data.
 
 For p ∈ (1, 2), the Tweedie distribution is a compound Poisson-Gamma.
-Given a configured SuperGLM, this module builds the design matrix once,
-then loops Brent iterations calling fit_pirls directly with warm starts.
+This module provides multiple search strategies for estimating the power
+parameter p via profile likelihood, plus exact Wright-Bessel logpdf
+evaluation and compound Poisson-Gamma simulation.
+
+Search methods:
+
+- ``"brent"`` (default): bounded scalar optimisation via scipy.
+- ``"grid"``: exhaustive grid search over p.
+- ``"grid_refine"``: coarse grid + local Brent refinement.
+- ``"profile_opt"``: general-purpose optimizer (L-BFGS-B, Powell) on
+  logit-transformed p.
 
 References
 ----------
@@ -17,9 +26,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
-from scipy.optimize import minimize_scalar
-from scipy.special import wright_bessel
+from scipy.optimize import minimize, minimize_scalar
+from scipy.special import expit, logit, wright_bessel
 
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
@@ -282,22 +292,47 @@ def _profile_phi(
 # Profile likelihood result
 # ---------------------------------------------------------------------------
 
+_TRACE_COLUMNS = ["step", "p", "phi", "nll", "n_iter", "fit_converged", "source"]
+
 
 @dataclass
 class TweedieProfileResult:
-    """Result of Tweedie power parameter estimation."""
+    """Result of Tweedie power parameter estimation.
+
+    Attributes
+    ----------
+    p_hat : float
+        Estimated power parameter.
+    phi_hat : float
+        Estimated dispersion at p_hat.
+    nll : float
+        Mean negative log-likelihood at (p_hat, phi_hat).
+    n_evaluations : int
+        Total number of profile evaluations.
+    converged : bool
+        Whether the search converged.
+    method : str
+        Search method used (``"brent"``, ``"grid"``, etc.).
+    phi_method : str
+        How phi was profiled (``"pearson"`` or ``"mle"``).
+    search_trace : DataFrame
+        Per-evaluation record with columns:
+        ``step, p, phi, nll, n_iter, fit_converged, source``.
+    """
 
     p_hat: float
     phi_hat: float
     nll: float
     n_evaluations: int
     converged: bool
-    cache: dict[float, float] = field(default_factory=dict)
+    method: str
+    phi_method: str
+    search_trace: pd.DataFrame
+    warnings: list[str] = field(default_factory=list)
 
-    # Stored to enable .ci()
+    # Stored for CI/plot
     _objective: Any = field(default=None, repr=False)
     _ll_scale: float = field(default=0.0, repr=False)
-
     _ci_cache: dict[float, tuple[float, float]] = field(default_factory=dict, repr=False)
 
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
@@ -326,15 +361,15 @@ class TweedieProfileResult:
     ):
         """Profile deviance plot for Tweedie power parameter p.
 
-        Evaluates the profile objective on a grid. Each grid point that
-        is not already cached requires a PIRLS refit.
+        Evaluates the profile objective on a dense grid for the curve, and
+        overlays the search evaluation points from ``search_trace``.
 
         Parameters
         ----------
         alpha : float
             Significance level for CI (default 0.05).
         n_points : int
-            Number of grid points for the curve.
+            Number of grid points for the smooth curve.
         ax : matplotlib Axes, optional
             Axes to plot on. If None, creates a new figure.
 
@@ -351,18 +386,16 @@ class TweedieProfileResult:
         import matplotlib.pyplot as plt
         from scipy.stats import chi2
 
-        # Snapshot original Brent evaluation points before CI/grid pollute cache
-        orig_cache = dict(self.cache)
-
         ci_lo, ci_hi = self.ci(alpha=alpha)
 
-        # Grid must cover CI and all cached Brent points
+        # Grid must cover CI and all search evaluation points
+        trace_ps = self.search_trace["p"].values
         margin = 0.2 * (ci_hi - ci_lo)
         grid_lo = max(1.01, ci_lo - margin)
         grid_hi = min(1.99, ci_hi + margin)
-        if orig_cache:
-            grid_lo = min(grid_lo, min(orig_cache.keys()) - 0.005)
-            grid_hi = max(grid_hi, max(orig_cache.keys()) + 0.005)
+        if len(trace_ps) > 0:
+            grid_lo = min(grid_lo, float(trace_ps.min()) - 0.005)
+            grid_hi = max(grid_hi, float(trace_ps.max()) + 0.005)
             grid_lo = max(1.01, grid_lo)
             grid_hi = min(1.99, grid_hi)
         p_grid = np.linspace(grid_lo, grid_hi, n_points)
@@ -379,21 +412,19 @@ class TweedieProfileResult:
 
         ax.plot(p_grid, deviance, color="steelblue", linewidth=1.5)
 
-        # Mark original Brent evaluation points (not grid/CI evals)
-        if orig_cache:
-            cache_ps = np.array(sorted(orig_cache.keys()))
-            cache_dev = (
-                2.0 * self._ll_scale * (np.array([orig_cache[p] for p in cache_ps]) - self.nll)
-            )
+        # Mark search evaluation points from trace
+        if len(trace_ps) > 0:
+            trace_nll = self.search_trace["nll"].values
+            trace_dev = 2.0 * self._ll_scale * (trace_nll - self.nll)
             ax.scatter(
-                cache_ps,
-                cache_dev,
+                trace_ps,
+                trace_dev,
                 color="darkorange",
                 s=35,
                 zorder=5,
                 edgecolors="white",
                 linewidths=0.5,
-                label=f"Brent evals ({len(cache_ps)})",
+                label=f"Evaluations ({len(trace_ps)})",
             )
 
         ax.axhline(
@@ -428,7 +459,495 @@ class TweedieProfileResult:
 
 
 # ---------------------------------------------------------------------------
-# Profile likelihood optimiser
+# Profile context — fit path
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ProfileContext:
+    """One-time setup + per-evaluation logic for profile p estimation (fit path).
+
+    All search methods share this context. It manages the design matrix,
+    solver dispatch, warm starts, and trace accumulation.
+    """
+
+    y_arr: NDArray
+    w_arr: NDArray
+    offset_arr: NDArray
+    dm: Any  # DesignMatrix
+    groups: list
+    link: Any
+    penalty: Any
+    use_direct: bool
+    lambda2: Any
+    direct_solve: str
+    phi_method: str
+    verbose: bool
+    ll_scale: float
+
+    # Mutable warm-start state
+    warm_beta: NDArray | None = field(default=None, repr=False)
+    warm_intercept: float | None = field(default=None, repr=False)
+    last_p_eval: float | None = field(default=None, repr=False)
+    last_mu: NDArray | None = field(default=None, repr=False)
+    last_edf: float | None = field(default=None, repr=False)
+
+    # Trace accumulator
+    trace_rows: list[dict] = field(default_factory=list, repr=False)
+    _nll_cache: dict[float, float] = field(default_factory=dict, repr=False)
+    n_evals: int = field(default=0, repr=False)
+
+    def evaluate(self, p: float, source: str = "") -> float:
+        """Fit at p, profile phi, record trace row, return mean NLL."""
+        from superglm.distributions import Tweedie
+
+        key = round(p, 6)
+        if key in self._nll_cache:
+            return self._nll_cache[key]
+
+        dist = Tweedie(p)
+        if self.use_direct:
+            result, _ = fit_irls_direct(
+                X=self.dm,
+                y=self.y_arr,
+                weights=self.w_arr,
+                family=dist,
+                link=self.link,
+                groups=self.groups,
+                lambda2=self.lambda2,
+                offset=self.offset_arr,
+                beta_init=self.warm_beta,
+                intercept_init=self.warm_intercept,
+                direct_solve=self.direct_solve,
+            )
+        else:
+            result = fit_pirls(
+                X=self.dm,
+                y=self.y_arr,
+                weights=self.w_arr,
+                family=dist,
+                link=self.link,
+                groups=self.groups,
+                penalty=self.penalty,
+                offset=self.offset_arr,
+                beta_init=self.warm_beta,
+                intercept_init=self.warm_intercept,
+            )
+
+        eta = stabilize_eta(
+            self.dm.matvec(result.beta) + result.intercept + self.offset_arr, self.link
+        )
+        mu = clip_mu(self.link.inverse(eta), dist)
+        df_resid = max(float(np.sum(self.w_arr)) - float(result.effective_df), 1.0)
+
+        phi, nll = _profile_phi(
+            self.y_arr,
+            mu,
+            p,
+            weights=self.w_arr,
+            df_resid=df_resid,
+            phi_method=self.phi_method,
+        )
+
+        # Update warm starts
+        self.warm_beta = result.beta
+        self.warm_intercept = result.intercept
+        self.last_p_eval = p
+        self.last_mu = mu
+        self.last_edf = float(result.effective_df)
+
+        # Record trace
+        self.trace_rows.append(
+            {
+                "step": self.n_evals,
+                "p": p,
+                "phi": phi,
+                "nll": nll,
+                "n_iter": result.n_iter,
+                "fit_converged": result.converged,
+                "source": source,
+            }
+        )
+        self._nll_cache[key] = nll
+        self.n_evals += 1
+
+        if self.verbose:
+            print(f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  iters={result.n_iter}")
+
+        return nll
+
+    def finalize(self, p_hat: float, method: str, converged: bool) -> TweedieProfileResult:
+        """Build result with final phi at p_hat and search_trace DataFrame."""
+        p_hat = round(p_hat, 6)
+        nll = self._nll_cache.get(p_hat, self.evaluate(p_hat, source="final"))
+
+        # Get phi at p_hat
+        if self.last_p_eval is not None and round(self.last_p_eval, 6) == p_hat:
+            mu_final = self.last_mu
+            edf_final = self.last_edf
+        else:
+            # One final fit at p_hat
+            self.evaluate(p_hat, source="final")
+            mu_final = self.last_mu
+            edf_final = self.last_edf
+
+        df_resid_final = max(float(np.sum(self.w_arr)) - float(edf_final), 1.0)
+        phi_hat, _ = _profile_phi(
+            self.y_arr,
+            mu_final,
+            p_hat,
+            weights=self.w_arr,
+            df_resid=df_resid_final,
+            phi_method=self.phi_method,
+        )
+
+        trace = pd.DataFrame(self.trace_rows, columns=_TRACE_COLUMNS)
+
+        return TweedieProfileResult(
+            p_hat=p_hat,
+            phi_hat=phi_hat,
+            nll=nll,
+            n_evaluations=self.n_evals,
+            converged=converged,
+            method=method,
+            phi_method=self.phi_method,
+            search_trace=trace,
+            _objective=self.evaluate,
+            _ll_scale=self.ll_scale,
+        )
+
+
+def _build_profile_context(
+    model,
+    X,
+    y,
+    sample_weight,
+    offset,
+    phi_method: str,
+    verbose: bool,
+) -> _ProfileContext:
+    """One-time setup: build design matrix, calibrate lambda, create context."""
+    from superglm.distributions import Tweedie
+
+    y_arr = np.asarray(y, dtype=np.float64)
+
+    if model._splines is not None and not model._specs:
+        model._auto_detect_features(X, sample_weight)
+
+    # Temporary p so _build_design_matrix can resolve the distribution.
+    # The design matrix itself doesn't depend on p.
+    saved_family = model.family
+    model.family = Tweedie(p=1.5)
+    y_arr, w_arr, offset_arr = model._build_design_matrix(X, y_arr, sample_weight, offset)
+    model.family = saved_family
+
+    if model.penalty.lambda1 is None:
+        model.penalty.lambda1 = model._compute_lambda_max(y_arr, w_arr) * 0.1
+
+    if offset_arr is None:
+        offset_arr = np.zeros(len(y_arr))
+
+    penalty = model.penalty
+    groups = model._groups
+    use_direct = penalty.lambda1 is not None and (
+        penalty.lambda1 == 0 or not penalty_has_targets(penalty, groups)
+    )
+
+    return _ProfileContext(
+        y_arr=y_arr,
+        w_arr=w_arr,
+        offset_arr=offset_arr,
+        dm=model._dm,
+        groups=groups,
+        link=model._link,
+        penalty=penalty,
+        use_direct=use_direct,
+        lambda2=model.lambda2,
+        direct_solve=getattr(model, "_direct_solve", "auto"),
+        phi_method=phi_method,
+        verbose=verbose,
+        ll_scale=float(len(y_arr)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Profile context — REML path
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ProfileContextREML:
+    """Per-evaluation logic for profile p estimation (REML path).
+
+    Each evaluation calls ``model.fit_reml()`` — no solver-level warm starts,
+    but shares the same dispatch interface as ``_ProfileContext``.
+    """
+
+    model: Any
+    X: Any
+    y: NDArray
+    sample_weight: Any
+    offset: Any
+    w_arr: NDArray
+    phi_method: str
+    verbose: bool
+    ll_scale: float
+
+    # Mutable state
+    last_p_eval: float | None = field(default=None, repr=False)
+    last_mu: NDArray | None = field(default=None, repr=False)
+    last_edf: float | None = field(default=None, repr=False)
+
+    # Trace accumulator
+    trace_rows: list[dict] = field(default_factory=list, repr=False)
+    _nll_cache: dict[float, float] = field(default_factory=dict, repr=False)
+    n_evals: int = field(default=0, repr=False)
+
+    def evaluate(self, p: float, source: str = "") -> float:
+        """Fit REML at p, profile phi, record trace row, return mean NLL."""
+        from superglm.distributions import Tweedie
+
+        key = round(p, 6)
+        if key in self._nll_cache:
+            return self._nll_cache[key]
+
+        self.model.family = Tweedie(p=p)
+        self.model.fit_reml(self.X, self.y, sample_weight=self.sample_weight, offset=self.offset)
+
+        mu = np.maximum(self.model.predict(self.X), 1e-10)
+        df_resid = max(float(np.sum(self.w_arr)) - float(self.model.result.effective_df), 1.0)
+        phi, nll = _profile_phi(
+            self.y,
+            mu,
+            p,
+            weights=self.w_arr,
+            df_resid=df_resid,
+            phi_method=self.phi_method,
+        )
+
+        self.last_p_eval = p
+        self.last_mu = mu
+        self.last_edf = float(self.model.result.effective_df)
+
+        n_iter = (
+            self.model._reml_result.n_reml_iter
+            if hasattr(self.model, "_reml_result") and self.model._reml_result is not None
+            else 0
+        )
+
+        self.trace_rows.append(
+            {
+                "step": self.n_evals,
+                "p": p,
+                "phi": phi,
+                "nll": nll,
+                "n_iter": n_iter,
+                "fit_converged": self.model.result.converged,
+                "source": source,
+            }
+        )
+        self._nll_cache[key] = nll
+        self.n_evals += 1
+
+        if self.verbose:
+            print(f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  reml_iters={n_iter}")
+
+        return nll
+
+    def finalize(self, p_hat: float, method: str, converged: bool) -> TweedieProfileResult:
+        """Build result with final phi at p_hat and search_trace DataFrame."""
+        p_hat = round(p_hat, 6)
+
+        # Ensure we have mu at p_hat
+        if self.last_p_eval is None or round(self.last_p_eval, 6) != p_hat:
+            self.evaluate(p_hat, source="final")
+
+        nll = self._nll_cache[p_hat]
+
+        df_resid_final = max(float(np.sum(self.w_arr)) - float(self.last_edf), 1.0)
+        phi_hat, _ = _profile_phi(
+            self.y,
+            self.last_mu,
+            p_hat,
+            weights=self.w_arr,
+            df_resid=df_resid_final,
+            phi_method=self.phi_method,
+        )
+
+        trace = pd.DataFrame(self.trace_rows, columns=_TRACE_COLUMNS)
+
+        return TweedieProfileResult(
+            p_hat=p_hat,
+            phi_hat=phi_hat,
+            nll=nll,
+            n_evaluations=self.n_evals,
+            converged=converged,
+            method=method,
+            phi_method=self.phi_method,
+            search_trace=trace,
+            _objective=self.evaluate,
+            _ll_scale=self.ll_scale,
+        )
+
+
+def _build_profile_context_reml(
+    model,
+    X,
+    y,
+    sample_weight,
+    offset,
+    phi_method: str,
+    verbose: bool,
+) -> _ProfileContextREML:
+    """Build context for REML-based profile estimation."""
+    y_np = np.asarray(y, dtype=np.float64)
+    w_arr = (
+        np.asarray(sample_weight, dtype=np.float64)
+        if sample_weight is not None
+        else np.ones(len(y_np))
+    )
+    return _ProfileContextREML(
+        model=model,
+        X=X,
+        y=y_np,
+        sample_weight=sample_weight,
+        offset=offset,
+        w_arr=w_arr,
+        phi_method=phi_method,
+        verbose=verbose,
+        ll_scale=float(len(y_np)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Search methods
+# ---------------------------------------------------------------------------
+
+
+def _search_brent(
+    ctx: _ProfileContext | _ProfileContextREML,
+    p_bounds: tuple[float, float],
+    xatol: float,
+    maxiter: int,
+) -> TweedieProfileResult:
+    """Bounded scalar Brent search over p."""
+    result = minimize_scalar(
+        lambda p: ctx.evaluate(p, source="brent"),
+        bounds=p_bounds,
+        method="bounded",
+        options={"xatol": xatol, "maxiter": maxiter},
+    )
+    converged = result.success if hasattr(result, "success") else True
+    return ctx.finalize(result.x, method="brent", converged=converged)
+
+
+def _search_grid(
+    ctx: _ProfileContext | _ProfileContextREML,
+    p_bounds: tuple[float, float],
+    n_grid: int,
+    grid: NDArray | None,
+) -> TweedieProfileResult:
+    """Exhaustive grid search over p."""
+    if grid is not None:
+        p_grid = np.asarray(grid, dtype=np.float64)
+    else:
+        p_grid = np.linspace(p_bounds[0], p_bounds[1], n_grid)
+
+    nll_values = np.array([ctx.evaluate(p, source="grid") for p in p_grid])
+    best_idx = int(np.argmin(nll_values))
+    p_hat = float(p_grid[best_idx])
+
+    return ctx.finalize(p_hat, method="grid", converged=True)
+
+
+def _search_grid_refine(
+    ctx: _ProfileContext | _ProfileContextREML,
+    p_bounds: tuple[float, float],
+    n_grid_coarse: int,
+    xatol: float,
+    maxiter: int,
+) -> TweedieProfileResult:
+    """Coarse grid search + local Brent refinement."""
+    # Stage 1: coarse grid
+    p_coarse = np.linspace(p_bounds[0], p_bounds[1], n_grid_coarse)
+    nll_coarse = np.array([ctx.evaluate(p, source="grid_coarse") for p in p_coarse])
+    best_idx = int(np.argmin(nll_coarse))
+    p_best = float(p_coarse[best_idx])
+
+    # Stage 2: refine around best region
+    step = (p_bounds[1] - p_bounds[0]) / max(n_grid_coarse - 1, 1)
+    refine_lo = max(p_bounds[0], p_best - step)
+    refine_hi = min(p_bounds[1], p_best + step)
+
+    result = minimize_scalar(
+        lambda p: ctx.evaluate(p, source="brent_refine"),
+        bounds=(refine_lo, refine_hi),
+        method="bounded",
+        options={"xatol": xatol, "maxiter": maxiter},
+    )
+
+    converged = result.success if hasattr(result, "success") else True
+    return ctx.finalize(result.x, method="grid_refine", converged=converged)
+
+
+def _search_profile_opt(
+    ctx: _ProfileContext | _ProfileContextREML,
+    p_bounds: tuple[float, float],
+    optimizer: str,
+    xatol: float,
+    maxiter: int,
+) -> TweedieProfileResult:
+    """Optimizer-driven profile search with logit-transformed p."""
+    _VALID_OPTIMIZERS = {"L-BFGS-B", "Powell"}
+    if optimizer not in _VALID_OPTIMIZERS:
+        raise ValueError(
+            f"optimizer={optimizer!r} is not valid, expected one of {sorted(_VALID_OPTIMIZERS)}"
+        )
+
+    lo, hi = p_bounds
+
+    def p_to_t(p: float) -> float:
+        """Map p ∈ (lo, hi) → t ∈ ℝ via logit."""
+        return float(logit((p - lo) / (hi - lo)))
+
+    def t_to_p(t: float) -> float:
+        """Map t ∈ ℝ → p ∈ (lo, hi) via expit."""
+        return float(lo + (hi - lo) * expit(t))
+
+    # 3-point initialization grid to pick starting point
+    init_ps = [lo + 0.1 * (hi - lo), 0.5 * (lo + hi), hi - 0.1 * (hi - lo)]
+    init_nlls = [ctx.evaluate(p, source="init") for p in init_ps]
+    best_init = init_ps[int(np.argmin(init_nlls))]
+    t0 = p_to_t(best_init)
+
+    def objective(t_arr):
+        t = float(t_arr[0]) if hasattr(t_arr, "__len__") else float(t_arr)
+        p = t_to_p(t)
+        return ctx.evaluate(p, source="optimizer")
+
+    opts: dict[str, Any] = {"maxiter": maxiter}
+    if optimizer == "L-BFGS-B":
+        opts["ftol"] = 1e-8
+        opts["gtol"] = 1e-6
+    elif optimizer == "Powell":
+        opts["ftol"] = 1e-8
+        opts["xtol"] = xatol
+
+    result = minimize(
+        objective,
+        x0=[t0],
+        method=optimizer,
+        options=opts,
+    )
+
+    p_hat = t_to_p(float(result.x[0]))
+    converged = bool(result.success)
+
+    return ctx.finalize(p_hat, method="profile_opt", converged=converged)
+
+
+# ---------------------------------------------------------------------------
+# Profile likelihood optimiser — public entry point
 # ---------------------------------------------------------------------------
 
 
@@ -445,17 +964,16 @@ def estimate_tweedie_p(
     verbose: bool = False,
     fit_mode: str = "fit",
     phi_method: str = "pearson",
+    method: str = "brent",
+    n_grid: int = 20,
+    grid: NDArray | None = None,
+    n_grid_coarse: int = 10,
+    optimizer: str = "L-BFGS-B",
 ) -> TweedieProfileResult:
     """Estimate the Tweedie power parameter via profile likelihood.
 
-    Dispatches to one of two internal paths based on *fit_mode*:
-
-    - ``"fit"`` (default): builds the design matrix once and calls
-      ``fit_pirls`` directly with warm starts for each candidate p.
-    - ``"fit_reml"``: calls ``model.fit_reml()`` for each candidate p,
-      re-estimating smoothing parameters at every evaluation.
-
-    Both paths use bounded Brent (scipy minimize_scalar) over p.
+    Builds the design matrix once and searches over candidate p values,
+    fitting the GLM at each candidate with warm starts.
 
     Parameters
     ----------
@@ -467,15 +985,13 @@ def estimate_tweedie_p(
     y : array-like
         Response variable.
     sample_weight : array-like, optional
-        Frequency weights (sample_weight). Must be frequency weights, not
-        variance weights — phi estimation and the profile likelihood
-        for p assume frequency weight scaling.
+        Frequency weights. Must be frequency weights, not variance weights.
     offset : array-like, optional
         Offset added to the linear predictor.
     p_bounds : tuple
         Bounds for p search, default (1.05, 1.95).
     xatol : float
-        Tolerance for Brent's method.
+        Tolerance for scalar optimisers (Brent).
     maxiter : int
         Maximum iterations for the optimiser.
     verbose : bool
@@ -484,6 +1000,22 @@ def estimate_tweedie_p(
         Fitting regime for each candidate p evaluation.
     phi_method : {"pearson", "mle"}
         How to profile out ``phi`` at each candidate ``p``.
+    method : {"brent", "grid", "grid_refine", "profile_opt", "joint_ml", "integrated"}
+        Search strategy. ``"brent"`` (default) uses bounded scalar
+        optimisation. ``"grid"`` does exhaustive grid search.
+        ``"grid_refine"`` does a coarse grid + local Brent refinement.
+        ``"profile_opt"`` uses a general-purpose optimizer (L-BFGS-B or
+        Powell) on logit-transformed p.
+    n_grid : int
+        Number of grid points for ``method="grid"`` (default 20).
+    grid : array-like, optional
+        Explicit p grid for ``method="grid"``. Overrides ``n_grid``.
+    n_grid_coarse : int
+        Number of coarse grid points for ``method="grid_refine"``
+        (default 10).
+    optimizer : str
+        Optimizer backend for ``method="profile_opt"``. One of
+        ``"L-BFGS-B"`` (default) or ``"Powell"``.
 
     Returns
     -------
@@ -499,6 +1031,12 @@ def estimate_tweedie_p(
             "Use families.tweedie(p=...) to create one."
         )
 
+    _VALID_METHODS = {"brent", "grid", "grid_refine", "profile_opt", "joint_ml", "integrated"}
+    if method not in _VALID_METHODS:
+        raise ValueError(
+            f"method={method!r} is not valid, expected one of {sorted(_VALID_METHODS)}"
+        )
+
     _VALID_FIT_MODES = {"fit", "fit_reml"}
     if fit_mode not in _VALID_FIT_MODES:
         raise ValueError(
@@ -510,325 +1048,31 @@ def estimate_tweedie_p(
             f"phi_method={phi_method!r} is not valid, expected one of {sorted(_VALID_PHI_METHODS)}"
         )
 
+    if method in ("joint_ml", "integrated"):
+        raise NotImplementedError(
+            f"method={method!r} is not yet implemented. "
+            f"Use one of: 'brent', 'grid', 'grid_refine', 'profile_opt'."
+        )
+
+    # Build context
     if fit_mode == "fit_reml":
-        return _estimate_tweedie_p_reml(
-            model,
-            X,
-            y,
-            sample_weight,
-            offset,
-            p_bounds=p_bounds,
-            xatol=xatol,
-            maxiter=maxiter,
-            verbose=verbose,
-            phi_method=phi_method,
-        )
-
-    return _estimate_tweedie_p_fit(
-        model,
-        X,
-        y,
-        sample_weight,
-        offset,
-        p_bounds=p_bounds,
-        xatol=xatol,
-        maxiter=maxiter,
-        verbose=verbose,
-        phi_method=phi_method,
-    )
-
-
-def _estimate_tweedie_p_fit(
-    model,
-    X,
-    y,
-    sample_weight,
-    offset,
-    *,
-    p_bounds,
-    xatol,
-    maxiter,
-    verbose,
-    phi_method,
-) -> TweedieProfileResult:
-    """Profile p using fit_pirls (original path)."""
-    from superglm.distributions import Tweedie
-
-    y = np.asarray(y, dtype=np.float64)
-
-    # --- One-time setup: build design matrix and calibrate lambda ---
-    if model._splines is not None and not model._specs:
-        model._auto_detect_features(X, sample_weight)
-
-    # Set a temporary p so _build_design_matrix can resolve the distribution.
-    # The design matrix itself doesn't depend on p at all.
-    saved_family = model.family
-    model.family = Tweedie(p=1.5)  # midpoint, any valid value works
-    y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, sample_weight, offset)
-    model.family = saved_family
-
-    # Calibrate lambda1 once if not already set
-    if model.penalty.lambda1 is None:
-        model.penalty.lambda1 = model._compute_lambda_max(y_arr, w_arr) * 0.1
-
-    # Ensure offset is an array for eta computation
-    if offset_arr is None:
-        offset_arr = np.zeros(len(y_arr))
-
-    dm = model._dm
-    groups = model._groups
-    link = model._link
-    penalty = model.penalty
-
-    # Use direct solver when lambda1=0 (no L1 penalty → no BCD needed),
-    # matching the dispatcher in fit_ops.fit().
-    _use_direct = penalty.lambda1 is not None and (
-        penalty.lambda1 == 0 or not penalty_has_targets(penalty, groups)
-    )
-
-    # Warm-start state (updated across Brent evaluations)
-    warm_beta = None
-    warm_intercept = None
-    # Track the last PIRLS result for final phi estimation
-    last_p_eval = None
-    last_mu = None
-    last_edf = None
-
-    cache: dict[float, float] = {}
-    n_evals = 0
-
-    def objective(p: float) -> float:
-        nonlocal n_evals, warm_beta, warm_intercept, last_p_eval, last_mu, last_edf
-        key = round(p, 6)
-        if key in cache:
-            return cache[key]
-
-        dist = Tweedie(p)
-        if _use_direct:
-            result, _ = fit_irls_direct(
-                X=dm,
-                y=y_arr,
-                weights=w_arr,
-                family=dist,
-                link=link,
-                groups=groups,
-                lambda2=model.lambda2,
-                offset=offset_arr,
-                beta_init=warm_beta,
-                intercept_init=warm_intercept,
-                direct_solve=getattr(model, "_direct_solve", "auto"),
-            )
-        else:
-            result = fit_pirls(
-                X=dm,
-                y=y_arr,
-                weights=w_arr,
-                family=dist,
-                link=link,
-                groups=groups,
-                penalty=penalty,
-                offset=offset_arr,
-                beta_init=warm_beta,
-                intercept_init=warm_intercept,
-            )
-
-        eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
-        mu = clip_mu(link.inverse(eta), dist)
-        # sum(weights) - edf for frequency-weighted data (matches statsmodels)
-        df_resid = max(float(np.sum(w_arr)) - float(result.effective_df), 1.0)
-
-        phi, nll = _profile_phi(
-            y_arr,
-            mu,
-            p,
-            weights=w_arr,
-            df_resid=df_resid,
-            phi_method=phi_method,
-        )
-
-        # Update warm starts for next evaluation
-        warm_beta = result.beta
-        warm_intercept = result.intercept
-        last_p_eval = p
-        last_mu = mu
-        last_edf = float(result.effective_df)
-
-        cache[key] = nll
-        n_evals += 1
-        if verbose:
-            print(f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  pirls_iters={result.n_iter}")
-        return nll
-
-    result = minimize_scalar(
-        objective,
-        bounds=p_bounds,
-        method="bounded",
-        options={"xatol": xatol, "maxiter": maxiter},
-    )
-
-    p_hat = round(result.x, 6)
-    nll = result.fun
-
-    # Get phi at p_hat. If the last evaluation was at p_hat, reuse mu;
-    # otherwise do one final (warm-started) fit.
-    if last_p_eval is not None and round(last_p_eval, 6) == p_hat:
-        mu_final = last_mu
-        edf_final = last_edf
+        ctx = _build_profile_context_reml(model, X, y, sample_weight, offset, phi_method, verbose)
     else:
-        dist = Tweedie(p_hat)
-        if _use_direct:
-            final_result, _ = fit_irls_direct(
-                X=dm,
-                y=y_arr,
-                weights=w_arr,
-                family=dist,
-                link=link,
-                groups=groups,
-                lambda2=model.lambda2,
-                offset=offset_arr,
-                beta_init=warm_beta,
-                intercept_init=warm_intercept,
-                direct_solve=getattr(model, "_direct_solve", "auto"),
-            )
-        else:
-            final_result = fit_pirls(
-                X=dm,
-                y=y_arr,
-                weights=w_arr,
-                family=dist,
-                link=link,
-                groups=groups,
-                penalty=penalty,
-                offset=offset_arr,
-                beta_init=warm_beta,
-                intercept_init=warm_intercept,
-            )
-        eta = stabilize_eta(
-            dm.matvec(final_result.beta) + final_result.intercept + offset_arr, link
-        )
-        mu_final = clip_mu(link.inverse(eta), dist)
-        edf_final = float(final_result.effective_df)
+        ctx = _build_profile_context(model, X, y, sample_weight, offset, phi_method, verbose)
 
-    df_resid_final = max(float(np.sum(w_arr)) - float(edf_final), 1.0)
-    phi_hat, _ = _profile_phi(
-        y_arr,
-        mu_final,
-        p_hat,
-        weights=w_arr,
-        df_resid=df_resid_final,
-        phi_method=phi_method,
-    )
-
-    return TweedieProfileResult(
-        p_hat=p_hat,
-        phi_hat=phi_hat,
-        nll=nll,
-        n_evaluations=n_evals,
-        converged=result.success if hasattr(result, "success") else True,
-        cache=cache,
-        _objective=objective,
-        _ll_scale=float(len(y_arr)),
-    )
+    # Dispatch search
+    if method == "brent":
+        return _search_brent(ctx, p_bounds, xatol, maxiter)
+    if method == "grid":
+        return _search_grid(ctx, p_bounds, n_grid, grid)
+    if method == "grid_refine":
+        return _search_grid_refine(ctx, p_bounds, n_grid_coarse, xatol, maxiter)
+    return _search_profile_opt(ctx, p_bounds, optimizer, xatol, maxiter)
 
 
-def _estimate_tweedie_p_reml(
-    model,
-    X,
-    y,
-    sample_weight,
-    offset,
-    *,
-    p_bounds,
-    xatol,
-    maxiter,
-    verbose,
-    phi_method,
-) -> TweedieProfileResult:
-    """Profile p using fit_reml for each candidate."""
-    from superglm.distributions import Tweedie
-
-    y_np = np.asarray(y, dtype=np.float64)
-    w_arr = (
-        np.asarray(sample_weight, dtype=np.float64)
-        if sample_weight is not None
-        else np.ones(len(y_np))
-    )
-
-    cache: dict[float, float] = {}
-    n_evals = 0
-    last_p_eval = None
-    last_mu = None
-    last_edf = None
-
-    def objective(p: float) -> float:
-        nonlocal n_evals, last_p_eval, last_mu, last_edf
-        key = round(p, 6)
-        if key in cache:
-            return cache[key]
-
-        # Set p and refit via REML
-        model.family = Tweedie(p=p)
-        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
-
-        mu = np.maximum(model.predict(X), 1e-10)
-        df_resid = max(float(np.sum(w_arr)) - float(model.result.effective_df), 1.0)
-        phi, nll = _profile_phi(
-            y_np,
-            mu,
-            p,
-            weights=w_arr,
-            df_resid=df_resid,
-            phi_method=phi_method,
-        )
-
-        last_p_eval = p
-        last_mu = mu
-        last_edf = float(model.result.effective_df)
-
-        cache[key] = nll
-        n_evals += 1
-        if verbose:
-            reml_iters = model._reml_result.n_reml_iter if hasattr(model, "_reml_result") else "?"
-            print(f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  reml_iters={reml_iters}")
-        return nll
-
-    result = minimize_scalar(
-        objective,
-        bounds=p_bounds,
-        method="bounded",
-        options={"xatol": xatol, "maxiter": maxiter},
-    )
-
-    p_hat = round(result.x, 6)
-    nll = result.fun
-
-    # Ensure we have mu at p_hat for phi
-    if last_p_eval is None or round(last_p_eval, 6) != p_hat:
-        model.family = Tweedie(p=p_hat)
-        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
-        last_mu = np.maximum(model.predict(X), 1e-10)
-        last_edf = float(model.result.effective_df)
-
-    df_resid_final = max(float(np.sum(w_arr)) - float(last_edf), 1.0)
-    phi_hat, _ = _profile_phi(
-        y_np,
-        last_mu,
-        p_hat,
-        weights=w_arr,
-        df_resid=df_resid_final,
-        phi_method=phi_method,
-    )
-
-    return TweedieProfileResult(
-        p_hat=p_hat,
-        phi_hat=phi_hat,
-        nll=nll,
-        n_evaluations=n_evals,
-        converged=result.success if hasattr(result, "success") else True,
-        cache=cache,
-        _objective=objective,
-        _ll_scale=float(len(y_np)),
-    )
+# ---------------------------------------------------------------------------
+# Profile likelihood confidence interval
+# ---------------------------------------------------------------------------
 
 
 def profile_ci_p(

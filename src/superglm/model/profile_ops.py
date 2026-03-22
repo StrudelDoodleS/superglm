@@ -18,6 +18,7 @@ def estimate_p(
     *,
     fit_mode="fit",
     phi_method="pearson",
+    method="brent",
     **kwargs,
 ):
     """Estimate Tweedie p via profile likelihood, refit, and return result."""
@@ -47,6 +48,7 @@ def estimate_p(
         offset=offset,
         fit_mode=resolved_mode,
         phi_method=phi_method,
+        method=method,
         **kwargs,
     )
     model.family = Tweedie(p=result.p_hat)
