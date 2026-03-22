@@ -440,7 +440,7 @@ def build_coef_rows(
 
         elif isinstance(spec, Categorical):
             gedf = _get_group_edf_map()
-            cat_edf = gedf.get(g.name, float(g.size))
+            cat_edf = gedf.get(g.name, 0.0) if active else 0.0
             for i, level in enumerate(spec._non_base):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
@@ -661,6 +661,7 @@ def build_coef_rows(
 
         elif isinstance(spec, Numeric):
             gedf = _get_group_edf_map()
+            num_edf = gedf.get(g.name, 0.0) if active else 0.0
             coef_display = float(b_g[0])
             se_display = float(se_g[0])
             z, p, ci_lo, ci_hi = _compute_coef_stats(coef_display, se_display, alpha)
@@ -671,7 +672,7 @@ def build_coef_rows(
                     coef=coef_display,
                     se=se_display,
                     z=z,
-                    edf=gedf.get(g.name, 1.0),
+                    edf=num_edf,
                     p=p,
                     ci_low=ci_lo,
                     ci_high=ci_hi,

@@ -415,11 +415,18 @@ class ModelSummary:
             f"SuperGLM Results</td></tr>"
         )
 
+        # Compute EDF breakdown (same as ASCII path)
+        smooth_edf_html = sum(r.edf for r in self._coef_rows if r.is_spline and r.edf is not None)
+        total_edf_html = info["effective_df"]
+        edf_str_html = _fmt(total_edf_html)
+        if smooth_edf_html > 0:
+            edf_str_html = f"{_fmt(total_edf_html)} ({_fmt(smooth_edf_html)} smooth)"
+
         # Header rows
         conv_str = f"{info['converged']} ({info['n_iter']} iter)"
         header_rows = [
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
-            ("Link", info["link"], "Df (effective)", _fmt(info["effective_df"])),
+            ("Link", info["link"], "Df (effective)", edf_str_html),
             ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
             ("Scale (phi)", _fmt(info["phi"]), "Pearson chi2", _fmt(info.get("pearson_chi2", ""))),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
