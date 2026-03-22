@@ -638,8 +638,15 @@ class TestSearchMethods:
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
 
     def test_profile_opt_recovers_p(self):
-        """method='profile_opt' should recover p."""
-        X, y, p_true = _tweedie_data()
+        """method='profile_opt' should recover p far from init grid.
+
+        Regression test: with 6-decimal cache rounding, L-BFGS-B finite-
+        difference probes aliased to the same key, making the gradient
+        appear zero. The optimizer would stop at the best init point (1.5)
+        instead of actually searching. Using p_true=1.35 (far from 1.5)
+        and checking for optimizer trace rows catches this.
+        """
+        X, y, p_true = _tweedie_data(p_true=1.35, seed=99)
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
             selection_penalty=0,
@@ -648,6 +655,11 @@ class TestSearchMethods:
         result = estimate_tweedie_p(model, X, y, method="profile_opt", p_bounds=(1.1, 1.9))
         assert result.method == "profile_opt"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
+        # Must have optimizer evals beyond init — proves the cache didn't
+        # flatten the objective for L-BFGS-B
+        sources = set(result.search_trace["source"].unique())
+        assert "optimizer" in sources, f"Only sources: {sources}; optimizer never explored"
+        assert result.n_evaluations > 3, f"Only {result.n_evaluations} evals — stopped at init"
 
     def test_profile_opt_powell(self):
         """optimizer='Powell' should also recover p."""

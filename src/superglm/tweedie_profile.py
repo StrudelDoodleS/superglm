@@ -501,7 +501,7 @@ class _ProfileContext:
         """Fit at p, profile phi, record trace row, return mean NLL."""
         from superglm.distributions import Tweedie
 
-        key = round(p, 6)
+        key = round(p, 12)
         if key in self._nll_cache:
             return self._nll_cache[key]
 
@@ -578,11 +578,11 @@ class _ProfileContext:
 
     def finalize(self, p_hat: float, method: str, converged: bool) -> TweedieProfileResult:
         """Build result with final phi at p_hat and search_trace DataFrame."""
-        p_hat = round(p_hat, 6)
+        p_hat = round(p_hat, 12)
         nll = self._nll_cache.get(p_hat, self.evaluate(p_hat, source="final"))
 
         # Get phi at p_hat
-        if self.last_p_eval is not None and round(self.last_p_eval, 6) == p_hat:
+        if self.last_p_eval is not None and round(self.last_p_eval, 12) == p_hat:
             mu_final = self.last_mu
             edf_final = self.last_edf
         else:
@@ -707,7 +707,7 @@ class _ProfileContextREML:
         """Fit REML at p, profile phi, record trace row, return mean NLL."""
         from superglm.distributions import Tweedie
 
-        key = round(p, 6)
+        key = round(p, 12)
         if key in self._nll_cache:
             return self._nll_cache[key]
 
@@ -756,10 +756,10 @@ class _ProfileContextREML:
 
     def finalize(self, p_hat: float, method: str, converged: bool) -> TweedieProfileResult:
         """Build result with final phi at p_hat and search_trace DataFrame."""
-        p_hat = round(p_hat, 6)
+        p_hat = round(p_hat, 12)
 
         # Ensure we have mu at p_hat
-        if self.last_p_eval is None or round(self.last_p_eval, 6) != p_hat:
+        if self.last_p_eval is None or round(self.last_p_eval, 12) != p_hat:
             self.evaluate(p_hat, source="final")
 
         nll = self._nll_cache[p_hat]
