@@ -1401,7 +1401,10 @@ class ModelMetrics:
             XtWX_inv_aug=XtWX_inv_aug,
             active_groups=active_groups,
             known_scale=self._known_scale,
-            group_edf_map=getattr(self._model, "_group_edf", None),
+            # Pass None so build_coef_rows computes EDF from this
+            # ModelMetrics instance's own active info (which may use
+            # different weights/data than the fit).
+            group_edf_map=None,
             reml_lambdas=getattr(self._model, "_reml_lambdas", None),
             lambda2=self._model.lambda2,
             n_obs=self.n_obs,

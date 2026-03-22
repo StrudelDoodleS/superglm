@@ -1247,3 +1247,39 @@ class TestSummaryInferenceCache:
         # Refit with different penalty
         model.fit(X, y, sample_weight=np.ones(len(y)))
         assert "_fit_inference_info" not in model.__dict__
+
+    def test_metrics_summary_uses_own_edf_not_fit_cache(self):
+        """ModelMetrics.summary() must compute EDF from its own weights, not fit cache."""
+        rng = np.random.default_rng(123)
+        n = 400
+        x = rng.uniform(0, 10, n)
+        y = rng.poisson(np.exp(0.5 + 0.3 * np.sin(x))).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+        w_fit = np.ones(n)
+        model.fit_reml(X, y, sample_weight=w_fit)
+
+        # Different weights — EDF should differ from fit-time values
+        w_alt = rng.uniform(0.5, 2.0, n)
+        met = model.metrics(X, y, sample_weight=w_alt)
+
+        # Get the spline EDF from metrics' own influence diagonal
+        edf_met, _ = met._influence_edf
+        _, _, _, _, active_groups_met = met._active_info
+        ag = active_groups_met[0]
+        met_edf = float(np.sum(edf_met[ag.sl]))
+
+        # Get the spline EDF from the summary coef row
+        coef_rows = met._build_coef_rows()
+        spline_row = next(r for r in coef_rows if r.is_spline)
+        summary_edf = spline_row.edf
+
+        # Summary EDF must match metrics' own EDF, not fit-time _group_edf
+        np.testing.assert_allclose(
+            summary_edf, met_edf, rtol=1e-10, err_msg="ModelMetrics.summary() used fit-time EDF"
+        )

@@ -309,18 +309,53 @@ def fit_active_info(model):
     return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
 
 
+def _build_active_penalty(model, active_groups):
+    """Build the p_active × p_active penalty matrix S in active-column space."""
+    from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+    from superglm.metrics import _second_diff_penalty
+
+    lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
+    p_a = sum(ag.size for ag in active_groups)
+    S = np.zeros((p_a, p_a))
+
+    for ag in active_groups:
+        g_idx = next(i for i, g in enumerate(model._groups) if g.name == ag.name)
+        gm = model._dm.group_matrices[g_idx]
+        if not ag.penalized:
+            continue
+        if not isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+            continue
+        omega = gm.omega
+        if omega is None:
+            continue
+        lam_g = lam2.get(ag.name, 0.0) if isinstance(lam2, dict) else lam2
+        R_inv = gm.R_inv
+        if omega is None:
+            p_b = R_inv.shape[0]
+            omega = _second_diff_penalty(p_b)
+        S[ag.sl, ag.sl] = lam_g * R_inv.T @ omega @ R_inv
+
+    return S
+
+
 def fit_inference_info(model):
     """Precomputed inference quantities derived from _fit_active_info.
 
+    Works entirely in p×p coefficient space — no O(n·p²) data passes.
+    Recovers X'WX from (X'WX+S)^{-1} and the penalty S, then derives
+    EDF and a Cholesky R factor for smooth tests.
+
     Returns a dict with:
-        R_a : weighted QR factor of X_a
+        R_a : (p_active, p_active) upper-triangular Cholesky factor of X'WX
         edf : per-coefficient EDF vector
         edf1 : Wood's alternative EDF vector
         group_edf_map : per-group summed EDF dict
     """
-    X_a, W, XtWX_inv, _, active_groups = model._fit_active_info
+    import scipy.linalg
 
-    if X_a.shape[1] == 0:
+    _, _, XtWX_inv, _, active_groups = model._fit_active_info
+
+    if XtWX_inv.shape[0] == 0:
         return {
             "R_a": np.empty((0, 0)),
             "edf": np.array([]),
@@ -328,12 +363,26 @@ def fit_inference_info(model):
             "group_edf_map": {},
         }
 
-    _, R_a = np.linalg.qr(X_a * np.sqrt(W)[:, None], mode="reduced")
+    p_a = XtWX_inv.shape[0]
 
-    XtWX = X_a.T @ (X_a * W[:, None])
-    F = XtWX_inv @ XtWX
+    # Recover X'WX = (X'WX+S)^{-1}^{-1} - S, all O(p³)
+    S = _build_active_penalty(model, active_groups)
+    H = np.linalg.inv(XtWX_inv)  # H = X'WX + S
+    XtWX = H - S
+
+    # EDF: F = (X'WX+S)^{-1} X'WX = I - (X'WX+S)^{-1} S
+    F = np.eye(p_a) - XtWX_inv @ S
     edf = np.diag(F)
     edf1 = 2.0 * edf - np.sum(F * F, axis=1)
+
+    # R factor via Cholesky of X'WX (O(p³) instead of O(n·p²) QR)
+    try:
+        R_a = scipy.linalg.cholesky(XtWX, lower=False, check_finite=False)
+    except np.linalg.LinAlgError:
+        # Near-singular: eigendecompose and build pseudo-R
+        eigvals, eigvecs = np.linalg.eigh(XtWX)
+        eigvals = np.maximum(eigvals, 0.0)
+        R_a = (eigvecs * np.sqrt(eigvals)).T  # p×p, R'R = XtWX
 
     group_edf_map: dict[str, float] = {}
     for ag in active_groups:
