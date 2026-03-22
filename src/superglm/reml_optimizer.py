@@ -1598,7 +1598,7 @@ def run_reml_once(
             )
             active_groups = list(groups)
         elif not use_direct:
-            XtWX_S_inv, active_groups = _penalised_xtwx_inv_gram(
+            XtWX_S_inv, _, active_groups = _penalised_xtwx_inv_gram(
                 beta, W, dm.group_matrices, groups, lambdas
             )
 

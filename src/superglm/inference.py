@@ -215,10 +215,13 @@ def compute_coef_covariance(
     dmu_deta = link.deriv_inverse(eta)
     W = fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
 
-    XtWX_S_inv, active_groups = _penalised_xtwx_inv_gram(
+    XtWX_S_inv, XtWX_S_inv_aug, active_groups = _penalised_xtwx_inv_gram(
         beta, W, dm.group_matrices, groups, lambda2
     )
-    return result.phi * XtWX_S_inv, active_groups
+    # Return the feature block of the augmented inverse for correct marginal SEs
+    # that account for intercept estimation uncertainty.
+    Cov_features = result.phi * XtWX_S_inv_aug[1:, 1:]
+    return Cov_features, active_groups
 
 
 # ── Centering ─────────────────────────────────────────────────────

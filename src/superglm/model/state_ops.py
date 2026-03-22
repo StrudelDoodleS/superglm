@@ -173,7 +173,7 @@ def summary(model, alpha: float = 0.05):
         model_info["tweedie_profile_nll"] = tw_pr.nll
 
     # Coef rows from shared builder
-    X_a, W, XtWX_inv, active_groups = model._fit_active_info
+    X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = model._fit_active_info
     known_scale = getattr(model._distribution, "scale_known", True)
     coef_rows = build_coef_rows(
         groups=model._groups,
@@ -183,6 +183,7 @@ def summary(model, alpha: float = 0.05):
         X_a=X_a,
         W=W,
         XtWX_inv=XtWX_inv,
+        XtWX_inv_aug=XtWX_inv_aug,
         active_groups=active_groups,
         known_scale=known_scale,
         group_edf_map=model._group_edf,
@@ -193,7 +194,7 @@ def summary(model, alpha: float = 0.05):
         monotone_repairs=getattr(model, "_monotone_repairs", None),
     )
 
-    # Standard errors for backward compat dict access
+    # Standard errors for backward compat dict access (use augmented inverse)
     phi = res.phi
     se_dict: dict[str, NDArray] = {}
     se_raw_dict: dict[str, NDArray] = {}
@@ -208,7 +209,8 @@ def summary(model, alpha: float = 0.05):
                 se_dict[g.name] = np.zeros(g.size)
                 se_raw_dict[g.name] = np.zeros(g.size)
             else:
-                var_diag = np.diag(XtWX_inv[ag.sl, ag.sl])
+                aug_sl = slice(1 + ag.start, 1 + ag.end)
+                var_diag = np.diag(XtWX_inv_aug[aug_sl, aug_sl])
                 se_raw_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
                 se_dict[g.name] = np.sqrt(np.maximum(phi * var_diag, 0.0))
 
@@ -297,10 +299,10 @@ def fit_active_info(model):
     W = model._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
-    X_a, XtWX_inv, active_groups, _ = _penalised_xtwx_inv(
+    X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
         model.result.beta, W, model._dm.group_matrices, model._groups, lam2
     )
-    return X_a, W, XtWX_inv, active_groups
+    return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
 
 
 def group_edf(model) -> dict[str, float] | None:
@@ -323,7 +325,7 @@ def group_edf(model) -> dict[str, float] | None:
     W = model._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
-    X_a, XtWX_S_inv, active_groups, _ = _penalised_xtwx_inv(
+    X_a, XtWX_S_inv, _, active_groups, _ = _penalised_xtwx_inv(
         beta, W, model._dm.group_matrices, model._groups, lam2
     )
 
