@@ -284,7 +284,7 @@ class TestSelectCovariance:
         )
         m.fit(X, y, sample_weight=sample_weight)
         metrics = m.metrics(X, y, sample_weight=sample_weight)
-        X_a, W, XtWX_inv, active_groups = metrics._active_info
+        X_a, W, XtWX_inv, _, active_groups = metrics._active_info
 
         # Covariance should be square, matching total active columns
         assert XtWX_inv.shape[0] == XtWX_inv.shape[1]
@@ -302,7 +302,7 @@ class TestSelectCovariance:
         )
         m.fit(X, y, sample_weight=sample_weight)
         metrics = m.metrics(X, y, sample_weight=sample_weight)
-        _, _, _, active_groups = metrics._active_info
+        _, _, _, _, active_groups = metrics._active_info
 
         linear_ags = [ag for ag in active_groups if ag.subgroup_type == "linear"]
         assert len(linear_ags) == 1
@@ -568,7 +568,7 @@ class TestSelectNoiseSuppressionREML:
         # Compute per-group EDF via metrics machinery
         metrics_obj = model.metrics(X, y)
         edf, _ = metrics_obj._influence_edf
-        _, _, _, active_groups = metrics_obj._active_info
+        _, _, _, _, active_groups = metrics_obj._active_info
         group_edf = {ag.name: float(np.sum(edf[ag.sl])) for ag in active_groups}
 
         # Noise groups: EDF < 0.02 (inactive groups have EDF = 0 by construction)
@@ -634,7 +634,7 @@ class TestSplitLinearSnapWeakSignal:
         # Compute per-group EDF
         m = model.metrics(X.iloc[:n_train], y[:n_train])
         edf, _ = m._influence_edf
-        _, _, _, active_groups = m._active_info
+        _, _, _, _, active_groups = m._active_info
         group_edf = {ag.name: float(np.sum(edf[ag.sl])) for ag in active_groups}
         for g in model._groups:
             if g.name not in group_edf:
