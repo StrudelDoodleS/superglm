@@ -172,17 +172,20 @@ def summary(model, alpha: float = 0.05):
         model_info["tweedie_p_method"] = "Profile (exact)"
         model_info["tweedie_profile_nll"] = tw_pr.nll
 
-    # Coef rows from shared builder — use precomputed inference info
-    X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = model._fit_active_info
+    # Coef rows from shared builder — use precomputed inference info.
+    # Only touches _fit_inference_info (gram path, O(p³)), never _fit_active_info.
     inf = model._fit_inference_info
+    XtWX_inv = inf["XtWX_inv"]
+    XtWX_inv_aug = inf["XtWX_inv_aug"]
+    active_groups = inf["active_groups"]
     known_scale = getattr(model._distribution, "scale_known", True)
     coef_rows = build_coef_rows(
         groups=model._groups,
         specs=model._specs,
         interaction_specs=model._interaction_specs,
         result=res,
-        X_a=X_a,
-        W=W,
+        X_a=np.empty((0, 0)),  # unused with precomputed values
+        W=inf["W"],
         XtWX_inv=XtWX_inv,
         XtWX_inv_aug=XtWX_inv_aug,
         active_groups=active_groups,
@@ -339,13 +342,18 @@ def _build_active_penalty(model, active_groups):
 
 
 def fit_inference_info(model):
-    """Precomputed inference quantities derived from _fit_active_info.
+    """All coefficient-space inference quantities for model.summary().
 
-    Works entirely in p×p coefficient space — no O(n·p²) data passes.
-    Recovers X'WX from (X'WX+S)^{-1} and the penalty S, then derives
-    EDF and a Cholesky R factor for smooth tests.
+    Self-contained: computes working weights W, then uses the gram path
+    (per-group gram blocks + p³ inversion) instead of materialising the
+    full n×p active design matrix.  This makes model.summary() O(n + p³)
+    instead of O(n·p²).
 
     Returns a dict with:
+        W : (n,) working weights
+        XtWX_inv : (p_active, p_active) = (X'WX + S)^{-1}
+        XtWX_inv_aug : (p_active+1, p_active+1) augmented inverse incl. intercept
+        active_groups : list of GroupSlice re-indexed to active columns
         R_a : (p_active, p_active) upper-triangular Cholesky factor of X'WX
         edf : per-coefficient EDF vector
         edf1 : Wood's alternative EDF vector
@@ -353,17 +361,40 @@ def fit_inference_info(model):
     """
     import scipy.linalg
 
-    _, _, XtWX_inv, _, active_groups = model._fit_active_info
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+    from superglm.metrics import _penalised_xtwx_inv_gram
 
-    if XtWX_inv.shape[0] == 0:
+    # Compute working weights — one O(n) pass
+    eta = model._dm.matvec(model.result.beta) + model.result.intercept
+    if model._fit_offset is not None:
+        eta = eta + model._fit_offset
+    eta = stabilize_eta(eta, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    V = model._distribution.variance(mu)
+    dmu_deta = model._link.deriv_inverse(eta)
+    W = model._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
+
+    lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
+
+    # Gram path: per-group gram + cross-gram blocks, then invert.
+    # O(n·p_g² per block + p³) — avoids the full n×p QR.
+    XtWX_inv, XtWX_inv_aug, active_groups = _penalised_xtwx_inv_gram(
+        model.result.beta, W, model._dm.group_matrices, model._groups, lam2
+    )
+
+    p_a = XtWX_inv.shape[0]
+    if p_a == 0:
         return {
+            "W": W,
+            "XtWX_inv": XtWX_inv,
+            "XtWX_inv_aug": XtWX_inv_aug,
+            "active_groups": active_groups,
             "R_a": np.empty((0, 0)),
             "edf": np.array([]),
             "edf1": np.array([]),
             "group_edf_map": {},
         }
-
-    p_a = XtWX_inv.shape[0]
 
     # Recover X'WX = (X'WX+S)^{-1}^{-1} - S, all O(p³)
     S = _build_active_penalty(model, active_groups)
@@ -389,6 +420,10 @@ def fit_inference_info(model):
         group_edf_map[ag.name] = float(np.sum(edf[ag.sl]))
 
     return {
+        "W": W,
+        "XtWX_inv": XtWX_inv,
+        "XtWX_inv_aug": XtWX_inv_aug,
+        "active_groups": active_groups,
         "R_a": R_a,
         "edf": edf,
         "edf1": edf1,
