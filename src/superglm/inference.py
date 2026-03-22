@@ -215,7 +215,7 @@ def compute_coef_covariance(
     dmu_deta = link.deriv_inverse(eta)
     W = fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
 
-    XtWX_S_inv, XtWX_S_inv_aug, active_groups = _penalised_xtwx_inv_gram(
+    XtWX_S_inv, XtWX_S_inv_aug, active_groups, _, _ = _penalised_xtwx_inv_gram(
         beta, W, dm.group_matrices, groups, lambda2
     )
     # Return the feature block of the augmented inverse for correct marginal SEs

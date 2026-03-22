@@ -193,7 +193,7 @@ class TestPenalisedXtwxInvOmega:
         _, inv_qr, aug_qr, groups_qr, _ = _penalised_xtwx_inv(
             beta, W, model._dm.group_matrices, model._groups, lam_dict
         )
-        inv_gram, aug_gram, groups_gram = _penalised_xtwx_inv_gram(
+        inv_gram, aug_gram, groups_gram, _, _ = _penalised_xtwx_inv_gram(
             beta, W, model._dm.group_matrices, model._groups, lam_dict
         )
 

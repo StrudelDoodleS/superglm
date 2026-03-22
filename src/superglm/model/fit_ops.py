@@ -154,6 +154,7 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
     # Invalidate cached properties from previous fit
     model.__dict__.pop("_coef_covariance", None)
     model.__dict__.pop("_fit_active_info", None)
+    model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
 
     # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed)
@@ -240,6 +241,7 @@ def fit_path(
     offset = model._fit_offset
     model.__dict__.pop("_coef_covariance", None)
     model.__dict__.pop("_fit_active_info", None)
+    model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
     if not model_has_lambda1_targets(model):
         raise ValueError(
@@ -610,6 +612,7 @@ def fit_reml(
     offset = model._fit_offset
     model.__dict__.pop("_coef_covariance", None)
     model.__dict__.pop("_fit_active_info", None)
+    model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
 
     # Auto-calibrate lambda1 if not set
