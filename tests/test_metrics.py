@@ -1274,6 +1274,37 @@ class TestSummaryInferenceCache:
         total_edf = sum(coef_edfs)
         assert total_edf < 1.5, f"Aliased columns should share ~1 EDF, got {total_edf}"
 
+    def test_summary_rank_deficient_smooth_term(self):
+        """Pseudo-R fallback must produce valid Wood test results for smooth terms.
+
+        Regression test for the path: singular XtWX → eigendecomposition pseudo-R
+        (state_ops.py) → wood_test_smooth (metrics.py). Two identical splines on
+        the same data force XtWX to be rank-deficient in the active system.
+        """
+        rng = np.random.default_rng(99)
+        n = 400
+        x = rng.uniform(0, 10, n)
+        X = pd.DataFrame({"x": x, "x_dup": x})
+        y = rng.poisson(np.exp(0.5 + 0.3 * np.sin(x))).astype(float)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=8), "x_dup": Spline(n_knots=8)},
+        )
+        model.fit(X, y)
+
+        # Must not raise LinAlgError
+        s = model.summary()
+        smooth_rows = [r for r in s._coef_rows if r.is_spline and r.active]
+        assert len(smooth_rows) >= 1
+
+        # Wood test p-values should be finite (not NaN/Inf)
+        for r in smooth_rows:
+            assert r.wald_p is not None, f"{r.name}: p-value is None"
+            assert np.isfinite(r.wald_p), f"{r.name}: p-value is {r.wald_p}"
+            assert 0.0 <= r.wald_p <= 1.0, f"{r.name}: p-value out of range: {r.wald_p}"
+
     def test_summary_near_aliased_edf_matches_metrics(self):
         """Near-aliased EDF from model.summary() should match model.metrics()."""
         rng = np.random.default_rng(88)
