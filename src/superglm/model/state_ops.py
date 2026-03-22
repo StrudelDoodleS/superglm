@@ -172,8 +172,9 @@ def summary(model, alpha: float = 0.05):
         model_info["tweedie_p_method"] = "Profile (exact)"
         model_info["tweedie_profile_nll"] = tw_pr.nll
 
-    # Coef rows from shared builder
+    # Coef rows from shared builder — use precomputed inference info
     X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = model._fit_active_info
+    inf = model._fit_inference_info
     known_scale = getattr(model._distribution, "scale_known", True)
     coef_rows = build_coef_rows(
         groups=model._groups,
@@ -186,12 +187,15 @@ def summary(model, alpha: float = 0.05):
         XtWX_inv_aug=XtWX_inv_aug,
         active_groups=active_groups,
         known_scale=known_scale,
-        group_edf_map=model._group_edf,
+        group_edf_map=inf["group_edf_map"],
         reml_lambdas=getattr(model, "_reml_lambdas", None),
         lambda2=model.lambda2,
         n_obs=n,
         alpha=alpha,
         monotone_repairs=getattr(model, "_monotone_repairs", None),
+        precomputed_R_a=inf["R_a"],
+        precomputed_edf=inf["edf"],
+        precomputed_edf1=inf["edf1"],
     )
 
     # Standard errors for backward compat dict access (use augmented inverse)
@@ -305,38 +309,46 @@ def fit_active_info(model):
     return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
 
 
-def group_edf(model) -> dict[str, float] | None:
-    """Per-group effective degrees of freedom via F = (X'WX+S)^{-1} X'WX."""
-    from superglm.distributions import clip_mu
-    from superglm.links import stabilize_eta
-    from superglm.metrics import _penalised_xtwx_inv
+def fit_inference_info(model):
+    """Precomputed inference quantities derived from _fit_active_info.
 
-    if model._dm is None or model._result is None:
-        return None
-
-    beta = model._result.beta
-    eta = model._dm.matvec(beta) + model._result.intercept
-    if model._fit_offset is not None:
-        eta = eta + model._fit_offset
-    eta = stabilize_eta(eta, model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution)
-    V = model._distribution.variance(mu)
-    dmu_deta = model._link.deriv_inverse(eta)
-    W = model._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
-
-    lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
-    X_a, XtWX_S_inv, _, active_groups, _ = _penalised_xtwx_inv(
-        beta, W, model._dm.group_matrices, model._groups, lam2
-    )
+    Returns a dict with:
+        R_a : weighted QR factor of X_a
+        edf : per-coefficient EDF vector
+        edf1 : Wood's alternative EDF vector
+        group_edf_map : per-group summed EDF dict
+    """
+    X_a, W, XtWX_inv, _, active_groups = model._fit_active_info
 
     if X_a.shape[1] == 0:
-        return {}
+        return {
+            "R_a": np.empty((0, 0)),
+            "edf": np.array([]),
+            "edf1": np.array([]),
+            "group_edf_map": {},
+        }
+
+    _, R_a = np.linalg.qr(X_a * np.sqrt(W)[:, None], mode="reduced")
 
     XtWX = X_a.T @ (X_a * W[:, None])
-    F = XtWX_S_inv @ XtWX
-    edf_vec = np.diag(F)
+    F = XtWX_inv @ XtWX
+    edf = np.diag(F)
+    edf1 = 2.0 * edf - np.sum(F * F, axis=1)
 
-    out: dict[str, float] = {}
+    group_edf_map: dict[str, float] = {}
     for ag in active_groups:
-        out[ag.name] = float(np.sum(edf_vec[ag.sl]))
-    return out
+        group_edf_map[ag.name] = float(np.sum(edf[ag.sl]))
+
+    return {
+        "R_a": R_a,
+        "edf": edf,
+        "edf1": edf1,
+        "group_edf_map": group_edf_map,
+    }
+
+
+def group_edf(model) -> dict[str, float] | None:
+    """Per-group effective degrees of freedom via F = (X'WX+S)^{-1} X'WX."""
+    if model._dm is None or model._result is None:
+        return None
+    return model._fit_inference_info["group_edf_map"]

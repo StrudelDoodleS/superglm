@@ -266,6 +266,10 @@ def build_coef_rows(
     n_obs: int,
     alpha: float = 0.05,
     monotone_repairs: dict | None = None,
+    # Precomputed inference quantities (avoids recomputing QR/EDF)
+    precomputed_R_a: NDArray | None = None,
+    precomputed_edf: NDArray | None = None,
+    precomputed_edf1: NDArray | None = None,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
 
@@ -337,9 +341,12 @@ def build_coef_rows(
         )
     )
 
-    # Lazily computed R factor and influence edf (only needed for smooth tests)
-    _R_factor = None
+    # Lazily computed R factor and influence edf (only needed for smooth tests).
+    # When precomputed values are provided, use them directly.
+    _R_factor = precomputed_R_a
     _influence_edf = None
+    if precomputed_edf is not None and precomputed_edf1 is not None:
+        _influence_edf = (precomputed_edf, precomputed_edf1)
 
     def _get_R_factor():
         nonlocal _R_factor
@@ -363,8 +370,8 @@ def build_coef_rows(
                 _influence_edf = (edf, edf1)
         return _influence_edf
 
-    # Per-group EDF map: sum of per-coefficient edf within each group's columns
-    _group_edf_cache: dict[str, float] | None = None
+    # Per-group EDF map: use precomputed group_edf_map when provided.
+    _group_edf_cache: dict[str, float] | None = group_edf_map
 
     def _get_group_edf_map() -> dict[str, float]:
         nonlocal _group_edf_cache

@@ -1208,3 +1208,42 @@ class TestModelSummaryAPI:
         assert "standard_errors" in s
         assert "coefficient_se" in s["standard_errors"]
         assert "coefficient_se_raw" in s["standard_errors"]
+
+
+class TestSummaryInferenceCache:
+    """Tests for the shared fit-inference cache used by summary()."""
+
+    def test_second_summary_does_not_recompute_qr(self, fitted_poisson):
+        """Second summary() call should reuse cached R_a, not redo QR."""
+        model, X, y, _ = fitted_poisson
+        # First call populates caches
+        s1 = model.summary()
+
+        # Monkeypatch np.linalg.qr to raise if called
+        import unittest.mock
+
+        with unittest.mock.patch("numpy.linalg.qr", side_effect=AssertionError("QR recomputed")):
+            s2 = model.summary()
+
+        # Both summaries should have identical coef rows
+        for r1, r2 in zip(s1._coef_rows, s2._coef_rows):
+            assert r1.name == r2.name
+            if r1.se is not None:
+                assert r1.se == pytest.approx(r2.se)
+
+    def test_group_edf_matches_inference_cache(self, fitted_poisson):
+        """_group_edf should return the same values as _fit_inference_info."""
+        model, _, _, _ = fitted_poisson
+        gedf = model._group_edf
+        inf = model._fit_inference_info
+        assert gedf == inf["group_edf_map"]
+
+    def test_cache_invalidated_after_refit(self, fitted_poisson):
+        """Refitting should clear cached inference info."""
+        model, X, y, _ = fitted_poisson
+        _ = model._fit_inference_info  # populate cache
+        assert "_fit_inference_info" in model.__dict__
+
+        # Refit with different penalty
+        model.fit(X, y, sample_weight=np.ones(len(y)))
+        assert "_fit_inference_info" not in model.__dict__

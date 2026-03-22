@@ -352,6 +352,10 @@ class SuperGLM:
         return state_ops.fit_active_info(self)
 
     @cached_property
+    def _fit_inference_info(self):
+        return state_ops.fit_inference_info(self)
+
+    @cached_property
     def _group_edf(self):
         return state_ops.group_edf(self)
 
