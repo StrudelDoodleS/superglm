@@ -227,7 +227,8 @@ def _penalised_xtwx_inv_gram(
     M = XtWX + S
     eigvals, eigvecs = np.linalg.eigh(M)
     threshold = 1e-6 * max(eigvals.max(), 1e-12)
-    inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
+    with np.errstate(divide="ignore"):
+        inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
     XtWX_S_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
 
     # Augmented (p+1)×(p+1) inverse including intercept row/column.
@@ -244,7 +245,8 @@ def _penalised_xtwx_inv_gram(
     M_aug[1:, 1:] = M  # XtWX + S
     eigvals_aug, eigvecs_aug = np.linalg.eigh(M_aug)
     threshold_aug = 1e-6 * max(eigvals_aug.max(), 1e-12)
-    inv_eigvals_aug = np.where(eigvals_aug > threshold_aug, 1.0 / eigvals_aug, 0.0)
+    with np.errstate(divide="ignore"):
+        inv_eigvals_aug = np.where(eigvals_aug > threshold_aug, 1.0 / eigvals_aug, 0.0)
     XtWX_S_inv_aug = (eigvecs_aug * inv_eigvals_aug[None, :]) @ eigvecs_aug.T
 
     return XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, XtWX, S
