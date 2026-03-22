@@ -1213,16 +1213,19 @@ class TestModelSummaryAPI:
 class TestSummaryInferenceCache:
     """Tests for the shared fit-inference cache used by summary()."""
 
-    def test_second_summary_does_not_recompute_qr(self, fitted_poisson):
-        """Second summary() call should reuse cached R_a, not redo QR."""
+    def test_second_summary_does_not_recompute_gram(self, fitted_poisson):
+        """Second summary() call should reuse cached inference info."""
         model, X, y, _ = fitted_poisson
         # First call populates caches
         s1 = model.summary()
 
-        # Monkeypatch np.linalg.qr to raise if called
+        # Monkeypatch the gram path to raise if called again
         import unittest.mock
 
-        with unittest.mock.patch("numpy.linalg.qr", side_effect=AssertionError("QR recomputed")):
+        with unittest.mock.patch(
+            "superglm.model.state_ops.fit_inference_info",
+            side_effect=AssertionError("inference recomputed"),
+        ):
             s2 = model.summary()
 
         # Both summaries should have identical coef rows
@@ -1247,6 +1250,58 @@ class TestSummaryInferenceCache:
         # Refit with different penalty
         model.fit(X, y, sample_weight=np.ones(len(y)))
         assert "_fit_inference_info" not in model.__dict__
+
+    def test_summary_rank_deficient_active_system(self):
+        """summary() must not crash when active columns are aliased."""
+        rng = np.random.default_rng(77)
+        n = 300
+        x1 = rng.standard_normal(n)
+        X = pd.DataFrame({"x1": x1, "x2": x1})  # exact duplicate
+        y = rng.poisson(np.exp(0.5 + 0.3 * x1)).astype(float)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        model.fit(X, y)
+        # Must not raise LinAlgError
+        s = model.summary()
+        assert len(s._coef_rows) > 0
+
+        # EDF should sum to ~1 (one effective parameter, aliased)
+        coef_edfs = [r.edf for r in s._coef_rows if r.edf is not None and r.name != "Intercept"]
+        total_edf = sum(coef_edfs)
+        assert total_edf < 1.5, f"Aliased columns should share ~1 EDF, got {total_edf}"
+
+    def test_summary_near_aliased_edf_matches_metrics(self):
+        """Near-aliased EDF from model.summary() should match model.metrics()."""
+        rng = np.random.default_rng(88)
+        n = 500
+        x1 = rng.standard_normal(n)
+        x2 = x1 + 1e-6 * rng.standard_normal(n)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        y = rng.poisson(np.exp(0.5 + 0.3 * x1)).astype(float)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        model.fit(X, y)
+
+        s = model.summary()
+        met = model.metrics(X, y)
+        met_rows = met._build_coef_rows()
+
+        for sr, mr in zip(s._coef_rows, met_rows):
+            if sr.edf is not None and mr.edf is not None:
+                np.testing.assert_allclose(
+                    sr.edf,
+                    mr.edf,
+                    atol=0.05,
+                    err_msg=f"EDF mismatch for {sr.name}",
+                )
 
     def test_metrics_summary_uses_own_edf_not_fit_cache(self):
         """ModelMetrics.summary() must compute EDF from its own weights, not fit cache."""

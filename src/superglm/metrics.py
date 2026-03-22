@@ -154,7 +154,7 @@ def _penalised_xtwx_inv_gram(
     group_matrices: list,
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
-) -> tuple[NDArray, NDArray, list[GroupSlice]]:
+) -> tuple[NDArray, NDArray, list[GroupSlice], NDArray | None, NDArray | None]:
     """Fast (X'WX + S)^{-1} via per-group gram matrices.
 
     Same result as ``_penalised_xtwx_inv`` but avoids forming the dense
@@ -171,6 +171,8 @@ def _penalised_xtwx_inv_gram(
     XtWX_S_inv_aug : (p_active+1, p_active+1) inverse of augmented system
         including intercept row/column.
     active_groups : list of GroupSlice re-indexed to active columns.
+    XtWX : (p_active, p_active) X'WX gram matrix, or None if p_active == 0.
+    S : (p_active, p_active) penalty matrix, or None if p_active == 0.
     """
     # Identify active groups
     active_gms: list = []
@@ -199,7 +201,7 @@ def _penalised_xtwx_inv_gram(
     if p_a == 0:
         w_sum = float(np.sum(W))
         aug_inv = np.array([[1.0 / w_sum]]) if w_sum > 0 else np.array([[0.0]])
-        return np.empty((0, 0)), aug_inv, []
+        return np.empty((0, 0)), aug_inv, [], None, None
 
     # Build X'WX block-by-block: gram for diagonal, cross_gram for off-diagonal.
     # For discretized groups this is O(n_bins) per block instead of O(n·p²).
@@ -245,7 +247,7 @@ def _penalised_xtwx_inv_gram(
     inv_eigvals_aug = np.where(eigvals_aug > threshold_aug, 1.0 / eigvals_aug, 0.0)
     XtWX_S_inv_aug = (eigvecs_aug * inv_eigvals_aug[None, :]) @ eigvecs_aug.T
 
-    return XtWX_S_inv, XtWX_S_inv_aug, active_groups_out
+    return XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, XtWX, S
 
 
 def build_coef_rows(

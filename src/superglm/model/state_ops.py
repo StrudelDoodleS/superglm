@@ -312,35 +312,6 @@ def fit_active_info(model):
     return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
 
 
-def _build_active_penalty(model, active_groups):
-    """Build the p_active × p_active penalty matrix S in active-column space."""
-    from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
-    from superglm.metrics import _second_diff_penalty
-
-    lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
-    p_a = sum(ag.size for ag in active_groups)
-    S = np.zeros((p_a, p_a))
-
-    for ag in active_groups:
-        g_idx = next(i for i, g in enumerate(model._groups) if g.name == ag.name)
-        gm = model._dm.group_matrices[g_idx]
-        if not ag.penalized:
-            continue
-        if not isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
-            continue
-        omega = gm.omega
-        if omega is None:
-            continue
-        lam_g = lam2.get(ag.name, 0.0) if isinstance(lam2, dict) else lam2
-        R_inv = gm.R_inv
-        if omega is None:
-            p_b = R_inv.shape[0]
-            omega = _second_diff_penalty(p_b)
-        S[ag.sl, ag.sl] = lam_g * R_inv.T @ omega @ R_inv
-
-    return S
-
-
 def fit_inference_info(model):
     """All coefficient-space inference quantities for model.summary().
 
@@ -379,7 +350,9 @@ def fit_inference_info(model):
 
     # Gram path: per-group gram + cross-gram blocks, then invert.
     # O(n·p_g² per block + p³) — avoids the full n×p QR.
-    XtWX_inv, XtWX_inv_aug, active_groups = _penalised_xtwx_inv_gram(
+    # Returns XtWX and S directly so we don't need to recover them
+    # from the (possibly truncated) pseudo-inverse.
+    XtWX_inv, XtWX_inv_aug, active_groups, XtWX, S = _penalised_xtwx_inv_gram(
         model.result.beta, W, model._dm.group_matrices, model._groups, lam2
     )
 
@@ -396,13 +369,9 @@ def fit_inference_info(model):
             "group_edf_map": {},
         }
 
-    # Recover X'WX = (X'WX+S)^{-1}^{-1} - S, all O(p³)
-    S = _build_active_penalty(model, active_groups)
-    H = np.linalg.inv(XtWX_inv)  # H = X'WX + S
-    XtWX = H - S
-
-    # EDF: F = (X'WX+S)^{-1} X'WX = I - (X'WX+S)^{-1} S
-    F = np.eye(p_a) - XtWX_inv @ S
+    # EDF: F = (X'WX+S)^{-1} X'WX — use XtWX directly from the gram path,
+    # which is correct even when XtWX_inv is a truncated pseudo-inverse.
+    F = XtWX_inv @ XtWX
     edf = np.diag(F)
     edf1 = 2.0 * edf - np.sum(F * F, axis=1)
 
