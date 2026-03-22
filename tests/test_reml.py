@@ -157,14 +157,15 @@ class TestPenalisedXtwxInvOmega:
         W = w * dmu**2 / V
 
         # Scalar lambda2 should match dict with same value
-        _, inv_scalar, _, _ = _penalised_xtwx_inv(
+        _, inv_scalar, aug_scalar, _, _ = _penalised_xtwx_inv(
             beta, W, model._dm.group_matrices, model._groups, 0.1
         )
         lam_dict = {g.name: 0.1 for g in model._groups}
-        _, inv_dict, _, _ = _penalised_xtwx_inv(
+        _, inv_dict, aug_dict, _, _ = _penalised_xtwx_inv(
             beta, W, model._dm.group_matrices, model._groups, lam_dict
         )
         np.testing.assert_allclose(inv_scalar, inv_dict, atol=1e-10)
+        np.testing.assert_allclose(aug_scalar, aug_dict, atol=1e-10)
 
     def test_gram_matches_qr(self, poisson_data):
         """_penalised_xtwx_inv_gram gives same result as _penalised_xtwx_inv."""
@@ -189,15 +190,16 @@ class TestPenalisedXtwxInvOmega:
 
         lam_dict = {g.name: 0.1 for g in model._groups}
 
-        _, inv_qr, groups_qr, _ = _penalised_xtwx_inv(
+        _, inv_qr, aug_qr, groups_qr, _ = _penalised_xtwx_inv(
             beta, W, model._dm.group_matrices, model._groups, lam_dict
         )
-        inv_gram, groups_gram = _penalised_xtwx_inv_gram(
+        inv_gram, aug_gram, groups_gram = _penalised_xtwx_inv_gram(
             beta, W, model._dm.group_matrices, model._groups, lam_dict
         )
 
         assert len(groups_qr) == len(groups_gram)
         np.testing.assert_allclose(inv_qr, inv_gram, atol=1e-8)
+        np.testing.assert_allclose(aug_qr, aug_gram, atol=1e-8)
 
 
 # ── _compute_R_inv override ──────────────────────────────────────
@@ -276,7 +278,7 @@ class TestMgcvStyleSmoothTestInput:
 
         row = next(r for r in metrics._build_coef_rows() if r.name == "Noise2")
 
-        X_a, W, XtWX_inv, active_groups = metrics._active_info
+        X_a, W, XtWX_inv, _, active_groups = metrics._active_info
         R_a = metrics._active_R_factor
         _, edf1 = metrics._influence_edf
         ag = next(a for a in active_groups if a.name == "Noise2")

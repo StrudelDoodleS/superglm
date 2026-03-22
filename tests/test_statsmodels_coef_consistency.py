@@ -128,6 +128,31 @@ def print_comparison(title, sm_result, sm_names, sg_model):
     print()
 
 
+def assert_coef_and_se_match(sm_result, sg_model, atol_coef=1e-4, atol_se=1e-3):
+    """Assert coefficients AND standard errors match between statsmodels and SuperGLM."""
+    sm_params = sm_result.params
+    sm_bse = sm_result.bse  # Standard errors from statsmodels
+
+    sg_intercept = sg_model._result.intercept
+    sg_beta = sg_model._result.beta
+
+    # Compare intercept
+    np.testing.assert_allclose(sg_intercept, sm_params[0], atol=atol_coef,
+                               err_msg="Intercept coef mismatch")
+
+    # Compare beta (features)
+    np.testing.assert_allclose(sg_beta, sm_params[1:], atol=atol_coef,
+                               err_msg="Feature coefs mismatch")
+
+    # Compare SEs via summary coef table
+    summary = sg_model.summary()
+    sg_ses = [row.se for row in summary._coef_rows]
+    sm_ses = list(sm_bse)
+
+    np.testing.assert_allclose(sg_ses, sm_ses, atol=atol_se,
+                               err_msg="Standard errors mismatch")
+
+
 # ══════════════════════════════════════════════════════════════
 # TEST 1: All numeric factors
 # ══════════════════════════════════════════════════════════════
@@ -136,6 +161,8 @@ num_features = {"x1": Numeric(), "x2": Numeric()}
 sm_res1, sm_names1 = fit_statsmodels(df, y, ["x1", "x2"], cat_cols=[])
 sg_model1 = fit_superglm(df, y, num_features)
 print_comparison("All Numeric", sm_res1, sm_names1, sg_model1)
+assert_coef_and_se_match(sm_res1, sg_model1)
+print("✓ Coefs and SEs match statsmodels")
 
 # ══════════════════════════════════════════════════════════════
 # TEST 2: All categorical factors
@@ -148,6 +175,8 @@ cat_features = {
 sm_res2, sm_names2 = fit_statsmodels(df, y, ["cat_a", "cat_b"], cat_cols=["cat_a", "cat_b"])
 sg_model2 = fit_superglm(df, y, cat_features)
 print_comparison("All Categorical", sm_res2, sm_names2, sg_model2)
+assert_coef_and_se_match(sm_res2, sg_model2)
+print("✓ Coefs and SEs match statsmodels")
 
 # ══════════════════════════════════════════════════════════════
 # TEST 3: Mixed (numeric + categorical)
@@ -162,3 +191,5 @@ mixed_features = {
 sm_res3, sm_names3 = fit_statsmodels(df, y, ["x1", "x2", "cat_a", "cat_b"], cat_cols=["cat_a", "cat_b"])
 sg_model3 = fit_superglm(df, y, mixed_features)
 print_comparison("Mixed (Numeric + Categorical)", sm_res3, sm_names3, sg_model3)
+assert_coef_and_se_match(sm_res3, sg_model3)
+print("✓ Coefs and SEs match statsmodels")

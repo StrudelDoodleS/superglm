@@ -34,7 +34,7 @@ def _penalised_xtwx_inv(
     group_matrices: list,
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
-) -> tuple[NDArray, NDArray, list[GroupSlice], list]:
+) -> tuple[NDArray, NDArray, NDArray, list[GroupSlice], list]:
     """Compute (X'WX + S)^{-1} via augmented QR + truncated SVD.
 
     Shared by ``model._coef_covariance`` and ``ModelMetrics._active_info``.
@@ -53,6 +53,9 @@ def _penalised_xtwx_inv(
     -------
     X_a : (n, p_active) dense active design matrix.
     XtWX_S_inv : (p_active, p_active) inverse of (X'WX + S).
+    XtWX_S_inv_aug : (p_active+1, p_active+1) inverse of augmented system
+        including intercept row/column. Element [0,0] is intercept variance,
+        [1:,1:] are feature marginal variances (accounting for intercept).
     active_groups : list of GroupSlice re-indexed to X_a columns.
     active_gms : list of GroupMatrix for active groups.
     """
@@ -83,7 +86,10 @@ def _penalised_xtwx_inv(
 
     if not active_cols:
         n = len(W)
-        return np.empty((n, 0)), np.empty((0, 0)), [], []
+        # Augmented inverse is 1×1: just the intercept variance
+        w_sum = float(np.sum(W))
+        aug_inv = np.array([[1.0 / w_sum]]) if w_sum > 0 else np.array([[0.0]])
+        return np.empty((n, 0)), np.empty((0, 0)), aug_inv, [], []
 
     X_a = np.hstack(active_cols)
     p_a = X_a.shape[1]
@@ -123,7 +129,23 @@ def _penalised_xtwx_inv(
     inv_s2 = np.where(s_R > threshold, 1.0 / s_R**2, 0.0)
     XtWX_S_inv = (Vh_R.T * inv_s2[None, :]) @ Vh_R
 
-    return X_a, XtWX_S_inv, active_groups_out, active_gms
+    # Augmented (p+1)×(p+1) inverse including intercept row/column.
+    # The augmented Fisher information is:
+    #   F_aug = [[sum(W),  X'W1], [X'W1,  X'WX + S]]
+    # where X'W1 = X_a' @ W (cross-product of features with intercept).
+    # This is needed for correct SEs that account for intercept estimation.
+    sqrtW = np.sqrt(W)
+    X_aug = np.hstack([np.ones((len(W), 1)), X_a])
+    S_aug_rows = np.zeros((p_a + 1, p_a + 1))
+    S_aug_rows[1:, 1:] = S_rows  # no penalty on intercept
+    A_aug = np.vstack([X_aug * sqrtW[:, None], S_aug_rows])
+    _, R_aug = np.linalg.qr(A_aug, mode="reduced")
+    _, s_aug, Vh_aug = np.linalg.svd(R_aug, full_matrices=False)
+    threshold_aug = 1e-6 * s_aug[0]
+    inv_s2_aug = np.where(s_aug > threshold_aug, 1.0 / s_aug**2, 0.0)
+    XtWX_S_inv_aug = (Vh_aug.T * inv_s2_aug[None, :]) @ Vh_aug
+
+    return X_a, XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, active_gms
 
 
 def _penalised_xtwx_inv_gram(
@@ -132,7 +154,7 @@ def _penalised_xtwx_inv_gram(
     group_matrices: list,
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
-) -> tuple[NDArray, list[GroupSlice]]:
+) -> tuple[NDArray, NDArray, list[GroupSlice]]:
     """Fast (X'WX + S)^{-1} via per-group gram matrices.
 
     Same result as ``_penalised_xtwx_inv`` but avoids forming the dense
@@ -146,6 +168,8 @@ def _penalised_xtwx_inv_gram(
     Returns
     -------
     XtWX_S_inv : (p_active, p_active) inverse of (X'WX + S).
+    XtWX_S_inv_aug : (p_active+1, p_active+1) inverse of augmented system
+        including intercept row/column.
     active_groups : list of GroupSlice re-indexed to active columns.
     """
     # Identify active groups
@@ -173,7 +197,9 @@ def _penalised_xtwx_inv_gram(
 
     p_a = col
     if p_a == 0:
-        return np.empty((0, 0)), []
+        w_sum = float(np.sum(W))
+        aug_inv = np.array([[1.0 / w_sum]]) if w_sum > 0 else np.array([[0.0]])
+        return np.empty((0, 0)), aug_inv, []
 
     # Build X'WX block-by-block: gram for diagonal, cross_gram for off-diagonal.
     # For discretized groups this is O(n_bins) per block instead of O(n·p²).
@@ -202,7 +228,24 @@ def _penalised_xtwx_inv_gram(
     inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
     XtWX_S_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
 
-    return XtWX_S_inv, active_groups_out
+    # Augmented (p+1)×(p+1) inverse including intercept row/column.
+    # Build X'W1 via per-group rmatvec (avoids materializing dense X_a).
+    XtW1 = np.empty(p_a)
+    for gm, ag in zip(active_gms, active_groups_out):
+        XtW1[ag.sl] = gm.rmatvec(W)
+    sum_W = float(np.sum(W))
+
+    M_aug = np.empty((p_a + 1, p_a + 1))
+    M_aug[0, 0] = sum_W
+    M_aug[0, 1:] = XtW1
+    M_aug[1:, 0] = XtW1
+    M_aug[1:, 1:] = M  # XtWX + S
+    eigvals_aug, eigvecs_aug = np.linalg.eigh(M_aug)
+    threshold_aug = 1e-6 * max(eigvals_aug.max(), 1e-12)
+    inv_eigvals_aug = np.where(eigvals_aug > threshold_aug, 1.0 / eigvals_aug, 0.0)
+    XtWX_S_inv_aug = (eigvecs_aug * inv_eigvals_aug[None, :]) @ eigvecs_aug.T
+
+    return XtWX_S_inv, XtWX_S_inv_aug, active_groups_out
 
 
 def build_coef_rows(
@@ -214,6 +257,7 @@ def build_coef_rows(
     X_a: NDArray,
     W: NDArray,
     XtWX_inv: NDArray,
+    XtWX_inv_aug: NDArray,
     active_groups: list[GroupSlice],
     known_scale: bool,
     group_edf_map: dict | None,
@@ -227,6 +271,12 @@ def build_coef_rows(
 
     Standalone function that can be called from ``ModelMetrics._build_coef_rows``
     or from ``SuperGLM.summary()`` without a ``ModelMetrics`` instance.
+
+    Parameters
+    ----------
+    XtWX_inv : (p_active, p_active) inverse used for EDF computation.
+    XtWX_inv_aug : (p_active+1, p_active+1) augmented inverse including
+        intercept row/column, used for SE computation.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.interaction import (
@@ -245,7 +295,8 @@ def build_coef_rows(
     beta = result.beta
     phi = result.phi
 
-    # Compute per-group SEs from XtWX_inv
+    # Compute per-group SEs from augmented inverse (accounts for intercept).
+    # The augmented inverse has intercept at row/col 0; feature blocks start at 1.
     se_dict: dict[str, NDArray] = {}
     for g in groups:
         if np.linalg.norm(beta[g.sl]) < 1e-12:
@@ -256,14 +307,16 @@ def build_coef_rows(
                 se_dict[g.name] = np.zeros(g.size)
             else:
                 scale = 1.0 if known_scale else phi
-                var_diag = scale * np.diag(XtWX_inv[ag.sl, ag.sl])
+                aug_sl = slice(1 + ag.start, 1 + ag.end)
+                var_diag = scale * np.diag(XtWX_inv_aug[aug_sl, aug_sl])
                 se_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
 
-    # Intercept SE
-    w_sum = float(np.sum(W))
-    if w_sum > 0:
+    # Intercept SE from augmented inverse [0, 0] element
+    icpt_var = float(XtWX_inv_aug[0, 0])
+    if icpt_var > 0:
         icpt_se = (
-            float(np.sqrt(1.0 / w_sum)) if known_scale else float(np.sqrt(max(phi, 0.0) / w_sum))
+            float(np.sqrt(icpt_var)) if known_scale
+            else float(np.sqrt(max(phi, 0.0) * icpt_var))
         )
     else:
         icpt_se = 0.0
@@ -326,7 +379,8 @@ def build_coef_rows(
     def _curve_se_range(feature_name):
         """Compute curve SE min/max for a spline feature."""
         scale = phi if not known_scale else 1.0
-        Cov_active = scale * XtWX_inv
+        # Use the feature block of the augmented inverse for correct marginal SEs
+        Cov_active = scale * XtWX_inv_aug[1:, 1:]
         se_curve = feature_se_from_cov(
             feature_name, Cov_active, active_groups, result, groups, specs, interaction_specs
         )
@@ -998,13 +1052,14 @@ class ModelMetrics:
     # ── Influence diagnostics (lazy) ──────────────────────────────
 
     @cached_property
-    def _active_info(self) -> tuple[NDArray, NDArray, NDArray, list[GroupSlice]]:
+    def _active_info(self) -> tuple[NDArray, NDArray, NDArray, NDArray, list[GroupSlice]]:
         """Shared computation for leverage and SEs.
 
-        Returns (X_a, W, XtWX_inv, active_groups) where:
+        Returns (X_a, W, XtWX_inv, XtWX_inv_aug, active_groups) where:
         - X_a: (n, p_active) active design columns
         - W: (n,) working weights
         - XtWX_inv: (p_active, p_active) = (X'WX + S)^{-1}, unscaled by phi
+        - XtWX_inv_aug: (p_active+1, p_active+1) augmented inverse incl. intercept
         - active_groups: list of GroupSlice for active groups (re-indexed to X_a columns)
         """
         beta = self._result.beta
@@ -1015,10 +1070,10 @@ class ModelMetrics:
         W = self._weights * dmu_deta**2 / V
 
         lam2 = getattr(self._model, "_reml_lambdas", None) or self._model.lambda2
-        X_a, XtWX_inv, active_groups, _ = _penalised_xtwx_inv(
+        X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
             beta, W, self._dm.group_matrices, self._groups, lam2
         )
-        return X_a, W, XtWX_inv, active_groups
+        return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
 
     @cached_property
     def _active_R_factor(self) -> NDArray:
@@ -1031,7 +1086,7 @@ class ModelMetrics:
         test should therefore operate on columns of this weighted QR factor,
         not on the raw design and not on an augmented ``[X; sqrt(S)]`` system.
         """
-        X_a, W, _, active_groups = self._active_info
+        X_a, W, _, _, active_groups = self._active_info
         if X_a.shape[1] == 0:
             return np.empty((0, 0))
 
@@ -1045,7 +1100,7 @@ class ModelMetrics:
         edf = diag(F) where F = (X'WX + S)^{-1} X'WX
         edf1 = 2*edf - diag(F @ F)  (Wood's alternative EDF)
         """
-        X_a, W, XtWX_inv, _ = self._active_info
+        X_a, W, XtWX_inv, _, _ = self._active_info
 
         if X_a.shape[1] == 0:
             return np.array([]), np.array([])
@@ -1066,7 +1121,7 @@ class ModelMetrics:
     @cached_property
     def _hat_diag(self) -> NDArray:
         """Hat matrix diagonal h_i via active-column inversion."""
-        X_a, W, XtWX_inv, _ = self._active_info
+        X_a, W, XtWX_inv, _, _ = self._active_info
 
         if X_a.shape[1] == 0:
             return np.zeros(self.n_obs)
@@ -1124,7 +1179,7 @@ class ModelMetrics:
         penalized estimate. They do not account for model selection
         uncertainty (same convention as glmnet / mgcv).
         """
-        _, _, XtWX_inv, active_groups = self._active_info
+        _, _, _, XtWX_inv_aug, active_groups = self._active_info
         phi = self.phi
         beta = self._result.beta
 
@@ -1135,7 +1190,8 @@ class ModelMetrics:
             else:
                 # Find corresponding active group
                 ag = next(ag for ag in active_groups if ag.name == g.name)
-                var_diag = phi * np.diag(XtWX_inv[ag.sl, ag.sl])
+                aug_sl = slice(1 + ag.start, 1 + ag.end)
+                var_diag = phi * np.diag(XtWX_inv_aug[aug_sl, aug_sl])
                 result[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
         return result
 
@@ -1149,7 +1205,7 @@ class ModelMetrics:
 
         Inactive groups get all-zero SEs.
         """
-        _, _, XtWX_inv, active_groups = self._active_info
+        _, _, _, XtWX_inv_aug, active_groups = self._active_info
         beta = self._result.beta
 
         result: dict[str, NDArray] = {}
@@ -1158,32 +1214,33 @@ class ModelMetrics:
                 result[g.name] = np.zeros(g.size)
             else:
                 ag = next(ag for ag in active_groups if ag.name == g.name)
-                var_diag = np.diag(XtWX_inv[ag.sl, ag.sl])
+                aug_sl = slice(1 + ag.start, 1 + ag.end)
+                var_diag = np.diag(XtWX_inv_aug[aug_sl, aug_sl])
                 result[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
         return result
 
     @cached_property
     def intercept_se(self) -> float:
-        """Standard error of the intercept (phi-scaled, conditional).
+        """Standard error of the intercept (phi-scaled).
 
-        Computed as sqrt(phi / sum(W)) where W are the GLM working weights.
-        This is the conditional SE given other coefficients, consistent with
-        the BCD solver's closed-form intercept update.
+        Computed from the [0,0] element of the augmented Fisher information
+        inverse, which accounts for covariance between the intercept and
+        all other coefficients (matching mgcv's Vp).
         """
-        _, W, _, _ = self._active_info
-        w_sum = float(np.sum(W))
-        if w_sum <= 0:
+        _, _, _, XtWX_inv_aug, _ = self._active_info
+        icpt_var = float(XtWX_inv_aug[0, 0])
+        if icpt_var <= 0:
             return 0.0
-        return float(np.sqrt(max(self.phi, 0.0) / w_sum))
+        return float(np.sqrt(max(self.phi, 0.0) * icpt_var))
 
     @cached_property
     def intercept_se_raw(self) -> float:
         """Standard error of the intercept assuming phi=1."""
-        _, W, _, _ = self._active_info
-        w_sum = float(np.sum(W))
-        if w_sum <= 0:
+        _, _, _, XtWX_inv_aug, _ = self._active_info
+        icpt_var = float(XtWX_inv_aug[0, 0])
+        if icpt_var <= 0:
             return 0.0
-        return float(np.sqrt(1.0 / w_sum))
+        return float(np.sqrt(icpt_var))
 
     def _feature_se_impl(
         self,
@@ -1232,8 +1289,8 @@ class ModelMetrics:
             else:
                 return {"se_coef": 0.0}
 
-        # Gather covariance from all active subgroups
-        _, _, XtWX_inv, active_groups = self._active_info
+        # Gather covariance from all active subgroups (use augmented inverse)
+        _, _, _, XtWX_inv_aug, active_groups = self._active_info
         phi = self.phi if phi_scale else 1.0
         active_subs = [ag for ag in active_groups if ag.feature_name == name]
         if not active_subs:
@@ -1250,7 +1307,8 @@ class ModelMetrics:
                 return {"se_coef": 0.0}
 
         indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
-        Cov_g = phi * XtWX_inv[np.ix_(indices, indices)]
+        aug_indices = indices + 1  # offset by 1 for intercept row/col
+        Cov_g = phi * XtWX_inv_aug[np.ix_(aug_indices, aug_indices)]
 
         if isinstance(spec, _SplineBase):
             x_grid = np.linspace(spec._lo, spec._hi, n_points)
@@ -1305,7 +1363,7 @@ class ModelMetrics:
 
     def _build_coef_rows(self, alpha: float = 0.05) -> list[_CoefRow]:
         """Build coefficient table rows for the summary."""
-        X_a, W, XtWX_inv, active_groups = self._active_info
+        X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = self._active_info
         return build_coef_rows(
             groups=self._groups,
             specs=self._model._specs,
@@ -1314,6 +1372,7 @@ class ModelMetrics:
             X_a=X_a,
             W=W,
             XtWX_inv=XtWX_inv,
+            XtWX_inv_aug=XtWX_inv_aug,
             active_groups=active_groups,
             known_scale=self._known_scale,
             group_edf_map=getattr(self._model, "_group_edf", None),
