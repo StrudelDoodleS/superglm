@@ -169,7 +169,7 @@ def summary(model, alpha: float = 0.05):
         model_info["tweedie_p"] = tw_pr.p_hat
         model_info["tweedie_p_ci"] = ci
         model_info["tweedie_phi"] = tw_pr.phi_hat
-        model_info["tweedie_p_method"] = "Profile (exact)"
+        model_info["tweedie_p_method"] = f"Profile ({tw_pr.method}, phi={tw_pr.phi_method})"
         model_info["tweedie_profile_nll"] = tw_pr.nll
 
     # Coef rows from shared builder — use precomputed inference info.
