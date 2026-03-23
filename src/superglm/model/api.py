@@ -540,6 +540,7 @@ class SuperGLM:
         *,
         fit_mode: str = "fit",
         phi_method: str = "pearson",
+        method: str = "brent",
         **kwargs,
     ):
         """Estimate Tweedie p via profile likelihood, refit, and return result.
@@ -552,6 +553,12 @@ class SuperGLM:
             How to profile out Tweedie dispersion ``phi`` at each candidate ``p``.
             ``"pearson"`` uses the weighted Pearson moment estimate, while
             ``"mle"`` runs a nested 1D likelihood optimization in ``phi``.
+        method : {"brent", "grid", "grid_refine", "profile_opt"}
+            Search strategy. ``"brent"`` (default) uses bounded scalar
+            optimisation. ``"grid"`` does exhaustive grid search.
+            ``"grid_refine"`` does a coarse grid + local Brent refinement.
+            ``"profile_opt"`` uses a general-purpose optimizer on
+            logit-transformed p.
         """
         return profile_ops.estimate_p(
             self,
@@ -561,6 +568,7 @@ class SuperGLM:
             offset,
             fit_mode=fit_mode,
             phi_method=phi_method,
+            method=method,
             **kwargs,
         )
 
