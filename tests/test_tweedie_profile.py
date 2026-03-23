@@ -1,5 +1,7 @@
 """Tests for Tweedie profile likelihood — p estimation."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -675,6 +677,91 @@ class TestSearchMethods:
         assert result.method == "profile_opt"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
 
+    def test_low_p_boundary_regression(self):
+        """Low-p profiles should not spuriously prefer the lower bound."""
+        X, y, _ = _tweedie_data(n=2_200, p_true=1.25, seed=7)
+        kwargs = {"p_bounds": (1.1, 1.9), "phi_method": "mle"}
+
+        grid_model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        grid = np.linspace(1.1, 1.9, 81)
+        r_grid = estimate_tweedie_p(grid_model, X, y, method="grid", grid=grid, **kwargs)
+
+        lbfgsb_model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        r_lbfgsb = estimate_tweedie_p(
+            lbfgsb_model, X, y, method="profile_opt", optimizer="L-BFGS-B", **kwargs
+        )
+
+        powell_model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        r_powell = estimate_tweedie_p(
+            powell_model, X, y, method="profile_opt", optimizer="Powell", **kwargs
+        )
+
+        assert r_grid.p_hat > 1.15
+        np.testing.assert_allclose(r_grid.p_hat, r_lbfgsb.p_hat, atol=0.02)
+        np.testing.assert_allclose(r_grid.p_hat, r_powell.p_hat, atol=0.02)
+
+    def test_low_p_saddlepoint_warning(self):
+        """Warn when saddlepoint dominates the final low-p profile fit."""
+        X, y, _ = _tweedie_data(n=2_500, p_true=1.08, seed=4)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+
+        with pytest.warns(UserWarning, match="Saddlepoint approximation used"):
+            result = estimate_tweedie_p(
+                model,
+                X,
+                y,
+                method="profile_opt",
+                optimizer="Powell",
+                p_bounds=(1.05, 1.9),
+                phi_method="mle",
+            )
+
+        assert result.saddlepoint_fraction >= 0.25
+        assert result.n_saddlepoint > 0
+        assert result.n_positive > 0
+        assert len(result.warnings) == 1
+
+    def test_regular_profile_has_no_saddlepoint_warning(self):
+        """Typical interior fits should not warn about saddlepoint usage."""
+        X, y, _ = _tweedie_data(n=2_500, p_true=1.25, seed=7)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = estimate_tweedie_p(
+                model,
+                X,
+                y,
+                method="profile_opt",
+                optimizer="Powell",
+                p_bounds=(1.05, 1.9),
+                phi_method="mle",
+            )
+
+        assert not caught
+        assert result.saddlepoint_fraction < 0.10
+        assert result.warnings == []
+
     def test_grid_with_weights(self):
         """Grid search should forward sample_weight correctly."""
         rng = np.random.default_rng(321)
@@ -879,3 +966,29 @@ class TestMethodAgreement:
         )
         result = estimate_tweedie_p(model, X, y, method=method, p_bounds=(1.1, 1.9))
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
+
+
+# =====================================================================
+# Deprecated .cache shim
+# =====================================================================
+
+
+class TestDeprecatedCache:
+    def test_cache_property_returns_dict(self):
+        """Deprecated .cache should return p→nll dict from search_trace."""
+        X, y, _ = _tweedie_data(n=2000, seed=7)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = estimate_tweedie_p(model, X, y, method="grid", n_grid=5, p_bounds=(1.1, 1.9))
+
+        with pytest.warns(DeprecationWarning, match="cache.*deprecated"):
+            cache = result.cache
+
+        assert isinstance(cache, dict)
+        assert len(cache) == 5
+        for p_val, nll_val in cache.items():
+            assert isinstance(p_val, float)
+            assert isinstance(nll_val, float)

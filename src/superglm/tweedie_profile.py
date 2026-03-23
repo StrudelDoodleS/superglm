@@ -22,6 +22,7 @@ References
 
 from __future__ import annotations
 
+import warnings as _warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -95,34 +96,30 @@ def generate_tweedie_cpg(
 # ---------------------------------------------------------------------------
 
 
-def tweedie_logpdf(
+@dataclass(frozen=True)
+class _TweedieLogpdfDiagnostics:
+    """Diagnostics for the Tweedie log-density evaluator."""
+
+    n_positive: int = 0
+    n_saddlepoint: int = 0
+
+    @property
+    def saddlepoint_fraction(self) -> float:
+        if self.n_positive == 0:
+            return 0.0
+        return float(self.n_saddlepoint) / float(self.n_positive)
+
+
+def _tweedie_logpdf_impl(
     y: NDArray,
     mu: NDArray,
     phi: float,
     p: float,
     *,
     weights: NDArray | None = None,
-    t_arg_limit: float = 1e4,
-) -> NDArray:
-    """Exact Tweedie log-density with saddlepoint fallback.
-
-    Parameters
-    ----------
-    y, mu : arrays of shape (n,)
-        Observations and fitted means.
-    phi : float
-        Dispersion parameter.
-    p : float
-        Power parameter in (1, 2).
-    weights : array of shape (n,), optional
-        Observation weights (e.g. sample_weight). Effective phi = phi / w.
-    t_arg_limit : float
-        Switch to saddlepoint when wright_bessel argument t >= this.
-
-    Returns
-    -------
-    logpdf : ndarray of shape (n,)
-    """
+    t_arg_limit: float = 1e14,
+) -> tuple[NDArray, _TweedieLogpdfDiagnostics]:
+    """Shared Tweedie log-density implementation with diagnostics."""
     y = np.asarray(y, dtype=np.float64)
     mu = np.asarray(mu, dtype=np.float64)
     n = len(y)
@@ -133,6 +130,7 @@ def tweedie_logpdf(
         phi_eff = phi / weights
 
     logpdf = np.zeros(n, dtype=np.float64)
+    n_saddlepoint = 0
 
     # --- Case 1: y = 0 (point mass) ---
     zero = y == 0
@@ -174,6 +172,7 @@ def tweedie_logpdf(
                 wb = wright_bessel(-alpha, 0.0, t_wb)
 
             valid = np.isfinite(wb) & (wb > 1e-300)
+            n_saddlepoint += int(np.count_nonzero(~valid))
             if np.any(valid):
                 log_a = np.log(wb[valid]) - np.log(y_wb[valid])
                 results_wb = np.full(len(t_wb), -np.inf, dtype=np.float64)
@@ -189,11 +188,58 @@ def tweedie_logpdf(
                 results[use_wb] = results_wb
 
         use_sp = ~use_wb
+        n_saddlepoint += int(np.count_nonzero(use_sp))
         if np.any(use_sp):
             results[use_sp] = _saddlepoint(y_p[use_sp], mu_p[use_sp], phi_p[use_sp], p)
 
         logpdf[pos] = results
 
+    diagnostics = _TweedieLogpdfDiagnostics(
+        n_positive=int(np.count_nonzero(pos)),
+        n_saddlepoint=n_saddlepoint,
+    )
+    return logpdf, diagnostics
+
+
+def tweedie_logpdf(
+    y: NDArray,
+    mu: NDArray,
+    phi: float,
+    p: float,
+    *,
+    weights: NDArray | None = None,
+    t_arg_limit: float = 1e14,
+) -> NDArray:
+    """Exact Tweedie log-density with saddlepoint fallback.
+
+    Parameters
+    ----------
+    y, mu : arrays of shape (n,)
+        Observations and fitted means.
+    phi : float
+        Dispersion parameter.
+    p : float
+        Power parameter in (1, 2).
+    weights : array of shape (n,), optional
+        Observation weights (e.g. sample_weight). Effective phi = phi / w.
+    t_arg_limit : float
+        Switch to saddlepoint when wright_bessel argument t >= this.
+        A high default keeps the exact Wright-Bessel branch active deeper
+        into the low-p region, where the saddlepoint can be noticeably
+        biased.
+
+    Returns
+    -------
+    logpdf : ndarray of shape (n,)
+    """
+    logpdf, _ = _tweedie_logpdf_impl(
+        y,
+        mu,
+        phi,
+        p,
+        weights=weights,
+        t_arg_limit=t_arg_limit,
+    )
     return logpdf
 
 
@@ -293,6 +339,8 @@ def _profile_phi(
 # ---------------------------------------------------------------------------
 
 _TRACE_COLUMNS = ["step", "p", "phi", "nll", "n_iter", "fit_converged", "source"]
+_SADDLEPOINT_NOTE_THRESHOLD = 0.10
+_SADDLEPOINT_WARN_THRESHOLD = 0.25
 
 
 @dataclass
@@ -318,6 +366,9 @@ class TweedieProfileResult:
     search_trace : DataFrame
         Per-evaluation record with columns:
         ``step, p, phi, nll, n_iter, fit_converged, source``.
+    saddlepoint_fraction : float
+        Fraction of positive density evaluations that used the saddlepoint
+        approximation at the final ``(p_hat, phi_hat)``.
     """
 
     p_hat: float
@@ -328,7 +379,26 @@ class TweedieProfileResult:
     method: str
     phi_method: str
     search_trace: pd.DataFrame
+    saddlepoint_fraction: float = 0.0
+    n_saddlepoint: int = 0
+    n_positive: int = 0
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def cache(self) -> dict[float, float]:
+        """Deprecated: use ``search_trace`` instead.
+
+        Returns a dict mapping ``p → nll`` reconstructed from the search
+        trace for backward compatibility.
+        """
+        import warnings as _w
+
+        _w.warn(
+            "TweedieProfileResult.cache is deprecated; use .search_trace instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return dict(zip(self.search_trace["p"], self.search_trace["nll"]))
 
     # Stored for CI/plot
     _objective: Any = field(default=None, repr=False)
@@ -456,6 +526,23 @@ class TweedieProfileResult:
         ax.set_ylim(bottom=0)
         ax.legend(fontsize=8, loc="upper right")
         return fig
+
+
+def _build_saddlepoint_messages(p: float, diagnostics: _TweedieLogpdfDiagnostics) -> list[str]:
+    """Build thresholded saddlepoint diagnostics for the final profile result."""
+    frac = diagnostics.saddlepoint_fraction
+    if diagnostics.n_positive == 0 or frac < _SADDLEPOINT_NOTE_THRESHOLD:
+        return []
+
+    message = (
+        "Saddlepoint approximation used for "
+        f"{diagnostics.n_saddlepoint}/{diagnostics.n_positive} positive Tweedie "
+        f"density terms ({frac:.0%}) at p={p:.3f}; profile likelihood may be "
+        "approximation-sensitive near the lower p bound."
+    )
+    if frac >= _SADDLEPOINT_WARN_THRESHOLD:
+        _warnings.warn(message, UserWarning, stacklevel=3)
+    return [message]
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +687,14 @@ class _ProfileContext:
             df_resid=df_resid_final,
             phi_method=self.phi_method,
         )
+        _, diagnostics = _tweedie_logpdf_impl(
+            self.y_arr,
+            mu_final,
+            phi_hat,
+            p_hat,
+            weights=self.w_arr,
+        )
+        warnings_list = _build_saddlepoint_messages(p_hat, diagnostics)
 
         trace = pd.DataFrame(self.trace_rows, columns=_TRACE_COLUMNS)
 
@@ -612,6 +707,10 @@ class _ProfileContext:
             method=method,
             phi_method=self.phi_method,
             search_trace=trace,
+            saddlepoint_fraction=diagnostics.saddlepoint_fraction,
+            n_saddlepoint=diagnostics.n_saddlepoint,
+            n_positive=diagnostics.n_positive,
+            warnings=warnings_list,
             _objective=self.evaluate,
             _ll_scale=self.ll_scale,
         )
@@ -773,6 +872,14 @@ class _ProfileContextREML:
             df_resid=df_resid_final,
             phi_method=self.phi_method,
         )
+        _, diagnostics = _tweedie_logpdf_impl(
+            self.y,
+            self.last_mu,
+            phi_hat,
+            p_hat,
+            weights=self.w_arr,
+        )
+        warnings_list = _build_saddlepoint_messages(p_hat, diagnostics)
 
         trace = pd.DataFrame(self.trace_rows, columns=_TRACE_COLUMNS)
 
@@ -785,6 +892,10 @@ class _ProfileContextREML:
             method=method,
             phi_method=self.phi_method,
             search_trace=trace,
+            saddlepoint_fraction=diagnostics.saddlepoint_fraction,
+            n_saddlepoint=diagnostics.n_saddlepoint,
+            n_positive=diagnostics.n_positive,
+            warnings=warnings_list,
             _objective=self.evaluate,
             _ll_scale=self.ll_scale,
         )
