@@ -90,6 +90,28 @@ def _disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j):
 
 
 @njit(cache=True)
+def _disc_disc_2d_hist_channels(bin_idx_i, bin_idx_j, chan_idx, W, chan_vals, n_bins_i, n_bins_j):
+    """Fused multi-channel 2D histogram for tensor-main cross-grams.
+
+    Returns a flat array of shape ``(n_bins_i * n_bins_j, n_channels)`` where
+    ``out[row, c]`` accumulates ``W[obs] * chan_vals[chan_idx[obs], c]`` for
+    observations mapping to the joint row ``bin_idx_i[obs] * n_bins_j + bin_idx_j[obs]``.
+
+    This avoids repeating an O(n) histogram pass once per channel.
+    """
+    n = len(W)
+    n_channels = chan_vals.shape[1]
+    result = np.zeros((n_bins_i * n_bins_j, n_channels))
+    for obs in range(n):
+        row = bin_idx_i[obs] * n_bins_j + bin_idx_j[obs]
+        w = W[obs]
+        c_src = chan_idx[obs]
+        for c in range(n_channels):
+            result[row, c] += w * chan_vals[c_src, c]
+    return result
+
+
+@njit(cache=True)
 def _fused_bincount_2(bin_idx, W, Wz, n_bins):
     """Fused dual bincount: aggregate W and Wz by bin in one O(n) pass."""
     n = len(bin_idx)
@@ -493,7 +515,20 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
 
     def matvec(self, v: NDArray) -> NDArray:
         B1, B2 = self.B1_unique_t, self.B2_unique_t
+        n_pairs = self.B_unique.shape[0]
+        n_obs = self.shape[0]
+        p_g = self.shape[1]
         K1, K2 = B1.shape[1], B2.shape[1]
+
+        # When the observed tensor support is small, evaluating on the unique
+        # support pairs and scattering back to observations is much cheaper
+        # than building an (n, K2) temporary via the factored observation path.
+        direct_pair_cost = n_pairs * p_g
+        factored_obs_cost = B1.shape[0] * p_g + n_obs * K2
+        if direct_pair_cost <= factored_obs_cost:
+            vals = self.B_unique @ (self.R_inv @ v)
+            return vals[self.bin_idx]
+
         u = (self.R_inv @ v).reshape(K1, K2)
         B1u = B1 @ u  # (n_bins1, K2)
         return np.sum(B1u[self.idx1] * B2[self.idx2], axis=1)
@@ -529,6 +564,7 @@ GroupMatrix = (
 )
 
 _MAX_DISC_DISC_HIST_CELLS = 5_000_000
+_MAX_DISC_DISC_CHANNEL_HIST_CELLS = 5_000_000
 
 
 def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> NDArray:
@@ -594,6 +630,25 @@ def _cross_gram_tensor_main(
     B_main = gm_main.B_unique
     K1, K2 = B1.shape[1], B2.shape[1]
     K_main_raw = B_main.shape[1]
+
+    n_cells = gm_main.n_bins * gm_tensor.n_bins1 * K2
+    if n_cells <= _MAX_DISC_DISC_CHANNEL_HIST_CELLS:
+        H_flat = _disc_disc_2d_hist_channels(
+            gm_main.bin_idx,
+            gm_tensor.idx1,
+            gm_tensor.idx2,
+            W,
+            B2,
+            gm_main.n_bins,
+            gm_tensor.n_bins1,
+        )
+        tmp = B_main.T @ H_flat.reshape(gm_main.n_bins, gm_tensor.n_bins1 * K2)
+        tmp_3d = tmp.reshape(K_main_raw, gm_tensor.n_bins1, K2)
+
+        result_raw = np.empty((K_main_raw, K1 * K2))
+        for j2 in range(K2):
+            result_raw[:, j2::K2] = tmp_3d[:, :, j2] @ B1
+        return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
 
     result_raw = np.zeros((K_main_raw, K1 * K2))
     for j2 in range(K2):
@@ -812,10 +867,10 @@ def _build_tabmat_split(gms: list[GroupMatrix]):
       - SparseSSPGroupMatrix → tabmat.DenseMatrix (must materialize B @ R_inv)
       - DenseGroupMatrix → tabmat.DenseMatrix (already dense)
     """
-    import tabmat
-
     if any(isinstance(gm, DiscretizedSSPGroupMatrix) for gm in gms):
         return None
+
+    import tabmat
 
     matrices = []
     for gm in gms:
