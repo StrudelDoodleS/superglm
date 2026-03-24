@@ -840,11 +840,16 @@ class TensorInteraction:
         B1_unique = self._centered_marginal_basis(support1, m1).toarray()
         B2_unique = self._centered_marginal_basis(support2, m2).toarray()
 
-        pair_codes = np.column_stack([idx1, idx2])
-        observed_pairs, pair_idx = np.unique(pair_codes, axis=0, return_inverse=True)
+        # Encode joint support pairs into one integer to avoid the much slower
+        # np.unique(..., axis=0) path on large observation arrays.
+        n_support2 = len(support2)
+        pair_codes = idx1.astype(np.int64) * n_support2 + idx2.astype(np.int64)
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        observed_i1 = (observed_codes // n_support2).astype(np.intp)
+        observed_i2 = (observed_codes % n_support2).astype(np.intp)
         B_joint = _row_kron_dense(
-            B1_unique[observed_pairs[:, 0]],
-            B2_unique[observed_pairs[:, 1]],
+            B1_unique[observed_i1],
+            B2_unique[observed_i2],
         )
         return DiscreteTensorBuildResult(
             infos=infos,
