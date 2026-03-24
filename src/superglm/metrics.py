@@ -793,7 +793,7 @@ def build_basis_detail(
     known_scale,
     alpha=0.05,
 ):
-    """Build per-basis coefficient detail for active 1-D spline groups.
+    """Build per-coefficient detail for active 1-D spline groups.
 
     Uses the same known_scale-aware covariance path as ``build_coef_rows``
     so that SE/z/p/CI values are consistent with the main summary.
@@ -1487,8 +1487,9 @@ class ModelMetrics:
             Significance level for confidence intervals (default 0.05 → 95% CI).
         detail : str
             Level of detail for spline terms. ``"compact"`` (default) shows
-            one row per spline group. ``"basis"`` adds per-basis coefficient
-            rows (ASCII: printed inline; HTML: in a ``<details>`` disclosure).
+            one row per spline group. ``"basis"`` adds per-coefficient
+            detail rows (ASCII: printed inline; HTML: in a ``<details>``
+            disclosure).
 
         Returns
         -------

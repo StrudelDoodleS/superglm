@@ -46,7 +46,7 @@ class _CoefRow:
 
 @dataclass
 class _BasisDetailRow:
-    """One per-basis coefficient row for spline detail display."""
+    """One per-coefficient detail row for a spline group."""
 
     parent_name: str  # group name, e.g. "x" or "x:spline"
     basis_index: int  # 0-based within group
@@ -625,7 +625,7 @@ class ModelSummary:
                         "<table style='width:100%;font-size:11px;color:#555;"
                         "border-collapse:collapse;margin:2px 0;'>"
                         "<tr>"
-                        "<th style='padding:1px 6px;text-align:left;'>coef</th>"
+                        "<th style='padding:1px 6px;text-align:left;'>#</th>"
                         "<th style='padding:1px 6px;'>coef</th>"
                         "<th style='padding:1px 6px;'>std err</th>"
                         "<th style='padding:1px 6px;'>z</th>"
