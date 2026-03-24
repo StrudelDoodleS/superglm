@@ -368,10 +368,12 @@ def _fit_pirls_inner(
                     p_eff += g.size - (g.size - 1) * shrink
 
     # Pearson-based phi for estimated-scale families (Tweedie, Gamma, NB2).
-    # Denominator uses sum(weights) - edf for frequency-weighted data.
+    # SuperGLM's sample_weight follows the prior-weight convention, so the
+    # residual d.f. correction is observation-count based (n - edf), while
+    # the weights still scale the Pearson numerator.
     V_final = np.maximum(family.variance(mu_new), 1e-10)
     pearson_chi2 = float(np.sum(weights * (y - mu_new) ** 2 / V_final))
-    df_resid = max(float(np.sum(weights)) - p_eff, 1)
+    df_resid = max(float(len(y)) - p_eff, 1)
     phi = pearson_chi2 / df_resid
 
     return PIRLSResult(

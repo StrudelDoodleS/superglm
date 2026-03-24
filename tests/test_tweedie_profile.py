@@ -273,6 +273,37 @@ class TestProfileLikelihood:
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
         np.testing.assert_allclose(result.phi_hat, phi_true, rtol=0.2)
 
+    def test_notebook_style_profile_recovers_true_p_under_prior_weights(self):
+        """Notebook-style exposure weights should not bias Pearson profiling downward."""
+        rng = np.random.default_rng(42)
+        p_true = 1.6
+        phi_true = 2.0
+        n = 12_000
+
+        x = rng.uniform(0.0, 1.0, n)
+        sample_weight = rng.uniform(0.5, 2.0, n)
+        mu_rate = np.exp(np.log(5.0) + 0.5 * np.sin(2.0 * np.pi * x))
+        mu_total = mu_rate * sample_weight
+        y = _generate_weighted_tweedie(mu_total, phi_true, p_true, sample_weight, rng)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.2),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Spline(n_knots=10)},
+        )
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            sample_weight=sample_weight,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
+        np.testing.assert_allclose(result.p_hat, p_true, atol=0.06)
+        np.testing.assert_allclose(result.phi_hat, phi_true, rtol=0.12)
+
     @pytest.mark.slow
     def test_insurance_like(self):
         """Insurance-like data with sample_weight and high zero rate."""
@@ -340,6 +371,50 @@ class TestProfileLikelihood:
         assert len(result.search_trace) >= 3
         assert result.method == "brent"
         assert result.phi_method == "pearson"
+
+
+class TestWeightedPhiConvention:
+    @staticmethod
+    def _make_weighted_dataset(seed: int = 2026, n: int = 4_000):
+        rng = np.random.default_rng(seed)
+        p_true = 1.6
+        phi_true = 2.0
+        x = rng.uniform(0.0, 1.0, n)
+        sample_weight = rng.uniform(0.5, 2.0, n)
+        mu = np.exp(1.2 + 0.7 * x) * sample_weight
+        y = _generate_weighted_tweedie(mu, phi_true, p_true, sample_weight, rng)
+        X = pd.DataFrame({"x": x})
+        return X, y, sample_weight
+
+    @staticmethod
+    def _assert_prior_weight_phi(model, X, y, sample_weight):
+        mu = np.asarray(model.predict(X), dtype=np.float64)
+        edf = float(model.result.effective_df)
+        pearson_chi2 = float(np.sum(sample_weight * (y - mu) ** 2 / np.maximum(mu, 1e-10) ** 1.6))
+        expected_phi = pearson_chi2 / max(len(y) - edf, 1.0)
+        wrong_phi = pearson_chi2 / max(float(np.sum(sample_weight)) - edf, 1.0)
+        np.testing.assert_allclose(model.result.phi, expected_phi, rtol=0.02)
+        assert abs(model.result.phi - wrong_phi) / expected_phi > 0.10
+
+    def test_direct_irls_uses_observation_count_df_for_weighted_phi(self):
+        X, y, sample_weight = self._make_weighted_dataset()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.6),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+        self._assert_prior_weight_phi(model, X, y, sample_weight)
+
+    def test_pirls_uses_observation_count_df_for_weighted_phi(self):
+        X, y, sample_weight = self._make_weighted_dataset()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.6),
+            penalty=GroupLasso(lambda1=0.05),
+            features={"x": Numeric()},
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+        self._assert_prior_weight_phi(model, X, y, sample_weight)
 
 
 # =====================================================================

@@ -529,12 +529,12 @@ def fit_irls_direct(
         profile["irls_finalize_s"] = profile.get("irls_finalize_s", 0.0) + _t_finalize
 
     # Pearson-based phi for estimated-scale families (Tweedie, Gamma, NB2).
-    # Denominator uses sum(weights) - edf when frequency weights are provided,
-    # matching statsmodels: df_resid = sum(freq_weights) - p.  For unit weights
-    # this equals n - edf.
+    # SuperGLM's sample_weight follows the prior-weight convention, so the
+    # residual d.f. correction is observation-count based (n - edf), while
+    # the weights still scale the Pearson numerator.
     V_final = np.maximum(family.variance(mu), 1e-10)
     pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
-    df_resid = max(float(np.sum(weights)) - p_eff, 1)
+    df_resid = max(float(len(y)) - p_eff, 1)
     phi = pearson_chi2 / df_resid
 
     result = PIRLSResult(

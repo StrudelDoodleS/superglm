@@ -589,11 +589,15 @@ class SuperGLM:
         self,
         terms: str | list[str] | None = None,
         *,
+        kind: str = "global",
         ci: str | bool | None = "pointwise",
         X: pd.DataFrame | None = None,
         sample_weight: NDArray | None = None,
         show_density: bool = True,
         show_knots: bool = False,
+        show_bases: bool = False,
+        scale: str = "response",
+        ci_style: str = "band",
         engine: str = "matplotlib",
         n_points: int = 200,
         figsize: tuple[float, float] | None = None,
@@ -618,6 +622,10 @@ class SuperGLM:
         ----------
         terms : str, list of str, or None
             Which term(s) to plot.  ``None`` plots all main effects.
+        kind : {"global", "local"}
+            ``"global"`` shows model-wide fitted effects (default).
+            ``"local"`` is reserved for per-row explanations (not yet
+            implemented).
         ci : {None, False, "pointwise", "simultaneous", "both"}
             Confidence interval style.  ``None`` or ``False`` disables bands.
         X : DataFrame, optional
@@ -629,9 +637,29 @@ class SuperGLM:
             bars for categorical).  Default True.
         show_knots : bool
             Show interior knot ticks (spline terms only).
+        show_bases : bool
+            Initial visibility for coefficient-weighted spline basis
+            contributions in the Plotly explorer.  Only meaningful when
+            ``scale="link"``; ignored in response-scale mode and by
+            the matplotlib renderer.
+        scale : {"response", "link"}
+            ``"response"`` (default) shows the fitted effect on the
+            inverse-link scale (relativities).  ``"link"`` shows the
+            additive link-scale contribution η(x) = Σ β_j B_j(x),
+            with optional basis decomposition overlays.  Only used
+            by the Plotly renderer.
+        ci_style : {"band", "lines"}
+            Plotly CI presentation. ``"band"`` (default) draws filled
+            confidence bands. ``"lines"`` draws line-only CI bounds with
+            no fill.
         engine : {"matplotlib", "plotly"}
-            Plotting backend.  ``"plotly"`` is currently supported only
-            for single interactions.
+            Plotting backend. ``"matplotlib"`` is the chart/export path for
+            single terms and grids. ``"plotly"`` is the interactive
+            main-effect explorer path, with a response/link scale toggle and
+            term selector. For main effects, Plotly requires at least two
+            terms (or ``terms=None``); use ``engine="matplotlib"`` for a
+            single-term chart. Requires the ``plotly`` optional dependency
+            (``pip install superglm[plotting]``).
         n_points : int
             Grid resolution for spline/polynomial curves.
         figsize : tuple, optional
@@ -650,16 +678,26 @@ class SuperGLM:
 
         Returns
         -------
-        matplotlib.figure.Figure or plotly Figure
+        matplotlib.figure.Figure or plotly.graph_objects.Figure
+
+        Examples
+        --------
+        >>> fig = model.plot(engine="plotly", X=X_train, sample_weight=w)
+        >>> fig.show()                      # interactive main-effect explorer
+        >>> fig.write_html("effects.html") # standalone HTML export
         """
         return explain_ops.plot(
             self,
             terms,
+            kind=kind,
             ci=ci,
             X=X,
             sample_weight=sample_weight,
             show_density=show_density,
             show_knots=show_knots,
+            show_bases=show_bases,
+            scale=scale,
+            ci_style=ci_style,
             engine=engine,
             n_points=n_points,
             figsize=figsize,
@@ -670,6 +708,59 @@ class SuperGLM:
             seed=seed,
             centering=centering,
             **kwargs,
+        )
+
+    def plot_data(
+        self,
+        terms: str | list[str] | None = None,
+        *,
+        kind: str = "global",
+        ci: str | bool | None = "pointwise",
+        X: pd.DataFrame | None = None,
+        sample_weight: NDArray | None = None,
+        show_density: bool = True,
+        show_knots: bool = False,
+        show_bases: bool = False,
+        n_points: int = 200,
+        alpha: float = 0.05,
+        n_sim: int = 10_000,
+        seed: int = 42,
+        centering: str = "mean",
+    ) -> dict[str, Any]:
+        """Return plain data needed to recreate SuperGLM plots.
+
+        This is the data/export companion to :meth:`plot`. It returns plain
+        pandas DataFrames, NumPy arrays, and metadata dictionaries instead of a
+        figure object, so users can rebuild charts in matplotlib, plotly, Excel,
+        or another reporting system.
+
+        For main effects, the payload includes per-term fitted effects and, when
+        requested, density overlays, spline knot positions, and basis
+        contributions. For interactions, it includes the reconstructed effect
+        data and, for continuous x continuous surfaces, optional density / HDR
+        grid data when ``X`` and ``sample_weight`` are supplied.
+
+        Examples
+        --------
+        >>> payload = model.plot_data("DrivAge", X=X_train, sample_weight=w, show_knots=True)
+        >>> curve_df = payload["terms"][0]["effect"]
+        >>> knots_df = payload["terms"][0]["knots"]
+        """
+        return explain_ops.plot_data(
+            self,
+            terms,
+            kind=kind,
+            ci=ci,
+            X=X,
+            sample_weight=sample_weight,
+            show_density=show_density,
+            show_knots=show_knots,
+            show_bases=show_bases,
+            n_points=n_points,
+            alpha=alpha,
+            n_sim=n_sim,
+            seed=seed,
+            centering=centering,
         )
 
     # ── Prediction ────────────────────────────────────────────────

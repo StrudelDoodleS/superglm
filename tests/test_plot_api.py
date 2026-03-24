@@ -1,10 +1,14 @@
 """Tests for the unified model.plot() API."""
 
+import importlib.util
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from superglm import Categorical, Numeric, Spline, SuperGLM
+
+PLOTLY_AVAILABLE = importlib.util.find_spec("plotly") is not None
 
 
 @pytest.fixture
@@ -106,6 +110,38 @@ class TestPlotSingleTerm:
 
         fig = fitted_model.plot("density")
         assert isinstance(fig, Figure)
+
+
+class TestPlotData:
+    def test_single_term_payload_has_effect_density_knots_and_bases(
+        self, fitted_model, sample_data
+    ):
+        X, _, sample_weight = sample_data
+        payload = fitted_model.plot_data(
+            "age",
+            X=X,
+            sample_weight=sample_weight,
+            show_knots=True,
+            show_bases=True,
+        )
+        assert payload["kind"] == "main_effects"
+        assert len(payload["terms"]) == 1
+        term = payload["terms"][0]
+        assert term["name"] == "age"
+        assert {"x", "log_relativity", "relativity"} <= set(term["effect"].columns)
+        assert term["density"] is not None
+        assert {"x", "density"} <= set(term["density"].columns)
+        assert term["knots"] is not None
+        assert {"x", "relativity", "log_relativity"} <= set(term["knots"].columns)
+        assert term["bases"] is not None
+        assert {"x", "basis_index", "basis_value", "coefficient", "contribution"} <= set(
+            term["bases"].columns
+        )
+
+    def test_all_main_effect_terms_follow_model_order(self, fitted_model):
+        payload = fitted_model.plot_data()
+        assert payload["kind"] == "main_effects"
+        assert [term["name"] for term in payload["terms"]] == list(fitted_model._feature_order)
 
 
 # ── terms=["a", "b"]: subset of main effects ──────────────────
@@ -330,10 +366,6 @@ class TestPlotErrors:
         with pytest.raises(KeyError, match="Term.*not found"):
             fitted_model.plot(["age", "nonexistent"])
 
-    def test_plotly_for_main_effects_raises(self, fitted_model):
-        with pytest.raises(ValueError, match="engine=.*only supported"):
-            fitted_model.plot("age", engine="plotly")
-
     def test_unknown_engine_raises(self, interaction_model):
         with pytest.raises(ValueError, match="Unknown engine"):
             interaction_model.plot("age:region", engine="bokeh")
@@ -466,3 +498,287 @@ class TestInteractionDensity:
         X, y, _ = sample_data
         fig = interaction_model.plot("age:region", X=X)
         assert isinstance(fig, Figure)
+
+
+@pytest.mark.skipif(not PLOTLY_AVAILABLE, reason="plotly not installed")
+class TestPlotlyMainEffects:
+    def test_plotly_single_main_effect_rejected(self, fitted_model):
+        with pytest.raises(ValueError, match="multi-term main-effect explorer"):
+            fitted_model.plot("age", engine="plotly")
+
+    def test_plotly_single_term_list_rejected(self, fitted_model):
+        with pytest.raises(ValueError, match="at least two main effects"):
+            fitted_model.plot(["age"], engine="plotly")
+
+    def test_plotly_all_main_effects_has_dropdown(self, sample_data, fitted_model):
+        import plotly.graph_objects as go
+
+        X, y, sample_weight = sample_data
+        fig = fitted_model.plot(engine="plotly", X=X, sample_weight=sample_weight)
+        assert isinstance(fig, go.Figure)
+        assert fig.layout.updatemenus
+        # updatemenus[0] = scale toggle (Response|Link), [1] = term dropdown
+        assert len(fig.layout.updatemenus[0].buttons) == 2  # Response, Link
+        assert len(fig.layout.updatemenus[1].buttons) == 3  # 3 features
+
+    def test_plotly_controls_are_left_stacked(self, fitted_model):
+        fig = fitted_model.plot(engine="plotly")
+        scale_menu = fig.layout.updatemenus[0]
+        term_menu = fig.layout.updatemenus[1]
+
+        assert scale_menu.type == "buttons"
+        assert term_menu.type == "dropdown"
+        assert scale_menu.x == 0.0
+        assert scale_menu.xanchor == "left"
+        assert term_menu.x == 0.0
+        assert term_menu.xanchor == "left"
+        assert scale_menu.y > term_menu.y
+
+        annotations = {annotation.text: annotation for annotation in fig.layout.annotations}
+        assert annotations["Scale"].x == 0.0
+        assert annotations["Scale"].xanchor == "left"
+        assert annotations["Term"].x == 0.0
+        assert annotations["Term"].xanchor == "left"
+        assert annotations["Scale"].y > annotations["Term"].y
+
+    def test_plotly_multi_main_effects(self, sample_data, fitted_model):
+        import plotly.graph_objects as go
+
+        X, y, sample_weight = sample_data
+        fig = fitted_model.plot(
+            ["age", "region"], engine="plotly", X=X, sample_weight=sample_weight
+        )
+        assert isinstance(fig, go.Figure)
+        assert fig.layout.updatemenus
+        assert len(fig.layout.updatemenus[1].buttons) == 2  # 2 features
+
+    def test_plotly_density_trace(self, sample_data, fitted_model):
+        X, y, sample_weight = sample_data
+        fig = fitted_model.plot(engine="plotly", X=X, sample_weight=sample_weight)
+        trace_names = {trace.name for trace in fig.data}
+        assert "Exposure density" in trace_names
+
+    def test_plotly_density_absent_without_X(self, fitted_model):
+        fig = fitted_model.plot(engine="plotly")
+        trace_names = {trace.name for trace in fig.data}
+        assert "Exposure density" not in trace_names
+
+    def test_plotly_knots_absent_by_default(self, fitted_model):
+        """In response mode, knots are absent unless show_knots=True."""
+        fig = fitted_model.plot(engine="plotly")
+        knot_traces = [t for t in fig.data if t.name == "Interior knots"]
+        assert len(knot_traces) == 0
+
+    def test_plotly_knots_shown(self, fitted_model):
+        fig = fitted_model.plot(engine="plotly", show_knots=True)
+        knot_traces = [t for t in fig.data if t.name == "Interior knots"]
+        assert knot_traces
+        assert knot_traces[0].visible is True
+        assert knot_traces[0].mode == "markers"
+
+    def test_plotly_bases_present_with_show_bases(self, fitted_model):
+        """Basis contributions are added when show_bases=True (link-scale data, always)."""
+        fig = fitted_model.plot(engine="plotly", show_bases=True)
+        basis_traces = [t for t in fig.data if t.name == "Basis contributions"]
+        assert len(basis_traces) == 1
+        assert basis_traces[0].hoverinfo == "skip"
+
+    def test_plotly_bases_shown_in_link_mode(self, fitted_model):
+        """Basis contributions appear on the link scale."""
+        fig = fitted_model.plot(engine="plotly", scale="link", show_bases=True)
+        basis = [t for t in fig.data if t.name == "Basis contributions"]
+        assert basis
+        assert basis[0].visible is True
+        assert basis[0].hoverinfo == "skip"
+
+    def test_plotly_ci_none(self, fitted_model):
+        fig = fitted_model.plot(engine="plotly", ci=None)
+        fill_traces = [t for t in fig.data if getattr(t, "fill", None) == "toself"]
+        assert len(fill_traces) == 0
+
+    def test_plotly_simultaneous_ci(self, fitted_model):
+        fig = fitted_model.plot(engine="plotly", ci="simultaneous")
+        sim_traces = [
+            t
+            for t in fig.data
+            if getattr(t, "fill", None) == "toself" and t.name == "95% simultaneous band"
+        ]
+        assert len(sim_traces) == 1
+
+    def test_plotly_ci_lines_use_neutral_styling(self, fitted_model):
+        fig = fitted_model.plot(engine="plotly", ci="pointwise", ci_style="lines")
+        fill_traces = [t for t in fig.data if getattr(t, "fill", None) == "toself"]
+        assert len(fill_traces) == 0
+
+        ci_trace = next(t for t in fig.data if t.name == "95% pointwise CI")
+        assert ci_trace.line.color == "rgba(24, 33, 43, 0.58)"
+        assert ci_trace.line.dash == "dash"
+
+    def test_kind_global_is_default(self, fitted_model):
+        import plotly.graph_objects as go
+
+        fig = fitted_model.plot(engine="plotly", kind="global")
+        assert isinstance(fig, go.Figure)
+
+    def test_kind_local_not_implemented(self, fitted_model):
+        with pytest.raises(NotImplementedError, match="kind=.*local"):
+            fitted_model.plot("age", kind="local")
+
+    def test_matplotlib_main_effects_unchanged(self, sample_data, fitted_model):
+        """Existing matplotlib path still works after plotly wiring."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.figure import Figure
+
+        X, y, sample_weight = sample_data
+        fig = fitted_model.plot("age", engine="matplotlib", X=X, sample_weight=sample_weight)
+        assert isinstance(fig, Figure)
+
+    def test_plotly_interaction_still_works(self, sample_data, interaction_model):
+        """Interaction plotly dispatch unchanged after main-effects wiring."""
+        import plotly.graph_objects as go
+
+        X, y, sample_weight = sample_data
+        fig = interaction_model.plot(
+            "age:region", engine="plotly", X=X, sample_weight=sample_weight
+        )
+        assert isinstance(fig, go.Figure)
+
+    def test_plotly_interaction_respects_n_points(self, sample_data, interaction_model):
+        import plotly.graph_objects as go
+
+        fig = interaction_model.plot("age:region", engine="plotly", n_points=61)
+        traces = [t for t in fig.data if isinstance(t, go.Scatter) and t.mode == "lines" and t.name]
+        assert any(len(t.x) == 61 for t in traces)
+
+    # ── Scale toggle ──────────────────────────────────────
+
+    def test_scale_response_default(self, fitted_model):
+        """Default scale='response' produces relativity traces."""
+        fig = fitted_model.plot(engine="plotly")
+        names = {t.name for t in fig.data}
+        assert "Relativity" in names
+
+    def test_scale_link_y_axis(self, fitted_model):
+        """Link-scale view uses η in the y-axis title."""
+        fig = fitted_model.plot(engine="plotly", scale="link")
+        y_title = fig.layout.yaxis.title.text
+        assert "η" in y_title or "link" in y_title.lower()
+
+    def test_scale_link_fitted_line_name(self, fitted_model):
+        """Link-scale fitted line keeps name 'Relativity'; hover shows η."""
+        fig = fitted_model.plot(engine="plotly", scale="link")
+        names = {t.name for t in fig.data}
+        assert "Relativity" in names
+        # The hovertemplate should reference η on link scale
+        rel_trace = next(t for t in fig.data if t.name == "Relativity")
+        assert "η" in (rel_trace.hovertemplate or "")
+
+    def test_scale_link_reference_at_zero(self, fitted_model):
+        """Link-scale reference line at 0, not 1."""
+        fig = fitted_model.plot(engine="plotly", scale="link")
+        hlines = [s for s in fig.layout.shapes if s.type == "line" and s.y0 == s.y1]
+        assert any(s.y0 == 0.0 for s in hlines)
+
+    def test_scale_response_reference_at_one(self, fitted_model):
+        """Response-scale reference line at 1."""
+        fig = fitted_model.plot(engine="plotly")
+        hlines = [s for s in fig.layout.shapes if s.type == "line" and s.y0 == s.y1]
+        assert any(s.y0 == 1.0 for s in hlines)
+
+    def test_scale_link_has_basis_contributions(self, fitted_model):
+        """Link scale with show_bases shows basis contribution traces."""
+        fig = fitted_model.plot(engine="plotly", scale="link", show_bases=True)
+        basis = [t for t in fig.data if t.name == "Basis contributions"]
+        assert len(basis) >= 1
+
+    def test_scale_response_basis_traces_hidden(self, fitted_model):
+        """Basis traces must not distort response-scale autorange."""
+        fig_no_bases = fitted_model.plot(engine="plotly", scale="response", show_bases=False)
+        fig_bases = fitted_model.plot(engine="plotly", scale="response", show_bases=True)
+
+        # Basis traces exist but are invisible on response scale
+        basis = [t for t in fig_bases.data if t.name == "Basis contributions"]
+        assert len(basis) >= 1
+        assert all(t.visible is False for t in basis)
+
+        # Y-axis autorange should be identical with and without bases
+        range_no = fig_no_bases.layout.yaxis.range
+        range_with = fig_bases.layout.yaxis.range
+        if range_no is not None and range_with is not None:
+            assert range_no == range_with
+
+    def test_link_toggle_restores_basis_visibility(self, fitted_model):
+        """Clicking Link after starting on response must make basis traces visible."""
+        fig = fitted_model.plot(engine="plotly", scale="response", show_bases=True)
+        # Find the scale toggle buttons
+        toggles = [m for m in fig.layout.updatemenus if m.type == "buttons"]
+        assert toggles
+        link_btn = next(b for b in toggles[0].buttons if b.label == "Link")
+        restyle = link_btn.args[0]
+        # The Link restyle must include visible entries that restore basis traces
+        assert "visible" in restyle
+        vis = restyle["visible"]
+        basis_indices = [i for i, t in enumerate(fig.data) if t.name == "Basis contributions"]
+        assert basis_indices
+        for idx in basis_indices:
+            assert vis[idx] is not False, f"Basis trace {idx} not restored by Link toggle"
+
+    def test_scale_link_knots_on_link_curve(self, fitted_model):
+        """Link-scale knots are markers on the η curve."""
+        fig = fitted_model.plot(engine="plotly", scale="link", show_knots=True)
+        knots = [t for t in fig.data if t.name == "Interior knots"]
+        assert knots
+        assert knots[0].mode == "markers"
+
+    def test_scale_invalid_raises(self, fitted_model):
+        with pytest.raises(ValueError, match="scale"):
+            fitted_model.plot("age", scale="bogus")
+
+    def test_simultaneous_ci_wider_than_pointwise_on_link(self, fitted_model):
+        """Simultaneous link-scale CI should be wider than pointwise."""
+        fig = fitted_model.plot(engine="plotly", ci="both", scale="link")
+        sim_fill = [
+            t
+            for t in fig.data
+            if getattr(t, "fill", None) == "toself" and "simultaneous" in (t.name or "").lower()
+        ]
+        pw_fill = [
+            t
+            for t in fig.data
+            if getattr(t, "fill", None) == "toself" and "pointwise" in (t.name or "").lower()
+        ]
+        assert len(sim_fill) == 1 and len(pw_fill) == 1
+        import numpy as np
+
+        sim_y = np.asarray(sim_fill[0].y)
+        pw_y = np.asarray(pw_fill[0].y)
+        n = len(sim_y) // 2
+        sim_span = sim_y[:n] - sim_y[n:][::-1]  # upper - lower
+        pw_span = pw_y[:n] - pw_y[n:][::-1]
+        assert np.all(sim_span >= pw_span - 1e-12)
+        assert np.any(sim_span > pw_span + 1e-12)
+
+    def test_term_dropdown_resets_to_response_scale(self, fitted_model):
+        """Switching terms via dropdown should reset to response scale."""
+        fig = fitted_model.plot(engine="plotly")
+        dropdowns = [m for m in fig.layout.updatemenus if m.type == "dropdown"]
+        if not dropdowns:
+            pytest.skip("Single-term model, no dropdown")
+        btn = dropdowns[0].buttons[0]
+        relayout = btn.args[1]
+        assert relayout.get("yaxis.title.text") == "Relativity"
+        # Scale toggle should be reset to index 0 (Response)
+        assert relayout.get("updatemenus[0].active") == 0
+
+    def test_plotly_main_effects_import_error(self, fitted_model):
+        """Clear ImportError when plotly is missing."""
+        from unittest.mock import patch
+
+        with patch.dict(
+            "sys.modules",
+            {"plotly": None, "plotly.graph_objects": None, "plotly.subplots": None},
+        ):
+            with pytest.raises(ImportError, match="plotly is required"):
+                fitted_model.plot(engine="plotly")

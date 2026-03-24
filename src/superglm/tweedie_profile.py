@@ -277,8 +277,9 @@ def estimate_phi(
 
     where denom = df_resid if provided, else n_obs (i.e. no df correction).
 
-    Note: for frequency-weighted data, callers should pass
-    ``df_resid = sum(weights) - edf``, not ``n - edf``.
+    For the prior-weight convention used by ``sample_weight`` in SuperGLM,
+    callers should pass the residual observation count
+    ``df_resid = n_obs - edf``.
     """
     y = np.asarray(y, dtype=np.float64)
     mu = np.asarray(mu, dtype=np.float64)
@@ -625,7 +626,7 @@ class _ProfileContext:
             self.dm.matvec(result.beta) + result.intercept + self.offset_arr, self.link
         )
         mu = clip_mu(self.link.inverse(eta), dist)
-        df_resid = max(float(np.sum(self.w_arr)) - float(result.effective_df), 1.0)
+        df_resid = max(float(len(self.y_arr)) - float(result.effective_df), 1.0)
 
         phi, nll = _profile_phi(
             self.y_arr,
@@ -678,7 +679,7 @@ class _ProfileContext:
             mu_final = self.last_mu
             edf_final = self.last_edf
 
-        df_resid_final = max(float(np.sum(self.w_arr)) - float(edf_final), 1.0)
+        df_resid_final = max(float(len(self.y_arr)) - float(edf_final), 1.0)
         phi_hat, _ = _profile_phi(
             self.y_arr,
             mu_final,
@@ -814,7 +815,7 @@ class _ProfileContextREML:
         self.model.fit_reml(self.X, self.y, sample_weight=self.sample_weight, offset=self.offset)
 
         mu = np.maximum(self.model.predict(self.X), 1e-10)
-        df_resid = max(float(np.sum(self.w_arr)) - float(self.model.result.effective_df), 1.0)
+        df_resid = max(float(len(self.y)) - float(self.model.result.effective_df), 1.0)
         phi, nll = _profile_phi(
             self.y,
             mu,
@@ -863,7 +864,7 @@ class _ProfileContextREML:
 
         nll = self._nll_cache[p_hat]
 
-        df_resid_final = max(float(np.sum(self.w_arr)) - float(self.last_edf), 1.0)
+        df_resid_final = max(float(len(self.y)) - float(self.last_edf), 1.0)
         phi_hat, _ = _profile_phi(
             self.y,
             self.last_mu,
