@@ -725,12 +725,12 @@ class TensorInteraction:
         B = BSpl.design_matrix(x_clip, info.knots, info.degree).tocsr()
         return sp.csr_matrix(B @ info.projection)
 
-    def _prepare_centered_marginals(
+    def _prepare_marginal_infos(
         self,
         x1: NDArray,
         x2: NDArray,
         parent_specs: dict,
-    ) -> tuple[sp.csr_matrix, sp.csr_matrix, NDArray, NDArray]:
+    ) -> tuple[TensorMarginalInfo, TensorMarginalInfo]:
         from superglm.features.spline import _SplineBase
 
         spec1 = parent_specs[self.feat1_name]
@@ -752,11 +752,20 @@ class TensorInteraction:
 
         self._p1 = self._marginal1.K_eff
         self._p2 = self._marginal2.K_eff
+        return self._marginal1, self._marginal2
 
-        B1 = sp.csr_matrix(self._marginal1.basis)
-        B2 = sp.csr_matrix(self._marginal2.basis)
-        S1 = self._marginal1.penalty
-        S2 = self._marginal2.penalty
+    def _prepare_centered_marginals(
+        self,
+        x1: NDArray,
+        x2: NDArray,
+        parent_specs: dict,
+    ) -> tuple[sp.csr_matrix, sp.csr_matrix, NDArray, NDArray]:
+        m1, m2 = self._prepare_marginal_infos(x1, x2, parent_specs)
+
+        B1 = sp.csr_matrix(m1.basis)
+        B2 = sp.csr_matrix(m2.basis)
+        S1 = m1.penalty
+        S2 = m2.penalty
         return B1, B2, S1, S2
 
     def _build_group_infos(self, omega: NDArray) -> GroupInfo | list[GroupInfo]:
@@ -830,11 +839,11 @@ class TensorInteraction:
         sample_weight: NDArray | None = None,
     ) -> DiscreteTensorBuildResult:
         """Build a discretized tensor basis on observed joint support pairs."""
-        B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs)
+        m1, m2 = self._prepare_marginal_infos(x1, x2, parent_specs)
+        S1, S2 = m1.penalty, m2.penalty
         omega = np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
         infos = self._build_group_infos(omega)
 
-        m1, m2 = self._marginal1, self._marginal2
         support1, idx1 = _discretize_column(x1, int(n_bins[0]))
         support2, idx2 = _discretize_column(x2, int(n_bins[1]))
         B1_unique = self._centered_marginal_basis(support1, m1).toarray()
