@@ -21,8 +21,8 @@ repos:
   - repo: local
     hooks:
       - id: pytest
-        name: pytest
-        entry: uv run --with pyarrow pytest tests/ -q
+        name: pytest-fast
+        entry: uv run --with pyarrow pytest tests/ -q -m "not slow"
         language: system
         pass_filenames: false
         always_run: true
