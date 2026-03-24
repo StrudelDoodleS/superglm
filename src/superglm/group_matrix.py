@@ -493,7 +493,20 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
 
     def matvec(self, v: NDArray) -> NDArray:
         B1, B2 = self.B1_unique_t, self.B2_unique_t
+        n_pairs = self.B_unique.shape[0]
+        n_obs = self.shape[0]
+        p_g = self.shape[1]
         K1, K2 = B1.shape[1], B2.shape[1]
+
+        # When the observed tensor support is small, evaluating on the unique
+        # support pairs and scattering back to observations is much cheaper
+        # than building an (n, K2) temporary via the factored observation path.
+        direct_pair_cost = n_pairs * p_g
+        factored_obs_cost = B1.shape[0] * p_g + n_obs * K2
+        if direct_pair_cost <= factored_obs_cost:
+            vals = self.B_unique @ (self.R_inv @ v)
+            return vals[self.bin_idx]
+
         u = (self.R_inv @ v).reshape(K1, K2)
         B1u = B1 @ u  # (n_bins1, K2)
         return np.sum(B1u[self.idx1] * B2[self.idx2], axis=1)
