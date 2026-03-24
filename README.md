@@ -345,11 +345,18 @@ m.residuals("quantile")         # quantile residuals (standard normal under corr
 # Per-term inference (TermInference dataclass)
 ti = model.term_inference("DrivAge")
 
-# Plot a single term with CI bands and exposure density strip
+# Plot a single term for export / deck use
 model.plot("DrivAge", X=df, sample_weight=exposure)
 
 # Plot all terms in a grid
 model.plot(X=df, sample_weight=exposure, ci="both")
+
+# Interactive Plotly explorer for main effects
+model.plot(engine="plotly", X=df, sample_weight=exposure)
+
+# Raw plot data for custom reporting / rebuilds
+payload = model.plot_data("DrivAge", X=df, sample_weight=exposure, show_knots=True)
+curve_df = payload["terms"][0]["effect"]
 
 # Relativity DataFrames — centering="mean" shifts so geometric mean = 1
 rels = model.relativities(with_se=True, centering="mean")

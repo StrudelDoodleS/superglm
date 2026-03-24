@@ -1,6 +1,6 @@
 [project]
 name = "superglm"
-version = "0.5.1"
+version = "0.6.0"
 description = "Penalised GLMs for insurance pricing: group lasso, P-splines, Tweedie"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,8 +35,11 @@ bench = [
 interactions = [
     "interpret>=0.7",
 ]
+plotting = [
+    "plotly>=5.24",
+]
 all = [
-    "superglm[dev,bench,interactions]",
+    "superglm[dev,bench,interactions,plotting]",
 ]
 
 [build-system]

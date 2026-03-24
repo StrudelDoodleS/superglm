@@ -245,6 +245,120 @@ class TestSurfacePlotly:
         assert isinstance(fig, go.Figure)
         assert any(isinstance(t, go.Surface) for t in fig.data)
 
+    def test_contour_view_has_contour_trace(self, interaction_data):
+        import plotly.graph_objects as go
+
+        model = _fit_poly_poly(interaction_data)
+        fig = plot_interaction(model, "age:bm", engine="plotly", interaction_view="contour")
+        assert any(isinstance(t, go.Contour) for t in fig.data)
+        assert not any(isinstance(t, go.Surface) for t in fig.data)
+
+    def test_contour_pair_has_hdr_panel(self, interaction_data):
+        import plotly.graph_objects as go
+
+        X, _ = interaction_data
+        sample_weight = np.ones(len(X), dtype=np.float64)
+        model = _fit_poly_poly(interaction_data)
+        fig = plot_interaction(
+            model,
+            "age:bm",
+            engine="plotly",
+            interaction_view="contour_pair",
+            X=X,
+            sample_weight=sample_weight,
+        )
+        assert any(isinstance(t, go.Contour) for t in fig.data)
+        assert not any(isinstance(t, go.Surface) for t in fig.data)
+        assert fig.layout.xaxis2.title.text == "age"
+        assert fig.layout.yaxis2.title.text == "bm"
+        assert any(
+            isinstance(t, go.Contour)
+            and getattr(getattr(t, "colorbar", None), "title", None).text == "HDR<br>Mass"
+            for t in fig.data
+        )
+
+    def test_contour_pair_requires_density_data(self, interaction_data):
+        model = _fit_poly_poly(interaction_data)
+        with pytest.raises(ValueError, match="requires X and sample_weight"):
+            plot_interaction(
+                model,
+                "age:bm",
+                engine="plotly",
+                interaction_view="contour_pair",
+            )
+
+    def test_invalid_interaction_view_raises(self, interaction_data):
+        model = _fit_poly_poly(interaction_data)
+        with pytest.raises(ValueError, match="interaction_view"):
+            plot_interaction(model, "age:bm", engine="plotly", interaction_view="bogus")
+
+    def test_respects_n_points(self, interaction_data):
+        import plotly.graph_objects as go
+
+        model = _fit_poly_poly(interaction_data)
+        fig = plot_interaction(model, "age:bm", engine="plotly", n_points=73)
+        surface = next(t for t in fig.data if isinstance(t, go.Surface) and t.name == "Relativity")
+        assert len(surface.x) == 73
+        assert len(surface.y) == 73
+        assert np.asarray(surface.z).shape == (73, 73)
+
+    def test_no_wall_traces_by_default(self, interaction_data):
+        import plotly.graph_objects as go
+
+        model = _fit_poly_poly(interaction_data)
+        fig = plot_interaction(model, "age:bm", engine="plotly")
+        assert not any(
+            isinstance(t, go.Scatter3d) and "Main effect:" in (t.name or "") for t in fig.data
+        )
+
+    def test_adds_main_effect_wall_traces(self, interaction_data):
+        import plotly.graph_objects as go
+
+        model = _fit_poly_poly(interaction_data)
+        fig = plot_interaction(model, "age:bm", engine="plotly", show_main_effect_walls=True)
+        assert any(
+            isinstance(t, go.Scatter3d) and "Main effect:" in (t.name or "") for t in fig.data
+        )
+
+    def test_surface_opacity_kwarg(self, interaction_data):
+        import plotly.graph_objects as go
+
+        model = _fit_poly_poly(interaction_data)
+        fig = plot_interaction(model, "age:bm", engine="plotly", surface_opacity=0.62)
+        surface = next(t for t in fig.data if isinstance(t, go.Surface) and t.name == "Relativity")
+        assert surface.opacity == pytest.approx(0.62)
+
+    def test_density_plane_sits_above_scene_floor(self, interaction_data):
+        import plotly.graph_objects as go
+
+        X, _ = interaction_data
+        sample_weight = np.ones(len(X), dtype=np.float64)
+        model = _fit_poly_poly(interaction_data)
+        fig = plot_interaction(
+            model,
+            "age:bm",
+            engine="plotly",
+            X=X,
+            sample_weight=sample_weight,
+        )
+        density = next(
+            t for t in fig.data if isinstance(t, go.Surface) and t.name == "Exposure density"
+        )
+        z_density = float(np.asarray(density.z).flat[0])
+        z_floor = float(fig.layout.scene.zaxis.range[0])
+        assert z_density > z_floor
+
+    def test_wall_traces_not_in_legend(self, interaction_data):
+        import plotly.graph_objects as go
+
+        model = _fit_poly_poly(interaction_data)
+        fig = plot_interaction(model, "age:bm", engine="plotly", show_main_effect_walls=True)
+        walls = [
+            t for t in fig.data if isinstance(t, go.Scatter3d) and "Main effect:" in (t.name or "")
+        ]
+        assert walls
+        assert all(t.showlegend is False for t in walls)
+
 
 # ── API / error tests ────────────────────────────────────────────
 
@@ -256,6 +370,35 @@ class TestInteractionPlotAPI:
         model = _fit_spline_cat(interaction_data)
         fig = model.plot("age:region")
         assert isinstance(fig, Figure)
+
+    def test_model_plot_data_returns_surface_and_density_grids(self, interaction_data):
+        X, _ = interaction_data
+        sample_weight = np.ones(len(X), dtype=np.float64)
+        model = _fit_poly_poly(interaction_data)
+        payload = model.plot_data("age:bm", X=X, sample_weight=sample_weight, n_points=41)
+        assert payload["kind"] == "interaction"
+        assert payload["plot_kind"] == "surface"
+        assert {"age", "bm", "relativity", "log_relativity"} <= set(payload["effect"].columns)
+        assert len(payload["grid_axes"]["age"]) == 41
+        assert len(payload["grid_axes"]["bm"]) == 41
+        assert payload["density"] is not None
+        assert {"age", "bm", "density", "hdr_mass"} <= set(payload["density"].columns)
+
+    def test_model_plot_forwards_interaction_view(self, interaction_data):
+        import plotly.graph_objects as go
+
+        X, _ = interaction_data
+        sample_weight = np.ones(len(X), dtype=np.float64)
+        model = _fit_poly_poly(interaction_data)
+        fig = model.plot(
+            "age:bm",
+            engine="plotly",
+            interaction_view="contour_pair",
+            X=X,
+            sample_weight=sample_weight,
+        )
+        assert any(isinstance(t, go.Contour) for t in fig.data)
+        assert not any(isinstance(t, go.Surface) for t in fig.data)
 
     def test_unknown_interaction_raises(self, interaction_data):
         model = _fit_spline_cat(interaction_data)
