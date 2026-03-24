@@ -1409,16 +1409,19 @@ class TestBasisDetail:
         model.fit(X, y)
         return model, X, y
 
-    def test_default_summary_no_basis_rows(self, spline_model):
+    def test_default_summary_no_coef_detail(self, spline_model):
         model, _, _ = spline_model
-        text = str(model.summary())
-        assert "Basis" not in text
+        s = model.summary()
+        text = str(s)
+        assert "Coef 1" not in text
+        # Compact mode should not compute basis detail at all
+        assert len(s._basis_detail) == 0
 
     def test_basis_detail_ascii(self, spline_model):
         model, _, _ = spline_model
         text = str(model.summary(detail="basis"))
-        assert "Basis 1" in text
-        assert "Basis 2" in text
+        assert "Coef 1" in text
+        assert "Coef 2" in text
 
     def test_basis_detail_row_count(self, spline_model):
         model, _, _ = spline_model
@@ -1441,11 +1444,11 @@ class TestBasisDetail:
                 assert np.isfinite(br.ci_low)
                 assert np.isfinite(br.ci_high)
 
-    def test_html_has_disclosure_compact(self, spline_model):
+    def test_html_no_disclosure_compact(self, spline_model):
         model, _, _ = spline_model
         html = model.summary(detail="compact")._repr_html_()
-        assert "<details>" in html
-        assert "<details open" not in html
+        # Compact mode: no disclosure, no basis_detail computed
+        assert "<details>" not in html
 
     def test_html_disclosure_open_for_basis(self, spline_model):
         model, _, _ = spline_model

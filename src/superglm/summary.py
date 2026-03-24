@@ -361,11 +361,11 @@ class ModelSummary:
                     spline_text = f"[{kind}, {param_label}, inactive]"
                     lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
 
-                # Basis detail rows (only for detail="basis")
+                # Coefficient detail rows (only for detail="basis")
                 if self._detail == "basis" and row.name in self._basis_detail:
                     for br in self._basis_detail[row.name]:
                         b_stars = _sig_stars(br.p)
-                        b_label = f"Basis {br.basis_index + 1}"
+                        b_label = f"Coef {br.basis_index + 1}"
                         lines.append(
                             _row(
                                 f"{'':<{name_w}s}      "
@@ -603,7 +603,7 @@ class ModelSummary:
                         f'font-style:italic;">{text}</td></tr>'
                     )
 
-                # HTML basis-detail disclosure
+                # HTML coefficient-detail disclosure
                 if row.name in self._basis_detail:
                     open_attr = " open" if self._detail == "basis" else ""
                     inner_rows = []
@@ -625,7 +625,7 @@ class ModelSummary:
                         "<table style='width:100%;font-size:11px;color:#555;"
                         "border-collapse:collapse;margin:2px 0;'>"
                         "<tr>"
-                        "<th style='padding:1px 6px;text-align:left;'>basis</th>"
+                        "<th style='padding:1px 6px;text-align:left;'>coef</th>"
                         "<th style='padding:1px 6px;'>coef</th>"
                         "<th style='padding:1px 6px;'>std err</th>"
                         "<th style='padding:1px 6px;'>z</th>"
@@ -639,7 +639,7 @@ class ModelSummary:
                         f'<tr><td colspan="{ncols}" style="padding:0;border:none;">'
                         f"<details{open_attr}>"
                         f"<summary style='cursor:pointer;font-size:11px;color:#888;"
-                        f"padding:2px 8px;'>&#x25B6; basis coefficients</summary>"
+                        f"padding:2px 8px;'>&#x25B6; coefficient detail</summary>"
                         f"{inner_table}"
                         f"</details></td></tr>"
                     )
