@@ -28,7 +28,7 @@ ti.spline                   # SplineMetadata (interior_knots, boundary_knots, ba
 All plotting goes through `model.plot()`:
 
 ```python
-# Single term
+# Single-term chart
 model.plot("DrivAge", X=df, sample_weight=exposure)
 
 # All terms in a grid
@@ -37,11 +37,46 @@ model.plot(X=df, sample_weight=exposure)
 # Subset of terms
 model.plot(["DrivAge", "VehAge"], X=df, sample_weight=exposure)
 
+# Interactive Plotly main-effect explorer
+model.plot(engine="plotly", X=df, sample_weight=exposure)
+
+# Plotly subset explorer
+model.plot(["DrivAge", "VehAge"], engine="plotly", X=df, sample_weight=exposure)
+
+# Plotly interaction contour + exposure HDR view
+model.plot(
+    "DrivAge:VehAge",
+    engine="plotly",
+    interaction_view="contour_pair",
+    X=df,
+    sample_weight=exposure,
+)
+
 # Interaction
 model.plot("DrivAge:Area")
 ```
 
+`engine="matplotlib"` is the chart/export path. `engine="plotly"` is the multi-term main-effect explorer path and requires at least two main effects (or `terms=None`).
+
 Options: `ci` (`"pointwise"`, `"simultaneous"`, `"both"`, `None`, `False`), `show_knots`, `show_density`, `title`, `subtitle`, `engine`.
+
+## Plot data export
+
+Use `model.plot_data()` when you need the underlying x/y/grid data to rebuild a
+plot outside SuperGLM:
+
+```python
+# Main-effect data
+payload = model.plot_data("DrivAge", X=df, sample_weight=exposure, show_knots=True)
+curve_df = payload["terms"][0]["effect"]
+density_df = payload["terms"][0]["density"]
+knots_df = payload["terms"][0]["knots"]
+
+# Continuous x continuous interaction grid
+payload = model.plot_data("DrivAge:VehAge", X=df, sample_weight=exposure, n_points=220)
+surface_df = payload["effect"]
+hdr_df = payload["density"]  # includes density + hdr_mass columns
+```
 
 ## Relativity DataFrames
 

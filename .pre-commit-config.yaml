@@ -22,7 +22,7 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        entry: uv run pytest tests/ -q
+        entry: uv run --with pyarrow pytest tests/ -q
         language: system
         pass_filenames: false
         always_run: true
