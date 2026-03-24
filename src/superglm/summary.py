@@ -44,6 +44,20 @@ class _CoefRow:
     monotone_repaired: bool = False
 
 
+@dataclass
+class _BasisDetailRow:
+    """One per-basis coefficient row for spline detail display."""
+
+    parent_name: str  # group name, e.g. "x" or "x:spline"
+    basis_index: int  # 0-based within group
+    coef: float
+    se: float
+    z: float
+    p: float
+    ci_low: float
+    ci_high: float
+
+
 def _compute_coef_stats(
     coef: float,
     se: float,
@@ -104,11 +118,20 @@ class ModelSummary:
         model_info: dict[str, Any],
         coef_rows: list[_CoefRow],
         alpha: float = 0.05,
+        detail: str = "compact",
+        basis_detail: dict[str, list[_BasisDetailRow]] | None = None,
     ):
+        _VALID_DETAIL = {"compact", "basis"}
+        if detail not in _VALID_DETAIL:
+            raise ValueError(
+                f"detail={detail!r} is not valid. Expected one of {sorted(_VALID_DETAIL)}."
+            )
         self._data = data
         self._info = model_info
         self._coef_rows = coef_rows
         self._alpha = alpha
+        self._detail = detail
+        self._basis_detail: dict[str, list[_BasisDetailRow]] = basis_detail or {}
 
     # ── Backward-compat dict interface ────────────────────────────
 
@@ -337,6 +360,24 @@ class ModelSummary:
                 else:
                     spline_text = f"[{kind}, {param_label}, inactive]"
                     lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
+
+                # Basis detail rows (only for detail="basis")
+                if self._detail == "basis" and row.name in self._basis_detail:
+                    for br in self._basis_detail[row.name]:
+                        b_stars = _sig_stars(br.p)
+                        b_label = f"Basis {br.basis_index + 1}"
+                        lines.append(
+                            _row(
+                                f"{'':<{name_w}s}      "
+                                f"{b_label:<9s}"
+                                f"{br.coef:>10.4f}"
+                                f"{br.se:>10.4f}"
+                                f"{br.z:>8.3f}"
+                                f"{br.p:>8.3f}"
+                                f"  {b_stars:<3s}"
+                            )
+                        )
+
             elif row.coef is not None and row.se is not None and row.se > 0:
                 stars = _sig_stars(row.p)
                 if abs(row.z) >= 100:
@@ -561,6 +602,48 @@ class ModelSummary:
                         f'<td colspan="{ncols - 1}" style="{cell_l};color:#666;'
                         f'font-style:italic;">{text}</td></tr>'
                     )
+
+                # HTML basis-detail disclosure
+                if row.name in self._basis_detail:
+                    open_attr = " open" if self._detail == "basis" else ""
+                    inner_rows = []
+                    for br in self._basis_detail[row.name]:
+                        b_stars = _sig_stars(br.p)
+                        inner_rows.append(
+                            f"<tr>"
+                            f"<td style='padding:1px 6px;'>{br.basis_index + 1}</td>"
+                            f"<td style='padding:1px 6px;'>{br.coef:.4f}</td>"
+                            f"<td style='padding:1px 6px;'>{br.se:.4f}</td>"
+                            f"<td style='padding:1px 6px;'>{br.z:.3f}</td>"
+                            f"<td style='padding:1px 6px;'>{br.p:.3f}</td>"
+                            f"<td style='padding:1px 6px;'>{br.ci_low:.3f}</td>"
+                            f"<td style='padding:1px 6px;'>{br.ci_high:.3f}</td>"
+                            f"<td style='padding:1px 6px;'>{b_stars}</td>"
+                            f"</tr>"
+                        )
+                    inner_table = (
+                        "<table style='width:100%;font-size:11px;color:#555;"
+                        "border-collapse:collapse;margin:2px 0;'>"
+                        "<tr>"
+                        "<th style='padding:1px 6px;text-align:left;'>basis</th>"
+                        "<th style='padding:1px 6px;'>coef</th>"
+                        "<th style='padding:1px 6px;'>std err</th>"
+                        "<th style='padding:1px 6px;'>z</th>"
+                        "<th style='padding:1px 6px;'>P&gt;|z|</th>"
+                        "<th style='padding:1px 6px;'>[ci_lo</th>"
+                        "<th style='padding:1px 6px;'>ci_hi]</th>"
+                        "<th style='padding:1px 6px;'></th>"
+                        "</tr>" + "".join(inner_rows) + "</table>"
+                    )
+                    parts.append(
+                        f'<tr><td colspan="{ncols}" style="padding:0;border:none;">'
+                        f"<details{open_attr}>"
+                        f"<summary style='cursor:pointer;font-size:11px;color:#888;"
+                        f"padding:2px 8px;'>&#x25B6; basis coefficients</summary>"
+                        f"{inner_table}"
+                        f"</details></td></tr>"
+                    )
+
             elif row.coef is not None and row.se is not None and row.se > 0:
                 stars = _sig_stars(row.p)
                 parts.append(
