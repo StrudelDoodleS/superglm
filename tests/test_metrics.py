@@ -1334,6 +1334,48 @@ class TestSummaryInferenceCache:
                     err_msg=f"EDF mismatch for {sr.name}",
                 )
 
+    def test_summary_sparse_categorical_se_matches_metrics(self):
+        """Rare weakly-identified factor levels must keep large summary SEs."""
+        rng = np.random.default_rng(0)
+        levels = list("ABCDEFGHIJ")
+        n = 8000
+        x = rng.choice(
+            levels,
+            size=n,
+            p=[0.22, 0.18, 0.14, 0.12, 0.10, 0.08, 0.06, 0.05, 0.04, 0.01],
+        )
+        w = np.ones(n)
+        rare_mask = x == "J"
+        w[rare_mask] = 1e-4
+
+        coef = {
+            lev: c for lev, c in zip(levels, [0.0, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.2, 0.5, -2.5])
+        }
+        eta = 1.5 + np.array([coef[v] for v in x])
+        mu = np.exp(eta)
+        counts = rng.poisson(mu * w).astype(float)
+        counts[rare_mask] = 0.0
+        y = counts / np.maximum(w, 1e-300)
+        X = pd.DataFrame({"cat": pd.Categorical(x, categories=levels)})
+
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="first")},
+        )
+        model.fit(X, y, sample_weight=w)
+
+        s_model = model.summary()
+        s_metrics = model.metrics(X, y, sample_weight=w).summary()
+
+        row_model = next(r for r in s_model._coef_rows if r.name == "cat[J]")
+        row_metrics = next(r for r in s_metrics._coef_rows if r.name == "cat[J]")
+
+        assert row_metrics.se > 1.0
+        assert np.isfinite(row_model.se)
+        assert row_model.se == pytest.approx(row_metrics.se, rel=1e-6, abs=1e-8)
+        assert row_model.p == pytest.approx(row_metrics.p, rel=1e-6, abs=1e-8)
+
     def test_metrics_summary_uses_own_edf_not_fit_cache(self):
         """ModelMetrics.summary() must compute EDF from its own weights, not fit cache."""
         rng = np.random.default_rng(123)

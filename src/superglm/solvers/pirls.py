@@ -346,7 +346,10 @@ def _fit_pirls_inner(
             S = _build_penalty_matrix(active_gms, active_groups_edf, lambda2, p_a)
             M = XtWX + S
             eigvals, eigvecs = np.linalg.eigh(M)
-            threshold = 1e-6 * max(eigvals.max(), 1e-12)
+            # Keep the gram-path truncation aligned with the dense QR/SVD path:
+            # singular-value cutoff ``rtol * s_max`` corresponds to
+            # eigenvalue cutoff ``rtol**2 * eig_max``.
+            threshold = (1e-6**2) * max(eigvals.max(), 1e-12)
             inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
             M_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
             p_eff = 1.0 + float(np.trace(M_inv @ XtWX))

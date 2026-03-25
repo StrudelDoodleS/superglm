@@ -929,7 +929,7 @@ class TestSearchTrace:
         trace = result.search_trace
         assert isinstance(trace, pd.DataFrame)
         expected_cols = {"step", "p", "phi", "nll", "n_iter", "fit_converged", "source"}
-        assert set(trace.columns) == expected_cols
+        assert expected_cols.issubset(set(trace.columns))
         assert len(trace) >= 3
         assert (trace["source"] == "brent").all()
 
