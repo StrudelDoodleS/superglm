@@ -365,16 +365,21 @@ class ModelSummary:
                 if self._detail == "full" and row.name in self._basis_detail:
                     for br in self._basis_detail[row.name]:
                         b_stars = _sig_stars(br.p)
-                        b_label = f"Coef {br.basis_index + 1}"
+                        b_label = f"  Coef {br.basis_index + 1}"
+                        if abs(br.z) >= 100:
+                            bz_str = f"{br.z:>8.1f}"
+                        else:
+                            bz_str = f"{br.z:>8.3f}"
                         lines.append(
                             _row(
-                                f"{'':<{name_w}s}      "
-                                f"{b_label:<9s}"
+                                f"{b_label:<{name_w}s}"
                                 f"{br.coef:>10.4f}"
                                 f"{br.se:>10.4f}"
-                                f"{br.z:>8.3f}"
+                                f"{bz_str}"
                                 f"{br.p:>8.3f}"
-                                f"  {b_stars:<3s}"
+                                f"{br.ci_low:>9.3f}"
+                                f"{br.ci_high:>9.3f}"
+                                f" {b_stars:<3s}"
                             )
                         )
 
