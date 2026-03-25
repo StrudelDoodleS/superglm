@@ -223,10 +223,13 @@ def _penalised_xtwx_inv_gram(
                 omega = _second_diff_penalty(p_b)
             S[ag.sl, ag.sl] = lam_g * R_inv.T @ omega @ R_inv
 
-    # Invert (X'WX + S) via truncated SVD
+    # Invert (X'WX + S) via eigendecomposition.
+    # Match the dense QR/SVD path: there we truncate singular values at
+    # ``rtol * s_max``. Since ``eigvals(M) = s**2``, the equivalent cutoff
+    # on the eigenvalue scale is ``rtol**2 * eig_max``.
     M = XtWX + S
     eigvals, eigvecs = np.linalg.eigh(M)
-    threshold = 1e-6 * max(eigvals.max(), 1e-12)
+    threshold = (1e-6**2) * max(eigvals.max(), 1e-12)
     with np.errstate(divide="ignore"):
         inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
     XtWX_S_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
@@ -244,7 +247,7 @@ def _penalised_xtwx_inv_gram(
     M_aug[1:, 0] = XtW1
     M_aug[1:, 1:] = M  # XtWX + S
     eigvals_aug, eigvecs_aug = np.linalg.eigh(M_aug)
-    threshold_aug = 1e-6 * max(eigvals_aug.max(), 1e-12)
+    threshold_aug = (1e-6**2) * max(eigvals_aug.max(), 1e-12)
     with np.errstate(divide="ignore"):
         inv_eigvals_aug = np.where(eigvals_aug > threshold_aug, 1.0 / eigvals_aug, 0.0)
     XtWX_S_inv_aug = (eigvecs_aug * inv_eigvals_aug[None, :]) @ eigvecs_aug.T
