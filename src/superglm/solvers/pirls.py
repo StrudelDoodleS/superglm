@@ -293,9 +293,10 @@ def _fit_pirls_inner(
             break
 
         if convergence == "coefficients":
+            coef_change = float(np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta))))
             coef_change = max(
-                abs(intercept - intercept_prev),
-                float(np.max(np.abs(beta - beta_prev))),
+                coef_change,
+                abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
             )
             if coef_change < tol:
                 converged = True
