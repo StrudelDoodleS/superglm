@@ -10,7 +10,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution, clip_mu, initial_mean
+from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initial_mean
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
@@ -100,7 +100,7 @@ def _fit_pirls_inner(
     intercept_init: float | None = None,
     max_iter_outer: int = 100,
     max_iter_inner: int = 5,
-    tol: float = 1e-6,
+    tol: float = 1e-8,
     active_set: bool = False,
     lambda2: float | dict[str, float] = 0.0,
     record_diagnostics: bool = False,
@@ -142,7 +142,7 @@ def _fit_pirls_inner(
 
         # Working weights and response (PIRLS)
         V = family.variance(mu)
-        V = np.maximum(V, 1e-10)
+        V = np.maximum(V, _VARIANCE_FLOOR)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
         z = eta + (y - mu) / dmu_deta
@@ -374,7 +374,7 @@ def _fit_pirls_inner(
     # SuperGLM's sample_weight follows the prior-weight convention, so the
     # residual d.f. correction is observation-count based (n - edf), while
     # the weights still scale the Pearson numerator.
-    V_final = np.maximum(family.variance(mu_new), 1e-10)
+    V_final = np.maximum(family.variance(mu_new), _VARIANCE_FLOOR)
     pearson_chi2 = float(np.sum(weights * (y - mu_new) ** 2 / V_final))
     df_resid = max(float(len(y)) - p_eff, 1)
     phi = pearson_chi2 / df_resid
@@ -411,7 +411,7 @@ def fit_pirls(
     intercept_init: float | None = None,
     max_iter_outer: int = 100,
     max_iter_inner: int = 5,
-    tol: float = 1e-6,
+    tol: float = 1e-8,
     active_set: bool = False,
     lambda2: float | dict[str, float] = 0.0,
     record_diagnostics: bool = False,

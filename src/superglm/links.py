@@ -342,17 +342,22 @@ class NegativeBinomialLink:
         return self.theta * e * (1 + e) / (1 - e) ** 3
 
 
+_LOG_LINK_ETA_MIN = -80.0
+_LOG_LINK_ETA_MAX = 80.0
+
+
 def stabilize_eta(eta: NDArray, link: Link) -> NDArray:
     """Clip eta only where the inverse link needs protection.
 
-    The old implementation clipped every linear predictor to ``[-20, 20]``.
-    That is fine for log-like links, but it is wrong for the identity link
-    because it changes the fitted Gaussian mean. This helper keeps the old
-    numerical safeguards where they matter without distorting identity-link
-    models.
+    For the log link, the bounds must be wide enough that the IRLS can reach
+    the true MLE for near-separated categories.  exp(-80) ≈ 2e-35 is safely
+    above float64 subnormal range for all practical distributions, and well
+    beyond the -37 / -43 regime seen in real actuarial data.
     """
     if isinstance(link, IdentityLink):
         return eta
+    if isinstance(link, LogLink):
+        return np.clip(eta, _LOG_LINK_ETA_MIN, _LOG_LINK_ETA_MAX)
     if isinstance(link, InverseLink | InverseSquaredLink):
         return np.clip(eta, 1e-12, 1e12)
     if isinstance(link, PowerLink):
@@ -361,7 +366,8 @@ def stabilize_eta(eta: NDArray, link: Link) -> NDArray:
         return np.clip(eta, 1e-12, 1e12)
     if isinstance(link, NegativeBinomialLink):
         return np.clip(eta, -30.0, -1e-10)
-    return np.clip(eta, -20.0, 20.0)
+    # Catch-all for custom links
+    return np.clip(eta, _LOG_LINK_ETA_MIN, _LOG_LINK_ETA_MAX)
 
 
 _LINK_SHORTCUTS: dict[str, type] = {

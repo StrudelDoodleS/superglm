@@ -12,6 +12,12 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import gammaln
 
+# ── Numerical guard constants for positive-mean families ─────────
+_POSITIVE_INIT_MIN = 1e-12  # floor for initial_mean (replaces 0.1 pseudo-response)
+_POSITIVE_MU_MIN = 1e-50  # clip_mu lower bound (log → eta ≈ -115)
+_POSITIVE_MU_MAX = 1e50  # clip_mu upper bound (log → eta ≈ +115)
+_VARIANCE_FLOOR = 1e-100  # V(mu) floor for IRLS working weights
+
 
 @runtime_checkable
 class Distribution(Protocol):
@@ -342,9 +348,10 @@ def validate_response(y: NDArray, family: Distribution) -> None:
 def initial_mean(y: NDArray, weights: NDArray, family: Distribution) -> float:
     """Weighted mean of y, clipped to the valid range for the family.
 
-    For positive-response families (Poisson, Gamma, NB, Tweedie), zeros in y
-    are replaced with 0.1 before averaging to avoid log(0) in the initial
-    intercept. For binomial, the raw weighted mean is clipped to (eps, 1-eps).
+    For positive-response families (Poisson, Gamma, NB, Tweedie), use the raw
+    weighted mean with only a small positive floor so sparse or near-separated
+    fits are not biased upward by an arbitrary pseudo-response.
+    For binomial, the raw weighted mean is clipped to (eps, 1-eps).
     For Gaussian, use the raw weighted mean with no positivity clipping.
     """
     if isinstance(family, Binomial):
@@ -352,15 +359,17 @@ def initial_mean(y: NDArray, weights: NDArray, family: Distribution) -> float:
         return np.clip(y_bar, 1e-3, 1 - 1e-3)
     if isinstance(family, Gaussian):
         return float(np.average(y, weights=weights))
-    # Positive-response families: guard against y=0 for log-link init
-    y_safe = np.where(y > 0, y, 0.1)
-    return max(float(np.average(y_safe, weights=weights)), 1e-10)
+    return max(float(np.average(y, weights=weights)), _POSITIVE_INIT_MIN)
 
 
 def clip_mu(mu: NDArray, family: Distribution) -> NDArray:
-    """Clip predicted means to a valid range for the family."""
+    """Clip predicted means to a valid range for the family.
+
+    For positive-mean families, the bounds must be wide enough that the
+    IRLS can converge for near-separated categorical levels.
+    """
     if isinstance(family, Binomial):
         return np.clip(mu, 1e-7, 1 - 1e-7)
     if isinstance(family, Gaussian):
         return mu
-    return np.clip(mu, 1e-7, 1e7)
+    return np.clip(mu, _POSITIVE_MU_MIN, _POSITIVE_MU_MAX)

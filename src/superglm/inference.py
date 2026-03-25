@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm.distributions import _VARIANCE_FLOOR
+
 if TYPE_CHECKING:
     from superglm.distributions import Distribution
     from superglm.group_matrix import DesignMatrix
@@ -213,7 +215,7 @@ def compute_coef_covariance(
     mu = clip_mu(link.inverse(eta), distribution)
     V = distribution.variance(mu)
     dmu_deta = link.deriv_inverse(eta)
-    W = fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
+    W = fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
     XtWX_S_inv, XtWX_S_inv_aug, active_groups, _, _ = _penalised_xtwx_inv_gram(
         beta, W, dm.group_matrices, groups, lambda2

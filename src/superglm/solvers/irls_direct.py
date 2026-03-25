@@ -25,7 +25,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution, clip_mu, initial_mean
+from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initial_mean
 from superglm.group_matrix import (
     DesignMatrix,
     DiscretizedSSPGroupMatrix,
@@ -213,7 +213,7 @@ def fit_irls_direct(
     beta_init: NDArray | None = None,
     intercept_init: float | None = None,
     max_iter: int = 100,
-    tol: float = 1e-6,
+    tol: float = 1e-8,
     return_xtwx: bool = False,
     profile: dict | None = None,
     cache_out: dict | None = None,
@@ -341,7 +341,7 @@ def fit_irls_direct(
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
         V = family.variance(mu)
-        V = np.maximum(V, 1e-10)
+        V = np.maximum(V, _VARIANCE_FLOOR)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
         z = eta + (y - mu) / dmu_deta
@@ -532,7 +532,7 @@ def fit_irls_direct(
     # SuperGLM's sample_weight follows the prior-weight convention, so the
     # residual d.f. correction is observation-count based (n - edf), while
     # the weights still scale the Pearson numerator.
-    V_final = np.maximum(family.variance(mu), 1e-10)
+    V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
     pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
     df_resid = max(float(len(y)) - p_eff, 1)
     phi = pearson_chi2 / df_resid
