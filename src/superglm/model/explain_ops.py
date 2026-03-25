@@ -144,11 +144,13 @@ def plot(
     show_bases=False,
     scale="response",
     ci_style="band",
+    categorical_display="auto",
     engine="matplotlib",
     n_points=200,
     figsize=None,
     title=None,
     subtitle=None,
+    plotly_style=None,
     alpha=0.05,
     n_sim=10_000,
     seed=42,
@@ -276,9 +278,11 @@ def plot(
             show_knots=show_knots,
             show_bases=show_bases,
             ci_style=ci_style,
+            categorical_display=categorical_display,
             scale=scale,
             title=title,
             subtitle=subtitle,
+            style=plotly_style,
         )
 
     if mode == "single_main":

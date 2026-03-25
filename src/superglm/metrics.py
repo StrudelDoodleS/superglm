@@ -296,6 +296,7 @@ def build_coef_rows(
         SplineCategorical,
     )
     from superglm.features.numeric import Numeric
+    from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
     from superglm.inference import feature_se_from_cov, spline_group_enrichment
@@ -408,6 +409,7 @@ def build_coef_rows(
 
     # Monotone repair info
     _mono_repairs = monotone_repairs or {}
+    handled_ordered_features: set[str] = set()
 
     # Feature rows
     for g in groups:
@@ -415,6 +417,76 @@ def build_coef_rows(
         b_g = beta[g.sl]
         se_g = se_dict[g.name]
         active = np.linalg.norm(b_g) > 1e-12
+
+        if isinstance(spec, OrderedCategorical):
+            if g.feature_name in handled_ordered_features:
+                continue
+            handled_ordered_features.add(g.feature_name)
+
+            feature_groups = [fg for fg in groups if fg.feature_name == g.feature_name]
+            beta_combined = np.concatenate([beta[fg.sl] for fg in feature_groups])
+            feature_active = bool(np.linalg.norm(beta_combined) > 1e-12)
+            feature_edf = (
+                sum(_get_group_edf_map().get(fg.name, 0.0) for fg in feature_groups)
+                if feature_active
+                else 0.0
+            )
+
+            scale = 1.0 if known_scale else phi
+            Cov_active = scale * XtWX_inv_aug[1:, 1:]
+            se_levels = feature_se_from_cov(
+                g.feature_name,
+                Cov_active,
+                active_groups,
+                result,
+                groups,
+                specs,
+                interaction_specs,
+            )
+            raw = spec.reconstruct(beta_combined)
+
+            if spec.basis == "spline":
+                levels = raw["levels"]
+                for i, level in enumerate(levels):
+                    coef_val = float(raw["level_log_relativities"][level])
+                    se_val = float(se_levels[i]) if i < len(se_levels) else 0.0
+                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                    rows.append(
+                        _CoefRow(
+                            name=f"{g.feature_name}[{level}]",
+                            group=g.feature_name,
+                            coef=coef_val,
+                            se=se_val,
+                            z=z,
+                            p=p,
+                            ci_low=ci_lo,
+                            ci_high=ci_hi,
+                            edf=feature_edf if i == 0 else None,
+                        )
+                    )
+            else:
+                row_idx = 0
+                for i, level in enumerate(raw["levels"]):
+                    if level == spec._base_level:
+                        continue
+                    coef_val = float(raw["log_relativities"][level])
+                    se_val = float(se_levels[i]) if i < len(se_levels) else 0.0
+                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                    rows.append(
+                        _CoefRow(
+                            name=f"{g.feature_name}[{level}]",
+                            group=g.feature_name,
+                            coef=coef_val,
+                            se=se_val,
+                            z=z,
+                            p=p,
+                            ci_low=ci_lo,
+                            ci_high=ci_hi,
+                            edf=feature_edf if row_idx == 0 else None,
+                        )
+                    )
+                    row_idx += 1
+            continue
 
         if isinstance(spec, _SplineBase):
             is_linear_subgroup = g.subgroup_type == "linear"

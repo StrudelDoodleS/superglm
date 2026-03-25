@@ -40,6 +40,52 @@ _EXP_EDGE = _PLOTLY_EXP_EDGE
 _KNOT_COLOR = _PLOTLY_KNOT_COLOR
 _CI_LINE_POINTWISE = "rgba(24, 33, 43, 0.58)"
 _CI_LINE_SIMULTANEOUS = "rgba(24, 33, 43, 0.78)"
+_ERROR_BAR_COLOR = "rgba(24, 33, 43, 0.72)"
+_SPLIT_TOP_DOMAIN = [0.31, 1.0]
+_SPLIT_BOTTOM_DOMAIN = [0.0, 0.23]
+_COLLAPSED_TOP_DOMAIN = [0.08, 1.0]
+_COLLAPSED_BOTTOM_DOMAIN = [0.0, 0.01]
+
+
+def _resolve_plotly_style(style: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge plotly explorer style overrides with defaults."""
+    defaults = {
+        "line_color": _LINE_COLOR,
+        "bar_color": _LINE_COLOR,
+        "density_fill_color": _EXP_FILL,
+        "density_edge_color": _EXP_EDGE,
+        "error_bar_color": _ERROR_BAR_COLOR,
+        "text_color": _PLOTLY_TEXT,
+        "text_outline_color": "rgba(255, 255, 255, 0.96)",
+        "line_width": _LINE_WIDTH * 1.7,
+        "curve_line_width": _LINE_WIDTH * 1.5,
+        "bar_opacity": 0.7,
+        "density_opacity": 0.92,
+    }
+    aliases = {
+        "spline_color": "line_color",
+        "curve_color": "line_color",
+        "font_color": "text_color",
+        "font_border_color": "text_outline_color",
+        "weight_density_color": "density_fill_color",
+        "exposure_density_color": "density_fill_color",
+        "weight_density_edge_color": "density_edge_color",
+        "exposure_density_edge_color": "density_edge_color",
+    }
+
+    merged = defaults.copy()
+    if not style:
+        return merged
+
+    for key, value in style.items():
+        canonical = aliases.get(key, key)
+        if canonical not in defaults:
+            raise ValueError(
+                f"Unknown plotly_style key {key!r}. Expected one of {sorted(defaults)} "
+                f"or aliases {sorted(aliases)}."
+            )
+        merged[canonical] = value
+    return merged
 
 
 @dataclass(frozen=True)
@@ -59,6 +105,8 @@ class _LinkVariant:
     """
 
     y: Any = None
+    base: Any = None
+    text: Any = None
     hovertemplate: str | None = None
     error_y_array: Any = None
     error_y_arrayminus: Any = None
@@ -70,9 +118,15 @@ class _XAxisConfig:
 
     top_x_title: str = ""
     top_x_type: str = "linear"
+    top_tickvals: list[float] | None = None
+    top_ticktext: list[str] | None = None
     bottom_x_title: str = ""
     bottom_y_title: str = "Diagnostics"
     bottom_x_type: str = "linear"
+    bottom_tickvals: list[float] | None = None
+    bottom_ticktext: list[str] | None = None
+    overlay_density_top: bool = False
+    top_secondary_y_title: str = "Density"
 
 
 def plot_main_effects_plotly(
@@ -87,8 +141,10 @@ def plot_main_effects_plotly(
     show_knots: bool = False,
     show_bases: bool = False,
     scale: str = "response",
+    categorical_display: str = "auto",
     title: str | None = None,
     subtitle: str | None = None,
+    style: dict[str, Any] | None = None,
 ):
     """Build a Plotly main-effect explorer with a term dropdown and scale toggle.
 
@@ -124,6 +180,10 @@ def plot_main_effects_plotly(
         Initial y-axis scale.  The toggle allows switching at any time.
     title, subtitle : str, optional
         Figure title and subtitle text.
+    style : dict, optional
+        Plotly trace-style overrides such as ``line_color``, ``bar_color``,
+        ``density_fill_color``, ``density_edge_color``, ``error_bar_color``,
+        ``text_color``, and ``text_outline_color``.
 
     Returns
     -------
@@ -137,9 +197,31 @@ def plot_main_effects_plotly(
         raise ImportError(
             "plotly is required for engine='plotly'. Install it with: pip install plotly"
         ) from None
+    from superglm.features.ordered_categorical import OrderedCategorical
 
     if not terms:
         return go.Figure()
+
+    unsupported_ordered_step = [
+        ti.name
+        for ti in terms
+        if isinstance(model._specs.get(ti.name), OrderedCategorical)
+        and model._specs[ti.name].basis == "step"
+    ]
+    if unsupported_ordered_step:
+        joined = ", ".join(unsupported_ordered_step)
+        raise NotImplementedError(
+            "Plotly main-effects explorer does not yet support "
+            f"OrderedCategorical(basis='step') for: {joined}. "
+            "Use engine='matplotlib' for now."
+        )
+    valid_categorical_display = {"auto", "bars", "markers", "bars+markers"}
+    if categorical_display not in valid_categorical_display:
+        raise ValueError(
+            f"categorical_display={categorical_display!r} is not valid, expected one of "
+            f"{sorted(valid_categorical_display)}."
+        )
+    style_cfg = _resolve_plotly_style(style)
 
     weighted = sample_weight is not None
     if X is not None and sample_weight is None:
@@ -182,6 +264,8 @@ def plot_main_effects_plotly(
                 show_knots=show_knots,
                 show_bases=show_bases,
                 needs_lower_panel=needs_lower_panel,
+                style_cfg=style_cfg,
+                categorical_display=categorical_display,
             )
         )
 
@@ -213,6 +297,10 @@ def plot_main_effects_plotly(
     link_ys: list[Any] = []
     response_hovers: list[Any] = []
     link_hovers: list[Any] = []
+    response_bases: list[Any] = []
+    link_bases: list[Any] = []
+    response_texts: list[Any] = []
+    link_texts: list[Any] = []
     resp_err_arr: list[Any] = []
     resp_err_minus: list[Any] = []
     link_err_arr: list[Any] = []
@@ -235,6 +323,18 @@ def plot_main_effects_plotly(
         response_hovers.append(trace.hovertemplate)
         link_hovers.append(
             lv.hovertemplate if lv.hovertemplate is not None else trace.hovertemplate
+        )
+        response_bases.append(_ensure_list(getattr(trace, "base", None)))
+        link_bases.append(
+            _ensure_list(lv.base)
+            if lv.base is not None
+            else _ensure_list(getattr(trace, "base", None))
+        )
+        response_texts.append(_ensure_list(getattr(trace, "text", None)))
+        link_texts.append(
+            _ensure_list(lv.text)
+            if lv.text is not None
+            else _ensure_list(getattr(trace, "text", None))
         )
 
         r_ea = _extract_error_array(trace)
@@ -273,6 +373,12 @@ def plot_main_effects_plotly(
         "y": link_ys,
         "hovertemplate": link_hovers,
     }
+    if any(base is not None for base in response_bases + link_bases):
+        response_restyle["base"] = response_bases
+        link_restyle["base"] = link_bases
+    if any(text is not None for text in response_texts + link_texts):
+        response_restyle["text"] = response_texts
+        link_restyle["text"] = link_texts
     if any_basis:
         response_restyle["visible"] = response_vis
         link_restyle["visible"] = link_vis
@@ -324,6 +430,19 @@ def plot_main_effects_plotly(
         margin=dict(l=70, r=40, t=top_margin, b=100 if needs_lower_panel else 80),
         legend_y=-0.18 if needs_lower_panel else -0.08,
     )
+    if needs_lower_panel:
+        fig.update_layout(
+            yaxis3=dict(
+                overlaying="y",
+                anchor="x",
+                side="right",
+                showgrid=False,
+                zeroline=False,
+                range=[0.0, 1.05],
+                title_text=density_y_title,
+                visible=False,
+            )
+        )
 
     _apply_axis_config(fig, x_configs[initial_term], needs_lower_panel)
     fig.update_yaxes(title_text="Relativity", row=1, col=1)
@@ -342,7 +461,7 @@ def plot_main_effects_plotly(
             type="buttons",
             direction="left",
             x=0.0,
-            y=1.28,
+            y=1.25,
             xanchor="left",
             yanchor="top",
             buttons=[
@@ -385,6 +504,8 @@ def plot_main_effects_plotly(
                 "y": response_ys,
                 "hovertemplate": response_hovers,
             }
+            if "base" in response_restyle:
+                restyle["base"] = response_bases
             if has_errors:
                 restyle["error_y.array"] = resp_err_arr
                 restyle["error_y.arrayminus"] = resp_err_minus
@@ -409,7 +530,7 @@ def plot_main_effects_plotly(
             dict(
                 type="dropdown",
                 x=0.0,
-                y=1.12,
+                y=1.09,
                 xanchor="left",
                 yanchor="top",
                 direction="down",
@@ -427,7 +548,7 @@ def plot_main_effects_plotly(
         dict(
             text="Scale",
             x=0.0,
-            y=1.27,
+            y=1.28,
             xref="paper",
             yref="paper",
             showarrow=False,
@@ -441,11 +562,12 @@ def plot_main_effects_plotly(
             dict(
                 text="Term",
                 x=0.0,
-                y=1.16,
+                y=1.12,
                 xref="paper",
                 yref="paper",
                 showarrow=False,
                 xanchor="left",
+                yanchor="bottom",
                 font=dict(size=11, color=_PLOTLY_TEXT),
             )
         )
@@ -457,6 +579,10 @@ def plot_main_effects_plotly(
             lv = link_variants[i]
             if lv.y is not None:
                 fig.data[i].y = _ensure_list(lv.y)
+            if lv.base is not None:
+                fig.data[i].base = _ensure_list(lv.base)
+            if lv.text is not None:
+                fig.data[i].text = _ensure_list(lv.text)
             if lv.hovertemplate is not None:
                 fig.data[i].hovertemplate = lv.hovertemplate
             if lv.error_y_array is not None:
@@ -490,12 +616,21 @@ def _add_term_traces(
     show_knots: bool,
     show_bases: bool,
     needs_lower_panel: bool,
+    style_cfg: dict[str, Any],
+    categorical_display: str,
 ) -> _XAxisConfig:
     """Append all traces for one term (response Y) and collect link variants."""
 
     if ti.kind in ("spline", "polynomial"):
         _add_continuous_term_traces(
-            fig, ti, term_idx, entries, link_variants, interval=interval, ci_style=ci_style
+            fig,
+            ti,
+            term_idx,
+            entries,
+            link_variants,
+            interval=interval,
+            ci_style=ci_style,
+            style_cfg=style_cfg,
         )
         if show_knots or show_bases:
             _add_spline_diagnostic_traces(
@@ -518,6 +653,7 @@ def _add_term_traces(
                 X=X,
                 sample_weight=sample_weight,
                 density_visible=density_visible,
+                style_cfg=style_cfg,
             )
         return _XAxisConfig(
             top_x_title=ti.name,
@@ -528,7 +664,7 @@ def _add_term_traces(
         )
 
     if ti.kind == "numeric":
-        _add_numeric_term_trace(fig, ti, term_idx, entries, link_variants)
+        _add_numeric_term_trace(fig, ti, term_idx, entries, link_variants, style_cfg=style_cfg)
         if needs_lower_panel:
             _add_numeric_density_trace(
                 fig,
@@ -539,6 +675,7 @@ def _add_term_traces(
                 X=X,
                 sample_weight=sample_weight,
                 density_visible=density_visible,
+                style_cfg=style_cfg,
             )
         return _XAxisConfig(
             top_x_title="Effect",
@@ -549,7 +686,16 @@ def _add_term_traces(
         )
 
     # categorical
-    _add_categorical_term_trace(fig, ti, term_idx, entries, link_variants)
+    overlay_density_top = False
+    _add_categorical_term_trace(
+        fig,
+        ti,
+        term_idx,
+        entries,
+        link_variants,
+        style_cfg=style_cfg,
+        categorical_display=categorical_display,
+    )
     if needs_lower_panel:
         _add_categorical_density_trace(
             fig,
@@ -560,6 +706,24 @@ def _add_term_traces(
             X=X,
             sample_weight=sample_weight,
             density_visible=density_visible,
+            style_cfg=style_cfg,
+            overlay_top=overlay_density_top,
+        )
+    if ti.smooth_curve is not None and ti.smooth_curve.level_x is not None:
+        tickvals = np.asarray(ti.smooth_curve.level_x, dtype=np.float64).tolist()
+        ticktext = [str(level) for level in ti.levels]
+        return _XAxisConfig(
+            top_x_title=ti.name,
+            top_x_type="linear",
+            top_tickvals=tickvals,
+            top_ticktext=ticktext,
+            bottom_x_title=ti.name,
+            bottom_y_title=density_y_title,
+            bottom_x_type="linear",
+            bottom_tickvals=tickvals,
+            bottom_ticktext=ticktext,
+            overlay_density_top=False,
+            top_secondary_y_title=density_y_title,
         )
     return _XAxisConfig(
         top_x_title=ti.name,
@@ -567,6 +731,8 @@ def _add_term_traces(
         bottom_x_title=ti.name,
         bottom_y_title=density_y_title,
         bottom_x_type="category",
+        overlay_density_top=False,
+        top_secondary_y_title=density_y_title,
     )
 
 
@@ -582,6 +748,7 @@ def _add_continuous_term_traces(
     *,
     interval,
     ci_style: str = "band",
+    style_cfg: dict[str, Any],
 ):
     """Add fitted effect + CI bands.  Traces use response Y; link variants stored."""
     import plotly.graph_objects as go
@@ -735,7 +902,7 @@ def _add_continuous_term_traces(
             y=y_resp,
             mode="lines",
             name="Relativity",
-            line=dict(color=_LINE_COLOR, width=_LINE_WIDTH * 1.7),
+            line=dict(color=style_cfg["line_color"], width=style_cfg["line_width"]),
             legendgroup=f"{ti.name}:line",
             hovertemplate=f"{ti.name}: %{{x:.3f}}<br>Relativity: %{{y:.4f}}<extra></extra>",
         ),
@@ -760,6 +927,8 @@ def _add_numeric_term_trace(
     term_idx: int,
     entries: list[_TraceEntry],
     link_variants: list[_LinkVariant],
+    *,
+    style_cfg: dict[str, Any],
 ):
     """Add a single-bar numeric slope summary with both-scale error bars."""
     import plotly.graph_objects as go
@@ -770,6 +939,8 @@ def _add_numeric_term_trace(
     resp_error_y = None
     link_err_up = None
     link_err_down = None
+    ci_lo_resp = None
+    ci_hi_resp = None
 
     if ti.ci_lower is not None and ti.ci_upper is not None:
         ci_lo_resp = float(np.asarray(ti.ci_lower)[0])
@@ -779,6 +950,7 @@ def _add_numeric_term_trace(
             symmetric=False,
             array=[ci_hi_resp - resp_val],
             arrayminus=[resp_val - ci_lo_resp],
+            color=style_cfg["error_bar_color"],
         )
         if ti.se_log_relativity is not None:
             from scipy.stats import norm
@@ -796,10 +968,16 @@ def _add_numeric_term_trace(
             x=["per unit"],
             y=[resp_val],
             name="Relativity",
-            marker_color=_LINE_COLOR,
+            marker_color=style_cfg["bar_color"],
             error_y=resp_error_y,
             legendgroup=f"{ti.name}:line",
-            hovertemplate=f"{ti.name}: per unit<br>Relativity: %{{y:.4f}}<extra></extra>",
+            hovertemplate=_numeric_hovertemplate(
+                ti.name,
+                "Relativity",
+                ci_low=ci_lo_resp if ti.ci_lower is not None and ti.ci_upper is not None else None,
+                ci_high=ci_hi_resp if ti.ci_lower is not None and ti.ci_upper is not None else None,
+                alpha=ti.alpha,
+            ),
         ),
         row=1,
         col=1,
@@ -808,7 +986,13 @@ def _add_numeric_term_trace(
     link_variants.append(
         _LinkVariant(
             y=[link_val],
-            hovertemplate=f"{ti.name}: per unit<br>η: %{{y:.4f}}<extra></extra>",
+            hovertemplate=_numeric_hovertemplate(
+                ti.name,
+                "η",
+                ci_low=(link_val - link_err_down[0]) if link_err_down is not None else None,
+                ci_high=(link_val + link_err_up[0]) if link_err_up is not None else None,
+                alpha=ti.alpha,
+            ),
             error_y_array=link_err_up,
             error_y_arrayminus=link_err_down,
         )
@@ -824,18 +1008,30 @@ def _add_categorical_term_trace(
     term_idx: int,
     entries: list[_TraceEntry],
     link_variants: list[_LinkVariant],
+    *,
+    style_cfg: dict[str, Any],
+    categorical_display: str,
 ):
     """Add categorical or ordered-categorical effect traces."""
     import plotly.graph_objects as go
 
     resp_y = np.asarray(ti.relativity)
     link_y = np.asarray(ti.log_relativity)
-    is_ordered = ti.smooth_curve is not None
+    resp_bar_y = resp_y - 1.0
+    curve = ti.smooth_curve
+    is_ordered = curve is not None
+    display_mode = _resolve_categorical_display(categorical_display, len(ti.levels))
+    show_bars = display_mode in {"bars", "bars+markers"}
+    show_markers = display_mode in {"markers", "bars+markers"}
 
     # Error bars — compute for both scales
     resp_error_y = None
     link_err_up = None
     link_err_down = None
+    ci_lo_resp = None
+    ci_hi_resp = None
+    ci_lo_link = None
+    ci_hi_link = None
 
     if ti.ci_lower is not None and ti.ci_upper is not None:
         ci_lo_resp = np.asarray(ti.ci_lower)
@@ -845,6 +1041,7 @@ def _add_categorical_term_trace(
             symmetric=False,
             array=ci_hi_resp - resp_y,
             arrayminus=resp_y - ci_lo_resp,
+            color=style_cfg["error_bar_color"],
         )
         if ti.se_log_relativity is not None:
             from scipy.stats import norm
@@ -853,6 +1050,8 @@ def _add_categorical_term_trace(
             se = np.asarray(ti.se_log_relativity)
             link_err_up = (z * se).tolist()
             link_err_down = (z * se).tolist()
+            ci_lo_link = link_y - z * se
+            ci_hi_link = link_y + z * se
         else:
             ci_lo_link = np.log(ci_lo_resp)
             ci_hi_link = np.log(ci_hi_resp)
@@ -861,36 +1060,127 @@ def _add_categorical_term_trace(
 
     if is_ordered:
         # OrderedCategorical: bars with relativity text + smooth curve overlay
-        fig.add_trace(
-            go.Bar(
-                x=list(ti.levels),
-                y=resp_y,
-                name="Relativity",
-                marker=dict(
-                    color=_hex_to_rgba(_LINE_COLOR, 0.7),
-                    line=dict(color=_LINE_COLOR, width=1),
-                ),
-                text=[f"{v:.3f}" for v in resp_y],
-                textposition="outside",
-                error_y=resp_error_y,
-                legendgroup=f"{ti.name}:bar",
-                hovertemplate=f"{ti.name}: %{{x}}<br>Relativity: %{{y:.4f}}<extra></extra>",
-            ),
-            row=1,
-            col=1,
+        level_x = (
+            np.asarray(curve.level_x, dtype=np.float64)
+            if curve is not None and curve.level_x is not None
+            else np.arange(len(ti.levels), dtype=np.float64)
         )
-        entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
-        link_variants.append(
-            _LinkVariant(
-                y=link_y.tolist(),
-                hovertemplate=f"{ti.name}: %{{x}}<br>η: %{{y:.4f}}<extra></extra>",
-                error_y_array=link_err_up,
-                error_y_arrayminus=link_err_down,
+        level_labels = [str(level) for level in ti.levels]
+        if ci_lo_resp is not None and ci_hi_resp is not None:
+            customdata = np.column_stack([resp_y, ci_lo_resp, ci_hi_resp, ci_lo_link, ci_hi_link])
+            resp_hover_bar = (
+                f"{ti.name}: %{{hovertext}}<br>Relativity: %{{customdata[0]:.4f}}"
+                f"<br>{int((1 - ti.alpha) * 100)}% CI: [%{{customdata[1]:.4f}}, %{{customdata[2]:.4f}}]"
+                "<extra></extra>"
             )
-        )
+            resp_hover_marker = (
+                f"{ti.name}: %{{hovertext}}<br>Relativity: %{{y:.4f}}"
+                f"<br>{int((1 - ti.alpha) * 100)}% CI: [%{{customdata[1]:.4f}}, %{{customdata[2]:.4f}}]"
+                "<extra></extra>"
+            )
+            link_hover = (
+                f"{ti.name}: %{{hovertext}}<br>η: %{{y:.4f}}"
+                f"<br>{int((1 - ti.alpha) * 100)}% CI: [%{{customdata[3]:.4f}}, %{{customdata[4]:.4f}}]"
+                "<extra></extra>"
+            )
+        else:
+            customdata = np.column_stack([resp_y])
+            resp_hover_bar = (
+                f"{ti.name}: %{{hovertext}}<br>Relativity: %{{customdata[0]:.4f}}<extra></extra>"
+            )
+            resp_hover_marker = (
+                f"{ti.name}: %{{hovertext}}<br>Relativity: %{{y:.4f}}<extra></extra>"
+            )
+            link_hover = f"{ti.name}: %{{hovertext}}<br>η: %{{y:.4f}}<extra></extra>"
+        if show_bars:
+            fig.add_trace(
+                go.Bar(
+                    x=level_x.tolist(),
+                    y=resp_bar_y,
+                    base=1.0,
+                    name="Relativity",
+                    marker=dict(
+                        color=_hex_to_rgba(style_cfg["bar_color"], style_cfg["bar_opacity"]),
+                        line=dict(color=style_cfg["bar_color"], width=1),
+                    ),
+                    width=_ordered_bar_width(level_x),
+                    customdata=customdata,
+                    hovertext=level_labels,
+                    legendgroup=f"{ti.name}:bar",
+                    hovertemplate=resp_hover_bar,
+                ),
+                row=1,
+                col=1,
+            )
+            entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
+            link_variants.append(
+                _LinkVariant(
+                    y=link_y.tolist(),
+                    base=0.0,
+                    hovertemplate=link_hover,
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=level_x.tolist(),
+                    y=resp_y,
+                    mode="text",
+                    name="Value labels",
+                    text=[f"{v:.3f}" for v in resp_y],
+                    textposition="top center",
+                    textfont=dict(
+                        color=style_cfg["text_color"],
+                        shadow=f"0 0 2px {style_cfg['text_outline_color']}",
+                    ),
+                    cliponaxis=False,
+                    showlegend=False,
+                    hoverinfo="skip",
+                    legendgroup=f"{ti.name}:labels",
+                ),
+                row=1,
+                col=1,
+            )
+            entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
+            link_variants.append(
+                _LinkVariant(
+                    y=link_y.tolist(),
+                    text=[f"{v:.3f}" for v in link_y],
+                    hovertemplate="<extra></extra>",
+                )
+            )
+
+        if show_markers:
+            marker_hover = resp_hover_marker if not show_bars else "<extra></extra>"
+            marker_link_hover = link_hover if not show_bars else "<extra></extra>"
+            fig.add_trace(
+                go.Scatter(
+                    x=level_x.tolist(),
+                    y=resp_y,
+                    mode="markers",
+                    name="Level markers" if show_bars else "Relativity",
+                    marker=dict(
+                        size=9,
+                        color=style_cfg["line_color"],
+                        line=dict(color=style_cfg["text_outline_color"], width=0.8),
+                    ),
+                    customdata=customdata,
+                    hovertext=level_labels,
+                    legendgroup=f"{ti.name}:markers",
+                    showlegend=not show_bars,
+                    hovertemplate=marker_hover,
+                ),
+                row=1,
+                col=1,
+            )
+            entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
+            link_variants.append(
+                _LinkVariant(
+                    y=link_y.tolist(),
+                    hovertemplate=marker_link_hover,
+                )
+            )
 
         # Smooth curve overlay
-        curve = ti.smooth_curve
         resp_curve_y = np.asarray(curve.relativity)
         link_curve_y = np.log(resp_curve_y)
         fig.add_trace(
@@ -899,8 +1189,9 @@ def _add_categorical_term_trace(
                 y=resp_curve_y,
                 mode="lines",
                 name="Smooth curve",
-                line=dict(color=_LINE_COLOR, width=_LINE_WIDTH * 1.5),
+                line=dict(color=style_cfg["line_color"], width=style_cfg["curve_line_width"]),
                 legendgroup=f"{ti.name}:curve",
+                hovertemplate=f"{ti.name}: %{{x:.3f}}<br>Relativity: %{{y:.4f}}<extra></extra>",
             ),
             row=1,
             col=1,
@@ -908,18 +1199,38 @@ def _add_categorical_term_trace(
         entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
         link_variants.append(_LinkVariant(y=link_curve_y.tolist()))
     else:
-        # Plain categorical: lines + markers
+        if ci_lo_resp is not None and ci_hi_resp is not None:
+            customdata = np.column_stack([ci_lo_resp, ci_hi_resp, ci_lo_link, ci_hi_link])
+            resp_hover = (
+                f"{ti.name}: %{{x}}<br>Relativity: %{{y:.4f}}"
+                f"<br>{int((1 - ti.alpha) * 100)}% CI: [%{{customdata[0]:.4f}}, %{{customdata[1]:.4f}}]"
+                "<extra></extra>"
+            )
+        else:
+            customdata = None
+            resp_hover = f"{ti.name}: %{{x}}<br>Relativity: %{{y:.4f}}<extra></extra>"
+        link_hover = (
+            f"{ti.name}: %{{x}}<br>η: %{{y:.4f}}"
+            + (
+                f"<br>{int((1 - ti.alpha) * 100)}% CI: [%{{customdata[2]:.4f}}, %{{customdata[3]:.4f}}]"
+                if ci_lo_link is not None and ci_hi_link is not None
+                else ""
+            )
+            + "<extra></extra>"
+        )
         fig.add_trace(
-            go.Scatter(
+            go.Bar(
                 x=list(ti.levels),
                 y=resp_y,
-                mode="lines+markers",
                 name="Relativity",
-                line=dict(color=_LINE_COLOR, width=_LINE_WIDTH * 1.2),
-                marker=dict(size=9, color=_LINE_COLOR),
+                marker=dict(
+                    color=_hex_to_rgba(style_cfg["bar_color"], style_cfg["bar_opacity"]),
+                    line=dict(color=style_cfg["bar_color"], width=1),
+                ),
                 error_y=resp_error_y,
-                legendgroup=f"{ti.name}:line",
-                hovertemplate=f"{ti.name}: %{{x}}<br>Relativity: %{{y:.4f}}<extra></extra>",
+                legendgroup=f"{ti.name}:bar",
+                customdata=customdata,
+                hovertemplate=resp_hover,
             ),
             row=1,
             col=1,
@@ -928,9 +1239,37 @@ def _add_categorical_term_trace(
         link_variants.append(
             _LinkVariant(
                 y=link_y.tolist(),
-                hovertemplate=f"{ti.name}: %{{x}}<br>η: %{{y:.4f}}<extra></extra>",
+                hovertemplate=link_hover,
                 error_y_array=link_err_up,
                 error_y_arrayminus=link_err_down,
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=list(ti.levels),
+                y=resp_y,
+                mode="text",
+                name="Value labels",
+                text=[f"{v:.3f}" for v in resp_y],
+                textposition="top center",
+                textfont=dict(
+                    color=style_cfg["text_color"],
+                    shadow=f"0 0 2px {style_cfg['text_outline_color']}",
+                ),
+                cliponaxis=False,
+                showlegend=False,
+                hoverinfo="skip",
+                legendgroup=f"{ti.name}:labels",
+            ),
+            row=1,
+            col=1,
+        )
+        entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
+        link_variants.append(
+            _LinkVariant(
+                y=link_y.tolist(),
+                text=[f"{v:.3f}" for v in link_y],
+                hovertemplate="<extra></extra>",
             )
         )
 
@@ -948,6 +1287,7 @@ def _add_continuous_density_trace(
     X: pd.DataFrame | None,
     sample_weight: NDArray | None,
     density_visible: bool,
+    style_cfg: dict[str, Any],
 ):
     """Add density strip for continuous terms."""
     import plotly.graph_objects as go
@@ -965,8 +1305,8 @@ def _add_continuous_density_trace(
             fill="tozeroy",
             name="Exposure density",
             legendgroup=f"{ti.name}:density",
-            line=dict(color=_EXP_EDGE, width=_EXP_EDGE_LW),
-            fillcolor=_hex_to_rgba(_EXP_FILL, 0.72),
+            line=dict(color=style_cfg["density_edge_color"], width=_EXP_EDGE_LW),
+            fillcolor=_hex_to_rgba(style_cfg["density_fill_color"], 0.72),
             hovertemplate=f"{ti.name}: %{{x:.3f}}<br>Density: %{{y:.3f}}<extra></extra>",
         ),
         row=2,
@@ -988,6 +1328,7 @@ def _add_numeric_density_trace(
     X: pd.DataFrame | None,
     sample_weight: NDArray | None,
     density_visible: bool,
+    style_cfg: dict[str, Any],
 ):
     """Add density strip for numeric terms."""
     import plotly.graph_objects as go
@@ -1006,8 +1347,8 @@ def _add_numeric_density_trace(
             fill="tozeroy",
             name="Exposure density",
             legendgroup=f"{ti.name}:density",
-            line=dict(color=_EXP_EDGE, width=_EXP_EDGE_LW),
-            fillcolor=_hex_to_rgba(_EXP_FILL, 0.72),
+            line=dict(color=style_cfg["density_edge_color"], width=_EXP_EDGE_LW),
+            fillcolor=_hex_to_rgba(style_cfg["density_fill_color"], 0.72),
             hovertemplate=f"{ti.name}: %{{x:.3f}}<br>Density: %{{y:.3f}}<extra></extra>",
         ),
         row=2,
@@ -1029,6 +1370,8 @@ def _add_categorical_density_trace(
     X: pd.DataFrame | None,
     sample_weight: NDArray | None,
     density_visible: bool,
+    style_cfg: dict[str, Any],
+    overlay_top: bool = False,
 ):
     """Add normalized exposure bars for categorical terms."""
     import plotly.graph_objects as go
@@ -1047,21 +1390,54 @@ def _add_categorical_density_trace(
     if peak > 0:
         weights = weights / peak
 
+    if ti.smooth_curve is not None and ti.smooth_curve.level_x is not None:
+        level_x = np.asarray(ti.smooth_curve.level_x, dtype=np.float64)
+        fig.add_trace(
+            go.Bar(
+                x=level_x.tolist(),
+                y=weights,
+                width=_ordered_bar_width(level_x),
+                customdata=np.array(levels, dtype=object),
+                name="Exposure density",
+                legendgroup=f"{ti.name}:density",
+                marker_color=style_cfg["density_fill_color"],
+                marker_line_color=style_cfg["density_edge_color"],
+                marker_line_width=_EXP_EDGE_LW,
+                opacity=style_cfg["density_opacity"],
+                hovertemplate=(
+                    f"{ti.name}: %{{customdata}}<br>Relative density: %{{y:.3f}}<extra></extra>"
+                ),
+            ),
+            row=1 if overlay_top else 2,
+            col=1,
+        )
+        if overlay_top:
+            fig.data[-1].yaxis = "y3"
+        entries.append(
+            _TraceEntry(
+                term_idx=term_idx, default_visibility=True if density_visible else "legendonly"
+            )
+        )
+        link_variants.append(_LinkVariant())
+        return
+
     fig.add_trace(
         go.Bar(
             x=levels,
             y=weights,
             name="Exposure density",
             legendgroup=f"{ti.name}:density",
-            marker_color=_EXP_FILL,
-            marker_line_color=_EXP_EDGE,
+            marker_color=style_cfg["density_fill_color"],
+            marker_line_color=style_cfg["density_edge_color"],
             marker_line_width=_EXP_EDGE_LW,
-            opacity=0.92,
+            opacity=style_cfg["density_opacity"],
             hovertemplate=f"{ti.name}: %{{x}}<br>Relative density: %{{y:.3f}}<extra></extra>",
         ),
-        row=2,
+        row=1 if overlay_top else 2,
         col=1,
     )
+    if overlay_top:
+        fig.data[-1].yaxis = "y3"
     entries.append(
         _TraceEntry(term_idx=term_idx, default_visibility=True if density_visible else "legendonly")
     )
@@ -1191,9 +1567,52 @@ def _supports_spline_diagnostics(model, ti: TermInference) -> bool:
 
 def _apply_axis_config(fig, cfg: _XAxisConfig, needs_lower_panel: bool) -> None:
     """Apply x-axis titles/types for the active term (y-axis set by toggle)."""
-    fig.update_xaxes(title_text=cfg.top_x_title, type=cfg.top_x_type, row=1, col=1)
+    fig.update_xaxes(
+        title_text=cfg.top_x_title,
+        type=cfg.top_x_type,
+        tickmode="array" if cfg.top_tickvals is not None else "auto",
+        tickvals=cfg.top_tickvals,
+        ticktext=cfg.top_ticktext,
+        row=1,
+        col=1,
+    )
     if needs_lower_panel:
-        fig.update_xaxes(title_text=cfg.bottom_x_title, type=cfg.bottom_x_type, row=2, col=1)
+        fig.update_xaxes(
+            title_text=cfg.bottom_x_title,
+            type=cfg.bottom_x_type,
+            tickmode="array" if cfg.bottom_tickvals is not None else "auto",
+            tickvals=cfg.bottom_tickvals,
+            ticktext=cfg.bottom_ticktext,
+            row=2,
+            col=1,
+        )
+        if cfg.overlay_density_top:
+            fig.update_layout(
+                xaxis=dict(showticklabels=True),
+                xaxis2=dict(showticklabels=False, title_text="", matches=None),
+                yaxis=dict(domain=_COLLAPSED_TOP_DOMAIN),
+                yaxis2=dict(domain=_COLLAPSED_BOTTOM_DOMAIN, showticklabels=False, title_text=""),
+                yaxis3=dict(
+                    visible=True,
+                    title_text=cfg.top_secondary_y_title,
+                    range=[0.0, 1.05],
+                ),
+            )
+            fig.layout.xaxis.matches = None
+        else:
+            fig.update_layout(
+                xaxis=dict(showticklabels=False),
+                xaxis2=dict(showticklabels=True, matches=None),
+                yaxis=dict(domain=_SPLIT_TOP_DOMAIN),
+                yaxis2=dict(
+                    domain=_SPLIT_BOTTOM_DOMAIN,
+                    showticklabels=True,
+                    title_text=cfg.bottom_y_title,
+                    range=[0.0, 1.05],
+                ),
+                yaxis3=dict(visible=False),
+            )
+            fig.layout.xaxis.matches = "x2"
 
 
 def _layout_update(cfg: _XAxisConfig, *, needs_lower_panel: bool, title: str) -> dict[str, Any]:
@@ -1205,20 +1624,52 @@ def _layout_update(cfg: _XAxisConfig, *, needs_lower_panel: bool, title: str) ->
         "title.text": title,
         "xaxis.title.text": cfg.top_x_title,
         "xaxis.type": cfg.top_x_type,
+        "xaxis.tickmode": "array" if cfg.top_tickvals is not None else "auto",
+        "xaxis.tickvals": cfg.top_tickvals,
+        "xaxis.ticktext": cfg.top_ticktext,
         "xaxis.autorange": True,
         "yaxis.autorange": True,
     }
     if needs_lower_panel:
-        layout.update(
-            {
-                "xaxis2.title.text": cfg.bottom_x_title,
-                "xaxis2.type": cfg.bottom_x_type,
-                "yaxis2.title.text": cfg.bottom_y_title,
-                "xaxis2.autorange": True,
-                "yaxis2.autorange": True,
-                "yaxis2.range": [0.0, 1.05],
-            }
-        )
+        if cfg.overlay_density_top:
+            layout.update(
+                {
+                    "xaxis.showticklabels": True,
+                    "xaxis.matches": None,
+                    "xaxis2.showticklabels": False,
+                    "xaxis2.matches": None,
+                    "xaxis2.title.text": "",
+                    "yaxis.domain": _COLLAPSED_TOP_DOMAIN,
+                    "yaxis2.domain": _COLLAPSED_BOTTOM_DOMAIN,
+                    "yaxis2.showticklabels": False,
+                    "yaxis2.title.text": "",
+                    "yaxis3.visible": True,
+                    "yaxis3.title.text": cfg.top_secondary_y_title,
+                    "yaxis3.range": [0.0, 1.05],
+                }
+            )
+        else:
+            layout.update(
+                {
+                    "xaxis.showticklabels": False,
+                    "xaxis.matches": "x2",
+                    "xaxis2.title.text": cfg.bottom_x_title,
+                    "xaxis2.type": cfg.bottom_x_type,
+                    "xaxis2.tickmode": "array" if cfg.bottom_tickvals is not None else "auto",
+                    "xaxis2.tickvals": cfg.bottom_tickvals,
+                    "xaxis2.ticktext": cfg.bottom_ticktext,
+                    "xaxis2.showticklabels": True,
+                    "xaxis2.matches": None,
+                    "yaxis.domain": _SPLIT_TOP_DOMAIN,
+                    "yaxis2.domain": _SPLIT_BOTTOM_DOMAIN,
+                    "yaxis2.title.text": cfg.bottom_y_title,
+                    "yaxis2.showticklabels": True,
+                    "xaxis2.autorange": True,
+                    "yaxis2.autorange": True,
+                    "yaxis2.range": [0.0, 1.05],
+                    "yaxis3.visible": False,
+                }
+            )
     return layout
 
 
@@ -1247,6 +1698,40 @@ def _basis_colors(n: int) -> list[str]:
         "#BAB0AC",
     ]
     return [base[i % len(base)] for i in range(n)]
+
+
+def _ordered_bar_width(x: NDArray) -> float:
+    """Reasonable bar width for ordered-category numeric positions."""
+    x = np.asarray(x, dtype=np.float64)
+    if x.size <= 1:
+        return 0.6
+    diffs = np.diff(np.sort(x))
+    diffs = diffs[diffs > 0]
+    if diffs.size == 0:
+        return 0.6
+    return float(np.min(diffs) * 0.72)
+
+
+def _resolve_categorical_display(mode: str, n_levels: int) -> str:
+    """Resolve categorical display mode, applying the auto threshold."""
+    if mode == "auto":
+        return "markers" if n_levels > 30 else "bars+markers"
+    return mode
+
+
+def _numeric_hovertemplate(
+    name: str,
+    y_label: str,
+    *,
+    ci_low: float | None,
+    ci_high: float | None,
+    alpha: float,
+) -> str:
+    """Hovertemplate for one-point numeric summaries with optional CI text."""
+    template = f"{name}: per unit<br>{y_label}: %{{y:.4f}}"
+    if ci_low is not None and ci_high is not None:
+        template += f"<br>{int((1 - alpha) * 100)}% CI: [{ci_low:.4f}, {ci_high:.4f}]"
+    return template + "<extra></extra>"
 
 
 def _ensure_list(val: Any) -> Any:
