@@ -598,11 +598,13 @@ class SuperGLM:
         show_bases: bool = False,
         scale: str = "response",
         ci_style: str = "band",
+        categorical_display: str = "auto",
         engine: str = "matplotlib",
         n_points: int = 200,
         figsize: tuple[float, float] | None = None,
         title: str | None = None,
         subtitle: str | None = None,
+        plotly_style: dict[str, Any] | None = None,
         alpha: float = 0.05,
         n_sim: int = 10_000,
         seed: int = 42,
@@ -652,6 +654,9 @@ class SuperGLM:
             Plotly CI presentation. ``"band"`` (default) draws filled
             confidence bands. ``"lines"`` draws line-only CI bounds with
             no fill.
+        categorical_display : {"auto", "bars", "markers", "bars+markers"}
+            Plotly categorical rendering mode. ``"auto"`` (default) uses
+            bars+markers up to 30 levels and markers-only above that.
         engine : {"matplotlib", "plotly"}
             Plotting backend. ``"matplotlib"`` is the chart/export path for
             single terms and grids. ``"plotly"`` is the interactive
@@ -666,6 +671,11 @@ class SuperGLM:
             Figure size override.
         title, subtitle : str, optional
             Figure-level title and subtitle.
+        plotly_style : dict, optional
+            Plotly main-effect explorer style overrides. Supported keys include
+            ``line_color``, ``bar_color``, ``density_fill_color``,
+            ``density_edge_color``, ``error_bar_color``, ``text_color``, and
+            ``text_outline_color``. Ignored by the matplotlib renderer.
         alpha : float
             Significance level for CIs (default 0.05).
         n_sim : int
@@ -698,11 +708,13 @@ class SuperGLM:
             show_bases=show_bases,
             scale=scale,
             ci_style=ci_style,
+            categorical_display=categorical_display,
             engine=engine,
             n_points=n_points,
             figsize=figsize,
             title=title,
             subtitle=subtitle,
+            plotly_style=plotly_style,
             alpha=alpha,
             n_sim=n_sim,
             seed=seed,

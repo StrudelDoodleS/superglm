@@ -343,14 +343,20 @@ class TestIntegrationSpline:
         assert np.all(preds > 0)
 
     def test_summary(self, age_band_data):
-        X, y, sample_weight, midpoints, _ = age_band_data
+        X, y, sample_weight, midpoints, bands = age_band_data
         model = SuperGLM(
             features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
         )
         model.fit(X, y, sample_weight=sample_weight)
         s = model.summary()
         text = str(s)
-        assert "age_band" in text
+        assert "age_band[18-25]" in text
+        assert f"age_band[{bands[-1]}]" in text
+        level_rows = [r for r in s._coef_rows if r.group == "age_band" and not r.is_spline]
+        assert len(level_rows) == len(bands)
+        assert all(r.name.startswith("age_band[") for r in level_rows)
+        assert not any(r.name == "age_band" and r.coef is not None for r in s._coef_rows)
+        assert all(np.isfinite(r.se) and r.se >= 0 for r in level_rows if r.se is not None)
 
     def test_relativities(self, age_band_data):
         X, y, sample_weight, midpoints, _ = age_band_data
@@ -445,7 +451,15 @@ class TestIntegrationStep:
         model.fit(X, y, sample_weight=sample_weight)
         s = model.summary()
         text = str(s)
-        assert "risk" in text
+        base_level = model._specs["risk"]._base_level
+        visible_levels = [lev for lev in levels if lev != base_level]
+        assert f"risk[{visible_levels[0]}]" in text
+        assert f"risk[{visible_levels[-1]}]" in text
+        level_rows = [r for r in s._coef_rows if r.group == "risk" and not r.is_spline]
+        assert len(level_rows) == len(levels) - 1
+        assert all(r.name.startswith("risk[") for r in level_rows)
+        assert not any(r.name == "risk" and r.coef is not None for r in s._coef_rows)
+        assert all(np.isfinite(r.se) and r.se >= 0 for r in level_rows if r.se is not None)
 
     def test_relativities(self, ordinal_data):
         X, y, sample_weight, levels = ordinal_data
