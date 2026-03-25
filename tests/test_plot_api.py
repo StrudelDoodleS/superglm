@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Numeric, Spline, SuperGLM
+from superglm import Categorical, Numeric, OrderedCategorical, Spline, SuperGLM
 
 PLOTLY_AVAILABLE = importlib.util.find_spec("plotly") is not None
 
@@ -562,6 +562,264 @@ class TestPlotlyMainEffects:
         fig = fitted_model.plot(engine="plotly")
         trace_names = {trace.name for trace in fig.data}
         assert "Exposure density" not in trace_names
+
+    def test_plotly_ordered_categorical_step_rejected(self):
+        rng = np.random.default_rng(123)
+        n = 400
+        levels = ["Low", "Medium", "High", "Very High"]
+        X = pd.DataFrame(
+            {
+                "risk": rng.choice(levels, n, p=[0.35, 0.30, 0.22, 0.13]),
+                "x": rng.normal(size=n),
+            }
+        )
+        sample_weight = rng.uniform(0.4, 1.0, n)
+        effect = {"Low": 0.0, "Medium": 0.15, "High": 0.35, "Very High": 0.65}
+        mu = np.exp(-1.4 + 0.2 * X["x"].to_numpy() + np.array([effect[v] for v in X["risk"]]))
+        y = rng.poisson(mu * sample_weight).astype(float)
+
+        model = SuperGLM(
+            features={
+                "risk": OrderedCategorical(order=levels, basis="step"),
+                "x": Numeric(),
+            }
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        with pytest.raises(NotImplementedError, match="OrderedCategorical\\(basis='step'\\)"):
+            model.plot(engine="plotly", X=X, sample_weight=sample_weight)
+
+    def test_plotly_categorical_uses_top_bars_with_error_bars(self):
+        rng = np.random.default_rng(100)
+        n = 500
+        X = pd.DataFrame(
+            {
+                "cat": rng.choice(["A", "B", "C", "D", "E"], n),
+                "x": rng.normal(size=n),
+            }
+        )
+        sample_weight = rng.uniform(0.4, 1.0, n)
+        mu = np.exp(-1.7 + 0.15 * X["x"].to_numpy() + 0.2 * (X["cat"] == "B").to_numpy())
+        y = rng.poisson(mu * sample_weight).astype(float)
+        model = SuperGLM(features={"cat": Categorical(), "x": Numeric()})
+        model.fit(X, y, sample_weight=sample_weight)
+
+        fig = model.plot(engine="plotly", X=X, sample_weight=sample_weight)
+        top_panel = [t for t in fig.data if getattr(t, "xaxis", None) == "x" and t.visible is True]
+        lower_panel = [
+            t for t in fig.data if getattr(t, "xaxis", None) == "x2" and t.visible is True
+        ]
+        rel = next(t for t in top_panel if t.type == "bar" and t.name == "Relativity")
+        density = next(t for t in lower_panel if t.type == "bar" and t.name == "Exposure density")
+        assert rel.error_y.array is not None
+        assert density.yaxis == "y2"
+
+    def test_plotly_categorical_keeps_bars_above_threshold(self):
+        rng = np.random.default_rng(101)
+        n = 1200
+        levels = [f"L{i:02d}" for i in range(35)]
+        X = pd.DataFrame(
+            {
+                "cat": rng.choice(levels, n),
+                "x": rng.normal(size=n),
+            }
+        )
+        sample_weight = rng.uniform(0.4, 1.0, n)
+        mu = np.exp(-1.8 + 0.1 * X["x"].to_numpy())
+        y = rng.poisson(mu * sample_weight).astype(float)
+        model = SuperGLM(features={"cat": Categorical(), "x": Numeric()})
+        model.fit(X, y, sample_weight=sample_weight)
+
+        fig = model.plot(engine="plotly", X=X, sample_weight=sample_weight)
+        top_panel = [t for t in fig.data if getattr(t, "xaxis", None) == "x" and t.visible is True]
+        assert any(t.type == "bar" and t.name == "Relativity" for t in top_panel)
+
+    def test_plotly_categorical_uses_lower_density_panel(self):
+        rng = np.random.default_rng(151)
+        n = 500
+        X = pd.DataFrame(
+            {
+                "cat": rng.choice(["A", "B", "C", "D", "E"], n),
+                "x": rng.normal(size=n),
+            }
+        )
+        sample_weight = rng.uniform(0.4, 1.0, n)
+        mu = np.exp(-1.7 + 0.15 * X["x"].to_numpy() + 0.2 * (X["cat"] == "B").to_numpy())
+        y = rng.poisson(mu * sample_weight).astype(float)
+        model = SuperGLM(features={"cat": Categorical(), "x": Numeric()})
+        model.fit(X, y, sample_weight=sample_weight)
+
+        fig = model.plot(engine="plotly", X=X, sample_weight=sample_weight)
+        assert fig.layout.yaxis3.visible is False
+        assert list(fig.layout.yaxis.domain) == [0.31, 1.0]
+        assert list(fig.layout.yaxis2.domain) == [0.0, 0.23]
+
+    def test_plotly_categorical_display_override_still_uses_bars(self):
+        rng = np.random.default_rng(102)
+        n = 1200
+        levels = [f"L{i:02d}" for i in range(35)]
+        X = pd.DataFrame(
+            {
+                "cat": rng.choice(levels, n),
+                "x": rng.normal(size=n),
+            }
+        )
+        sample_weight = rng.uniform(0.4, 1.0, n)
+        mu = np.exp(-1.8 + 0.1 * X["x"].to_numpy())
+        y = rng.poisson(mu * sample_weight).astype(float)
+        model = SuperGLM(features={"cat": Categorical(), "x": Numeric()})
+        model.fit(X, y, sample_weight=sample_weight)
+
+        fig = model.plot(
+            engine="plotly",
+            X=X,
+            sample_weight=sample_weight,
+            categorical_display="bars+markers",
+        )
+        top_panel = [t for t in fig.data if getattr(t, "xaxis", None) == "x" and t.visible is True]
+        assert any(t.type == "bar" and t.name == "Relativity" for t in top_panel)
+
+    def test_plotly_ordered_categorical_spline_uses_numeric_axis(self):
+        rng = np.random.default_rng(321)
+        n = 500
+        levels = ["18-25", "26-35", "36-45", "46-55", "56-65", "65+"]
+        midpoints = {
+            "18-25": 21.5,
+            "26-35": 30.5,
+            "36-45": 40.5,
+            "46-55": 50.5,
+            "56-65": 60.5,
+            "65+": 70.0,
+        }
+        X = pd.DataFrame(
+            {
+                "age_band": rng.choice(levels, n, p=[0.15, 0.25, 0.25, 0.20, 0.10, 0.05]),
+                "x": rng.normal(size=n),
+            }
+        )
+        sample_weight = rng.uniform(0.4, 1.0, n)
+        x_mid = np.array([midpoints[v] for v in X["age_band"]], dtype=np.float64)
+        mu = np.exp(-1.7 + 0.015 * (x_mid - 45.0) ** 2 / 100 + 0.1 * X["x"].to_numpy())
+        y = rng.poisson(mu * sample_weight).astype(float)
+
+        model = SuperGLM(
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3),
+                "x": Numeric(),
+            }
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+        fig = model.plot(engine="plotly", X=X, sample_weight=sample_weight)
+
+        assert fig.layout.xaxis.type == "linear"
+        assert list(fig.layout.xaxis.ticktext) == levels
+
+        ordered_bar = next(t for t in fig.data if t.type == "bar" and t.name == "Relativity")
+        smooth_curve = next(t for t in fig.data if t.type == "scatter" and t.name == "Smooth curve")
+        np.testing.assert_allclose(
+            np.asarray(ordered_bar.x, dtype=np.float64), list(midpoints.values())
+        )
+        assert len(smooth_curve.x) == 200
+        assert np.issubdtype(np.asarray(smooth_curve.x).dtype, np.number)
+
+    def test_plotly_ordered_categorical_spline_ci_moves_to_hover(self):
+        rng = np.random.default_rng(321)
+        n = 500
+        levels = ["18-25", "26-35", "36-45", "46-55", "56-65", "65+"]
+        midpoints = {
+            "18-25": 21.5,
+            "26-35": 30.5,
+            "36-45": 40.5,
+            "46-55": 50.5,
+            "56-65": 60.5,
+            "65+": 70.0,
+        }
+        X = pd.DataFrame(
+            {
+                "age_band": rng.choice(levels, n, p=[0.15, 0.25, 0.25, 0.20, 0.10, 0.05]),
+                "x": rng.normal(size=n),
+            }
+        )
+        sample_weight = rng.uniform(0.4, 1.0, n)
+        x_mid = np.array([midpoints[v] for v in X["age_band"]], dtype=np.float64)
+        mu = np.exp(-1.7 + 0.015 * (x_mid - 45.0) ** 2 / 100 + 0.1 * X["x"].to_numpy())
+        y = rng.poisson(mu * sample_weight).astype(float)
+
+        model = SuperGLM(
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3),
+                "x": Numeric(),
+            }
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+        fig = model.plot(engine="plotly", X=X, sample_weight=sample_weight)
+
+        ordered_bar = next(t for t in fig.data if t.type == "bar" and t.name == "Relativity")
+        assert ordered_bar.error_y.array is None
+        assert "95% CI:" in (ordered_bar.hovertemplate or "")
+        assert ordered_bar.hovertext[0] == levels[0]
+
+    def test_plotly_style_overrides_apply(self):
+        rng = np.random.default_rng(321)
+        n = 500
+        levels = ["18-25", "26-35", "36-45", "46-55", "56-65", "65+"]
+        midpoints = {
+            "18-25": 21.5,
+            "26-35": 30.5,
+            "36-45": 40.5,
+            "46-55": 50.5,
+            "56-65": 60.5,
+            "65+": 70.0,
+        }
+        X = pd.DataFrame(
+            {
+                "age_band": rng.choice(levels, n, p=[0.15, 0.25, 0.25, 0.20, 0.10, 0.05]),
+                "x": rng.normal(size=n),
+            }
+        )
+        sample_weight = rng.uniform(0.4, 1.0, n)
+        x_mid = np.array([midpoints[v] for v in X["age_band"]], dtype=np.float64)
+        mu = np.exp(-1.7 + 0.015 * (x_mid - 45.0) ** 2 / 100 + 0.1 * X["x"].to_numpy())
+        y = rng.poisson(mu * sample_weight).astype(float)
+
+        model = SuperGLM(
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3),
+                "x": Numeric(),
+            }
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+        fig = model.plot(
+            engine="plotly",
+            X=X,
+            sample_weight=sample_weight,
+            plotly_style={
+                "bar_color": "#2244AA",
+                "spline_color": "#00AA55",
+                "weight_density_color": "#FFAA00",
+                "weight_density_edge_color": "#663300",
+                "error_bar_color": "#111111",
+                "font_color": "#222222",
+                "font_border_color": "#FFFFFF",
+            },
+        )
+
+        ordered_bar = next(t for t in fig.data if t.type == "bar" and t.name == "Relativity")
+        value_labels = next(t for t in fig.data if t.type == "scatter" and t.name == "Value labels")
+        smooth_curve = next(t for t in fig.data if t.type == "scatter" and t.name == "Smooth curve")
+        density_bar = next(t for t in fig.data if t.type == "bar" and t.name == "Exposure density")
+        numeric_bar = next(
+            t for t in fig.data if t.type == "bar" and t.name == "Relativity" and len(t.x) == 1
+        )
+
+        assert ordered_bar.marker.color == "rgba(34, 68, 170, 0.7)"
+        assert ordered_bar.marker.line.color == "#2244AA"
+        assert value_labels.textfont.color == "#222222"
+        assert value_labels.textfont.shadow == "0 0 2px #FFFFFF"
+        assert smooth_curve.line.color == "#00AA55"
+        assert density_bar.marker.color == "#FFAA00"
+        assert density_bar.marker.line.color == "#663300"
+        assert numeric_bar.error_y.color == "#111111"
 
     def test_plotly_knots_absent_by_default(self, fitted_model):
         """In response mode, knots are absent unless show_knots=True."""
