@@ -170,6 +170,8 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
             groups=model._groups,
             lambda2=model.lambda2,
             offset=offset,
+            max_iter=model._max_iter,
+            tol=model._tol,
             record_diagnostics=record_diagnostics,
             direct_solve=model._direct_solve,
         )
@@ -183,6 +185,8 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
             groups=model._groups,
             penalty=model.penalty,
             offset=offset,
+            max_iter_outer=model._max_iter,
+            tol=model._tol,
             active_set=model._active_set,
             lambda2=model.lambda2,
             record_diagnostics=record_diagnostics,

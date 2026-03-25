@@ -102,6 +102,8 @@ def init_model(
     direct_solve: str = "auto",
     discrete: bool = False,
     n_bins: int | dict[str, int] = 256,
+    tol: float = 1e-8,
+    max_iter: int = 100,
 ):
     """Initialize model state (body of SuperGLM.__init__)."""
     if features is not None and splines is not None:
@@ -123,6 +125,8 @@ def init_model(
     model._direct_solve = direct_solve
     model._discrete = discrete
     model._n_bins = n_bins
+    model._tol = tol
+    model._max_iter = max_iter
 
     model._specs: dict[str, FeatureSpec] = {}
     model._feature_order: list[str] = []
@@ -200,6 +204,8 @@ def clone_without_features(
         direct_solve=model._direct_solve,
         discrete=model._discrete,
         n_bins=model._n_bins,
+        tol=model._tol,
+        max_iter=model._max_iter,
     )
 
     # Resolve lambda2

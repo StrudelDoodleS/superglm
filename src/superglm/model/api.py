@@ -54,6 +54,9 @@ class SuperGLM:
         # Discretization
         discrete: bool = False,
         n_bins: int | dict[str, int] = 256,
+        # Convergence
+        tol: float = 1e-8,
+        max_iter: int = 100,
     ):
         """
         Parameters
@@ -112,6 +115,12 @@ class SuperGLM:
             Use discretized basis matrices for large-*n* REML (fREML-style).
         n_bins : int or dict[str, int]
             Number of discretization bins per feature when ``discrete=True``.
+        tol : float
+            Relative deviance convergence tolerance for IRLS / PIRLS.
+            Default ``1e-8``.  Larger values (e.g. ``1e-6``) converge faster
+            but may stop before near-separated coefficients have stabilised.
+        max_iter : int
+            Maximum IRLS / PIRLS outer iterations.  Default ``100``.
         """
         base.init_model(
             self,
@@ -131,6 +140,8 @@ class SuperGLM:
             direct_solve=direct_solve,
             discrete=discrete,
             n_bins=n_bins,
+            tol=tol,
+            max_iter=max_iter,
         )
 
     def __repr__(self) -> str:
