@@ -57,6 +57,7 @@ class SuperGLM:
         # Convergence
         tol: float = 1e-8,
         max_iter: int = 100,
+        convergence: str = "deviance",
     ):
         """
         Parameters
@@ -116,11 +117,18 @@ class SuperGLM:
         n_bins : int or dict[str, int]
             Number of discretization bins per feature when ``discrete=True``.
         tol : float
-            Relative deviance convergence tolerance for IRLS / PIRLS.
-            Default ``1e-8``.  Larger values (e.g. ``1e-6``) converge faster
-            but may stop before near-separated coefficients have stabilised.
+            Convergence tolerance for IRLS / PIRLS.  Default ``1e-8``.
+            Larger values (e.g. ``1e-6``) converge faster but may stop
+            before near-separated coefficients have stabilised.
         max_iter : int
             Maximum IRLS / PIRLS outer iterations.  Default ``100``.
+        convergence : {"deviance", "coefficients"}
+            Convergence criterion.  ``"deviance"`` (default) stops when
+            relative deviance change drops below *tol* — fast, since
+            well-identified coefficients lock in early.
+            ``"coefficients"`` stops when the maximum absolute coefficient
+            change drops below *tol* (statsmodels-style) — pushes
+            near-separated coefficients further but uses more iterations.
         """
         base.init_model(
             self,
@@ -142,6 +150,7 @@ class SuperGLM:
             n_bins=n_bins,
             tol=tol,
             max_iter=max_iter,
+            convergence=convergence,
         )
 
     def __repr__(self) -> str:

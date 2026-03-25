@@ -174,6 +174,7 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
             tol=model._tol,
             record_diagnostics=record_diagnostics,
             direct_solve=model._direct_solve,
+            convergence=model._convergence,
         )
     else:
         model._result = fit_pirls(
@@ -190,6 +191,7 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
             active_set=model._active_set,
             lambda2=model.lambda2,
             record_diagnostics=record_diagnostics,
+            convergence=model._convergence,
         )
 
     # Fix phi for known-scale families (Poisson): phi is always 1.0.

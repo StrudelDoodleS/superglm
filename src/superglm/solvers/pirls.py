@@ -104,6 +104,7 @@ def _fit_pirls_inner(
     active_set: bool = False,
     lambda2: float | dict[str, float] = 0.0,
     record_diagnostics: bool = False,
+    convergence: str = "deviance",
 ) -> PIRLSResult:
     """Single-pass PIRLS fit with proximal Newton BCD inner solver."""
     n, p = dm.shape
@@ -291,9 +292,18 @@ def _fit_pirls_inner(
             logger.warning(f"PIRLS non-finite deviance at outer={outer + 1}: dev={dev:.2e}")
             break
 
-        if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
-            converged = True
-            break
+        if convergence == "coefficients":
+            coef_change = max(
+                abs(intercept - intercept_prev),
+                float(np.max(np.abs(beta - beta_prev))),
+            )
+            if coef_change < tol:
+                converged = True
+                break
+        else:
+            if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
+                converged = True
+                break
         dev_prev = dev
 
     t_elapsed = time.perf_counter() - t_total
@@ -415,6 +425,7 @@ def fit_pirls(
     active_set: bool = False,
     lambda2: float | dict[str, float] = 0.0,
     record_diagnostics: bool = False,
+    convergence: str = "deviance",
 ) -> PIRLSResult:
     """Fit a penalised GLM via PIRLS with proximal Newton BCD.
 
@@ -451,6 +462,7 @@ def fit_pirls(
         active_set,
         lambda2=lambda2,
         record_diagnostics=record_diagnostics,
+        convergence=convergence,
     )
 
     # Stage 2: if flavor, adjust weights and refit (warm-start both beta and intercept)
@@ -475,6 +487,7 @@ def fit_pirls(
             active_set=active_set,
             lambda2=lambda2,
             record_diagnostics=record_diagnostics,
+            convergence=convergence,
         )
 
     return result

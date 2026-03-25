@@ -219,6 +219,7 @@ def fit_irls_direct(
     cache_out: dict | None = None,
     record_diagnostics: bool = False,
     direct_solve: str = "auto",
+    convergence: str = "deviance",
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -477,9 +478,18 @@ def fit_irls_direct(
             logger.warning(f"IRLS direct non-finite deviance at iter={it + 1}: dev={dev:.2e}")
             break
 
-        if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
-            converged = True
-            break
+        if convergence == "coefficients":
+            coef_change = max(
+                abs(intercept - intercept_prev),
+                float(np.max(np.abs(beta - beta_prev))),
+            )
+            if coef_change < tol:
+                converged = True
+                break
+        else:
+            if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
+                converged = True
+                break
         dev_prev = dev
 
     t_elapsed = time.perf_counter() - t_start
