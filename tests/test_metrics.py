@@ -1369,3 +1369,170 @@ class TestSummaryInferenceCache:
         np.testing.assert_allclose(
             summary_edf, met_edf, rtol=1e-10, err_msg="ModelMetrics.summary() used fit-time EDF"
         )
+
+
+# ── Basis Detail ─────────────────────────────────────────────────
+
+
+class TestBasisDetail:
+    """Tests for the detail='basis' spline coefficient disclosure."""
+
+    @pytest.fixture
+    def spline_model(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 10, n)
+        mu = np.exp(0.5 + 0.1 * x)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.01,
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+        model.fit(X, y)
+        return model, X, y
+
+    @pytest.fixture
+    def numeric_model(self):
+        rng = np.random.default_rng(42)
+        n = 300
+        x = rng.standard_normal(n)
+        mu = np.exp(0.5 + 0.3 * x)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.01,
+            features={"x": Numeric()},
+        )
+        model.fit(X, y)
+        return model, X, y
+
+    def test_default_summary_no_coef_detail_in_ascii(self, spline_model):
+        model, _, _ = spline_model
+        s = model.summary()
+        text = str(s)
+        # ASCII compact: no inline coef rows
+        assert "Coef 1" not in text
+        # But basis_detail is computed (for HTML closed disclosures)
+        assert len(s._basis_detail) > 0
+
+    def test_basis_detail_ascii(self, spline_model):
+        model, _, _ = spline_model
+        text = str(model.summary(detail="full"))
+        assert "Coef 1" in text
+        assert "Coef 2" in text
+
+    def test_basis_detail_row_count(self, spline_model):
+        model, _, _ = spline_model
+        s = model.summary(detail="full")
+        # Find the spline group
+        spline_groups = [g for g in model._groups if g.feature_name == "x"]
+        for g in spline_groups:
+            if g.name in s._basis_detail:
+                assert len(s._basis_detail[g.name]) == g.size
+
+    def test_basis_detail_coef_stats_finite(self, spline_model):
+        model, _, _ = spline_model
+        s = model.summary(detail="full")
+        for rows in s._basis_detail.values():
+            for br in rows:
+                assert np.isfinite(br.coef)
+                assert br.se > 0
+                assert np.isfinite(br.z)
+                assert np.isfinite(br.p)
+                assert np.isfinite(br.ci_low)
+                assert np.isfinite(br.ci_high)
+
+    def test_html_disclosure_closed_compact(self, spline_model):
+        model, _, _ = spline_model
+        html = model.summary(detail="compact")._repr_html_()
+        # Compact: closed disclosure present
+        assert "<details>" in html
+        assert "<details open" not in html
+
+    def test_html_disclosure_open_for_full(self, spline_model):
+        model, _, _ = spline_model
+        html = model.summary(detail="full")._repr_html_()
+        assert "<details open>" in html
+
+    def test_non_spline_no_disclosure(self, numeric_model):
+        model, _, _ = numeric_model
+        html = model.summary(detail="compact")._repr_html_()
+        assert "<details>" not in html
+
+    def test_inactive_spline_no_basis_detail(self):
+        rng = np.random.default_rng(42)
+        n = 100
+        x = rng.standard_normal(n)
+        y = rng.poisson(1.0, n).astype(float)  # x has no effect
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=1000.0,  # very high penalty to zero out the spline
+            features={"x": Spline(n_knots=5, penalty="ssp")},
+        )
+        model.fit(X, y)
+        s = model.summary(detail="full")
+        # inactive splines should not have basis detail
+        for g in model._groups:
+            if g.feature_name == "x":
+                assert g.name not in s._basis_detail
+
+    def test_invalid_detail_raises(self, spline_model):
+        model, _, _ = spline_model
+        with pytest.raises(ValueError, match="detail="):
+            model.summary(detail="bogus")
+
+    def test_select_true_both_subgroups(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 10, n)
+        mu = np.exp(0.5 + 0.1 * x)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(n_knots=8, penalty="ssp", select=True)},
+        )
+        model.fit_reml(X, y)
+        s = model.summary(detail="full")
+        # Both :linear and :spline subgroups should be present
+        subgroup_names = [g.name for g in model._groups if g.feature_name == "x"]
+        assert len(subgroup_names) == 2  # x:linear, x:spline
+        for name in subgroup_names:
+            # Active subgroups should have basis detail
+            g = next(g for g in model._groups if g.name == name)
+            if np.linalg.norm(model.result.beta[g.sl]) > 1e-12:
+                assert name in s._basis_detail
+                assert len(s._basis_detail[name]) == g.size
+
+    def test_model_and_metrics_summary_agree(self, spline_model):
+        model, X, y = spline_model
+        s1 = model.summary(detail="full")
+        s2 = model.metrics(X, y).summary(detail="full")
+        assert set(s1._basis_detail.keys()) == set(s2._basis_detail.keys())
+        for key in s1._basis_detail:
+            rows1 = s1._basis_detail[key]
+            rows2 = s2._basis_detail[key]
+            assert len(rows1) == len(rows2)
+            for r1, r2 in zip(rows1, rows2):
+                np.testing.assert_allclose(r1.coef, r2.coef, rtol=1e-10)
+                np.testing.assert_allclose(r1.se, r2.se, rtol=1e-10)
+
+    def test_basis_se_matches_main_summary_se(self, spline_model):
+        """Basis SEs use the same known_scale-aware path as the main summary."""
+        model, _, _ = spline_model
+        s = model.summary(detail="full")
+        # Get per-group SEs from the backward-compat dict
+        se_dict = s["standard_errors"]["coefficient_se"]
+        for g_name, basis_rows in s._basis_detail.items():
+            main_se = se_dict[g_name]
+            for br in basis_rows:
+                np.testing.assert_allclose(
+                    br.se,
+                    main_se[br.basis_index],
+                    rtol=1e-10,
+                    err_msg=f"Basis SE mismatch for {g_name}[{br.basis_index}]",
+                )

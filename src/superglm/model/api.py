@@ -403,9 +403,9 @@ class SuperGLM:
         """Per-group diagnostic dict for programmatic / audit access."""
         return state_ops.diagnostics(self)
 
-    def summary(self, alpha: float = 0.05):
+    def summary(self, alpha: float = 0.05, detail: str = "compact"):
         """Rich model summary with coefficient table (statsmodels-style)."""
-        return state_ops.summary(self, alpha)
+        return state_ops.summary(self, alpha, detail=detail)
 
     def _feature_groups(self, name: str) -> list[GroupSlice]:
         """Get all groups belonging to a feature."""
