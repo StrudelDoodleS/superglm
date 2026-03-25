@@ -130,6 +130,17 @@ def init_model(
     model._max_iter = max_iter
     if convergence not in ("deviance", "coefficients"):
         raise ValueError(f"convergence must be 'deviance' or 'coefficients', got {convergence!r}")
+    if convergence == "coefficients":
+        import warnings
+
+        warnings.warn(
+            "convergence='coefficients' is experimental. Near-separated levels "
+            "have no finite MLE, so coefficient-based convergence may not "
+            "terminate or may produce numerically unstable results. "
+            "Use convergence='deviance' (default) for production fits.",
+            UserWarning,
+            stacklevel=3,
+        )
     model._convergence = convergence
 
     model._specs: dict[str, FeatureSpec] = {}

@@ -126,9 +126,9 @@ class SuperGLM:
             Convergence criterion.  ``"deviance"`` (default) stops when
             relative deviance change drops below *tol* — fast, since
             well-identified coefficients lock in early.
-            ``"coefficients"`` stops when the maximum absolute coefficient
-            change drops below *tol* (statsmodels-style) — pushes
-            near-separated coefficients further but uses more iterations.
+            ``"coefficients"`` (**experimental**) stops when the maximum
+            relative coefficient change drops below *tol*.  May not
+            converge for near-separated levels where the MLE is at −∞.
         """
         base.init_model(
             self,
