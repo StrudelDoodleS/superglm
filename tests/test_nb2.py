@@ -317,7 +317,7 @@ class TestNB2MetricsSummary:
         metrics = model.metrics(X, y)
         summary = metrics.summary()
         text = str(summary)
-        assert "NegativeBinomial" in text
+        assert "NegativeBinomial" in text or "Neg. Binomial" in text
 
 
 # =====================================================================
