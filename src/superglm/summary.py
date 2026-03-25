@@ -121,7 +121,7 @@ class ModelSummary:
         detail: str = "compact",
         basis_detail: dict[str, list[_BasisDetailRow]] | None = None,
     ):
-        _VALID_DETAIL = {"compact", "basis"}
+        _VALID_DETAIL = {"compact", "full"}
         if detail not in _VALID_DETAIL:
             raise ValueError(
                 f"detail={detail!r} is not valid. Expected one of {sorted(_VALID_DETAIL)}."
@@ -361,8 +361,8 @@ class ModelSummary:
                     spline_text = f"[{kind}, {param_label}, inactive]"
                     lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
 
-                # Coefficient detail rows (only for detail="basis")
-                if self._detail == "basis" and row.name in self._basis_detail:
+                # Coefficient detail rows (only for detail="full")
+                if self._detail == "full" and row.name in self._basis_detail:
                     for br in self._basis_detail[row.name]:
                         b_stars = _sig_stars(br.p)
                         b_label = f"Coef {br.basis_index + 1}"
@@ -605,7 +605,7 @@ class ModelSummary:
 
                 # HTML coefficient-detail disclosure
                 if row.name in self._basis_detail:
-                    open_attr = " open" if self._detail == "basis" else ""
+                    open_attr = " open" if self._detail == "full" else ""
                     inner_rows = []
                     for br in self._basis_detail[row.name]:
                         b_stars = _sig_stars(br.p)

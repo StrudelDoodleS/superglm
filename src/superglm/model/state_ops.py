@@ -226,18 +226,16 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         "coefficient_se_raw": se_raw_dict,
     }
 
-    basis_detail = None
-    if detail == "basis":
-        basis_detail = build_basis_detail(
-            groups=model._groups,
-            specs=model._specs,
-            interaction_specs=model._interaction_specs,
-            result=res,
-            XtWX_inv_aug=XtWX_inv_aug,
-            active_groups=active_groups,
-            known_scale=known_scale,
-            alpha=alpha,
-        )
+    basis_detail = build_basis_detail(
+        groups=model._groups,
+        specs=model._specs,
+        interaction_specs=model._interaction_specs,
+        result=res,
+        XtWX_inv_aug=XtWX_inv_aug,
+        active_groups=active_groups,
+        known_scale=known_scale,
+        alpha=alpha,
+    )
 
     return ModelSummary(
         data, model_info, coef_rows, alpha=alpha, detail=detail, basis_detail=basis_detail

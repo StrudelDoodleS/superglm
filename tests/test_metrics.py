@@ -1409,23 +1409,24 @@ class TestBasisDetail:
         model.fit(X, y)
         return model, X, y
 
-    def test_default_summary_no_coef_detail(self, spline_model):
+    def test_default_summary_no_coef_detail_in_ascii(self, spline_model):
         model, _, _ = spline_model
         s = model.summary()
         text = str(s)
+        # ASCII compact: no inline coef rows
         assert "Coef 1" not in text
-        # Compact mode should not compute basis detail at all
-        assert len(s._basis_detail) == 0
+        # But basis_detail is computed (for HTML closed disclosures)
+        assert len(s._basis_detail) > 0
 
     def test_basis_detail_ascii(self, spline_model):
         model, _, _ = spline_model
-        text = str(model.summary(detail="basis"))
+        text = str(model.summary(detail="full"))
         assert "Coef 1" in text
         assert "Coef 2" in text
 
     def test_basis_detail_row_count(self, spline_model):
         model, _, _ = spline_model
-        s = model.summary(detail="basis")
+        s = model.summary(detail="full")
         # Find the spline group
         spline_groups = [g for g in model._groups if g.feature_name == "x"]
         for g in spline_groups:
@@ -1434,7 +1435,7 @@ class TestBasisDetail:
 
     def test_basis_detail_coef_stats_finite(self, spline_model):
         model, _, _ = spline_model
-        s = model.summary(detail="basis")
+        s = model.summary(detail="full")
         for rows in s._basis_detail.values():
             for br in rows:
                 assert np.isfinite(br.coef)
@@ -1444,15 +1445,16 @@ class TestBasisDetail:
                 assert np.isfinite(br.ci_low)
                 assert np.isfinite(br.ci_high)
 
-    def test_html_no_disclosure_compact(self, spline_model):
+    def test_html_disclosure_closed_compact(self, spline_model):
         model, _, _ = spline_model
         html = model.summary(detail="compact")._repr_html_()
-        # Compact mode: no disclosure, no basis_detail computed
-        assert "<details>" not in html
+        # Compact: closed disclosure present
+        assert "<details>" in html
+        assert "<details open" not in html
 
-    def test_html_disclosure_open_for_basis(self, spline_model):
+    def test_html_disclosure_open_for_full(self, spline_model):
         model, _, _ = spline_model
-        html = model.summary(detail="basis")._repr_html_()
+        html = model.summary(detail="full")._repr_html_()
         assert "<details open>" in html
 
     def test_non_spline_no_disclosure(self, numeric_model):
@@ -1472,7 +1474,7 @@ class TestBasisDetail:
             features={"x": Spline(n_knots=5, penalty="ssp")},
         )
         model.fit(X, y)
-        s = model.summary(detail="basis")
+        s = model.summary(detail="full")
         # inactive splines should not have basis detail
         for g in model._groups:
             if g.feature_name == "x":
@@ -1495,7 +1497,7 @@ class TestBasisDetail:
             features={"x": Spline(n_knots=8, penalty="ssp", select=True)},
         )
         model.fit_reml(X, y)
-        s = model.summary(detail="basis")
+        s = model.summary(detail="full")
         # Both :linear and :spline subgroups should be present
         subgroup_names = [g.name for g in model._groups if g.feature_name == "x"]
         assert len(subgroup_names) == 2  # x:linear, x:spline
@@ -1508,8 +1510,8 @@ class TestBasisDetail:
 
     def test_model_and_metrics_summary_agree(self, spline_model):
         model, X, y = spline_model
-        s1 = model.summary(detail="basis")
-        s2 = model.metrics(X, y).summary(detail="basis")
+        s1 = model.summary(detail="full")
+        s2 = model.metrics(X, y).summary(detail="full")
         assert set(s1._basis_detail.keys()) == set(s2._basis_detail.keys())
         for key in s1._basis_detail:
             rows1 = s1._basis_detail[key]
@@ -1522,7 +1524,7 @@ class TestBasisDetail:
     def test_basis_se_matches_main_summary_se(self, spline_model):
         """Basis SEs use the same known_scale-aware path as the main summary."""
         model, _, _ = spline_model
-        s = model.summary(detail="basis")
+        s = model.summary(detail="full")
         # Get per-group SEs from the backward-compat dict
         se_dict = s["standard_errors"]["coefficient_se"]
         for g_name, basis_rows in s._basis_detail.items():

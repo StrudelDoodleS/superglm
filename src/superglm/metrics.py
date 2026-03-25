@@ -1487,9 +1487,10 @@ class ModelMetrics:
             Significance level for confidence intervals (default 0.05 → 95% CI).
         detail : str
             Level of detail for spline terms. ``"compact"`` (default) shows
-            one row per spline group. ``"basis"`` adds per-coefficient
-            detail rows (ASCII: printed inline; HTML: in a ``<details>``
-            disclosure).
+            one row per spline group. ``"full"`` adds per-coefficient
+            detail rows (ASCII: printed inline; HTML: pre-expanded
+            ``<details>`` disclosure). Default ``"compact"`` still shows
+            closed disclosures in HTML.
 
         Returns
         -------
@@ -1566,19 +1567,17 @@ class ModelMetrics:
 
         coef_rows = self._build_coef_rows(alpha=alpha)
 
-        basis_detail = None
-        if detail == "basis":
-            X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = self._active_info
-            basis_detail = build_basis_detail(
-                groups=self._groups,
-                specs=self._model._specs,
-                interaction_specs=self._model._interaction_specs,
-                result=self._result,
-                XtWX_inv_aug=XtWX_inv_aug,
-                active_groups=active_groups,
-                known_scale=self._known_scale,
-                alpha=alpha,
-            )
+        X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = self._active_info
+        basis_detail = build_basis_detail(
+            groups=self._groups,
+            specs=self._model._specs,
+            interaction_specs=self._model._interaction_specs,
+            result=self._result,
+            XtWX_inv_aug=XtWX_inv_aug,
+            active_groups=active_groups,
+            known_scale=self._known_scale,
+            alpha=alpha,
+        )
 
         return ModelSummary(
             data, model_info, coef_rows, alpha=alpha, detail=detail, basis_detail=basis_detail
