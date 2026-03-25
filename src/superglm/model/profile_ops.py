@@ -80,6 +80,12 @@ def estimate_p(
     model._fit_stats = _compute_fit_stats(
         y, mu, weights, offset_arr, model._distribution, model._link, result.phi_hat
     )
+
+    # Eagerly compute the default CI so summary() doesn't trigger
+    # expensive profile refits on first access.
+    if result._objective is not None:
+        result.ci(alpha=0.05)
+
     return result
 
 
