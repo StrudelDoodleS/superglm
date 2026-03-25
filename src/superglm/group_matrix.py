@@ -860,7 +860,12 @@ def _block_xtwx_signed(
 def _build_tabmat_split(gms: list[GroupMatrix]):
     """Build a tabmat SplitMatrix from non-discrete group matrices.
 
-    Returns None if any group is discretized (tabmat can't handle binned ops).
+    Returns None if any group is discretized (tabmat can't handle binned ops)
+    or if all groups are categorical (built-in bincount path is faster and
+    deterministic — tabmat would materialise dense one-hot matrices and
+    delegate to multi-threaded BLAS, introducing floating-point
+    non-determinism with no performance benefit).
+
     Uses native tabmat types to avoid unnecessary densification:
       - CategoricalGroupMatrix → tabmat.CategoricalMatrix (codes only, no dense)
       - SparseGroupMatrix → tabmat.SparseMatrix (CSR, no dense)
@@ -868,6 +873,12 @@ def _build_tabmat_split(gms: list[GroupMatrix]):
       - DenseGroupMatrix → tabmat.DenseMatrix (already dense)
     """
     if any(isinstance(gm, DiscretizedSSPGroupMatrix) for gm in gms):
+        return None
+
+    # All-categorical models: the built-in bincount gram (O(n) per group)
+    # and numba _cat_cat_weighted_crosstab (O(n) per pair) are faster than
+    # tabmat's dense BLAS sandwich and fully deterministic.
+    if all(isinstance(gm, CategoricalGroupMatrix) for gm in gms):
         return None
 
     import tabmat
