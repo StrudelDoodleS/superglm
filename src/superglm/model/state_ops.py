@@ -45,11 +45,11 @@ def diagnostics(model) -> dict[str, Any]:
     return out
 
 
-def summary(model, alpha: float = 0.05):
+def summary(model, alpha: float = 0.05, detail: str = "compact"):
     """Rich model summary with coefficient table (statsmodels-style)."""
     from scipy.special import gammaln
 
-    from superglm.metrics import build_coef_rows
+    from superglm.metrics import build_basis_detail, build_coef_rows
     from superglm.summary import ModelSummary
 
     if model._fit_stats is None:
@@ -226,7 +226,20 @@ def summary(model, alpha: float = 0.05):
         "coefficient_se_raw": se_raw_dict,
     }
 
-    return ModelSummary(data, model_info, coef_rows, alpha=alpha)
+    basis_detail = build_basis_detail(
+        groups=model._groups,
+        specs=model._specs,
+        interaction_specs=model._interaction_specs,
+        result=res,
+        XtWX_inv_aug=XtWX_inv_aug,
+        active_groups=active_groups,
+        known_scale=known_scale,
+        alpha=alpha,
+    )
+
+    return ModelSummary(
+        data, model_info, coef_rows, alpha=alpha, detail=detail, basis_detail=basis_detail
+    )
 
 
 def feature_groups(model, name: str) -> list[GroupSlice]:

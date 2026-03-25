@@ -15,7 +15,7 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     _block_xtwx,
 )
-from superglm.summary import ModelSummary, _CoefRow, _compute_coef_stats
+from superglm.summary import ModelSummary, _BasisDetailRow, _CoefRow, _compute_coef_stats
 from superglm.types import GroupSlice
 
 if TYPE_CHECKING:
@@ -783,6 +783,69 @@ def build_coef_rows(
     return rows
 
 
+def build_basis_detail(
+    groups,
+    specs,
+    interaction_specs,
+    result,
+    XtWX_inv_aug,
+    active_groups,
+    known_scale,
+    alpha=0.05,
+):
+    """Build per-coefficient detail for active 1-D spline groups.
+
+    Uses the same known_scale-aware covariance path as ``build_coef_rows``
+    so that SE/z/p/CI values are consistent with the main summary.
+    """
+    from superglm.features.spline import _SplineBase
+
+    beta = result.beta
+    phi = result.phi
+    detail: dict[str, list] = {}
+
+    for g in groups:
+        # V1: skip interactions
+        if g.feature_name in interaction_specs:
+            continue
+        spec = specs.get(g.feature_name)
+        if not isinstance(spec, _SplineBase):
+            continue
+        b_g = beta[g.sl]
+        if np.linalg.norm(b_g) < 1e-12:
+            continue
+
+        ag = next((a for a in active_groups if a.name == g.name), None)
+        if ag is None:
+            continue
+
+        scale = 1.0 if known_scale else phi
+        aug_sl = slice(1 + ag.start, 1 + ag.end)
+        var_diag = scale * np.diag(XtWX_inv_aug[aug_sl, aug_sl])
+        se_arr = np.sqrt(np.maximum(var_diag, 0.0))
+
+        rows = []
+        for i in range(g.size):
+            coef_val = float(b_g[i])
+            se_val = float(se_arr[i])
+            z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+            rows.append(
+                _BasisDetailRow(
+                    parent_name=g.name,
+                    basis_index=i,
+                    coef=coef_val,
+                    se=se_val,
+                    z=z,
+                    p=p,
+                    ci_low=ci_lo,
+                    ci_high=ci_hi,
+                )
+            )
+        detail[g.name] = rows
+
+    return detail
+
+
 class ModelMetrics:
     """Post-fit diagnostics for a SuperGLM model.
 
@@ -1415,13 +1478,19 @@ class ModelMetrics:
             alpha=alpha,
         )
 
-    def summary(self, alpha: float = 0.05) -> ModelSummary:
+    def summary(self, alpha: float = 0.05, detail: str = "compact") -> ModelSummary:
         """Formatted model summary with coefficient table.
 
         Parameters
         ----------
         alpha : float
             Significance level for confidence intervals (default 0.05 → 95% CI).
+        detail : str
+            Level of detail for spline terms. ``"compact"`` (default) shows
+            one row per spline group. ``"full"`` adds per-coefficient
+            detail rows (ASCII: printed inline; HTML: pre-expanded
+            ``<details>`` disclosure). Default ``"compact"`` still shows
+            closed disclosures in HTML.
 
         Returns
         -------
@@ -1498,4 +1567,18 @@ class ModelMetrics:
 
         coef_rows = self._build_coef_rows(alpha=alpha)
 
-        return ModelSummary(data, model_info, coef_rows, alpha=alpha)
+        X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = self._active_info
+        basis_detail = build_basis_detail(
+            groups=self._groups,
+            specs=self._model._specs,
+            interaction_specs=self._model._interaction_specs,
+            result=self._result,
+            XtWX_inv_aug=XtWX_inv_aug,
+            active_groups=active_groups,
+            known_scale=self._known_scale,
+            alpha=alpha,
+        )
+
+        return ModelSummary(
+            data, model_info, coef_rows, alpha=alpha, detail=detail, basis_detail=basis_detail
+        )
