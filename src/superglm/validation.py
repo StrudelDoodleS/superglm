@@ -369,12 +369,11 @@ def lorenz_curve(
     gini_ratio = gini_model / gini_perfect if gini_perfect > 0 else 0.0
 
     # Build curve DataFrame — use model ordering x-axis for all curves
-    # Interpolate perfect curve onto model's x-axis
-    cum_loss_ordered = np.linspace(0, 1, n + 1)  # random = diagonal
+    # Random ordering diagonal: cum_loss_share == cum_exposure_share
     curve_df = pd.DataFrame(
         {
             "cum_exposure_share": cum_exp_m,
-            "cum_loss_share_ordered": cum_loss_ordered,
+            "cum_loss_share_ordered": cum_exp_m,
             "cum_loss_share_model": cum_loss_m,
             "cum_loss_share_perfect": np.interp(cum_exp_m, cum_exp_p, cum_loss_p),
         }
@@ -382,7 +381,7 @@ def lorenz_curve(
 
     # Plot
     ax_plot, fig = _make_ax(ax)
-    ax_plot.plot(cum_exp_m, cum_loss_ordered, "k--", linewidth=0.7, label="Random")
+    ax_plot.plot([0, 1], [0, 1], "k--", linewidth=0.7, label="Random")
     ax_plot.plot(cum_exp_m, cum_loss_m, "-", color="C0", linewidth=1.2, label="Model")
     ax_plot.plot(cum_exp_p, cum_loss_p, "-", color="C2", linewidth=1.0, alpha=0.7, label="Perfect")
     ax_plot.set_xlabel("Cumulative exposure share")

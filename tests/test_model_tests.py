@@ -177,6 +177,24 @@ class TestScoreTestZINonPoisson:
             score_test_zi(model, X, y)
 
 
+# ── T18b: score_test_zi — sample_weight raises ────────────────────
+
+
+class TestScoreTestZIWeights:
+    """sample_weight should raise NotImplementedError."""
+
+    def test_weights_raise(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 5, n)
+        y = rng.poisson(np.exp(0.5 + 0.3 * x)).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = _fit_poisson(X, y)
+        w = np.ones(n)
+        with pytest.raises(NotImplementedError, match="sample_weight"):
+            score_test_zi(model, X, y, sample_weight=w)
+
+
 # ── T19: dispersion_test — equidispersed Poisson ─────────────────
 
 
@@ -240,6 +258,24 @@ class TestDispersionTestAlternative:
         assert isinstance(result, DispersionTestResult)
         assert 0 <= result.p_value <= 1
         assert result.alternative == alt
+
+
+# ── T21b: dispersion_test — sample_weight raises ──────────────────
+
+
+class TestDispersionTestWeights:
+    """sample_weight should raise NotImplementedError."""
+
+    def test_weights_raise(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 5, n)
+        y = rng.poisson(np.exp(0.5 + 0.3 * x)).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = _fit_poisson(X, y)
+        w = np.ones(n)
+        with pytest.raises(NotImplementedError, match="sample_weight"):
+            dispersion_test(model, X, y, sample_weight=w)
 
 
 # ── T22: vuong_test — nested models ──────────────────────────────

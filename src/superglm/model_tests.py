@@ -261,6 +261,12 @@ def score_test_zi(
     """
     _check_family(model, {"Poisson"}, "score_test_zi")
 
+    if sample_weight is not None:
+        raise NotImplementedError(
+            "sample_weight is not yet supported for score_test_zi. "
+            "Pass sample_weight=None or omit it."
+        )
+
     y = np.asarray(y, dtype=float)
     mu = _get_mu(model, X, y, offset)
 
@@ -271,10 +277,7 @@ def score_test_zi(
     # Numerator: [sum(I(y=0) - p0)]^2
     numer = (np.sum(indicator - p0)) ** 2
 
-    # Denominator: sum(p0*(1-p0)) - sum(mu^2 * p0) / sum(mu)
-    # Simplified from van den Broek (1995): Var under H0
-    denom = np.sum(p0 * (1 - p0) - mu**2 * p0)
-    # Correction for estimation of mu
+    # Denominator: Var under H0 from van den Broek (1995)
     # Full formula: Var = sum(q_i(1-q_i)) - (sum(mu_i*q_i))^2 / sum(mu_i)
     # where q_i = exp(-mu_i)
     correction = (np.sum(mu * p0)) ** 2 / np.sum(mu)
@@ -328,6 +331,12 @@ def dispersion_test(
     DispersionTestResult
     """
     _check_family(model, {"Poisson"}, "dispersion_test")
+
+    if sample_weight is not None:
+        raise NotImplementedError(
+            "sample_weight is not yet supported for dispersion_test. "
+            "Pass sample_weight=None or omit it."
+        )
 
     if alternative not in {"greater", "less", "two-sided"}:
         raise ValueError(
@@ -414,12 +423,17 @@ def vuong_test(
     # Per-observation log-likelihood differences
     m = ll_a - ll_b
 
-    # Apply weights if provided
+    # Compute (weighted) mean and std of per-obs LL differences
     if sample_weight is not None:
         w = np.asarray(sample_weight, dtype=float)
-        m = m * w
-
-    mean_m = float(np.mean(m))
+        w_sum = w.sum()
+        mean_m = float(np.sum(w * m) / w_sum)
+        # Weighted variance with Bessel-like correction
+        var_m = float(np.sum(w * (m - mean_m) ** 2) / w_sum)
+        omega = float(np.sqrt(var_m))
+    else:
+        mean_m = float(np.mean(m))
+        omega = float(np.std(m, ddof=1))
 
     # Model complexities
     p_a = model_a.result.effective_df
@@ -430,8 +444,6 @@ def vuong_test(
         mean_m -= (p_a - p_b) / n
     elif correction == "bic":
         mean_m -= (p_a - p_b) * np.log(n) / (2 * n)
-
-    omega = float(np.std(m, ddof=1))
 
     if omega < 1e-10:
         # Models are essentially identical

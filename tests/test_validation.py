@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import matplotlib
 import numpy as np
+import pytest
 
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from superglm.validation import (
     DoubleLiftChartResult,
@@ -17,6 +19,14 @@ from superglm.validation import (
     lorenz_curve,
     loss_ratio_chart,
 )
+
+
+@pytest.fixture(autouse=True)
+def _close_figures():
+    """Close all matplotlib figures after each test to avoid resource leaks."""
+    yield
+    plt.close("all")
+
 
 # ── T6: lift_chart basic ─────────────────────────────────────────
 
@@ -178,6 +188,34 @@ class TestLorenzCurveGini:
         cum_loss = result.curve["cum_loss_share_model"].values
         # Should be monotonically non-decreasing
         assert np.all(np.diff(cum_loss) >= -1e-10)
+
+    def test_lorenz_nonuniform_exposure_diagonal(self):
+        """The random ordering diagonal must equal cum_exposure_share, even
+        when exposure is non-uniform (the core insurance use case)."""
+        rng = np.random.default_rng(42)
+        n = 500
+        y = rng.exponential(2.0, n)
+        y_pred = y + rng.normal(0, 1, n)
+        exposure = rng.uniform(0.5, 5.0, n)  # highly non-uniform
+        result = lorenz_curve(y, y_pred, exposure=exposure)
+        curve = result.curve
+        np.testing.assert_allclose(
+            curve["cum_loss_share_ordered"].values,
+            curve["cum_exposure_share"].values,
+            atol=1e-12,
+        )
+
+    def test_lorenz_nonuniform_exposure_gini_bounds(self):
+        """Gini bounds should still hold with non-uniform exposure."""
+        rng = np.random.default_rng(42)
+        n = 500
+        y = rng.exponential(2.0, n)
+        y_pred = y + rng.normal(0, 1, n)
+        exposure = rng.uniform(0.5, 5.0, n)
+        result = lorenz_curve(y, y_pred, exposure=exposure)
+        assert result.gini_model >= -0.01
+        assert result.gini_perfect >= result.gini_model - 0.01
+        assert 0.0 <= result.gini_ratio <= 1.01
 
     def test_lorenz_endpoints(self):
         rng = np.random.default_rng(42)
