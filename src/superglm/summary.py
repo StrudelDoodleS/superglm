@@ -81,7 +81,12 @@ def _camel_to_spaced(name: str) -> str:
     return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
 
 
-_SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1  '?' quasi-separated"
+_SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
+_QS_NOTE = (
+    "QS: quasi-complete separation — a predictor perfectly or nearly predicts\n"
+    "zero response, so the log-link coefficient diverges to -∞ and no finite\n"
+    "MLE exists. Flagged levels have <20 obs or <0.05% exposure."
+)
 _WALD_NOTE = (
     "Note: smooth p-values use Wood (2013) Bayesian test.\n"
     "Parametric p-values are Wald approximations.\n"
@@ -427,6 +432,9 @@ class ModelSummary:
 
         lines.append(_bot())
         lines.append(_SIG_LEGEND)
+        has_qs = any(r.quasi_separated for r in self._coef_rows)
+        if has_qs:
+            lines.append(_QS_NOTE)
         abbrevs = info.get("penalty_abbrevs", {})
         if abbrevs:
             lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
@@ -707,6 +715,12 @@ class ModelSummary:
             f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
             f'color:#666;border:none;">{_SIG_LEGEND}</td></tr>'
         )
+        has_qs = any(r.quasi_separated for r in self._coef_rows)
+        if has_qs:
+            parts.append(
+                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+                f'color:#c60;border:none;">{_QS_NOTE}</td></tr>'
+            )
         has_smooth = any(r.is_spline for r in self._coef_rows)
         if has_smooth:
             note_text = _WALD_NOTE
