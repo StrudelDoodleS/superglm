@@ -392,19 +392,21 @@ def optimize_direct_reml(
     m = len(group_names)
     log_lo, log_hi = np.log(1e-6), np.log(1e10)
     max_newton_step = 5.0
+    _eps = np.finfo(float).eps
+    # Relative convergence tolerance.  reml_tol was originally an absolute
+    # gradient threshold; as a relative tolerance scaled by score_scale,
+    # 1e-6 is the tightest sensible value (Wood 2011 default).
+    _tol = min(reml_tol, 1e-6)
 
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
     warm_beta: NDArray | None = None
     warm_intercept: float | None = None
-    grad_tol = max(reml_tol, 1e-6)
 
     best_obj = np.inf
     best_lambdas = lambdas.copy()
     best_pirls = None
-    best_grad: NDArray | None = None
     converged = False
     n_iter = 0
-    n_warmup = 3
 
     _t_reml_start = _time.perf_counter()
     _t_pirls = 0.0
@@ -413,7 +415,6 @@ def optimize_direct_reml(
     _t_hessian = 0.0
     _t_w_correction = 0.0
     _t_linesearch = 0.0
-    _t_fp_update = 0.0
     _n_linesearch_fits = 0
 
     # === Bootstrap: one FP step from minimal penalty ===
@@ -459,9 +460,19 @@ def optimize_direct_reml(
         r_j = penalty_ranks[g.name]
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
+        # Snap degenerate select=True groups to upper bound.
+        # When quad << trace, the FP update is degenerate (any lambda
+        # is approximately a fixed point).  Snap breaks the degeneracy.
+        if (
+            select_snap
+            and g.subgroup_type is not None
+            and trace_term > 1e-12
+            and boot_inv_phi * quad < 0.1 * trace_term
+        ):
+            lam_fp = np.exp(log_hi)
         rho[i] = np.clip(np.log(max(lam_fp, 1e-6)), log_lo, log_hi)
 
-    rho_prev = rho.copy()
+    prev_obj = np.inf
 
     if verbose:
         boot_lam_str = ", ".join(
@@ -519,7 +530,6 @@ def optimize_direct_reml(
             pq = float(pirls_result.beta @ S_eval @ pirls_result.beta)
             M_p = sum(c.rank for c in penalty_caches.values())
             phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
-        inv_phi = 1.0 / max(phi_hat, 1e-10)
         _t_objective += _time.perf_counter() - _t0
 
         _t0 = _time.perf_counter()
@@ -534,9 +544,9 @@ def optimize_direct_reml(
         )
         _t_gradient += _time.perf_counter() - _t0
 
-        # W(ρ) correction: skip during FP warmup and on discrete path
+        # W(ρ) correction
         _t0 = _time.perf_counter()
-        if outer >= n_warmup and not discrete:
+        if not discrete:
             w_corr = reml_w_correction(
                 dm,
                 link,
@@ -564,7 +574,6 @@ def optimize_direct_reml(
             best_obj = obj
             best_lambdas = cand_lambdas.copy()
             best_pirls = pirls_result
-            best_grad = grad.copy()
 
         lambda_history.append(cand_lambdas.copy())
 
@@ -575,54 +584,32 @@ def optimize_direct_reml(
             elif rho_clipped[i] <= log_lo + 0.01 and grad[i] > 0:
                 proj_grad[i] = 0.0
         proj_grad_norm = float(np.max(np.abs(proj_grad)))
-        rho_change = float(np.max(np.abs(rho_clipped - rho_prev)))
+
+        # Compound convergence criterion (Wood 2011):
+        # score_scale = |log(phi)| + |obj|, both (a) and (b) must hold.
+        score_scale = abs(np.log(max(phi_hat, 1e-300))) + abs(obj)
+        score_scale = max(score_scale, 1.0)  # floor to avoid degeneracy
+        obj_change = abs(obj - prev_obj) if outer > 0 else np.inf
 
         if verbose:
-            phase = "FP" if outer < n_warmup else "Newton"
             lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
             print(
-                f"  REML {phase} iter={n_iter}  obj={obj:.4f}  "
-                f"|∇|={proj_grad_norm:.6f}  Δρ={rho_change:.4f}  "
+                f"  REML Newton iter={n_iter}  obj={obj:.4f}  "
+                f"|∇|={proj_grad_norm:.6f}  Δobj={obj_change:.6g}  "
                 f"lambdas=[{lam_str}]"
             )
 
-        rho_prev = rho_clipped.copy()
+        prev_obj = obj
 
-        if outer >= n_warmup and proj_grad_norm < max(reml_tol, 5e-3):
-            converged = True
-            break
+        # Require at least 2 iterations before checking convergence
+        if outer >= 1:
+            grad_converged = proj_grad_norm < _tol * score_scale
+            obj_converged = obj_change < _tol * score_scale
+            if grad_converged and obj_converged:
+                converged = True
+                break
 
-        # Phase 1: Fixed-point warm-up
-        if outer < n_warmup:
-            _t0 = _time.perf_counter()
-            for i, (idx, g) in enumerate(reml_groups):
-                gm = dm.group_matrices[idx]
-                if penalty_caches is not None:
-                    omega_ssp = penalty_caches[g.name].omega_ssp
-                else:
-                    omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-                beta_g = pirls_result.beta[g.sl]
-                quad = float(beta_g @ omega_ssp @ beta_g)
-                H_inv_jj = XtWX_S_inv[g.sl, g.sl]
-                trace_term = float(np.trace(H_inv_jj @ omega_ssp))
-                r_j = penalty_ranks[g.name]
-                denom = inv_phi * quad + trace_term
-                lam_new = r_j / denom if denom > 1e-12 else cand_lambdas[g.name]
-                # Snap degenerate select=True groups to upper bound.
-                # When quad << trace, the FP update is degenerate (any lambda
-                # is approximately a fixed point).  Snap breaks the degeneracy.
-                if (
-                    select_snap
-                    and g.subgroup_type is not None
-                    and trace_term > 1e-12
-                    and inv_phi * quad < 0.1 * trace_term
-                ):
-                    lam_new = np.exp(log_hi)
-                rho[i] = np.clip(np.log(max(lam_new, 1e-6)), log_lo, log_hi)
-            _t_fp_update += _time.perf_counter() - _t0
-            continue
-
-        # Phase 2: Newton with exact outer Hessian
+        # Newton with exact outer Hessian
         _t0 = _time.perf_counter()
         hess = reml_direct_hessian(
             dm.group_matrices,
@@ -639,22 +626,52 @@ def optimize_direct_reml(
             dH_extra=dH_extra,
         )
 
-        eigvals_h, eigvecs_h = np.linalg.eigh(hess)
-        max_eig = max(eigvals_h.max(), 1e-12)
-        eigvals_pd = np.maximum(eigvals_h, 1e-6 * max_eig)
+        # Active-set: freeze components with negligible gradient and Hessian
+        freeze_tol = 0.1 * _tol
+        frozen = np.zeros(m, dtype=bool)
+        for i in range(m):
+            if (
+                abs(proj_grad[i]) < freeze_tol * score_scale
+                and abs(hess[i, i]) < freeze_tol * score_scale
+            ):
+                frozen[i] = True
+        active_idx = np.where(~frozen)[0]
 
-        if eigvals_h.min() < -0.1 * max_eig:
-            step_scale = min(1.0, max_newton_step / max(np.linalg.norm(grad), 1e-8))
-            delta = -grad * step_scale
+        if active_idx.size == 0:
+            # All components frozen — converged
+            _t_hessian += _time.perf_counter() - _t0
+            converged = True
+            break
+
+        # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
+        if active_idx.size < m:
+            hess_sub = hess[np.ix_(active_idx, active_idx)]
+            grad_sub = grad[active_idx]
         else:
-            hess_pd = (eigvecs_h * eigvals_pd) @ eigvecs_h.T
-            delta = -np.linalg.solve(hess_pd, grad)
-            delta = np.clip(delta, -max_newton_step, max_newton_step)
+            hess_sub = hess
+            grad_sub = grad
+
+        eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub)
+        max_eig = max(abs(eigvals_h).max(), 1e-12)
+        eig_floor = max_eig * _eps**0.7
+        eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor)
+
+        hess_pd = (eigvecs_h * eigvals_pd) @ eigvecs_h.T
+        delta_sub = -np.linalg.solve(hess_pd, grad_sub)
+
+        # Scatter back to full delta
+        delta = np.zeros(m)
+        delta[active_idx] = delta_sub
+
+        # Proportional step cap: scale entire vector if any component > max_step
+        max_delta = float(np.max(np.abs(delta)))
+        if max_delta > max_newton_step:
+            delta *= max_newton_step / max_delta
         _t_hessian += _time.perf_counter() - _t0
 
         # Step-halving line search with Armijo condition
         _t0 = _time.perf_counter()
-        max_ls = 2 if discrete else 8
+        max_ls = 8
         step = 1.0
         armijo_c = 1e-4
         descent = float(grad @ delta)
@@ -705,18 +722,20 @@ def optimize_direct_reml(
             step *= 0.5
 
         if not accepted:
-            rho = np.clip(
-                rho_clipped - 0.1 * grad / max(np.linalg.norm(grad), 1e-8),
-                log_lo,
-                log_hi,
-            )
+            # Steepest descent fallback: unit-length in infinity norm
+            grad_max = float(np.max(np.abs(grad)))
+            if grad_max > 1e-12:
+                rho = np.clip(
+                    rho_clipped - grad / grad_max,
+                    log_lo,
+                    log_hi,
+                )
+            else:
+                rho = rho_clipped
         _t_linesearch += _time.perf_counter() - _t0
 
     if best_pirls is None:
         raise RuntimeError("Direct REML Newton did not evaluate any candidates")
-
-    grad_norm = float(np.max(np.abs(best_grad))) if best_grad is not None else np.inf
-    converged = converged or grad_norm <= grad_tol
 
     if profile is not None:
         profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
@@ -726,7 +745,6 @@ def optimize_direct_reml(
         profile["reml_w_correction_s"] = _t_w_correction
         profile["reml_hessian_newton_s"] = _t_hessian
         profile["reml_linesearch_s"] = _t_linesearch
-        profile["reml_fp_update_s"] = _t_fp_update
         profile["reml_n_linesearch_fits"] = _n_linesearch_fits
         profile["reml_n_outer_iter"] = n_iter
 
@@ -832,9 +850,10 @@ def optimize_discrete_reml_cached_w(
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
     warm_beta: NDArray | None = None
     warm_intercept: float | None = None
-    grad_tol = max(reml_tol, 5e-3)
     max_newton_step = 5.0
     max_halving = 25
+    _eps = np.finfo(float).eps
+    _tol = min(reml_tol, 1e-6)
 
     best_obj = np.inf
     best_lambdas = lambdas.copy()
@@ -896,6 +915,14 @@ def optimize_discrete_reml_cached_w(
         r_j = penalty_ranks[g.name]
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
+        # Snap degenerate select=True groups to upper bound.
+        if (
+            select_snap
+            and g.subgroup_type is not None
+            and trace_term > 1e-12
+            and boot_inv_phi * quad < 0.1 * trace_term
+        ):
+            lam_fp = np.exp(log_hi)
         rho[i] = np.clip(np.log(max(lam_fp, 1e-6)), log_lo, log_hi)
 
     if verbose:
@@ -997,12 +1024,45 @@ def optimize_discrete_reml_cached_w(
             phi_hat=phi_hat,
         )
 
-        # Newton direction with PD Hessian fix (mgcv-style: flip neg eigs)
-        eigvals_h, eigvecs_h = np.linalg.eigh(hess)
-        eigvals_pd = np.abs(eigvals_h)
-        thresh = max(eigvals_pd.max(), 1e-12) * np.finfo(float).eps ** 0.5
-        eigvals_pd = np.maximum(eigvals_pd, thresh)
-        delta = -(eigvecs_h * (1.0 / eigvals_pd)) @ (eigvecs_h.T @ grad)
+        # Active-set: freeze components with negligible gradient and Hessian
+        score_scale_d = abs(np.log(max(phi_hat, 1e-300))) + abs(obj)
+        score_scale_d = max(score_scale_d, 1.0)
+        freeze_tol_d = 0.1 * _tol
+
+        proj_grad_d = grad.copy()
+        for i in range(m):
+            if rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
+                proj_grad_d[i] = 0.0
+            elif rho_clipped[i] <= log_lo + 0.01 and grad[i] > 0:
+                proj_grad_d[i] = 0.0
+
+        frozen_d = np.zeros(m, dtype=bool)
+        for i in range(m):
+            if (
+                abs(proj_grad_d[i]) < freeze_tol_d * score_scale_d
+                and abs(hess[i, i]) < freeze_tol_d * score_scale_d
+            ):
+                frozen_d[i] = True
+        active_idx_d = np.where(~frozen_d)[0]
+
+        # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
+        if active_idx_d.size == 0:
+            delta = np.zeros(m)
+        else:
+            if active_idx_d.size < m:
+                hess_sub_d = hess[np.ix_(active_idx_d, active_idx_d)]
+                grad_sub_d = grad[active_idx_d]
+            else:
+                hess_sub_d = hess
+                grad_sub_d = grad
+
+            eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub_d)
+            max_eig_d = max(abs(eigvals_h).max(), 1e-12)
+            eig_floor_d = max_eig_d * _eps**0.7
+            eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor_d)
+            delta_sub_d = -(eigvecs_h * (1.0 / eigvals_pd)) @ (eigvecs_h.T @ grad_sub_d)
+            delta = np.zeros(m)
+            delta[active_idx_d] = delta_sub_d
 
         # Step capping
         max_delta = float(np.max(np.abs(delta)))
@@ -1013,7 +1073,6 @@ def optimize_discrete_reml_cached_w(
 
         # --- Step 3: Line search (step halving on working-model REML) ---
         _t0 = _time.perf_counter()
-        rho_prev = rho.copy()
         accepted = False
         step = 1.0
         for _ls in range(max_halving):
@@ -1074,38 +1133,35 @@ def optimize_discrete_reml_cached_w(
         _t_linesearch += _time.perf_counter() - _t0
 
         if not accepted:
-            # Tiny gradient step as last resort
-            rho = np.clip(
-                rho - 0.1 * grad / max(np.linalg.norm(grad), 1e-8),
-                log_lo,
-                log_hi,
-            )
+            # Steepest descent fallback: unit-length in infinity norm
+            grad_max_d = float(np.max(np.abs(grad)))
+            if grad_max_d > 1e-12:
+                rho = np.clip(
+                    rho - grad / grad_max_d,
+                    log_lo,
+                    log_hi,
+                )
+            # else: keep rho unchanged
 
-        # Convergence check
-        rho_change = float(np.max(np.abs(rho - rho_prev)))
-
-        # Project gradient onto feasible set
-        proj_grad = grad.copy()
-        for i in range(m):
-            if rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
-                proj_grad[i] = 0.0
-            elif rho_clipped[i] <= log_lo + 0.01 and grad[i] > 0:
-                proj_grad[i] = 0.0
-        proj_grad_norm = float(np.max(np.abs(proj_grad)))
+        # Convergence check — compound criterion with score_scale
+        proj_grad_norm = float(np.max(np.abs(proj_grad_d)))
 
         if verbose:
             lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
+            obj_change_d = abs(obj - prev_obj) if poi_iter > 0 else np.inf
             print(
                 f"  POI iter {poi_iter + 1}  obj={obj:.4f}  "
-                f"|∇|={proj_grad_norm:.6f}  Δρ={rho_change:.4f}  [{lam_str}]"
+                f"|∇|={proj_grad_norm:.6f}  Δobj={obj_change_d:.6g}  [{lam_str}]"
             )
 
         obj_change = abs(obj - prev_obj) if poi_iter > 0 else np.inf
-        obj_scale = max(abs(obj), 1.0)
         prev_obj = obj
-        if poi_iter >= 2 and proj_grad_norm < grad_tol and obj_change < reml_tol * obj_scale:
-            converged = True
-            break
+        if poi_iter >= 1:
+            grad_converged_d = proj_grad_norm < _tol * score_scale_d
+            obj_converged_d = obj_change < _tol * score_scale_d
+            if grad_converged_d and obj_converged_d:
+                converged = True
+                break
 
     # === Final full IRLS refit at converged lambdas ===
     rho_clipped = np.clip(rho, log_lo, log_hi)
