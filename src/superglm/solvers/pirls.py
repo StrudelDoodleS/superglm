@@ -127,7 +127,13 @@ def _fit_pirls_inner(
     total_inner_iters = 0
     total_groups_skipped = 0
 
-    dev_prev = np.inf
+    # Compute initial deviance for step-halving baseline (catches divergence
+    # from iteration 1, e.g. NB2 deviance going negative under L1 penalty).
+    eta_init = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
+    mu_init = clip_mu(link.inverse(eta_init), family)
+    dev_prev = float(np.sum(weights * family.deviance_unit(y, mu_init)))
+    if not np.isfinite(dev_prev):
+        dev_prev = np.inf
     converged = False
     max_halving = 5  # max step-halving attempts per outer iteration
     for outer in range(max_iter_outer):
@@ -146,6 +152,13 @@ def _fit_pirls_inner(
         V = np.maximum(V, _VARIANCE_FLOOR)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
+        # Clamp W ratio to prevent ill-conditioned gram matrices when
+        # group lasso shrinks groups toward zero (mu → 0, W → 0 for some
+        # observations while others stay normal).  Floor at 1e-10 * max(W)
+        # matches R glm.fit's effective treatment of negligible-weight obs.
+        w_max = W.max()
+        if w_max > 0:
+            W = np.maximum(W, w_max * 1e-10)
         z = eta + (y - mu) / dmu_deta
 
         # Per-group Hessians and Lipschitz constants
@@ -228,13 +241,21 @@ def _fit_pirls_inner(
         mu_new = clip_mu(link.inverse(eta_new), family)
         dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
 
-        # Step halving: if deviance spiked dramatically (>2x), interpolate
-        # between previous and current solution.  Small deviance increases
-        # are normal in IRLS (especially non-canonical links) and don't
-        # warrant halving.  The per-group Hessian regularisation (eps =
-        # 1e-4 * L_g) is the primary defense in the BCD inner solve.
+        # Step halving: triggered when deviance deteriorates. Covers:
+        # 1. dev > 2×prev: classic overshoot (non-canonical links)
+        # 2. dev < 0 < prev: sign flip signals divergence (NB2 with L1
+        #    can push mu → ∞ for y=0 obs, making deviance very negative)
+        # 3. non-finite: NaN/Inf from numerical breakdown
         n_halvings = 0
-        if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
+        need_halving = False
+        if np.isfinite(dev_prev):
+            if not np.isfinite(dev):
+                need_halving = True
+            elif dev > 2.0 * dev_prev:
+                need_halving = True
+            elif dev_prev >= 0 and dev < -abs(dev_prev):
+                need_halving = True
+        if need_halving:
             for halving in range(max_halving):
                 beta = 0.5 * (beta + beta_prev)
                 intercept = 0.5 * (intercept + intercept_prev)

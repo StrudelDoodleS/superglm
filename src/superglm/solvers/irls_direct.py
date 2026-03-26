@@ -345,6 +345,9 @@ def fit_irls_direct(
         V = np.maximum(V, _VARIANCE_FLOOR)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
+        w_max = W.max()
+        if w_max > 0:
+            W = np.maximum(W, w_max * 1e-10)
         z = eta + (y - mu) / dmu_deta
         _t_working += time.perf_counter() - _t0
 
