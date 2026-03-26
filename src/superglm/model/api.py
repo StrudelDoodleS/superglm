@@ -742,6 +742,55 @@ class SuperGLM:
             **kwargs,
         )
 
+    def plot_diagnostics(
+        self,
+        X: pd.DataFrame,
+        y: NDArray,
+        sample_weight: NDArray | None = None,
+        offset: NDArray | None = None,
+        *,
+        residual_type: str = "deviance",
+        figsize: tuple[float, float] | None = None,
+        seed: int = 42,
+    ):
+        """Create an R-style 2x2 residual diagnostic figure.
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            Design matrix.
+        y : NDArray
+            Response vector.
+        sample_weight : NDArray or None
+            Optional observation weights.
+        offset : NDArray or None
+            Optional offset.
+        residual_type : str
+            Residual type for Panel 1. One of ``"deviance"``, ``"pearson"``,
+            ``"response"``, ``"working"``, ``"quantile"``.
+        figsize : tuple or None
+            Figure size in inches. Defaults to ``(10, 8)``.
+        seed : int
+            Random seed for quantile residuals.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            A figure with 4 diagnostic subplots.
+        """
+        from superglm.plotting.diagnostics import plot_diagnostics
+
+        return plot_diagnostics(
+            self,
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            residual_type=residual_type,
+            figsize=figsize,
+            seed=seed,
+        )
+
     def plot_data(
         self,
         terms: str | list[str] | None = None,
