@@ -10,7 +10,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution, clip_mu, initial_mean
+from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initial_mean
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
@@ -100,10 +100,11 @@ def _fit_pirls_inner(
     intercept_init: float | None = None,
     max_iter_outer: int = 100,
     max_iter_inner: int = 5,
-    tol: float = 1e-6,
+    tol: float = 1e-8,
     active_set: bool = False,
     lambda2: float | dict[str, float] = 0.0,
     record_diagnostics: bool = False,
+    convergence: str = "deviance",
 ) -> PIRLSResult:
     """Single-pass PIRLS fit with proximal Newton BCD inner solver."""
     n, p = dm.shape
@@ -142,7 +143,7 @@ def _fit_pirls_inner(
 
         # Working weights and response (PIRLS)
         V = family.variance(mu)
-        V = np.maximum(V, 1e-10)
+        V = np.maximum(V, _VARIANCE_FLOOR)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
         z = eta + (y - mu) / dmu_deta
@@ -291,9 +292,19 @@ def _fit_pirls_inner(
             logger.warning(f"PIRLS non-finite deviance at outer={outer + 1}: dev={dev:.2e}")
             break
 
-        if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
-            converged = True
-            break
+        if convergence == "coefficients":
+            coef_change = float(np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta))))
+            coef_change = max(
+                coef_change,
+                abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
+            )
+            if coef_change < tol:
+                converged = True
+                break
+        else:
+            if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
+                converged = True
+                break
         dev_prev = dev
 
     t_elapsed = time.perf_counter() - t_total
@@ -374,7 +385,7 @@ def _fit_pirls_inner(
     # SuperGLM's sample_weight follows the prior-weight convention, so the
     # residual d.f. correction is observation-count based (n - edf), while
     # the weights still scale the Pearson numerator.
-    V_final = np.maximum(family.variance(mu_new), 1e-10)
+    V_final = np.maximum(family.variance(mu_new), _VARIANCE_FLOOR)
     pearson_chi2 = float(np.sum(weights * (y - mu_new) ** 2 / V_final))
     df_resid = max(float(len(y)) - p_eff, 1)
     phi = pearson_chi2 / df_resid
@@ -411,10 +422,11 @@ def fit_pirls(
     intercept_init: float | None = None,
     max_iter_outer: int = 100,
     max_iter_inner: int = 5,
-    tol: float = 1e-6,
+    tol: float = 1e-8,
     active_set: bool = False,
     lambda2: float | dict[str, float] = 0.0,
     record_diagnostics: bool = False,
+    convergence: str = "deviance",
 ) -> PIRLSResult:
     """Fit a penalised GLM via PIRLS with proximal Newton BCD.
 
@@ -451,6 +463,7 @@ def fit_pirls(
         active_set,
         lambda2=lambda2,
         record_diagnostics=record_diagnostics,
+        convergence=convergence,
     )
 
     # Stage 2: if flavor, adjust weights and refit (warm-start both beta and intercept)
@@ -475,6 +488,7 @@ def fit_pirls(
             active_set=active_set,
             lambda2=lambda2,
             record_diagnostics=record_diagnostics,
+            convergence=convergence,
         )
 
     return result

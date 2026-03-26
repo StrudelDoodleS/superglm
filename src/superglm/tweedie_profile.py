@@ -22,6 +22,7 @@ References
 
 from __future__ import annotations
 
+import logging
 import warnings as _warnings
 from dataclasses import dataclass, field
 from typing import Any
@@ -37,6 +38,8 @@ from superglm.links import stabilize_eta
 from superglm.penalties.base import penalty_has_targets
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Compound Poisson-Gamma simulation
@@ -587,12 +590,15 @@ class _ProfileContext:
 
     def evaluate(self, p: float, source: str = "") -> float:
         """Fit at p, profile phi, record trace row, return mean NLL."""
+        import time as _time
+
         from superglm.distributions import Tweedie
 
         key = round(p, 12)
         if key in self._nll_cache:
             return self._nll_cache[key]
 
+        _t0 = _time.perf_counter()
         dist = Tweedie(p)
         if self.use_direct:
             result, _ = fit_irls_direct(
@@ -658,9 +664,16 @@ class _ProfileContext:
         )
         self._nll_cache[key] = nll
         self.n_evals += 1
+        _elapsed = _time.perf_counter() - _t0
 
+        logger.info(
+            f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  phi={phi:.4f}  "
+            f"nll={nll:.4f}  iters={result.n_iter}  {_elapsed:.2f}s"
+        )
         if self.verbose:
-            print(f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  iters={result.n_iter}")
+            print(
+                f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  iters={result.n_iter}  {_elapsed:.2f}s"
+            )
 
         return nll
 
@@ -805,12 +818,15 @@ class _ProfileContextREML:
 
     def evaluate(self, p: float, source: str = "") -> float:
         """Fit REML at p, profile phi, record trace row, return mean NLL."""
+        import time as _time
+
         from superglm.distributions import Tweedie
 
         key = round(p, 12)
         if key in self._nll_cache:
             return self._nll_cache[key]
 
+        _t0 = _time.perf_counter()
         self.model.family = Tweedie(p=p)
         self.model.fit_reml(self.X, self.y, sample_weight=self.sample_weight, offset=self.offset)
 
@@ -848,9 +864,16 @@ class _ProfileContextREML:
         )
         self._nll_cache[key] = nll
         self.n_evals += 1
+        _elapsed = _time.perf_counter() - _t0
 
+        logger.info(
+            f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  phi={phi:.4f}  "
+            f"nll={nll:.4f}  reml_iters={n_iter}  {_elapsed:.2f}s"
+        )
         if self.verbose:
-            print(f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  reml_iters={n_iter}")
+            print(
+                f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  reml_iters={n_iter}  {_elapsed:.2f}s"
+            )
 
         return nll
 

@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributions import _VARIANCE_FLOOR
 from superglm.inference import compute_coef_covariance
 from superglm.types import GroupSlice
 
@@ -316,7 +317,7 @@ def fit_active_info(model):
     mu = clip_mu(model._link.inverse(eta), model._distribution)
     V = model._distribution.variance(mu)
     dmu_deta = model._link.deriv_inverse(eta)
-    W = model._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
+    W = model._fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
     X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
@@ -357,7 +358,7 @@ def fit_inference_info(model):
     mu = clip_mu(model._link.inverse(eta), model._distribution)
     V = model._distribution.variance(mu)
     dmu_deta = model._link.deriv_inverse(eta)
-    W = model._fit_weights * dmu_deta**2 / np.maximum(V, 1e-10)
+    W = model._fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
 

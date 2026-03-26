@@ -3,6 +3,7 @@
 import pickle
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from superglm.distributions import Gamma, Poisson, Tweedie
@@ -1185,3 +1186,89 @@ class TestClassIdentity:
 
         blob = pickle.dumps(SuperGLM())
         assert b"superglm.model.api" not in blob
+
+
+class TestCategoricalDeterminism:
+    """Categorical-only models must give bit-identical results across fits."""
+
+    def test_categorical_fit_deterministic(self):
+        """Two fits of the same categorical Tweedie model must agree to machine epsilon.
+
+        Before the tabmat bypass fix, the tabmat sandwich path used multi-threaded
+        BLAS to compute X'WX, causing non-deterministic results that near-separated
+        categories amplified to visible-level coefficient differences.  With the
+        fix, the bincount-based gram is deterministic; only the Cholesky solve
+        contributes ~1 ulp noise via BLAS internals.
+        """
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(123)
+        n = 5_000
+        cat_a = rng.choice(["lo", "mid", "hi"], n, p=[0.3, 0.4, 0.3])
+        cat_b = rng.choice(["x", "y", "z", "w"], n)
+        eta = 1.0 + 0.3 * (cat_a == "hi") - 0.2 * (cat_a == "lo")
+        mu = np.exp(eta)
+        y = rng.poisson(mu).astype(float)
+        df = pd.DataFrame({"a": cat_a, "b": cat_b})
+
+        def _fit():
+            m = SuperGLM(
+                family=Tweedie(p=1.5),
+                link="log",
+                selection_penalty=0.0,
+                features={
+                    "a": Categorical(base="first"),
+                    "b": Categorical(base="first"),
+                },
+            )
+            m.fit(df, y)
+            return m
+
+        m1 = _fit()
+        m2 = _fit()
+
+        # Coefficients agree to ~1e-12 (BLAS Cholesky noise is ~1e-15,
+        # well below the threshold that near-separation can amplify).
+        np.testing.assert_allclose(m1._result.beta, m2._result.beta, atol=1e-12)
+        np.testing.assert_allclose(m1._result.intercept, m2._result.intercept, atol=1e-12)
+        np.testing.assert_allclose(m1._result.phi, m2._result.phi, rtol=1e-12)
+        np.testing.assert_allclose(m1._result.deviance, m2._result.deviance, rtol=1e-12)
+
+    def test_categorical_only_uses_bincount_gram(self):
+        """Categorical-only model must use bincount gram, not tabmat BLAS sandwich."""
+        from superglm import SuperGLM
+        from superglm.group_matrix import CategoricalGroupMatrix
+
+        rng = np.random.default_rng(456)
+        n = 200
+        df = pd.DataFrame(
+            {
+                "a": rng.choice(["x", "y", "z"], n),
+                "b": rng.choice(["p", "q"], n),
+            }
+        )
+        y = rng.poisson(5.0, n).astype(float)
+
+        m = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "a": Categorical(base="first"),
+                "b": Categorical(base="first"),
+            },
+        )
+        m.fit(df, y)
+
+        # All groups should be CategoricalGroupMatrix
+        assert all(isinstance(gm, CategoricalGroupMatrix) for gm in m._dm.group_matrices)
+        # Verify determinism: re-fit should give identical results
+        m2 = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "a": Categorical(base="first"),
+                "b": Categorical(base="first"),
+            },
+        )
+        m2.fit(df, y)
+        np.testing.assert_allclose(m._result.beta, m2._result.beta, atol=1e-12)

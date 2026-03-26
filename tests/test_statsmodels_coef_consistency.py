@@ -161,6 +161,122 @@ class TestStatsmodelsCoefConsistency:
         _assert_coef_and_se_match(sm_res, sg_model)
 
 
+class TestNearSeparatedTweedieConsistency:
+    """Tweedie model with near-separated categories, weights, and offset.
+
+    Matches the actuarial use case: some categorical levels have near-zero
+    exposure, producing very negative coefficients in statsmodels.
+    SuperGLM must reach the same MLE for well-identified levels and push
+    near-separated coefficients well past the old -16 clip wall.
+
+    NOTE: The freq_weights + offset parity target here is provisional.
+    SuperGLM's sample_weight semantics vs statsmodels' freq_weights may
+    not be an exact match in all edge cases — revisit if results diverge
+    for non-trivial weight configurations.
+    """
+
+    def test_near_separated_with_weights_and_offset(self):
+        """Near-separated Tweedie categoricals must match statsmodels."""
+        sm = pytest.importorskip("statsmodels")  # noqa: F841
+        import statsmodels.api as sm_api
+
+        from superglm import SuperGLM
+        from superglm.distributions import Tweedie
+
+        rng = np.random.default_rng(42)
+        n = 10_000
+        P = 1.5
+
+        # Categorical with one near-separated level ("rare": ~100 obs, all y=0)
+        probs = [0.40, 0.35, 0.20, 0.04, 0.01]
+        cat = rng.choice(["base", "mid", "hi", "lo", "rare"], n, p=probs)
+
+        # Exposure weights (typical insurance: partial year)
+        exposure = rng.uniform(0.2, 1.0, n)
+
+        # True DGP
+        eta_true = 5.0 + 0.3 * (cat == "hi") - 0.2 * (cat == "lo") + 0.1 * (cat == "mid")
+        mu_true = np.exp(eta_true) * exposure
+        from superglm.tweedie_profile import generate_tweedie_cpg
+
+        y = generate_tweedie_cpg(n, mu=mu_true, phi=2.0, p=P, rng=rng)
+        # Force near-separation: rare level has y=0
+        y[cat == "rare"] = 0.0
+
+        df = pd.DataFrame({"cat": cat})
+        log_exposure = np.log(exposure)
+
+        # --- statsmodels fit ---
+        dummies = pd.get_dummies(df["cat"], prefix="cat", drop_first=True, dtype=float)
+        X_sm = sm_api.add_constant(np.column_stack([dummies.values]))
+        family_sm = sm_api.families.Tweedie(var_power=P, link=sm_api.families.links.Log())
+        sm_res = sm_api.GLM(
+            y, X_sm, family=family_sm, freq_weights=exposure, offset=log_exposure
+        ).fit(maxiter=100)
+
+        # --- SuperGLM fit ---
+        sg = SuperGLM(
+            family=Tweedie(p=P),
+            link="log",
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="first")},
+        )
+        sg.fit(df, y, sample_weight=exposure, offset=log_exposure)
+
+        # Well-identified coefficients must match closely
+        np.testing.assert_allclose(
+            sg._result.intercept,
+            sm_res.params[0],
+            atol=0.05,
+            err_msg="Intercept mismatch",
+        )
+
+        # Near-separated level: must be pushed well past old -16 clip wall
+        sm_coefs = sm_res.params[1:]
+        sg_coefs = sg._result.beta
+        sm_names = list(dummies.columns)
+        sg_names = sg._specs["cat"]._non_base
+
+        for sm_name, sm_coef in zip(sm_names, sm_coefs):
+            level = sm_name.replace("cat_", "")
+            sg_idx = sg_names.index(level)
+            sg_coef = sg_coefs[sg_idx]
+            if abs(sm_coef) < 5:
+                # Well-identified: tight match
+                np.testing.assert_allclose(
+                    sg_coef,
+                    sm_coef,
+                    atol=0.05,
+                    err_msg=f"Coef mismatch for level '{level}'",
+                )
+            else:
+                # Near-separated: both should be very negative, not clipped
+                assert sg_coef < -20, (
+                    f"Near-separated level '{level}': SuperGLM coef={sg_coef:.2f} "
+                    f"is not negative enough (statsmodels={sm_coef:.2f}). "
+                    f"Likely stuck at eta/mu clip wall."
+                )
+
+
+class TestInitialMeanCleanup:
+    """initial_mean should not inject a 0.1 pseudo-response for y=0."""
+
+    def test_positive_families_use_raw_weighted_mean(self):
+        from superglm.distributions import Tweedie, initial_mean
+
+        # Skip if running against a stale install that still has the
+        # old 0.1 pseudo-response (e.g. system pytest in a worktree).
+        try:
+            from superglm.distributions import _POSITIVE_INIT_MIN  # noqa: F401
+        except ImportError:
+            pytest.skip("stale superglm install without _POSITIVE_INIT_MIN")
+
+        y = np.array([0.0, 0.0, 0.0, 1.0])
+        w = np.array([1.0, 1.0, 1.0, 1.0])
+        expected = np.average(y, weights=w)
+        assert initial_mean(y, w, Tweedie(p=1.5)) == pytest.approx(expected)
+
+
 class TestSplineSEConsistency:
     """Spline curve SEs should use the augmented (marginal) covariance."""
 

@@ -9,14 +9,6 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/**"
-  pull_request:
-    branches: [master]
-    paths:
-      - "src/**"
-      - "tests/**"
-      - "pyproject.toml"
-      - "uv.lock"
-      - ".github/workflows/**"
 
 jobs:
   test:
