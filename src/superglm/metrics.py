@@ -856,8 +856,9 @@ def build_coef_rows(
             )
 
     # ── Quasi-separation detection ──────────────────────────────
-    # Flag parametric rows where the SE is so large relative to peers
-    # that the coefficient is effectively undetermined by the data.
+    # Flag parametric rows where the coefficient is effectively undetermined:
+    # - SE hugely inflated (>50x median) — classical quasi-separation
+    # - SE underflowed to ~0 for a large coefficient — numerical separation
     # Uses median SE of non-spline, non-intercept rows as baseline.
     parametric_ses = [
         r.se
@@ -866,10 +867,19 @@ def build_coef_rows(
     ]
     if parametric_ses:
         median_se = float(np.median(parametric_ses))
-        # Threshold: SE > 50x median indicates quasi-separation
         sep_threshold = max(median_se * 50, 10.0)
         for r in rows:
-            if r.se is not None and r.se > sep_threshold and not r.is_spline:
+            if r.is_spline or r.name == "Intercept":
+                continue
+            if r.se is not None and r.se > sep_threshold:
+                r.quasi_separated = True
+            elif (
+                r.coef is not None
+                and r.se is not None
+                and abs(r.coef) > 10
+                and (r.se < 1e-6 or (r.se > 0 and abs(r.coef / r.se) > 1e6))
+            ):
+                # SE underflowed or z-score is absurd — numerical separation
                 r.quasi_separated = True
 
     return rows
