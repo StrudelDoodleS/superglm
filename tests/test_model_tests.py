@@ -416,3 +416,50 @@ class TestVuongTestMismatchedData:
         result = vuong_test(model_a, model_b, X, y_test, correction="none")
         assert isinstance(result, VuongTestResult)
         assert np.isfinite(result.statistic)
+
+
+# ── T27: vuong_test — sample_weight ──────────────────────────────
+
+
+class TestVuongTestWeighted:
+    """Vuong test with sample_weight produces valid, different results."""
+
+    def test_weighted_vs_unweighted(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = rng.uniform(0, 5, n)
+        x2 = rng.uniform(0, 5, n)
+        mu = np.exp(0.5 + 0.3 * x1 + 0.1 * x2)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        w = rng.uniform(0.1, 5.0, n)
+
+        # Different feature sets so LL differs per observation
+        model_a = _fit_poisson_numeric(X, y, features={"x1": Numeric(), "x2": Numeric()})
+        model_b = _fit_poisson_numeric(X[["x1"]], y, features={"x1": Numeric()})
+
+        r_uw = vuong_test(model_a, model_b, X, y, correction="none")
+        r_w = vuong_test(model_a, model_b, X, y, sample_weight=w, correction="none")
+
+        assert isinstance(r_w, VuongTestResult)
+        assert np.isfinite(r_w.statistic)
+        assert 0 <= r_w.p_value <= 1
+        # Weighted reweights the LL diffs, so statistic should differ
+        assert abs(r_w.statistic - r_uw.statistic) > 1e-6
+
+    def test_uniform_weight_matches_unweighted(self):
+        rng = np.random.default_rng(99)
+        n = 300
+        x = rng.uniform(0, 5, n)
+        y = rng.poisson(np.exp(0.3 * x)).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        m1 = _fit_poisson_numeric(X, y, features={"x": Numeric()})
+        m2 = _fit_poisson_numeric(X, y, features={"x": Numeric()})
+
+        r_uw = vuong_test(m1, m2, X, y, correction="none")
+        r_w = vuong_test(m1, m2, X, y, sample_weight=np.ones(n), correction="none")
+
+        # Uniform weights should give identical results
+        assert abs(r_w.statistic - r_uw.statistic) < 1e-10
+        assert abs(r_w.omega - r_uw.omega) < 1e-10

@@ -420,20 +420,17 @@ def vuong_test(
     ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset, sample_weight)
     ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset, sample_weight)
 
-    # Per-observation log-likelihood differences
+    # Per-observation log-likelihood differences, scaled by weight.
+    # Vuong (1989) uses w_i * [log f_A(y_i) - log f_B(y_i)] so that
+    # high-exposure observations contribute proportionally.
     m = ll_a - ll_b
-
-    # Compute (weighted) mean and std of per-obs LL differences
     if sample_weight is not None:
         w = np.asarray(sample_weight, dtype=float)
-        w_sum = w.sum()
-        mean_m = float(np.sum(w * m) / w_sum)
-        # Weighted variance with Bessel-like correction
-        var_m = float(np.sum(w * (m - mean_m) ** 2) / w_sum)
-        omega = float(np.sqrt(var_m))
-    else:
-        mean_m = float(np.mean(m))
-        omega = float(np.std(m, ddof=1))
+        m = m * w
+
+    # Compute mean and std of (weighted) LL differences
+    mean_m = float(np.mean(m))
+    omega = float(np.std(m, ddof=1))
 
     # Model complexities
     p_a = model_a.result.effective_df
