@@ -875,10 +875,14 @@ def _build_tabmat_split(gms: list[GroupMatrix]):
     if any(isinstance(gm, DiscretizedSSPGroupMatrix) for gm in gms):
         return None
 
-    # All-categorical models: the built-in bincount gram (O(n) per group)
-    # and numba _cat_cat_weighted_crosstab (O(n) per pair) are faster than
-    # tabmat's dense BLAS sandwich and fully deterministic.
-    if all(isinstance(gm, CategoricalGroupMatrix) for gm in gms):
+    # All low-cardinality categoricals: the built-in bincount gram (O(n) per
+    # group) and numba _cat_cat_weighted_crosstab (O(n) per pair) are faster
+    # than tabmat's dense BLAS sandwich and fully deterministic.  High-
+    # cardinality categoricals (>100 levels) benefit from tabmat's native
+    # CategoricalMatrix which avoids the O(n × K) dense allocation.
+    if all(isinstance(gm, CategoricalGroupMatrix) for gm in gms) and all(
+        gm.n_levels <= 100 for gm in gms if isinstance(gm, CategoricalGroupMatrix)
+    ):
         return None
 
     import tabmat
