@@ -1017,7 +1017,6 @@ def _add_categorical_term_trace(
 
     resp_y = np.asarray(ti.relativity)
     link_y = np.asarray(ti.log_relativity)
-    resp_bar_y = resp_y - 1.0
     curve = ti.smooth_curve
     is_ordered = curve is not None
     display_mode = _resolve_categorical_display(categorical_display, len(ti.levels))
@@ -1096,8 +1095,8 @@ def _add_categorical_term_trace(
             fig.add_trace(
                 go.Bar(
                     x=level_x.tolist(),
-                    y=resp_bar_y,
-                    base=1.0,
+                    y=resp_y,
+                    base=0.0,
                     name="Relativity",
                     marker=dict(
                         color=_hex_to_rgba(style_cfg["bar_color"], style_cfg["bar_opacity"]),
