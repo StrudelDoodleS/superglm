@@ -549,7 +549,8 @@ class ModelSummary:
             "P>|z|",
             f"[{half:.3f}",
             f"{1 - half:.3f}]",
-            "",
+            "Sig",
+            "QS",
         ]
         parts.append("<tr>")
         parts.append(f'<td style="{hdr_cell_l}">{col_names[0]}</td>')

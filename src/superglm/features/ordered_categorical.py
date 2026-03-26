@@ -165,8 +165,8 @@ class OrderedCategorical:
 
     def __repr__(self) -> str:
         n = self._n_levels
-        if self._spline_obj is not None:
-            return f"OrderedCategorical(basis={self._spline_obj!r}, {n} levels)"
+        if self._spline is not None:
+            return f"OrderedCategorical(basis={self._spline!r}, {n} levels)"
         return f"OrderedCategorical(basis={self.basis!r}, {n} levels, n_knots={self.n_knots})"
 
     def _init_spline(self) -> None:

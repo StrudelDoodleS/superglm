@@ -1609,6 +1609,8 @@ class ModelMetrics:
             lambda2=self._model.lambda2,
             n_obs=self.n_obs,
             alpha=alpha,
+            group_matrices=self._dm.group_matrices if self._dm is not None else None,
+            sample_weights=self._weights,
         )
 
     def summary(self, alpha: float = 0.05, detail: str = "compact") -> ModelSummary:
