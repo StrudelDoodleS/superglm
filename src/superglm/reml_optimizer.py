@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import clip_mu
+from superglm.distributions import _VARIANCE_FLOOR, clip_mu
 from superglm.group_matrix import (
     DesignMatrix,
     _block_xtwx,
@@ -75,7 +75,7 @@ def compute_dW_deta(
         return None
     g1 = link.deriv_inverse(eta)  # dμ/dη
     g2 = link.deriv2_inverse(eta)  # d²μ/dη²
-    V = np.maximum(distribution.variance(mu), 1e-10)
+    V = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
     Vp = distribution.variance_derivative(mu)
     return sample_weight * (g1 / V) * (2.0 * g2 - g1**2 * Vp / V)
 
@@ -187,7 +187,7 @@ def reml_laml_objective(
     if XtWX is None:
         V = distribution.variance(mu)
         dmu_deta = link.deriv_inverse(eta)
-        W = sample_weight * dmu_deta**2 / np.maximum(V, 1e-10)
+        W = sample_weight * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
         XtWX = _block_xtwx(dm.group_matrices, groups, W, tabmat_split=dm.tabmat_split)
 
     p = XtWX.shape[0]
@@ -1245,7 +1245,7 @@ def optimize_efs_reml(
     boot_mu = clip_mu(link.inverse(boot_eta), distribution)
     boot_V = distribution.variance(boot_mu)
     boot_dmu = link.deriv_inverse(boot_eta)
-    boot_W = sample_weight * boot_dmu**2 / np.maximum(boot_V, 1e-10)
+    boot_W = sample_weight * boot_dmu**2 / np.maximum(boot_V, _VARIANCE_FLOOR)
     boot_xtwx = _block_xtwx(dm.group_matrices, groups, boot_W, tabmat_split=dm.tabmat_split)
 
     # Estimate phi for estimated-scale families
@@ -1332,7 +1332,7 @@ def optimize_efs_reml(
             mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
-            W = sample_weight * dmu_deta**2 / np.maximum(V, 1e-10)
+            W = sample_weight * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
             cached_xtwx = _block_xtwx(dm.group_matrices, groups, W, tabmat_split=dm.tabmat_split)
 
@@ -1561,7 +1561,7 @@ def run_reml_once(
             mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
-            W = sample_weight * dmu_deta**2 / np.maximum(V, 1e-10)
+            W = sample_weight * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
             active_groups = list(groups)
             XtWX_S_inv = XtWX_S_inv_full
@@ -1588,7 +1588,7 @@ def run_reml_once(
             mu = clip_mu(link.inverse(eta), distribution)
             V = distribution.variance(mu)
             dmu_deta = link.deriv_inverse(eta)
-            W = sample_weight * dmu_deta**2 / np.maximum(V, 1e-10)
+            W = sample_weight * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
         if use_direct and cheap_iter:
             if cached_direct_xtwx is None:
