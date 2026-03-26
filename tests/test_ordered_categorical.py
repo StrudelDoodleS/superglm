@@ -577,3 +577,76 @@ class TestIntegrationMixed:
         preds = model.predict(X)
         assert preds.shape == (len(X),)
         assert np.all(preds > 0)
+
+
+class TestSplineObjectBasis:
+    """OrderedCategorical with a Spline() object as basis."""
+
+    def test_spline_object_builds_and_fits(self, age_band_data):
+        from superglm.features.spline import Spline
+
+        X, y, sample_weight, _, _ = age_band_data
+        spec = OrderedCategorical(
+            order=sorted(X["age_band"].unique()),
+            basis=Spline(n_knots=4, kind="bs"),
+        )
+        model = SuperGLM(
+            family="poisson",
+            features={"age_band": spec},
+            selection_penalty=0.0,
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+        assert model.result.converged
+
+    def test_spline_object_with_monotone(self, age_band_data):
+        from superglm.features.spline import Spline
+
+        X, y, sample_weight, _, _ = age_band_data
+        spec = OrderedCategorical(
+            order=sorted(X["age_band"].unique()),
+            basis=Spline(n_knots=4, monotone="increasing"),
+        )
+        model = SuperGLM(
+            family="poisson",
+            features={"age_band": spec},
+            selection_penalty=0.0,
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+        assert model.result.converged
+        # Monotone attribute should be visible on the internal spline
+        assert spec._spline.monotone == "increasing"
+
+    def test_spline_object_overrides_string_params(self, age_band_data):
+        """When Spline object is passed, kind/n_knots/etc are ignored."""
+        from superglm.features.spline import Spline
+
+        X, y, sample_weight, _, _ = age_band_data
+        spec = OrderedCategorical(
+            order=sorted(X["age_band"].unique()),
+            basis=Spline(n_knots=3, kind="cr"),
+            kind="bs",  # should be ignored
+            n_knots=10,  # should be ignored
+        )
+        # Internal spline should use the Spline object's params
+        assert spec._spline.n_knots <= 3  # may be clamped but not 10
+
+    def test_repr_shows_spline_object(self):
+        from superglm.features.spline import Spline
+
+        spec = OrderedCategorical(
+            order=["a", "b", "c", "d"],
+            basis=Spline(n_knots=3),
+        )
+        r = repr(spec)
+        assert "OrderedCategorical" in r
+        assert "4 levels" in r
+
+    def test_n_knots_clamped_for_spline_object(self):
+        from superglm.features.spline import Spline
+
+        with pytest.warns(UserWarning, match="clamped"):
+            spec = OrderedCategorical(
+                order=["a", "b", "c"],  # 3 levels → max 2 knots
+                basis=Spline(n_knots=10),
+            )
+        assert spec._spline.n_knots == 2

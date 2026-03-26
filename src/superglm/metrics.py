@@ -123,10 +123,12 @@ def _penalised_xtwx_inv(
     A = np.vstack([X_a * np.sqrt(W)[:, None], S_rows])
     _, R = np.linalg.qr(A, mode="reduced")
 
-    # Truncated SVD for numerical stability
+    # Truncated SVD for numerical stability.
+    # Regularize truncated directions so SEs are large-but-finite.
     _, s_R, Vh_R = np.linalg.svd(R, full_matrices=False)
     threshold = 1e-6 * s_R[0]
-    inv_s2 = np.where(s_R > threshold, 1.0 / s_R**2, 0.0)
+    regularized = 1.0 / threshold**2
+    inv_s2 = np.where(s_R > threshold, 1.0 / s_R**2, regularized)
     XtWX_S_inv = (Vh_R.T * inv_s2[None, :]) @ Vh_R
 
     # Augmented (p+1)×(p+1) inverse including intercept row/column.
@@ -142,7 +144,8 @@ def _penalised_xtwx_inv(
     _, R_aug = np.linalg.qr(A_aug, mode="reduced")
     _, s_aug, Vh_aug = np.linalg.svd(R_aug, full_matrices=False)
     threshold_aug = 1e-6 * s_aug[0]
-    inv_s2_aug = np.where(s_aug > threshold_aug, 1.0 / s_aug**2, 0.0)
+    regularized_aug = 1.0 / threshold_aug**2
+    inv_s2_aug = np.where(s_aug > threshold_aug, 1.0 / s_aug**2, regularized_aug)
     XtWX_S_inv_aug = (Vh_aug.T * inv_s2_aug[None, :]) @ Vh_aug
 
     return X_a, XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, active_gms
@@ -227,11 +230,15 @@ def _penalised_xtwx_inv_gram(
     # Match the dense QR/SVD path: there we truncate singular values at
     # ``rtol * s_max``. Since ``eigvals(M) = s**2``, the equivalent cutoff
     # on the eigenvalue scale is ``rtol**2 * eig_max``.
+    # Truncated directions get a large regularized inverse (1/threshold)
+    # so that SEs are finite-but-huge rather than zero — correctly
+    # signaling "undetermined" for near-separated coefficients.
     M = XtWX + S
     eigvals, eigvecs = np.linalg.eigh(M)
     threshold = (1e-6**2) * max(eigvals.max(), 1e-12)
+    regularized = 1.0 / threshold
     with np.errstate(divide="ignore"):
-        inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
+        inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, regularized)
     XtWX_S_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
 
     # Augmented (p+1)×(p+1) inverse including intercept row/column.
@@ -248,8 +255,9 @@ def _penalised_xtwx_inv_gram(
     M_aug[1:, 1:] = M  # XtWX + S
     eigvals_aug, eigvecs_aug = np.linalg.eigh(M_aug)
     threshold_aug = (1e-6**2) * max(eigvals_aug.max(), 1e-12)
+    regularized_aug = 1.0 / threshold_aug
     with np.errstate(divide="ignore"):
-        inv_eigvals_aug = np.where(eigvals_aug > threshold_aug, 1.0 / eigvals_aug, 0.0)
+        inv_eigvals_aug = np.where(eigvals_aug > threshold_aug, 1.0 / eigvals_aug, regularized_aug)
     XtWX_S_inv_aug = (eigvecs_aug * inv_eigvals_aug[None, :]) @ eigvecs_aug.T
 
     return XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, XtWX, S
@@ -277,6 +285,8 @@ def build_coef_rows(
     precomputed_R_a: NDArray | None = None,
     precomputed_edf: NDArray | None = None,
     precomputed_edf1: NDArray | None = None,
+    group_matrices: list | None = None,
+    sample_weights: NDArray | None = None,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
 
@@ -302,9 +312,23 @@ def build_coef_rows(
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
+    from superglm.group_matrix import CategoricalGroupMatrix
     from superglm.inference import feature_se_from_cov, spline_group_enrichment
 
     beta = result.beta
+
+    # ── Per-level diagnostics for categorical features ────────────
+    # Compute observation count and exposure share per non-base level.
+    _level_diag: dict[str, dict[int, tuple[int, float]]] = {}
+    if group_matrices is not None and sample_weights is not None:
+        total_weight = float(np.sum(sample_weights))
+        for gm, g in zip(group_matrices, groups):
+            if isinstance(gm, CategoricalGroupMatrix):
+                K = gm.n_levels
+                n_per = np.bincount(gm.codes, minlength=K + 1)[:K]
+                exp_per = np.bincount(gm.codes, weights=sample_weights, minlength=K + 1)[:K]
+                exp_share = exp_per / max(total_weight, 1e-300)
+                _level_diag[g.name] = {i: (int(n_per[i]), float(exp_share[i])) for i in range(K)}
     phi = result.phi
 
     # Compute per-group SEs from augmented inverse (accounts for intercept).
@@ -585,10 +609,12 @@ def build_coef_rows(
         elif isinstance(spec, Categorical):
             gedf = _get_group_edf_map()
             cat_edf = gedf.get(g.name, 0.0) if active else 0.0
+            diag = _level_diag.get(g.name, {})
             for i, level in enumerate(spec._non_base):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                n_obs_i, exp_share_i = diag.get(i, (None, None))
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{level}]",
@@ -599,7 +625,9 @@ def build_coef_rows(
                         p=p,
                         ci_low=ci_lo,
                         ci_high=ci_hi,
-                        edf=cat_edf if i == 0 else None,  # report group edf on first row
+                        edf=cat_edf if i == 0 else None,
+                        level_n_obs=n_obs_i,
+                        level_exposure_share=exp_share_i,
                     )
                 )
 
@@ -856,10 +884,19 @@ def build_coef_rows(
             )
 
     # ── Quasi-separation detection ──────────────────────────────
-    # Flag parametric rows where the coefficient is effectively undetermined:
-    # - SE hugely inflated (>50x median) — classical quasi-separation
-    # - SE underflowed to ~0 for a large coefficient — numerical separation
-    # Uses median SE of non-spline, non-intercept rows as baseline.
+    # Primary: data-driven — flag categorical levels with too few obs.
+    # Fallback: SE-based — for non-categorical features or when
+    # per-level diagnostics are unavailable.
+    for r in rows:
+        if r.is_spline or r.name == "Intercept":
+            continue
+        # Data-driven: insufficient observations or exposure
+        if r.level_n_obs is not None and r.level_n_obs < 20:
+            r.quasi_separated = True
+        elif r.level_exposure_share is not None and r.level_exposure_share < 0.0005:
+            r.quasi_separated = True
+
+    # SE-based fallback for rows without per-level diagnostics
     parametric_ses = [
         r.se
         for r in rows
@@ -869,17 +906,11 @@ def build_coef_rows(
         median_se = float(np.median(parametric_ses))
         sep_threshold = max(median_se * 50, 10.0)
         for r in rows:
-            if r.is_spline or r.name == "Intercept":
+            if r.quasi_separated or r.is_spline or r.name == "Intercept":
                 continue
+            if r.level_n_obs is not None:
+                continue  # already handled by data-driven check
             if r.se is not None and r.se > sep_threshold:
-                r.quasi_separated = True
-            elif (
-                r.coef is not None
-                and r.se is not None
-                and abs(r.coef) > 10
-                and (r.se < 1e-6 or (r.se > 0 and abs(r.coef / r.se) > 1e6))
-            ):
-                # SE underflowed or z-score is absurd — numerical separation
                 r.quasi_separated = True
 
     return rows
@@ -1578,6 +1609,8 @@ class ModelMetrics:
             lambda2=self._model.lambda2,
             n_obs=self.n_obs,
             alpha=alpha,
+            group_matrices=self._dm.group_matrices if self._dm is not None else None,
+            sample_weights=self._weights,
         )
 
     def summary(self, alpha: float = 0.05, detail: str = "compact") -> ModelSummary:

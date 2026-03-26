@@ -44,6 +44,8 @@ class _CoefRow:
     monotone_repaired: bool = False
     # Quasi-separation warning
     quasi_separated: bool = False
+    level_n_obs: int | None = None
+    level_exposure_share: float | None = None
 
 
 @dataclass
@@ -79,7 +81,12 @@ def _camel_to_spaced(name: str) -> str:
     return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
 
 
-_SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1  '?' quasi-separated"
+_SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
+_QS_NOTE = (
+    "QS: quasi-complete separation — a predictor perfectly or nearly predicts\n"
+    "zero response, so the log-link coefficient diverges to -∞ and no finite\n"
+    "MLE exists. Flagged levels have <20 obs or <0.05% exposure."
+)
 _WALD_NOTE = (
     "Note: smooth p-values use Wood (2013) Bayesian test.\n"
     "Parametric p-values are Wald approximations.\n"
@@ -217,10 +224,10 @@ class ModelSummary:
             rows.append(("Tweedie p", p_str, "Method", method))
 
         # Compute content width from coefficient columns AND header values
-        #   coef table: name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4)
+        #   coef table: name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4) + qs(2)
         name_w = max(len(r.name) for r in self._coef_rows) if self._coef_rows else 10
         name_w = max(name_w, 10)
-        coef_W = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4
+        coef_W = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4 + 2
 
         # Header layout: "{k1:20}{v1:>val}  {k2:20}{v2:>val}" → need val >= max value len
         # Each half = 20 (key) + val; total = 20 + val + 2 + 20 + val = 42 + 2*val
@@ -303,7 +310,8 @@ class ModelSummary:
             f"{'P>|z|':>8s}"
             f"{'[' + f'{half:.3f}':>9s}"
             f"{f'{1 - half:.3f}' + ']':>9s}"
-            f"{'':>5s}"
+            f" {'Sig':<3s}"
+            f" {'QS'}"
         )
         lines.append(_row(hdr))
         lines.append(_thin())
@@ -381,13 +389,14 @@ class ModelSummary:
                                 f"{br.p:>8.3f}"
                                 f"{br.ci_low:>9.3f}"
                                 f"{br.ci_high:>9.3f}"
-                                f"  {b_stars:<3s}"
+                                f" {b_stars:<3s}"
+                                f"{'':>2s}"
                             )
                         )
 
             elif row.coef is not None and row.se is not None and row.se > 0:
                 stars = _sig_stars(row.p)
-                sep = "?" if row.quasi_separated else " "
+                qs = "?" if row.quasi_separated else " "
                 if abs(row.z) >= 100:
                     z_str = f"{row.z:>8.1f}"
                 else:
@@ -401,7 +410,8 @@ class ModelSummary:
                         f"{row.p:>8.3f}"
                         f"{row.ci_low:>9.3f}"
                         f"{row.ci_high:>9.3f}"
-                        f" {sep}{stars:<3s}"
+                        f" {stars:<3s}"
+                        f" {qs}"
                     )
                 )
             else:
@@ -415,12 +425,16 @@ class ModelSummary:
                         f"{'---':>8s}"
                         f"{'---':>9s}"
                         f"{'---':>9s}"
-                        f"{'':>5s}"
+                        f"{'':>4s}"
+                        f"{'':>2s}"
                     )
                 )
 
         lines.append(_bot())
         lines.append(_SIG_LEGEND)
+        has_qs = any(r.quasi_separated for r in self._coef_rows)
+        if has_qs:
+            lines.append(_QS_NOTE)
         abbrevs = info.get("penalty_abbrevs", {})
         if abbrevs:
             lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
@@ -432,6 +446,16 @@ class ModelSummary:
                 "Parametric p-values are Wald approximations.\n"
                 "For borderline significance, use a likelihood ratio test."
             )
+
+        # Quasi-separated footnote
+        qs_rows = [r for r in self._coef_rows if r.quasi_separated and r.level_n_obs is not None]
+        if qs_rows:
+            lines.append("")
+            lines.append("? Quasi-separated levels (insufficient data):")
+            for r in qs_rows:
+                exp_pct = r.level_exposure_share * 100 if r.level_exposure_share is not None else 0
+                lines.append(f"    {r.name}: {r.level_n_obs} obs ({exp_pct:.2f}% exposure)")
+
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -443,7 +467,7 @@ class ModelSummary:
         info = self._info
         half = self._alpha / 2.0
         _fmt = self._fmt_scalar
-        ncols = 8  # name + coef + se + z + p + ci_lo + ci_hi + sig
+        ncols = 9  # name + coef + se + z + p + ci_lo + ci_hi + sig + qs
 
         css = "border-collapse:collapse;font-family:monospace;font-size:13px;margin:8px 0;"
         cell = "padding:3px 8px;text-align:right;border:none;"
@@ -525,7 +549,8 @@ class ModelSummary:
             "P>|z|",
             f"[{half:.3f}",
             f"{1 - half:.3f}]",
-            "",
+            "Sig",
+            "QS",
         ]
         parts.append("<tr>")
         parts.append(f'<td style="{hdr_cell_l}">{col_names[0]}</td>')
@@ -640,7 +665,8 @@ class ModelSummary:
                         "<th style='padding:1px 6px;'>P&gt;|z|</th>"
                         "<th style='padding:1px 6px;'>[ci_lo</th>"
                         "<th style='padding:1px 6px;'>ci_hi]</th>"
-                        "<th style='padding:1px 6px;'></th>"
+                        "<th style='padding:1px 6px;'>Sig</th>"
+                        "<th style='padding:1px 6px;'>QS</th>"
                         "</tr>" + "".join(inner_rows) + "</table>"
                     )
                     parts.append(
@@ -654,7 +680,7 @@ class ModelSummary:
 
             elif row.coef is not None and row.se is not None and row.se > 0:
                 stars = _sig_stars(row.p)
-                sep = "?" if row.quasi_separated else ""
+                qs = "?" if row.quasi_separated else ""
                 parts.append(
                     f"<tr>"
                     f'<td style="{cell_l}">{row.name}</td>'
@@ -664,7 +690,8 @@ class ModelSummary:
                     f'<td style="{cell}">{row.p:.3f}</td>'
                     f'<td style="{cell}">{row.ci_low:.3f}</td>'
                     f'<td style="{cell}">{row.ci_high:.3f}</td>'
-                    f'<td style="{sig_cell}">{sep}{stars}</td>'
+                    f'<td style="{sig_cell}">{stars}</td>'
+                    f'<td style="{sig_cell}">{qs}</td>'
                     f"</tr>"
                 )
             else:
@@ -679,6 +706,7 @@ class ModelSummary:
                     f'<td style="{cell}">---</td>'
                     f'<td style="{cell}">---</td>'
                     f'<td style="{sig_cell}"></td>'
+                    f'<td style="{sig_cell}"></td>'
                     f"</tr>"
                 )
 
@@ -688,6 +716,12 @@ class ModelSummary:
             f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
             f'color:#666;border:none;">{_SIG_LEGEND}</td></tr>'
         )
+        has_qs = any(r.quasi_separated for r in self._coef_rows)
+        if has_qs:
+            parts.append(
+                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+                f'color:#c60;border:none;">{_QS_NOTE}</td></tr>'
+            )
         has_smooth = any(r.is_spline for r in self._coef_rows)
         if has_smooth:
             note_text = _WALD_NOTE
@@ -701,5 +735,20 @@ class ModelSummary:
             f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
             f'color:#888;font-style:italic;border:none;">{note_html}</td></tr>'
         )
+        # Quasi-separated footnote
+        qs_rows = [r for r in self._coef_rows if r.quasi_separated and r.level_n_obs is not None]
+        if qs_rows:
+            qs_lines = ["? Quasi-separated levels (insufficient data):"]
+            for r in qs_rows:
+                exp_pct = r.level_exposure_share * 100 if r.level_exposure_share is not None else 0
+                qs_lines.append(
+                    f"&nbsp;&nbsp;&nbsp;&nbsp;{r.name}: {r.level_n_obs} obs ({exp_pct:.2f}% exposure)"
+                )
+            qs_html = "<br>".join(qs_lines)
+            parts.append(
+                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+                f'color:#c60;border:none;">{qs_html}</td></tr>'
+            )
+
         parts.append("</table>")
         return "\n".join(parts)
