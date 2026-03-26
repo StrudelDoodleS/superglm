@@ -256,3 +256,30 @@ class TestCustomFigsize:
         w, h = fig.get_size_inches()
         assert abs(w - 12) < 0.1
         assert abs(h - 10) < 0.1
+
+
+# ── T6: sample_weight and offset ─────────────────────────────────
+
+
+class TestSampleWeightAndOffset:
+    """Smoke test: sample_weight and offset do not crash."""
+
+    def test_with_sample_weight(self):
+        rng = np.random.default_rng(42)
+        X, y = _make_poisson_data(rng, n=300)
+        w = rng.uniform(0.5, 2.0, len(y))
+        model = SuperGLM(family="poisson", features={"x": Spline(n_knots=5)}, selection_penalty=0.0)
+        model.fit(X, y, sample_weight=w)
+        fig = model.plot_diagnostics(X, y, sample_weight=w)
+        assert isinstance(fig, Figure)
+        assert len(fig.get_axes()) == 4
+
+    def test_with_offset(self):
+        rng = np.random.default_rng(42)
+        X, y = _make_poisson_data(rng, n=300)
+        offset = rng.uniform(-0.5, 0.5, len(y))
+        model = SuperGLM(family="poisson", features={"x": Spline(n_knots=5)}, selection_penalty=0.0)
+        model.fit(X, y, offset=offset)
+        fig = model.plot_diagnostics(X, y, offset=offset)
+        assert isinstance(fig, Figure)
+        assert len(fig.get_axes()) == 4

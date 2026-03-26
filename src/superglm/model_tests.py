@@ -120,17 +120,19 @@ def _per_obs_ll_binomial(y: NDArray, mu: NDArray) -> NDArray:
     return y * np.log(mu_safe) + (1 - y) * np.log(1 - mu_safe)
 
 
-def _per_obs_ll_tweedie(y: NDArray, mu: NDArray, phi: float, p: float, weights: NDArray) -> NDArray:
-    """Per-observation Tweedie log-likelihood."""
+def _per_obs_ll_tweedie(y: NDArray, mu: NDArray, phi: float, p: float) -> NDArray:
+    """Per-observation Tweedie log-likelihood (unweighted density)."""
     from superglm.tweedie_profile import tweedie_logpdf
 
-    return tweedie_logpdf(y, mu, phi, p, weights=weights)
+    return tweedie_logpdf(y, mu, phi, p)
 
 
-def _per_obs_log_likelihood(
-    model: SuperGLM, X, y: NDArray, offset=None, sample_weight=None
-) -> NDArray:
-    """Compute per-observation log-likelihood for any supported family."""
+def _per_obs_log_likelihood(model: SuperGLM, X, y: NDArray, offset=None) -> NDArray:
+    """Compute per-observation log-likelihood for any supported family.
+
+    Returns the *unweighted* log-density at each observation. Callers
+    (e.g. vuong_test) handle observation weighting separately.
+    """
     from superglm.distributions import (
         Binomial,
         Gamma,
@@ -156,8 +158,7 @@ def _per_obs_log_likelihood(
     elif isinstance(family, Binomial):
         return _per_obs_ll_binomial(y, mu)
     elif isinstance(family, Tweedie):
-        w = np.ones(len(y)) if sample_weight is None else np.asarray(sample_weight, dtype=float)
-        return _per_obs_ll_tweedie(y, mu, result.phi, family.p, w)
+        return _per_obs_ll_tweedie(y, mu, result.phi, family.p)
     else:
         raise ValueError(f"Unsupported family: {type(family).__name__}")
 
@@ -417,20 +418,21 @@ def vuong_test(
     y_arr = np.asarray(y, dtype=float)
     n = len(y_arr)
 
-    ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset, sample_weight)
-    ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset, sample_weight)
+    ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
+    ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
 
-    # Per-observation log-likelihood differences, scaled by weight.
-    # Vuong (1989) uses w_i * [log f_A(y_i) - log f_B(y_i)] so that
-    # high-exposure observations contribute proportionally.
-    m = ll_a - ll_b
+    d = ll_a - ll_b  # per-observation LL differences
+
     if sample_weight is not None:
         w = np.asarray(sample_weight, dtype=float)
-        m = m * w
-
-    # Compute mean and std of (weighted) LL differences
-    mean_m = float(np.mean(m))
-    omega = float(np.std(m, ddof=1))
+        # Weighted mean and Bessel-corrected weighted std
+        sum_w = w.sum()
+        mean_m = float(np.sum(w * d) / sum_w)
+        sum_w2 = np.sum(w**2)
+        omega = float(np.sqrt(np.sum(w * (d - mean_m) ** 2) / (sum_w - sum_w2 / sum_w)))
+    else:
+        mean_m = float(np.mean(d))
+        omega = float(np.std(d, ddof=1))
 
     # Model complexities
     p_a = model_a.result.effective_df

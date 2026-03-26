@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
+import numba
 import numpy as np
 from scipy import stats
 
@@ -15,86 +16,95 @@ if TYPE_CHECKING:
     from superglm.model import SuperGLM
 
 
-def _lowess(x: NDArray, y: NDArray, *, frac: float = 0.6, n_steps: int = 2) -> NDArray:
-    """Lightweight LOWESS smoother (locally-weighted scatterplot smoothing).
+@numba.njit(cache=True)
+def _lowess_core(x_s, y_s, k, n_steps):
+    """Numba-accelerated LOWESS with tricube kernel and sliding window."""
+    n = len(x_s)
+    y_hat = np.empty(n)
+    robustness_w = np.ones(n)
 
-    Uses a tricube kernel with iteratively re-weighted least squares.
-    """
+    for _iteration in range(1 + n_steps):
+        left = 0
+        for i in range(n):
+            # Slide window right: k nearest neighbours are contiguous in sorted x
+            while left + k < n:
+                if x_s[i] - x_s[left] > x_s[left + k] - x_s[i]:
+                    left += 1
+                else:
+                    break
+
+            right = min(left + k, n)
+            h = max(x_s[i] - x_s[left], x_s[right - 1] - x_s[i]) + 1e-10
+
+            # Single-pass weighted regression: accumulate sufficient statistics
+            sw = 0.0
+            swx = 0.0
+            swy = 0.0
+            swxx = 0.0
+            swxy = 0.0
+            for j in range(left, right):
+                u = abs(x_s[j] - x_s[i]) / h
+                if u < 1.0:
+                    u3 = u * u * u
+                    t = 1.0 - u3
+                    w = t * t * t * robustness_w[j]
+                else:
+                    w = 0.0
+                sw += w
+                wx = w * x_s[j]
+                swx += wx
+                swy += w * y_s[j]
+                swxx += wx * x_s[j]
+                swxy += w * x_s[j] * y_s[j]
+
+            if sw < 1e-12:
+                y_hat[i] = y_s[i]
+                continue
+
+            mx = swx / sw
+            my = swy / sw
+            den = swxx - swx * swx / sw
+            if abs(den) < 1e-12:
+                y_hat[i] = my
+            else:
+                num = swxy - swx * swy / sw
+                y_hat[i] = my + (num / den) * (x_s[i] - mx)
+
+        # Update robustness weights after initial fit and each robustness step
+        if _iteration < n_steps:
+            # Median absolute residual
+            abs_resid = np.empty(n)
+            for i in range(n):
+                abs_resid[i] = abs(y_s[i] - y_hat[i])
+            med_resid = np.median(abs_resid)
+            if med_resid < 1e-12:
+                break
+            inv6m = 1.0 / (6.0 * med_resid)
+            for i in range(n):
+                u = (y_s[i] - y_hat[i]) * inv6m
+                au = abs(u)
+                if au < 1.0:
+                    t = 1.0 - u * u
+                    robustness_w[i] = t * t
+                else:
+                    robustness_w[i] = 0.0
+
+    return y_hat
+
+
+def _lowess(x: NDArray, y: NDArray, *, frac: float = 0.6, n_steps: int = 2) -> NDArray:
+    """LOWESS smoother (numba-accelerated, tricube kernel, robustness iterations)."""
     n = len(x)
     if n < 3:
         return y.copy()
 
     order = np.argsort(x)
-    x_s = x[order].astype(float)
-    y_s = y[order].astype(float)
-
+    x_s = np.ascontiguousarray(x[order], dtype=np.float64)
+    y_s = np.ascontiguousarray(y[order], dtype=np.float64)
     k = max(int(np.ceil(frac * n)), 3)
-    y_hat = np.zeros(n)
 
-    for i in range(n):
-        dists = np.abs(x_s - x_s[i])
-        # Find the k-th nearest distance
-        idx = np.argpartition(dists, min(k - 1, n - 1))[:k]
-        h = dists[idx].max() + 1e-10
-        u = dists[idx] / h
-        w = (1 - u**3) ** 3  # tricube kernel
-        w = np.maximum(w, 0.0)
+    y_hat = _lowess_core(x_s, y_s, k, n_steps)
 
-        xi = x_s[idx]
-        yi = y_s[idx]
-
-        # Weighted linear fit
-        sw = w.sum()
-        if sw < 1e-12:
-            y_hat[i] = yi.mean()
-            continue
-        mx = np.sum(w * xi) / sw
-        my = np.sum(w * yi) / sw
-        dx = xi - mx
-        dy = yi - my
-        denom = np.sum(w * dx**2)
-        if denom < 1e-12:
-            y_hat[i] = my
-        else:
-            slope = np.sum(w * dx * dy) / denom
-            y_hat[i] = my + slope * (x_s[i] - mx)
-
-    # Iterative robustness steps
-    for _ in range(n_steps):
-        resid = y_s - y_hat
-        med_resid = np.median(np.abs(resid))
-        if med_resid < 1e-12:
-            break
-        u_rob = resid / (6.0 * med_resid)
-        robustness_w = np.where(np.abs(u_rob) < 1, (1 - u_rob**2) ** 2, 0.0)
-
-        for i in range(n):
-            dists = np.abs(x_s - x_s[i])
-            idx = np.argpartition(dists, min(k - 1, n - 1))[:k]
-            h = dists[idx].max() + 1e-10
-            u = dists[idx] / h
-            w = (1 - u**3) ** 3
-            w = np.maximum(w, 0.0) * robustness_w[idx]
-
-            xi = x_s[idx]
-            yi = y_s[idx]
-
-            sw = w.sum()
-            if sw < 1e-12:
-                y_hat[i] = yi.mean()
-                continue
-            mx = np.sum(w * xi) / sw
-            my = np.sum(w * yi) / sw
-            dx = xi - mx
-            dy = yi - my
-            denom = np.sum(w * dx**2)
-            if denom < 1e-12:
-                y_hat[i] = my
-            else:
-                slope = np.sum(w * dx * dy) / denom
-                y_hat[i] = my + slope * (x_s[i] - mx)
-
-    # Restore original order
     result = np.empty(n)
     result[order] = y_hat
     return result
@@ -109,6 +119,7 @@ def plot_diagnostics(
     *,
     residual_type: str = "deviance",
     figsize: tuple[float, float] | None = None,
+    max_points: int = 25_000,
     seed: int = 42,
 ) -> Figure:
     """Create an R-style 2x2 residual diagnostic figure.
@@ -130,8 +141,12 @@ def plot_diagnostics(
         ``"response"``, ``"working"``, ``"quantile"``.
     figsize : tuple or None
         Figure size ``(width, height)`` in inches. Defaults to ``(10, 8)``.
+    max_points : int
+        Maximum number of points to plot and smooth. When ``n > max_points``,
+        a random subsample is drawn for scatter plots and LOWESS smoothers.
+        Set to 0 to disable subsampling.
     seed : int
-        Random seed for quantile residuals.
+        Random seed for quantile residuals and subsampling.
 
     Returns
     -------
@@ -160,6 +175,16 @@ def plot_diagnostics(
 
     # Leverage for Panel 4
     leverage = m.leverage
+
+    # Subsample for plotting/smoothing if n is large
+    if max_points > 0 and n > max_points:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(n, max_points, replace=False)
+        mu = mu[idx]
+        resid_p1 = resid_p1[idx]
+        std_dev_resid = std_dev_resid[idx]
+        leverage = leverage[idx]
+        n = max_points
 
     # Build the family/link label for suptitle
     family_name = type(model._distribution).__name__

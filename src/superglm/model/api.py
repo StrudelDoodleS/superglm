@@ -751,6 +751,7 @@ class SuperGLM:
         *,
         residual_type: str = "deviance",
         figsize: tuple[float, float] | None = None,
+        max_points: int = 25_000,
         seed: int = 42,
     ):
         """Create an R-style 2x2 residual diagnostic figure.
@@ -770,8 +771,10 @@ class SuperGLM:
             ``"response"``, ``"working"``, ``"quantile"``.
         figsize : tuple or None
             Figure size in inches. Defaults to ``(10, 8)``.
+        max_points : int
+            Maximum points to plot/smooth. Set to 0 to disable subsampling.
         seed : int
-            Random seed for quantile residuals.
+            Random seed for quantile residuals and subsampling.
 
         Returns
         -------
@@ -788,6 +791,7 @@ class SuperGLM:
             offset=offset,
             residual_type=residual_type,
             figsize=figsize,
+            max_points=max_points,
             seed=seed,
         )
 
