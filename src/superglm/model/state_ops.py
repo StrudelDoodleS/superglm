@@ -39,8 +39,16 @@ def diagnostics(model) -> dict[str, Any]:
         "deviance": res.deviance,
         "phi": res.phi,
         "effective_df": res.effective_df,
-        "n_iter": res.n_iter,
-        "converged": res.converged,
+        "n_iter": (
+            model._reml_result.n_reml_iter
+            if getattr(model, "_reml_result", None) is not None
+            else res.n_iter
+        ),
+        "converged": (
+            model._reml_result.converged
+            if getattr(model, "_reml_result", None) is not None
+            else res.converged
+        ),
         "lambda1": model.penalty.lambda1,
     }
     return out
@@ -150,8 +158,16 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         "aicc": aicc,
         "bic": bic,
         "ebic": ebic,
-        "converged": res.converged,
-        "n_iter": res.n_iter,
+        "converged": (
+            model._reml_result.converged
+            if getattr(model, "_reml_result", None) is not None
+            else res.converged
+        ),
+        "n_iter": (
+            model._reml_result.n_reml_iter
+            if getattr(model, "_reml_result", None) is not None
+            else res.n_iter
+        ),
     }
 
     # NB theta profile info
