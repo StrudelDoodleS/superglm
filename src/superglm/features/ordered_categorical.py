@@ -56,26 +56,33 @@ class OrderedCategorical:
     order : list[str] or None
         Ordered list of category labels.  Numeric values are generated as
         ``linspace(0, 1, len(order))``.  Mutually exclusive with ``values``.
-    basis : {"spline", "step"}
-        ``"spline"`` maps categories to numeric values and builds a spline.
-        ``"step"`` one-hot encodes with a first-difference penalty.
+    basis : {"spline", "step"} or Spline object
+        ``"spline"`` (default) maps categories to numeric values and
+        builds a default B-spline.  ``"step"`` one-hot encodes with a
+        first-difference penalty.  A ``Spline(...)`` object can be passed
+        directly for full control over kind, monotone constraints,
+        select, penalty, etc.::
+
+            OrderedCategorical(order=[...], basis=Spline(monotone="increasing"))
+
+        When a Spline object is passed, the ``kind``, ``n_knots``,
+        ``degree``, ``select``, and ``penalty`` parameters are ignored.
     kind : str
-        Spline type (spline mode only). ``"bs"`` (default), ``"cr"``,
-        ``"ns"``, etc.  See :class:`Spline` for options.
+        Spline type (ignored if ``basis`` is a Spline object).
+        ``"bs"`` (default), ``"cr"``, ``"ns"``, etc.
     base : str
         Reference level for step mode.  ``"most_exposed"`` (default),
         ``"first"``, or a specific level name.  Ignored in spline mode.
     n_knots : int
-        Number of interior knots (spline mode only).  Auto-clamped to
-        ``n_levels - 1`` if too large for the number of categories.
+        Number of interior knots (ignored if ``basis`` is a Spline object).
+        Auto-clamped to ``n_levels - 1`` if too large.
     degree : int
-        B-spline degree (spline mode only).  Default 3 (cubic).
+        B-spline degree (ignored if ``basis`` is a Spline object).
     select : bool
-        Enable mgcv-style double penalty for feature selection
-        (spline mode only).
+        Enable mgcv-style double penalty (ignored if ``basis`` is a
+        Spline object).
     penalty : str
-        Penalty type for internal spline.  ``"ssp"`` (default) or
-        ``"none"``.
+        Penalty type (ignored if ``basis`` is a Spline object).
 
     Examples
     --------
@@ -96,7 +103,7 @@ class OrderedCategorical:
         self,
         values: dict[str, float] | None = None,
         order: list[str] | None = None,
-        basis: str = "spline",
+        basis: str | Any = "spline",
         kind: str = "bs",
         base: str = "most_exposed",
         n_knots: int = 5,
@@ -104,16 +111,26 @@ class OrderedCategorical:
         select: bool = False,
         penalty: str = "ssp",
     ):
+        from superglm.features.spline import _SplineBase
+
         if values is not None and order is not None:
             raise ValueError("Specify exactly one of 'values' or 'order', not both.")
         if values is None and order is None:
             raise ValueError("Must specify either 'values' or 'order'.")
-        if basis not in ("spline", "step"):
-            raise ValueError(f"basis must be 'spline' or 'step', got {basis!r}")
-        if basis == "step" and select:
+
+        # Accept a Spline object as basis
+        if isinstance(basis, _SplineBase):
+            self._spline_obj = basis
+            self.basis = "spline"
+        elif basis in ("spline", "step"):
+            self._spline_obj = None
+            self.basis = basis
+        else:
+            raise ValueError(f"basis must be 'spline', 'step', or a Spline object, got {basis!r}")
+
+        if self.basis == "step" and select:
             raise ValueError("select=True is not supported with basis='step'.")
 
-        self.basis = basis
         self.kind = kind
         self.base = base
         self.select = select
@@ -148,10 +165,29 @@ class OrderedCategorical:
 
     def __repr__(self) -> str:
         n = self._n_levels
+        if self._spline_obj is not None:
+            return f"OrderedCategorical(basis={self._spline_obj!r}, {n} levels)"
         return f"OrderedCategorical(basis={self.basis!r}, {n} levels, n_knots={self.n_knots})"
 
     def _init_spline(self) -> None:
         """Create the internal Spline object for spline mode."""
+        import copy
+
+        if self._spline_obj is not None:
+            # User passed a Spline object — deep-copy so we own it,
+            # then clamp n_knots if needed.
+            self._spline = copy.deepcopy(self._spline_obj)
+            if self._spline.n_knots > self._n_levels - 1:
+                effective = self._n_levels - 1
+                warnings.warn(
+                    f"OrderedCategorical: Spline n_knots={self._spline.n_knots} "
+                    f"clamped to {effective} (n_levels - 1 = {self._n_levels - 1})",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                self._spline.n_knots = effective
+            return
+
         from superglm.features.spline import Spline
 
         effective_n_knots = min(self.n_knots, self._n_levels - 1)
