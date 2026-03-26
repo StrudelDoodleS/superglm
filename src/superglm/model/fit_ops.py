@@ -582,7 +582,6 @@ def fit_reml(
     """Fit with REML estimation of per-term smoothing parameters."""
     from superglm.model.base import (
         auto_detect,
-        compute_lambda_max,
         model_build_design_matrix,
         model_has_lambda1_targets,
     )
@@ -621,9 +620,10 @@ def fit_reml(
     model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
 
-    # Auto-calibrate lambda1 if not set
+    # lambda1=None means "no L1 selection" in the REML path — default to 0
+    # so the direct IRLS optimizer (Newton REML) is used instead of BCD+EFS.
     if model.penalty.lambda1 is None:
-        model.penalty.lambda1 = compute_lambda_max(model, y, sample_weight) * 0.1
+        model.penalty.lambda1 = 0.0
 
     # Identify REML-eligible groups: penalized SSP groups with stored omega
     reml_groups: list[tuple[int, GroupSlice]] = []
@@ -662,11 +662,10 @@ def fit_reml(
     penalty_caches = build_penalty_caches(model._dm.group_matrices, reml_groups)
     penalty_ranks = {name: cache.rank for name, cache in penalty_caches.items()}
 
-    # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed)
+    # Direct IRLS when lambda1=0 or unset (no L1 penalty → no BCD needed)
     offset_arr = offset if offset is not None else np.zeros(len(y))
-    use_direct = model.penalty.lambda1 is not None and (
-        model.penalty.lambda1 == 0 or not model_has_lambda1_targets(model)
-    )
+    lam1 = model.penalty.lambda1
+    use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
 
     if use_direct:
         best = model_optimize_direct_reml(
