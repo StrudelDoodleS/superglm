@@ -16,6 +16,17 @@ from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR
 
+# Overflow guard for exp(log_rel ± z * se).  exp(500) ≈ 1.4e217, safely
+# within float64 range; quasi-separated levels get large but finite CIs
+# instead of inf/nan.
+_MAX_LOG_REL = 500.0
+
+
+def _safe_exp(x: np.ndarray | float) -> np.ndarray | float:
+    """Exponentiate with overflow protection for CI bounds."""
+    return np.exp(np.clip(x, -_MAX_LOG_REL, _MAX_LOG_REL))
+
+
 if TYPE_CHECKING:
     from superglm.distributions import Distribution
     from superglm.group_matrix import DesignMatrix
@@ -244,9 +255,9 @@ def _recenter_term(ti: TermInference, centering: str) -> TermInference:
     if log_rel.size <= 1:
         return ti  # numeric: single value, skip
     shift = float(np.mean(log_rel))
-    factor = np.exp(-shift)
+    factor = _safe_exp(-shift)
     new_log_rel = log_rel - shift
-    new_rel = np.exp(new_log_rel)
+    new_rel = _safe_exp(new_log_rel)
     new_ci_lo = ti.ci_lower * factor if ti.ci_lower is not None else None
     new_ci_hi = ti.ci_upper * factor if ti.ci_upper is not None else None
     new_ci_lo_sim = (
@@ -568,12 +579,12 @@ def simultaneous_bands(
         {
             "x": x_grid,
             "log_relativity": log_rel,
-            "relativity": np.exp(log_rel),
+            "relativity": _safe_exp(log_rel),
             "se": se,
-            "ci_lower_pointwise": np.exp(log_rel - z * se),
-            "ci_upper_pointwise": np.exp(log_rel + z * se),
-            "ci_lower_simultaneous": np.exp(log_rel - c_sim * se),
-            "ci_upper_simultaneous": np.exp(log_rel + c_sim * se),
+            "ci_lower_pointwise": _safe_exp(log_rel - z * se),
+            "ci_upper_pointwise": _safe_exp(log_rel + z * se),
+            "ci_lower_simultaneous": _safe_exp(log_rel - c_sim * se),
+            "ci_upper_simultaneous": _safe_exp(log_rel + c_sim * se),
         }
     )
 
@@ -651,7 +662,7 @@ def relativities(
         shift = float(np.mean(log_rel))
         df = df.copy()
         df["log_relativity"] = log_rel - shift
-        df["relativity"] = np.exp(df["log_relativity"])
+        df["relativity"] = _safe_exp(df["log_relativity"].values)
         return df
 
     out: dict[str, pd.DataFrame] = {}
@@ -1163,8 +1174,8 @@ def term_inference(
                     specs,
                     interaction_specs,
                 )
-                ci_lo = np.exp(level_log_rels - z_alpha * se)
-                ci_hi = np.exp(level_log_rels + z_alpha * se)
+                ci_lo = _safe_exp(level_log_rels - z_alpha * se)
+                ci_hi = _safe_exp(level_log_rels + z_alpha * se)
 
                 # Continuous curve for plotting
                 level_x = np.array([raw["level_values"][lv] for lv in levels])
@@ -1183,8 +1194,8 @@ def term_inference(
                     relativity=raw["relativity"],
                     level_x=level_x,
                     se_log_relativity=curve_se,
-                    ci_lower=np.exp(raw["log_relativity"] - z_alpha * curve_se),
-                    ci_upper=np.exp(raw["log_relativity"] + z_alpha * curve_se),
+                    ci_lower=_safe_exp(raw["log_relativity"] - z_alpha * curve_se),
+                    ci_upper=_safe_exp(raw["log_relativity"] + z_alpha * curve_se),
                 )
             elif active:
                 # No SEs requested but still provide the curve shape
@@ -1234,8 +1245,8 @@ def term_inference(
                     specs,
                     interaction_specs,
                 )
-                ci_lo = np.exp(log_rels - z_alpha * se)
-                ci_hi = np.exp(log_rels + z_alpha * se)
+                ci_lo = _safe_exp(log_rels - z_alpha * se)
+                ci_hi = _safe_exp(log_rels + z_alpha * se)
 
             return _recenter_term(
                 TermInference(
@@ -1278,8 +1289,8 @@ def term_inference(
                 interaction_specs,
                 n_points=n_points,
             )
-            ci_lo = np.exp(log_rel - z_alpha * se)
-            ci_hi = np.exp(log_rel + z_alpha * se)
+            ci_lo = _safe_exp(log_rel - z_alpha * se)
+            ci_hi = _safe_exp(log_rel + z_alpha * se)
 
             if simultaneous:
                 bands = simultaneous_bands(
@@ -1345,8 +1356,8 @@ def term_inference(
                 specs,
                 interaction_specs,
             )
-            ci_lo = np.exp(log_rels - z_alpha * se)
-            ci_hi = np.exp(log_rels + z_alpha * se)
+            ci_lo = _safe_exp(log_rels - z_alpha * se)
+            ci_hi = _safe_exp(log_rels + z_alpha * se)
 
         return _recenter_term(
             TermInference(
@@ -1387,8 +1398,8 @@ def term_inference(
                 interaction_specs,
                 n_points=n_points,
             )
-            ci_lo = np.exp(log_rel - z_alpha * se)
-            ci_hi = np.exp(log_rel + z_alpha * se)
+            ci_lo = _safe_exp(log_rel - z_alpha * se)
+            ci_hi = _safe_exp(log_rel + z_alpha * se)
 
         return _recenter_term(
             TermInference(
@@ -1426,8 +1437,8 @@ def term_inference(
                 specs,
                 interaction_specs,
             )
-            ci_lo = np.exp(log_rel - z_alpha * se)
-            ci_hi = np.exp(log_rel + z_alpha * se)
+            ci_lo = _safe_exp(log_rel - z_alpha * se)
+            ci_hi = _safe_exp(log_rel + z_alpha * se)
 
         return _recenter_term(
             TermInference(
