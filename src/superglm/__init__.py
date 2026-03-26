@@ -76,6 +76,16 @@ from superglm.links import (
 from superglm.metrics import ModelMetrics
 from superglm.model import PathResult, SuperGLM
 from superglm.model_selection import CrossValidationResult, cross_validate
+from superglm.model_tests import (
+    DispersionTestResult,
+    ScoreTestZIResult,
+    VuongTestResult,
+    ZeroInflationResult,
+    dispersion_test,
+    score_test_zi,
+    vuong_test,
+    zero_inflation_index,
+)
 from superglm.nb_profile import NBProfileResult, estimate_nb_theta
 from superglm.penalties.flavors import Adaptive
 from superglm.penalties.group_elastic_net import GroupElasticNet
@@ -91,6 +101,16 @@ from superglm.tweedie_profile import (
     estimate_tweedie_p,
     generate_tweedie_cpg,
     tweedie_logpdf,
+)
+from superglm.validation import (
+    DoubleLiftChartResult,
+    LiftChartResult,
+    LorenzCurveResult,
+    LossRatioChartResult,
+    double_lift_chart,
+    lift_chart,
+    lorenz_curve,
+    loss_ratio_chart,
 )
 from superglm.wood_pvalue import wood_test_smooth
 
@@ -162,5 +182,23 @@ __all__ = [
     "SplineRedundancyReport",
     "cross_validate",
     "CrossValidationResult",
+    # Validation toolkit
+    "LiftChartResult",
+    "DoubleLiftChartResult",
+    "LorenzCurveResult",
+    "LossRatioChartResult",
+    "lift_chart",
+    "double_lift_chart",
+    "lorenz_curve",
+    "loss_ratio_chart",
+    # Model adequacy tests
+    "ZeroInflationResult",
+    "ScoreTestZIResult",
+    "DispersionTestResult",
+    "VuongTestResult",
+    "zero_inflation_index",
+    "score_test_zi",
+    "dispersion_test",
+    "vuong_test",
 ]
 __version__ = "0.7.0"
