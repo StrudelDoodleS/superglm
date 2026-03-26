@@ -200,6 +200,8 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         precomputed_R_a=inf["R_a"],
         precomputed_edf=inf["edf"],
         precomputed_edf1=inf["edf1"],
+        group_matrices=model._dm.group_matrices if model._dm is not None else None,
+        sample_weights=model._fit_weights,
     )
 
     # Standard errors for backward compat dict access (use augmented inverse)
