@@ -303,7 +303,7 @@ class ModelSummary:
             f"{'P>|z|':>8s}"
             f"{'[' + f'{half:.3f}':>9s}"
             f"{f'{1 - half:.3f}' + ']':>9s}"
-            f"{'':>4s}"
+            f"{'':>5s}"
         )
         lines.append(_row(hdr))
         lines.append(_thin())
@@ -350,8 +350,8 @@ class ModelSummary:
                         f"[{kind}, {param_label}, chi2({df_str})={row.wald_chi2:.1f}, p={p_str}]"
                     )
                     prefix = f"{row.name:<{name_w}s}  {spline_text} "
-                    pad = max(W - len(prefix) - 3, 0)
-                    lines.append(_row(f"{prefix}{'':<{pad}s}{stars:<3s}"))
+                    pad = max(W - len(prefix) - 4, 0)
+                    lines.append(_row(f"{prefix}{'':<{pad}s} {stars:<3s}"))
                     if detail_str:
                         lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
                 elif row.active:
@@ -381,14 +381,13 @@ class ModelSummary:
                                 f"{br.p:>8.3f}"
                                 f"{br.ci_low:>9.3f}"
                                 f"{br.ci_high:>9.3f}"
-                                f" {b_stars:<3s}"
+                                f"  {b_stars:<3s}"
                             )
                         )
 
             elif row.coef is not None and row.se is not None and row.se > 0:
                 stars = _sig_stars(row.p)
-                if row.quasi_separated:
-                    stars = "?" if not stars else stars + "?"
+                sep = "?" if row.quasi_separated else " "
                 if abs(row.z) >= 100:
                     z_str = f"{row.z:>8.1f}"
                 else:
@@ -402,7 +401,7 @@ class ModelSummary:
                         f"{row.p:>8.3f}"
                         f"{row.ci_low:>9.3f}"
                         f"{row.ci_high:>9.3f}"
-                        f" {stars:<4s}"
+                        f" {sep}{stars:<3s}"
                     )
                 )
             else:
@@ -416,7 +415,7 @@ class ModelSummary:
                         f"{'---':>8s}"
                         f"{'---':>9s}"
                         f"{'---':>9s}"
-                        f"{'':>4s}"
+                        f"{'':>5s}"
                     )
                 )
 
@@ -655,8 +654,7 @@ class ModelSummary:
 
             elif row.coef is not None and row.se is not None and row.se > 0:
                 stars = _sig_stars(row.p)
-                if row.quasi_separated:
-                    stars = "?" if not stars else stars + "?"
+                sep = "?" if row.quasi_separated else ""
                 parts.append(
                     f"<tr>"
                     f'<td style="{cell_l}">{row.name}</td>'
@@ -666,7 +664,7 @@ class ModelSummary:
                     f'<td style="{cell}">{row.p:.3f}</td>'
                     f'<td style="{cell}">{row.ci_low:.3f}</td>'
                     f'<td style="{cell}">{row.ci_high:.3f}</td>'
-                    f'<td style="{sig_cell}">{stars}</td>'
+                    f'<td style="{sig_cell}">{sep}{stars}</td>'
                     f"</tr>"
                 )
             else:
