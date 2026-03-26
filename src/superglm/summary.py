@@ -224,10 +224,10 @@ class ModelSummary:
             rows.append(("Tweedie p", p_str, "Method", method))
 
         # Compute content width from coefficient columns AND header values
-        #   coef table: name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4)
+        #   coef table: name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4) + qs(2)
         name_w = max(len(r.name) for r in self._coef_rows) if self._coef_rows else 10
         name_w = max(name_w, 10)
-        coef_W = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4
+        coef_W = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4 + 2
 
         # Header layout: "{k1:20}{v1:>val}  {k2:20}{v2:>val}" → need val >= max value len
         # Each half = 20 (key) + val; total = 20 + val + 2 + 20 + val = 42 + 2*val
