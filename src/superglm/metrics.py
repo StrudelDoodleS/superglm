@@ -855,6 +855,23 @@ def build_coef_rows(
                 )
             )
 
+    # ── Quasi-separation detection ──────────────────────────────
+    # Flag parametric rows where the SE is so large relative to peers
+    # that the coefficient is effectively undetermined by the data.
+    # Uses median SE of non-spline, non-intercept rows as baseline.
+    parametric_ses = [
+        r.se
+        for r in rows
+        if r.se is not None and r.se > 0 and not r.is_spline and r.name != "Intercept"
+    ]
+    if parametric_ses:
+        median_se = float(np.median(parametric_ses))
+        # Threshold: SE > 50x median indicates quasi-separation
+        sep_threshold = max(median_se * 50, 10.0)
+        for r in rows:
+            if r.se is not None and r.se > sep_threshold and not r.is_spline:
+                r.quasi_separated = True
+
     return rows
 
 
