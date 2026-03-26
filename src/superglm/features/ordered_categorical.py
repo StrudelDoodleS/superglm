@@ -26,32 +26,70 @@ from superglm.types import GroupInfo
 class OrderedCategorical:
     """Ordered categorical feature with spline or step basis.
 
+    Designed for continuous variables that arrive pre-binned into ordered
+    categories (e.g. age bands, mileage bands).  Maps category labels to
+    numeric values and fits a smooth function through them, borrowing
+    strength between adjacent levels.
+
+    Two modes:
+
+    - **spline** (default): maps levels to numeric values (midpoints or
+      linspace), builds a B-spline through them.  The spline smooths across
+      levels and the penalty controls wiggliness.  With ``fit_reml()``,
+      REML selects the smoothing parameter automatically — the effective
+      degrees of freedom will typically be much less than the number of
+      levels.
+
+    - **step**: one-hot encodes with a first-difference penalty (D1'D1)
+      so adjacent categories are soft-fused.  Each level gets its own
+      coefficient, penalized toward its neighbours.
+
+    Monotone constraints are not yet supported directly; pass a
+    ``Spline(monotone=...)`` object as ``basis`` in a future release.
+
     Parameters
     ----------
     values : dict[str, float] or None
         Explicit mapping from category labels to numeric values (e.g.
-        midpoints). Mutually exclusive with ``order``.
+        midpoints: ``{"18-25": 21.5, "26-35": 30.5, ...}``).
+        Mutually exclusive with ``order``.
     order : list[str] or None
-        Ordered list of category labels. Numeric values are generated as
-        ``linspace(0, 1, len(order))``. Mutually exclusive with ``values``.
+        Ordered list of category labels.  Numeric values are generated as
+        ``linspace(0, 1, len(order))``.  Mutually exclusive with ``values``.
     basis : {"spline", "step"}
-        "spline" maps categories to numeric values and builds a spline.
-        "step" one-hot encodes with a first-difference penalty.
+        ``"spline"`` maps categories to numeric values and builds a spline.
+        ``"step"`` one-hot encodes with a first-difference penalty.
     kind : str
-        Spline type (spline mode only). Passed to ``Spline(kind=...)``.
-        ``"bs"`` (default), ``"cr"``, ``"ns"``, etc.
+        Spline type (spline mode only). ``"bs"`` (default), ``"cr"``,
+        ``"ns"``, etc.  See :class:`Spline` for options.
     base : str
-        Reference level selection for step mode and spline identifiability.
-        "most_exposed" (default), "first", or a specific level name.
+        Reference level for step mode.  ``"most_exposed"`` (default),
+        ``"first"``, or a specific level name.  Ignored in spline mode.
     n_knots : int
-        Number of interior knots (spline mode only). Auto-clamped to
-        ``n_levels - 1`` if too large.
+        Number of interior knots (spline mode only).  Auto-clamped to
+        ``n_levels - 1`` if too large for the number of categories.
     degree : int
-        B-spline degree (spline mode only).
+        B-spline degree (spline mode only).  Default 3 (cubic).
     select : bool
-        Enable mgcv-style double penalty (spline mode only).
+        Enable mgcv-style double penalty for feature selection
+        (spline mode only).
     penalty : str
-        Penalty type for internal spline ("ssp" or "none").
+        Penalty type for internal spline.  ``"ssp"`` (default) or
+        ``"none"``.
+
+    Examples
+    --------
+    Using ordered level names (auto-spaced 0 to 1)::
+
+        OrderedCategorical(order=["18-25", "26-35", "36-45", "46-55", "56+"])
+
+    Using explicit midpoints::
+
+        OrderedCategorical(values={"18-25": 21.5, "26-35": 30.5, "36-45": 40.5})
+
+    Step basis (one coefficient per level, soft-fused)::
+
+        OrderedCategorical(order=[...], basis="step")
     """
 
     def __init__(
