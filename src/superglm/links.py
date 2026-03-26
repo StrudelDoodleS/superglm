@@ -358,6 +358,10 @@ def stabilize_eta(eta: NDArray, link: Link) -> NDArray:
         return eta
     if isinstance(link, LogLink):
         return np.clip(eta, _LOG_LINK_ETA_MIN, _LOG_LINK_ETA_MAX)
+    if isinstance(link, LogitLink | ProbitLink | CloglogLink):
+        # Logit/probit/cloglog: mu = sigmoid(eta), dmu/deta → 0 at extremes.
+        # [-20, 20] keeps mu in ~[2e-9, 1-2e-9], safe for (y-mu)/dmu.
+        return np.clip(eta, -20.0, 20.0)
     if isinstance(link, InverseLink | InverseSquaredLink):
         return np.clip(eta, 1e-12, 1e12)
     if isinstance(link, PowerLink):
@@ -366,8 +370,8 @@ def stabilize_eta(eta: NDArray, link: Link) -> NDArray:
         return np.clip(eta, 1e-12, 1e12)
     if isinstance(link, NegativeBinomialLink):
         return np.clip(eta, -30.0, -1e-10)
-    # Catch-all for custom links
-    return np.clip(eta, _LOG_LINK_ETA_MIN, _LOG_LINK_ETA_MAX)
+    # Catch-all for custom links (conservative)
+    return np.clip(eta, -20.0, 20.0)
 
 
 _LINK_SHORTCUTS: dict[str, type] = {
