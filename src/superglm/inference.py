@@ -1207,7 +1207,7 @@ def term_inference(
                     level_x=level_x,
                 )
 
-            return _recenter_term(
+            ti_result = _recenter_term(
                 TermInference(
                     name=name,
                     kind="categorical",
@@ -1227,6 +1227,9 @@ def term_inference(
                 ),
                 centering,
             )
+            if spec._grouping is not None:
+                ti_result = _expand_grouped_term(ti_result, spec._grouping)
+            return ti_result
         else:
             # Step mode: categorical-style output
             raw = spec.reconstruct(beta_combined)
@@ -1248,7 +1251,7 @@ def term_inference(
                 ci_lo = _safe_exp(log_rels - z_alpha * se)
                 ci_hi = _safe_exp(log_rels + z_alpha * se)
 
-            return _recenter_term(
+            ti_result = _recenter_term(
                 TermInference(
                     name=name,
                     kind="categorical",
@@ -1267,6 +1270,9 @@ def term_inference(
                 ),
                 centering,
             )
+            if spec._grouping is not None:
+                ti_result = _expand_grouped_term(ti_result, spec._grouping)
+            return ti_result
 
     # ── Spline ───────────────────────────────────────────────────
     if isinstance(spec, _SplineBase):
@@ -1359,7 +1365,7 @@ def term_inference(
             ci_lo = _safe_exp(log_rels - z_alpha * se)
             ci_hi = _safe_exp(log_rels + z_alpha * se)
 
-        return _recenter_term(
+        ti_result = _recenter_term(
             TermInference(
                 name=name,
                 kind="categorical",
@@ -1378,6 +1384,9 @@ def term_inference(
             ),
             centering,
         )
+        if spec._grouping is not None:
+            ti_result = _expand_grouped_term(ti_result, spec._grouping)
+        return ti_result
 
     # ── Polynomial ───────────────────────────────────────────────
     elif isinstance(spec, Polynomial):
@@ -1478,6 +1487,72 @@ def _build_spline_metadata(spec) -> SplineMetadata:
         degree=spec.degree,
         extrapolation=spec.extrapolation,
         knot_alpha=knot_alpha,
+    )
+
+
+def _expand_grouped_term(ti: TermInference, grouping) -> TermInference:
+    """Expand a grouped TermInference back to all original levels.
+
+    Each original level gets the relativity/SE/CI of its group.
+    For OrderedCategorical smooth_curve, level_x positions are expanded
+    so grouped levels share the group's x-position.
+    """
+    grouped_levels = list(ti.levels)
+    group_idx = {lev: i for i, lev in enumerate(grouped_levels)}
+
+    expanded_levels = grouping.all_original_levels
+    indices = [group_idx[grouping.original_to_group[lev]] for lev in expanded_levels]
+
+    log_rel = np.asarray(ti.log_relativity)[indices]
+    rel = np.asarray(ti.relativity)[indices]
+
+    se = ti.se_log_relativity
+    ci_lo = ti.ci_lower
+    ci_hi = ti.ci_upper
+    if se is not None:
+        se = np.asarray(se)[indices]
+    if ci_lo is not None:
+        ci_lo = np.asarray(ci_lo)[indices]
+    if ci_hi is not None:
+        ci_hi = np.asarray(ci_hi)[indices]
+
+    # Expand smooth_curve level_x if present
+    curve = ti.smooth_curve
+    if curve is not None and curve.level_x is not None:
+        expanded_level_x = np.asarray(curve.level_x)[indices]
+        curve = SmoothCurve(
+            x=curve.x,
+            log_relativity=curve.log_relativity,
+            relativity=curve.relativity,
+            level_x=expanded_level_x,
+            se_log_relativity=curve.se_log_relativity,
+            ci_lower=curve.ci_lower,
+            ci_upper=curve.ci_upper,
+        )
+
+    return TermInference(
+        name=ti.name,
+        kind=ti.kind,
+        active=ti.active,
+        x=ti.x,
+        levels=expanded_levels,
+        log_relativity=log_rel,
+        relativity=rel,
+        se_log_relativity=se,
+        ci_lower=ci_lo,
+        ci_upper=ci_hi,
+        ci_lower_simultaneous=ti.ci_lower_simultaneous,
+        ci_upper_simultaneous=ti.ci_upper_simultaneous,
+        critical_value_simultaneous=ti.critical_value_simultaneous,
+        absorbs_intercept=ti.absorbs_intercept,
+        centering_mode=ti.centering_mode,
+        edf=ti.edf,
+        smoothing_lambda=ti.smoothing_lambda,
+        spline=ti.spline,
+        smooth_curve=curve,
+        monotone=ti.monotone,
+        monotone_repaired=ti.monotone_repaired,
+        alpha=ti.alpha,
     )
 
 
