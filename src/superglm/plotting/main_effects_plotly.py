@@ -127,6 +127,7 @@ class _XAxisConfig:
     bottom_ticktext: list[str] | None = None
     overlay_density_top: bool = False
     top_secondary_y_title: str = "Density"
+    resp_y_range: list[float] | None = None  # explicit y-axis range for response scale
 
 
 def plot_main_effects_plotly(
@@ -390,11 +391,12 @@ def plot_main_effects_plotly(
 
     response_relayout: dict[str, Any] = {
         "yaxis.title.text": "Relativity",
-        "yaxis.autorange": True,
+        # Do NOT set yaxis.autorange here — the per-term dropdown controls
+        # the y-range explicitly to avoid error bars distorting the scale.
     }
     link_relayout: dict[str, Any] = {
         "yaxis.title.text": "η (link scale)",
-        "yaxis.autorange": True,
+        "yaxis.autorange": True,  # link scale is naturally bounded, autorange is fine
     }
     # Move reference hline between scales
     if fig.layout.shapes:
@@ -446,6 +448,8 @@ def plot_main_effects_plotly(
 
     _apply_axis_config(fig, x_configs[initial_term], needs_lower_panel)
     fig.update_yaxes(title_text="Relativity", row=1, col=1)
+    if x_configs[initial_term].resp_y_range is not None:
+        fig.update_yaxes(range=x_configs[initial_term].resp_y_range, autorange=False, row=1, col=1)
     if needs_lower_panel:
         fig.update_yaxes(title_text=x_configs[initial_term].bottom_y_title, row=2, col=1)
         fig.update_yaxes(range=[0.0, 1.05], row=2, col=1)
@@ -655,12 +659,15 @@ def _add_term_traces(
                 density_visible=density_visible,
                 style_cfg=style_cfg,
             )
+        resp_vals = np.asarray(ti.relativity)
+        pad = (resp_vals.max() - resp_vals.min()) * 0.15
         return _XAxisConfig(
             top_x_title=ti.name,
             top_x_type="linear",
             bottom_x_title=ti.name,
             bottom_y_title=density_y_title,
             bottom_x_type="linear",
+            resp_y_range=[max(0, float(resp_vals.min()) - pad), float(resp_vals.max()) + pad],
         )
 
     if ti.kind == "numeric":
@@ -677,13 +684,23 @@ def _add_term_traces(
                 density_visible=density_visible,
                 style_cfg=style_cfg,
             )
+        resp_vals = np.asarray(ti.relativity)
+        pad = (resp_vals.max() - resp_vals.min()) * 0.15 or 0.1
         return _XAxisConfig(
             top_x_title="Effect",
             top_x_type="category",
             bottom_x_title=ti.name,
             bottom_y_title=density_y_title,
             bottom_x_type="linear",
+            resp_y_range=[max(0, float(resp_vals.min()) - pad), float(resp_vals.max()) + pad],
         )
+
+    # Compute y-axis range from relativity values (markers/curve, not CIs)
+    resp_vals = np.asarray(ti.relativity)
+    if ti.smooth_curve is not None:
+        resp_vals = np.concatenate([resp_vals, np.asarray(ti.smooth_curve.relativity)])
+    pad = (resp_vals.max() - resp_vals.min()) * 0.15
+    resp_y_range = [max(0, float(resp_vals.min()) - pad), float(resp_vals.max()) + pad]
 
     # categorical — density bars added BEFORE term traces for z-order (behind)
     _add_categorical_density_trace(
@@ -734,6 +751,7 @@ def _add_term_traces(
             bottom_ticktext=ticktext,
             overlay_density_top=True,
             top_secondary_y_title="Exposure",
+            resp_y_range=resp_y_range,
         )
     return _XAxisConfig(
         top_x_title=ti.name,
@@ -743,6 +761,7 @@ def _add_term_traces(
         bottom_x_type="category",
         overlay_density_top=True,
         top_secondary_y_title="Exposure",
+        resp_y_range=resp_y_range,
     )
 
 
@@ -1050,6 +1069,14 @@ def _add_categorical_term_trace(
     if ti.ci_lower is not None and ti.ci_upper is not None:
         ci_lo_resp = np.asarray(ti.ci_lower)
         ci_hi_resp = np.asarray(ti.ci_upper)
+        # Clamp CIs so extreme SEs don't blow up the y-axis scale.
+        # Cap at 5x the max relativity or 1/5 the min, whichever is wider.
+        y_max = float(resp_y.max())
+        y_min = float(resp_y.min())
+        ci_cap_hi = max(y_max * 5.0, 10.0)
+        ci_cap_lo = min(y_min / 5.0, 0.01)
+        ci_hi_resp = np.minimum(ci_hi_resp, ci_cap_hi)
+        ci_lo_resp = np.maximum(ci_lo_resp, ci_cap_lo)
         resp_error_y = dict(
             type="data",
             symmetric=False,
@@ -1573,8 +1600,12 @@ def _layout_update(cfg: _XAxisConfig, *, needs_lower_panel: bool, title: str) ->
         "xaxis.tickvals": cfg.top_tickvals,
         "xaxis.ticktext": cfg.top_ticktext,
         "xaxis.autorange": True,
-        "yaxis.autorange": True,
     }
+    if cfg.resp_y_range is not None:
+        layout["yaxis.autorange"] = False
+        layout["yaxis.range"] = cfg.resp_y_range
+    else:
+        layout["yaxis.autorange"] = True
     if needs_lower_panel:
         if cfg.overlay_density_top:
             layout.update(
