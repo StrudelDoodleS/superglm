@@ -110,6 +110,7 @@ class OrderedCategorical:
         degree: int = 3,
         select: bool = False,
         penalty: str = "ssp",
+        grouping: Any = None,
     ):
         from superglm.features.spline import _SplineBase
 
@@ -150,7 +151,33 @@ class OrderedCategorical:
             vals = np.linspace(0.0, 1.0, n) if n > 1 else np.array([0.0])
             self._level_to_value = dict(zip(order, vals.tolist()))
 
-        self._known_levels = set(self._ordered_levels)
+        # Grouping: validate and store
+        self._grouping = grouping
+        self._original_level_to_value: dict[str, float] | None = None
+        if grouping is not None:
+            # _known_levels includes all *original* levels (for predict-time validation)
+            self._known_levels = set(grouping.all_original_levels)
+            # Preserve original level→value mapping for plot expansion
+            orig_ltv = dict(self._level_to_value)
+            self._original_level_to_value = orig_ltv
+            # Build level_to_value for grouped levels.
+            # When values= was used, orig_ltv keys are original level names
+            # so we average them per group. When order= was used, orig_ltv
+            # keys are already the grouped level names — use them directly
+            # if the group name matches, otherwise average originals.
+            grouped_ltv = {}
+            for glev in grouping.grouped_levels:
+                if glev in orig_ltv:
+                    grouped_ltv[glev] = orig_ltv[glev]
+                else:
+                    originals = grouping.group_to_originals[glev]
+                    vals = [orig_ltv[o] for o in originals if o in orig_ltv]
+                    if vals:
+                        grouped_ltv[glev] = float(np.mean(vals))
+            self._level_to_value = grouped_ltv
+            self._ordered_levels = list(grouping.grouped_levels)
+        else:
+            self._known_levels = set(self._ordered_levels)
         self._n_levels = len(self._ordered_levels)
 
         # Step mode state
@@ -207,7 +234,11 @@ class OrderedCategorical:
         )
 
     def _map_to_numeric(self, x: NDArray) -> NDArray:
-        """Map categorical values to their numeric representations (vectorized)."""
+        """Map categorical values to their numeric representations (vectorized).
+
+        Expects x to already be mapped through grouping if applicable
+        (callers build() and transform() handle that).
+        """
         return pd.Series(x).map(self._level_to_value).values.astype(np.float64)
 
     def _choose_base(self, x: NDArray, sample_weight: NDArray | None) -> None:
@@ -241,6 +272,9 @@ class OrderedCategorical:
         """Build design columns from ordered categorical data."""
         x = np.asarray(x).ravel()
         _validate_categorical_levels(x, self._known_levels)
+
+        if self._grouping is not None:
+            x = pd.Series(x).map(self._grouping.original_to_group).values
 
         if self.basis == "spline":
             return self._build_spline(x, sample_weight)
@@ -312,6 +346,9 @@ class OrderedCategorical:
         """Build design matrix for new data using learned parameters."""
         x = np.asarray(x).ravel()
         _validate_categorical_levels(x, self._known_levels)
+
+        if self._grouping is not None:
+            x = pd.Series(x).map(self._grouping.original_to_group).values
 
         if self.basis == "spline":
             x_numeric = self._map_to_numeric(x)
