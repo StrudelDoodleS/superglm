@@ -367,17 +367,42 @@ def feature_se_from_cov(
     # OrderedCategorical: delegate to spline or categorical logic
     if isinstance(spec, OrderedCategorical):
         if spec.basis == "spline":
-            # SEs at the K category positions, not a continuous grid
+            # Contrast SEs: SE(level_i - base) for proper categorical inference.
+            # Base level gets SE=0 (it's the reference).
             level_values = np.array([spec._level_to_value[lev] for lev in spec._ordered_levels])
-            return _spline_se(
-                spec._spline,
-                name,
-                beta,
-                feature_groups,
-                active_groups,
-                Cov_active,
-                x_eval=level_values,
+            beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
+            if np.linalg.norm(beta_combined) < 1e-12:
+                return np.zeros(len(spec._ordered_levels))
+            active_subs = [ag for ag in active_groups if ag.feature_name == name]
+            if not active_subs:
+                return np.zeros(len(spec._ordered_levels))
+            indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
+            Cov_g = Cov_active[np.ix_(indices, indices)]
+            B_levels = spec._spline._raw_basis_matrix(level_values)
+            M = B_levels @ spec._spline._R_inv if spec._spline._R_inv is not None else B_levels
+            active_cols = np.concatenate(
+                [
+                    np.arange(g.start, g.end) - feature_groups[0].start
+                    for g in feature_groups
+                    if any(ag.feature_name == name and ag.name == g.name for ag in active_subs)
+                ]
             )
+            M = M[:, active_cols]
+            # Full K×K covariance of level predictions
+            Cov_levels = M @ Cov_g @ M.T
+            base_idx = spec._ordered_levels.index(spec._base_level)
+            # Contrast variance: Var(level_i - base)
+            se_all = np.zeros(len(spec._ordered_levels))
+            for i in range(len(spec._ordered_levels)):
+                if i == base_idx:
+                    continue  # base SE = 0
+                var_contrast = (
+                    Cov_levels[i, i]
+                    + Cov_levels[base_idx, base_idx]
+                    - 2.0 * Cov_levels[i, base_idx]
+                )
+                se_all[i] = np.sqrt(max(var_contrast, 0.0))
+            return se_all
         else:
             # Step mode: unwind reparametrisation for SEs
             beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
@@ -1152,6 +1177,10 @@ def term_inference(
 
     # ── OrderedCategorical ────────────────────────────────────────
     if isinstance(spec, OrderedCategorical):
+        # Regardless of basis, this is a categorical with K levels.
+        # EDF = K-1 (not the spline trace), and tests should use K-1 DF.
+        edf = float(spec._n_levels - 1) if active else 0.0
+
         if spec.basis == "spline":
             # Spline mode: primary output is categorical (K levels with SEs),
             # plus a smooth_curve for plotting the fitted spline.
@@ -1208,26 +1237,24 @@ def term_inference(
                 )
 
             spline_meta = _build_spline_metadata(inner) if inner is not None else None
-            ti_result = _recenter_term(
-                TermInference(
-                    name=name,
-                    kind="categorical",
-                    active=active,
-                    levels=levels,
-                    log_relativity=level_log_rels,
-                    relativity=level_rels,
-                    se_log_relativity=se,
-                    ci_lower=ci_lo,
-                    ci_upper=ci_hi,
-                    absorbs_intercept=False,
-                    centering_mode="base_level",
-                    edf=edf,
-                    smoothing_lambda=lam,
-                    smooth_curve=curve,
-                    spline=spline_meta,
-                    alpha=alpha,
-                ),
-                centering,
+            # OrderedCategorical: base level already shifted to 0/1 — skip recentering
+            ti_result = TermInference(
+                name=name,
+                kind="categorical",
+                active=active,
+                levels=levels,
+                log_relativity=level_log_rels,
+                relativity=level_rels,
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=False,
+                centering_mode="base_level",
+                edf=edf,
+                smoothing_lambda=lam,
+                smooth_curve=curve,
+                spline=spline_meta,
+                alpha=alpha,
             )
             if spec._grouping is not None:
                 ti_result = _expand_grouped_term(
@@ -1255,24 +1282,22 @@ def term_inference(
                 ci_lo = _safe_exp(log_rels - z_alpha * se)
                 ci_hi = _safe_exp(log_rels + z_alpha * se)
 
-            ti_result = _recenter_term(
-                TermInference(
-                    name=name,
-                    kind="categorical",
-                    active=active,
-                    levels=levels,
-                    log_relativity=log_rels,
-                    relativity=rels,
-                    se_log_relativity=se,
-                    ci_lower=ci_lo,
-                    ci_upper=ci_hi,
-                    absorbs_intercept=False,
-                    centering_mode="base_level",
-                    edf=edf,
-                    smoothing_lambda=lam,
-                    alpha=alpha,
-                ),
-                centering,
+            # OrderedCategorical: base level already at 0/1 — skip recentering
+            ti_result = TermInference(
+                name=name,
+                kind="categorical",
+                active=active,
+                levels=levels,
+                log_relativity=log_rels,
+                relativity=rels,
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=False,
+                centering_mode="base_level",
+                edf=edf,
+                smoothing_lambda=lam,
+                alpha=alpha,
             )
             if spec._grouping is not None:
                 ti_result = _expand_grouped_term(
