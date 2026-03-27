@@ -1012,16 +1012,21 @@ def _add_categorical_term_trace(
     style_cfg: dict[str, Any],
     categorical_display: str,
 ):
-    """Add categorical or ordered-categorical effect traces."""
+    """Add categorical or ordered-categorical effect traces.
+
+    Always renders line+markers (no bars for relativities).
+    Ordered categoricals get markers + smooth curve overlay.
+    Unordered categoricals get lines+markers.
+    """
     import plotly.graph_objects as go
 
     resp_y = np.asarray(ti.relativity)
     link_y = np.asarray(ti.log_relativity)
     curve = ti.smooth_curve
     is_ordered = curve is not None
-    display_mode = _resolve_categorical_display(categorical_display, len(ti.levels))
-    show_bars = display_mode in {"bars", "bars+markers"}
-    show_markers = display_mode in {"markers", "bars+markers"}
+
+    # _resolve_categorical_display kept callable for backward compat
+    _resolve_categorical_display(categorical_display, len(ti.levels))
 
     # Error bars — compute for both scales
     resp_error_y = None
@@ -1058,7 +1063,7 @@ def _add_categorical_term_trace(
             link_err_down = (link_y - ci_lo_link).tolist()
 
     if is_ordered:
-        # OrderedCategorical: bars with relativity text + smooth curve overlay
+        # OrderedCategorical: markers with error bars + smooth curve overlay
         level_x = (
             np.asarray(curve.level_x, dtype=np.float64)
             if curve is not None and curve.level_x is not None
@@ -1067,11 +1072,6 @@ def _add_categorical_term_trace(
         level_labels = [str(level) for level in ti.levels]
         if ci_lo_resp is not None and ci_hi_resp is not None:
             customdata = np.column_stack([resp_y, ci_lo_resp, ci_hi_resp, ci_lo_link, ci_hi_link])
-            resp_hover_bar = (
-                f"{ti.name}: %{{hovertext}}<br>Relativity: %{{customdata[0]:.4f}}"
-                f"<br>{int((1 - ti.alpha) * 100)}% CI: [%{{customdata[1]:.4f}}, %{{customdata[2]:.4f}}]"
-                "<extra></extra>"
-            )
             resp_hover_marker = (
                 f"{ti.name}: %{{hovertext}}<br>Relativity: %{{y:.4f}}"
                 f"<br>{int((1 - ti.alpha) * 100)}% CI: [%{{customdata[1]:.4f}}, %{{customdata[2]:.4f}}]"
@@ -1084,100 +1084,41 @@ def _add_categorical_term_trace(
             )
         else:
             customdata = np.column_stack([resp_y])
-            resp_hover_bar = (
-                f"{ti.name}: %{{hovertext}}<br>Relativity: %{{customdata[0]:.4f}}<extra></extra>"
-            )
             resp_hover_marker = (
                 f"{ti.name}: %{{hovertext}}<br>Relativity: %{{y:.4f}}<extra></extra>"
             )
             link_hover = f"{ti.name}: %{{hovertext}}<br>η: %{{y:.4f}}<extra></extra>"
-        if show_bars:
-            fig.add_trace(
-                go.Bar(
-                    x=level_x.tolist(),
-                    y=resp_y,
-                    base=0.0,
-                    name="Relativity",
-                    marker=dict(
-                        color=_hex_to_rgba(style_cfg["bar_color"], style_cfg["bar_opacity"]),
-                        line=dict(color=style_cfg["bar_color"], width=1),
-                    ),
-                    width=_ordered_bar_width(level_x),
-                    customdata=customdata,
-                    hovertext=level_labels,
-                    legendgroup=f"{ti.name}:bar",
-                    hovertemplate=resp_hover_bar,
-                ),
-                row=1,
-                col=1,
-            )
-            entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
-            link_variants.append(
-                _LinkVariant(
-                    y=link_y.tolist(),
-                    base=0.0,
-                    hovertemplate=link_hover,
-                )
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=level_x.tolist(),
-                    y=resp_y,
-                    mode="text",
-                    name="Value labels",
-                    text=[f"{v:.3f}" for v in resp_y],
-                    textposition="top center",
-                    textfont=dict(
-                        color=style_cfg["text_color"],
-                        shadow=f"0 0 2px {style_cfg['text_outline_color']}",
-                    ),
-                    cliponaxis=False,
-                    showlegend=False,
-                    hoverinfo="skip",
-                    legendgroup=f"{ti.name}:labels",
-                ),
-                row=1,
-                col=1,
-            )
-            entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
-            link_variants.append(
-                _LinkVariant(
-                    y=link_y.tolist(),
-                    text=[f"{v:.3f}" for v in link_y],
-                    hovertemplate="<extra></extra>",
-                )
-            )
 
-        if show_markers:
-            marker_hover = resp_hover_marker if not show_bars else "<extra></extra>"
-            marker_link_hover = link_hover if not show_bars else "<extra></extra>"
-            fig.add_trace(
-                go.Scatter(
-                    x=level_x.tolist(),
-                    y=resp_y,
-                    mode="markers",
-                    name="Level markers" if show_bars else "Relativity",
-                    marker=dict(
-                        size=9,
-                        color=style_cfg["line_color"],
-                        line=dict(color=style_cfg["text_outline_color"], width=0.8),
-                    ),
-                    customdata=customdata,
-                    hovertext=level_labels,
-                    legendgroup=f"{ti.name}:markers",
-                    showlegend=not show_bars,
-                    hovertemplate=marker_hover,
+        # Markers trace with error bars
+        fig.add_trace(
+            go.Scatter(
+                x=level_x.tolist(),
+                y=resp_y,
+                mode="markers",
+                name="Relativity",
+                marker=dict(
+                    size=9,
+                    color=style_cfg["line_color"],
+                    line=dict(color=style_cfg["text_outline_color"], width=0.8),
                 ),
-                row=1,
-                col=1,
+                error_y=resp_error_y,
+                customdata=customdata,
+                hovertext=level_labels,
+                legendgroup=f"{ti.name}:markers",
+                hovertemplate=resp_hover_marker,
+            ),
+            row=1,
+            col=1,
+        )
+        entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
+        link_variants.append(
+            _LinkVariant(
+                y=link_y.tolist(),
+                hovertemplate=link_hover,
+                error_y_array=link_err_up,
+                error_y_arrayminus=link_err_down,
             )
-            entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
-            link_variants.append(
-                _LinkVariant(
-                    y=link_y.tolist(),
-                    hovertemplate=marker_link_hover,
-                )
-            )
+        )
 
         # Smooth curve overlay
         resp_curve_y = np.asarray(curve.relativity)
@@ -1198,6 +1139,7 @@ def _add_categorical_term_trace(
         entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
         link_variants.append(_LinkVariant(y=link_curve_y.tolist()))
     else:
+        # Unordered Categorical: lines+markers with error bars
         if ci_lo_resp is not None and ci_hi_resp is not None:
             customdata = np.column_stack([ci_lo_resp, ci_hi_resp, ci_lo_link, ci_hi_link])
             resp_hover = (
@@ -1218,16 +1160,19 @@ def _add_categorical_term_trace(
             + "<extra></extra>"
         )
         fig.add_trace(
-            go.Bar(
+            go.Scatter(
                 x=list(ti.levels),
                 y=resp_y,
+                mode="lines+markers",
                 name="Relativity",
                 marker=dict(
-                    color=_hex_to_rgba(style_cfg["bar_color"], style_cfg["bar_opacity"]),
-                    line=dict(color=style_cfg["bar_color"], width=1),
+                    size=9,
+                    color=style_cfg["line_color"],
+                    line=dict(color=style_cfg["text_outline_color"], width=0.8),
                 ),
+                line=dict(color=style_cfg["line_color"], width=style_cfg["curve_line_width"]),
                 error_y=resp_error_y,
-                legendgroup=f"{ti.name}:bar",
+                legendgroup=f"{ti.name}:markers",
                 customdata=customdata,
                 hovertemplate=resp_hover,
             ),
@@ -1241,34 +1186,6 @@ def _add_categorical_term_trace(
                 hovertemplate=link_hover,
                 error_y_array=link_err_up,
                 error_y_arrayminus=link_err_down,
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=list(ti.levels),
-                y=resp_y,
-                mode="text",
-                name="Value labels",
-                text=[f"{v:.3f}" for v in resp_y],
-                textposition="top center",
-                textfont=dict(
-                    color=style_cfg["text_color"],
-                    shadow=f"0 0 2px {style_cfg['text_outline_color']}",
-                ),
-                cliponaxis=False,
-                showlegend=False,
-                hoverinfo="skip",
-                legendgroup=f"{ti.name}:labels",
-            ),
-            row=1,
-            col=1,
-        )
-        entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
-        link_variants.append(
-            _LinkVariant(
-                y=link_y.tolist(),
-                text=[f"{v:.3f}" for v in link_y],
-                hovertemplate="<extra></extra>",
             )
         )
 
