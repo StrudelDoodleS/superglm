@@ -110,6 +110,7 @@ class OrderedCategorical:
         degree: int = 3,
         select: bool = False,
         penalty: str = "ssp",
+        grouping: Any = None,
     ):
         from superglm.features.spline import _SplineBase
 
@@ -150,7 +151,24 @@ class OrderedCategorical:
             vals = np.linspace(0.0, 1.0, n) if n > 1 else np.array([0.0])
             self._level_to_value = dict(zip(order, vals.tolist()))
 
-        self._known_levels = set(self._ordered_levels)
+        # Grouping: validate and store
+        self._grouping = grouping
+        if grouping is not None:
+            # _known_levels includes all *original* levels (for predict-time validation)
+            self._known_levels = set(grouping.all_original_levels)
+            # The ordered levels used for fitting are the *grouped* levels
+            self._ordered_levels = [
+                lev for lev in self._ordered_levels if lev in set(grouping.grouped_levels)
+            ]
+            self._n_levels = len(self._ordered_levels)
+            # Rebuild level_to_value for grouped levels only
+            self._level_to_value = {
+                lev: self._level_to_value[lev]
+                for lev in self._ordered_levels
+                if lev in self._level_to_value
+            }
+        else:
+            self._known_levels = set(self._ordered_levels)
         self._n_levels = len(self._ordered_levels)
 
         # Step mode state
@@ -208,6 +226,8 @@ class OrderedCategorical:
 
     def _map_to_numeric(self, x: NDArray) -> NDArray:
         """Map categorical values to their numeric representations (vectorized)."""
+        if self._grouping is not None:
+            x = pd.Series(x).map(self._grouping.original_to_group).values
         return pd.Series(x).map(self._level_to_value).values.astype(np.float64)
 
     def _choose_base(self, x: NDArray, sample_weight: NDArray | None) -> None:
@@ -241,6 +261,9 @@ class OrderedCategorical:
         """Build design columns from ordered categorical data."""
         x = np.asarray(x).ravel()
         _validate_categorical_levels(x, self._known_levels)
+
+        if self._grouping is not None:
+            x = pd.Series(x).map(self._grouping.original_to_group).values
 
         if self.basis == "spline":
             return self._build_spline(x, sample_weight)
@@ -312,6 +335,9 @@ class OrderedCategorical:
         """Build design matrix for new data using learned parameters."""
         x = np.asarray(x).ravel()
         _validate_categorical_levels(x, self._known_levels)
+
+        if self._grouping is not None:
+            x = pd.Series(x).map(self._grouping.original_to_group).values
 
         if self.basis == "spline":
             x_numeric = self._map_to_numeric(x)

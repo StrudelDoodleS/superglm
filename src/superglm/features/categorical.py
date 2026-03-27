@@ -58,8 +58,9 @@ class Categorical:
         Or pass a specific level name as a string.
     """
 
-    def __init__(self, base: str = "most_exposed"):
+    def __init__(self, base: str = "most_exposed", grouping=None):
         self.base = base
+        self._grouping = grouping
         self._levels: list[str] = []
         self._base_level: str = ""
         self._non_base: list[str] = []
@@ -79,6 +80,12 @@ class Categorical:
         import pandas as pd
 
         x = np.asarray(x).ravel()
+
+        # Apply grouping mapping before factorization
+        if self._grouping is not None:
+            # Validate against original levels
+            _validate_categorical_levels(x, set(self._grouping.all_original_levels))
+            x = pd.Series(x).map(self._grouping.original_to_group).values
 
         # Single-pass O(n) factorize — avoids O(n log n) sort + O(n * levels) loop
         codes, uniques = pd.factorize(x, sort=True)
@@ -131,8 +138,14 @@ class Categorical:
 
     def transform(self, x: NDArray) -> NDArray:
         """One-hot encode using levels learned during build()."""
+        import pandas as pd
+
         x = np.asarray(x).ravel()
-        _validate_categorical_levels(x, set(self._levels))
+        if self._grouping is not None:
+            _validate_categorical_levels(x, set(self._grouping.all_original_levels))
+            x = pd.Series(x).map(self._grouping.original_to_group).values
+        else:
+            _validate_categorical_levels(x, set(self._levels))
         return np.column_stack([(x == lev).astype(np.float64) for lev in self._non_base])
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
