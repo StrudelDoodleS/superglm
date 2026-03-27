@@ -563,7 +563,7 @@ class TestPlotlyMainEffects:
         trace_names = {trace.name for trace in fig.data}
         assert "Exposure density" not in trace_names
 
-    def test_plotly_ordered_categorical_step_rejected(self):
+    def test_plotly_ordered_categorical_step_renders(self):
         rng = np.random.default_rng(123)
         n = 400
         levels = ["Low", "Medium", "High", "Very High"]
@@ -586,8 +586,10 @@ class TestPlotlyMainEffects:
         )
         model.fit(X, y, sample_weight=sample_weight)
 
-        with pytest.raises(NotImplementedError, match="OrderedCategorical\\(basis='step'\\)"):
-            model.plot(engine="plotly", X=X, sample_weight=sample_weight)
+        import plotly.graph_objects as go
+
+        fig = model.plot(engine="plotly", X=X, sample_weight=sample_weight)
+        assert isinstance(fig, go.Figure)
 
     def test_plotly_categorical_uses_scatter_with_error_bars(self):
         rng = np.random.default_rng(100)

@@ -1208,26 +1208,24 @@ def term_inference(
                 )
 
             spline_meta = _build_spline_metadata(inner) if inner is not None else None
-            ti_result = _recenter_term(
-                TermInference(
-                    name=name,
-                    kind="categorical",
-                    active=active,
-                    levels=levels,
-                    log_relativity=level_log_rels,
-                    relativity=level_rels,
-                    se_log_relativity=se,
-                    ci_lower=ci_lo,
-                    ci_upper=ci_hi,
-                    absorbs_intercept=False,
-                    centering_mode="base_level",
-                    edf=edf,
-                    smoothing_lambda=lam,
-                    smooth_curve=curve,
-                    spline=spline_meta,
-                    alpha=alpha,
-                ),
-                centering,
+            # OrderedCategorical: base level already shifted to 0/1 — skip recentering
+            ti_result = TermInference(
+                name=name,
+                kind="categorical",
+                active=active,
+                levels=levels,
+                log_relativity=level_log_rels,
+                relativity=level_rels,
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=False,
+                centering_mode="base_level",
+                edf=edf,
+                smoothing_lambda=lam,
+                smooth_curve=curve,
+                spline=spline_meta,
+                alpha=alpha,
             )
             if spec._grouping is not None:
                 ti_result = _expand_grouped_term(
@@ -1255,24 +1253,22 @@ def term_inference(
                 ci_lo = _safe_exp(log_rels - z_alpha * se)
                 ci_hi = _safe_exp(log_rels + z_alpha * se)
 
-            ti_result = _recenter_term(
-                TermInference(
-                    name=name,
-                    kind="categorical",
-                    active=active,
-                    levels=levels,
-                    log_relativity=log_rels,
-                    relativity=rels,
-                    se_log_relativity=se,
-                    ci_lower=ci_lo,
-                    ci_upper=ci_hi,
-                    absorbs_intercept=False,
-                    centering_mode="base_level",
-                    edf=edf,
-                    smoothing_lambda=lam,
-                    alpha=alpha,
-                ),
-                centering,
+            # OrderedCategorical: base level already at 0/1 — skip recentering
+            ti_result = TermInference(
+                name=name,
+                kind="categorical",
+                active=active,
+                levels=levels,
+                log_relativity=log_rels,
+                relativity=rels,
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=False,
+                centering_mode="base_level",
+                edf=edf,
+                smoothing_lambda=lam,
+                alpha=alpha,
             )
             if spec._grouping is not None:
                 ti_result = _expand_grouped_term(

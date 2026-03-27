@@ -242,7 +242,7 @@ class OrderedCategorical:
         return pd.Series(x).map(self._level_to_value).values.astype(np.float64)
 
     def _choose_base(self, x: NDArray, sample_weight: NDArray | None) -> None:
-        """Choose the base level (step mode)."""
+        """Choose the base level for relativities."""
         if self._base_level and self._base_level in self._ordered_levels:
             return
 
@@ -285,6 +285,7 @@ class OrderedCategorical:
         self, x: NDArray, sample_weight: NDArray | None
     ) -> GroupInfo | list[GroupInfo]:
         """Spline mode: map to numeric, delegate to internal Spline."""
+        self._choose_base(x, sample_weight)
         x_numeric = self._map_to_numeric(x)
         return self._spline.build(x_numeric)
 
@@ -370,7 +371,11 @@ class OrderedCategorical:
             return self._reconstruct_step(beta)
 
     def _reconstruct_spline(self, beta: NDArray) -> dict[str, Any]:
-        """Spline mode: delegate to internal spline, add per-level annotations."""
+        """Spline mode: delegate to internal spline, add per-level annotations.
+
+        Shifts the curve so that the base level has log_relativity=0 (relativity=1),
+        giving proper categorical-style relativities.
+        """
         raw = self._spline.reconstruct(beta)
 
         # Per-level values on the fitted curve
@@ -379,6 +384,13 @@ class OrderedCategorical:
         beta_orig = self._spline._R_inv @ beta if self._spline._R_inv is not None else beta
         level_log_rels = B_levels @ beta_orig
 
+        # Shift so base level = 0 (relativity = 1)
+        base_shift = float(level_log_rels[self._ordered_levels.index(self._base_level)])
+        level_log_rels = level_log_rels - base_shift
+        raw["log_relativity"] = raw["log_relativity"] - base_shift
+        raw["relativity"] = np.exp(raw["log_relativity"])
+
+        raw["base_level"] = self._base_level
         raw["levels"] = self._ordered_levels
         raw["level_values"] = dict(zip(self._ordered_levels, level_values.tolist()))
         raw["level_log_relativities"] = dict(zip(self._ordered_levels, level_log_rels.tolist()))

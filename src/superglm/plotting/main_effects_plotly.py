@@ -198,24 +198,11 @@ def plot_main_effects_plotly(
         raise ImportError(
             "plotly is required for engine='plotly'. Install it with: pip install plotly"
         ) from None
-    from superglm.features.ordered_categorical import OrderedCategorical
 
     if not terms:
         return go.Figure()
 
-    unsupported_ordered_step = [
-        ti.name
-        for ti in terms
-        if isinstance(model._specs.get(ti.name), OrderedCategorical)
-        and model._specs[ti.name].basis == "step"
-    ]
-    if unsupported_ordered_step:
-        joined = ", ".join(unsupported_ordered_step)
-        raise NotImplementedError(
-            "Plotly main-effects explorer does not yet support "
-            f"OrderedCategorical(basis='step') for: {joined}. "
-            "Use engine='matplotlib' for now."
-        )
+    # OrderedCategorical step mode renders as a plain categorical (no smooth curve)
     valid_categorical_display = {"auto", "bars", "markers", "bars+markers"}
     if categorical_display not in valid_categorical_display:
         raise ValueError(
