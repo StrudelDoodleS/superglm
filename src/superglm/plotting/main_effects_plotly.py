@@ -685,8 +685,19 @@ def _add_term_traces(
             bottom_x_type="linear",
         )
 
-    # categorical
-    overlay_density_top = False
+    # categorical — density bars added BEFORE term traces for z-order (behind)
+    _add_categorical_density_trace(
+        fig,
+        ti,
+        term_idx,
+        entries,
+        link_variants,
+        X=X,
+        sample_weight=sample_weight,
+        density_visible=density_visible,
+        style_cfg=style_cfg,
+        overlay_top=True,
+    )
     _add_categorical_term_trace(
         fig,
         ti,
@@ -696,19 +707,6 @@ def _add_term_traces(
         style_cfg=style_cfg,
         categorical_display=categorical_display,
     )
-    if needs_lower_panel:
-        _add_categorical_density_trace(
-            fig,
-            ti,
-            term_idx,
-            entries,
-            link_variants,
-            X=X,
-            sample_weight=sample_weight,
-            density_visible=density_visible,
-            style_cfg=style_cfg,
-            overlay_top=overlay_density_top,
-        )
     if ti.smooth_curve is not None and ti.smooth_curve.level_x is not None:
         tickvals = np.asarray(ti.smooth_curve.level_x, dtype=np.float64).tolist()
         ticktext = [str(level) for level in ti.levels]
@@ -722,8 +720,8 @@ def _add_term_traces(
             bottom_x_type="linear",
             bottom_tickvals=tickvals,
             bottom_ticktext=ticktext,
-            overlay_density_top=False,
-            top_secondary_y_title=density_y_title,
+            overlay_density_top=True,
+            top_secondary_y_title="Exposure",
         )
     return _XAxisConfig(
         top_x_title=ti.name,
@@ -731,8 +729,8 @@ def _add_term_traces(
         bottom_x_title=ti.name,
         bottom_y_title=density_y_title,
         bottom_x_type="category",
-        overlay_density_top=False,
-        top_secondary_y_title=density_y_title,
+        overlay_density_top=True,
+        top_secondary_y_title="Exposure",
     )
 
 
@@ -1289,7 +1287,12 @@ def _add_categorical_density_trace(
     style_cfg: dict[str, Any],
     overlay_top: bool = False,
 ):
-    """Add normalized exposure bars for categorical terms."""
+    """Add absolute exposure bars for categorical terms.
+
+    Shows raw sample_weight sums per level (no normalization).
+    When overlay_top=True, bars render on the right y-axis (y3)
+    in the top panel with low opacity.
+    """
     import plotly.graph_objects as go
 
     if X is None or sample_weight is None or ti.name not in X.columns:
@@ -1302,9 +1305,8 @@ def _add_categorical_density_trace(
         .sum()
     )
     weights = np.array([float(exp.get(level, 0.0)) for level in levels], dtype=np.float64)
-    peak = float(weights.max()) if weights.size else 0.0
-    if peak > 0:
-        weights = weights / peak
+
+    bar_opacity = 0.3
 
     if ti.smooth_curve is not None and ti.smooth_curve.level_x is not None:
         level_x = np.asarray(ti.smooth_curve.level_x, dtype=np.float64)
@@ -1314,14 +1316,14 @@ def _add_categorical_density_trace(
                 y=weights,
                 width=_ordered_bar_width(level_x),
                 customdata=np.array(levels, dtype=object),
-                name="Exposure density",
+                name="Exposure",
                 legendgroup=f"{ti.name}:density",
                 marker_color=style_cfg["density_fill_color"],
                 marker_line_color=style_cfg["density_edge_color"],
                 marker_line_width=_EXP_EDGE_LW,
-                opacity=style_cfg["density_opacity"],
+                opacity=bar_opacity,
                 hovertemplate=(
-                    f"{ti.name}: %{{customdata}}<br>Relative density: %{{y:.3f}}<extra></extra>"
+                    f"{ti.name}: %{{customdata}}<br>Exposure: %{{y:,.0f}}<extra></extra>"
                 ),
             ),
             row=1 if overlay_top else 2,
@@ -1341,13 +1343,13 @@ def _add_categorical_density_trace(
         go.Bar(
             x=levels,
             y=weights,
-            name="Exposure density",
+            name="Exposure",
             legendgroup=f"{ti.name}:density",
             marker_color=style_cfg["density_fill_color"],
             marker_line_color=style_cfg["density_edge_color"],
             marker_line_width=_EXP_EDGE_LW,
-            opacity=style_cfg["density_opacity"],
-            hovertemplate=f"{ti.name}: %{{x}}<br>Relative density: %{{y:.3f}}<extra></extra>",
+            opacity=bar_opacity,
+            hovertemplate=f"{ti.name}: %{{x}}<br>Exposure: %{{y:,.0f}}<extra></extra>",
         ),
         row=1 if overlay_top else 2,
         col=1,
@@ -1511,7 +1513,7 @@ def _apply_axis_config(fig, cfg: _XAxisConfig, needs_lower_panel: bool) -> None:
                 yaxis3=dict(
                     visible=True,
                     title_text=cfg.top_secondary_y_title,
-                    range=[0.0, 1.05],
+                    autorange=True,
                 ),
             )
             fig.layout.xaxis.matches = None
@@ -1561,7 +1563,7 @@ def _layout_update(cfg: _XAxisConfig, *, needs_lower_panel: bool, title: str) ->
                     "yaxis2.title.text": "",
                     "yaxis3.visible": True,
                     "yaxis3.title.text": cfg.top_secondary_y_title,
-                    "yaxis3.range": [0.0, 1.05],
+                    "yaxis3.autorange": True,
                 }
             )
         else:
