@@ -205,3 +205,4 @@ __all__ = [
     "vuong_test",
 ]
 __version__ = "0.7.0"
+# Harness artifact cleanup
