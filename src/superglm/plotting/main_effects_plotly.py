@@ -707,6 +707,18 @@ def _add_term_traces(
         style_cfg=style_cfg,
         categorical_display=categorical_display,
     )
+    # show_knots for OrderedCategorical spline terms
+    if show_knots and ti.spline is not None:
+        _add_spline_diagnostic_traces(
+            fig,
+            model,
+            ti,
+            term_idx,
+            entries,
+            link_variants,
+            show_knots=show_knots,
+            show_bases=False,  # basis contributions not shown for categoricals
+        )
     if ti.smooth_curve is not None and ti.smooth_curve.level_x is not None:
         tickvals = np.asarray(ti.smooth_curve.level_x, dtype=np.float64).tolist()
         ticktext = [str(level) for level in ti.levels]
@@ -1381,16 +1393,28 @@ def _add_spline_diagnostic_traces(
     Knots sit on whichever curve the scale toggle is showing.
     Basis contributions show β_j B_j(x) on the link scale and are
     visible on both response and link views.
+
+    For OrderedCategorical (ti.x is None), uses smooth_curve data for the
+    interpolation grid and skips basis contributions.
     """
     import plotly.graph_objects as go
 
     spec = model._specs.get(ti.name)
-    if spec is None or not hasattr(spec, "_basis_matrix"):
+    is_categorical_spline = ti.kind == "categorical" and ti.spline is not None
+    if not is_categorical_spline and (spec is None or not hasattr(spec, "_basis_matrix")):
         return
 
-    x_grid = np.asarray(ti.x)
-    resp_y_curve = np.asarray(ti.relativity)
-    link_y_curve = np.asarray(ti.log_relativity)
+    # Use smooth_curve data for categoricals (ti.x is None)
+    if ti.x is None and ti.smooth_curve is not None:
+        x_grid = np.asarray(ti.smooth_curve.x)
+        resp_y_curve = np.asarray(ti.smooth_curve.relativity)
+        link_y_curve = np.log(resp_y_curve)
+    elif ti.x is not None:
+        x_grid = np.asarray(ti.x)
+        resp_y_curve = np.asarray(ti.relativity)
+        link_y_curve = np.asarray(ti.log_relativity)
+    else:
+        return
 
     # ── Knots ─────────────────────────────────────────────────
     if show_knots and ti.spline is not None and ti.spline.interior_knots.size > 0:
@@ -1476,6 +1500,9 @@ def _add_spline_diagnostic_traces(
 
 def _supports_spline_diagnostics(model, ti: TermInference) -> bool:
     """Whether a term can show knots/basis diagnostics."""
+    # Categoricals with spline metadata (OrderedCategorical spline mode) support knots
+    if ti.spline is not None:
+        return True
     spec = model._specs.get(ti.name)
     return ti.kind == "spline" and spec is not None and hasattr(spec, "_basis_matrix")
 

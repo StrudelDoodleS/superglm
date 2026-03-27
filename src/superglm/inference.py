@@ -1207,6 +1207,7 @@ def term_inference(
                     level_x=level_x,
                 )
 
+            spline_meta = _build_spline_metadata(inner) if inner is not None else None
             ti_result = _recenter_term(
                 TermInference(
                     name=name,
@@ -1223,6 +1224,7 @@ def term_inference(
                     edf=edf,
                     smoothing_lambda=lam,
                     smooth_curve=curve,
+                    spline=spline_meta,
                     alpha=alpha,
                 ),
                 centering,
