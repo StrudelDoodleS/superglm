@@ -153,19 +153,21 @@ class OrderedCategorical:
 
         # Grouping: validate and store
         self._grouping = grouping
+        self._original_level_to_value: dict[str, float] | None = None
         if grouping is not None:
             # _known_levels includes all *original* levels (for predict-time validation)
             self._known_levels = set(grouping.all_original_levels)
+            # Preserve original level→value mapping for plot expansion
+            orig_ltv = dict(self._level_to_value)
+            self._original_level_to_value = orig_ltv
             # Build level_to_value for grouped levels.
             # When values= was used, orig_ltv keys are original level names
             # so we average them per group. When order= was used, orig_ltv
             # keys are already the grouped level names — use them directly
             # if the group name matches, otherwise average originals.
-            orig_ltv = dict(self._level_to_value)
             grouped_ltv = {}
             for glev in grouping.grouped_levels:
                 if glev in orig_ltv:
-                    # Group name is already a key (order= case, or identity-mapped)
                     grouped_ltv[glev] = orig_ltv[glev]
                 else:
                     originals = grouping.group_to_originals[glev]

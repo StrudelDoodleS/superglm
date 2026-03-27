@@ -1230,7 +1230,9 @@ def term_inference(
                 centering,
             )
             if spec._grouping is not None:
-                ti_result = _expand_grouped_term(ti_result, spec._grouping)
+                ti_result = _expand_grouped_term(
+                    ti_result, spec._grouping, spec._original_level_to_value
+                )
             return ti_result
         else:
             # Step mode: categorical-style output
@@ -1273,7 +1275,9 @@ def term_inference(
                 centering,
             )
             if spec._grouping is not None:
-                ti_result = _expand_grouped_term(ti_result, spec._grouping)
+                ti_result = _expand_grouped_term(
+                    ti_result, spec._grouping, spec._original_level_to_value
+                )
             return ti_result
 
     # ── Spline ───────────────────────────────────────────────────
@@ -1492,12 +1496,14 @@ def _build_spline_metadata(spec) -> SplineMetadata:
     )
 
 
-def _expand_grouped_term(ti: TermInference, grouping) -> TermInference:
+def _expand_grouped_term(
+    ti: TermInference, grouping, original_level_values: dict[str, float] | None = None
+) -> TermInference:
     """Expand a grouped TermInference back to all original levels.
 
     Each original level gets the relativity/SE/CI of its group.
-    For OrderedCategorical smooth_curve, level_x positions are expanded
-    so grouped levels share the group's x-position.
+    For OrderedCategorical smooth_curve, level_x positions use the original
+    level numeric values so each level gets its own x-position on the plot.
     """
     grouped_levels = list(ti.levels)
     group_idx = {lev: i for i, lev in enumerate(grouped_levels)}
@@ -1518,14 +1524,48 @@ def _expand_grouped_term(ti: TermInference, grouping) -> TermInference:
     if ci_hi is not None:
         ci_hi = np.asarray(ci_hi)[indices]
 
-    # Expand smooth_curve level_x if present
+    # Expand smooth_curve: give each original level its own x-position and
+    # rebuild the display curve via PCHIP interpolation through the expanded
+    # (level_x, relativity) pairs so it passes through every marker.
     curve = ti.smooth_curve
     if curve is not None and curve.level_x is not None:
-        expanded_level_x = np.asarray(curve.level_x)[indices]
+        from scipy.interpolate import PchipInterpolator
+
+        if original_level_values is not None:
+            expanded_level_x = np.array([original_level_values[lev] for lev in expanded_levels])
+        else:
+            grouped_lx = np.asarray(curve.level_x)
+            n_expanded = len(expanded_levels)
+            expanded_level_x = (
+                np.linspace(float(grouped_lx.min()), float(grouped_lx.max()), n_expanded)
+                if n_expanded > 1
+                else grouped_lx[indices]
+            )
+
+        # Rebuild display curve through expanded level positions
+        # Deduplicate x-positions (grouped levels share the same relativity
+        # but may have different x — keep first occurrence for interpolation)
+        seen_x = {}
+        for xi, yi in zip(expanded_level_x, log_rel):
+            if xi not in seen_x:
+                seen_x[xi] = yi
+        uniq_x = np.array(sorted(seen_x.keys()))
+        uniq_log_y = np.array([seen_x[x] for x in uniq_x])
+
+        if len(uniq_x) >= 2:
+            pchip = PchipInterpolator(uniq_x, uniq_log_y)
+            new_x = np.linspace(float(uniq_x[0]), float(uniq_x[-1]), 200)
+            new_log_rel = pchip(new_x)
+            new_rel = np.exp(new_log_rel)
+        else:
+            new_x = curve.x
+            new_log_rel = curve.log_relativity
+            new_rel = curve.relativity
+
         curve = SmoothCurve(
-            x=curve.x,
-            log_relativity=curve.log_relativity,
-            relativity=curve.relativity,
+            x=new_x,
+            log_relativity=new_log_rel,
+            relativity=new_rel,
             level_x=expanded_level_x,
             se_log_relativity=curve.se_log_relativity,
             ci_lower=curve.ci_lower,
