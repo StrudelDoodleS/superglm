@@ -453,8 +453,11 @@ def build_coef_rows(
             feature_groups = [fg for fg in groups if fg.feature_name == g.feature_name]
             beta_combined = np.concatenate([beta[fg.sl] for fg in feature_groups])
             feature_active = bool(np.linalg.norm(beta_combined) > 1e-12)
-            # Categorical EDF = K-1 regardless of spline/step basis
-            feature_edf = float(spec._n_levels - 1) if feature_active else 0.0
+            feature_edf = (
+                sum(_get_group_edf_map().get(fg.name, 0.0) for fg in feature_groups)
+                if feature_active
+                else 0.0
+            )
 
             scale = 1.0 if known_scale else phi
             Cov_active = scale * XtWX_inv_aug[1:, 1:]
