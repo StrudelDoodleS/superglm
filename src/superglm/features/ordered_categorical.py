@@ -156,18 +156,24 @@ class OrderedCategorical:
         if grouping is not None:
             # _known_levels includes all *original* levels (for predict-time validation)
             self._known_levels = set(grouping.all_original_levels)
-            # Build level_to_value for grouped levels using mean of original values
+            # Build level_to_value for grouped levels.
+            # When values= was used, orig_ltv keys are original level names
+            # so we average them per group. When order= was used, orig_ltv
+            # keys are already the grouped level names — use them directly
+            # if the group name matches, otherwise average originals.
             orig_ltv = dict(self._level_to_value)
             grouped_ltv = {}
             for glev in grouping.grouped_levels:
-                originals = grouping.group_to_originals[glev]
-                vals = [orig_ltv[o] for o in originals if o in orig_ltv]
-                if vals:
-                    grouped_ltv[glev] = float(np.mean(vals))
+                if glev in orig_ltv:
+                    # Group name is already a key (order= case, or identity-mapped)
+                    grouped_ltv[glev] = orig_ltv[glev]
+                else:
+                    originals = grouping.group_to_originals[glev]
+                    vals = [orig_ltv[o] for o in originals if o in orig_ltv]
+                    if vals:
+                        grouped_ltv[glev] = float(np.mean(vals))
             self._level_to_value = grouped_ltv
-            # The ordered levels used for fitting are the grouped levels
             self._ordered_levels = list(grouping.grouped_levels)
-            self._n_levels = len(self._ordered_levels)
         else:
             self._known_levels = set(self._ordered_levels)
         self._n_levels = len(self._ordered_levels)

@@ -1408,7 +1408,7 @@ def _add_spline_diagnostic_traces(
     if ti.x is None and ti.smooth_curve is not None:
         x_grid = np.asarray(ti.smooth_curve.x)
         resp_y_curve = np.asarray(ti.smooth_curve.relativity)
-        link_y_curve = np.log(resp_y_curve)
+        link_y_curve = np.asarray(ti.smooth_curve.log_relativity)
     elif ti.x is not None:
         x_grid = np.asarray(ti.x)
         resp_y_curve = np.asarray(ti.relativity)
