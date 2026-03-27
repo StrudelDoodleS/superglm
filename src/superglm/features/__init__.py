@@ -1,4 +1,5 @@
 from superglm.features.categorical import Categorical
+from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.interaction import (
     CategoricalInteraction,
     NumericCategorical,
@@ -18,6 +19,8 @@ __all__ = [
     "CubicRegressionSpline",
     "Categorical",
     "OrderedCategorical",
+    "LevelGrouping",
+    "collapse_levels",
     "Numeric",
     "SplineCategorical",
     "PolynomialCategorical",

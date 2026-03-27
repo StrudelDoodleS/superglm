@@ -589,7 +589,7 @@ class TestPlotlyMainEffects:
         with pytest.raises(NotImplementedError, match="OrderedCategorical\\(basis='step'\\)"):
             model.plot(engine="plotly", X=X, sample_weight=sample_weight)
 
-    def test_plotly_categorical_uses_top_bars_with_error_bars(self):
+    def test_plotly_categorical_uses_scatter_with_error_bars(self):
         rng = np.random.default_rng(100)
         n = 500
         X = pd.DataFrame(
@@ -606,15 +606,13 @@ class TestPlotlyMainEffects:
 
         fig = model.plot(engine="plotly", X=X, sample_weight=sample_weight)
         top_panel = [t for t in fig.data if getattr(t, "xaxis", None) == "x" and t.visible is True]
-        lower_panel = [
-            t for t in fig.data if getattr(t, "xaxis", None) == "x2" and t.visible is True
-        ]
-        rel = next(t for t in top_panel if t.type == "bar" and t.name == "Relativity")
-        density = next(t for t in lower_panel if t.type == "bar" and t.name == "Exposure density")
+        rel = next(t for t in top_panel if t.type == "scatter" and t.name == "Relativity")
         assert rel.error_y.array is not None
-        assert density.yaxis == "y2"
+        # Exposure is now on y3 (right axis) in top panel
+        exposure = next(t for t in fig.data if t.type == "bar" and t.name == "Exposure")
+        assert exposure.yaxis == "y3"
 
-    def test_plotly_categorical_keeps_bars_above_threshold(self):
+    def test_plotly_categorical_uses_scatter_many_levels(self):
         rng = np.random.default_rng(101)
         n = 1200
         levels = [f"L{i:02d}" for i in range(35)]
@@ -632,9 +630,10 @@ class TestPlotlyMainEffects:
 
         fig = model.plot(engine="plotly", X=X, sample_weight=sample_weight)
         top_panel = [t for t in fig.data if getattr(t, "xaxis", None) == "x" and t.visible is True]
-        assert any(t.type == "bar" and t.name == "Relativity" for t in top_panel)
+        # Now uses scatter (lines+markers) even for many levels
+        assert any(t.type == "scatter" and t.name == "Relativity" for t in top_panel)
 
-    def test_plotly_categorical_uses_lower_density_panel(self):
+    def test_plotly_categorical_uses_top_density_overlay(self):
         rng = np.random.default_rng(151)
         n = 500
         X = pd.DataFrame(
@@ -650,11 +649,11 @@ class TestPlotlyMainEffects:
         model.fit(X, y, sample_weight=sample_weight)
 
         fig = model.plot(engine="plotly", X=X, sample_weight=sample_weight)
-        assert fig.layout.yaxis3.visible is False
-        assert list(fig.layout.yaxis.domain) == [0.31, 1.0]
-        assert list(fig.layout.yaxis2.domain) == [0.0, 0.23]
+        # For categoricals, exposure is now on the top panel (y3) with overlay
+        assert fig.layout.yaxis3.visible is True
+        assert fig.layout.yaxis3.title.text == "Exposure"
 
-    def test_plotly_categorical_display_override_still_uses_bars(self):
+    def test_plotly_categorical_display_override_still_uses_scatter(self):
         rng = np.random.default_rng(102)
         n = 1200
         levels = [f"L{i:02d}" for i in range(35)]
@@ -677,7 +676,8 @@ class TestPlotlyMainEffects:
             categorical_display="bars+markers",
         )
         top_panel = [t for t in fig.data if getattr(t, "xaxis", None) == "x" and t.visible is True]
-        assert any(t.type == "bar" and t.name == "Relativity" for t in top_panel)
+        # categorical_display parameter is retained but rendering always uses scatter
+        assert any(t.type == "scatter" and t.name == "Relativity" for t in top_panel)
 
     def test_plotly_ordered_categorical_spline_uses_numeric_axis(self):
         rng = np.random.default_rng(321)
@@ -714,10 +714,12 @@ class TestPlotlyMainEffects:
         assert fig.layout.xaxis.type == "linear"
         assert list(fig.layout.xaxis.ticktext) == levels
 
-        ordered_bar = next(t for t in fig.data if t.type == "bar" and t.name == "Relativity")
+        ordered_scatter = next(
+            t for t in fig.data if t.type == "scatter" and t.name == "Relativity"
+        )
         smooth_curve = next(t for t in fig.data if t.type == "scatter" and t.name == "Smooth curve")
         np.testing.assert_allclose(
-            np.asarray(ordered_bar.x, dtype=np.float64), list(midpoints.values())
+            np.asarray(ordered_scatter.x, dtype=np.float64), list(midpoints.values())
         )
         assert len(smooth_curve.x) == 200
         assert np.issubdtype(np.asarray(smooth_curve.x).dtype, np.number)
@@ -754,10 +756,13 @@ class TestPlotlyMainEffects:
         model.fit(X, y, sample_weight=sample_weight)
         fig = model.plot(engine="plotly", X=X, sample_weight=sample_weight)
 
-        ordered_bar = next(t for t in fig.data if t.type == "bar" and t.name == "Relativity")
-        assert ordered_bar.error_y.array is None
-        assert "95% CI:" in (ordered_bar.hovertemplate or "")
-        assert ordered_bar.hovertext[0] == levels[0]
+        ordered_scatter = next(
+            t for t in fig.data if t.type == "scatter" and t.name == "Relativity"
+        )
+        # Markers now carry error bars directly
+        assert ordered_scatter.error_y.array is not None
+        assert "95% CI:" in (ordered_scatter.hovertemplate or "")
+        assert ordered_scatter.hovertext[0] == levels[0]
 
     def test_plotly_style_overrides_apply(self):
         rng = np.random.default_rng(321)
@@ -804,18 +809,14 @@ class TestPlotlyMainEffects:
             },
         )
 
-        ordered_bar = next(t for t in fig.data if t.type == "bar" and t.name == "Relativity")
-        value_labels = next(t for t in fig.data if t.type == "scatter" and t.name == "Value labels")
-        smooth_curve = next(t for t in fig.data if t.type == "scatter" and t.name == "Smooth curve")
-        density_bar = next(t for t in fig.data if t.type == "bar" and t.name == "Exposure density")
-        numeric_bar = next(
-            t for t in fig.data if t.type == "bar" and t.name == "Relativity" and len(t.x) == 1
+        ordered_scatter = next(
+            t for t in fig.data if t.type == "scatter" and t.name == "Relativity" and len(t.x) > 1
         )
+        smooth_curve = next(t for t in fig.data if t.type == "scatter" and t.name == "Smooth curve")
+        density_bar = next(t for t in fig.data if t.type == "bar" and t.name == "Exposure")
+        numeric_bar = next(t for t in fig.data if t.type == "bar" and t.name == "Relativity")
 
-        assert ordered_bar.marker.color == "rgba(34, 68, 170, 0.7)"
-        assert ordered_bar.marker.line.color == "#2244AA"
-        assert value_labels.textfont.color == "#222222"
-        assert value_labels.textfont.shadow == "0 0 2px #FFFFFF"
+        assert ordered_scatter.marker.color == "#00AA55"
         assert smooth_curve.line.color == "#00AA55"
         assert density_bar.marker.color == "#FFAA00"
         assert density_bar.marker.line.color == "#663300"
