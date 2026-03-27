@@ -156,17 +156,18 @@ class OrderedCategorical:
         if grouping is not None:
             # _known_levels includes all *original* levels (for predict-time validation)
             self._known_levels = set(grouping.all_original_levels)
-            # The ordered levels used for fitting are the *grouped* levels
-            self._ordered_levels = [
-                lev for lev in self._ordered_levels if lev in set(grouping.grouped_levels)
-            ]
+            # Build level_to_value for grouped levels using mean of original values
+            orig_ltv = dict(self._level_to_value)
+            grouped_ltv = {}
+            for glev in grouping.grouped_levels:
+                originals = grouping.group_to_originals[glev]
+                vals = [orig_ltv[o] for o in originals if o in orig_ltv]
+                if vals:
+                    grouped_ltv[glev] = float(np.mean(vals))
+            self._level_to_value = grouped_ltv
+            # The ordered levels used for fitting are the grouped levels
+            self._ordered_levels = list(grouping.grouped_levels)
             self._n_levels = len(self._ordered_levels)
-            # Rebuild level_to_value for grouped levels only
-            self._level_to_value = {
-                lev: self._level_to_value[lev]
-                for lev in self._ordered_levels
-                if lev in self._level_to_value
-            }
         else:
             self._known_levels = set(self._ordered_levels)
         self._n_levels = len(self._ordered_levels)
@@ -225,9 +226,11 @@ class OrderedCategorical:
         )
 
     def _map_to_numeric(self, x: NDArray) -> NDArray:
-        """Map categorical values to their numeric representations (vectorized)."""
-        if self._grouping is not None:
-            x = pd.Series(x).map(self._grouping.original_to_group).values
+        """Map categorical values to their numeric representations (vectorized).
+
+        Expects x to already be mapped through grouping if applicable
+        (callers build() and transform() handle that).
+        """
         return pd.Series(x).map(self._level_to_value).values.astype(np.float64)
 
     def _choose_base(self, x: NDArray, sample_weight: NDArray | None) -> None:

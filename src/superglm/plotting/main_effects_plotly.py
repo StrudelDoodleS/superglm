@@ -438,7 +438,7 @@ def plot_main_effects_plotly(
                 side="right",
                 showgrid=False,
                 zeroline=False,
-                range=[0.0, 1.05],
+                autorange=True,
                 title_text=density_y_title,
                 visible=False,
             )
