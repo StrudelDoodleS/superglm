@@ -96,9 +96,12 @@ segmentation power. Values closer to 1.0 indicate better ranking.
 
 1. **Split** data into training (80%) and holdout (20%)
 2. **Cross-validate** on training with the same folds for all candidate models
-3. **Compare** fold-level metrics (mean, median, std, wins)
+3. **Compare** fold-level deltas (mean, median, std) — models often
+   trade off across metrics (e.g. better deviance, slightly worse Gini),
+   so present the full delta table rather than picking a single winner
 4. **Refit** selected models on all training data
 5. **Evaluate** on holdout with `double_lift_chart()` and `lorenz_curve()`
+   — the holdout double-lift chart is the business-facing evidence
 
 See the [Plotting & Diagnostics Demo](../notebooks/plotting_diagnostics_demo.ipynb)
 notebook for a complete worked example on the French MTPL2 dataset.
