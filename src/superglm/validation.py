@@ -200,88 +200,170 @@ def lift_chart(
 
 def double_lift_chart(
     y_obs,
-    y_pred_a,
-    y_pred_b,
+    y_pred_model,
+    y_pred_current,
     sample_weight=None,
     exposure=None,
     *,
     n_bins: int = 10,
-    labels: tuple[str, str] = ("Model A", "Model B"),
+    labels: tuple[str, str, str] = ("Actual", "Model", "Current"),
     ax: Axes | None = None,
 ) -> DoubleLiftChartResult:
-    """Double lift chart: compare two models' A/E ratios across bins.
+    """CAS-style double lift chart (CAS RPM 2016 methodology).
 
-    Bins are defined by model A's predictions.
+    Sorts by the ratio ``y_pred_model / y_pred_current``, bins into
+    equal-exposure quantiles, and plots three indexed series: Actual,
+    Model, and Current — each indexed to its own overall average.
+
+    This is the standard actuarial double lift chart for comparing a
+    new model against a current/baseline model on holdout data.
 
     Parameters
     ----------
     y_obs : array-like
-        Observed response values.
-    y_pred_a, y_pred_b : array-like
-        Predictions from model A and model B.
+        Observed response values (frequency, severity, or loss ratio).
+    y_pred_model : array-like
+        New model predictions (holdout).
+    y_pred_current : array-like
+        Current/baseline/manual predictions (holdout).
     sample_weight : array-like or None
-        Observation weights.
+        Observation weights (case/frequency weights).
     exposure : array-like or None
         Exposure measure for rate models.
     n_bins : int
-        Number of quantile bins.
+        Number of equal-exposure quantile bins.
     labels : tuple of str
-        Labels for the two models.
+        Display labels for (Actual, Model, Current).
     ax : matplotlib Axes or None
-        If provided, plot onto this axes.
+        If provided, plot onto this axes (``figure`` in result will be None).
 
     Returns
     -------
     DoubleLiftChartResult
+
+    References
+    ----------
+    CAS RPM 2016, "Predictive Modeling — Lift and Double Lift Charts",
+    https://www.casact.org/sites/default/files/presentation/rpm_2016_presentations_pm-lm-4.pdf
     """
     y_obs = _ensure_array(y_obs)
-    y_pred_a = _ensure_array(y_pred_a)
-    y_pred_b = _ensure_array(y_pred_b)
+    y_pred_model = _ensure_array(y_pred_model)
+    y_pred_current = _ensure_array(y_pred_current)
     n = len(y_obs)
     w = _default_weights(sample_weight, n)
     exp = _ensure_array(exposure) if exposure is not None else np.ones(n, dtype=float)
 
+    # Sort score: model / current (with epsilon guard)
+    eps = 1e-10
+    sort_score = y_pred_model / np.maximum(y_pred_current, eps)
+
+    # Equal-exposure bins based on sort score
     bin_weights = w * exp
-    bins_idx = _quantile_bins(y_pred_a, bin_weights, n_bins)
+    bins_idx = _quantile_bins(sort_score, bin_weights, n_bins)
+
+    # Overall exposure-weighted averages (for indexing)
+    total_we = bin_weights.sum()
+    overall_actual = np.sum(bin_weights * y_obs) / total_we if total_we > 0 else 1.0
+    overall_model = np.sum(bin_weights * y_pred_model) / total_we if total_we > 0 else 1.0
+    overall_current = np.sum(bin_weights * y_pred_current) / total_we if total_we > 0 else 1.0
 
     rows = []
-    total_exp = bin_weights.sum()
     for b in range(n_bins):
         mask = bins_idx == b
         if not mask.any():
             continue
-        we = w[mask] * exp[mask]
+        we = bin_weights[mask]
         we_sum = we.sum()
-        obs_mean = np.sum(we * y_obs[mask]) / we_sum if we_sum > 0 else 0.0
-        pred_a_mean = np.sum(we * y_pred_a[mask]) / we_sum if we_sum > 0 else 0.0
-        pred_b_mean = np.sum(we * y_pred_b[mask]) / we_sum if we_sum > 0 else 0.0
-        ae_a = obs_mean / pred_a_mean if pred_a_mean != 0 else np.nan
-        ae_b = obs_mean / pred_b_mean if pred_b_mean != 0 else np.nan
+        if we_sum <= 0:
+            continue
+
+        actual_avg = float(np.sum(we * y_obs[mask]) / we_sum)
+        model_avg = float(np.sum(we * y_pred_model[mask]) / we_sum)
+        current_avg = float(np.sum(we * y_pred_current[mask]) / we_sum)
+
         rows.append(
             {
                 "bin": b + 1,
-                "exposure_share": we_sum / total_exp if total_exp > 0 else 0.0,
-                "observed": obs_mean,
-                f"predicted_{labels[0]}": pred_a_mean,
-                f"predicted_{labels[1]}": pred_b_mean,
-                f"ae_ratio_{labels[0]}": ae_a,
-                f"ae_ratio_{labels[1]}": ae_b,
+                "n_rows": int(mask.sum()),
+                "exposure_sum": float(we_sum),
+                "exposure_share": we_sum / total_we,
+                "target_sum": float(np.sum(w[mask] * y_obs[mask] * exp[mask])),
+                "actual_avg": actual_avg,
+                "model_avg": model_avg,
+                "current_avg": current_avg,
+                "actual_index": actual_avg / overall_actual if overall_actual != 0 else np.nan,
+                "model_index": model_avg / overall_model if overall_model != 0 else np.nan,
+                "current_index": (
+                    current_avg / overall_current if overall_current != 0 else np.nan
+                ),
+                "sort_score_min": float(sort_score[mask].min()),
+                "sort_score_median": float(np.median(sort_score[mask])),
+                "sort_score_max": float(sort_score[mask].max()),
             }
         )
 
     df = pd.DataFrame(rows)
 
+    # ── Plot ──────────────────────────────────────────────────────
     ax_plot, fig = _make_ax(ax)
+
     x = np.arange(len(df))
-    ax_plot.plot(x, df[f"ae_ratio_{labels[0]}"], "o-", label=labels[0], markersize=4)
-    ax_plot.plot(x, df[f"ae_ratio_{labels[1]}"], "s-", label=labels[1], markersize=4)
+    lbl_actual, lbl_model, lbl_current = labels
+
+    # Exposure-share bars on secondary axis (behind lines)
+    ax_exp = ax_plot.twinx()
+    ax_exp.bar(
+        x,
+        df["exposure_share"],
+        width=0.8,
+        alpha=0.08,
+        color="grey",
+        label="Exposure share",
+        zorder=1,
+    )
+    ax_exp.set_ylabel("Exposure share", fontsize=8, color="grey")
+    ax_exp.tick_params(axis="y", colors="grey")
+
+    # Three indexed series
+    ax_plot.plot(
+        x,
+        df["actual_index"],
+        "o-",
+        label=lbl_actual,
+        color="C0",
+        markersize=5,
+        linewidth=1.5,
+        zorder=3,
+    )
+    ax_plot.plot(
+        x,
+        df["model_index"],
+        "s-",
+        label=lbl_model,
+        color="C1",
+        markersize=5,
+        linewidth=1.5,
+        zorder=3,
+    )
+    ax_plot.plot(
+        x,
+        df["current_index"],
+        "^-",
+        label=lbl_current,
+        color="C2",
+        markersize=5,
+        linewidth=1.5,
+        zorder=3,
+    )
     ax_plot.axhline(1.0, color="grey", linewidth=0.7, linestyle="--")
+
     ax_plot.set_xticks(x)
     ax_plot.set_xticklabels(df["bin"].astype(int))
-    ax_plot.set_xlabel("Bin (sorted by " + labels[0] + " prediction)")
-    ax_plot.set_ylabel("A/E ratio")
+    ax_plot.set_xlabel(f"Bin (sorted by {lbl_model} / {lbl_current} predicted rate)")
+    ax_plot.set_ylabel("Indexed rate (bin avg / overall avg)")
     ax_plot.set_title("Double Lift Chart")
-    ax_plot.legend(fontsize=8)
+    ax_plot.legend(loc="upper left", fontsize=8)
+    ax_exp.legend(loc="upper right", fontsize=7)
 
     return DoubleLiftChartResult(bins=df, figure=fig)
 

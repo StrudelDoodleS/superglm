@@ -1136,6 +1136,11 @@ class ModelMetrics:
         beta = self._result.beta
         return sum(1 for g in self._groups if np.linalg.norm(beta[g.sl]) > 1e-12)
 
+    @cached_property
+    def eta(self) -> NDArray:
+        """Linear predictor (link-scale fitted values)."""
+        return self._link.link(self._mu)
+
     # ── Residuals ─────────────────────────────────────────────────
 
     def residuals(self, kind: str = "deviance", *, seed: int | None = 42) -> NDArray:
@@ -1179,9 +1184,14 @@ class ModelMetrics:
     def _quantile_residuals(self, seed: int | None = 42) -> NDArray:
         """Randomized quantile residuals (Dunn & Smyth 1996).
 
-        For discrete families (Poisson, NB2), uses jittered uniform on the
-        CDF interval [F(y-1), F(y)]. For continuous families (Gamma), uses
-        the CDF directly (no randomization needed).
+        Weight-aware: for rate-encoded data (e.g. Poisson frequency with
+        exposure weights), the CDF is computed on the count scale
+        (y*w ~ Poisson(mu*w)) so that residuals correctly reflect the
+        precision of each observation.
+
+        For discrete families (Poisson, NB2, Binomial), uses jittered
+        uniform on the CDF interval [F(y-1), F(y)]. For continuous
+        families (Gamma, Gaussian), uses the CDF directly.
 
         Parameters
         ----------
@@ -1201,43 +1211,55 @@ class ModelMetrics:
             Tweedie,
         )
 
-        y, mu = self._y, self._mu
+        y, mu, w = self._y, self._mu, self._weights
         rng = np.random.default_rng(seed)
 
         if isinstance(self._family, Binomial):
-            # Bernoulli: F(0|mu) = 1-mu, F(1|mu) = 1. Jitter in [F(y-1), F(y)].
+            # Bernoulli: w is case/frequency weight, not trials.
+            # CDF is the same regardless of weight.
             a = np.where(y == 0, 0.0, 1.0 - mu)
             b = np.where(y == 0, 1.0 - mu, 1.0)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Poisson):
-            a = poisson.cdf(y - 1, mu)
-            b = poisson.cdf(y, mu)
+            # Rate encoding: count = y * w ~ Poisson(mu * w).
+            # CDF on the count scale, then jitter.
+            count = np.round(y * w)
+            lam = mu * w
+            a = poisson.cdf(count - 1, lam)
+            b = poisson.cdf(count, lam)
             u = rng.uniform(a, b)
         elif isinstance(self._family, NegativeBinomial):
             theta = self._family.theta
             p_nb = theta / (mu + theta)
-            a = nbinom.cdf(y - 1, n=theta, p=p_nb)
-            b = nbinom.cdf(y, n=theta, p=p_nb)
+            # NB2: count = y * w ~ NB(theta, p_nb) with mean mu * w.
+            # For weighted NB2, adjust n and p to match mean = mu * w:
+            # E[Y] = n*(1-p)/p = mu*w => n = theta*w, p = theta/(mu+theta)
+            # But theta*w may not be integer; use scipy which handles float n.
+            count = np.round(y * w)
+            n_param = theta * w
+            a = nbinom.cdf(count - 1, n=n_param, p=p_nb)
+            b = nbinom.cdf(count, n=n_param, p=p_nb)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Gamma):
-            # Gamma is continuous: shape k = 1/phi, scale = mu*phi
-            shape = 1.0 / self.phi
-            scale = mu * self.phi
+            # Gamma: effective shape = w/phi, scale = mu*phi/w
+            # E[Y] = mu, Var[Y] = mu^2 * phi / w
+            shape = w / self.phi
+            scale = mu * self.phi / w
             u = gamma_dist.cdf(y, a=shape, scale=scale)
         elif isinstance(self._family, Gaussian):
-            u = norm.cdf(y, loc=mu, scale=np.sqrt(self.phi))
+            # Effective variance = phi / w
+            u = norm.cdf(y, loc=mu, scale=np.sqrt(self.phi / w))
         elif isinstance(self._family, Tweedie):
             # Tweedie p in (1,2): compound Poisson-Gamma.
-            # Y = sum_{j=1}^N X_j where N ~ Pois(lam), X_j ~ Gamma(alpha, scale).
-            # CDF via compound Poisson sum — fully vectorized per Poisson term.
+            # With weights: lambda and scale both depend on w.
             p_tw = self._family.p
             phi = self.phi
 
-            # Poisson rate and compound Gamma parameters
-            lam = np.power(mu, 2 - p_tw) / ((2 - p_tw) * phi)
+            # Weight-adjusted Poisson rate and compound Gamma parameters
+            lam = w * np.power(mu, 2 - p_tw) / ((2 - p_tw) * phi)
             p_zero = np.exp(-lam)
             alpha_tw = (2 - p_tw) / (p_tw - 1)  # Gamma shape per claim
-            scale_tw = phi * (p_tw - 1) * np.power(mu, p_tw - 1)  # Gamma scale
+            scale_tw = phi * (p_tw - 1) * np.power(mu, p_tw - 1) / w
 
             u = np.empty_like(y)
 

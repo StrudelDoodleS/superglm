@@ -749,12 +749,20 @@ class SuperGLM:
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
-        residual_type: str = "deviance",
+        n_sim: int = 100,
         figsize: tuple[float, float] | None = None,
-        max_points: int = 25_000,
+        max_points: int = 50_000,
         seed: int = 42,
+        residual_type: str = "auto",
     ):
-        """Create an R-style 2x2 residual diagnostic figure.
+        """GLM/GAM diagnostic figure with simulation-based Q-Q envelope.
+
+        Four panels using quantile residuals (Dunn & Smyth 1996):
+
+        1. Q-Q with simulation envelope
+        2. Calibration (exposure-weighted observed vs predicted)
+        3. Residuals vs Linear Predictor
+        4. Residual distribution (histogram + N(0,1) overlay)
 
         Parameters
         ----------
@@ -763,18 +771,21 @@ class SuperGLM:
         y : NDArray
             Response vector.
         sample_weight : NDArray or None
-            Optional observation weights.
+            Optional observation weights (exposure for frequency models).
         offset : NDArray or None
             Optional offset.
-        residual_type : str
-            Residual type for Panel 1. One of ``"deviance"``, ``"pearson"``,
-            ``"response"``, ``"working"``, ``"quantile"``.
+        n_sim : int
+            Number of simulation replicates for the Q-Q envelope.
         figsize : tuple or None
             Figure size in inches. Defaults to ``(10, 8)``.
         max_points : int
-            Maximum points to plot/smooth. Set to 0 to disable subsampling.
+            Threshold for scatter vs hexbin rendering.
         seed : int
-            Random seed for quantile residuals and subsampling.
+            Random seed for quantile residuals, simulation, and
+            subsampling.
+        residual_type : str
+            .. deprecated::
+                Ignored. All panels use quantile residuals.
 
         Returns
         -------
@@ -789,10 +800,11 @@ class SuperGLM:
             y,
             sample_weight=sample_weight,
             offset=offset,
-            residual_type=residual_type,
+            n_sim=n_sim,
             figsize=figsize,
             max_points=max_points,
             seed=seed,
+            residual_type=residual_type,
         )
 
     def plot_data(
