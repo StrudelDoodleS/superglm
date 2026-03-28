@@ -115,33 +115,67 @@ class TestLiftChartWeighted:
 
 
 class TestDoubleLiftChart:
-    """T8: Double lift chart tests."""
+    """T8: Double lift chart — CAS RPM 2016 methodology."""
 
     def test_identical_models(self):
         rng = np.random.default_rng(42)
         n = 200
         y = rng.poisson(3.0, n).astype(float)
-        pred = y + rng.normal(0, 0.5, n)
+        pred = np.abs(y + rng.normal(0, 0.5, n)) + 0.01
         result = double_lift_chart(y, pred, pred, n_bins=5)
         assert isinstance(result, DoubleLiftChartResult)
-        # A/E ratios should be identical for both models
-        cols = [c for c in result.bins.columns if "ae_ratio" in c]
-        assert len(cols) == 2
+        # When model == current, their indices should be identical
         np.testing.assert_allclose(
-            result.bins[cols[0]].values, result.bins[cols[1]].values, rtol=1e-10
+            result.bins["model_index"].values,
+            result.bins["current_index"].values,
+            rtol=1e-10,
         )
 
-    def test_better_model_closer_to_one(self):
+    def test_exposure_shares_sum_to_one(self):
         rng = np.random.default_rng(42)
         n = 500
         y = rng.poisson(5.0, n).astype(float)
-        pred_a = y + rng.normal(0, 0.2, n)  # good
-        pred_b = y + rng.normal(0, 2.0, n)  # bad
-        result = double_lift_chart(y, pred_a, pred_b, n_bins=5, labels=("Good", "Bad"))
-        # The better model's A/E ratios should be closer to 1.0
-        ae_good = result.bins["ae_ratio_Good"].values
-        ae_bad = result.bins["ae_ratio_Bad"].values
-        assert np.mean(np.abs(ae_good - 1.0)) < np.mean(np.abs(ae_bad - 1.0))
+        pred_m = np.abs(y + rng.normal(0, 0.2, n)) + 0.01
+        pred_c = np.abs(y + rng.normal(0, 2.0, n)) + 0.01
+        result = double_lift_chart(y, pred_m, pred_c, n_bins=10)
+        np.testing.assert_allclose(result.bins["exposure_share"].sum(), 1.0, atol=1e-10)
+
+    def test_required_columns(self):
+        rng = np.random.default_rng(42)
+        n = 200
+        y = rng.poisson(3.0, n).astype(float)
+        pred = np.abs(y + rng.normal(0, 0.5, n)) + 0.01
+        result = double_lift_chart(y, pred, pred, n_bins=5)
+        required = {
+            "bin",
+            "n_rows",
+            "exposure_sum",
+            "exposure_share",
+            "target_sum",
+            "actual_avg",
+            "model_avg",
+            "current_avg",
+            "actual_index",
+            "model_index",
+            "current_index",
+            "sort_score_min",
+            "sort_score_max",
+        }
+        assert required.issubset(set(result.bins.columns))
+
+    def test_overall_average_reconstruction(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        y = rng.poisson(5.0, n).astype(float)
+        exp = rng.uniform(0.5, 2.0, n)
+        pred_m = np.abs(y + rng.normal(0, 0.2, n)) + 0.01
+        pred_c = np.abs(y + rng.normal(0, 1.0, n)) + 0.01
+        result = double_lift_chart(y, pred_m, pred_c, exposure=exp, n_bins=10)
+        df = result.bins
+        # Reconstruct overall actual from bin summaries
+        reconstructed = (df["actual_avg"] * df["exposure_sum"]).sum() / df["exposure_sum"].sum()
+        direct = np.sum(exp * y) / np.sum(exp)
+        np.testing.assert_allclose(reconstructed, direct, rtol=1e-6)
 
 
 # ── T9: lorenz_curve and Gini ────────────────────────────────────
