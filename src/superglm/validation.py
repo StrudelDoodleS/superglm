@@ -22,7 +22,16 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class LiftChartResult:
-    """Result from :func:`lift_chart`."""
+    """Result from :func:`lift_chart`.
+
+    Attributes
+    ----------
+    bins : pd.DataFrame
+        One row per quantile bin with columns: ``bin``, ``exposure_share``,
+        ``observed``, ``predicted``, ``obs_pred_ratio``.
+    figure : matplotlib.figure.Figure or None
+        The generated figure, or ``None`` if an external ``ax`` was provided.
+    """
 
     bins: pd.DataFrame
     figure: Figure | None
@@ -30,7 +39,19 @@ class LiftChartResult:
 
 @dataclass(frozen=True)
 class DoubleLiftChartResult:
-    """Result from :func:`double_lift_chart`."""
+    """Result from :func:`double_lift_chart`.
+
+    Attributes
+    ----------
+    bins : pd.DataFrame
+        One row per quantile bin with columns: ``bin``, ``n_rows``,
+        ``exposure_sum``, ``exposure_share``, ``target_sum``,
+        ``actual_avg``, ``model_avg``, ``current_avg``,
+        ``actual_index``, ``model_index``, ``current_index``,
+        ``sort_score_min``, ``sort_score_median``, ``sort_score_max``.
+    figure : matplotlib.figure.Figure or None
+        The generated figure, or ``None`` if an external ``ax`` was provided.
+    """
 
     bins: pd.DataFrame
     figure: Figure | None
@@ -38,7 +59,23 @@ class DoubleLiftChartResult:
 
 @dataclass(frozen=True)
 class LorenzCurveResult:
-    """Result from :func:`lorenz_curve`."""
+    """Result from :func:`lorenz_curve`.
+
+    Attributes
+    ----------
+    curve : pd.DataFrame
+        Lorenz curve data with columns: ``cum_exposure_share``,
+        ``cum_loss_share_ordered``, ``cum_loss_share_model``,
+        ``cum_loss_share_perfect``.
+    gini_model : float
+        Gini coefficient for the model ordering.
+    gini_perfect : float
+        Gini coefficient for perfect-foresight ordering.
+    gini_ratio : float
+        Normalised Gini: ``gini_model / gini_perfect``.
+    figure : matplotlib.figure.Figure or None
+        The generated figure, or ``None`` if an external ``ax`` was provided.
+    """
 
     curve: pd.DataFrame
     gini_model: float
@@ -49,7 +86,16 @@ class LorenzCurveResult:
 
 @dataclass(frozen=True)
 class LossRatioChartResult:
-    """Result from :func:`loss_ratio_chart`."""
+    """Result from :func:`loss_ratio_chart`.
+
+    Attributes
+    ----------
+    bins : pd.DataFrame
+        One row per quantile bin with columns: ``bin``, ``exposure_share``,
+        ``observed``, ``predicted``.
+    figure : matplotlib.figure.Figure or None
+        The generated figure, or ``None`` if an external ``ax`` was provided.
+    """
 
     bins: pd.DataFrame
     figure: Figure | None
@@ -141,6 +187,7 @@ def lift_chart(
     Returns
     -------
     LiftChartResult
+        Contains a ``bins`` DataFrame and an optional ``figure``.
     """
     y_obs = _ensure_array(y_obs)
     y_pred = _ensure_array(y_pred)
@@ -232,14 +279,16 @@ def double_lift_chart(
         Exposure measure for rate models.
     n_bins : int
         Number of equal-exposure quantile bins.
-    labels : tuple of str
-        Display labels for (Actual, Model, Current).
+    labels : tuple of (str, str, str)
+        Display labels as ``(Actual, Model, Current)``. Each element
+        names the corresponding series in the plot legend and axis labels.
     ax : matplotlib Axes or None
         If provided, plot onto this axes (``figure`` in result will be None).
 
     Returns
     -------
     DoubleLiftChartResult
+        Contains a ``bins`` DataFrame and an optional ``figure``.
 
     References
     ----------
@@ -395,6 +444,8 @@ def lorenz_curve(
     Returns
     -------
     LorenzCurveResult
+        Contains ``curve`` DataFrame, ``gini_model``, ``gini_perfect``,
+        ``gini_ratio``, and an optional ``figure``.
     """
     y_obs = _ensure_array(y_obs)
     y_pred = _ensure_array(y_pred)
@@ -515,6 +566,7 @@ def loss_ratio_chart(
     Returns
     -------
     LossRatioChartResult
+        Contains a ``bins`` DataFrame and an optional ``figure``.
     """
     y_obs = _ensure_array(y_obs)
     y_pred = _ensure_array(y_pred)

@@ -231,6 +231,8 @@ def cross_validate(
     Returns
     -------
     CrossValidationResult
+        Per-fold scores, mean/std aggregates, and optionally out-of-fold
+        predictions and fitted estimators.
     """
     # ── Validation ────────────────────────────────────────────────
     if not hasattr(cv, "split") or not callable(cv.split):
