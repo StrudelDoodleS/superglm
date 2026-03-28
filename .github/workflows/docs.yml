@@ -1,0 +1,43 @@
+name: Docs
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "src/**"
+      - "README.md"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docs.yml"
+
+concurrency:
+  group: docs-deploy
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - run: uv python install 3.12
+
+      - name: Install docs dependencies
+        run: uv sync --group docs --extra plotting
+
+      # Notebooks are pre-executed with outputs committed.
+      # No nbconvert --execute step needed in CI.
+
+      - name: Build and deploy
+        run: uv run mkdocs gh-deploy --force
+
+      # NOTE: After the first deploy, enable GitHub Pages in repo settings:
+      # Settings > Pages > Source: Deploy from a branch > Branch: gh-pages

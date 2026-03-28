@@ -362,7 +362,29 @@ curve_df = payload["terms"][0]["effect"]
 rels = model.relativities(with_se=True, centering="mean")
 ```
 
-### Diagnostics
+### Diagnostic plots
+
+`plot_diagnostics()` produces a GLM/GAM-appropriate 4-panel figure using quantile residuals (Dunn & Smyth 1996) with simulation-based Q-Q envelopes:
+
+```python
+model.plot_diagnostics(X, y, sample_weight=exposure)
+```
+
+Panels: Q-Q envelope, calibration, residuals vs linear predictor, residual histogram. Hexbin density rendering activates automatically for large datasets.
+
+### Validation charts
+
+```python
+from superglm.validation import double_lift_chart, lorenz_curve
+
+# CAS-style double lift chart (RPM 2016 methodology)
+double_lift_chart(y_holdout, mu_new, mu_baseline, exposure=exp_holdout, n_bins=20)
+
+# Lorenz curve with Gini coefficient
+lorenz_curve(y, mu, exposure=exposure)
+```
+
+### Other diagnostics
 
 ```python
 model.term_importance(df, sample_weight=exposure)     # weighted variance of each term's eta contribution
