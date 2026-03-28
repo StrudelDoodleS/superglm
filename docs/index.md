@@ -1,16 +1,42 @@
-# SuperGLM
+<div class="sg-hero">
+  <div class="sg-hero__logo">
+    <img src="images/logo.png" alt="SuperGLM logo">
+  </div>
+  <div class="sg-hero__copy">
+    <h1>SuperGLM</h1>
+    <p>
+      Penalised GLMs for insurance pricing, with spline smooths, exact and
+      discrete REML, group penalties, interactions, diagnostics, and actuarial
+      validation tooling.
+    </p>
+    <div class="sg-hero__actions">
+      <a class="md-button md-button--primary" href="getting-started/quickstart/">Quick Start</a>
+      <a class="md-button" href="notebooks/plotting_diagnostics_demo/">Diagnostics Demo</a>
+      <a class="md-button" href="api/model/">API Reference</a>
+    </div>
+  </div>
+</div>
 
-Penalised GLMs for insurance pricing. SuperGLM supports standard penalised fits, exact REML, large-*n* discrete/fREML-style REML, spline double-penalty shrinkage, group penalties, interactions, and statsmodels-style summaries for Poisson, Gamma, NB2, and Tweedie models.
+## What it covers
 
-## Features
-
-- **Group penalties** — group lasso, sparse group lasso, group elastic net, ridge
-- **Spline bases** — B-splines, natural splines, cubic regression splines with SSP reparametrisation
-- **REML smoothness selection** — exact and discrete/fREML paths
-- **Double-penalty shrinkage** — mgcv-style `select=True` for automatic term selection
-- **Interactions** — spline × categorical, polynomial × categorical, and more
-- **Inference** — statsmodels-style summary tables, Wood (2013) smooth tests, pointwise and simultaneous confidence bands
-- **Families** — Poisson, Gamma, Negative Binomial (NB2), Tweedie (with profile estimation)
+<div class="sg-feature-grid">
+  <div class="sg-feature-card">
+    <h3>Flexible feature types</h3>
+    <p>B-splines, natural splines, cubic regression splines, ordered categoricals, numeric, categorical, and interaction terms.</p>
+  </div>
+  <div class="sg-feature-card">
+    <h3>Modern fitting paths</h3>
+    <p>Standard penalised fitting, exact REML, and large-<em>n</em> discrete/fREML-style REML for production-scale insurance data.</p>
+  </div>
+  <div class="sg-feature-card">
+    <h3>Diagnostics and validation</h3>
+    <p>Quantile-residual diagnostics, Lorenz curves, CAS-style double lift charts, and cross-validation with out-of-fold predictions.</p>
+  </div>
+  <div class="sg-feature-card">
+    <h3>Inference and shrinkage</h3>
+    <p>Statsmodels-style summaries, smooth significance tests, confidence bands, group penalties, and mgcv-style double-penalty selection.</p>
+  </div>
+</div>
 
 ## Example plots
 
