@@ -33,3 +33,6 @@ jobs:
 
       - name: Fast tests
         run: uv run --with pyarrow pytest tests/ -q -m "not slow" --maxfail=1
+
+      - name: Docs build check
+        run: uv sync --group docs --extra plotting && uv run mkdocs build --strict

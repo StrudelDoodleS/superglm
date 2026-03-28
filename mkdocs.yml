@@ -52,6 +52,9 @@ extra_javascript:
 
 plugins:
   - search
+  - mkdocs-jupyter:
+      execute: false
+      include_source: true
   - mkdocstrings:
       handlers:
         python:
@@ -80,6 +83,13 @@ nav:
     - Families & Dispersion: guide/families.md
     - Interactions: guide/interactions.md
     - Inspecting Results: guide/results.md
+    - Model Validation: guide/validation.md
+    - Deployment: guide/deployment.md
+  - Examples:
+    - MTPL2 Frequency Walkthrough: notebooks/mtpl2_frequency_walkthrough.ipynb
+    - Plotting & Diagnostics Demo: notebooks/plotting_diagnostics_demo.ipynb
+    - Ordered Categorical Smoothing: notebooks/ordered_categorical_smoothing.ipynb
+    - Tweedie Profile Estimation: notebooks/tweedie_profile_estimation.ipynb
   - API Reference:
     - SuperGLM: api/model.md
     - Features: api/features.md
@@ -87,3 +97,6 @@ nav:
     - Penalties: api/penalties.md
     - Inference: api/inference.md
     - Plotting: api/plotting.md
+    - Validation: api/validation.md
+    - Diagnostics: api/diagnostics.md
+    - Model Selection: api/model_selection.md

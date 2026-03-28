@@ -54,6 +54,7 @@ packages = ["src/superglm"]
 target-version = "py310"
 line-length = 100
 src = ["src", "tests"]
+extend-exclude = ["docs/notebooks"]
 
 [tool.ruff.lint]
 select = [
@@ -110,4 +111,8 @@ ignore_missing_imports = true
 docs = [
     "mkdocs-material>=9.7.5",
     "mkdocstrings[python]>=1.0.3",
+    "mkdocs-jupyter>=0.25.0",
+    "nbconvert>=7.0",
+    "nbformat>=5.0",
+    "ipykernel>=6.0",
 ]

@@ -16,3 +16,8 @@ needed to recreate charts in your own plotting stack.
 ::: superglm.plotting.plot_relativities
 
 ::: superglm.plotting.plot_interaction
+
+## Diagnostic plots
+
+See [Diagnostics](diagnostics.md) for `plot_diagnostics()` — the GLM/GAM
+4-panel diagnostic figure with simulation-based Q-Q envelopes.
