@@ -30,6 +30,34 @@
   margin-top: 1rem;
 }
 
+.sg-hero__actions .md-button,
+.sg-hero__actions .md-button:visited {
+  color: var(--md-primary-fg-color);
+}
+
+.sg-hero__actions .md-button--primary,
+.sg-hero__actions .md-button--primary:visited {
+  color: var(--md-primary-bg-color);
+}
+
+.sg-hero__actions .md-button:focus:not(:hover),
+.sg-hero__actions .md-button:focus-visible:not(:hover) {
+  background-color: transparent;
+  border-color: var(--md-primary-fg-color);
+  color: var(--md-primary-fg-color);
+  box-shadow: 0 0 0 0.2rem var(--md-accent-fg-color--transparent);
+  outline: none;
+}
+
+.sg-hero__actions .md-button--primary:focus:not(:hover),
+.sg-hero__actions .md-button--primary:focus-visible:not(:hover) {
+  background-color: var(--md-primary-fg-color);
+  border-color: var(--md-primary-fg-color);
+  color: var(--md-primary-bg-color);
+  box-shadow: 0 0 0 0.2rem var(--md-accent-fg-color--transparent);
+  outline: none;
+}
+
 .sg-feature-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
