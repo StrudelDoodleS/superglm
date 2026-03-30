@@ -616,7 +616,7 @@ def fit_irls_direct(
     _t0 = time.perf_counter()
     XtWX_beta = XtWX
     M_beta = XtWX_beta + S
-    H_inv, _, _ = _safe_decompose_H(M_beta)
+    H_inv, log_det_H, _ = _safe_decompose_H(M_beta)
     XtWX_S_inv_beta = H_inv
 
     # Exact effective df: 1 (intercept) + trace((X'WX + S)^{-1} X'WX)
@@ -644,6 +644,7 @@ def fit_irls_direct(
         phi=phi,
         effective_df=p_eff,
         iteration_log=iteration_log if record_diagnostics else None,
+        log_det_H=log_det_H,
     )
 
     if return_xtwx:

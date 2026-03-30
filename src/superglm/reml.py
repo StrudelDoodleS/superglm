@@ -66,7 +66,11 @@ def build_penalty_caches(
         gm = group_matrices[idx]
         omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
         eigvals = np.linalg.eigvalsh(omega_ssp)
-        thresh = 1e-8 * max(eigvals.max(), 1e-12)
+        # Adaptive rank threshold: eps^{2/3} balances between the old fixed
+        # 1e-8 and the Higham-suggested eps*p.  Too tight (eps*p ~ 1e-15)
+        # includes numerical-zero eigenvalues; too loose (1e-8) may miss
+        # genuine small eigenvalues in ill-conditioned penalties.
+        thresh = np.finfo(float).eps ** (2 / 3) * max(eigvals.max(), 1e-12)
         pos_eigvals = eigvals[eigvals > thresh]
         rank = float(len(pos_eigvals))
         log_det = float(np.sum(np.log(pos_eigvals))) if pos_eigvals.size else 0.0

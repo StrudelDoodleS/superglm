@@ -57,6 +57,7 @@ class PIRLSResult:
     phi: float
     effective_df: float
     iteration_log: list[IterationDiagnostics] | None = None
+    log_det_H: float | None = None  # log|X'WX + S| from _safe_decompose_H  # noqa: N815
 
 
 def _compute_group_hessians(

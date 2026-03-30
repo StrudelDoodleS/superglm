@@ -366,8 +366,20 @@ def reml_laml_objective(
     offset_arr: NDArray,
     XtWX: NDArray | None = None,
     penalty_caches: dict | None = None,
+    log_det_H: float | None = None,
 ) -> float:
     """Laplace REML/LAML objective up to additive constants.
+
+    Wood (2011) Section 2, Eqs (4)-(5): V(ρ) = -ℓ(β̂) + ½β̂'Sβ̂ +
+    ½log|H| - ½log|S|₊. Known-scale: nll + ½(penalty_quad + logdet_m -
+    logdet_s). Estimated-scale: φ profiled out → ½(n-Mp)·log(D+β̂'Sβ̂)
+    replaces the nll + ½ penalty_quad terms.
+
+    Parameters
+    ----------
+    log_det_H : float, optional
+        Precomputed log|X'WX + S| from ``_safe_decompose_H``.  Avoids
+        redundant eigendecomposition when the caller already has it.
 
     Handles both known-scale families (Poisson, NB2 where φ=1) and
     estimated-scale families (Gamma, Tweedie) via φ-profiled REML.
@@ -393,12 +405,15 @@ def reml_laml_objective(
         pos_s = eigvals_s[eigvals_s > thresh_s]
         logdet_s = float(np.sum(np.log(pos_s))) if pos_s.size else 0.0
 
-    # log|H| = log|X'WX + S|
-    M = XtWX + S
-    eigvals_m = np.linalg.eigvalsh(M)
-    thresh_m = 1e-10 * max(eigvals_m.max(), 1e-12)
-    pos_m = eigvals_m[eigvals_m > thresh_m]
-    logdet_m = float(np.sum(np.log(pos_m))) if pos_m.size else 0.0
+    # log|H| = log|X'WX + S| — reuse precomputed value if available
+    if log_det_H is not None:
+        logdet_m = log_det_H
+    else:
+        M = XtWX + S
+        eigvals_m = np.linalg.eigvalsh(M)
+        thresh_m = 1e-10 * max(eigvals_m.max(), 1e-12)
+        pos_m = eigvals_m[eigvals_m > thresh_m]
+        logdet_m = float(np.sum(np.log(pos_m))) if pos_m.size else 0.0
 
     # φ-profiled REML for estimated-scale families
     scale_known = getattr(distribution, "scale_known", True)
@@ -730,6 +745,7 @@ def optimize_direct_reml(
             offset_arr,
             XtWX=XtWX,
             penalty_caches=penalty_caches,
+            log_det_H=pirls_result.log_det_H,
         )
 
         phi_hat = 1.0
@@ -927,6 +943,7 @@ def optimize_direct_reml(
                 offset_arr,
                 XtWX=trial_xtwx,
                 penalty_caches=penalty_caches,
+                log_det_H=trial_result.log_det_H,
             )
 
             if trial_obj <= obj + armijo_c * step * descent:

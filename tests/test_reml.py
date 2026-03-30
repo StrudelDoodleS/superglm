@@ -609,6 +609,47 @@ class TestREMLSelectTrue:
         # Should have 4 REML lambdas: x1:linear, x1:spline, x2:linear, x2:spline
         assert len(model._reml_lambdas) == 4
 
+    def test_reml_select_logdet_independent_subgroups(self, poisson_data):
+        """select=True: linear and spline subgroups contribute independently to log|S|+.
+
+        Each subgroup has its own penalty matrix (omega_ssp) and lambda.
+        cached_logdet_s_plus should equal the sum of per-subgroup
+        r_j * log(lambda_j) + log|Omega_j|+ contributions.
+        """
+        from superglm.group_matrix import SparseSSPGroupMatrix
+        from superglm.reml import build_penalty_caches, cached_logdet_s_plus
+
+        X, y, w = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.01,
+            features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
+        )
+        model.fit_reml(X[["x1"]], y, sample_weight=w, max_reml_iter=15)
+
+        reml_groups = []
+        for i, (gm, g) in enumerate(zip(model._dm.group_matrices, model._groups)):
+            if g.penalized and isinstance(gm, SparseSSPGroupMatrix):
+                reml_groups.append((i, g))
+
+        caches = build_penalty_caches(model._dm.group_matrices, reml_groups)
+        lambdas = model._reml_lambdas
+
+        # Verify: cached formula matches manual per-group sum
+        cached_val = cached_logdet_s_plus(lambdas, caches)
+        manual_val = 0.0
+        for name, cache in caches.items():
+            lam = lambdas.get(name, 1.0)
+            if lam > 0 and cache.rank > 0:
+                manual_val += cache.rank * np.log(lam) + cache.log_det_omega_plus
+        np.testing.assert_allclose(cached_val, manual_val, atol=1e-12)
+
+        # Verify both subgroups contribute (nonzero rank and log_det)
+        assert "x1:linear" in caches
+        assert "x1:spline" in caches
+        assert caches["x1:linear"].rank > 0
+        assert caches["x1:spline"].rank > 0
+
 
 # ── Backward compatibility ───────────────────────────────────────
 
