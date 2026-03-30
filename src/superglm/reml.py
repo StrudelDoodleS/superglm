@@ -49,6 +49,9 @@ def build_penalty_caches(
 ) -> dict[str, PenaltyCache]:
     """Build PenaltyCache for each REML-eligible group.
 
+    Wood (2011) Section 3.1: pre-compute eigenstructure of each Ω_j in
+    SSP coordinates so that log|S|₊ and rank(Ω_j) are O(1) per Newton step.
+
     Parameters
     ----------
     group_matrices : list of GroupMatrix
@@ -82,8 +85,9 @@ def cached_logdet_s_plus(
 ) -> float:
     """Compute log|S|₊ from cached penalty eigenstructure.
 
-    Uses the identity: log|S|₊ = Σ_j (r_j · log(λ_j) + log|Ω_j|₊).
-    No eigendecomposition needed — only scalar arithmetic.
+    Wood (2011) Section 3.1: stable block-diagonal identity
+    log|S|₊ = Σ_j (r_j · log(λ_j) + log|Ω_j|₊), avoiding repeated
+    eigendecompositions of the full penalty matrix.
     """
     total = 0.0
     for name, cache in penalty_caches.items():

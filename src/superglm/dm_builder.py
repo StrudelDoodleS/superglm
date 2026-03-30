@@ -56,7 +56,12 @@ def compute_R_inv(
     sample_weight: NDArray,
     lambda2: float | dict,
 ) -> NDArray:
-    """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv."""
+    """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv.
+
+    Wood (2011) Section 3.1 / Section 5: absorb penalty into parameterization.
+    R = chol(B'WB/n + λΩ + εI)^T, then R_inv = R^{-1} so that the SSP basis
+    X_ssp = B @ R_inv has near-identity X'WX regardless of λ.
+    """
     lam2 = _resolve_lambda2(lambda2)
     if sp.issparse(B):
         G = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / np.sum(sample_weight)

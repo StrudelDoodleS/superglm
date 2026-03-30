@@ -60,6 +60,9 @@ def compute_dW_deta(
 ) -> NDArray | None:
     """Derivative of IRLS weights w.r.t. the linear predictor.
 
+    Wood (2011) Appendix D: dW/dη needed for the implicit-differentiation
+    chain in the W(ρ) correction (Section 3.4).
+
     W_i = exposure_i · (dμ/dη)² / V(μ)
 
     dW_i/dη = exposure_i · (dμ/dη / V(μ)) · [2(d²μ/dη²) − (dμ/dη)² V'(μ)/V(μ)]
@@ -99,6 +102,11 @@ def reml_w_correction(
     distribution: Any,
 ) -> tuple[NDArray, dict[int, NDArray]] | None:
     """First-order W(ρ) correction for REML derivatives.
+
+    Wood (2011) Section 3.4 / Appendix C: implicit differentiation of β̂(ρ)
+    through W(η(ρ)) using the chain dβ̂/dρ = −H⁻¹ S_j β̂ (IFT on the
+    PIRLS stationarity condition). First-order approximation: d²W/dρ²
+    terms are dropped per the higher-order discussion in Appendix C.
 
     Computes the contribution from d(X'WX)/dρ_j = X'diag(dW/dρ_j)X
     which the fixed-W Laplace approximation drops.  The gradient
@@ -179,6 +187,11 @@ def reml_laml_objective(
 ) -> float:
     """Laplace REML/LAML objective up to additive constants.
 
+    Wood (2011) Section 2, Eqs (4)-(5): V(ρ) = -ℓ(β̂) + ½β̂'Sβ̂ +
+    ½log|H| - ½log|S|₊. Known-scale: nll + ½(penalty_quad + logdet_m -
+    logdet_s). Estimated-scale: φ profiled out → ½(n-Mp)·log(D+β̂'Sβ̂)
+    replaces the nll + ½ penalty_quad terms.
+
     Handles both known-scale families (Poisson, NB2 where φ=1) and
     estimated-scale families (Gamma, Tweedie) via φ-profiled REML.
     """
@@ -240,7 +253,12 @@ def reml_direct_gradient(
     penalty_ranks: dict[str, float],
     phi_hat: float = 1.0,
 ) -> NDArray:
-    """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W)."""
+    """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W).
+
+    Wood (2011) Section 3.4: ∂V/∂ρ_j at fixed W. Chain rule ∂/∂ρ = λ ∂/∂λ
+    converts from λ to log-λ (ρ) parameterization, giving the λ factor.
+    g_j = ½(λ_j(β̂'Ω_jβ̂/φ + tr(H⁻¹ λ_jΩ_j)) - r_j).
+    """
     grad = np.zeros(len(reml_groups), dtype=np.float64)
     inv_phi = 1.0 / max(phi_hat, 1e-10)
     for i, (idx, g) in enumerate(reml_groups):
@@ -269,7 +287,16 @@ def reml_direct_hessian(
     phi_hat: float = 1.0,
     dH_extra: dict[int, NDArray] | None = None,
 ) -> NDArray:
-    """Outer Hessian of the REML criterion w.r.t. log-lambdas."""
+    """Outer Hessian of the REML criterion w.r.t. log-lambdas.
+
+    Wood (2011) Appendix B / Eq 6.2. Uses implicit-differentiation
+    Jacobian (outer products of H⁻¹ dH_j) rather than explicit K/T
+    matrices from Appendix B — both equivalent. Terms:
+      -0.5 tr(F_i F_j^T)    — direct differentiation of log|H|
+      -S_beta^T H⁻¹ S_beta  — implicit differentiation of β̂'Sβ̂/φ
+      -outer(q,q)/(D+pq)²   — profiled-scale correction (estimated-φ)
+      g_i + 0.5·r_j on diag — ρ-chain-rule diagonal correction (Eq 6.2)
+    """
     m = len(reml_groups)
     p = XtWX_S_inv.shape[0]
     hess = np.zeros((m, m))
