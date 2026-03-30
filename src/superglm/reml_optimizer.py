@@ -60,9 +60,6 @@ def compute_dW_deta(
 ) -> NDArray | None:
     """Derivative of IRLS weights w.r.t. the linear predictor.
 
-    Wood (2011) Appendix D: dW/dη needed for the implicit-differentiation
-    chain in the W(ρ) correction (Section 3.4).
-
     W_i = exposure_i · (dμ/dη)² / V(μ)
 
     dW_i/dη = exposure_i · (dμ/dη / V(μ)) · [2(d²μ/dη²) − (dμ/dη)² V'(μ)/V(μ)]
@@ -83,25 +80,78 @@ def compute_dW_deta(
     return sample_weight * (g1 / V) * (2.0 * g2 - g1**2 * Vp / V)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# W(ρ) correction
-# ═══════════════════════════════════════════════════════════════════
-
-
-def _compute_d2W_deta2(
+def compute_d2W_deta2(
     link: Any,
     distribution: Any,
+    mu: NDArray,
     eta: NDArray,
     sample_weight: NDArray,
 ) -> NDArray | None:
     """Second derivative of IRLS weights w.r.t. the linear predictor.
 
-    Computed via central finite differences of ``compute_dW_deta``.
-    This avoids requiring third-order link derivatives (d³μ/dη³)
-    which most link objects do not provide.
+    Analytic formula from differentiating the Appendix D expression
+    dW/dη = sw · (g1/V) · [2g2 − g1² Vp/V].
 
-    Returns None when ``compute_dW_deta`` itself returns None (missing
-    second-order methods on the link or distribution).
+    Let A = g1/V,  B = 2g2 − g1² Vp/V.
+    Then dW/dη = sw · A · B, and
+    d²W/dη² = sw · (A' B + A B').
+
+    Requires ``link.deriv3_inverse`` (d³μ/dη³) and
+    ``distribution.variance_second_derivative`` (V''(μ)).
+    Falls back to central finite differences of ``compute_dW_deta``
+    when those methods are absent.
+    """
+    has_analytic = hasattr(link, "deriv3_inverse") and hasattr(
+        distribution, "variance_second_derivative"
+    )
+    if has_analytic:
+        return _compute_d2W_deta2_analytic(link, distribution, mu, eta, sample_weight)
+    return _compute_d2W_deta2_fd(link, distribution, eta, sample_weight)
+
+
+def _compute_d2W_deta2_analytic(
+    link: Any,
+    distribution: Any,
+    mu: NDArray,
+    eta: NDArray,
+    sample_weight: NDArray,
+) -> NDArray:
+    """Analytic d²W/dη² using third-order link and second-order variance."""
+    g1 = link.deriv_inverse(eta)  # dμ/dη
+    g2 = link.deriv2_inverse(eta)  # d²μ/dη²
+    g3 = link.deriv3_inverse(eta)  # d³μ/dη³
+    V = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
+    Vp = distribution.variance_derivative(mu)
+    Vpp = distribution.variance_second_derivative(mu)
+
+    # A = g1 / V
+    # A' = dA/dη = (g2 V − g1 Vp g1) / V²  = (g2 − g1² Vp/V) / V
+    #    using chain rule: dV/dη = Vp · g1
+    inv_V = 1.0 / V
+    A = g1 * inv_V
+    A_prime = (g2 - g1**2 * Vp * inv_V) * inv_V
+
+    # B = 2g2 − g1² Vp / V
+    # B' = dB/dη = 2g3 − d/dη[g1² Vp / V]
+    #    d/dη[g1² Vp / V] = (2g1 g2 Vp + g1² Vpp g1) / V − g1² Vp · Vp g1 / V²
+    #                      = g1 (2g2 Vp + g1² Vpp) / V − g1³ Vp² / V²
+    B = 2.0 * g2 - g1**2 * Vp * inv_V
+    d_g1sq_Vp_over_V = g1 * (2.0 * g2 * Vp + g1**2 * Vpp) * inv_V - g1**3 * Vp**2 * inv_V**2
+    B_prime = 2.0 * g3 - d_g1sq_Vp_over_V
+
+    return sample_weight * (A_prime * B + A * B_prime)
+
+
+def _compute_d2W_deta2_fd(
+    link: Any,
+    distribution: Any,
+    eta: NDArray,
+    sample_weight: NDArray,
+) -> NDArray | None:
+    """Finite-difference fallback for d²W/dη².
+
+    Central FD of ``compute_dW_deta``, used when the link or distribution
+    does not provide ``deriv3_inverse`` or ``variance_second_derivative``.
     """
     eps = 1e-5
     mu_base = clip_mu(link.inverse(eta), distribution)
@@ -121,6 +171,11 @@ def _compute_d2W_deta2(
         return None
 
     return (dW_plus - dW_minus) / (2.0 * eps)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# W(ρ) correction
+# ═══════════════════════════════════════════════════════════════════
 
 
 def reml_w_correction(
@@ -148,19 +203,18 @@ def reml_w_correction(
     correction is exact to first order; the Hessian C_j matrices are
     first-order (d²W/dρ² terms are dropped) unless ``w_correction_order=2``.
 
-    When ``w_correction_order=2``, the second-order cross-term Hessian
-    correction from Appendix C is also computed::
+    When ``w_correction_order=2``, the full second-order Hessian correction
+    from Section 3.5.1 is computed::
 
-        dH2_cross[j,k] = 0.5 * tr(H⁻¹ X' diag(d²W/dη² · dη_j · dη_k) X)
+        ∂²w/(∂ρ_j ∂ρ_k) = (d²w/dη²)·(dη/dρ_j)·(dη/dρ_k) + (dw/dη)·(d²η/(dρ_j dρ_k))
 
-    This accounts for the curvature of W w.r.t. ρ through the product
-    of per-group linear predictor perturbations.
+    where d²η/(dρ_j dρ_k) = X · d²β̂/(dρ_j dρ_k) from Section 3.4.
 
     Parameters
     ----------
     w_correction_order : int, default 1
-        1 = first-order only (current default, backward compatible).
-        2 = include second-order Hessian cross-terms from d²W/dη².
+        1 = first-order only (backward compatible).
+        2 = include second-order Hessian cross-terms (Wood 2011 Section 3.5.1).
 
     Returns ``(grad_correction, dH_extra)`` when ``w_correction_order=1``
     (backward compatible 2-tuple), or
@@ -169,7 +223,8 @@ def reml_w_correction(
     vanishes (e.g. Gamma with log link where dW/dη = 0 identically) or
     if the link/distribution does not provide the required methods.
 
-    dH2_cross is an (m, m) array of second-order Hessian corrections.
+    dH2_cross is an (m, m) array of second-order Hessian corrections:
+    ``dH2_cross[j,k] = 0.5 * tr(H⁻¹ X' diag(∂²w/(∂ρ_j ∂ρ_k)) X)``.
     """
     eta = stabilize_eta(
         dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
@@ -194,10 +249,13 @@ def reml_w_correction(
     # Pre-compute d²W/dη² for second-order path
     d2W_deta2: NDArray | None = None
     if w_correction_order >= 2:
-        d2W_deta2 = _compute_d2W_deta2(link, distribution, eta, sample_weight)
+        d2W_deta2 = compute_d2W_deta2(link, distribution, mu, eta, sample_weight)
 
-    # Store deta_j vectors for second-order cross-terms
+    # Store per-group quantities for second-order cross-terms
     deta_vectors: list[NDArray] = []
+    dbeta_vectors: list[NDArray] = []
+    omega_ssp_list: list[NDArray] = []
+    lam_list: list[float] = []
 
     for i, (idx, g) in enumerate(reml_groups):
         if penalty_caches is not None:
@@ -231,17 +289,55 @@ def reml_w_correction(
 
         if w_correction_order >= 2:
             deta_vectors.append(deta_j)
+            dbeta_vectors.append(dbeta_j)
+            omega_ssp_list.append(omega_ssp)
+            lam_list.append(lam)
 
-    # Second-order Hessian cross-terms
+    # ── Second-order Hessian cross-terms (Wood 2011, Section 3.5.1) ──
     dH2_cross: NDArray | None = None
     if w_correction_order >= 2 and d2W_deta2 is not None:
         dH2_cross = np.zeros((m, m))
         for i in range(m):
+            g_i = reml_groups[i][1]
             for j in range(i, m):
-                # d²W/dη² · dη_i · dη_j  (elementwise product)
-                a_ij = d2W_deta2 * deta_vectors[i] * deta_vectors[j]
-                C_ij = _block_xtwx_signed(gms, groups, a_ij, tabmat_split=dm.tabmat_split)
-                # 0.5 * tr(H⁻¹ C_ij)
+                g_j = reml_groups[j][1]
+
+                # ── f^{jk} vector (Section 3.4, eq for d²β̂) ──
+                # f_i = 0.5 * deta_j * deta_k * dW_deta
+                f_jk = 0.5 * deta_vectors[i] * deta_vectors[j] * dW_deta
+
+                # X^T f^{jk}
+                Xt_f = dm.rmatvec(f_jk)
+
+                # λ_j S_j dβ̂/dρ_k  (nonzero only in g_j.sl block)
+                lam_i_S_i_dbeta_j = np.zeros(p)
+                lam_i_S_i_dbeta_j[g_i.sl] = lam_list[i] * (
+                    omega_ssp_list[i] @ dbeta_vectors[j][g_i.sl]
+                )
+
+                # λ_k S_k dβ̂/dρ_j  (nonzero only in g_k.sl block)
+                lam_j_S_j_dbeta_i = np.zeros(p)
+                lam_j_S_j_dbeta_i[g_j.sl] = lam_list[j] * (
+                    omega_ssp_list[j] @ dbeta_vectors[i][g_j.sl]
+                )
+
+                # rhs = X^T f^{jk} + λ_i S_i dβ̂_j + λ_j S_j dβ̂_i
+                rhs = Xt_f + lam_i_S_i_dbeta_j + lam_j_S_j_dbeta_i
+
+                # d²β̂/(dρ_i dρ_j) = δ_ij · dβ̂/dρ_j − H⁻¹ rhs
+                d2beta_ij = -(XtWX_S_inv @ rhs)
+                if i == j:
+                    d2beta_ij += dbeta_vectors[j]
+
+                # d²η/(dρ_i dρ_j) = X · d²β̂/(dρ_i dρ_j)
+                d2eta_ij = dm.matvec(d2beta_ij)
+
+                # Full ∂²w/(∂ρ_i ∂ρ_j) (Section 3.5.1 T_{jk} derivation):
+                # = d²W/dη² · dη_i · dη_j  +  dW/dη · d²η_ij
+                d2w_drho_ij = d2W_deta2 * deta_vectors[i] * deta_vectors[j] + dW_deta * d2eta_ij
+
+                # Hessian correction: 0.5 * tr(H⁻¹ X' diag(d2w_drho_ij) X)
+                C_ij = _block_xtwx_signed(gms, groups, d2w_drho_ij, tabmat_split=dm.tabmat_split)
                 val = 0.5 * float(np.sum(XtWX_S_inv * C_ij))
                 dH2_cross[i, j] = val
                 dH2_cross[j, i] = val
@@ -270,11 +366,6 @@ def reml_laml_objective(
     penalty_caches: dict | None = None,
 ) -> float:
     """Laplace REML/LAML objective up to additive constants.
-
-    Wood (2011) Section 2, Eqs (4)-(5): V(ρ) = -ℓ(β̂) + ½β̂'Sβ̂ +
-    ½log|H| - ½log|S|₊. Known-scale: nll + ½(penalty_quad + logdet_m -
-    logdet_s). Estimated-scale: φ profiled out → ½(n-Mp)·log(D+β̂'Sβ̂)
-    replaces the nll + ½ penalty_quad terms.
 
     Handles both known-scale families (Poisson, NB2 where φ=1) and
     estimated-scale families (Gamma, Tweedie) via φ-profiled REML.
@@ -337,12 +428,7 @@ def reml_direct_gradient(
     penalty_ranks: dict[str, float],
     phi_hat: float = 1.0,
 ) -> NDArray:
-    """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W).
-
-    Wood (2011) Section 3.4: ∂V/∂ρ_j at fixed W. Chain rule ∂/∂ρ = λ ∂/∂λ
-    converts from λ to log-λ (ρ) parameterization, giving the λ factor.
-    g_j = ½(λ_j(β̂'Ω_jβ̂/φ + tr(H⁻¹ λ_jΩ_j)) - r_j).
-    """
+    """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W)."""
     grad = np.zeros(len(reml_groups), dtype=np.float64)
     inv_phi = 1.0 / max(phi_hat, 1e-10)
     for i, (idx, g) in enumerate(reml_groups):
@@ -374,20 +460,16 @@ def reml_direct_hessian(
 ) -> NDArray:
     """Outer Hessian of the REML criterion w.r.t. log-lambdas.
 
-    Wood (2011) Appendix B / Eq 6.2. Uses implicit-differentiation
+    Wood (2011) Appendix B / Eq 6.2.  Uses implicit-differentiation
     Jacobian (outer products of H⁻¹ dH_j) rather than explicit K/T
-    matrices from Appendix B — both equivalent. Terms:
-      -0.5 tr(F_i F_j^T)    — direct differentiation of log|H|
-      -S_beta^T H⁻¹ S_beta  — implicit differentiation of β̂'Sβ̂/φ
-      -outer(q,q)/(D+pq)²   — profiled-scale correction (estimated-φ)
-      g_i + 0.5·r_j on diag — ρ-chain-rule diagonal correction (Eq 6.2)
+    matrices from Appendix B.
 
     Parameters
     ----------
     dH2_cross : NDArray or None
         Second-order W(ρ) Hessian correction from ``reml_w_correction``
         with ``w_correction_order=2``.  An (m, m) matrix of
-        0.5 * tr(H⁻¹ X'diag(d²W/dη² · dη_i · dη_j)X) values,
+        0.5 * tr(H⁻¹ X'diag(∂²w/(∂ρ_j ∂ρ_k))X) values,
         added directly to the Hessian.
     """
     m = len(reml_groups)
@@ -444,7 +526,7 @@ def reml_direct_hessian(
         q = np.array(quad_per_group)
         hess -= 0.5 * max(n_obs - M_p, 1.0) * np.outer(q, q) / d_plus_pq**2
 
-    # Second-order W(ρ) cross-term from d²W/dη²
+    # Second-order W(ρ) cross-term from d²W/(dρ_j dρ_k)
     if dH2_cross is not None:
         hess += dH2_cross
 
@@ -714,8 +796,8 @@ def optimize_direct_reml(
                 proj_grad[i] = 0.0
         proj_grad_norm = float(np.max(np.abs(proj_grad)))
 
-        # Compound convergence criterion (Wood 2011, Section 6.2):
-        # max(|g_j|) < eps * (1 + |V_r|), both gradient and objective change.
+        # Compound convergence criterion (Wood 2011):
+        # Wood (2011) Section 6.2: max(|g_j|) < eps * (1 + |V_r|).
         score_scale = max(1.0 + abs(obj), 1.0)
         obj_change = abs(obj - prev_obj) if outer > 0 else np.inf
 
@@ -1623,14 +1705,12 @@ def optimize_efs_reml(
                 penalty_caches=penalty_caches,
             )
             if obj_trial > obj_curr + 1e-8 * max(abs(obj_curr), 1.0):
-                # Geometric mean interpolation in log-lambda space
                 for _, g in reml_groups:
                     log_old = np.log(max(lambdas[g.name], 1e-10))
                     log_new = np.log(max(lambdas_new[g.name], 1e-10))
                     lambdas_new[g.name] = float(
                         np.clip(np.exp(0.5 * (log_old + log_new)), 1e-6, 1e10)
                     )
-                # Update Anderson state for the dampened step
                 if len(reml_update_names) > 0:
                     aa_prev_log_gx = np.array([np.log(lambdas_new[n_]) for n_ in reml_update_names])
 

@@ -71,14 +71,16 @@ item on that basis without human approval.
   `dW_i/dη = w_i(2(d²μ/dη²)(dμ/dη)⁻¹ - V'(μ)/V(μ))` matches Appendix D.
 - `done` First-order IFT chain: dβ̂/dρ → dη/dρ → dW → C_j → gradient correction.
   `reml_w_correction()` reml_optimizer.py:88-159.
-- `partial` **Second-order W(rho) correction: FD approximation, not analytic.**
+- `done` **Second-order W(rho) correction: analytic, paper-complete.**
   `w_correction_order=1` (default): first-order only.
-  `w_correction_order=2`: includes d²W/dη² cross-term Hessian correction
-  inspired by Appendix C, but computed via FD of compute_dW_deta (not the
-  analytic third-order link derivatives the paper implies). This is a
-  second-order numerical approximation, not a direct paper implementation.
-  MTPL2 benchmark: 15.5% overhead, 0.0004 deviance difference.
-  **Remaining**: analytic d²W/dη² would require d³μ/dη³ on link objects.
+  `w_correction_order=2`: full Section 3.4 / 3.5.1 implementation:
+  - Analytic d²W/dη² via `deriv3_inverse` + `variance_second_derivative`
+    (FD fallback for custom links without these methods)
+  - Full d²β̂/(dρ_j dρ_k) from Section 3.4 including the f^{jk} term,
+    cross-penalty products λ_j S_j dβ̂/dρ_k, and the δ_jk correction
+  - Complete ∂²w/(∂ρ_j ∂ρ_k) = (d²w/dη²)(dη_j)(dη_k) + (dw/dη)(d²η_jk)
+    — both terms, not just the first
+  MTPL2 benchmark: 41% overhead, 0.0013 deviance difference.
 - `done` dH_extra incorporated into Hessian off-diagonals (line 290-291).
 - `todo` Add FD tests isolating W(rho) contributions by family/link
   (Poisson/log, Binomial/logit, Tweedie/log, NB2/log).
