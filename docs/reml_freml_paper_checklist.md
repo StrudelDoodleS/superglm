@@ -15,11 +15,14 @@ The rule for this document is simple:
 
 ## Status Legend
 
-- `todo`
-- `partial`
-- `done`
-- `n/a`
-- `engineering` — not in the paper; our choice, documented
+- `todo` — not yet started
+- `partial` — partly implemented
+- `done` — implemented
+- `n/a` — not applicable to this repo
+- `engineering` — intentionally not implemented by explicit human decision
+
+Agents can recommend an `engineering` deferral, but must not close a paper
+item on that basis without human approval.
 
 ---
 
@@ -68,12 +71,14 @@ The rule for this document is simple:
   `dW_i/dη = w_i(2(d²μ/dη²)(dμ/dη)⁻¹ - V'(μ)/V(μ))` matches Appendix D.
 - `done` First-order IFT chain: dβ̂/dρ → dη/dρ → dW → C_j → gradient correction.
   `reml_w_correction()` reml_optimizer.py:88-159.
-- `done` **Second-order W(rho) terms: empirically closed.**
-  Benchmark (scratch/benchmark_w_correction_error.py) compares analytic
-  total gradient vs outer FD of objective — a proxy for remaining
-  outer-derivative mismatch, not a pure isolation of dropped d²W/dρ²
-  terms. Default seed: <0.06%; multi-seed spot checks: <0.3%.
-  Engineering decision: first-order is sufficient for this repo's scope.
+- `partial` **Second-order W(rho) terms not yet implemented.**
+  Current code is first-order only (d²W/dρ² dropped, line 106).
+  Benchmark (scratch/benchmark_w_correction_error.py) shows the omitted
+  terms appear small on tested setups (<0.3% multi-seed), but this does
+  not satisfy paper-complete.
+  **TODO**: implement second-order W(rho) correction from Appendix C,
+  make correction order selectable (first vs second), keep both paths,
+  benchmark accuracy/lambda/convergence/runtime between them.
 - `done` dH_extra incorporated into Hessian off-diagonals (line 290-291).
 - `todo` Add FD tests isolating W(rho) contributions by family/link
   (Poisson/log, Binomial/logit, Tweedie/log, NB2/log).
