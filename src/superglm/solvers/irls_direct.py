@@ -23,6 +23,7 @@ import time
 
 import numpy as np
 import scipy.linalg
+import scipy.linalg.lapack
 from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initial_mean
@@ -43,48 +44,80 @@ logger = logging.getLogger(__name__)
 def _robust_solve(
     M: NDArray, rhs: NDArray, residual_tol: float = 1e-6
 ) -> tuple[NDArray, float, bool]:
-    """Solve ``M @ x = rhs`` with Cholesky primary path, SVD fallback.
+    """Solve ``M @ x = rhs`` with pivoted Cholesky, SVD fallback.
 
-    After Cholesky, the solution quality is verified via the relative residual
-    ``||Mx - rhs|| / ||rhs||``.  If this exceeds *residual_tol* (indicating
-    the system is too ill-conditioned for Cholesky to produce accurate digits),
-    the solver falls back to truncated SVD.  This catches near-singular systems
-    (cond ~1e14) where Cholesky technically succeeds but returns garbage.
+    Uses a three-tier strategy (Higham, *Accuracy and Stability*, Ch. 10):
+
+    1. **Pivoted Cholesky** (``dpstrf``): rank-revealing, handles PSD
+       matrices.  If full-rank, solves via triangular back-substitution.
+       If rank-deficient, solves the minimum-norm system from the leading
+       *r* pivoted columns.
+    2. **Residual check**: verifies ``||Mx - rhs|| / ||rhs|| < residual_tol``
+       as a direct solve-quality signal.
+    3. **SVD fallback**: backward-stable for any condition number.
 
     Parameters
     ----------
     M : (k, k) ndarray, symmetric positive (semi-)definite
     rhs : (k,) ndarray
     residual_tol : float
-        Maximum acceptable relative residual from the Cholesky solve.
+        Maximum acceptable relative residual from the solve.
 
     Returns
     -------
     x : (k,) ndarray
     cond_est : float
-        Estimated condition number (Cholesky diagonal heuristic, or SVD-based).
+        Estimated condition number (from pivoted Cholesky diagonal or SVD).
     used_svd : bool
         True if the SVD path was taken.
     """
+    k = M.shape[0]
+
+    # === Primary path: Pivoted Cholesky (Higham Ch. 10.3) ===
     try:
-        L = scipy.linalg.cholesky(M, lower=True, check_finite=False)
-        x = scipy.linalg.cho_solve((L, True), rhs)
-        # Verify solution quality — catches ill-conditioned systems where
-        # Cholesky succeeds but the solve loses all significant digits.
+        c, piv, rank, info = scipy.linalg.lapack.dpstrf(M, lower=0)
+        if info < 0:
+            raise np.linalg.LinAlgError("dpstrf: illegal argument")
+
+        piv0 = piv - 1  # 0-indexed
+        U = np.triu(c[:rank, :rank])  # rank x rank upper triangular
+
+        # Permute rhs to pivoted order
+        rhs_perm = rhs[piv0]
+
+        if rank == k:
+            # Full rank: solve U' U x_perm = rhs_perm
+            y = scipy.linalg.solve_triangular(U, rhs_perm, lower=False, trans="T")
+            x_perm = scipy.linalg.solve_triangular(U, y, lower=False)
+            # Unpermute
+            x = np.empty(k)
+            x[piv0] = x_perm
+        else:
+            # Rank-deficient: solve in the leading rank subspace
+            rhs_r = rhs_perm[:rank]
+            # U[:rank, :rank] is the factor: solve U' U x_r = rhs_r
+            y = scipy.linalg.solve_triangular(U, rhs_r, lower=False, trans="T")
+            x_r = scipy.linalg.solve_triangular(U, y, lower=False)
+            x_perm = np.zeros(k)
+            x_perm[:rank] = x_r
+            x = np.empty(k)
+            x[piv0] = x_perm
+
+        # Verify solution quality
         rhs_norm = np.linalg.norm(rhs)
         rel_residual = np.linalg.norm(M @ x - rhs) / max(rhs_norm, 1e-300)
         if rel_residual < residual_tol:
-            diag_L = np.diag(L)
-            cond_est = float((diag_L.max() / max(diag_L.min(), 1e-300)) ** 2)
+            diag_U = np.abs(np.diag(U))
+            cond_est = float((diag_U.max() / max(diag_U.min(), 1e-300)) ** 2)
             return x, cond_est, False
-    except np.linalg.LinAlgError:
+    except (np.linalg.LinAlgError, ValueError):
         pass
 
-    # SVD fallback — backward-stable for any condition number
-    U, s, Vh = np.linalg.svd(M, full_matrices=False)
+    # === Fallback: Truncated SVD (backward-stable for any condition) ===
+    U_svd, s, Vh = np.linalg.svd(M, full_matrices=False)
     thresh = s[0] * 1e-10
     inv_s = np.where(s > thresh, 1.0 / s, 0.0)
-    x = (Vh.T * inv_s) @ (U.T @ rhs)
+    x = (Vh.T * inv_s) @ (U_svd.T @ rhs)
     cond_est = float(s[0] / max(s[-1], 1e-300))
     return x, cond_est, True
 
@@ -150,47 +183,92 @@ def _invert_xtwx_plus_penalty(
 def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, float, bool]:
     """Decompose H = X'WX + S, returning its inverse and log-determinant.
 
-    Attempts a fast Cholesky decomposition first.  After computing the inverse,
-    verifies quality via a spot-check: ``||H @ H_inv[:, 0] - e_0||``.  If the
-    residual exceeds *residual_tol*, falls back to truncated SVD.  This catches
-    near-singular systems (cond ~1e14) where Cholesky succeeds but the inverse
-    is garbage.
+    Uses a three-tier strategy (Higham, *Accuracy and Stability*, Ch. 10):
+
+    1. **Pivoted Cholesky** (``dpstrf``): rank-revealing, O(p³), handles
+       positive semi-definite matrices gracefully.  If full-rank, the
+       inverse is computed via triangular solves.  If rank-deficient, a
+       truncated pseudo-inverse is formed from the leading *r* columns.
+    2. **Residual spot-check**: after computing the inverse, verify
+       ``||H @ H_inv[:, 0] - e_0|| < residual_tol``.  This is a direct
+       solve-quality signal that catches conditioning pathologies the
+       pivoted Cholesky's rank estimate might miss.
+    3. **SVD fallback**: backward-stable for any condition number.
 
     Parameters
     ----------
     H : (p, p) ndarray
         The matrix to invert (typically X'WX + S).
     residual_tol : float
-        Maximum acceptable residual from the Cholesky inverse spot-check.
+        Maximum acceptable residual from the inverse spot-check.
 
     Returns
     -------
     H_inv : (p, p) ndarray
         The inverse (or pseudo-inverse) of H.
     log_det_H : float
-        log|H| (from Cholesky diagonal) or log|H|₊ (from positive SVD values).
+        log|H| (full-rank) or log|H|₊ (rank-deficient, positive eigenvalues).
     cholesky_ok : bool
-        True if the Cholesky path succeeded with acceptable quality.
+        True if the pivoted-Cholesky path succeeded with acceptable quality.
     """
     p = H.shape[0]
 
-    # === Primary path: Fast Cholesky with quality spot-check ===
+    # === Primary path: Pivoted Cholesky (Higham Ch. 10.3) ===
+    # dpstrf computes P' U' U P = H (upper) with column pivoting,
+    # revealing the numerical rank.
     try:
-        L = scipy.linalg.cholesky(H, lower=True, check_finite=False)
-        H_inv = scipy.linalg.cho_solve((L, True), np.eye(p))
-        # Spot-check: verify first column of the inverse (O(p²), not O(p³))
-        e0 = np.zeros(p)
-        e0[0] = 1.0
-        residual = np.linalg.norm(H @ H_inv[:, 0] - e0)
-        if residual < residual_tol:
-            diag_L = np.diag(L)
-            log_det_H = 2.0 * float(np.sum(np.log(diag_L)))
-            return H_inv, log_det_H, True
-    except np.linalg.LinAlgError:
+        c, piv, rank, info = scipy.linalg.lapack.dpstrf(H, lower=0)
+        piv0 = piv[:rank] - 1  # 0-indexed pivot indices for the leading rank columns
+
+        if info < 0:
+            raise np.linalg.LinAlgError("dpstrf: illegal argument")
+
+        U = np.triu(c[:rank, :rank])  # rank x rank upper triangular factor
+
+        if rank == p:
+            # Full rank — invert via triangular solve on the permuted system.
+            # P' U' U P = H  =>  H_inv = P' (U' U)^{-1} P
+            U_inv = scipy.linalg.solve_triangular(U, np.eye(rank), lower=False)
+            H_inv_perm = U_inv @ U_inv.T
+
+            # Unpermute: H_inv[i, j] = H_inv_perm[inv_piv[i], inv_piv[j]]
+            inv_piv = np.argsort(piv0)
+            H_inv = H_inv_perm[np.ix_(inv_piv, inv_piv)]
+
+            # Spot-check: verify first column of the inverse (O(p²))
+            e0 = np.zeros(p)
+            e0[0] = 1.0
+            residual = np.linalg.norm(H @ H_inv[:, 0] - e0)
+            if residual < residual_tol:
+                diag_U = np.abs(np.diag(U))
+                log_det_H = 2.0 * float(np.sum(np.log(diag_U)))
+                return H_inv, log_det_H, True
+        else:
+            # Rank-deficient — truncated pseudo-inverse from leading r columns.
+            # Only the first `rank` pivoted columns contribute.
+            # U is rank x rank, factor of the rank x rank leading minor of P H P'.
+            # The remaining (p - rank) directions are in the null space.
+            U_inv = scipy.linalg.solve_triangular(U, np.eye(rank), lower=False)
+            # Pseudo-inverse in permuted space: zero out null-space directions
+            H_inv_perm = np.zeros((p, p))
+            H_inv_perm[:rank, :rank] = U_inv @ U_inv.T
+
+            inv_piv = np.argsort(piv - 1)  # full piv, 0-indexed
+            H_inv = H_inv_perm[np.ix_(inv_piv, inv_piv)]
+
+            # Spot-check
+            e0 = np.zeros(p)
+            e0[0] = 1.0
+            residual = np.linalg.norm(H @ H_inv[:, 0] - e0)
+            if residual < residual_tol:
+                diag_U = np.abs(np.diag(U))
+                log_det_H = 2.0 * float(np.sum(np.log(diag_U)))
+                return H_inv, log_det_H, True
+    except (np.linalg.LinAlgError, ValueError):
         pass
 
     # === Fallback: Truncated SVD (backward-stable for any condition) ===
-    U, s, Vh = np.linalg.svd(H, full_matrices=False)
+    U_svd, s, Vh = np.linalg.svd(H, full_matrices=False)
     thresh = s[0] * 1e-10
     inv_s = np.where(s > thresh, 1.0 / s, 0.0)
     H_inv = (Vh.T * inv_s) @ Vh  # symmetric: Vh.T @ diag(inv_s) @ Vh

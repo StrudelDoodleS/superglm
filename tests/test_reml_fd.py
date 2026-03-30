@@ -603,3 +603,99 @@ class TestREMLFiniteDifference:
                     f"{family} total Hessian[{i},{j}]: analytic={hess_with[i, j]:.6f}, "
                     f"fd={fd_hess[i, j]:.6f}, rel_err={rel_err:.4f}"
                 )
+
+    def test_hessian_diagonal_uses_total_gradient(self):
+        """Regression: Hessian diagonal must use the total gradient.
+
+        Wood (2011) eq 6.2: H[i,i] += g_i + 0.5*r_j where g_i is the
+        *total* gradient (partial + W(rho) correction).  For Poisson/log,
+        the W(rho) correction is nonzero, so passing total vs partial
+        gradient should produce different Hessian diagonals.
+
+        This test ensures the bug of passing grad_partial instead of
+        grad (total) to reml_direct_hessian() never recurs.
+        """
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model("poisson")
+
+        # Partial gradient (fixed W)
+        grad_partial = m._reml_direct_gradient(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            phi_hat=phi_hat,
+        )
+
+        # W correction (nonzero for Poisson/log)
+        w_corr = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+        )
+        assert w_corr is not None, "Poisson/log must have nonzero W correction"
+        grad_total = grad_partial + w_corr[0]
+        dH_extra = w_corr[1]
+
+        # Hessian with total gradient (correct per Wood 2011)
+        hess_total = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad_total,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+            dH_extra=dH_extra,
+        )
+
+        # Hessian with partial gradient (the old bug)
+        hess_partial = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad_partial,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+            dH_extra=dH_extra,
+        )
+
+        # The diagonals must differ (W correction is nonzero for Poisson)
+        diag_diff = np.abs(np.diag(hess_total) - np.diag(hess_partial))
+        assert np.any(diag_diff > 1e-8), (
+            "Poisson/log: Hessian diagonal should differ between total and "
+            f"partial gradient, but max diff = {diag_diff.max():.2e}"
+        )
+
+        # Off-diagonals must be identical (only the diagonal correction
+        # depends on the gradient parameter)
+        m_groups = len(reml_groups)
+        for i in range(m_groups):
+            for j in range(m_groups):
+                if i != j:
+                    assert hess_total[i, j] == hess_partial[i, j], (
+                        f"Off-diagonal [{i},{j}] should not depend on gradient"
+                    )

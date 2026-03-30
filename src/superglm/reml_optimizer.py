@@ -585,10 +585,9 @@ def optimize_direct_reml(
                 proj_grad[i] = 0.0
         proj_grad_norm = float(np.max(np.abs(proj_grad)))
 
-        # Compound convergence criterion (Wood 2011):
-        # score_scale = |log(phi)| + |obj|, both (a) and (b) must hold.
-        score_scale = abs(np.log(max(phi_hat, 1e-300))) + abs(obj)
-        score_scale = max(score_scale, 1.0)  # floor to avoid degeneracy
+        # Compound convergence criterion (Wood 2011, Section 6.2):
+        # max(|g_j|) < eps * (1 + |V_r|), both gradient and objective change.
+        score_scale = max(1.0 + abs(obj), 1.0)
         obj_change = abs(obj - prev_obj) if outer > 0 else np.inf
 
         if verbose:
@@ -610,6 +609,9 @@ def optimize_direct_reml(
                 break
 
         # Newton with exact outer Hessian
+        # Wood (2011) eq 6.2: diagonal correction H[i,i] += g_i + 0.5*r_j
+        # must use the *total* gradient (partial + W(rho) correction), not
+        # the fixed-W partial gradient alone.
         _t0 = _time.perf_counter()
         hess = reml_direct_hessian(
             dm.group_matrices,
@@ -617,7 +619,7 @@ def optimize_direct_reml(
             XtWX_S_inv,
             cand_lambdas,
             reml_groups,
-            grad_partial,
+            grad,
             penalty_ranks,
             penalty_caches=penalty_caches,
             pirls_result=pirls_result,
@@ -1025,8 +1027,8 @@ def optimize_discrete_reml_cached_w(
         )
 
         # Active-set: freeze components with negligible gradient and Hessian
-        score_scale_d = abs(np.log(max(phi_hat, 1e-300))) + abs(obj)
-        score_scale_d = max(score_scale_d, 1.0)
+        # Wood (2011) Section 6.2: score_scale = 1 + |V_r|
+        score_scale_d = max(1.0 + abs(obj), 1.0)
         freeze_tol_d = 0.1 * _tol
 
         proj_grad_d = grad.copy()
@@ -1452,6 +1454,51 @@ def optimize_efs_reml(
         if len(reml_update_names) > 0:
             aa_prev_log_x = np.array([np.log(lambdas[n_]) for n_ in reml_update_names])
             aa_prev_log_gx = np.array([np.log(lambdas_new[n_]) for n_ in reml_update_names])
+
+        # ── Approximate uphill-step guard (Wood & Fasiolo 2017) ────
+        # EFS is not guaranteed to decrease the REML objective.  Evaluate
+        # the objective at lambdas_new on the *current* basis (R_inv has not
+        # changed yet) as an approximate guard.  This is not a strict
+        # monotonicity guarantee — R_inv changes at line ~1485 — but it
+        # catches gross uphill steps before committing to the update.
+        if cached_xtwx is not None:
+            obj_curr = reml_laml_objective(
+                dm,
+                distribution,
+                link,
+                groups,
+                y,
+                pirls_result,
+                lambdas,
+                sample_weight,
+                offset_arr,
+                XtWX=cached_xtwx,
+                penalty_caches=penalty_caches,
+            )
+            obj_trial = reml_laml_objective(
+                dm,
+                distribution,
+                link,
+                groups,
+                y,
+                pirls_result,
+                lambdas_new,
+                sample_weight,
+                offset_arr,
+                XtWX=cached_xtwx,
+                penalty_caches=penalty_caches,
+            )
+            if obj_trial > obj_curr + 1e-8 * max(abs(obj_curr), 1.0):
+                # Geometric mean interpolation in log-lambda space
+                for _, g in reml_groups:
+                    log_old = np.log(max(lambdas[g.name], 1e-10))
+                    log_new = np.log(max(lambdas_new[g.name], 1e-10))
+                    lambdas_new[g.name] = float(
+                        np.clip(np.exp(0.5 * (log_old + log_new)), 1e-6, 1e10)
+                    )
+                # Update Anderson state for the dampened step
+                if len(reml_update_names) > 0:
+                    aa_prev_log_gx = np.array([np.log(lambdas_new[n_]) for n_ in reml_update_names])
 
         # ── Convergence check ─────────────────────────────────────
         changes = [

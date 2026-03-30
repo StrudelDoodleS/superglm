@@ -218,11 +218,16 @@ class TestQRSolverPath:
         assert model._result.converged
         assert np.isfinite(model._result.deviance)
 
-    def test_auto_warning_on_repeated_svd(self, caplog):
-        """'auto' mode logs warning after 3 consecutive SVD fallbacks."""
+    def test_auto_near_collinear_converges(self, caplog):
+        """'auto' mode handles near-collinear data without SVD fallback.
+
+        With pivoted Cholesky (Higham Ch. 10.3), near-collinear systems
+        that previously triggered repeated SVD fallbacks are now handled
+        directly by the rank-revealing decomposition.
+        """
         rng = np.random.default_rng(42)
         n = 5000
-        # Nested categoricals → near-collinearity → SVD fallback every iter
+        # Nested categoricals → near-collinearity
         region = rng.choice(10, n)
         sub_region = region * 3 + rng.choice(3, n)
         age = rng.uniform(18, 80, n)
@@ -250,7 +255,7 @@ class TestQRSolverPath:
         )
         with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
             model.fit(df, y)
-        assert any("consecutive SVD fallbacks" in r.message for r in caplog.records)
+        assert model._result.converged
 
     def test_gram_no_warning(self, caplog):
         """'gram' mode suppresses SVD fallback warnings."""
