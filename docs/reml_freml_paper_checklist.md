@@ -113,13 +113,16 @@ item on that basis without human approval.
   `log|S|₊ = Σ_j(r_j log λ_j + log|Ω_j|₊)` — stable form from Section 3.1.
 - `done` Penalty caches precomputed once per fit.
   `build_penalty_caches()` reml.py:46-76.
-- `todo` **Full Appendix B similarity transform not implemented.**
-  Code uses simplified eigenvalue-based log-det (threshold + sum logs).
-  Appendix B gives a recursive Frobenius-norm column separation algorithm
-  for general multi-penalty log-det computation.
-  Currently sufficient for SSP (single penalty per group after R_inv) but
-  missing full robustness for general multi-penalty cases.
-  **Decision**: implement the full algorithm (Slice 3).
+- `partial` **Appendix B similarity transform: Slice 3A done, 3B scoped.**
+  Current simplified approach (per-group eigendecomposition) is correct
+  for SSP (single penalty per group). Slice 3A cleanup done:
+  - Unified log-det: reml_laml_objective accepts precomputed log_det_H
+  - Adaptive threshold: eps^{2/3} * max replaces fixed 1e-8
+  - Select=True double-penalty verified with targeted test
+  Slice 3B (full Appendix B similarity transform) is scoped as
+  **foundational architecture for multi-penalty REML** — multiple
+  penalties per term, tensor extensions, general determinant/rank.
+  Not needed for current SSP structure; deferred to dedicated session.
 - `engineering` R_inv regularization ε=1e-8 is fixed, not adaptive.
   Paper is silent on the exact regularization constant.
 
