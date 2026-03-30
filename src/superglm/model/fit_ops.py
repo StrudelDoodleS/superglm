@@ -321,9 +321,17 @@ def model_compute_dW_deta(model, mu, eta, sample_weight):
 
 
 def model_reml_w_correction(
-    model, pirls_result, XtWX_S_inv, lambdas, reml_groups, penalty_caches, sample_weight, offset_arr
+    model,
+    pirls_result,
+    XtWX_S_inv,
+    lambdas,
+    reml_groups,
+    penalty_caches,
+    sample_weight,
+    offset_arr,
+    w_correction_order=1,
 ):
-    """First-order W(ρ) correction for REML derivatives."""
+    """W(ρ) correction for REML derivatives (first- or second-order)."""
     return reml_w_correction(
         model._dm,
         model._link,
@@ -336,6 +344,7 @@ def model_reml_w_correction(
         sample_weight,
         offset_arr,
         model._distribution,
+        w_correction_order=w_correction_order,
     )
 
 
@@ -385,6 +394,7 @@ def model_reml_direct_hessian(
     n_obs=0,
     phi_hat=1.0,
     dH_extra=None,
+    dH2_cross=None,
 ):
     """Outer Hessian of the REML criterion w.r.t. log-lambdas."""
     return reml_direct_hessian(
@@ -400,6 +410,7 @@ def model_reml_direct_hessian(
         n_obs=n_obs,
         phi_hat=phi_hat,
         dH_extra=dH_extra,
+        dH2_cross=dH2_cross,
     )
 
 

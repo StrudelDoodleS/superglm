@@ -763,3 +763,149 @@ class TestREMLFiniteDifference:
                     assert hess_total[i, j] == hess_partial[i, j], (
                         f"Off-diagonal [{i},{j}] should not depend on gradient"
                     )
+
+    def test_w_correction_order2_returns_three_tuple(self):
+        """w_correction_order=2 returns (grad, dH_extra, dH2_cross) 3-tuple."""
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model("poisson")
+
+        result = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+            w_correction_order=2,
+        )
+        assert result is not None
+        assert len(result) == 3, f"Expected 3-tuple, got {len(result)}-tuple"
+        grad_corr, dH_extra, dH2_cross = result
+        assert grad_corr.shape == (len(reml_groups),)
+        assert dH2_cross is not None
+        assert dH2_cross.shape == (len(reml_groups), len(reml_groups))
+        # dH2_cross should be symmetric
+        np.testing.assert_allclose(dH2_cross, dH2_cross.T, atol=1e-12)
+
+    def test_w_correction_order2_changes_hessian(self):
+        """Order-2 W correction produces a different Hessian than order-1.
+
+        For Poisson/log, d²W/dη² is nonzero, so the second-order
+        cross-terms should alter the Hessian off-diagonals.
+        """
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model("poisson")
+
+        # Order 1
+        w1 = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+            w_correction_order=1,
+        )
+        grad_partial = m._reml_direct_gradient(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            phi_hat=phi_hat,
+        )
+        grad1 = grad_partial + w1[0]
+        hess1 = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad1,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+            dH_extra=w1[1],
+        )
+
+        # Order 2
+        w2 = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+            w_correction_order=2,
+        )
+        grad2 = grad_partial + w2[0]  # gradient is same for both orders
+        hess2 = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad2,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+            dH_extra=w2[1],
+            dH2_cross=w2[2],
+        )
+
+        # Gradients must be identical
+        np.testing.assert_allclose(grad1, grad2, atol=1e-14)
+
+        # Hessians must differ (d²W/dη² is nonzero for Poisson/log)
+        hess_diff = np.abs(hess2 - hess1)
+        assert np.any(hess_diff > 1e-8), (
+            "Poisson/log: order-2 Hessian should differ from order-1, "
+            f"but max diff = {hess_diff.max():.2e}"
+        )
+
+    def test_fit_reml_w_correction_order2_converges(self):
+        """fit_reml(w_correction_order=2) runs and converges on Poisson data."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = rng.uniform(0, 1, n)
+        mu = np.exp(0.5 + np.sin(2 * np.pi * x1))
+        y = rng.poisson(mu).astype(float)
+        df = pd.DataFrame({"x1": x1})
+
+        from superglm.features.spline import CubicRegressionSpline
+
+        m = SuperGLM(
+            features={"x1": CubicRegressionSpline(n_knots=8)},
+            family="poisson",
+        )
+        m.fit_reml(df, y, w_correction_order=2)
+        assert m._result.converged

@@ -334,6 +334,11 @@ class SuperGLM:
             Initial per-group lambda. Defaults to ``self.lambda2``.
         verbose : bool
             Print progress.
+        w_correction_order : int
+            Order of the W(rho) implicit-differentiation correction.
+            1 = first-order (default, fast). 2 = includes second-order
+            d²W/dη² Hessian cross-terms (Wood 2011 Appendix C, computed
+            via FD approximation). Only affects the exact REML path.
 
         Returns
         -------
@@ -999,6 +1004,7 @@ class SuperGLM:
         penalty_caches,
         sample_weight,
         offset_arr,
+        w_correction_order=1,
     ):
         return fit_ops.model_reml_w_correction(
             self,
@@ -1009,6 +1015,7 @@ class SuperGLM:
             penalty_caches,
             sample_weight,
             offset_arr,
+            w_correction_order=w_correction_order,
         )
 
     def _reml_laml_objective(
@@ -1037,6 +1044,7 @@ class SuperGLM:
         n_obs=0,
         phi_hat=1.0,
         dH_extra=None,
+        dH2_cross=None,
     ):
         return fit_ops.model_reml_direct_hessian(
             self,
@@ -1050,6 +1058,7 @@ class SuperGLM:
             n_obs,
             phi_hat,
             dH_extra,
+            dH2_cross,
         )
 
     def _optimize_direct_reml(
