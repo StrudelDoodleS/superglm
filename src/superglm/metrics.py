@@ -1325,12 +1325,13 @@ class ModelMetrics:
 
     @cached_property
     def _active_R_factor(self) -> NDArray:
-        """Upper-triangular factor used by mgcv-style smooth tests.
+        """Upper-triangular factor used by Wood-style smooth tests.
 
-        ``mgcv::summary.gam`` feeds ``testStat`` the relevant columns of the
-        weighted design QR factor rather than the raw ``n x p_g`` design block.
-        For a fitted active design ``X_a`` with working weights ``W``, mgcv's
-        stored ``R`` satisfies ``R.T @ R = X_a.T @ diag(W) @ X_a``. The Wood
+        The smooth-term test operates on the relevant columns of the
+        weighted design QR factor rather than the raw ``n x p_g`` design
+        block. For a fitted active design ``X_a`` with working weights
+        ``W``, the factor ``R`` satisfies
+        ``R.T @ R = X_a.T @ diag(W) @ X_a``. The Wood
         test should therefore operate on columns of this weighted QR factor,
         not on the raw design and not on an augmented ``[X; sqrt(S)]`` system.
         """
@@ -1473,7 +1474,7 @@ class ModelMetrics:
 
         Computed from the [0,0] element of the augmented Fisher information
         inverse, which accounts for covariance between the intercept and
-        all other coefficients (matching mgcv's Vp).
+        all other coefficients.
         """
         _, _, _, XtWX_inv_aug, _ = self._active_info
         icpt_var = float(XtWX_inv_aug[0, 0])

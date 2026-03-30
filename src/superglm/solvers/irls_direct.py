@@ -11,8 +11,8 @@ X'WX without materialising the full (n, p) dense matrix.  For discretized
 groups this reduces the O(n·p²) bottleneck to O(n_bins·K²) per group.
 
 This replaces BCD when lambda1=0 (no L1/group lasso penalty), which is
-the mgcv-style workflow where REML handles both smoothing and selection
-through the double penalty.  Without BCD, the 33-iteration aliasing from
+the standard REML workflow where smoothing and optional term selection
+are handled through the penalty structure. Without BCD, the 33-iteration aliasing from
 shared B matrices between select=True subgroups vanishes entirely.
 """
 

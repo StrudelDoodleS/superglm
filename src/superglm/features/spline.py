@@ -360,7 +360,7 @@ class _SplineBase:
     def absorbs_intercept(self) -> bool:
         """Whether the smooth should absorb the intercept-like direction.
 
-        mgcv-style smooth terms are constrained so that the unweighted
+        Centered smooth terms are constrained so that the unweighted
         mean contribution over the training data is zero, making the model
         intercept carry the constant part.  This is True by default for all
         spline kinds.
@@ -422,8 +422,8 @@ class _SplineBase:
     ) -> tuple[NDArray, int, NDArray | None]:
         """Remove the intercept-confounded smooth direction.
 
-        mgcv-style: the constraint ``sum_i B(x_i) @ beta = 0`` (unweighted
-        over training observations) centres the smooth so that the mean
+        The constraint ``sum_i B(x_i) @ beta = 0`` (unweighted over
+        training observations) centres the smooth so that the mean
         contribution over the covariate distribution is zero.  The model
         intercept carries the constant part.  Exposure/weights are a
         likelihood concept and do not enter the identifiability constraint.
@@ -718,10 +718,10 @@ class BasisSpline(_SplineBase):
         "ssp" enables SSP reparametrisation, "none" disables it.
     select : bool
         If True, decompose the spline into null-space (linear) and
-        range-space (wiggly) subgroups for mgcv-style three-way
-        selection: nonlinear -> linear -> dropped.
+        range-space (wiggly) subgroups for three-way selection:
+        nonlinear -> linear -> dropped.
 
-        **mgcv double penalty**: The null-space (linear) subgroup is
+        **Double penalty**: The null-space (linear) subgroup is
         penalised with a ridge penalty (``penalty_matrix=eye(1)``).
         With ``fit_reml()``, REML estimates separate lambdas for the
         linear and spline subgroups — driving the linear lambda to
@@ -772,13 +772,14 @@ class BasisSpline(_SplineBase):
         )
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
-        """mgcv-style open knot vector with 0.001*range edge padding.
+        """Open knot vector with 0.001*range edge padding.
 
         Instead of repeating the boundary knot ``degree + 1`` times
         (clamped construction), extend the knot vector beyond the data
         range at regular spacing.  The internal effective boundary is
-        expanded by ``0.001 * range`` on each side, matching mgcv's
-        ``smooth.construct.ps.smooth.spec``.
+        expanded by ``0.001 * range`` on each side.  This keeps the
+        spline basis open while leaving the public fitted boundary tied
+        to the observed training range.
 
         The public boundary (``self._lo``, ``self._hi``) is unchanged,
         so ``fitted_boundary``, clipping, and extrapolation still refer
@@ -886,7 +887,8 @@ class NaturalSpline(_SplineBase):
 class CubicRegressionSpline(_SplineBase):
     """CR spline: integrated f'' squared penalty + natural boundary constraints.
 
-    Equivalent to mgcv's ``s(x, bs="cr")``. Always cubic (degree=3).
+    Compatible with the standard cubic regression spline construction
+    used in GAM packages. Always cubic (degree=3).
     Natural boundary constraints (f''=0 at boundaries) are mandatory.
     The basis has linear tails, but default prediction still clips at
     the training boundary unless ``extrapolation="extend"`` is used.
@@ -1319,7 +1321,7 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     """Convert basis dimension ``k`` to interior knot count.
 
     ``k`` is the number of basis functions *before* identifiability,
-    matching mgcv's ``k`` parameter.  The built column count is
+    following the common GAM basis-dimension convention.  The built column count is
     ``k - 1`` for all spline kinds because the identifiability
     constraint (unweighted sum-to-zero) removes one direction.
 
@@ -1408,16 +1410,16 @@ def Spline(
           Equivalent to ``NaturalSpline``.
         - ``"cr"`` — Cubic regression spline (integrated f'' penalty +
           natural constraints + identifiability).
-          Equivalent to ``CubicRegressionSpline`` / mgcv's ``bs="cr"``.
+          Equivalent to ``CubicRegressionSpline``.
         - ``"cr_cardinal"`` — **Experimental** cardinal cubic regression
-          spline.  Uses the mgcv-native parameterisation where basis
-          functions are cardinal natural cubic spline interpolants.
+          spline.  Uses a cardinal natural cubic spline parameterisation
+          where basis functions are interpolants at the knot locations.
           Penalty is ``B_d^T D^{-1} B_d`` from the tridiagonal second-
           derivative system.
 
     k : int, optional
         Basis dimension (number of basis functions before
-        identifiability), matching mgcv's ``k``.  The built column
+        identifiability), following the common GAM ``k`` convention. The built column
         count is always ``k - 1`` because the identifiability
         constraint (unweighted sum-to-zero) removes one
         direction.  Internally converted to ``n_knots`` via
@@ -1437,8 +1439,8 @@ def Spline(
         ``"ssp"`` enables SSP reparametrisation (default), ``"none"``
         disables it.
     select : bool
-        If True, decompose into linear + wiggly subgroups for mgcv-style
-        double-penalty selection.  Supported for ``"bs"``, ``"cr"``, and
+        If True, decompose into linear + wiggly subgroups for
+        double-penalty selection. Supported for ``"bs"``, ``"cr"``, and
         ``"cr_cardinal"``.  Not supported for ``"ns"`` (its constrained
         penalty has only 1 null eigenvalue).
     knots : array-like, optional
