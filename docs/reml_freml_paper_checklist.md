@@ -68,12 +68,10 @@ The rule for this document is simple:
   `dW_i/dη = w_i(2(d²μ/dη²)(dμ/dη)⁻¹ - V'(μ)/V(μ))` matches Appendix D.
 - `done` First-order IFT chain: dβ̂/dρ → dη/dρ → dW → C_j → gradient correction.
   `reml_w_correction()` reml_optimizer.py:88-159.
-- `partial` **Second-order W(rho) terms are dropped.**
-  Comment at line 106: "first-order (d²W/dρ² terms are dropped)."
-  Paper Appendix C includes d²β/dρ² terms. These are higher-order and small
-  near convergence, but they exist in the paper.
-  **Decision**: benchmark the approximation error first (FD of full coupled
-  gradient vs analytic) before deciding whether to implement second-order.
+- `done` **Second-order W(rho) terms: benchmarked and closed.**
+  First-order approximation error measured at <0.06% across all families
+  (Poisson, Gamma, Tweedie, NB2). Second-order terms not worth implementing.
+  Benchmark: scratch/benchmark_w_correction_error.py.
 - `done` dH_extra incorporated into Hessian off-diagonals (line 290-291).
 - `todo` Add FD tests isolating W(rho) contributions by family/link
   (Poisson/log, Binomial/logit, Tweedie/log, NB2/log).
@@ -138,9 +136,10 @@ The rule for this document is simple:
 - `done` W correction zero for Gamma/log, nonzero for Poisson/log.
   test_reml_fd.py: `test_w_correction_zero_for_gamma_log`,
   `test_w_correction_nonzero_for_poisson_log`.
-- `todo` Expand FD coverage to NB2, Tweedie, Binomial.
+- `done` Expand FD coverage to NB2, Tweedie (23 tests, up from 11).
+- `done` FD test of dW/dη for Poisson/log and Gamma/log.
+- `todo` Expand FD coverage to Binomial.
 - `todo` Add stress tests for rank deficiency, extreme lambdas, near-collinearity.
-- `todo` FD test of dW/dη for standard families against central differences.
 
 ---
 
