@@ -68,10 +68,12 @@ The rule for this document is simple:
   `dW_i/dη = w_i(2(d²μ/dη²)(dμ/dη)⁻¹ - V'(μ)/V(μ))` matches Appendix D.
 - `done` First-order IFT chain: dβ̂/dρ → dη/dρ → dW → C_j → gradient correction.
   `reml_w_correction()` reml_optimizer.py:88-159.
-- `done` **Second-order W(rho) terms: benchmarked and closed.**
-  First-order approximation error measured at <0.06% across all families
-  (Poisson, Gamma, Tweedie, NB2). Second-order terms not worth implementing.
-  Benchmark: scratch/benchmark_w_correction_error.py.
+- `done` **Second-order W(rho) terms: empirically closed.**
+  Benchmark (scratch/benchmark_w_correction_error.py) compares analytic
+  total gradient vs outer FD of objective — a proxy for remaining
+  outer-derivative mismatch, not a pure isolation of dropped d²W/dρ²
+  terms. Default seed: <0.06%; multi-seed spot checks: <0.3%.
+  Engineering decision: first-order is sufficient for this repo's scope.
 - `done` dH_extra incorporated into Hessian off-diagonals (line 290-291).
 - `todo` Add FD tests isolating W(rho) contributions by family/link
   (Poisson/log, Binomial/logit, Tweedie/log, NB2/log).
