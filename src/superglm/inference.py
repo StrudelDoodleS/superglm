@@ -854,7 +854,7 @@ def drop1(
        After ``fit_reml()``, reduced models inherit the full model's
        smoothing parameters as fixed values — REML is **not**
        re-run for each reduced model. This is computationally
-       practical and follows the spirit of ``mgcv::anova.gam``,
+       practical and follows common GAM approximate-anova practice,
        but means the comparison conditions on the full model's
        smoothing selection.
 
