@@ -116,7 +116,9 @@ def _robust_solve(
     # === Fallback: Truncated SVD (backward-stable for any condition) ===
     U_svd, s, Vh = np.linalg.svd(M, full_matrices=False)
     thresh = s[0] * 1e-10
-    inv_s = np.where(s > thresh, 1.0 / s, 0.0)
+    mask = s > thresh
+    inv_s = np.zeros_like(s)
+    np.divide(1.0, s, out=inv_s, where=mask)
     x = (Vh.T * inv_s) @ (U_svd.T @ rhs)
     cond_est = float(s[0] / max(s[-1], 1e-300))
     return x, cond_est, True
@@ -185,14 +187,16 @@ def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, 
 
     Uses a three-tier strategy (Higham, *Accuracy and Stability*, Ch. 10):
 
-    1. **Pivoted Cholesky** (``dpstrf``): rank-revealing, O(p³), handles
-       positive semi-definite matrices gracefully.  If full-rank, the
-       inverse is computed via triangular solves.  If rank-deficient, a
-       truncated pseudo-inverse is formed from the leading *r* columns.
+    1. **Pivoted Cholesky** (``dpstrf``): rank-revealing, O(p³).  Detects
+       rank deficiency earlier and more cheaply than SVD.  For full-rank
+       systems the inverse is computed via triangular solves.  For
+       rank-deficient systems a truncated pseudo-inverse is formed from
+       the leading *r* pivoted columns.
     2. **Residual spot-check**: after computing the inverse, verify
        ``||H @ H_inv[:, 0] - e_0|| < residual_tol``.  This is a direct
-       solve-quality signal that catches conditioning pathologies the
-       pivoted Cholesky's rank estimate might miss.
+       solve-quality signal.  In practice, many rank-deficient cases
+       still fail this check and fall through to SVD — the pivoted
+       Cholesky win is earlier detection, not SVD elimination.
     3. **SVD fallback**: backward-stable for any condition number.
 
     Parameters
@@ -270,7 +274,9 @@ def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, 
     # === Fallback: Truncated SVD (backward-stable for any condition) ===
     U_svd, s, Vh = np.linalg.svd(H, full_matrices=False)
     thresh = s[0] * 1e-10
-    inv_s = np.where(s > thresh, 1.0 / s, 0.0)
+    mask = s > thresh
+    inv_s = np.zeros_like(s)
+    np.divide(1.0, s, out=inv_s, where=mask)
     H_inv = (Vh.T * inv_s) @ Vh  # symmetric: Vh.T @ diag(inv_s) @ Vh
 
     pos_s = s[s > thresh]

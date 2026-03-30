@@ -1455,12 +1455,16 @@ def optimize_efs_reml(
             aa_prev_log_x = np.array([np.log(lambdas[n_]) for n_ in reml_update_names])
             aa_prev_log_gx = np.array([np.log(lambdas_new[n_]) for n_ in reml_update_names])
 
-        # ── Approximate uphill-step guard (Wood & Fasiolo 2017) ────
-        # EFS is not guaranteed to decrease the REML objective.  Evaluate
-        # the objective at lambdas_new on the *current* basis (R_inv has not
-        # changed yet) as an approximate guard.  This is not a strict
-        # monotonicity guarantee — R_inv changes at line ~1485 — but it
-        # catches gross uphill steps before committing to the update.
+        # ── Stale-basis uphill-step guard (heuristic) ─────────────
+        # EFS is not guaranteed to decrease the REML objective (Wood &
+        # Fasiolo 2017).  We evaluate the objective at lambdas_new using
+        # the *current* dm, pirls_result, and cached_xtwx — all of which
+        # are stale w.r.t. the proposed lambdas.  After this check, the
+        # DM/R_inv may be rebuilt (~line 1526), changing the true
+        # objective surface.  So this guard can: (a) damp a step that
+        # would actually improve the post-rebuild objective, or (b) miss
+        # a step that goes uphill after rebuild.  It is a heuristic
+        # safeguard against gross uphill moves, not a monotonicity fix.
         if cached_xtwx is not None:
             obj_curr = reml_laml_objective(
                 dm,
