@@ -79,7 +79,7 @@ class OrderedCategorical:
     degree : int
         B-spline degree (ignored if ``basis`` is a Spline object).
     select : bool
-        Enable mgcv-style double penalty (ignored if ``basis`` is a
+        Enable double-penalty shrinkage (ignored if ``basis`` is a
         Spline object).
     penalty : str
         Penalty type (ignored if ``basis`` is a Spline object).
