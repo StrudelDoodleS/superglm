@@ -24,7 +24,9 @@ class Link(Protocol):
 
     Optional methods (detected at runtime via hasattr):
         deriv2_inverse — d²μ/dη², used by REML W(ρ) correction.
-        If absent, the W(ρ) correction is skipped and REML falls back
+        deriv3_inverse — d³μ/dη³, used by second-order W(ρ) correction
+        (Wood 2011, Appendix D).
+        If absent, the correction is skipped and REML falls back
         to the fixed-W Laplace approximation.
     """
 
@@ -63,6 +65,10 @@ class LogLink:
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
         return np.exp(eta)
 
+    def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        """d³μ/dη³ = exp(η). Wood (2011) Appendix D."""
+        return np.exp(eta)
+
 
 class IdentityLink:
     """Identity link: eta = mu, mu = eta."""
@@ -80,6 +86,10 @@ class IdentityLink:
         return np.ones_like(eta)
 
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
+        return np.zeros_like(eta)
+
+    def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        """d³μ/dη³ = 0. Wood (2011) Appendix D."""
         return np.zeros_like(eta)
 
 
@@ -110,6 +120,13 @@ class LogitLink:
 
         p = expit(eta)
         return p * (1 - p) * (1 - 2 * p)
+
+    def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        """d³μ/dη³ = μ(1-μ)(1 - 6μ + 6μ²). Wood (2011) Appendix D."""
+        from scipy.special import expit
+
+        p = expit(eta)
+        return p * (1 - p) * (1 - 6 * p + 6 * p**2)
 
 
 class ProbitLink:
@@ -146,6 +163,12 @@ class ProbitLink:
 
         return -eta * norm.pdf(eta)
 
+    def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        """d³μ/dη³ = (η² - 1)·φ(η). Wood (2011) Appendix D."""
+        from scipy.stats import norm
+
+        return (eta**2 - 1) * norm.pdf(eta)
+
 
 class CloglogLink:
     """Complementary log-log link: eta = log(-log(1 - mu)).
@@ -175,6 +198,11 @@ class CloglogLink:
         ee = np.exp(eta)
         return ee * np.exp(-ee) * (1 - ee)
 
+    def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        """d³μ/dη³ = exp(η-eη)·((1-eη)² - eη). Wood (2011) Appendix D."""
+        ee = np.exp(eta)
+        return ee * np.exp(-ee) * ((1 - ee) ** 2 - ee)
+
 
 class CauchitLink:
     """Cauchit link: eta = tan(pi*(mu - 0.5)), mu = 0.5 + arctan(eta)/pi.
@@ -200,6 +228,10 @@ class CauchitLink:
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
         return -2 * eta / (np.pi * (1 + eta**2) ** 2)
 
+    def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        """d³μ/dη³ = 2(3η² - 1) / (π(1+η²)³). Wood (2011) Appendix D."""
+        return 2 * (3 * eta**2 - 1) / (np.pi * (1 + eta**2) ** 3)
+
 
 class InverseLink:
     """Inverse (reciprocal) link: eta = 1/mu, mu = 1/eta.
@@ -221,6 +253,10 @@ class InverseLink:
 
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
         return 2.0 / eta**3
+
+    def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        """d³μ/dη³ = -6/η⁴. Wood (2011) Appendix D."""
+        return -6.0 / eta**4
 
 
 class InverseSquaredLink:
@@ -244,6 +280,10 @@ class InverseSquaredLink:
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
         return 0.75 * eta ** (-2.5)
 
+    def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        """d³μ/dη³ = -15/8 · η^{-7/2}. Wood (2011) Appendix D."""
+        return -1.875 * eta ** (-3.5)
+
 
 class SqrtLink:
     """Square-root link: eta = sqrt(mu), mu = eta^2.
@@ -265,6 +305,10 @@ class SqrtLink:
 
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
         return 2.0 * np.ones_like(eta)
+
+    def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        """d³μ/dη³ = 0. Wood (2011) Appendix D."""
+        return np.zeros_like(eta)
 
 
 class PowerLink:
@@ -303,6 +347,12 @@ class PowerLink:
         q = 1.0 / p
         return q * (q - 1) * np.power(np.maximum(eta, 1e-15), q - 2)
 
+    def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        """d³μ/dη³ = q(q-1)(q-2)·η^{q-3}, q=1/p. Wood (2011) Appendix D."""
+        p = self.power
+        q = 1.0 / p
+        return q * (q - 1) * (q - 2) * np.power(np.maximum(eta, 1e-15), q - 3)
+
 
 class NegativeBinomialLink:
     """Negative binomial link: eta = log(mu / (mu + theta)).
@@ -340,6 +390,11 @@ class NegativeBinomialLink:
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
         e = np.exp(np.clip(eta, -30, 0 - 1e-10))
         return self.theta * e * (1 + e) / (1 - e) ** 3
+
+    def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        """d³μ/dη³ = θe(1 + 4e + e²)/(1-e)⁴. Wood (2011) Appendix D."""
+        e = np.exp(np.clip(eta, -30, 0 - 1e-10))
+        return self.theta * e * (1 + 4 * e + e**2) / (1 - e) ** 4
 
 
 _LOG_LINK_ETA_MIN = -80.0
