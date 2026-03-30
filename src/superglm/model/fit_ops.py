@@ -417,6 +417,7 @@ def model_optimize_direct_reml(
     verbose,
     penalty_caches=None,
     profile=None,
+    w_correction_order=1,
 ):
     """Optimize the direct REML objective via damped Newton (Wood 2011)."""
     return optimize_direct_reml(
@@ -439,6 +440,7 @@ def model_optimize_direct_reml(
         max_analytical_per_w=getattr(model, "_max_analytical_per_w", 30),
         select_snap=getattr(model, "_select_snap", True),
         direct_solve=getattr(model, "_direct_solve", "auto"),
+        w_correction_order=w_correction_order,
     )
 
 
@@ -578,6 +580,7 @@ def fit_reml(
     reml_tol=1e-4,
     lambda2_init=None,
     verbose=False,
+    w_correction_order=1,
 ):
     """Fit with REML estimation of per-term smoothing parameters."""
     from superglm.model.base import (
@@ -681,6 +684,7 @@ def fit_reml(
             verbose=verbose,
             penalty_caches=penalty_caches,
             profile=_profile,
+            w_correction_order=w_correction_order,
         )
     else:
         best = model_optimize_efs_reml(

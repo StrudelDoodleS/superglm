@@ -303,6 +303,7 @@ class SuperGLM:
         reml_tol: float = 1e-4,
         lambda2_init: float | None = None,
         verbose: bool = False,
+        w_correction_order: int = 1,
     ) -> SuperGLM:
         """Fit with REML estimation of per-term smoothing parameters.
 
@@ -349,6 +350,7 @@ class SuperGLM:
             reml_tol=reml_tol,
             lambda2_init=lambda2_init,
             verbose=verbose,
+            w_correction_order=w_correction_order,
         )
 
     # ── Properties ────────────────────────────────────────────────

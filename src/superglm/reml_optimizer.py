@@ -88,6 +88,41 @@ def compute_dW_deta(
 # ═══════════════════════════════════════════════════════════════════
 
 
+def _compute_d2W_deta2(
+    link: Any,
+    distribution: Any,
+    eta: NDArray,
+    sample_weight: NDArray,
+) -> NDArray | None:
+    """Second derivative of IRLS weights w.r.t. the linear predictor.
+
+    Computed via central finite differences of ``compute_dW_deta``.
+    This avoids requiring third-order link derivatives (d³μ/dη³)
+    which most link objects do not provide.
+
+    Returns None when ``compute_dW_deta`` itself returns None (missing
+    second-order methods on the link or distribution).
+    """
+    eps = 1e-5
+    mu_base = clip_mu(link.inverse(eta), distribution)
+    dW_base = compute_dW_deta(link, distribution, mu_base, eta, sample_weight)
+    if dW_base is None:
+        return None
+
+    eta_plus = eta + eps
+    mu_plus = clip_mu(link.inverse(eta_plus), distribution)
+    dW_plus = compute_dW_deta(link, distribution, mu_plus, eta_plus, sample_weight)
+
+    eta_minus = eta - eps
+    mu_minus = clip_mu(link.inverse(eta_minus), distribution)
+    dW_minus = compute_dW_deta(link, distribution, mu_minus, eta_minus, sample_weight)
+
+    if dW_plus is None or dW_minus is None:
+        return None
+
+    return (dW_plus - dW_minus) / (2.0 * eps)
+
+
 def reml_w_correction(
     dm: DesignMatrix,
     link: Any,
@@ -100,24 +135,46 @@ def reml_w_correction(
     sample_weight: NDArray,
     offset_arr: NDArray,
     distribution: Any,
-) -> tuple[NDArray, dict[int, NDArray]] | None:
-    """First-order W(ρ) correction for REML derivatives.
+    w_correction_order: int = 1,
+) -> tuple[NDArray, dict[int, NDArray]] | tuple[NDArray, dict[int, NDArray], NDArray | None] | None:
+    """W(ρ) correction for REML derivatives (first- or second-order).
 
     Wood (2011) Section 3.4 / Appendix C: implicit differentiation of β̂(ρ)
     through W(η(ρ)) using the chain dβ̂/dρ = −H⁻¹ S_j β̂ (IFT on the
-    PIRLS stationarity condition). First-order approximation: d²W/dρ²
-    terms are dropped per the higher-order discussion in Appendix C.
+    PIRLS stationarity condition).
 
     Computes the contribution from d(X'WX)/dρ_j = X'diag(dW/dρ_j)X
     which the fixed-W Laplace approximation drops.  The gradient
     correction is exact to first order; the Hessian C_j matrices are
-    first-order (d²W/dρ² terms are dropped).
+    first-order (d²W/dρ² terms are dropped) unless ``w_correction_order=2``.
 
-    Returns (grad_correction, dH_extra) or None if the correction vanishes
-    (e.g. Gamma with log link where dW/dη = 0 identically) or if the
-    link/distribution does not provide the required second-order methods.
+    When ``w_correction_order=2``, the second-order cross-term Hessian
+    correction from Appendix C is also computed::
+
+        dH2_cross[j,k] = 0.5 * tr(H⁻¹ X' diag(d²W/dη² · dη_j · dη_k) X)
+
+    This accounts for the curvature of W w.r.t. ρ through the product
+    of per-group linear predictor perturbations.
+
+    Parameters
+    ----------
+    w_correction_order : int, default 1
+        1 = first-order only (current default, backward compatible).
+        2 = include second-order Hessian cross-terms from d²W/dη².
+
+    Returns ``(grad_correction, dH_extra)`` when ``w_correction_order=1``
+    (backward compatible 2-tuple), or
+    ``(grad_correction, dH_extra, dH2_cross)`` when
+    ``w_correction_order=2`` (3-tuple).  Returns None if the correction
+    vanishes (e.g. Gamma with log link where dW/dη = 0 identically) or
+    if the link/distribution does not provide the required methods.
+
+    dH2_cross is an (m, m) array of second-order Hessian corrections.
     """
-    eta = stabilize_eta(dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr, link)
+    eta = stabilize_eta(
+        dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
+        link,
+    )
     mu = clip_mu(link.inverse(eta), distribution)
     dW_deta = compute_dW_deta(link, distribution, mu, eta, sample_weight)
 
@@ -133,6 +190,14 @@ def reml_w_correction(
     dH_extra: dict[int, NDArray] = {}
 
     gms = dm.group_matrices
+
+    # Pre-compute d²W/dη² for second-order path
+    d2W_deta2: NDArray | None = None
+    if w_correction_order >= 2:
+        d2W_deta2 = _compute_d2W_deta2(link, distribution, eta, sample_weight)
+
+    # Store deta_j vectors for second-order cross-terms
+    deta_vectors: list[NDArray] = []
 
     for i, (idx, g) in enumerate(reml_groups):
         if penalty_caches is not None:
@@ -164,6 +229,25 @@ def reml_w_correction(
 
         dH_extra[i] = C_j
 
+        if w_correction_order >= 2:
+            deta_vectors.append(deta_j)
+
+    # Second-order Hessian cross-terms
+    dH2_cross: NDArray | None = None
+    if w_correction_order >= 2 and d2W_deta2 is not None:
+        dH2_cross = np.zeros((m, m))
+        for i in range(m):
+            for j in range(i, m):
+                # d²W/dη² · dη_i · dη_j  (elementwise product)
+                a_ij = d2W_deta2 * deta_vectors[i] * deta_vectors[j]
+                C_ij = _block_xtwx_signed(gms, groups, a_ij, tabmat_split=dm.tabmat_split)
+                # 0.5 * tr(H⁻¹ C_ij)
+                val = 0.5 * float(np.sum(XtWX_S_inv * C_ij))
+                dH2_cross[i, j] = val
+                dH2_cross[j, i] = val
+
+    if w_correction_order >= 2:
+        return grad_correction, dH_extra, dH2_cross
     return grad_correction, dH_extra
 
 
@@ -286,6 +370,7 @@ def reml_direct_hessian(
     n_obs: int = 0,
     phi_hat: float = 1.0,
     dH_extra: dict[int, NDArray] | None = None,
+    dH2_cross: NDArray | None = None,
 ) -> NDArray:
     """Outer Hessian of the REML criterion w.r.t. log-lambdas.
 
@@ -296,6 +381,14 @@ def reml_direct_hessian(
       -S_beta^T H⁻¹ S_beta  — implicit differentiation of β̂'Sβ̂/φ
       -outer(q,q)/(D+pq)²   — profiled-scale correction (estimated-φ)
       g_i + 0.5·r_j on diag — ρ-chain-rule diagonal correction (Eq 6.2)
+
+    Parameters
+    ----------
+    dH2_cross : NDArray or None
+        Second-order W(ρ) Hessian correction from ``reml_w_correction``
+        with ``w_correction_order=2``.  An (m, m) matrix of
+        0.5 * tr(H⁻¹ X'diag(d²W/dη² · dη_i · dη_j)X) values,
+        added directly to the Hessian.
     """
     m = len(reml_groups)
     p = XtWX_S_inv.shape[0]
@@ -351,6 +444,10 @@ def reml_direct_hessian(
         q = np.array(quad_per_group)
         hess -= 0.5 * max(n_obs - M_p, 1.0) * np.outer(q, q) / d_plus_pq**2
 
+    # Second-order W(ρ) cross-term from d²W/dη²
+    if dH2_cross is not None:
+        hess += dH2_cross
+
     return hess
 
 
@@ -380,6 +477,7 @@ def optimize_direct_reml(
     max_analytical_per_w: int = 30,
     select_snap: bool = True,
     direct_solve: str = "auto",
+    w_correction_order: int = 1,
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
 
@@ -586,16 +684,20 @@ def optimize_direct_reml(
                 sample_weight,
                 offset_arr,
                 distribution,
+                w_correction_order=w_correction_order,
             )
         else:
             w_corr = None
         _t_w_correction += _time.perf_counter() - _t0
         if w_corr is not None:
-            grad_w_correction, dH_extra = w_corr
+            grad_w_correction = w_corr[0]
+            dH_extra = w_corr[1]
+            dH2_cross = w_corr[2] if len(w_corr) > 2 else None
             grad = grad_partial + grad_w_correction
         else:
             grad = grad_partial.copy()
             dH_extra = None
+            dH2_cross = None
 
         if obj < best_obj:
             best_obj = obj
@@ -653,6 +755,7 @@ def optimize_direct_reml(
             n_obs=len(y),
             phi_hat=phi_hat,
             dH_extra=dH_extra,
+            dH2_cross=dH2_cross,
         )
 
         # Active-set: freeze components with negligible gradient and Hessian
