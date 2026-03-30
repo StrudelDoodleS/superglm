@@ -294,6 +294,10 @@ def reml_w_correction(
             lam_list.append(lam)
 
     # ── Second-order Hessian cross-terms (Wood 2011, Section 3.5.1) ──
+    #
+    # Cost: O(m² · n · p²) per Newton iteration — m²/2 gram operations via
+    # _block_xtwx_signed, plus m²/2 rmatvec + matvec calls.  For typical
+    # m=4, p=30 this is ~10 grams at ~30ms each (MTPL2 678k).
     dH2_cross: NDArray | None = None
     if w_correction_order >= 2 and d2W_deta2 is not None:
         dH2_cross = np.zeros((m, m))
@@ -303,19 +307,18 @@ def reml_w_correction(
                 g_j = reml_groups[j][1]
 
                 # ── f^{jk} vector (Section 3.4, eq for d²β̂) ──
-                # f_i = 0.5 * deta_j * deta_k * dW_deta
                 f_jk = 0.5 * deta_vectors[i] * deta_vectors[j] * dW_deta
 
                 # X^T f^{jk}
                 Xt_f = dm.rmatvec(f_jk)
 
-                # λ_j S_j dβ̂/dρ_k  (nonzero only in g_j.sl block)
+                # λ_i S_i dβ̂/dρ_j  (nonzero only in g_i.sl block)
                 lam_i_S_i_dbeta_j = np.zeros(p)
                 lam_i_S_i_dbeta_j[g_i.sl] = lam_list[i] * (
                     omega_ssp_list[i] @ dbeta_vectors[j][g_i.sl]
                 )
 
-                # λ_k S_k dβ̂/dρ_j  (nonzero only in g_k.sl block)
+                # λ_j S_j dβ̂/dρ_i  (nonzero only in g_j.sl block)
                 lam_j_S_j_dbeta_i = np.zeros(p)
                 lam_j_S_j_dbeta_i[g_j.sl] = lam_list[j] * (
                     omega_ssp_list[j] @ dbeta_vectors[i][g_j.sl]
@@ -333,7 +336,6 @@ def reml_w_correction(
                 d2eta_ij = dm.matvec(d2beta_ij)
 
                 # Full ∂²w/(∂ρ_i ∂ρ_j) (Section 3.5.1 T_{jk} derivation):
-                # = d²W/dη² · dη_i · dη_j  +  dW/dη · d²η_ij
                 d2w_drho_ij = d2W_deta2 * deta_vectors[i] * deta_vectors[j] + dW_deta * d2eta_ij
 
                 # Hessian correction: 0.5 * tr(H⁻¹ X' diag(d2w_drho_ij) X)

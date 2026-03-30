@@ -439,6 +439,61 @@ class TestREMLFiniteDifference:
         else:
             np.testing.assert_allclose(dW_analytic, dW_fd, rtol=1e-5, atol=1e-10)
 
+    @pytest.mark.parametrize("family", ["poisson", "gamma", "nb2", "tweedie"])
+    def test_d2W_deta2_analytic_matches_fd(self, family):
+        """Analytic compute_d2W_deta2() matches FD of compute_dW_deta()."""
+        from superglm.distributions import clip_mu
+        from superglm.links import stabilize_eta
+        from superglm.reml_optimizer import compute_d2W_deta2
+
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model(family)
+
+        eta = stabilize_eta(
+            m._dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
+            m._link,
+        )
+        mu = clip_mu(m._link.inverse(eta), m._distribution)
+
+        # Analytic d²W/dη²
+        d2W_analytic = compute_d2W_deta2(m._link, m._distribution, mu, eta, sample_weight)
+
+        # FD of compute_dW_deta
+        eps = 1e-5
+        eta_p = eta + eps
+        mu_p = clip_mu(m._link.inverse(eta_p), m._distribution)
+        dW_p = compute_dW_deta(m._link, m._distribution, mu_p, eta_p, sample_weight)
+
+        eta_m = eta - eps
+        mu_m = clip_mu(m._link.inverse(eta_m), m._distribution)
+        dW_m = compute_dW_deta(m._link, m._distribution, mu_m, eta_m, sample_weight)
+
+        if dW_p is None or dW_m is None:
+            # Gamma/log: dW/deta=0 everywhere, so d²W/deta²=0
+            if d2W_analytic is not None:
+                np.testing.assert_allclose(d2W_analytic, 0.0, atol=1e-6)
+            return
+
+        d2W_fd = (dW_p - dW_m) / (2 * eps)
+
+        if d2W_analytic is None:
+            np.testing.assert_allclose(d2W_fd, 0.0, atol=1e-4)
+        else:
+            np.testing.assert_allclose(d2W_analytic, d2W_fd, rtol=1e-4, atol=1e-8)
+
     def test_w_correction_zero_for_gamma_log(self):
         """Gamma with log link has dW/dη=0, so W correction must vanish."""
         (
