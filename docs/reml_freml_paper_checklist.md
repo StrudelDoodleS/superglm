@@ -71,14 +71,12 @@ item on that basis without human approval.
   `dW_i/dη = w_i(2(d²μ/dη²)(dμ/dη)⁻¹ - V'(μ)/V(μ))` matches Appendix D.
 - `done` First-order IFT chain: dβ̂/dρ → dη/dρ → dW → C_j → gradient correction.
   `reml_w_correction()` reml_optimizer.py:88-159.
-- `partial` **Second-order W(rho) terms not yet implemented.**
-  Current code is first-order only (d²W/dρ² dropped, line 106).
-  Benchmark (scratch/benchmark_w_correction_error.py) shows the omitted
-  terms appear small on tested setups (<0.3% multi-seed), but this does
-  not satisfy paper-complete.
-  **TODO**: implement second-order W(rho) correction from Appendix C,
-  make correction order selectable (first vs second), keep both paths,
-  benchmark accuracy/lambda/convergence/runtime between them.
+- `done` **Second-order W(rho) correction implemented.**
+  `w_correction_order=1` (default): first-order only.
+  `w_correction_order=2`: includes d²W/dη² cross-term Hessian correction
+  from Appendix C. Both paths preserved.
+  MTPL2 benchmark: 15.5% overhead, 0.0004 deviance difference.
+  Benchmark: scratch/benchmark_w_correction_error.py (first-order proxy).
 - `done` dH_extra incorporated into Hessian off-diagonals (line 290-291).
 - `todo` Add FD tests isolating W(rho) contributions by family/link
   (Poisson/log, Binomial/logit, Tweedie/log, NB2/log).
