@@ -256,6 +256,9 @@ class TestQRSolverPath:
         with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
             model.fit(df, y)
         assert model._result.converged
+        # Pivoted Cholesky should handle this without repeated SVD fallbacks.
+        # Lock in the improvement: assert the warning is absent.
+        assert not any("consecutive SVD fallbacks" in r.message for r in caplog.records)
 
     def test_gram_no_warning(self, caplog):
         """'gram' mode suppresses SVD fallback warnings."""
