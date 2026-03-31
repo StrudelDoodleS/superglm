@@ -36,7 +36,7 @@ from superglm.group_matrix import (
 )
 from superglm.links import Link, stabilize_eta
 from superglm.solvers.pirls import IterationDiagnostics, PIRLSResult
-from superglm.types import GroupSlice
+from superglm.types import GroupSlice, PenaltyComponent
 
 logger = logging.getLogger(__name__)
 
@@ -129,13 +129,39 @@ def _build_penalty_matrix(
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
     p: int,
+    reml_penalties: list[PenaltyComponent] | None = None,
 ) -> NDArray:
     """Build block-diagonal penalty matrix S (p×p).
 
-    For each penalised SSP group: S[g.sl, g.sl] = lam_g * R_inv.T @ omega @ R_inv.
-    Non-SSP and unpenalised groups contribute nothing.
+    If ``reml_penalties`` is provided, uses the multi-penalty path where
+    multiple PenaltyComponents can accumulate (+=) into the same group
+    block.  Each component carries its own omega and is keyed by a
+    distinct lambda name.
+
+    Otherwise falls back to the legacy single-penalty-per-group path.
+
+    Parameters
+    ----------
+    reml_penalties : list of PenaltyComponent, optional
+        When provided, each component contributes ``lam * omega_ssp``
+        to the block identified by ``pc.group_sl``.  Multiple components
+        sharing the same block are summed (e.g. tensor product marginals).
     """
     S = np.zeros((p, p))
+
+    if reml_penalties is not None:
+        for pc in reml_penalties:
+            gm = group_matrices[pc.group_index]
+            lam = lambda2[pc.name] if isinstance(lambda2, dict) else lambda2
+            if lam == 0:
+                continue
+            omega_ssp = (
+                pc.omega_ssp if pc.omega_ssp is not None else (gm.R_inv.T @ pc.omega_raw @ gm.R_inv)
+            )
+            S[pc.group_sl, pc.group_sl] += lam * omega_ssp
+        return S
+
+    # Legacy single-penalty path (unchanged)
     for gm, g in zip(group_matrices, groups):
         if not g.penalized:
             continue
@@ -173,10 +199,24 @@ def _invert_xtwx_plus_penalty(
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
+    S_override: NDArray | None = None,
+    reml_penalties: list[PenaltyComponent] | None = None,
 ) -> NDArray:
-    """Invert ``X'WX + S(lambda2)`` for a fixed weighted Gram matrix."""
-    p = XtWX.shape[0]
-    S = _build_penalty_matrix(group_matrices, groups, lambda2, p)
+    """Invert ``X'WX + S(lambda2)`` for a fixed weighted Gram matrix.
+
+    Parameters
+    ----------
+    S_override : (p, p) ndarray, optional
+        Pre-built penalty matrix.  When provided, skips internal
+        ``_build_penalty_matrix`` call entirely.
+    reml_penalties : list of PenaltyComponent, optional
+        Forwarded to ``_build_penalty_matrix`` for the multi-penalty path.
+    """
+    if S_override is not None:
+        S = S_override
+    else:
+        p = XtWX.shape[0]
+        S = _build_penalty_matrix(group_matrices, groups, lambda2, p, reml_penalties=reml_penalties)
     M_beta = XtWX + S
     H_inv, _, _ = _safe_decompose_H(M_beta)
     return H_inv
@@ -304,6 +344,8 @@ def fit_irls_direct(
     record_diagnostics: bool = False,
     direct_solve: str = "auto",
     convergence: str = "deviance",
+    S_override: NDArray | None = None,
+    reml_penalties: list[PenaltyComponent] | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -347,6 +389,11 @@ def fit_irls_direct(
         held fixed.
     record_diagnostics : bool
         If True, record per-iteration W/mu/eta stats on the result.
+    S_override : (p, p) ndarray, optional
+        Pre-built penalty matrix.  When provided, skips internal
+        ``_build_penalty_matrix`` call entirely.
+    reml_penalties : list of PenaltyComponent, optional
+        Forwarded to ``_build_penalty_matrix`` for the multi-penalty path.
 
     Returns
     -------
@@ -377,7 +424,10 @@ def fit_irls_direct(
         intercept = float(link.link(np.atleast_1d(mu0))[0])
 
     # Build penalty matrix S (p×p, block-diagonal)
-    S = _build_penalty_matrix(gms, groups, lambda2, p)
+    if S_override is not None:
+        S = S_override
+    else:
+        S = _build_penalty_matrix(gms, groups, lambda2, p, reml_penalties=reml_penalties)
 
     # QR pre-computation: materialise full design matrix once
     _use_qr = direct_solve == "qr"

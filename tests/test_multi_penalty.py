@@ -1,12 +1,15 @@
 """Tests for Wood (2011) Appendix B multi-penalty log-determinant kernel."""
 
 import numpy as np
+import pandas as pd
+import pytest
 
 from superglm.multi_penalty import (
     logdet_s_gradient,
     logdet_s_hessian,
     similarity_transform_logdet,
 )
+from superglm.types import PenaltyComponent
 
 
 def _make_psd(q: int, rank: int, rng: np.random.Generator) -> np.ndarray:
@@ -350,3 +353,250 @@ class TestLogdetDerivatives:
             fd_grad[j] = (res_p.logdet_s_plus - res_m.logdet_s_plus) / (2 * eps)
 
         np.testing.assert_allclose(grad, fd_grad, rtol=1e-4, atol=1e-6)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Cut 2A: _build_penalty_matrix multi-penalty + S_override tests
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestBuildPenaltyMatrixMultiComponent:
+    """Verify _build_penalty_matrix accumulates multiple PenaltyComponents."""
+
+    def test_two_components_same_group(self):
+        """Two PenaltyComponents for same group: S = lam1*Omega1 + lam2*Omega2."""
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+
+        rng = np.random.default_rng(42)
+        p_g = 6
+        p = p_g  # single group fills the whole coefficient vector
+
+        # Two different omega_ssp matrices (PSD)
+        A1 = rng.standard_normal((p_g, p_g))
+        omega1 = A1.T @ A1
+        A2 = rng.standard_normal((p_g, p_g))
+        omega2 = A2.T @ A2
+
+        lam1, lam2 = 2.5, 0.3
+        lambda2 = {"comp1": lam1, "comp2": lam2}
+
+        sl = slice(0, p_g)
+        pc1 = PenaltyComponent(
+            name="comp1",
+            group_name="grp",
+            group_index=0,
+            group_sl=sl,
+            omega_raw=omega1,  # not used when omega_ssp is set
+            omega_ssp=omega1,
+        )
+        pc2 = PenaltyComponent(
+            name="comp2",
+            group_name="grp",
+            group_index=0,
+            group_sl=sl,
+            omega_raw=omega2,
+            omega_ssp=omega2,
+        )
+
+        # group_matrices not used when omega_ssp is pre-computed,
+        # but must be indexable
+        S = _build_penalty_matrix(
+            group_matrices=[None],
+            groups=[],
+            lambda2=lambda2,
+            p=p,
+            reml_penalties=[pc1, pc2],
+        )
+
+        expected = lam1 * omega1 + lam2 * omega2
+        np.testing.assert_allclose(S[:p_g, :p_g], expected, rtol=1e-12)
+
+    def test_zero_lambda_skipped(self):
+        """Component with lambda=0 contributes nothing."""
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+
+        p_g = 4
+        omega = np.eye(p_g)
+        sl = slice(0, p_g)
+        pc = PenaltyComponent(
+            name="comp",
+            group_name="grp",
+            group_index=0,
+            group_sl=sl,
+            omega_raw=omega,
+            omega_ssp=omega,
+        )
+
+        S = _build_penalty_matrix(
+            group_matrices=[None],
+            groups=[],
+            lambda2={"comp": 0.0},
+            p=p_g,
+            reml_penalties=[pc],
+        )
+        np.testing.assert_array_equal(S, np.zeros((p_g, p_g)))
+
+    def test_legacy_path_unchanged(self):
+        """Without reml_penalties, falls through to legacy single-penalty path."""
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+
+        # Legacy path requires SSP group matrices; just verify an empty
+        # group list produces all-zero S (no crash, no change)
+        S = _build_penalty_matrix(
+            group_matrices=[],
+            groups=[],
+            lambda2=1.0,
+            p=5,
+            reml_penalties=None,
+        )
+        np.testing.assert_array_equal(S, np.zeros((5, 5)))
+
+    def test_omega_ssp_fallback_from_raw(self):
+        """When omega_ssp is None, falls back to R_inv.T @ omega_raw @ R_inv."""
+        from types import SimpleNamespace
+
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+
+        rng = np.random.default_rng(99)
+        p_g = 4
+        R_inv = rng.standard_normal((p_g, p_g))
+        omega_raw = np.eye(p_g)
+        expected_ssp = R_inv.T @ omega_raw @ R_inv
+
+        gm = SimpleNamespace(R_inv=R_inv)
+        sl = slice(0, p_g)
+        pc = PenaltyComponent(
+            name="comp",
+            group_name="grp",
+            group_index=0,
+            group_sl=sl,
+            omega_raw=omega_raw,
+            omega_ssp=None,  # force fallback
+        )
+
+        S = _build_penalty_matrix(
+            group_matrices=[gm],
+            groups=[],
+            lambda2={"comp": 3.0},
+            p=p_g,
+            reml_penalties=[pc],
+        )
+        np.testing.assert_allclose(S[:p_g, :p_g], 3.0 * expected_ssp, rtol=1e-12)
+
+
+@pytest.mark.slow
+class TestFitIrlsDirectSOverrideParity:
+    """S_override produces identical results to internal S build."""
+
+    def test_parity(self):
+        from superglm.features.spline import CubicRegressionSpline
+        from superglm.model import SuperGLM
+        from superglm.solvers.irls_direct import _build_penalty_matrix, fit_irls_direct
+
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 1, n)
+        mu = np.exp(0.5 + np.sin(2 * np.pi * x))
+        y = rng.poisson(mu).astype(float)
+
+        df = pd.DataFrame({"x": x})
+        m = SuperGLM(
+            features={"x": CubicRegressionSpline(n_knots=8)},
+            family="poisson",
+        )
+        m.fit(df, y)
+
+        weights = np.ones(n)
+        offset = np.zeros(n)
+        lambdas = {"x": 5.0}
+
+        # Build S externally
+        p = m._dm.p
+        S = _build_penalty_matrix(m._dm.group_matrices, m._groups, lambdas, p)
+
+        # Fit without S_override (internal build)
+        res_internal, inv_internal = fit_irls_direct(
+            X=m._dm,
+            y=y,
+            weights=weights,
+            family=m._distribution,
+            link=m._link,
+            groups=m._groups,
+            lambda2=lambdas,
+            offset=offset,
+        )
+
+        # Fit with S_override (external build)
+        res_override, inv_override = fit_irls_direct(
+            X=m._dm,
+            y=y,
+            weights=weights,
+            family=m._distribution,
+            link=m._link,
+            groups=m._groups,
+            lambda2=lambdas,
+            offset=offset,
+            S_override=S,
+        )
+
+        np.testing.assert_allclose(res_override.beta, res_internal.beta, rtol=1e-12)
+        np.testing.assert_allclose(res_override.deviance, res_internal.deviance, rtol=1e-12)
+        np.testing.assert_allclose(inv_override, inv_internal, rtol=1e-10)
+
+
+@pytest.mark.slow
+class TestInvertXtWXPlusPenaltySOverrideParity:
+    """S_override in _invert_xtwx_plus_penalty matches internal path."""
+
+    def test_parity(self):
+        from superglm.features.spline import CubicRegressionSpline
+        from superglm.model import SuperGLM
+        from superglm.solvers.irls_direct import (
+            _build_penalty_matrix,
+            _invert_xtwx_plus_penalty,
+            fit_irls_direct,
+        )
+
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 1, n)
+        mu = np.exp(0.5 + np.sin(2 * np.pi * x))
+        y = rng.poisson(mu).astype(float)
+
+        df = pd.DataFrame({"x": x})
+        m = SuperGLM(
+            features={"x": CubicRegressionSpline(n_knots=8)},
+            family="poisson",
+        )
+        m.fit(df, y)
+
+        weights = np.ones(n)
+        offset = np.zeros(n)
+        lambdas = {"x": 5.0}
+
+        # Get XtWX from a fit
+        _, _, XtWX = fit_irls_direct(
+            X=m._dm,
+            y=y,
+            weights=weights,
+            family=m._distribution,
+            link=m._link,
+            groups=m._groups,
+            lambda2=lambdas,
+            offset=offset,
+            return_xtwx=True,
+        )
+
+        # Build S externally
+        p = XtWX.shape[0]
+        S = _build_penalty_matrix(m._dm.group_matrices, m._groups, lambdas, p)
+
+        # Invert without S_override
+        inv_internal = _invert_xtwx_plus_penalty(XtWX, m._dm.group_matrices, m._groups, lambdas)
+
+        # Invert with S_override
+        inv_override = _invert_xtwx_plus_penalty(
+            XtWX, m._dm.group_matrices, m._groups, lambdas, S_override=S
+        )
+
+        np.testing.assert_allclose(inv_override, inv_internal, rtol=1e-12)

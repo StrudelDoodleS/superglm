@@ -434,6 +434,8 @@ def reml_laml_objective(
     XtWX: NDArray | None = None,
     penalty_caches: dict | None = None,
     log_det_H: float | None = None,
+    S_override: NDArray | None = None,
+    reml_penalties: list[PenaltyComponent] | None = None,
 ) -> float:
     """Laplace REML/LAML objective up to additive constants.
 
@@ -460,7 +462,12 @@ def reml_laml_objective(
         XtWX = _block_xtwx(dm.group_matrices, groups, W, tabmat_split=dm.tabmat_split)
 
     p = XtWX.shape[0]
-    S = _build_penalty_matrix(dm.group_matrices, groups, lambdas, p)
+    if S_override is not None:
+        S = S_override
+    else:
+        S = _build_penalty_matrix(
+            dm.group_matrices, groups, lambdas, p, reml_penalties=reml_penalties
+        )
     penalty_quad = float(result.beta @ S @ result.beta)
 
     # log|S|₊
@@ -763,7 +770,9 @@ def optimize_direct_reml(
     boot_phi = 1.0
     if not scale_known and penalty_caches is not None:
         p_dim = boot_xtwx.shape[0]
-        S_boot = _build_penalty_matrix(dm.group_matrices, groups, boot_lambdas, p_dim)
+        S_boot = _build_penalty_matrix(
+            dm.group_matrices, groups, boot_lambdas, p_dim, reml_penalties=penalties
+        )
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
         M_p = sum(c.rank for c in penalty_caches.values())
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
@@ -812,6 +821,15 @@ def optimize_direct_reml(
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
             cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
 
+        # Pre-build penalty matrix S once for this lambda candidate
+        S_cand = _build_penalty_matrix(
+            dm.group_matrices,
+            groups,
+            cand_lambdas,
+            dm.p,
+            reml_penalties=penalties,
+        )
+
         _t0 = _time.perf_counter()
         pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
             X=dm,
@@ -827,6 +845,7 @@ def optimize_direct_reml(
             return_xtwx=True,
             profile=profile,
             direct_solve=direct_solve,
+            S_override=S_cand,
         )
         _t_pirls += _time.perf_counter() - _t0
         warm_beta = pirls_result.beta.copy()
@@ -846,13 +865,12 @@ def optimize_direct_reml(
             XtWX=XtWX,
             penalty_caches=penalty_caches,
             log_det_H=pirls_result.log_det_H,
+            S_override=S_cand,
         )
 
         phi_hat = 1.0
         if not scale_known and penalty_caches is not None:
-            p_dim = XtWX.shape[0]
-            S_eval = _build_penalty_matrix(dm.group_matrices, groups, cand_lambdas, p_dim)
-            pq = float(pirls_result.beta @ S_eval @ pirls_result.beta)
+            pq = float(pirls_result.beta @ S_cand @ pirls_result.beta)
             M_p = sum(c.rank for c in penalty_caches.values())
             phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
         _t_objective += _time.perf_counter() - _t0
@@ -1013,6 +1031,13 @@ def optimize_direct_reml(
                 trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
 
             _n_linesearch_fits += 1
+            S_trial = _build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                trial_lambdas,
+                dm.p,
+                reml_penalties=penalties,
+            )
             trial_result, trial_inv, trial_xtwx = fit_irls_direct(
                 X=dm,
                 y=y,
@@ -1027,6 +1052,7 @@ def optimize_direct_reml(
                 return_xtwx=True,
                 profile=profile,
                 direct_solve=direct_solve,
+                S_override=S_trial,
             )
 
             trial_obj = reml_laml_objective(
@@ -1042,6 +1068,7 @@ def optimize_direct_reml(
                 XtWX=trial_xtwx,
                 penalty_caches=penalty_caches,
                 log_det_H=trial_result.log_det_H,
+                S_override=S_trial,
             )
 
             if trial_obj <= obj + armijo_c * step * descent:
@@ -1233,7 +1260,9 @@ def optimize_discrete_reml_cached_w(
     # Bootstrap FP step for initial rho
     boot_phi = 1.0
     if not scale_known and penalty_caches is not None:
-        S_boot = _build_penalty_matrix(dm.group_matrices, groups, boot_lambdas, p)
+        S_boot = _build_penalty_matrix(
+            dm.group_matrices, groups, boot_lambdas, p, reml_penalties=penalties
+        )
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
         M_p = sum(c.rank for c in penalty_caches.values())
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
@@ -1280,6 +1309,15 @@ def optimize_discrete_reml_cached_w(
             cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
 
         # --- Step 1: One PIRLS step (W update) ---
+        # Pre-build S once for this candidate
+        S_cand = _build_penalty_matrix(
+            dm.group_matrices,
+            groups,
+            cand_lambdas,
+            p,
+            reml_penalties=penalties,
+        )
+
         _t0 = _time.perf_counter()
         cache = {}
         pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
@@ -1298,6 +1336,7 @@ def optimize_discrete_reml_cached_w(
             profile=profile,
             cache_out=cache,
             direct_solve=direct_solve,
+            S_override=S_cand,
         )
         _t_pirls += _time.perf_counter() - _t0
         _n_pirls_steps += 1
@@ -1323,12 +1362,12 @@ def optimize_discrete_reml_cached_w(
             offset_arr,
             XtWX=XtWX,
             penalty_caches=penalty_caches,
+            S_override=S_cand,
         )
 
         phi_hat = 1.0
         if not scale_known and penalty_caches is not None:
-            S_eval = _build_penalty_matrix(dm.group_matrices, groups, cand_lambdas, p)
-            pq = float(pirls_result.beta @ S_eval @ pirls_result.beta)
+            pq = float(pirls_result.beta @ S_cand @ pirls_result.beta)
             M_p = sum(c.rank for c in penalty_caches.values())
             phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
         _t_objective += _time.perf_counter() - _t0
@@ -1420,7 +1459,13 @@ def optimize_discrete_reml_cached_w(
                 trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
 
             # Solve augmented system analytically (O(p³), no data pass)
-            S_trial = _build_penalty_matrix(dm.group_matrices, groups, trial_lambdas, p)
+            S_trial = _build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                trial_lambdas,
+                p,
+                reml_penalties=penalties,
+            )
             beta_trial, intercept_trial = _solve_cached_augmented(
                 XtWX,
                 S_trial,
@@ -1457,6 +1502,7 @@ def optimize_discrete_reml_cached_w(
                 offset_arr,
                 XtWX=XtWX,
                 penalty_caches=penalty_caches,
+                S_override=S_trial,
             )
 
             _n_linesearch_evals += 1
@@ -1651,16 +1697,16 @@ def optimize_efs_reml(
 
     # Estimate phi for estimated-scale families
     boot_inv_phi = 1.0
+    S_boot = _build_penalty_matrix(
+        dm.group_matrices, groups, boot_lambdas, dm.p, reml_penalties=penalties
+    )
     if not scale_known and penalty_caches is not None:
-        p_dim = boot_xtwx.shape[0]
-        S_boot = _build_penalty_matrix(dm.group_matrices, groups, boot_lambdas, p_dim)
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
         M_p = sum(c.rank for c in penalty_caches.values())
         boot_phi = max((boot_result.deviance + pq_boot) / max(n - M_p, 1.0), 1e-10)
         boot_inv_phi = 1.0 / boot_phi
 
     # One EFS fixed-point step on bootstrap beta
-    S_boot = _build_penalty_matrix(dm.group_matrices, groups, boot_lambdas, dm.p)
     H_boot = boot_xtwx + S_boot
     H_boot_inv, _, _ = _safe_decompose_H(H_boot)
 
@@ -1744,7 +1790,7 @@ def optimize_efs_reml(
 
         # ── Compute H⁻¹ = (X'WX + S)⁻¹ ──────────────────────────
         p = dm.p
-        S = _build_penalty_matrix(dm.group_matrices, groups, lambdas, p)
+        S = _build_penalty_matrix(dm.group_matrices, groups, lambdas, p, reml_penalties=penalties)
         H = cached_xtwx + S
         H_inv, _, _ = _safe_decompose_H(H)
 
@@ -2059,7 +2105,11 @@ def run_reml_once(
             if cached_direct_xtwx is None:
                 raise RuntimeError("REML cheap iteration missing cached direct XtWX")
             XtWX_S_inv = _invert_xtwx_plus_penalty(
-                cached_direct_xtwx, dm.group_matrices, groups, lambdas
+                cached_direct_xtwx,
+                dm.group_matrices,
+                groups,
+                lambdas,
+                reml_penalties=penalties_rro,
             )
             active_groups = list(groups)
         elif not use_direct:
@@ -2070,7 +2120,13 @@ def run_reml_once(
         inv_phi = 1.0
         if not scale_known and penalty_caches is not None:
             p_dim = dm.p
-            S_fp = _build_penalty_matrix(dm.group_matrices, groups, lambdas, p_dim)
+            S_fp = _build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                lambdas,
+                p_dim,
+                reml_penalties=penalties_rro,
+            )
             pq = float(beta @ S_fp @ beta)
             M_p = sum(c.rank for c in penalty_caches.values())
             phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
