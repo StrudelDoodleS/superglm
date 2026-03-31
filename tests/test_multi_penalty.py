@@ -238,6 +238,30 @@ class TestSimilarityTransformLogdet:
         EtE = result.E_sqrt.T @ result.E_sqrt
         np.testing.assert_allclose(EtE, S_total, rtol=1e-6, atol=1e-10)
 
+    def test_tensor_scale_q50_q100(self):
+        """Interaction-scale penalty blocks: correct at q=50 and q=100.
+
+        Tensor product smooths (ti/te) can push penalty block size to
+        q = k1 * k2, easily reaching 50-100. Three-way interactions go
+        higher but are rare and expected to be slow.
+        """
+        rng = np.random.default_rng(42)
+        for q in [50, 100]:
+            # Two penalties with different rank structures (typical tensor setup)
+            S1 = _make_psd(q, q, rng)
+            S2 = _make_psd(q, q - 5, rng)  # rank-deficient margin
+            lambdas = np.array([1.0, 2.0])
+
+            result = similarity_transform_logdet([S1, S2], lambdas)
+            S_total = lambdas[0] * S1 + lambdas[1] * S2
+            _, expected = np.linalg.slogdet(S_total)
+
+            assert result.rank == q
+            np.testing.assert_allclose(result.logdet_s_plus, expected, rtol=1e-6)
+            # Q_plus should be full rank, Q_zero empty
+            assert result.Q_plus.shape == (q, q)
+            assert result.Q_zero.shape == (q, 0)
+
 
 class TestLogdetDerivatives:
     """FD tests for gradient and Hessian of log|S|+."""
