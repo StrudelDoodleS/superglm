@@ -26,9 +26,9 @@ class SimilarityTransformResult:
     """Result of Appendix B similarity transform."""
 
     logdet_s_plus: float  # log|S|+ (positive eigenvalues only)
-    S_pinv_plus: NDArray  # Pseudo-inverse on positive subspace
-    Q_s: NDArray  # (q, q) accumulated orthogonal transform
-    E_sqrt: NDArray  # (q, q) stable square root: E'E = S
+    S_pinv_plus: NDArray  # (q, q) pseudo-inverse on positive subspace
+    Q_s: NDArray  # (q, rank) orthogonal map to positive subspace
+    E_sqrt: NDArray  # (q, q) stable square root: E'E ≈ S
     rank: int  # Numerical rank of S
 
 
@@ -170,7 +170,11 @@ def similarity_transform_logdet(
         gamma = gamma_prime
 
     # ── Compute log|S|+ from the transformed structure ────────────
-    # Form the full S in the transformed coordinates
+    # NOTE: this prototype forms S_transformed and runs eigvalsh on it.
+    # A fully realized Appendix B would extract the determinant directly
+    # from the block-diagonal structure built by the recursion. This is
+    # correct but does not yet exploit the recursive column separation
+    # for the determinant computation itself.
     S_transformed = np.zeros((n_pos, n_pos))
     for i in range(M):
         S_transformed += lambdas[i] * (

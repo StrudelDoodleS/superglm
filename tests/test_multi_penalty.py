@@ -109,6 +109,20 @@ class TestSimilarityTransformLogdet:
 
         np.testing.assert_allclose(result.logdet_s_plus, expected, rtol=1e-8)
 
+    def test_q_s_shape_matches_rank(self):
+        """Q_s shape is (q, rank), not (q, q)."""
+        rng = np.random.default_rng(42)
+        q = 6
+        S1 = _make_psd(q, 3, rng)  # rank 3
+        lambdas = np.array([1.0])
+
+        result = similarity_transform_logdet([S1], lambdas)
+
+        assert result.Q_s.shape == (q, result.rank)
+        # Columns should be orthonormal
+        QtQ = result.Q_s.T @ result.Q_s
+        np.testing.assert_allclose(QtQ, np.eye(result.rank), atol=1e-10)
+
     def test_all_zero_penalties(self):
         """Degenerate case: all-zero penalties → rank 0, logdet 0."""
         q = 5
