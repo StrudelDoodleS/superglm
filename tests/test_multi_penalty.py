@@ -109,19 +109,55 @@ class TestSimilarityTransformLogdet:
 
         np.testing.assert_allclose(result.logdet_s_plus, expected, rtol=1e-8)
 
-    def test_q_s_shape_matches_rank(self):
-        """Q_s shape is (q, rank), not (q, q)."""
+    def test_q_plus_q_zero_orthogonal_decomposition(self):
+        """Q_plus/Q_zero form a complete orthogonal decomposition of q-space."""
+        rng = np.random.default_rng(42)
+        q = 8
+        rank = 5
+        S1 = _make_psd(q, rank, rng)
+        lambdas = np.array([2.0])
+
+        result = similarity_transform_logdet([S1], lambdas)
+        S_total = lambdas[0] * S1
+
+        # Q_plus: (q, rank) penalized subspace
+        assert result.Q_plus.shape == (q, result.rank)
+        np.testing.assert_allclose(result.Q_plus.T @ result.Q_plus, np.eye(result.rank), atol=1e-10)
+
+        # Q_zero: (q, q-rank) null space
+        assert result.Q_zero.shape == (q, q - result.rank)
+        np.testing.assert_allclose(
+            result.Q_zero.T @ result.Q_zero, np.eye(q - result.rank), atol=1e-10
+        )
+
+        # Cross-orthogonality: Q_plus' Q_zero ≈ 0
+        np.testing.assert_allclose(result.Q_plus.T @ result.Q_zero, 0.0, atol=1e-10)
+
+        # Q_full is orthogonal: Q_full' Q_full ≈ I
+        Q_full = result.Q_full
+        assert Q_full.shape == (q, q)
+        np.testing.assert_allclose(Q_full.T @ Q_full, np.eye(q), atol=1e-10)
+
+        # S @ Q_zero ≈ 0 (null space of S)
+        np.testing.assert_allclose(S_total @ result.Q_zero, 0.0, atol=1e-8)
+
+        # Completeness: Q_plus Q_plus' + Q_zero Q_zero' ≈ I
+        proj_sum = result.Q_plus @ result.Q_plus.T + result.Q_zero @ result.Q_zero.T
+        np.testing.assert_allclose(proj_sum, np.eye(q), atol=1e-10)
+
+    def test_full_rank_q_zero_is_empty(self):
+        """Full-rank S: Q_zero has zero columns."""
         rng = np.random.default_rng(42)
         q = 6
-        S1 = _make_psd(q, 3, rng)  # rank 3
+        S1 = _make_psd(q, q, rng) + 0.1 * np.eye(q)
         lambdas = np.array([1.0])
 
         result = similarity_transform_logdet([S1], lambdas)
 
-        assert result.Q_s.shape == (q, result.rank)
-        # Columns should be orthonormal
-        QtQ = result.Q_s.T @ result.Q_s
-        np.testing.assert_allclose(QtQ, np.eye(result.rank), atol=1e-10)
+        assert result.rank == q
+        assert result.Q_plus.shape == (q, q)
+        assert result.Q_zero.shape == (q, 0)
+        assert result.Q_full.shape == (q, q)
 
     def test_all_zero_penalties(self):
         """Degenerate case: all-zero penalties → rank 0, logdet 0."""

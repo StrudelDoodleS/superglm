@@ -23,13 +23,29 @@ _EPS = np.finfo(float).eps
 
 @dataclass
 class SimilarityTransformResult:
-    """Result of Appendix B similarity transform."""
+    """Result of Appendix B similarity transform.
+
+    The transform separates the q-dimensional coefficient space into:
+    - Q_plus: (q, rank) orthonormal basis for the penalized subspace
+    - Q_zero: (q, q-rank) orthonormal basis for the null space of S
+    - Q_full: (q, q) = [Q_plus | Q_zero], full orthogonal basis
+
+    Q_plus is used for log|S|+, S⁺, E_sqrt, derivative formulas.
+    Q_zero is needed for null-space handling and select=True style penalties.
+    Q_full is the complete basis change when a full reparameterization is needed.
+    """
 
     logdet_s_plus: float  # log|S|+ (positive eigenvalues only)
     S_pinv_plus: NDArray  # (q, q) pseudo-inverse on positive subspace
-    Q_s: NDArray  # (q, rank) orthogonal map to positive subspace
+    Q_plus: NDArray  # (q, rank) penalized subspace basis
+    Q_zero: NDArray  # (q, q-rank) null space basis
     E_sqrt: NDArray  # (q, q) stable square root: E'E ≈ S
     rank: int  # Numerical rank of S
+
+    @property
+    def Q_full(self) -> NDArray:
+        """(q, q) full orthogonal basis [Q_plus | Q_zero]."""
+        return np.hstack([self.Q_plus, self.Q_zero])
 
 
 def similarity_transform_logdet(
@@ -85,7 +101,8 @@ def similarity_transform_logdet(
         return SimilarityTransformResult(
             logdet_s_plus=0.0,
             S_pinv_plus=np.zeros((q, q)),
-            Q_s=np.eye(q),
+            Q_plus=np.zeros((q, 0)),
+            Q_zero=np.eye(q),
             E_sqrt=np.zeros((q, q)),
             rank=0,
         )
@@ -191,17 +208,36 @@ def similarity_transform_logdet(
     else:
         logdet = float(np.sum(np.log(pos_final)))
 
+    # ── Build Q_plus and Q_zero ─────────────────────────────────────
+    # Q_total maps from original q-space to the n_pos-dimensional positive
+    # subspace. Within that subspace, the final eigendecomposition separates
+    # penalized from near-null directions.
+    Q_total = U_plus @ Q_inner  # (q, n_pos)
+
+    # Split the transformed-space eigenvectors into penalized (V_plus)
+    # and near-null (V_zero_internal)
+    eigvals_t, eigvecs_t = np.linalg.eigh(S_transformed)
+    idx_t = np.argsort(eigvals_t)[::-1]
+    eigvals_t = eigvals_t[idx_t]
+    eigvecs_t = eigvecs_t[:, idx_t]
+
+    thresh_final = _EPS ** (2 / 3) * max(eigvals_t.max(), 1e-12)
+    V_plus = eigvecs_t[:, :rank]  # (n_pos, rank) penalized directions
+    V_zero_internal = eigvecs_t[:, rank:]  # (n_pos, n_pos-rank) internal null
+
+    # Map back to original coordinates
+    Q_plus = Q_total @ V_plus  # (q, rank) penalized subspace
+
+    # Q_zero combines: (1) internal null from the positive subspace,
+    # (2) the original common null space (U_init columns beyond n_pos)
+    U_null_init = U_init[:, n_pos:]  # (q, q-n_pos) common null space
+    Q_zero_internal = Q_total @ V_zero_internal  # (q, n_pos-rank)
+    Q_zero = np.hstack([Q_zero_internal, U_null_init])  # (q, q-rank)
+
     # ── Pseudo-inverse on positive subspace ───────────────────────
-    # S_pinv_plus in original coordinates
-    Q_total = U_plus @ Q_inner  # (q, n_pos) total orthogonal transform
-    if rank > 0 and rank == n_pos:
-        S_trans_inv = np.linalg.inv(S_transformed)
-        S_pinv_plus = Q_total @ S_trans_inv @ Q_total.T
-    elif rank > 0:
-        # Partial rank — use eigendecomposition for pseudo-inverse
-        eigvals_t, eigvecs_t = np.linalg.eigh(S_transformed)
-        mask_t = eigvals_t > _EPS ** (2 / 3) * max(eigvals_t.max(), 1e-12)
+    if rank > 0:
         inv_eigvals = np.zeros_like(eigvals_t)
+        mask_t = eigvals_t > thresh_final
         np.divide(1.0, eigvals_t, out=inv_eigvals, where=mask_t)
         S_trans_pinv = (eigvecs_t * inv_eigvals) @ eigvecs_t.T
         S_pinv_plus = Q_total @ S_trans_pinv @ Q_total.T
@@ -213,11 +249,10 @@ def similarity_transform_logdet(
     if rank > 0:
         diag_S = np.abs(np.diag(S_transformed))
         P_diag = np.sqrt(np.maximum(diag_S, 1e-300))
-        P_inv = np.zeros_like(P_diag)
-        np.divide(1.0, P_diag, out=P_inv, where=P_diag > 1e-300)
+        P_inv_diag = np.zeros_like(P_diag)
+        np.divide(1.0, P_diag, out=P_inv_diag, where=P_diag > 1e-300)
 
-        S_precond = (S_transformed * P_inv[:, None]) * P_inv[None, :]
-        # Ensure symmetric PD for Cholesky
+        S_precond = (S_transformed * P_inv_diag[:, None]) * P_inv_diag[None, :]
         S_precond = 0.5 * (S_precond + S_precond.T)
         eigvals_pc = np.linalg.eigvalsh(S_precond)
         if eigvals_pc.min() < 0:
@@ -225,16 +260,11 @@ def similarity_transform_logdet(
 
         try:
             L = np.linalg.cholesky(S_precond)
-            E_inner = L.T * P_diag[None, :]  # (n_pos, n_pos)
+            E_inner = L.T * P_diag[None, :]
         except np.linalg.LinAlgError:
-            # Fallback: eigendecomposition-based square root
-            eigvals_t, eigvecs_t = np.linalg.eigh(S_transformed)
-            eigvals_t = np.maximum(eigvals_t, 0.0)
-            E_inner = (eigvecs_t * np.sqrt(eigvals_t)) @ eigvecs_t.T
+            eigvals_sq = np.maximum(eigvals_t, 0.0)
+            E_inner = (eigvecs_t * np.sqrt(eigvals_sq)) @ eigvecs_t.T
 
-        # Map back to original coordinates
-        E_sqrt = np.zeros((q, q))
-        E_sqrt[:n_pos, :n_pos] = E_inner
         E_sqrt = Q_total @ E_inner @ Q_total.T
     else:
         E_sqrt = np.zeros((q, q))
@@ -242,7 +272,8 @@ def similarity_transform_logdet(
     return SimilarityTransformResult(
         logdet_s_plus=logdet,
         S_pinv_plus=S_pinv_plus,
-        Q_s=Q_total,
+        Q_plus=Q_plus,
+        Q_zero=Q_zero,
         E_sqrt=E_sqrt,
         rank=rank,
     )
