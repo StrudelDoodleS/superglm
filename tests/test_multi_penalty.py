@@ -600,3 +600,176 @@ class TestInvertXtWXPlusPenaltySOverrideParity:
         )
 
         np.testing.assert_allclose(inv_override, inv_internal, rtol=1e-12)
+
+
+class TestEndToEndMultiPenaltyDirect:
+    """End-to-end: optimize_direct_reml with pc.name != group_name.
+
+    Constructs two synthetic PenaltyComponents for one group (split the
+    single omega into two halves), then runs the direct REML Newton optimizer
+    through convergence.
+    """
+
+    @pytest.mark.slow
+    def test_direct_reml_converges_with_multi_penalty(self):
+        """optimize_direct_reml converges with two components per group."""
+        from superglm import SuperGLM
+        from superglm.features.spline import CubicRegressionSpline
+        from superglm.group_matrix import SparseSSPGroupMatrix
+        from superglm.reml_optimizer import optimize_direct_reml
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+        from superglm.types import PenaltyComponent
+
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = rng.uniform(0, 1, n)
+        mu = np.exp(0.5 + np.sin(2 * np.pi * x1))
+        y = rng.poisson(mu).astype(float)
+        df = pd.DataFrame({"x1": x1})
+
+        m = SuperGLM(
+            features={"x1": CubicRegressionSpline(n_knots=8)},
+            family="poisson",
+        )
+        m.fit(df, y)
+
+        # Identify the penalised group
+        reml_groups = []
+        for i, (gm, g) in enumerate(zip(m._dm.group_matrices, m._groups)):
+            if g.penalized and isinstance(gm, SparseSSPGroupMatrix) and gm.omega is not None:
+                reml_groups.append((i, g))
+        assert len(reml_groups) == 1
+        idx, g = reml_groups[0]
+        gm = m._dm.group_matrices[idx]
+        omega_ssp_full = gm.R_inv.T @ gm.omega @ gm.R_inv
+
+        # Split omega into two synthetic halves via eigendecomposition
+        eigvals, eigvecs = np.linalg.eigh(omega_ssp_full)
+        mid = len(eigvals) // 2
+        omega1 = (eigvecs[:, :mid] * eigvals[:mid]) @ eigvecs[:, :mid].T
+        omega2 = (eigvecs[:, mid:] * eigvals[mid:]) @ eigvecs[:, mid:].T
+        # omega1 + omega2 ≈ omega_ssp_full
+        np.testing.assert_allclose(omega1 + omega2, omega_ssp_full, atol=1e-12)
+
+        # Build two PenaltyComponents with different names
+        eps_thresh = np.finfo(float).eps ** (2 / 3)
+
+        def _make_pc(name, omega_ssp):
+            ev = np.linalg.eigvalsh(omega_ssp)
+            thresh = eps_thresh * max(ev.max(), 1e-12)
+            pos = ev[ev > thresh]
+            return PenaltyComponent(
+                name=name,
+                group_name=g.name,
+                group_index=idx,
+                group_sl=g.sl,
+                omega_raw=gm.omega,  # raw not used by direct path
+                omega_ssp=omega_ssp,
+                rank=float(len(pos)),
+                log_det_omega_plus=float(np.sum(np.log(pos))) if len(pos) > 0 else 0.0,
+                eigvals_omega=pos,
+            )
+
+        pc1 = _make_pc("x1:pen1", omega1)
+        pc2 = _make_pc("x1:pen2", omega2)
+        penalties = [pc1, pc2]
+
+        # Build penalty caches (one per component)
+        from superglm.reml import PenaltyCache
+
+        penalty_caches = {
+            pc.name: PenaltyCache(
+                omega_ssp=pc.omega_ssp,
+                log_det_omega_plus=pc.log_det_omega_plus,
+                rank=pc.rank,
+                eigvals_omega=pc.eigvals_omega,
+            )
+            for pc in penalties
+        }
+        penalty_ranks = {pc.name: pc.rank for pc in penalties}
+        lambdas = {"x1:pen1": 1.0, "x1:pen2": 1.0}
+
+        # Run optimize_direct_reml
+        result = optimize_direct_reml(
+            dm=m._dm,
+            distribution=m._distribution,
+            link=m._link,
+            groups=m._groups,
+            discrete=False,
+            y=y,
+            sample_weight=np.ones(n),
+            offset_arr=np.zeros(n),
+            reml_groups=reml_groups,
+            penalty_ranks=penalty_ranks,
+            lambdas=lambdas,
+            max_reml_iter=15,
+            reml_tol=1e-4,
+            verbose=False,
+            penalty_caches=penalty_caches,
+            reml_penalties=penalties,
+        )
+
+        # Must converge
+        assert result.converged, "Multi-penalty direct REML did not converge"
+
+        # Final lambdas must have both component keys
+        assert "x1:pen1" in result.lambdas
+        assert "x1:pen2" in result.lambdas
+
+        # Final S from multi-penalty should equal sum of component contributions
+        p = m._dm.p
+        S_multi = _build_penalty_matrix(
+            m._dm.group_matrices,
+            m._groups,
+            result.lambdas,
+            p,
+            reml_penalties=penalties,
+        )
+        S_manual = result.lambdas["x1:pen1"] * omega1 + result.lambdas["x1:pen2"] * omega2
+        np.testing.assert_allclose(S_multi[g.sl, g.sl], S_manual, rtol=1e-10)
+
+    @pytest.mark.slow
+    def test_component_independence(self):
+        """Changing one component lambda changes S independently of the other."""
+        from superglm.types import PenaltyComponent
+
+        q = 6
+        rng = np.random.default_rng(42)
+        omega1 = _make_psd(q, 3, rng)
+        omega2 = _make_psd(q, 3, rng)
+
+        pc1 = PenaltyComponent(
+            name="t:a",
+            group_name="t",
+            group_index=0,
+            group_sl=slice(0, q),
+            omega_raw=omega1,
+            omega_ssp=omega1,
+            rank=3.0,
+        )
+        pc2 = PenaltyComponent(
+            name="t:b",
+            group_name="t",
+            group_index=0,
+            group_sl=slice(0, q),
+            omega_raw=omega2,
+            omega_ssp=omega2,
+            rank=3.0,
+        )
+
+        # Baseline
+        lam_base = {"t:a": 1.0, "t:b": 1.0}
+        S_base = np.zeros((q, q))
+        for pc in [pc1, pc2]:
+            S_base[pc.group_sl, pc.group_sl] += lam_base[pc.name] * pc.omega_ssp
+
+        # Change only lambda for component "t:a"
+        lam_a_changed = {"t:a": 5.0, "t:b": 1.0}
+        S_a = np.zeros((q, q))
+        for pc in [pc1, pc2]:
+            S_a[pc.group_sl, pc.group_sl] += lam_a_changed[pc.name] * pc.omega_ssp
+
+        # The difference should only involve omega1
+        diff = S_a - S_base
+        expected_diff = 4.0 * omega1  # (5-1) * omega1
+        np.testing.assert_allclose(diff, expected_diff, atol=1e-12)

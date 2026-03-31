@@ -792,10 +792,9 @@ def optimize_direct_reml(
         # Snap degenerate select=True groups to upper bound.
         # When quad << trace, the FP update is degenerate
         # (any lambda is approx a fixed point).  Snap breaks it.
-        # Look up subgroup_type from reml_groups if available.
-        sg_type = None
-        if reml_groups is not None:
-            sg_type = reml_groups[i][1].subgroup_type
+        # Look up subgroup_type from the parent group (by group_index, not
+        # penalty index — multi-penalty has more components than groups).
+        sg_type = groups[pc.group_index].subgroup_type if pc.group_index < len(groups) else None
         if (
             select_snap
             and sg_type is not None
