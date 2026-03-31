@@ -720,6 +720,7 @@ def fit_reml(
         )
     model._result = best.pirls_result
     model._reml_lambdas = best.lambdas
+    model._reml_penalties = reml_penalties
     model._reml_result = best
     lambdas = best.lambdas
     n_reml_iter = best.n_reml_iter
