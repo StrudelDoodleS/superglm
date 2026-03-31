@@ -670,16 +670,16 @@ def fit_reml(
         )
         return model
 
-    # Initialize per-group lambdas
-    lam_init = lambda2_init if lambda2_init is not None else model.lambda2
-    lambdas = {g.name: lam_init for _, g in reml_groups}
-
     # Build penalty components and caches (eigenstructure computed once)
     from superglm.reml import build_penalty_caches, build_penalty_components
 
     reml_penalties = build_penalty_components(model._dm.group_matrices, reml_groups)
     penalty_caches = build_penalty_caches(model._dm.group_matrices, reml_groups)
     penalty_ranks = {pc.name: pc.rank for pc in reml_penalties}
+
+    # Initialize per-component lambdas (penalty-indexed, not term-indexed)
+    lam_init = lambda2_init if lambda2_init is not None else model.lambda2
+    lambdas = {pc.name: lam_init for pc in reml_penalties}
 
     # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
     offset_arr = offset if offset is not None else np.zeros(len(y))

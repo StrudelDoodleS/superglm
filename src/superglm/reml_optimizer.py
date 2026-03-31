@@ -1612,7 +1612,13 @@ def optimize_efs_reml(
     Biometrics 73(4), 1071-1081.
     """
     scale_known = getattr(distribution, "scale_known", True)
-    reml_update_names = [g.name for _, g in reml_groups]
+    penalties = _coerce_reml_penalties(
+        reml_groups=reml_groups,
+        reml_penalties=reml_penalties,
+        group_matrices=dm.group_matrices,
+        penalty_caches=penalty_caches,
+    )
+    reml_update_names = [pc.name for pc in penalties]
     n = len(y)
 
     # ── Bootstrap: one PIRLS with minimal penalty → one EFS step ──
@@ -1658,28 +1664,33 @@ def optimize_efs_reml(
     H_boot = boot_xtwx + S_boot
     H_boot_inv, _, _ = _safe_decompose_H(H_boot)
 
-    for _idx, g in reml_groups:
-        beta_g = boot_result.beta[g.sl]
+    for pc in penalties:
+        beta_g = boot_result.beta[pc.group_sl]
         if np.linalg.norm(beta_g) < 1e-12:
             continue
-        omega_ssp = penalty_caches[g.name].omega_ssp
+        omega_ssp = pc.omega_ssp if pc.omega_ssp is not None else penalty_caches[pc.name].omega_ssp
         quad = float(beta_g @ omega_ssp @ beta_g)
-        trace_term = float(np.trace(H_boot_inv[g.sl, g.sl] @ omega_ssp))
-        r_j = penalty_ranks[g.name]
+        trace_term = float(np.trace(H_boot_inv[pc.group_sl, pc.group_sl] @ omega_ssp))
+        r_j = pc.rank if pc.rank > 0 else penalty_ranks[pc.name]
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
-        lambdas[g.name] = float(np.clip(lam_fp, 1e-6, 1e10))
+        lambdas[pc.name] = float(np.clip(lam_fp, 1e-6, 1e10))
 
-    # Rebuild DM with bootstrapped lambdas
+    # Rebuild DM with bootstrapped lambdas — refresh penalties + caches
     old_gms = dm.group_matrices
     dm = rebuild_dm(lambdas, sample_weight)
     penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
     penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
+    penalties = _coerce_reml_penalties(
+        reml_groups=reml_groups,
+        group_matrices=dm.group_matrices,
+        penalty_caches=penalty_caches,
+    )
     warm_beta = _map_beta_between_bases(boot_result.beta, old_gms, dm.group_matrices, groups)
     warm_intercept = float(boot_result.intercept)
 
     if verbose:
-        lam_str = ", ".join(f"{g.name}={lambdas[g.name]:.4g}" for _, g in reml_groups)
+        lam_str = ", ".join(f"{pc.name}={lambdas[pc.name]:.4g}" for pc in penalties)
         print(f"  REML bootstrap: lambdas=[{lam_str}]")
 
     # ── Main EFS loop ─────────────────────────────────────────────
@@ -1747,31 +1758,33 @@ def optimize_efs_reml(
 
         # ── EFS lambda update ─────────────────────────────────────
         lambdas_new = lambdas.copy()
-        for _idx, g in reml_groups:
-            beta_g = beta[g.sl]
+        for pc in penalties:
+            beta_g = beta[pc.group_sl]
 
             # Skip zeroed groups (L1 penalty killed them)
             if np.linalg.norm(beta_g) < 1e-12:
                 continue
 
-            omega_ssp = penalty_caches[g.name].omega_ssp
+            omega_ssp = (
+                pc.omega_ssp if pc.omega_ssp is not None else penalty_caches[pc.name].omega_ssp
+            )
             quad = float(beta_g @ omega_ssp @ beta_g)
-            trace_term = float(np.trace(H_inv[g.sl, g.sl] @ omega_ssp))
+            trace_term = float(np.trace(H_inv[pc.group_sl, pc.group_sl] @ omega_ssp))
 
-            r_j = penalty_ranks[g.name]
+            r_j = pc.rank if pc.rank > 0 else penalty_ranks[pc.name]
             denom = inv_phi * quad + trace_term
 
             if denom > 1e-12:
                 lam_new = r_j / denom
             else:
-                lam_new = lambdas[g.name]
+                lam_new = lambdas[pc.name]
 
             # Clamp log-lambda step to prevent wild jumps
-            log_step = np.log(max(lam_new, 1e-10)) - np.log(max(lambdas[g.name], 1e-10))
+            log_step = np.log(max(lam_new, 1e-10)) - np.log(max(lambdas[pc.name], 1e-10))
             log_step = np.clip(log_step, -5.0, 5.0)
-            lam_new = lambdas[g.name] * np.exp(log_step)
+            lam_new = lambdas[pc.name] * np.exp(log_step)
 
-            lambdas_new[g.name] = float(np.clip(lam_new, 1e-6, 1e10))
+            lambdas_new[pc.name] = float(np.clip(lam_new, 1e-6, 1e10))
 
         # ── Anderson(1) acceleration on log-lambda ────────────────
         if aa_prev_log_x is not None and len(reml_update_names) > 0:
@@ -1830,10 +1843,10 @@ def optimize_efs_reml(
                 penalty_caches=penalty_caches,
             )
             if obj_trial > obj_curr + 1e-8 * max(abs(obj_curr), 1.0):
-                for _, g in reml_groups:
-                    log_old = np.log(max(lambdas[g.name], 1e-10))
-                    log_new = np.log(max(lambdas_new[g.name], 1e-10))
-                    lambdas_new[g.name] = float(
+                for pc in penalties:
+                    log_old = np.log(max(lambdas[pc.name], 1e-10))
+                    log_new = np.log(max(lambdas_new[pc.name], 1e-10))
+                    lambdas_new[pc.name] = float(
                         np.clip(np.exp(0.5 * (log_old + log_new)), 1e-6, 1e10)
                     )
                 if len(reml_update_names) > 0:
@@ -1841,14 +1854,14 @@ def optimize_efs_reml(
 
         # ── Convergence check ─────────────────────────────────────
         changes = [
-            abs(np.log(lambdas_new[g.name]) - np.log(lambdas[g.name]))
-            for _, g in reml_groups
-            if lambdas[g.name] > 0 and lambdas_new[g.name] > 0
+            abs(np.log(lambdas_new[pc.name]) - np.log(lambdas[pc.name]))
+            for pc in penalties
+            if lambdas[pc.name] > 0 and lambdas_new[pc.name] > 0
         ]
         max_change = max(changes) if changes else 0.0
 
         if verbose:
-            lam_str = ", ".join(f"{g.name}={lambdas_new[g.name]:.4g}" for _, g in reml_groups)
+            lam_str = ", ".join(f"{pc.name}={lambdas_new[pc.name]:.4g}" for pc in penalties)
             mode = "cheap" if cheap_iter else f"pirls={last_pirls_iters}"
             print(
                 f"  REML iter={n_reml_iter}  max_change={max_change:.6f}  "
@@ -1869,9 +1882,14 @@ def optimize_efs_reml(
             dm = rebuild_dm(lambdas_new, sample_weight)
             warm_beta = _map_beta_between_bases(beta, old_gms, dm.group_matrices, groups)
             warm_intercept = intercept
-            # R_inv changed → recompute penalty caches (omega_ssp etc.)
+            # R_inv changed → recompute penalties + caches (basis-dependent)
             penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
             penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
+            penalties = _coerce_reml_penalties(
+                reml_groups=reml_groups,
+                group_matrices=dm.group_matrices,
+                penalty_caches=penalty_caches,
+            )
             cheap_iter = False
         else:
             # Cheap: re-invert cached X'WX + S only (O(p³), no data pass)
@@ -1957,10 +1975,15 @@ def run_reml_once(
 
     scale_known = getattr(distribution, "scale_known", True)
 
+    penalties_rro = _coerce_reml_penalties(
+        reml_groups=reml_groups,
+        group_matrices=dm.group_matrices,
+        penalty_caches=penalty_caches,
+    )
     if use_direct:
-        reml_update_names = [g.name for _, g in reml_groups]
+        reml_update_names = [pc.name for pc in penalties_rro]
     else:
-        reml_update_names = [g.name for _, g in reml_groups if penalty_ranks[g.name] > 1]
+        reml_update_names = [pc.name for pc in penalties_rro if pc.rank > 1]
 
     warm_beta = None
     warm_intercept = None
@@ -1972,7 +1995,7 @@ def run_reml_once(
     cheap_iter = False
     cached_direct_xtwx: NDArray | None = None
     last_pirls_iters = 0
-    direct_has_scalar_groups = any(penalty_ranks[g.name] <= 1 for _, g in reml_groups)
+    direct_has_scalar_groups = any(pc.rank <= 1 for pc in penalties_rro)
     direct_cheap_threshold = 0.01 if direct_has_scalar_groups else 0.2
     bcd_cheap_threshold = 0.01
 
@@ -2054,29 +2077,31 @@ def run_reml_once(
             inv_phi = 1.0 / phi_hat
 
         lambdas_new = lambdas.copy()
-        for idx, g in reml_groups:
-            if not use_direct and penalty_ranks[g.name] <= 1:
+        for pc in penalties_rro:
+            if not use_direct and pc.rank <= 1:
                 continue
 
-            gm = dm.group_matrices[idx]
-            beta_g = beta[g.sl]
+            gm = dm.group_matrices[pc.group_index]
+            beta_g = beta[pc.group_sl]
             if np.linalg.norm(beta_g) < 1e-12:
                 continue
 
-            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+            omega_ssp = (
+                pc.omega_ssp if pc.omega_ssp is not None else gm.R_inv.T @ gm.omega @ gm.R_inv
+            )
             quad = float(beta_g @ omega_ssp @ beta_g)
 
-            ag = next((a for a in active_groups if a.name == g.name), None)
+            ag = next((a for a in active_groups if a.name == pc.name), None)
             if ag is None:
                 continue
 
             H_inv_jj = XtWX_S_inv[ag.sl, ag.sl]
             trace_term = float(np.trace(H_inv_jj @ omega_ssp))
 
-            r_j = penalty_ranks[g.name]
+            r_j = pc.rank if pc.rank > 0 else penalty_ranks.get(pc.name, 0.0)
             denom = inv_phi * quad + trace_term
-            lam_new = r_j / denom if denom > 1e-12 else lambdas[g.name]
-            lambdas_new[g.name] = float(np.clip(lam_new, 1e-6, 1e10))
+            lam_new = r_j / denom if denom > 1e-12 else lambdas[pc.name]
+            lambdas_new[pc.name] = float(np.clip(lam_new, 1e-6, 1e10))
 
         if aa_prev_log_x is not None and len(reml_update_names) > 0:
             log_x = np.array([np.log(lambdas[n]) for n in reml_update_names])
@@ -2098,26 +2123,26 @@ def run_reml_once(
 
         if use_direct:
             changes = [
-                abs(np.log(lambdas_new[g.name]) - np.log(lambdas[g.name]))
-                for _, g in reml_groups
-                if lambdas[g.name] > 0 and lambdas_new[g.name] > 0
+                abs(np.log(lambdas_new[pc.name]) - np.log(lambdas[pc.name]))
+                for pc in penalties_rro
+                if lambdas[pc.name] > 0 and lambdas_new[pc.name] > 0
             ]
         else:
             changes = [
-                abs(np.log(lambdas_new[g.name]) - np.log(lambdas[g.name]))
-                for _, g in reml_groups
-                if lambdas[g.name] > 0 and lambdas_new[g.name] > 0 and penalty_ranks[g.name] > 1
+                abs(np.log(lambdas_new[pc.name]) - np.log(lambdas[pc.name]))
+                for pc in penalties_rro
+                if lambdas[pc.name] > 0 and lambdas_new[pc.name] > 0 and pc.rank > 1
             ]
             if not changes:
                 changes = [
-                    abs(np.log(lambdas_new[g.name]) - np.log(lambdas[g.name]))
-                    for _, g in reml_groups
-                    if lambdas[g.name] > 0 and lambdas_new[g.name] > 0
+                    abs(np.log(lambdas_new[pc.name]) - np.log(lambdas[pc.name]))
+                    for pc in penalties_rro
+                    if lambdas[pc.name] > 0 and lambdas_new[pc.name] > 0
                 ]
         max_change = max(changes) if changes else 0.0
 
         if verbose:
-            lam_str = ", ".join(f"{g.name}={lambdas_new[g.name]:.4g}" for _, g in reml_groups)
+            lam_str = ", ".join(f"{pc.name}={lambdas_new[pc.name]:.4g}" for pc in penalties_rro)
             mode = "cheap" if cheap_iter else f"pirls={last_pirls_iters}"
             print(
                 f"  REML iter={n_reml_iter}  max_change={max_change:.6f}  "
