@@ -126,6 +126,7 @@ class PenaltyComponent:
     name: str  # stable lambda key, e.g. "age:wiggle", "age:null"
     group_name: str  # parent GroupSlice name
     group_index: int  # index into groups list
+    group_sl: slice  # coefficient slice from parent GroupSlice
     omega_raw: NDArray  # (K, K) penalty in B-spline / raw basis space
     omega_ssp: NDArray | None = None  # (p_g, p_g) in SSP coordinates
     rank: float = 0.0
