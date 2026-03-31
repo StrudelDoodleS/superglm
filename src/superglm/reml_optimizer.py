@@ -2165,6 +2165,14 @@ def run_reml_once(
             dm = rebuild_dm(lambdas_new, sample_weight)
             warm_beta = _map_beta_between_bases(beta, old_gms, dm.group_matrices, groups)
             warm_intercept = intercept
+            # R_inv changed → refresh penalties + caches (basis-dependent)
+            penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
+            penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
+            penalties_rro = _coerce_reml_penalties(
+                reml_groups=reml_groups,
+                group_matrices=dm.group_matrices,
+                penalty_caches=penalty_caches,
+            )
             cheap_iter = False
         else:
             cheap_iter = True
