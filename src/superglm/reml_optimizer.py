@@ -44,7 +44,64 @@ from superglm.solvers.irls_direct import (
     fit_irls_direct,
 )
 from superglm.solvers.pirls import PIRLSResult, fit_pirls
-from superglm.types import GroupSlice
+from superglm.types import GroupSlice, PenaltyComponent
+
+
+def _coerce_reml_penalties(
+    reml_groups=None,
+    reml_penalties=None,
+    group_matrices=None,
+    penalty_caches=None,
+):
+    """Coerce legacy reml_groups to reml_penalties list.
+
+    Accepts either reml_penalties (preferred) or reml_groups (legacy).
+    When given reml_groups, builds PenaltyComponent objects from the
+    group matrices and penalty_caches (if available).
+    """
+    if reml_penalties is not None:
+        return reml_penalties
+    if reml_groups is None:
+        raise ValueError("Either reml_penalties or reml_groups must be provided")
+    # Build from legacy reml_groups
+    components = []
+    for idx, g in reml_groups:
+        gm = group_matrices[idx] if group_matrices is not None else None
+        omega_ssp = None
+        rank = 0.0
+        log_det = 0.0
+        eigvals = None
+        omega_raw = None
+        if penalty_caches is not None and g.name in penalty_caches:
+            cache = penalty_caches[g.name]
+            omega_ssp = cache.omega_ssp
+            rank = cache.rank
+            log_det = cache.log_det_omega_plus
+            eigvals = cache.eigvals_omega
+        elif (
+            gm is not None
+            and hasattr(gm, "R_inv")
+            and hasattr(gm, "omega")
+            and gm.omega is not None
+        ):
+            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+        if gm is not None and hasattr(gm, "omega"):
+            omega_raw = gm.omega
+        components.append(
+            PenaltyComponent(
+                name=g.name,
+                group_name=g.name,
+                group_index=idx,
+                group_sl=g.sl,
+                omega_raw=omega_raw,
+                omega_ssp=omega_ssp,
+                rank=rank,
+                log_det_omega_plus=log_det,
+                eigvals_omega=eigvals,
+            )
+        )
+    return components
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Weight derivative
@@ -185,12 +242,14 @@ def reml_w_correction(
     pirls_result: PIRLSResult,
     XtWX_S_inv: NDArray,
     lambdas: dict[str, float],
-    reml_groups: list[tuple[int, GroupSlice]],
-    penalty_caches: dict | None,
-    sample_weight: NDArray,
-    offset_arr: NDArray,
-    distribution: Any,
+    reml_groups=None,
+    penalty_caches: dict | None = None,
+    sample_weight: NDArray | None = None,
+    offset_arr: NDArray | None = None,
+    distribution: Any = None,
     w_correction_order: int = 1,
+    *,
+    reml_penalties: list[PenaltyComponent] | None = None,
 ) -> tuple[NDArray, dict[int, NDArray]] | tuple[NDArray, dict[int, NDArray], NDArray | None] | None:
     """W(ρ) correction for REML derivatives (first- or second-order).
 
@@ -226,6 +285,12 @@ def reml_w_correction(
     dH2_cross is an (m, m) array of second-order Hessian corrections:
     ``dH2_cross[j,k] = 0.5 * tr(H⁻¹ X' diag(∂²w/(∂ρ_j ∂ρ_k)) X)``.
     """
+    penalties = _coerce_reml_penalties(
+        reml_groups=reml_groups,
+        reml_penalties=reml_penalties,
+        group_matrices=dm.group_matrices,
+        penalty_caches=penalty_caches,
+    )
     eta = stabilize_eta(
         dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
         link,
@@ -234,13 +299,13 @@ def reml_w_correction(
     dW_deta = compute_dW_deta(link, distribution, mu, eta, sample_weight)
 
     if dW_deta is None:
-        return None  # Custom link/distribution without second-order methods
+        return None  # Custom link/distribution w/o 2nd-order
 
     if np.max(np.abs(dW_deta)) < 1e-12:
         return None  # No correction (e.g. Gamma/log)
 
     p = XtWX_S_inv.shape[0]
-    m = len(reml_groups)
+    m = len(penalties)
     grad_correction = np.zeros(m)
     dH_extra: dict[int, NDArray] = {}
 
@@ -257,32 +322,34 @@ def reml_w_correction(
     omega_ssp_list: list[NDArray] = []
     lam_list: list[float] = []
 
-    for i, (idx, g) in enumerate(reml_groups):
-        if penalty_caches is not None:
-            omega_ssp = penalty_caches[g.name].omega_ssp
-        else:
-            gm = gms[idx]
-            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-        lam = lambdas[g.name]
-        beta_g = pirls_result.beta[g.sl]
+    for i, pc in enumerate(penalties):
+        omega_ssp = pc.omega_ssp
+        if omega_ssp is None:
+            if penalty_caches is not None and pc.name in penalty_caches:
+                omega_ssp = penalty_caches[pc.name].omega_ssp
+            else:
+                gm = gms[pc.group_index]
+                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+        lam = lambdas[pc.name]
+        beta_g = pirls_result.beta[pc.group_sl]
 
-        # S_j β̂ (p-vector, nonzero only in g.sl block)
+        # S_j beta (p-vector, nonzero only in pc.group_sl block)
         s_beta = np.zeros(p)
-        s_beta[g.sl] = lam * (omega_ssp @ beta_g)
+        s_beta[pc.group_sl] = lam * (omega_ssp @ beta_g)
 
-        # dβ̂/dρ_j = -H⁻¹ S_j β̂  (IFT)
+        # dbeta/drho_j = -H^{-1} S_j beta  (IFT)
         dbeta_j = -(XtWX_S_inv @ s_beta)
 
-        # dη/dρ_j = X dβ̂/dρ_j
+        # deta/drho_j = X dbeta/drho_j
         deta_j = dm.matvec(dbeta_j)
 
-        # a_j = (dW/dη) ⊙ dη_j  — weights change per observation
+        # a_j = (dW/deta) * deta_j  -- weight changes per obs
         a_j = dW_deta * deta_j
 
-        # C_j = X'diag(a_j)X — the dW contribution to dH/dρ_j
+        # C_j = X'diag(a_j)X -- dW contribution to dH/drho_j
         C_j = _block_xtwx_signed(gms, groups, a_j, tabmat_split=dm.tabmat_split)
 
-        # Gradient correction: ½ tr(H⁻¹ C_j)
+        # Gradient correction: 0.5 tr(H^{-1} C_j)
         grad_correction[i] = 0.5 * float(np.sum(XtWX_S_inv * C_j))
 
         dH_extra[i] = C_j
@@ -302,26 +369,26 @@ def reml_w_correction(
     if w_correction_order >= 2 and d2W_deta2 is not None:
         dH2_cross = np.zeros((m, m))
         for i in range(m):
-            g_i = reml_groups[i][1]
+            pc_i = penalties[i]
             for j in range(i, m):
-                g_j = reml_groups[j][1]
+                pc_j = penalties[j]
 
-                # ── f^{jk} vector (Section 3.4, eq for d²β̂) ──
+                # f^{jk} vector (Section 3.4, eq for d2beta)
                 f_jk = 0.5 * deta_vectors[i] * deta_vectors[j] * dW_deta
 
                 # X^T f^{jk}
                 Xt_f = dm.rmatvec(f_jk)
 
-                # λ_i S_i dβ̂/dρ_j  (nonzero only in g_i.sl block)
+                # lam_i S_i dbeta/drho_j  (nonzero in pc_i block)
                 lam_i_S_i_dbeta_j = np.zeros(p)
-                lam_i_S_i_dbeta_j[g_i.sl] = lam_list[i] * (
-                    omega_ssp_list[i] @ dbeta_vectors[j][g_i.sl]
+                lam_i_S_i_dbeta_j[pc_i.group_sl] = lam_list[i] * (
+                    omega_ssp_list[i] @ dbeta_vectors[j][pc_i.group_sl]
                 )
 
-                # λ_j S_j dβ̂/dρ_i  (nonzero only in g_j.sl block)
+                # lam_j S_j dbeta/drho_i  (nonzero in pc_j block)
                 lam_j_S_j_dbeta_i = np.zeros(p)
-                lam_j_S_j_dbeta_i[g_j.sl] = lam_list[j] * (
-                    omega_ssp_list[j] @ dbeta_vectors[i][g_j.sl]
+                lam_j_S_j_dbeta_i[pc_j.group_sl] = lam_list[j] * (
+                    omega_ssp_list[j] @ dbeta_vectors[i][pc_j.group_sl]
                 )
 
                 # rhs = X^T f^{jk} + λ_i S_i dβ̂_j + λ_j S_j dβ̂_i
@@ -441,22 +508,32 @@ def reml_direct_gradient(
     result: PIRLSResult,
     XtWX_S_inv: NDArray,
     lambdas: dict[str, float],
-    reml_groups: list[tuple[int, GroupSlice]],
-    penalty_ranks: dict[str, float],
+    reml_groups=None,
+    penalty_ranks: dict[str, float] | None = None,
     phi_hat: float = 1.0,
+    *,
+    reml_penalties: list[PenaltyComponent] | None = None,
+    penalty_caches: dict | None = None,
 ) -> NDArray:
     """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W)."""
-    grad = np.zeros(len(reml_groups), dtype=np.float64)
+    penalties = _coerce_reml_penalties(
+        reml_groups=reml_groups,
+        reml_penalties=reml_penalties,
+        group_matrices=group_matrices,
+        penalty_caches=penalty_caches,
+    )
+    grad = np.zeros(len(penalties), dtype=np.float64)
     inv_phi = 1.0 / max(phi_hat, 1e-10)
-    for i, (idx, g) in enumerate(reml_groups):
-        gm = group_matrices[idx]
-        omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-        beta_g = result.beta[g.sl]
+    for i, pc in enumerate(penalties):
+        gm = group_matrices[pc.group_index]
+        omega_ssp = pc.omega_ssp if pc.omega_ssp is not None else gm.R_inv.T @ gm.omega @ gm.R_inv
+        beta_g = result.beta[pc.group_sl]
         quad = float(beta_g @ omega_ssp @ beta_g)
-        H_inv_jj = XtWX_S_inv[g.sl, g.sl]
+        H_inv_jj = XtWX_S_inv[pc.group_sl, pc.group_sl]
         trace_term = float(np.trace(H_inv_jj @ omega_ssp))
-        lam = float(lambdas[g.name])
-        grad[i] = 0.5 * (lam * (inv_phi * quad + trace_term) - penalty_ranks[g.name])
+        lam = float(lambdas[pc.name])
+        r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
+        grad[i] = 0.5 * (lam * (inv_phi * quad + trace_term) - r_j)
     return grad
 
 
@@ -465,15 +542,17 @@ def reml_direct_hessian(
     distribution: Any,
     XtWX_S_inv: NDArray,
     lambdas: dict[str, float],
-    reml_groups: list[tuple[int, GroupSlice]],
-    gradient: NDArray,
-    penalty_ranks: dict[str, float],
+    reml_groups=None,
+    gradient: NDArray | None = None,
+    penalty_ranks: dict[str, float] | None = None,
     penalty_caches: dict | None = None,
     pirls_result: object | None = None,
     n_obs: int = 0,
     phi_hat: float = 1.0,
     dH_extra: dict[int, NDArray] | None = None,
     dH2_cross: NDArray | None = None,
+    *,
+    reml_penalties: list[PenaltyComponent] | None = None,
 ) -> NDArray:
     """Outer Hessian of the REML criterion w.r.t. log-lambdas.
 
@@ -489,22 +568,30 @@ def reml_direct_hessian(
         0.5 * tr(H⁻¹ X'diag(∂²w/(∂ρ_j ∂ρ_k))X) values,
         added directly to the Hessian.
     """
-    m = len(reml_groups)
+    penalties = _coerce_reml_penalties(
+        reml_groups=reml_groups,
+        reml_penalties=reml_penalties,
+        group_matrices=group_matrices,
+        penalty_caches=penalty_caches,
+    )
+    m = len(penalties)
     p = XtWX_S_inv.shape[0]
     hess = np.zeros((m, m))
 
     full_HdHj: dict[int, NDArray] = {}
     quad_per_group: list[float] = []
     s_beta_list: list[NDArray] = []
-    for i, (idx, g) in enumerate(reml_groups):
-        if penalty_caches is not None:
-            omega_ssp = penalty_caches[g.name].omega_ssp
-        else:
-            gm = group_matrices[idx]
-            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-        lam = lambdas[g.name]
+    for i, pc in enumerate(penalties):
+        omega_ssp = pc.omega_ssp
+        if omega_ssp is None:
+            if penalty_caches is not None and pc.name in penalty_caches:
+                omega_ssp = penalty_caches[pc.name].omega_ssp
+            else:
+                gm = group_matrices[pc.group_index]
+                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+        lam = lambdas[pc.name]
         F = np.zeros((p, p))
-        F[:, g.sl] = XtWX_S_inv[:, g.sl] @ (lam * omega_ssp)
+        F[:, pc.group_sl] = XtWX_S_inv[:, pc.group_sl] @ (lam * omega_ssp)
 
         if dH_extra is not None and i in dH_extra:
             F = F + XtWX_S_inv @ dH_extra[i]
@@ -512,10 +599,10 @@ def reml_direct_hessian(
         full_HdHj[i] = F
 
         if pirls_result is not None:
-            beta_g = pirls_result.beta[g.sl]
+            beta_g = pirls_result.beta[pc.group_sl]
             quad_per_group.append(lam * float(beta_g @ omega_ssp @ beta_g))
             v = np.zeros(p)
-            v[g.sl] = lam * (omega_ssp @ beta_g)
+            v[pc.group_sl] = lam * (omega_ssp @ beta_g)
             s_beta_list.append(v)
         else:
             quad_per_group.append(0.0)
@@ -526,8 +613,10 @@ def reml_direct_hessian(
             h = -0.5 * float(np.sum(full_HdHj[i] * full_HdHj[j].T))
             hess[i, j] = h
             hess[j, i] = h
-        name_i = reml_groups[i][1].name
-        hess[i, i] += gradient[i] + 0.5 * penalty_ranks[name_i]
+        r_i = penalties[i].rank
+        if r_i <= 0 and penalty_ranks is not None:
+            r_i = penalty_ranks[penalties[i].name]
+        hess[i, i] += gradient[i] + 0.5 * r_i
 
     if pirls_result is not None:
         inv_phi = 1.0 / max(phi_hat, 1e-10)
@@ -537,7 +626,9 @@ def reml_direct_hessian(
 
     scale_known = getattr(distribution, "scale_known", True)
     if not scale_known and pirls_result is not None and n_obs > 0:
-        M_p = sum(penalty_ranks[g.name] for _, g in reml_groups)
+        M_p = sum(pc.rank for pc in penalties)
+        if M_p <= 0 and penalty_ranks is not None:
+            M_p = sum(penalty_ranks[pc.name] for pc in penalties)
         pq_total = sum(quad_per_group)
         d_plus_pq = max(pirls_result.deviance + pq_total, 1e-300)
         q = np.array(quad_per_group)
@@ -577,6 +668,7 @@ def optimize_direct_reml(
     select_snap: bool = True,
     direct_solve: str = "auto",
     w_correction_order: int = 1,
+    reml_penalties: list[PenaltyComponent] | None = None,
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
 
@@ -589,6 +681,12 @@ def optimize_direct_reml(
         Cached-W fREML optimizer (fewer data passes), delegated to
         ``optimize_discrete_reml_cached_w``.
     """
+    penalties = _coerce_reml_penalties(
+        reml_groups=reml_groups,
+        reml_penalties=reml_penalties,
+        group_matrices=dm.group_matrices,
+        penalty_caches=penalty_caches,
+    )
     if discrete:
         return optimize_discrete_reml_cached_w(
             dm,
@@ -609,10 +707,11 @@ def optimize_direct_reml(
             max_analytical_per_w=max_analytical_per_w,
             select_snap=select_snap,
             direct_solve=direct_solve,
+            reml_penalties=penalties,
         )
 
     scale_known = getattr(distribution, "scale_known", True)
-    group_names = [g.name for _, g in reml_groups]
+    group_names = [pc.name for pc in penalties]
     m = len(group_names)
     log_lo, log_hi = np.log(1e-6), np.log(1e10)
     max_newton_step = 5.0
@@ -671,25 +770,26 @@ def optimize_direct_reml(
     boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
 
     rho = np.zeros(m, dtype=np.float64)
-    for i, (idx, g) in enumerate(reml_groups):
-        gm = dm.group_matrices[idx]
-        if penalty_caches is not None:
-            omega_ssp = penalty_caches[g.name].omega_ssp
-        else:
-            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-        beta_g = boot_result.beta[g.sl]
+    for i, pc in enumerate(penalties):
+        gm = dm.group_matrices[pc.group_index]
+        omega_ssp = pc.omega_ssp if pc.omega_ssp is not None else gm.R_inv.T @ gm.omega @ gm.R_inv
+        beta_g = boot_result.beta[pc.group_sl]
         quad = float(beta_g @ omega_ssp @ beta_g)
-        H_inv_jj = boot_inv[g.sl, g.sl]
+        H_inv_jj = boot_inv[pc.group_sl, pc.group_sl]
         trace_term = float(np.trace(H_inv_jj @ omega_ssp))
-        r_j = penalty_ranks[g.name]
+        r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
         # Snap degenerate select=True groups to upper bound.
-        # When quad << trace, the FP update is degenerate (any lambda
-        # is approximately a fixed point).  Snap breaks the degeneracy.
+        # When quad << trace, the FP update is degenerate
+        # (any lambda is approx a fixed point).  Snap breaks it.
+        # Look up subgroup_type from reml_groups if available.
+        sg_type = None
+        if reml_groups is not None:
+            sg_type = reml_groups[i][1].subgroup_type
         if (
             select_snap
-            and g.subgroup_type is not None
+            and sg_type is not None
             and trace_term > 1e-12
             and boot_inv_phi * quad < 0.1 * trace_term
         ):
@@ -763,13 +863,12 @@ def optimize_direct_reml(
             pirls_result,
             XtWX_S_inv,
             cand_lambdas,
-            reml_groups,
-            penalty_ranks,
+            reml_penalties=penalties,
             phi_hat=phi_hat,
         )
         _t_gradient += _time.perf_counter() - _t0
 
-        # W(ρ) correction
+        # W(rho) correction
         _t0 = _time.perf_counter()
         if not discrete:
             w_corr = reml_w_correction(
@@ -779,12 +878,12 @@ def optimize_direct_reml(
                 pirls_result,
                 XtWX_S_inv,
                 cand_lambdas,
-                reml_groups,
-                penalty_caches,
-                sample_weight,
-                offset_arr,
-                distribution,
+                penalty_caches=penalty_caches,
+                sample_weight=sample_weight,
+                offset_arr=offset_arr,
+                distribution=distribution,
                 w_correction_order=w_correction_order,
+                reml_penalties=penalties,
             )
         else:
             w_corr = None
@@ -847,15 +946,14 @@ def optimize_direct_reml(
             distribution,
             XtWX_S_inv,
             cand_lambdas,
-            reml_groups,
-            grad,
-            penalty_ranks,
+            gradient=grad,
             penalty_caches=penalty_caches,
             pirls_result=pirls_result,
             n_obs=len(y),
             phi_hat=phi_hat,
             dH_extra=dH_extra,
             dH2_cross=dH2_cross,
+            reml_penalties=penalties,
         )
 
         # Active-set: freeze components with negligible gradient and Hessian
@@ -1055,6 +1153,7 @@ def optimize_discrete_reml_cached_w(
     # Legacy kwargs accepted but ignored (removed in POI rewrite)
     max_analytical_per_w: int = 30,
     select_snap: bool = True,
+    reml_penalties: list[PenaltyComponent] | None = None,
 ) -> REMLResult:
     """POI fREML optimizer for the discrete path.
 
@@ -1074,8 +1173,14 @@ def optimize_discrete_reml_cached_w(
     lambdas are large but not maximally penalized.  Deviance drift is
     typically <0.1% relative (guarded by test_wide_poisson_poi_quality).
     """
+    penalties = _coerce_reml_penalties(
+        reml_groups=reml_groups,
+        reml_penalties=reml_penalties,
+        group_matrices=dm.group_matrices,
+        penalty_caches=penalty_caches,
+    )
     scale_known = getattr(distribution, "scale_known", True)
-    group_names = [g.name for _, g in reml_groups]
+    group_names = [pc.name for pc in penalties]
     m = len(group_names)
     log_lo, log_hi = np.log(1e-6), np.log(1e10)
     p = dm.p
@@ -1135,23 +1240,25 @@ def optimize_discrete_reml_cached_w(
     boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
 
     rho = np.zeros(m, dtype=np.float64)
-    for i, (idx, g) in enumerate(reml_groups):
-        if penalty_caches is not None:
-            omega_ssp = penalty_caches[g.name].omega_ssp
-        else:
-            gm = dm.group_matrices[idx]
+    for i, pc in enumerate(penalties):
+        omega_ssp = pc.omega_ssp
+        if omega_ssp is None:
+            gm = dm.group_matrices[pc.group_index]
             omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-        beta_g = boot_result.beta[g.sl]
+        beta_g = boot_result.beta[pc.group_sl]
         quad = float(beta_g @ omega_ssp @ beta_g)
-        H_inv_jj = boot_inv[g.sl, g.sl]
+        H_inv_jj = boot_inv[pc.group_sl, pc.group_sl]
         trace_term = float(np.trace(H_inv_jj @ omega_ssp))
-        r_j = penalty_ranks[g.name]
+        r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
         # Snap degenerate select=True groups to upper bound.
+        sg_type = None
+        if reml_groups is not None:
+            sg_type = reml_groups[i][1].subgroup_type
         if (
             select_snap
-            and g.subgroup_type is not None
+            and sg_type is not None
             and trace_term > 1e-12
             and boot_inv_phi * quad < 0.1 * trace_term
         ):
@@ -1239,8 +1346,7 @@ def optimize_discrete_reml_cached_w(
             pirls_result,
             XtWX_S_inv,
             cand_lambdas,
-            reml_groups,
-            penalty_ranks,
+            reml_penalties=penalties,
             phi_hat=phi_hat,
         )
         hess = reml_direct_hessian(
@@ -1248,13 +1354,12 @@ def optimize_discrete_reml_cached_w(
             distribution,
             XtWX_S_inv,
             cand_lambdas,
-            reml_groups,
-            grad,
-            penalty_ranks,
+            gradient=grad,
             penalty_caches=penalty_caches,
             pirls_result=pirls_result,
             n_obs=len(y),
             phi_hat=phi_hat,
+            reml_penalties=penalties,
         )
 
         # Active-set: freeze components with negligible gradient and Hessian
@@ -1488,6 +1593,7 @@ def optimize_efs_reml(
     verbose: bool,
     penalty_caches: dict | None = None,
     rebuild_dm: Any = None,
+    reml_penalties: list[PenaltyComponent] | None = None,
 ) -> tuple[REMLResult, DesignMatrix]:
     """EFS (generalized Fellner-Schall) REML optimizer for the BCD path.
 

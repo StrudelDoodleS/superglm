@@ -429,6 +429,7 @@ def model_optimize_direct_reml(
     penalty_caches=None,
     profile=None,
     w_correction_order=1,
+    reml_penalties=None,
 ):
     """Optimize the direct REML objective via damped Newton (Wood 2011)."""
     return optimize_direct_reml(
@@ -452,6 +453,7 @@ def model_optimize_direct_reml(
         select_snap=getattr(model, "_select_snap", True),
         direct_solve=getattr(model, "_direct_solve", "auto"),
         w_correction_order=w_correction_order,
+        reml_penalties=reml_penalties,
     )
 
 
@@ -506,6 +508,7 @@ def model_optimize_efs_reml(
     reml_tol,
     verbose,
     penalty_caches=None,
+    reml_penalties=None,
 ):
     """EFS REML optimizer for the BCD path (lambda1 > 0)."""
     from superglm.model.base import rebuild_dm_with_lambdas
@@ -530,6 +533,7 @@ def model_optimize_efs_reml(
         rebuild_dm=lambda lambdas, sample_weight: rebuild_dm_with_lambdas(
             model, lambdas, sample_weight
         ),
+        reml_penalties=reml_penalties,
     )
     model._dm = dm
     return result
@@ -670,13 +674,14 @@ def fit_reml(
     lam_init = lambda2_init if lambda2_init is not None else model.lambda2
     lambdas = {g.name: lam_init for _, g in reml_groups}
 
-    # Build penalty caches (eigenstructure computed once, reused across iterations)
-    from superglm.reml import build_penalty_caches
+    # Build penalty components and caches (eigenstructure computed once)
+    from superglm.reml import build_penalty_caches, build_penalty_components
 
+    reml_penalties = build_penalty_components(model._dm.group_matrices, reml_groups)
     penalty_caches = build_penalty_caches(model._dm.group_matrices, reml_groups)
-    penalty_ranks = {name: cache.rank for name, cache in penalty_caches.items()}
+    penalty_ranks = {pc.name: pc.rank for pc in reml_penalties}
 
-    # Direct IRLS when lambda1=0 or unset (no L1 penalty → no BCD needed)
+    # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
     offset_arr = offset if offset is not None else np.zeros(len(y))
     lam1 = model.penalty.lambda1
     use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
@@ -696,6 +701,7 @@ def fit_reml(
             penalty_caches=penalty_caches,
             profile=_profile,
             w_correction_order=w_correction_order,
+            reml_penalties=reml_penalties,
         )
     else:
         best = model_optimize_efs_reml(
@@ -710,6 +716,7 @@ def fit_reml(
             reml_tol=reml_tol,
             verbose=verbose,
             penalty_caches=penalty_caches,
+            reml_penalties=reml_penalties,
         )
     model._result = best.pirls_result
     model._reml_lambdas = best.lambdas
