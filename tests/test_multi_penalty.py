@@ -145,6 +145,47 @@ class TestSimilarityTransformLogdet:
         proj_sum = result.Q_plus @ result.Q_plus.T + result.Q_zero @ result.Q_zero.T
         np.testing.assert_allclose(proj_sum, np.eye(q), atol=1e-10)
 
+    def test_weak_positive_eigenvalue_not_discarded(self):
+        """Near-singular but full-rank S must not lose weak eigenvalues.
+
+        Regression: diag(1.0, 1e-6) is full-rank. The initial Frobenius
+        transform must not discard the 1e-6 eigenvalue, or log|S|+ will
+        be wrong and S @ Q_zero will be nonzero.
+        """
+        q = 2
+        S1 = np.diag([1.0, 1e-6])
+        lambdas = np.array([1.0])
+
+        result = similarity_transform_logdet([S1], lambdas)
+
+        assert result.rank == q, f"Expected full rank {q}, got {result.rank}"
+        expected_logdet = np.log(1.0) + np.log(1e-6)
+        np.testing.assert_allclose(result.logdet_s_plus, expected_logdet, rtol=1e-6)
+
+        # Q_zero should be empty (full rank → no null space)
+        assert result.Q_zero.shape == (q, 0), (
+            f"Full-rank S should have empty Q_zero, got shape {result.Q_zero.shape}"
+        )
+
+    def test_weak_positive_multi_penalty(self):
+        """Two penalties where the combined S has a weak eigenvalue ~1e-8."""
+        rng = np.random.default_rng(42)
+        q = 5
+        S1 = np.diag([1.0, 0.5, 0.1, 0.01, 1e-8])
+        S2 = _make_psd(q, q, rng) * 1e-10  # very small second penalty
+        lambdas = np.array([1.0, 1.0])
+
+        result = similarity_transform_logdet([S1, S2], lambdas)
+        S_total = S1 + S2
+
+        # S_total is full rank (S1 diagonal + tiny S2 perturbation)
+        eigvals = np.linalg.eigvalsh(S_total)
+        expected_rank = int(np.sum(eigvals > np.finfo(float).eps * q * eigvals.max()))
+        expected_logdet = float(np.sum(np.log(eigvals[eigvals > 1e-15 * eigvals.max()])))
+
+        assert result.rank == expected_rank
+        np.testing.assert_allclose(result.logdet_s_plus, expected_logdet, rtol=1e-4)
+
     def test_full_rank_q_zero_is_empty(self):
         """Full-rank S: Q_zero has zero columns."""
         rng = np.random.default_rng(42)

@@ -93,7 +93,11 @@ def similarity_transform_logdet(
     eigvals_init = eigvals_init[idx]
     U_init = U_init[:, idx]
 
-    pos_mask = eigvals_init > eps_rank * max(eigvals_init.max(), 1e-12)
+    # Initial cut: discard only numerically zero directions (machine eps level).
+    # Weak-but-positive eigenvalues must survive to the final rank decision.
+    # eps_rank (used later for recursive rank detection) is too aggressive here.
+    eps_init = _EPS * q * max(eigvals_init.max(), 1e-12)
+    pos_mask = eigvals_init > eps_init
     n_pos = int(np.sum(pos_mask))
 
     if n_pos == 0:
