@@ -107,6 +107,63 @@ class TestOmegaStored:
         assert not np.allclose(gm.omega, d2_penalty, atol=1e-6)
 
 
+# ── PenaltyComponent bridge ──────────────────────────────────────
+
+
+class TestPenaltyComponents:
+    """build_penalty_components produces the same data as build_penalty_caches."""
+
+    def test_components_match_caches(self, poisson_data, spline_model):
+        """PenaltyComponent fields match PenaltyCache for single-penalty groups."""
+        from superglm.group_matrix import DiscretizedSSPGroupMatrix
+        from superglm.reml import build_penalty_caches, build_penalty_components
+
+        X, y, w = poisson_data
+        spline_model.fit(X, y, sample_weight=w)
+
+        reml_groups = []
+        for i, (gm, g) in enumerate(zip(spline_model._dm.group_matrices, spline_model._groups)):
+            if g.penalized and isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+                reml_groups.append((i, g))
+
+        caches = build_penalty_caches(spline_model._dm.group_matrices, reml_groups)
+        components = build_penalty_components(spline_model._dm.group_matrices, reml_groups)
+
+        assert len(components) == len(caches)
+        for comp in components:
+            cache = caches[comp.name]
+            np.testing.assert_allclose(comp.omega_ssp, cache.omega_ssp, atol=1e-14)
+            assert comp.rank == cache.rank
+            np.testing.assert_allclose(
+                comp.log_det_omega_plus, cache.log_det_omega_plus, atol=1e-14
+            )
+            np.testing.assert_allclose(comp.eigvals_omega, cache.eigvals_omega, atol=1e-14)
+            assert comp.group_name == comp.name  # single-penalty: name == group_name
+            assert comp.omega_raw is not None
+
+    def test_component_count_matches_reml_groups(self, poisson_data):
+        """One PenaltyComponent per REML-eligible group (single-penalty case)."""
+        from superglm.group_matrix import DiscretizedSSPGroupMatrix
+        from superglm.reml import build_penalty_components
+
+        X, y, w = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            features={"x1": Spline(n_knots=8), "x2": Spline(n_knots=8)},
+        )
+        model.fit(X[["x1", "x2"]], y, sample_weight=w)
+
+        reml_groups = []
+        for i, (gm, g) in enumerate(zip(model._dm.group_matrices, model._groups)):
+            if g.penalized and isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+                reml_groups.append((i, g))
+
+        components = build_penalty_components(model._dm.group_matrices, reml_groups)
+        assert len(components) == len(reml_groups)
+        names = [c.name for c in components]
+        assert len(set(names)) == len(names)  # unique names
+
+
 # ── _penalised_xtwx_inv uses stored omega ───────────────────────
 
 

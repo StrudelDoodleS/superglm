@@ -27,6 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+from superglm.types import PenaltyComponent
 
 
 @dataclass
@@ -99,6 +100,55 @@ def cached_logdet_s_plus(
         if lam > 0 and cache.rank > 0:
             total += cache.rank * np.log(lam) + cache.log_det_omega_plus
     return total
+
+
+def build_penalty_components(
+    group_matrices: list,
+    reml_groups: list[tuple[int, object]],
+) -> list[PenaltyComponent]:
+    """Build PenaltyComponent list from the current single-penalty group structure.
+
+    This is the bridge between the existing single-penalty-per-group architecture
+    and the future multi-penalty path. Currently produces one PenaltyComponent per
+    REML-eligible group (same cardinality as reml_groups). Multi-penalty terms
+    would produce multiple PenaltyComponents per group.
+
+    The PenaltyComponent list defines the REML lambda dimensions — one smoothing
+    parameter per component. This separates term structure (GroupSlice) from
+    penalty structure (PenaltyComponent).
+
+    Parameters
+    ----------
+    group_matrices : list of GroupMatrix
+    reml_groups : list of (group_index, GroupSlice) tuples
+
+    Returns
+    -------
+    list of PenaltyComponent, one per smoothing parameter.
+    """
+    components: list[PenaltyComponent] = []
+    eps_thresh = np.finfo(float).eps ** (2 / 3)
+    for idx, g in reml_groups:
+        gm = group_matrices[idx]
+        omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+        eigvals = np.linalg.eigvalsh(omega_ssp)
+        thresh = eps_thresh * max(eigvals.max(), 1e-12)
+        pos_eigvals = eigvals[eigvals > thresh]
+        rank = float(len(pos_eigvals))
+        log_det = float(np.sum(np.log(pos_eigvals))) if pos_eigvals.size else 0.0
+        components.append(
+            PenaltyComponent(
+                name=g.name,
+                group_name=g.name,
+                group_index=idx,
+                omega_raw=gm.omega,
+                omega_ssp=omega_ssp,
+                rank=rank,
+                log_det_omega_plus=log_det,
+                eigvals_omega=pos_eigvals,
+            )
+        )
+    return components
 
 
 @dataclass
