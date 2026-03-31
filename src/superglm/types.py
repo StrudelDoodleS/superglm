@@ -108,6 +108,31 @@ class GroupSlice:
         return slice(self.start, self.end)
 
 
+# ── Penalty components for multi-penalty REML ─────────────────
+@dataclass
+class PenaltyComponent:
+    """One (omega, lambda) pair within a term's penalty structure.
+
+    REML operates over a list of these — one per smoothing parameter.
+    A single-penalty term has one PenaltyComponent; a multi-penalty
+    term (e.g. tensor product, adaptive smooth) has several, each
+    with its own lambda optimized by REML.
+
+    The key separation: GroupSlice defines column blocks (term
+    structure, used by PIRLS). PenaltyComponent defines smoothing
+    parameters (penalty structure, used by REML derivatives).
+    """
+
+    name: str  # stable lambda key, e.g. "age:wiggle", "age:null"
+    group_name: str  # parent GroupSlice name
+    group_index: int  # index into groups list
+    omega_raw: NDArray  # (K, K) penalty in B-spline / raw basis space
+    omega_ssp: NDArray | None = None  # (p_g, p_g) in SSP coordinates
+    rank: float = 0.0
+    log_det_omega_plus: float = 0.0
+    eigvals_omega: NDArray | None = None  # positive eigenvalues of omega_ssp
+
+
 # ── Tensor marginal ingredients ────────────────────────────────
 @dataclass
 class TensorMarginalInfo:
