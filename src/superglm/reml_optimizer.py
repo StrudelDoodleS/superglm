@@ -749,6 +749,9 @@ def optimize_direct_reml(
 
     # === Bootstrap: one FP step from minimal penalty ===
     boot_lambdas = {name: 1e-4 for name in lambdas}
+    S_boot = _build_penalty_matrix(
+        dm.group_matrices, groups, boot_lambdas, dm.p, reml_penalties=penalties
+    )
     _t0 = _time.perf_counter()
     boot_result, boot_inv, boot_xtwx = fit_irls_direct(
         X=dm,
@@ -762,6 +765,7 @@ def optimize_direct_reml(
         return_xtwx=True,
         profile=profile,
         direct_solve=direct_solve,
+        S_override=S_boot,
     )
     _t_pirls += _time.perf_counter() - _t0
     warm_beta = boot_result.beta.copy()
@@ -769,10 +773,6 @@ def optimize_direct_reml(
 
     boot_phi = 1.0
     if not scale_known and penalty_caches is not None:
-        p_dim = boot_xtwx.shape[0]
-        S_boot = _build_penalty_matrix(
-            dm.group_matrices, groups, boot_lambdas, p_dim, reml_penalties=penalties
-        )
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
         M_p = sum(c.rank for c in penalty_caches.values())
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
@@ -1236,6 +1236,9 @@ def optimize_discrete_reml_cached_w(
 
     # === Bootstrap: one FP step from minimal penalty ===
     boot_lambdas = {name: 1e-4 for name in lambdas}
+    S_boot = _build_penalty_matrix(
+        dm.group_matrices, groups, boot_lambdas, p, reml_penalties=penalties
+    )
     _t0 = _time.perf_counter()
     cache: dict = {}
     boot_result, boot_inv, boot_xtwx = fit_irls_direct(
@@ -1251,6 +1254,7 @@ def optimize_discrete_reml_cached_w(
         profile=profile,
         cache_out=cache,
         direct_solve=direct_solve,
+        S_override=S_boot,
     )
     _t_pirls += _time.perf_counter() - _t0
     _n_pirls_steps += boot_result.n_iter
@@ -1260,9 +1264,6 @@ def optimize_discrete_reml_cached_w(
     # Bootstrap FP step for initial rho
     boot_phi = 1.0
     if not scale_known and penalty_caches is not None:
-        S_boot = _build_penalty_matrix(
-            dm.group_matrices, groups, boot_lambdas, p, reml_penalties=penalties
-        )
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
         M_p = sum(c.rank for c in penalty_caches.values())
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
@@ -1552,6 +1553,9 @@ def optimize_discrete_reml_cached_w(
     final_lambdas = lambdas.copy()
     for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
         final_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+    S_final = _build_penalty_matrix(
+        dm.group_matrices, groups, final_lambdas, dm.p, reml_penalties=penalties
+    )
     _t0 = _time.perf_counter()
     final_result, final_inv, final_xtwx = fit_irls_direct(
         X=dm,
@@ -1567,6 +1571,7 @@ def optimize_discrete_reml_cached_w(
         return_xtwx=True,
         profile=profile,
         direct_solve=direct_solve,
+        S_override=S_final,
     )
     _t_pirls += _time.perf_counter() - _t0
     _t0 = _time.perf_counter()
@@ -1582,6 +1587,7 @@ def optimize_discrete_reml_cached_w(
         offset_arr,
         XtWX=final_xtwx,
         penalty_caches=penalty_caches,
+        S_override=S_final,
     )
     _t_objective += _time.perf_counter() - _t0
     # Always use the final refit — it is the authoritative result from
@@ -2049,6 +2055,9 @@ def run_reml_once(
         n_reml_iter = reml_iter + 1
 
         if use_direct and not cheap_iter:
+            S_iter = _build_penalty_matrix(
+                dm.group_matrices, groups, lambdas, dm.p, reml_penalties=penalties_rro
+            )
             pirls_result, XtWX_S_inv_full, XtWX_full = fit_irls_direct(
                 X=dm,
                 y=y,
@@ -2062,6 +2071,7 @@ def run_reml_once(
                 intercept_init=warm_intercept,
                 return_xtwx=True,
                 direct_solve=direct_solve,
+                S_override=S_iter,
             )
             beta = pirls_result.beta
             intercept = pirls_result.intercept
@@ -2238,6 +2248,9 @@ def run_reml_once(
     if cheap_iter and converged and not use_direct:
         dm = rebuild_dm(lambdas, sample_weight)
 
+    S_final_rro = _build_penalty_matrix(
+        dm.group_matrices, groups, lambdas, dm.p, reml_penalties=penalties_rro
+    )
     if use_direct:
         final_result, _ = fit_irls_direct(
             X=dm,
@@ -2251,8 +2264,10 @@ def run_reml_once(
             beta_init=warm_beta,
             intercept_init=warm_intercept,
             direct_solve=direct_solve,
+            S_override=S_final_rro,
         )
     else:
+        # BCD/PIRLS path — S_override not yet supported (Cut 2B)
         final_result = fit_pirls(
             X=dm,
             y=y,
@@ -2286,6 +2301,7 @@ def run_reml_once(
             sample_weight,
             offset_arr,
             penalty_caches=final_caches,
+            S_override=S_final_rro if use_direct else None,
         ),
     )
     return reml_result, dm
