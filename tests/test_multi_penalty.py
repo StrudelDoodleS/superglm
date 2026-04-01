@@ -773,3 +773,212 @@ class TestEndToEndMultiPenaltyDirect:
         diff = S_a - S_base
         expected_diff = 4.0 * omega1  # (5-1) * omega1
         np.testing.assert_allclose(diff, expected_diff, atol=1e-12)
+
+
+# ── GroupInfo penalty_components validation ────────────────────
+
+
+class TestGroupInfoPenaltyComponents:
+    """Validate GroupInfo.penalty_components field."""
+
+    def test_valid_penalty_components(self):
+        """penalty_components with matching shapes and sum accepted."""
+        from superglm.types import GroupInfo
+
+        q = 4
+        rng = np.random.default_rng(42)
+        omega1 = _make_psd(q, 2, rng)
+        omega2 = _make_psd(q, 2, rng)
+        omega_sum = omega1 + omega2
+
+        info = GroupInfo(
+            columns=None,
+            n_cols=q,
+            penalty_matrix=omega_sum,
+            penalty_components=[("a", omega1), ("b", omega2)],
+        )
+        assert info.penalty_components is not None
+        assert len(info.penalty_components) == 2
+
+    def test_wrong_shape_raises(self):
+        """penalty_components with wrong shape raise ValueError."""
+        from superglm.types import GroupInfo
+
+        q = 4
+        rng = np.random.default_rng(42)
+        omega_good = _make_psd(q, 2, rng)
+        omega_bad = _make_psd(q + 1, 2, rng)
+
+        with pytest.raises(ValueError, match="penalty_component.*shape"):
+            GroupInfo(
+                columns=None,
+                n_cols=q,
+                penalty_matrix=omega_good,
+                penalty_components=[("a", omega_good), ("b", omega_bad)],
+            )
+
+    def test_sum_mismatch_raises(self):
+        """penalty_components that don't sum to penalty_matrix raise ValueError."""
+        from superglm.types import GroupInfo
+
+        q = 4
+        rng = np.random.default_rng(42)
+        omega1 = _make_psd(q, 2, rng)
+        omega2 = _make_psd(q, 2, rng)
+        omega_wrong = omega1 + 2 * omega2  # wrong sum
+
+        with pytest.raises(ValueError, match="does not match"):
+            GroupInfo(
+                columns=None,
+                n_cols=q,
+                penalty_matrix=omega_wrong,
+                penalty_components=[("a", omega1), ("b", omega2)],
+            )
+
+
+# ── Tensor penalty component emission ─────────────────────────
+
+
+class TestTensorPenaltyComponentEmission:
+    """Verify TensorInteraction emits separate marginal penalty components."""
+
+    def test_non_decompose_emits_components(self):
+        """Non-decompose tensor build populates penalty_components."""
+        from superglm.features.interaction import TensorInteraction
+        from superglm.features.spline import CubicRegressionSpline
+
+        rng = np.random.default_rng(42)
+        n = 200
+        x1, x2 = rng.uniform(0, 1, n), rng.uniform(0, 1, n)
+
+        spec1 = CubicRegressionSpline(n_knots=4)
+        spec2 = CubicRegressionSpline(n_knots=4)
+        spec1.build_knots_and_penalty(x1, np.ones(n))
+        spec2.build_knots_and_penalty(x2, np.ones(n))
+
+        ti = TensorInteraction("x1", "x2", n_knots=(4, 4))
+        info = ti.build(x1, x2, {"x1": spec1, "x2": spec2})
+
+        # Non-decompose returns a single GroupInfo with penalty_components
+        assert not isinstance(info, list)
+        assert info.penalty_components is not None
+        assert len(info.penalty_components) == 2
+
+        # Semantic names
+        suffixes = [s for s, _ in info.penalty_components]
+        assert "margin_x1" in suffixes
+        assert "margin_x2" in suffixes
+
+        # Components sum to penalty_matrix
+        comp_sum = sum(omega for _, omega in info.penalty_components)
+        np.testing.assert_allclose(comp_sum, info.penalty_matrix, atol=1e-12)
+
+    def test_decompose_does_not_emit_components(self):
+        """decompose=True still uses eigenspace splitting, not penalty_components."""
+        from superglm.features.interaction import TensorInteraction
+        from superglm.features.spline import CubicRegressionSpline
+
+        rng = np.random.default_rng(42)
+        n = 200
+        x1, x2 = rng.uniform(0, 1, n), rng.uniform(0, 1, n)
+
+        spec1 = CubicRegressionSpline(n_knots=4)
+        spec2 = CubicRegressionSpline(n_knots=4)
+        spec1.build_knots_and_penalty(x1, np.ones(n))
+        spec2.build_knots_and_penalty(x2, np.ones(n))
+
+        ti = TensorInteraction("x1", "x2", n_knots=(4, 4), decompose=True)
+        infos = ti.build(x1, x2, {"x1": spec1, "x2": spec2})
+
+        # decompose returns a list of GroupInfos (Mechanism A)
+        assert isinstance(infos, list)
+        assert len(infos) == 2
+        # Neither subgroup should have penalty_components
+        for info in infos:
+            assert info.penalty_components is None
+
+
+# ── log|S|+ correctness for shared-block penalties ────────────
+
+
+class TestLogdetSharedBlock:
+    """Verify compute_logdet_s_plus gives correct joint log-det."""
+
+    def test_joint_logdet_matches_eigendecomposition(self):
+        """compute_logdet_s_plus matches naive eigendecomposition of sum(lam*omega)."""
+        from superglm.reml import compute_logdet_s_plus
+
+        q = 8
+        rng = np.random.default_rng(42)
+        omega1 = _make_psd(q, 5, rng) + 0.01 * np.eye(q)
+        omega2 = _make_psd(q, 5, rng) + 0.01 * np.eye(q)
+
+        lam1, lam2 = 3.0, 0.7
+
+        pc1 = PenaltyComponent(
+            name="g:a",
+            group_name="g",
+            group_index=0,
+            group_sl=slice(0, q),
+            omega_raw=omega1,
+            omega_ssp=omega1,
+            rank=float(q),
+        )
+        pc2 = PenaltyComponent(
+            name="g:b",
+            group_name="g",
+            group_index=0,
+            group_sl=slice(0, q),
+            omega_raw=omega2,
+            omega_ssp=omega2,
+            rank=float(q),
+        )
+        penalties = [pc1, pc2]
+        lambdas = {"g:a": lam1, "g:b": lam2}
+
+        # Grouped path
+        result = compute_logdet_s_plus(lambdas, penalties)
+
+        # Naive eigendecomposition of the combined matrix
+        S_combined = lam1 * omega1 + lam2 * omega2
+        eigvals = np.linalg.eigvalsh(S_combined)
+        expected = float(np.sum(np.log(eigvals[eigvals > 1e-10])))
+
+        np.testing.assert_allclose(result, expected, rtol=1e-6)
+
+    def test_single_penalty_matches_additive_formula(self):
+        """For single-penalty groups, compute_logdet_s_plus matches the fast shortcut."""
+        from superglm.reml import PenaltyCache, cached_logdet_s_plus, compute_logdet_s_plus
+
+        q = 6
+        rng = np.random.default_rng(42)
+        omega = _make_psd(q, 4, rng) + 0.01 * np.eye(q)
+        eigvals = np.linalg.eigvalsh(omega)
+        pos = eigvals[eigvals > 1e-10]
+
+        pc = PenaltyComponent(
+            name="g",
+            group_name="g",
+            group_index=0,
+            group_sl=slice(0, q),
+            omega_raw=omega,
+            omega_ssp=omega,
+            rank=float(len(pos)),
+            log_det_omega_plus=float(np.sum(np.log(pos))),
+            eigvals_omega=pos,
+        )
+        lambdas = {"g": 2.5}
+
+        # New path
+        result_new = compute_logdet_s_plus(lambdas, [pc])
+
+        # Old additive path
+        cache = PenaltyCache(
+            omega_ssp=omega,
+            log_det_omega_plus=pc.log_det_omega_plus,
+            rank=pc.rank,
+            eigvals_omega=pos,
+        )
+        result_old = cached_logdet_s_plus(lambdas, {"g": cache})
+
+        np.testing.assert_allclose(result_new, result_old, rtol=1e-10)
