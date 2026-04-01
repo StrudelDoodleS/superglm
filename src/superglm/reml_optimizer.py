@@ -600,13 +600,13 @@ def reml_direct_hessian(
     p = XtWX_S_inv.shape[0]
     hess = np.zeros((m, m))
 
-    # Pre-compute log-det first derivatives for multi-penalty groups.
-    # For single-penalty groups, r_j = rank(Ω_j).
-    # For shared-block groups, r_j = λ_j tr(S⁻¹ S_j) from Appendix B.
-    # The second derivative (h_logdet) is computed but not yet used in the
-    # Hessian — wiring it requires deriving how it enters alongside the
-    # existing g_i + 0.5*r_i diagonal term. That's a follow-up.
-    r_logdet, _ = compute_logdet_s_derivatives(lambdas, penalties)
+    # Pre-compute log-det derivatives for multi-penalty groups.
+    # r_logdet: first derivative ∂log|S|₊/∂ρ_i
+    # h_logdet: second derivative ∂²log|S|₊/(∂ρ_i ∂ρ_j)
+    # For single-penalty, r_i = rank and h_ii = rank (they're equal).
+    # For shared-block multi-penalty, h_ij is non-trivial and needed
+    # to correct the Hessian curvature for the anisotropy directions.
+    r_logdet, h_logdet = compute_logdet_s_derivatives(lambdas, penalties)
 
     full_HdHj: dict[int, NDArray] = {}
     quad_per_group: list[float] = []
@@ -644,12 +644,23 @@ def reml_direct_hessian(
             hess[i, j] = h
             hess[j, i] = h
 
-    # Wood (2011) Eq 6.2: diagonal includes g_i + 0.5 * ∂log|S|₊/∂ρ_i.
+    # Wood (2011) Eq 6.2: diagonal includes g_i + 0.5 * r_i.
     for i in range(m):
         r_i = r_logdet.get(penalties[i].name, penalties[i].rank)
         if r_i <= 0 and penalty_ranks is not None:
             r_i = penalty_ranks.get(penalties[i].name, 0.0)
         hess[i, i] += gradient[i] + 0.5 * r_i
+
+    # Shared-block log|S|₊ Hessian correction: -0.5 * ∂²log|S|₊/(∂ρ_i ∂ρ_j).
+    # For single-penalty, h_logdet = 0 (log|λΩ|₊ is linear in ρ), so this
+    # is a no-op. For shared-block multi-penalty, the non-zero cross-terms
+    # give the Newton step proper curvature for the anisotropy directions.
+    for (name_i, name_j), h_ij in h_logdet.items():
+        if h_ij == 0.0:
+            continue
+        i = next(k for k, pc in enumerate(penalties) if pc.name == name_i)
+        j = next(k for k, pc in enumerate(penalties) if pc.name == name_j)
+        hess[i, j] -= 0.5 * h_ij
 
     if pirls_result is not None:
         inv_phi = 1.0 / max(phi_hat, 1e-10)

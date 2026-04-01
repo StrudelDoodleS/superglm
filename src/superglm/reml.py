@@ -242,7 +242,8 @@ def compute_logdet_s_derivatives(
         if len(indices) == 1:
             pc = penalties[indices[0]]
             r_dict[pc.name] = pc.rank
-            hess_dict[(pc.name, pc.name)] = pc.rank
+            # Second derivative of log|λΩ|₊ = r·log(λ) + const w.r.t. ρ is 0.
+            hess_dict[(pc.name, pc.name)] = 0.0
         else:
             comp_omegas = [penalties[i].omega_ssp for i in indices]
             comp_lambdas = np.array([lambdas.get(penalties[i].name, 1.0) for i in indices])
