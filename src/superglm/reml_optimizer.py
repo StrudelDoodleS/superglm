@@ -36,6 +36,8 @@ from superglm.reml import (
     _map_beta_between_bases,
     build_penalty_caches,
     cached_logdet_s_plus,
+    compute_logdet_s_derivatives,
+    compute_logdet_s_plus,
 )
 from superglm.solvers.irls_direct import (
     _build_penalty_matrix,
@@ -470,8 +472,10 @@ def reml_laml_objective(
         )
     penalty_quad = float(result.beta @ S @ result.beta)
 
-    # log|S|₊
-    if penalty_caches is not None:
+    # log|S|₊ — use multi-penalty-aware path when reml_penalties available
+    if reml_penalties is not None:
+        logdet_s = compute_logdet_s_plus(lambdas, reml_penalties)
+    elif penalty_caches is not None:
         logdet_s = cached_logdet_s_plus(lambdas, penalty_caches)
     else:
         eigvals_s = np.linalg.eigvalsh(S)
@@ -529,6 +533,12 @@ def reml_direct_gradient(
         group_matrices=group_matrices,
         penalty_caches=penalty_caches,
     )
+
+    # Pre-compute log-det derivatives for multi-penalty groups.
+    # For single-penalty groups, r_j = rank(Ω_j) (fast shortcut).
+    # For multi-penalty groups sharing a block, r_j = λ_j tr(S⁻¹ S_j).
+    r_dict, _ = compute_logdet_s_derivatives(lambdas, penalties)
+
     grad = np.zeros(len(penalties), dtype=np.float64)
     inv_phi = 1.0 / max(phi_hat, 1e-10)
     for i, pc in enumerate(penalties):
@@ -539,7 +549,9 @@ def reml_direct_gradient(
         H_inv_jj = XtWX_S_inv[pc.group_sl, pc.group_sl]
         trace_term = float(np.trace(H_inv_jj @ omega_ssp))
         lam = float(lambdas[pc.name])
-        r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
+        r_j = r_dict.get(pc.name, pc.rank)
+        if r_j <= 0 and penalty_ranks is not None:
+            r_j = penalty_ranks.get(pc.name, 0.0)
         grad[i] = 0.5 * (lam * (inv_phi * quad + trace_term) - r_j)
     return grad
 
@@ -585,6 +597,9 @@ def reml_direct_hessian(
     p = XtWX_S_inv.shape[0]
     hess = np.zeros((m, m))
 
+    # Pre-compute log-det first derivatives for multi-penalty groups.
+    r_logdet, _ = compute_logdet_s_derivatives(lambdas, penalties)
+
     full_HdHj: dict[int, NDArray] = {}
     quad_per_group: list[float] = []
     s_beta_list: list[NDArray] = []
@@ -620,9 +635,14 @@ def reml_direct_hessian(
             h = -0.5 * float(np.sum(full_HdHj[i] * full_HdHj[j].T))
             hess[i, j] = h
             hess[j, i] = h
-        r_i = penalties[i].rank
+
+    # Wood (2011) Eq 6.2: diagonal of the outer Hessian includes
+    # g_i + 0.5 * ∂log|S|₊/∂ρ_i. For single-penalty, ∂log|S|₊/∂ρ_i = r_i.
+    # For multi-penalty groups sharing a block, use the Appendix B gradient.
+    for i in range(m):
+        r_i = r_logdet.get(penalties[i].name, penalties[i].rank)
         if r_i <= 0 and penalty_ranks is not None:
-            r_i = penalty_ranks[penalties[i].name]
+            r_i = penalty_ranks.get(penalties[i].name, 0.0)
         hess[i, i] += gradient[i] + 0.5 * r_i
 
     if pirls_result is not None:

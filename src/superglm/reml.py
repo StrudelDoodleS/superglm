@@ -70,27 +70,50 @@ def build_penalty_components(
     eps_thresh = np.finfo(float).eps ** (2 / 3)
     for idx, g in reml_groups:
         gm = group_matrices[idx]
-        omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-        eigvals = np.linalg.eigvalsh(omega_ssp)
-        # Adaptive rank threshold: eps^{2/3} balances between the old fixed
-        # 1e-8 and the Higham-suggested eps*p.
-        thresh = eps_thresh * max(eigvals.max(), 1e-12)
-        pos_eigvals = eigvals[eigvals > thresh]
-        rank = float(len(pos_eigvals))
-        log_det = float(np.sum(np.log(pos_eigvals))) if pos_eigvals.size else 0.0
-        components.append(
-            PenaltyComponent(
-                name=g.name,
-                group_name=g.name,
-                group_index=idx,
-                group_sl=g.sl,
-                omega_raw=gm.omega,
-                omega_ssp=omega_ssp,
-                rank=rank,
-                log_det_omega_plus=log_det,
-                eigvals_omega=pos_eigvals,
+
+        if getattr(gm, "omega_components", None) is not None:
+            # Multi-penalty path: N components share this coefficient block.
+            for suffix, omega_j in gm.omega_components:
+                omega_ssp_j = gm.R_inv.T @ omega_j @ gm.R_inv
+                eigvals = np.linalg.eigvalsh(omega_ssp_j)
+                thresh = eps_thresh * max(eigvals.max(), 1e-12)
+                pos_eigvals = eigvals[eigvals > thresh]
+                rank = float(len(pos_eigvals))
+                log_det = float(np.sum(np.log(pos_eigvals))) if pos_eigvals.size else 0.0
+                components.append(
+                    PenaltyComponent(
+                        name=f"{g.name}:{suffix}",
+                        group_name=g.name,
+                        group_index=idx,
+                        group_sl=g.sl,
+                        omega_raw=omega_j,
+                        omega_ssp=omega_ssp_j,
+                        rank=rank,
+                        log_det_omega_plus=log_det,
+                        eigvals_omega=pos_eigvals,
+                    )
+                )
+        else:
+            # Single-penalty path (unchanged).
+            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+            eigvals = np.linalg.eigvalsh(omega_ssp)
+            thresh = eps_thresh * max(eigvals.max(), 1e-12)
+            pos_eigvals = eigvals[eigvals > thresh]
+            rank = float(len(pos_eigvals))
+            log_det = float(np.sum(np.log(pos_eigvals))) if pos_eigvals.size else 0.0
+            components.append(
+                PenaltyComponent(
+                    name=g.name,
+                    group_name=g.name,
+                    group_index=idx,
+                    group_sl=g.sl,
+                    omega_raw=gm.omega,
+                    omega_ssp=omega_ssp,
+                    rank=rank,
+                    log_det_omega_plus=log_det,
+                    eigvals_omega=pos_eigvals,
+                )
             )
-        )
     return components
 
 
@@ -124,6 +147,10 @@ def cached_logdet_s_plus(
     Wood (2011) Section 3.1: stable block-diagonal identity
     log|S|₊ = Σ_j (r_j · log(λ_j) + log|Ω_j|₊), avoiding repeated
     eigendecompositions of the full penalty matrix.
+
+    NOTE: This is the single-penalty-per-block shortcut. For multi-penalty
+    groups sharing a coefficient block, use ``compute_logdet_s_plus``
+    which correctly computes the joint log-determinant.
     """
     total = 0.0
     for name, cache in penalty_caches.items():
@@ -131,6 +158,84 @@ def cached_logdet_s_plus(
         if lam > 0 and cache.rank > 0:
             total += cache.rank * np.log(lam) + cache.log_det_omega_plus
     return total
+
+
+def _group_penalties(penalties: list[PenaltyComponent]) -> dict[str, list[int]]:
+    """Group penalty component indices by group_name."""
+    groups: dict[str, list[int]] = {}
+    for i, pc in enumerate(penalties):
+        groups.setdefault(pc.group_name, []).append(i)
+    return groups
+
+
+def compute_logdet_s_plus(
+    lambdas: dict[str, float],
+    penalties: list[PenaltyComponent],
+) -> float:
+    """Compute log|S|₊ correctly for both single and multi-penalty groups.
+
+    For single-component groups, uses the fast additive formula
+    r_j · log(λ_j) + log|Ω_j|₊. For multi-component groups sharing
+    a coefficient block, calls similarity_transform_logdet to compute
+    log|Σ λ_j Ω_j|₊ correctly.
+    """
+    from superglm.multi_penalty import similarity_transform_logdet
+
+    total = 0.0
+    for group_name, indices in _group_penalties(penalties).items():
+        if len(indices) == 1:
+            pc = penalties[indices[0]]
+            lam = lambdas.get(pc.name, 1.0)
+            if lam > 0 and pc.rank > 0:
+                total += pc.rank * np.log(lam) + pc.log_det_omega_plus
+        else:
+            comp_omegas = [penalties[i].omega_ssp for i in indices]
+            comp_lambdas = np.array([lambdas.get(penalties[i].name, 1.0) for i in indices])
+            result = similarity_transform_logdet(comp_omegas, comp_lambdas)
+            total += result.logdet_s_plus
+    return total
+
+
+def compute_logdet_s_derivatives(
+    lambdas: dict[str, float],
+    penalties: list[PenaltyComponent],
+) -> tuple[dict[str, float], dict[tuple[str, str], float]]:
+    """Compute ∂log|S|₊/∂ρ_j and ∂²log|S|₊/(∂ρ_i ∂ρ_j) for multi-penalty groups.
+
+    Returns (r_dict, hess_dict) where:
+    - r_dict[pc.name] = the effective r_j for gradient: λ_j tr(S⁻¹ S_j)
+    - hess_dict[(name_i, name_j)] = the log-det Hessian contribution
+
+    For single-component groups, r_j = rank(Ω_j) (the fast shortcut).
+    For multi-component groups, uses logdet_s_gradient / logdet_s_hessian.
+    """
+    from superglm.multi_penalty import (
+        logdet_s_gradient,
+        logdet_s_hessian,
+        similarity_transform_logdet,
+    )
+
+    r_dict: dict[str, float] = {}
+    hess_dict: dict[tuple[str, str], float] = {}
+
+    for group_name, indices in _group_penalties(penalties).items():
+        if len(indices) == 1:
+            pc = penalties[indices[0]]
+            r_dict[pc.name] = pc.rank
+            hess_dict[(pc.name, pc.name)] = pc.rank
+        else:
+            comp_omegas = [penalties[i].omega_ssp for i in indices]
+            comp_lambdas = np.array([lambdas.get(penalties[i].name, 1.0) for i in indices])
+            result = similarity_transform_logdet(comp_omegas, comp_lambdas)
+            grad = logdet_s_gradient(result, comp_omegas, comp_lambdas)
+            hess = logdet_s_hessian(result, comp_omegas, comp_lambdas)
+            for local_i, global_i in enumerate(indices):
+                name_i = penalties[global_i].name
+                r_dict[name_i] = float(grad[local_i])
+                for local_j, global_j in enumerate(indices):
+                    name_j = penalties[global_j].name
+                    hess_dict[(name_i, name_j)] = float(hess[local_i, local_j])
+    return r_dict, hess_dict
 
 
 @dataclass
