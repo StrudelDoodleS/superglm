@@ -18,8 +18,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 
-from superglm import SuperGLM
-from superglm.features.spline import CubicRegressionSpline
+from superglm import Spline, SuperGLM
 
 # ── Generate shared dataset ─────────────────────────────────────
 
@@ -102,8 +101,8 @@ model = SuperGLM(
     family="poisson",
     selection_penalty=0,
     features={
-        "x1": CubicRegressionSpline(n_knots=6),
-        "x2": CubicRegressionSpline(n_knots=6),
+        "x1": Spline(kind="cr", n_knots=6),
+        "x2": Spline(kind="cr", n_knots=6),
     },
     interactions=[("x1", "x2")],
 )
