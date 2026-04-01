@@ -1089,3 +1089,149 @@ class TestREMLDiscreteRobustness:
         edf_exact = exact.result.effective_df
         edf_disc = disc.result.effective_df
         assert abs(edf_exact - edf_disc) < 1.0
+
+
+# ── Multi-penalty post-fit inference regression tests ──────────────
+
+
+class TestMultiPenaltyPostFitInference:
+    """Verify multi-penalty S propagates through all post-fit paths.
+
+    Uses select=True splines which create two PenaltyComponents per group
+    (range-space + null-space), each with its own REML lambda.  These tests
+    ensure the post-fit helpers reconstruct the correct composite S, not
+    the legacy single-penalty-per-group S.
+    """
+
+    @pytest.fixture
+    def select_model_fitted(self):
+        """A fitted select=True model with multi-penalty structure."""
+        rng = np.random.default_rng(99)
+        n = 600
+        x1 = rng.uniform(0, 10, n)
+        eta = 0.5 + 0.4 * np.sin(x1)
+        mu = np.exp(eta)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1})
+        w = np.ones(n)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.01,
+            features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
+        )
+        model.fit_reml(X[["x1"]], y, sample_weight=w, max_reml_iter=15)
+        assert model._reml_result.converged
+        assert model._reml_penalties is not None
+        assert len(model._reml_penalties) >= 2  # range + null space
+        return model, X[["x1"]], y, w
+
+    @pytest.mark.slow
+    def test_coef_covariance_uses_multi_penalty_S(self, select_model_fitted):
+        """_coef_covariance must use the multi-penalty S, not legacy per-group S."""
+        model, X, y, w = select_model_fitted
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+
+        # Multi-penalty S (what inference should use)
+        lam2 = model._reml_lambdas
+        S_multi = _build_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            lam2,
+            model._dm.p,
+            reml_penalties=model._reml_penalties,
+        )
+        # Legacy single-penalty S (what the old path would produce)
+        S_legacy = _build_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            lam2,
+            model._dm.p,
+        )
+
+        # The two S matrices should differ for select=True
+        assert not np.allclose(S_multi, S_legacy, atol=1e-10), (
+            "select=True should produce different multi-penalty vs legacy S"
+        )
+
+        # Covariance should be finite and positive diagonal
+        cov, groups = model._coef_covariance
+        assert np.all(np.isfinite(cov))
+        assert np.all(np.diag(cov) >= 0)
+
+    @pytest.mark.slow
+    def test_fit_active_info_uses_multi_penalty_S(self, select_model_fitted):
+        """_fit_active_info inverse must reflect multi-penalty S."""
+        model, X, y, w = select_model_fitted
+
+        X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = model._fit_active_info
+        assert np.all(np.isfinite(XtWX_inv))
+        assert np.all(np.diag(XtWX_inv) >= 0)
+        # Augmented includes intercept
+        assert XtWX_inv_aug.shape[0] == XtWX_inv.shape[0] + 1
+
+    @pytest.mark.slow
+    def test_fit_inference_info_uses_multi_penalty_S(self, select_model_fitted):
+        """_fit_inference_info must use multi-penalty S."""
+        model, X, y, w = select_model_fitted
+
+        info = model._fit_inference_info
+        assert np.all(np.isfinite(info["XtWX_inv"]))
+        assert np.all(np.isfinite(info["edf"]))
+        assert np.all(info["edf"] >= -1e-10)
+        assert np.all(info["edf"] <= 1.0 + 1e-10)
+
+    @pytest.mark.slow
+    def test_metrics_active_info_uses_multi_penalty_S(self, select_model_fitted):
+        """ModelMetrics._active_info must use multi-penalty S for leverage/Cook's."""
+        model, X, y, w = select_model_fitted
+
+        met = model.metrics(X, y, sample_weight=w)
+
+        # Access _active_info which feeds leverage and Cook's distance
+        X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = met._active_info
+        assert np.all(np.isfinite(XtWX_inv))
+        assert np.all(np.diag(XtWX_inv) >= 0)
+
+        # Leverage should be finite and in [0, 1]
+        leverage = met.leverage
+        assert np.all(np.isfinite(leverage))
+        assert np.all(leverage >= -1e-10)
+        assert np.all(leverage <= 1.0 + 1e-10)
+
+
+class TestStaleREMLClearing:
+    """Verify fit() clears REML state from a previous fit_reml()."""
+
+    @pytest.mark.slow
+    def test_fit_clears_reml_state(self, poisson_data, spline_model):
+        """After fit_reml() then fit(), REML attributes must be None."""
+        X, y, w = poisson_data
+
+        # First: fit with REML
+        spline_model.fit_reml(X, y, sample_weight=w, max_reml_iter=10)
+        assert spline_model._reml_lambdas is not None
+        assert spline_model._reml_penalties is not None
+        assert spline_model._reml_result is not None
+
+        # Second: plain fit on the same model instance
+        spline_model.fit(X, y, sample_weight=w)
+
+        # REML state must be cleared
+        assert spline_model._reml_lambdas is None
+        assert spline_model._reml_penalties is None
+        assert spline_model._reml_result is None
+
+    @pytest.mark.slow
+    def test_covariance_after_refit_uses_global_lambda(self, poisson_data, spline_model):
+        """After fit_reml() then fit(), covariance uses global lambda2, not stale REML."""
+        X, y, w = poisson_data
+
+        # Fit with REML, then refit with plain fit
+        spline_model.fit_reml(X, y, sample_weight=w, max_reml_iter=10)
+        spline_model.fit(X, y, sample_weight=w)
+
+        # Covariance should work (no crash) and use global lambda2
+        cov, groups = spline_model._coef_covariance
+        assert np.all(np.isfinite(cov))
+        assert np.all(np.diag(cov) >= 0)

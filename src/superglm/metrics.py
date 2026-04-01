@@ -1050,6 +1050,21 @@ class ModelMetrics:
         else:
             self._mu = model.predict(X, offset=offset)
 
+    def _build_S_from_penalties(self, lam2) -> NDArray | None:
+        """Build full penalty matrix from model._reml_penalties if available."""
+        penalties = getattr(self._model, "_reml_penalties", None)
+        if penalties is None:
+            return None
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+
+        return _build_penalty_matrix(
+            self._dm.group_matrices,
+            self._groups,
+            lam2,
+            self._dm.p,
+            reml_penalties=penalties,
+        )
+
     # ── Scalar properties ─────────────────────────────────────────
 
     @property
@@ -1343,8 +1358,9 @@ class ModelMetrics:
         W = self._weights * dmu_deta**2 / V
 
         lam2 = getattr(self._model, "_reml_lambdas", None) or self._model.lambda2
+        S_full = self._build_S_from_penalties(lam2)
         X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
-            beta, W, self._dm.group_matrices, self._groups, lam2
+            beta, W, self._dm.group_matrices, self._groups, lam2, S_override=S_full
         )
         return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
 
