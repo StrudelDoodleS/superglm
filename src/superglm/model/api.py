@@ -300,7 +300,7 @@ class SuperGLM:
         offset: NDArray | None = None,
         *,
         max_reml_iter: int = 20,
-        reml_tol: float = 1e-4,
+        reml_tol: float = 1e-6,
         lambda2_init: float | None = None,
         verbose: bool = False,
         w_correction_order: int = 1,
@@ -329,7 +329,7 @@ class SuperGLM:
         max_reml_iter : int
             Maximum REML outer iterations (default 20).
         reml_tol : float
-            Convergence tolerance on log-lambda (default 1e-4).
+            Convergence tolerance on log-lambda (default 1e-6).
         lambda2_init : float, optional
             Initial per-group lambda. Defaults to ``self.lambda2``.
         verbose : bool
