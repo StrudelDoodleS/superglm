@@ -1280,3 +1280,8 @@ class TestStaleREMLClearing:
         assert model._reml_lambdas is None
         assert model._reml_penalties is None
         assert model._reml_result is None
+
+        # fit_path must refresh bookkeeping so summary() doesn't report stale REML
+        assert model._last_fit_meta is not None
+        assert model._last_fit_meta["method"] == "fit_path"
+        assert model._fit_stats is not None

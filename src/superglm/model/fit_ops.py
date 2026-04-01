@@ -316,6 +316,16 @@ def fit_path(
     # Set model state to the last (least-regularized) fit
     model._result = result
 
+    eta = model._dm.matvec(result.beta) + result.intercept
+    if offset is not None:
+        eta = eta + offset
+    eta = stabilize_eta(eta, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    model._fit_stats = _compute_fit_stats(
+        y, mu, sample_weight, offset, model._distribution, model._link, result.phi
+    )
+    model._last_fit_meta = {"method": "fit_path", "discrete": model._discrete}
+
     return PathResult(
         lambda_seq=lambda_seq,
         coef_path=coef_path,
