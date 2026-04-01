@@ -206,6 +206,7 @@ def compute_coef_covariance(
     fit_weights: NDArray,
     fit_offset: NDArray | None,
     lambda2: float | dict[str, float],
+    S_override: NDArray | None = None,
 ) -> tuple[NDArray, list[GroupSlice]]:
     """Phi-scaled Bayesian covariance for active coefficients.
 
@@ -229,7 +230,7 @@ def compute_coef_covariance(
     W = fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
     XtWX_S_inv, XtWX_S_inv_aug, active_groups, _, _ = _penalised_xtwx_inv_gram(
-        beta, W, dm.group_matrices, groups, lambda2
+        beta, W, dm.group_matrices, groups, lambda2, S_override=S_override
     )
     # Return the feature block of the augmented inverse for correct marginal SEs
     # that account for intercept estimation uncertainty.

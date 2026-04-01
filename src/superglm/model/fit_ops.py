@@ -734,7 +734,13 @@ def fit_reml(
         phi_fixed = 1.0
     else:
         p_dim = model._dm.p
-        S_final = _build_penalty_matrix(model._dm.group_matrices, model._groups, lambdas, p_dim)
+        S_final = _build_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            lambdas,
+            p_dim,
+            reml_penalties=reml_penalties,
+        )
         pq_final = float(best.pirls_result.beta @ S_final @ best.pirls_result.beta)
         M_p = sum(penalty_ranks[g.name] for _, g in reml_groups)
         phi_fixed = max((best.pirls_result.deviance + pq_final) / max(len(y) - M_p, 1.0), 1e-10)
