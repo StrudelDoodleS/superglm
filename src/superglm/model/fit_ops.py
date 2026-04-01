@@ -621,7 +621,7 @@ def fit_reml(
     offset=None,
     *,
     max_reml_iter=20,
-    reml_tol=1e-4,
+    reml_tol=1e-6,
     lambda2_init=None,
     verbose=False,
     w_correction_order=1,
