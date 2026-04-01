@@ -607,6 +607,7 @@ def model_run_reml_once(
             model, lambdas, sample_weight
         ),
         direct_solve=getattr(model, "_direct_solve", "auto"),
+        reml_penalties=getattr(model, "_reml_penalties", None),
     )
     model._dm = dm
     return result

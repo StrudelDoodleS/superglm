@@ -2053,6 +2053,7 @@ def run_reml_once(
     penalty_caches: dict | None = None,
     rebuild_dm: Any = None,
     direct_solve: str = "auto",
+    reml_penalties: list[PenaltyComponent] | None = None,
 ) -> tuple[REMLResult, DesignMatrix]:
     """Run a single REML fixed-point outer loop from a chosen initial lambda scale.
 
@@ -2062,11 +2063,14 @@ def run_reml_once(
 
     scale_known = getattr(distribution, "scale_known", True)
 
-    penalties_rro = _coerce_reml_penalties(
-        reml_groups=reml_groups,
-        group_matrices=dm.group_matrices,
-        penalty_caches=penalty_caches,
-    )
+    if reml_penalties is not None:
+        penalties_rro = reml_penalties
+    else:
+        penalties_rro = _coerce_reml_penalties(
+            reml_groups=reml_groups,
+            group_matrices=dm.group_matrices,
+            penalty_caches=penalty_caches,
+        )
     if use_direct:
         reml_update_names = [pc.name for pc in penalties_rro]
     else:
