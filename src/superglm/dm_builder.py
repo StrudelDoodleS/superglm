@@ -377,6 +377,10 @@ def _process_info(
             gm.omega = omega_full
         if hasattr(gm, "projection"):
             gm.projection = P
+        if info.penalty_components is not None and hasattr(gm, "omega_components"):
+            gm.omega_components = [
+                (suffix, P @ omega_j @ P.T) for suffix, omega_j in info.penalty_components
+            ]
 
     elif info.reparametrize and info.penalty_matrix is not None:
         B_for = B_unique if use_discrete else info.columns
@@ -403,6 +407,8 @@ def _process_info(
             gm.omega = info.penalty_matrix
         else:
             gm = DenseGroupMatrix(info.columns @ R_inv)
+        if info.penalty_components is not None and hasattr(gm, "omega_components"):
+            gm.omega_components = info.penalty_components
 
     else:
         n_cols = info.n_cols
@@ -708,6 +714,32 @@ def build_design_matrix(
 # ═══════════════════════════════════════════════════════════════════
 
 
+def _resolve_group_lambda(gm, g, lambdas):
+    """Resolve the effective lambda and omega for a group, handling multi-penalty.
+
+    Returns (effective_lambda, effective_omega, has_components) where:
+    - For single-penalty groups: (lambdas[g.name], gm.omega, False)
+    - For multi-penalty groups: (1.0, sum(lam_j * omega_j), True)
+      The effective lambda is 1.0 because it's already baked into the omega.
+    """
+    if gm.omega_components is not None:
+        effective_omega = sum(
+            lambdas[f"{g.name}:{suffix}"] * omega_j for suffix, omega_j in gm.omega_components
+        )
+        return 1.0, effective_omega, True
+    return lambdas[g.name], gm.omega, False
+
+
+def _group_has_lambda(gm, g, lambdas):
+    """Check whether lambdas dict contains entries for this group."""
+    if g.name in lambdas:
+        return True
+    if gm.omega_components is not None:
+        first_suffix = gm.omega_components[0][0]
+        return f"{g.name}:{first_suffix}" in lambdas
+    return False
+
+
 def rebuild_design_matrix_with_lambdas(
     dm: DesignMatrix,
     groups: list[GroupSlice],
@@ -722,37 +754,36 @@ def rebuild_design_matrix_with_lambdas(
     """
     new_gms: list[GroupMatrix] = []
     for gm, g in zip(dm.group_matrices, groups):
-        if isinstance(gm, SparseSSPGroupMatrix) and g.name in lambdas:
-            omega = gm.omega
-            if omega is None:
+        if isinstance(gm, SparseSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
+            if gm.omega is None:
                 new_gms.append(gm)
                 continue
-            lam = lambdas[g.name]
+            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
             if gm.projection is not None:
                 P = gm.projection
-                omega_proj = P.T @ omega @ P
+                omega_proj = P.T @ omega_eff @ P
                 R_inv_local = compute_projected_R_inv(gm.B, P, omega_proj, sample_weight, lam)
                 R_inv_new = P @ R_inv_local
             else:
-                R_inv_new = compute_R_inv(gm.B, omega, sample_weight, lam)
+                R_inv_new = compute_R_inv(gm.B, omega_eff, sample_weight, lam)
             new_gm = SparseSSPGroupMatrix(gm.B, R_inv_new)
-            new_gm.omega = omega
+            new_gm.omega = gm.omega
             new_gm.projection = gm.projection
+            new_gm.omega_components = gm.omega_components
             new_gms.append(new_gm)
-        elif isinstance(gm, DiscretizedTensorGroupMatrix) and g.name in lambdas:
-            omega = gm.omega
-            if omega is None:
+        elif isinstance(gm, DiscretizedTensorGroupMatrix) and _group_has_lambda(gm, g, lambdas):
+            if gm.omega is None:
                 new_gms.append(gm)
                 continue
-            lam = lambdas[g.name]
+            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
             exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
             if gm.projection is not None:
                 P = gm.projection
-                omega_proj = P.T @ omega @ P
+                omega_proj = P.T @ omega_eff @ P
                 R_inv_local = compute_projected_R_inv(gm.B_unique, P, omega_proj, exposure_agg, lam)
                 R_inv_new = P @ R_inv_local
             else:
-                R_inv_new = compute_R_inv(gm.B_unique, omega, exposure_agg, lam)
+                R_inv_new = compute_R_inv(gm.B_unique, omega_eff, exposure_agg, lam)
             new_gm = DiscretizedTensorGroupMatrix(
                 gm.B1_unique_t,
                 gm.B2_unique_t,
@@ -763,26 +794,27 @@ def rebuild_design_matrix_with_lambdas(
                 gm.bin_idx,
                 tensor_id=gm.tensor_id,
             )
-            new_gm.omega = omega
+            new_gm.omega = gm.omega
             new_gm.projection = gm.projection
+            new_gm.omega_components = gm.omega_components
             new_gms.append(new_gm)
-        elif isinstance(gm, DiscretizedSSPGroupMatrix) and g.name in lambdas:
-            omega = gm.omega
-            if omega is None:
+        elif isinstance(gm, DiscretizedSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
+            if gm.omega is None:
                 new_gms.append(gm)
                 continue
-            lam = lambdas[g.name]
+            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
             exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
             if gm.projection is not None:
                 P = gm.projection
-                omega_proj = P.T @ omega @ P
+                omega_proj = P.T @ omega_eff @ P
                 R_inv_local = compute_projected_R_inv(gm.B_unique, P, omega_proj, exposure_agg, lam)
                 R_inv_new = P @ R_inv_local
             else:
-                R_inv_new = compute_R_inv(gm.B_unique, omega, exposure_agg, lam)
+                R_inv_new = compute_R_inv(gm.B_unique, omega_eff, exposure_agg, lam)
             new_gm = DiscretizedSSPGroupMatrix(gm.B_unique, R_inv_new, gm.bin_idx)
-            new_gm.omega = omega
+            new_gm.omega = gm.omega
             new_gm.projection = gm.projection
+            new_gm.omega_components = gm.omega_components
             new_gms.append(new_gm)
         else:
             new_gms.append(gm)
