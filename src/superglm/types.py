@@ -55,6 +55,10 @@ class GroupInfo:
     # select=True subgroup support for double-penalty decomposition
     subgroup_name: str | None = None  # "linear" or "spline"
     projection: NDArray | None = None  # (K, n_cols) projection from B-spline basis
+    # Multi-penalty: list of (suffix, omega) tuples for shared-block penalties.
+    # Each omega is in the same basis as penalty_matrix (projected when projection present).
+    # penalty_matrix should equal the sum of the component omegas.
+    penalty_components: list[tuple[str, NDArray]] | None = None
 
     def __post_init__(self):
         if self.columns is None:
@@ -80,6 +84,21 @@ class GroupInfo:
             raise ValueError(
                 f"penalty_matrix shape {self.penalty_matrix.shape} != ({self.n_cols}, {self.n_cols})"
             )
+        if self.penalty_components is not None:
+            pm_dim = (
+                self.penalty_matrix.shape[0] if self.penalty_matrix is not None else self.n_cols
+            )
+            comp_sum = np.zeros((pm_dim, pm_dim))
+            for suffix, omega in self.penalty_components:
+                if omega.shape != (pm_dim, pm_dim):
+                    raise ValueError(
+                        f"penalty_component '{suffix}' shape {omega.shape} != ({pm_dim}, {pm_dim})"
+                    )
+                comp_sum += omega
+            if self.penalty_matrix is not None and not np.allclose(
+                comp_sum, self.penalty_matrix, atol=1e-12
+            ):
+                raise ValueError("penalty_components sum does not match penalty_matrix")
 
 
 # ── Group bookkeeping for the solver ────────────────────────────
