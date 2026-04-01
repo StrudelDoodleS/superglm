@@ -604,6 +604,7 @@ def relativities(
     with_se: bool = False,
     covariance_fn=None,
     centering: str = "mean",
+    term_shifts: dict[str, float] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Extract plot-ready relativity DataFrames for all features.
 
@@ -655,13 +656,23 @@ def relativities(
 
     from superglm.features.ordered_categorical import OrderedCategorical
 
-    def _center_df(df: pd.DataFrame) -> pd.DataFrame:
-        """Apply mean centering to a relativity DataFrame if requested."""
-        if centering != "mean" or "log_relativity" not in df.columns:
+    def _center_df(df: pd.DataFrame, name: str = "") -> pd.DataFrame:
+        """Apply centering to a relativity DataFrame.
+
+        When term_shifts is provided (canonical training-data centering),
+        uses the precomputed shift. Otherwise falls back to grid-mean
+        centering if centering="mean".
+        """
+        if "log_relativity" not in df.columns:
             return df
-        log_rel = df["log_relativity"].values.copy()
-        shift = float(np.mean(log_rel))
+        if term_shifts is not None and name in term_shifts:
+            shift = term_shifts[name]
+        elif centering == "mean":
+            shift = float(np.mean(df["log_relativity"].values))
+        else:
+            return df
         df = df.copy()
+        log_rel = df["log_relativity"].values.copy()
         df["log_relativity"] = log_rel - shift
         df["relativity"] = _safe_exp(df["log_relativity"].values)
         return df
@@ -691,7 +702,7 @@ def relativities(
                     specs,
                     interaction_specs,
                 )
-            out[name] = _center_df(df)
+            out[name] = _center_df(df, name)
             continue
 
         if "x" in raw:
@@ -714,7 +725,7 @@ def relativities(
                     interaction_specs,
                     n_points=len(raw["x"]),
                 )
-            out[name] = _center_df(df)
+            out[name] = _center_df(df, name)
         elif "levels" in raw:
             # Categorical
             levels = raw["levels"]
@@ -737,7 +748,7 @@ def relativities(
                     specs,
                     interaction_specs,
                 )
-            out[name] = _center_df(df)
+            out[name] = _center_df(df, name)
         elif "relativity_per_unit" in raw:
             # Numeric
             rel = raw["relativity_per_unit"]

@@ -37,7 +37,19 @@ def refit_unpenalised(model, X, y, sample_weight=None, offset=None, keep_smoothi
 
 
 def relativities(model, with_se=False, centering="mean"):
-    """Extract plot-ready relativity DataFrames for all features."""
+    """Extract plot-ready relativity DataFrames for all features.
+
+    Term effects use canonical training-data centering so relativities
+    represent deviations from the portfolio average. The ``centering``
+    parameter is accepted for backward compatibility but ignored.
+    """
+    from superglm.model.state_ops import _compute_term_centering_shift
+
+    # Compute canonical centering shifts for all terms
+    shifts: dict[str, float] = {}
+    for name in list(model._feature_order) + list(model._interaction_order):
+        shifts[name] = _compute_term_centering_shift(model, name)
+
     return _relativities(
         model._feature_order,
         model._interaction_order,
@@ -47,7 +59,8 @@ def relativities(model, with_se=False, centering="mean"):
         model.result,
         with_se=with_se,
         covariance_fn=(lambda: model._coef_covariance) if with_se else None,
-        centering=centering,
+        centering="native",
+        term_shifts=shifts,
     )
 
 

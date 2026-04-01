@@ -286,8 +286,33 @@ def feature_groups(model, name: str) -> list[GroupSlice]:
     return [g for g in model._groups if g.feature_name == name]
 
 
+def _compute_term_centering_shift(model, name: str) -> float:
+    """Compute weighted mean of a term's fitted partial over training data.
+
+    This is the canonical centering shift: subtracting it makes the term
+    effect have weighted-mean zero over the training set, absorbing the
+    level difference into the intercept. For select=True terms, this
+    operates on the combined (linear+spline) partial, not the subgroups
+    separately.
+    """
+    groups = feature_groups(model, name)
+    partial = np.zeros(model._dm.n)
+    for g in groups:
+        idx = next(i for i, gg in enumerate(model._groups) if gg.name == g.name)
+        gm = model._dm.group_matrices[idx]
+        partial += gm.matvec(model.result.beta[g.sl])
+    weights = model._fit_weights
+    return float(np.average(partial, weights=weights))
+
+
 def reconstruct_feature(model, name: str) -> dict[str, Any]:
-    """Reconstruct a fitted feature's curve or effect on its original scale."""
+    """Reconstruct a fitted feature's curve or effect on its original scale.
+
+    Returns the canonical term effect centered by the training-data
+    weighted mean, so relativities are interpretable as deviations from
+    the portfolio average. For select=True splines, the linear and spline
+    subgroups are recombined before centering.
+    """
     res = model.result
     groups = feature_groups(model, name)
     beta_combined = np.concatenate([res.beta[g.sl] for g in groups])
@@ -300,10 +325,18 @@ def reconstruct_feature(model, name: str) -> dict[str, Any]:
             f"directly to disambiguate."
         )
     if in_main:
-        return model._specs[name].reconstruct(beta_combined)
-    if in_inter:
-        return model._interaction_specs[name].reconstruct(beta_combined)
-    raise KeyError(f"Feature not found: {name}")
+        raw = model._specs[name].reconstruct(beta_combined)
+    elif in_inter:
+        raw = model._interaction_specs[name].reconstruct(beta_combined)
+    else:
+        raise KeyError(f"Feature not found: {name}")
+
+    # Apply canonical training-data centering
+    shift = _compute_term_centering_shift(model, name)
+    if "log_relativity" in raw:
+        raw["log_relativity"] = raw["log_relativity"] - shift
+        raw["relativity"] = np.exp(raw["log_relativity"])
+    return raw
 
 
 def knot_summary(model) -> dict[str, dict[str, Any]]:
