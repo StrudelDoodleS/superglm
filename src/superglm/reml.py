@@ -160,6 +160,26 @@ def cached_logdet_s_plus(
     return total
 
 
+def compute_total_penalty_rank(penalties: list[PenaltyComponent]) -> float:
+    """Compute total penalty rank, correctly handling shared-block groups.
+
+    For single-component groups, uses the component rank.
+    For multi-component groups sharing a coefficient block, computes
+    rank(Σ Ω_j) which is <= sum of individual ranks due to overlap.
+    """
+    total = 0.0
+    eps_thresh = np.finfo(float).eps ** (2 / 3)
+    for group_name, indices in _group_penalties(penalties).items():
+        if len(indices) == 1:
+            total += penalties[indices[0]].rank
+        else:
+            omega_sum = sum(penalties[i].omega_ssp for i in indices)
+            eigvals = np.linalg.eigvalsh(omega_sum)
+            thresh = eps_thresh * max(eigvals.max(), 1e-12)
+            total += float(np.sum(eigvals > thresh))
+    return total
+
+
 def _group_penalties(penalties: list[PenaltyComponent]) -> dict[str, list[int]]:
     """Group penalty component indices by group_name."""
     groups: dict[str, list[int]] = {}

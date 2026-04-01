@@ -38,6 +38,7 @@ from superglm.reml import (
     cached_logdet_s_plus,
     compute_logdet_s_derivatives,
     compute_logdet_s_plus,
+    compute_total_penalty_rank,
 )
 from superglm.solvers.irls_direct import (
     _build_penalty_matrix,
@@ -497,7 +498,9 @@ def reml_laml_objective(
     scale_known = getattr(distribution, "scale_known", True)
     if not scale_known:
         n = len(y)
-        if penalty_caches is not None:
+        if reml_penalties is not None:
+            M_p = compute_total_penalty_rank(reml_penalties)
+        elif penalty_caches is not None:
             M_p = sum(c.rank for c in penalty_caches.values())
         else:
             M_p = float(len(pos_s))
@@ -653,7 +656,7 @@ def reml_direct_hessian(
 
     scale_known = getattr(distribution, "scale_known", True)
     if not scale_known and pirls_result is not None and n_obs > 0:
-        M_p = sum(pc.rank for pc in penalties)
+        M_p = compute_total_penalty_rank(penalties)
         if M_p <= 0 and penalty_ranks is not None:
             M_p = sum(penalty_ranks[pc.name] for pc in penalties)
         pq_total = sum(quad_per_group)
@@ -885,6 +888,7 @@ def optimize_direct_reml(
             penalty_caches=penalty_caches,
             log_det_H=pirls_result.log_det_H,
             S_override=S_cand,
+            reml_penalties=penalties,
         )
 
         phi_hat = 1.0
@@ -1088,6 +1092,7 @@ def optimize_direct_reml(
                 penalty_caches=penalty_caches,
                 log_det_H=trial_result.log_det_H,
                 S_override=S_trial,
+                reml_penalties=penalties,
             )
 
             if trial_obj <= obj + armijo_c * step * descent:
@@ -1383,6 +1388,7 @@ def optimize_discrete_reml_cached_w(
             XtWX=XtWX,
             penalty_caches=penalty_caches,
             S_override=S_cand,
+            reml_penalties=penalties,
         )
 
         phi_hat = 1.0
@@ -1523,6 +1529,7 @@ def optimize_discrete_reml_cached_w(
                 XtWX=XtWX,
                 penalty_caches=penalty_caches,
                 S_override=S_trial,
+                reml_penalties=penalties,
             )
 
             _n_linesearch_evals += 1
@@ -1607,6 +1614,7 @@ def optimize_discrete_reml_cached_w(
         XtWX=final_xtwx,
         penalty_caches=penalty_caches,
         S_override=S_final,
+        reml_penalties=penalties,
     )
     _t_objective += _time.perf_counter() - _t0
     # Always use the final refit — it is the authoritative result from
@@ -1899,6 +1907,7 @@ def optimize_efs_reml(
                 offset_arr,
                 XtWX=cached_xtwx,
                 penalty_caches=penalty_caches,
+                reml_penalties=penalties,
             )
             obj_trial = reml_laml_objective(
                 dm,
@@ -1912,6 +1921,7 @@ def optimize_efs_reml(
                 offset_arr,
                 XtWX=cached_xtwx,
                 penalty_caches=penalty_caches,
+                reml_penalties=penalties,
             )
             if obj_trial > obj_curr + 1e-8 * max(abs(obj_curr), 1.0):
                 for pc in penalties:
@@ -1971,8 +1981,13 @@ def optimize_efs_reml(
     # ── Final refit ───────────────────────────────────────────────
     if cheap_iter and converged:
         dm = rebuild_dm(lambdas, sample_weight)
-        # R_inv changed → refresh caches for the objective computation
+        # R_inv changed → refresh caches and penalties for the objective computation
         penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
+        penalties = _coerce_reml_penalties(
+            reml_groups=reml_groups,
+            group_matrices=dm.group_matrices,
+            penalty_caches=penalty_caches,
+        )
 
     final_result = fit_pirls(
         X=dm,
@@ -2006,6 +2021,7 @@ def optimize_efs_reml(
             sample_weight,
             offset_arr,
             penalty_caches=penalty_caches,
+            reml_penalties=penalties,
         ),
     )
     return reml_result, dm
@@ -2321,6 +2337,7 @@ def run_reml_once(
             offset_arr,
             penalty_caches=final_caches,
             S_override=S_final_rro if use_direct else None,
+            reml_penalties=penalties_rro,
         ),
     )
     return reml_result, dm
