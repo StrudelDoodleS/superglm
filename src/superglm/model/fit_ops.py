@@ -831,8 +831,15 @@ def _update_reml_r_inv(model, reml_groups, lambdas):
         if not hasattr(ispec, "set_reparametrisation"):
             continue
         fgroups = feature_groups(model, iname)
-        # Check if any group was updated by REML
-        updated = any(fg.name in lambdas for fg in fgroups)
+
+        # Check if any group was updated by REML (component-aware:
+        # multi-penalty tensor keys are "x1:x2:margin_x1" not "x1:x2")
+        def _has_lambda(fg):
+            if fg.name in lambdas:
+                return True
+            return any(k.startswith(f"{fg.name}:") for k in lambdas)
+
+        updated = any(_has_lambda(fg) for fg in fgroups)
         if not updated:
             continue
         if len(fgroups) > 1:
