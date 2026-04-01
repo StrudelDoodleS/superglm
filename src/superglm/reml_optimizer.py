@@ -600,10 +600,13 @@ def reml_direct_hessian(
     p = XtWX_S_inv.shape[0]
     hess = np.zeros((m, m))
 
-    # Pre-compute log-det derivatives for multi-penalty groups.
-    # r_logdet: first derivative ∂log|S|₊/∂ρ_i (used in diagonal)
-    # h_logdet: second derivative ∂²log|S|₊/(∂ρ_i ∂ρ_j) (curvature correction)
-    r_logdet, h_logdet = compute_logdet_s_derivatives(lambdas, penalties)
+    # Pre-compute log-det first derivatives for multi-penalty groups.
+    # For single-penalty groups, r_j = rank(Ω_j).
+    # For shared-block groups, r_j = λ_j tr(S⁻¹ S_j) from Appendix B.
+    # The second derivative (h_logdet) is computed but not yet used in the
+    # Hessian — wiring it requires deriving how it enters alongside the
+    # existing g_i + 0.5*r_i diagonal term. That's a follow-up.
+    r_logdet, _ = compute_logdet_s_derivatives(lambdas, penalties)
 
     full_HdHj: dict[int, NDArray] = {}
     quad_per_group: list[float] = []
