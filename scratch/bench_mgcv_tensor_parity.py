@@ -158,9 +158,13 @@ for x1_val in [0.25, 0.5, 0.75]:
 # EDF comparison
 print(f"\nEDF: superglm={model.result.effective_df:.2f}")
 
+converged = model._reml_result.converged
 print("\n=== Verdict ===")
+if not converged:
+    print("WARNING: SuperGLM REML did not converge — result may improve with more iterations")
 if corr > 0.99 and rmse / mean_pred < 0.05:
-    print("PASS: surfaces are similar (corr > 0.99, relative RMSE < 5%)")
+    label = "PASS" if converged else "PASS (not converged)"
+    print(f"{label}: surfaces are similar (corr > 0.99, relative RMSE < 5%)")
 elif corr > 0.95:
     print("MARGINAL: surfaces are broadly similar but not tight")
 else:
