@@ -600,8 +600,10 @@ def reml_direct_hessian(
     p = XtWX_S_inv.shape[0]
     hess = np.zeros((m, m))
 
-    # Pre-compute log-det first derivatives for multi-penalty groups.
-    r_logdet, _ = compute_logdet_s_derivatives(lambdas, penalties)
+    # Pre-compute log-det derivatives for multi-penalty groups.
+    # r_logdet: first derivative ∂log|S|₊/∂ρ_i (used in diagonal)
+    # h_logdet: second derivative ∂²log|S|₊/(∂ρ_i ∂ρ_j) (curvature correction)
+    r_logdet, h_logdet = compute_logdet_s_derivatives(lambdas, penalties)
 
     full_HdHj: dict[int, NDArray] = {}
     quad_per_group: list[float] = []
@@ -639,9 +641,7 @@ def reml_direct_hessian(
             hess[i, j] = h
             hess[j, i] = h
 
-    # Wood (2011) Eq 6.2: diagonal of the outer Hessian includes
-    # g_i + 0.5 * ∂log|S|₊/∂ρ_i. For single-penalty, ∂log|S|₊/∂ρ_i = r_i.
-    # For multi-penalty groups sharing a block, use the Appendix B gradient.
+    # Wood (2011) Eq 6.2: diagonal includes g_i + 0.5 * ∂log|S|₊/∂ρ_i.
     for i in range(m):
         r_i = r_logdet.get(penalties[i].name, penalties[i].rank)
         if r_i <= 0 and penalty_ranks is not None:
@@ -746,10 +746,7 @@ def optimize_direct_reml(
     log_lo, log_hi = np.log(1e-6), np.log(1e10)
     max_newton_step = 5.0
     _eps = np.finfo(float).eps
-    # Relative convergence tolerance.  reml_tol was originally an absolute
-    # gradient threshold; as a relative tolerance scaled by score_scale,
-    # 1e-6 is the tightest sensible value (Wood 2011 default).
-    _tol = min(reml_tol, 1e-6)
+    _tol = reml_tol
 
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
     warm_beta: NDArray | None = None
