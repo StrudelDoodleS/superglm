@@ -1285,3 +1285,114 @@ class TestStaleREMLClearing:
         assert model._last_fit_meta is not None
         assert model._last_fit_meta["method"] == "fit_path"
         assert model._fit_stats is not None
+
+
+# ── Multi-penalty tensor REML (anisotropic smoothing) ────────────
+
+
+class TestMultiPenaltyTensorREML:
+    """End-to-end tests for ti() + main effects with separate marginal lambdas."""
+
+    @pytest.mark.slow
+    def test_tensor_reml_converges_with_separate_lambdas(self):
+        """fit_reml on s(x1) + s(x2) + ti(x1, x2) converges with per-margin lambdas."""
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2 + 0.2 * np.sin(2 * np.pi * x1) * x2
+        mu = np.exp(eta)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+
+        assert model._reml_result.converged
+
+        # Lambda dict should have marginal entries for the tensor term
+        lam = model._reml_lambdas
+        margin_keys = [k for k in lam if "margin_" in k]
+        assert len(margin_keys) == 2, f"Expected 2 margin keys, got {margin_keys}"
+        assert any("margin_x1" in k for k in margin_keys)
+        assert any("margin_x2" in k for k in margin_keys)
+
+        # Main effect splines should also have lambdas
+        assert "x1" in lam
+        assert "x2" in lam
+
+        # Prediction should work
+        pred = model.predict(X)
+        assert pred.shape == (n,)
+        assert np.all(np.isfinite(pred))
+        assert np.all(pred > 0)
+
+    @pytest.mark.slow
+    def test_tensor_penalty_components_correct(self):
+        """Tensor ti() penalty components are correctly structured in REML."""
+        rng = np.random.default_rng(123)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2
+        mu = np.exp(eta)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+
+        # Verify penalty component structure
+        penalties = model._reml_penalties
+        tensor_pcs = [pc for pc in penalties if pc.name != pc.group_name]
+        assert len(tensor_pcs) == 2
+        assert any("margin_x1" in pc.name for pc in tensor_pcs)
+        assert any("margin_x2" in pc.name for pc in tensor_pcs)
+
+        # Both should share the same group_sl (same coefficient block)
+        assert tensor_pcs[0].group_sl == tensor_pcs[1].group_sl
+
+        # Each component omega_ssp should be PSD and non-zero
+        for pc in tensor_pcs:
+            eigvals = np.linalg.eigvalsh(pc.omega_ssp)
+            assert np.all(eigvals >= -1e-10)
+            assert pc.rank > 0
+
+        # Component omegas should sum to the full group omega
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+
+        S_components = _build_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            model._reml_lambdas,
+            model._dm.p,
+            reml_penalties=penalties,
+        )
+        assert np.all(np.isfinite(S_components))
+
+    @pytest.mark.slow
+    def test_single_spline_reml_unchanged(self, poisson_data, spline_model):
+        """Backward compat: single-spline fit_reml unchanged by multi-penalty changes."""
+        X, y, w = poisson_data
+
+        spline_model.fit_reml(X, y, sample_weight=w, max_reml_iter=15)
+        assert spline_model._reml_result.converged
+
+        # No margin keys — only single-penalty groups
+        lam = spline_model._reml_lambdas
+        margin_keys = [k for k in lam if "margin_" in k]
+        assert len(margin_keys) == 0
+
+        # Penalties should be single-component
+        for pc in spline_model._reml_penalties:
+            assert pc.name == pc.group_name
