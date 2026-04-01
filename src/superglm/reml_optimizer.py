@@ -797,7 +797,7 @@ def optimize_direct_reml(
     boot_phi = 1.0
     if not scale_known and penalty_caches is not None:
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
-        M_p = sum(c.rank for c in penalty_caches.values())
+        M_p = compute_total_penalty_rank(penalties)
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
     boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
 
@@ -894,7 +894,7 @@ def optimize_direct_reml(
         phi_hat = 1.0
         if not scale_known and penalty_caches is not None:
             pq = float(pirls_result.beta @ S_cand @ pirls_result.beta)
-            M_p = sum(c.rank for c in penalty_caches.values())
+            M_p = compute_total_penalty_rank(penalties)
             phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
         _t_objective += _time.perf_counter() - _t0
 
@@ -1289,7 +1289,7 @@ def optimize_discrete_reml_cached_w(
     boot_phi = 1.0
     if not scale_known and penalty_caches is not None:
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
-        M_p = sum(c.rank for c in penalty_caches.values())
+        M_p = compute_total_penalty_rank(penalties)
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
     boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
 
@@ -1394,7 +1394,7 @@ def optimize_discrete_reml_cached_w(
         phi_hat = 1.0
         if not scale_known and penalty_caches is not None:
             pq = float(pirls_result.beta @ S_cand @ pirls_result.beta)
-            M_p = sum(c.rank for c in penalty_caches.values())
+            M_p = compute_total_penalty_rank(penalties)
             phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
         _t_objective += _time.perf_counter() - _t0
 
@@ -1735,7 +1735,7 @@ def optimize_efs_reml(
     )
     if not scale_known and penalty_caches is not None:
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
-        M_p = sum(c.rank for c in penalty_caches.values())
+        M_p = compute_total_penalty_rank(penalties)
         boot_phi = max((boot_result.deviance + pq_boot) / max(n - M_p, 1.0), 1e-10)
         boot_inv_phi = 1.0 / boot_phi
 
@@ -1831,7 +1831,7 @@ def optimize_efs_reml(
         inv_phi = 1.0
         if not scale_known and penalty_caches is not None:
             pq = float(beta @ S @ beta)
-            M_p = sum(c.rank for c in penalty_caches.values())
+            M_p = compute_total_penalty_rank(penalties)
             phi_hat = max((pirls_result.deviance + pq) / max(n - M_p, 1.0), 1e-10)
             inv_phi = 1.0 / phi_hat
 
@@ -2173,7 +2173,7 @@ def run_reml_once(
                 reml_penalties=penalties_rro,
             )
             pq = float(beta @ S_fp @ beta)
-            M_p = sum(c.rank for c in penalty_caches.values())
+            M_p = compute_total_penalty_rank(penalties_rro)
             phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
             inv_phi = 1.0 / phi_hat
 
