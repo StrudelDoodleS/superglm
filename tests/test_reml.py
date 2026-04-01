@@ -1126,78 +1126,97 @@ class TestMultiPenaltyPostFitInference:
         assert len(model._reml_penalties) >= 2  # range + null space
         return model, X[["x1"]], y, w
 
+    def _get_covariance_with_and_without_multi_penalty(self, model, X, y, w):
+        """Get covariance from the model, then recompute with legacy S for comparison.
+
+        Uses the actual model paths to get the multi-penalty result, then
+        temporarily removes _reml_penalties to get the legacy result.
+        This tests the real code path, not a manual reimplementation.
+        """
+        # Multi-penalty path (what the model should use)
+        cov_multi, _ = model._coef_covariance
+
+        # Legacy path: temporarily remove _reml_penalties and recompute
+        saved_penalties = model._reml_penalties
+        model._reml_penalties = None
+        # Invalidate cached covariance so it recomputes
+        model.__dict__.pop("_coef_covariance", None)
+        cov_legacy, _ = model._coef_covariance
+        # Restore
+        model._reml_penalties = saved_penalties
+        model.__dict__.pop("_coef_covariance", None)
+
+        # Precondition: the two paths must produce different results
+        assert not np.allclose(cov_multi, cov_legacy, rtol=1e-6), (
+            "select=True multi-penalty and legacy S should produce different covariances"
+        )
+        return cov_multi, cov_legacy
+
     @pytest.mark.slow
     def test_coef_covariance_uses_multi_penalty_S(self, select_model_fitted):
-        """_coef_covariance must use the multi-penalty S, not legacy per-group S."""
+        """_coef_covariance must use multi-penalty S, not legacy per-group S."""
         model, X, y, w = select_model_fitted
-        from superglm.solvers.irls_direct import _build_penalty_matrix
+        cov_multi, cov_legacy = self._get_covariance_with_and_without_multi_penalty(model, X, y, w)
 
-        # Multi-penalty S (what inference should use)
-        lam2 = model._reml_lambdas
-        S_multi = _build_penalty_matrix(
-            model._dm.group_matrices,
-            model._groups,
-            lam2,
-            model._dm.p,
-            reml_penalties=model._reml_penalties,
-        )
-        # Legacy single-penalty S (what the old path would produce)
-        S_legacy = _build_penalty_matrix(
-            model._dm.group_matrices,
-            model._groups,
-            lam2,
-            model._dm.p,
-        )
-
-        # The two S matrices should differ for select=True
-        assert not np.allclose(S_multi, S_legacy, atol=1e-10), (
-            "select=True should produce different multi-penalty vs legacy S"
-        )
-
-        # Covariance should be finite and positive diagonal
-        cov, groups = model._coef_covariance
-        assert np.all(np.isfinite(cov))
-        assert np.all(np.diag(cov) >= 0)
+        # Re-fetch: should match the multi-penalty result
+        cov_actual, _ = model._coef_covariance
+        np.testing.assert_allclose(cov_actual, cov_multi, rtol=1e-10)
 
     @pytest.mark.slow
     def test_fit_active_info_uses_multi_penalty_S(self, select_model_fitted):
-        """_fit_active_info inverse must reflect multi-penalty S."""
+        """_fit_active_info inverse must reflect multi-penalty, not legacy S."""
         model, X, y, w = select_model_fitted
 
-        X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = model._fit_active_info
-        assert np.all(np.isfinite(XtWX_inv))
-        assert np.all(np.diag(XtWX_inv) >= 0)
-        # Augmented includes intercept
-        assert XtWX_inv_aug.shape[0] == XtWX_inv.shape[0] + 1
+        # Get multi-penalty result
+        X_a, W, inv_multi, inv_aug_multi, groups = model._fit_active_info
+
+        # Get legacy result
+        saved = model._reml_penalties
+        model._reml_penalties = None
+        model.__dict__.pop("_fit_active_info", None)
+        _, _, inv_legacy, _, _ = model._fit_active_info
+        model._reml_penalties = saved
+        model.__dict__.pop("_fit_active_info", None)
+
+        assert not np.allclose(inv_multi, inv_legacy, rtol=1e-6)
 
     @pytest.mark.slow
     def test_fit_inference_info_uses_multi_penalty_S(self, select_model_fitted):
-        """_fit_inference_info must use multi-penalty S."""
+        """_fit_inference_info inverse must reflect multi-penalty, not legacy S."""
         model, X, y, w = select_model_fitted
 
-        info = model._fit_inference_info
-        assert np.all(np.isfinite(info["XtWX_inv"]))
-        assert np.all(np.isfinite(info["edf"]))
-        assert np.all(info["edf"] >= -1e-10)
-        assert np.all(info["edf"] <= 1.0 + 1e-10)
+        info_multi = model._fit_inference_info
+
+        saved = model._reml_penalties
+        model._reml_penalties = None
+        model.__dict__.pop("_fit_inference_info", None)
+        info_legacy = model._fit_inference_info
+        model._reml_penalties = saved
+        model.__dict__.pop("_fit_inference_info", None)
+
+        assert not np.allclose(
+            info_multi["XtWX_inv"],
+            info_legacy["XtWX_inv"],
+            rtol=1e-6,
+        )
 
     @pytest.mark.slow
     def test_metrics_active_info_uses_multi_penalty_S(self, select_model_fitted):
         """ModelMetrics._active_info must use multi-penalty S for leverage/Cook's."""
         model, X, y, w = select_model_fitted
 
-        met = model.metrics(X, y, sample_weight=w)
+        # Multi-penalty path
+        met_multi = model.metrics(X, y, sample_weight=w)
+        _, _, inv_multi, _, _ = met_multi._active_info
 
-        # Access _active_info which feeds leverage and Cook's distance
-        X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = met._active_info
-        assert np.all(np.isfinite(XtWX_inv))
-        assert np.all(np.diag(XtWX_inv) >= 0)
+        # Legacy path
+        saved = model._reml_penalties
+        model._reml_penalties = None
+        met_legacy = model.metrics(X, y, sample_weight=w)
+        _, _, inv_legacy, _, _ = met_legacy._active_info
+        model._reml_penalties = saved
 
-        # Leverage should be finite and in [0, 1]
-        leverage = met.leverage
-        assert np.all(np.isfinite(leverage))
-        assert np.all(leverage >= -1e-10)
-        assert np.all(leverage <= 1.0 + 1e-10)
+        assert not np.allclose(inv_multi, inv_legacy, rtol=1e-6)
 
 
 class TestStaleREMLClearing:
@@ -1235,3 +1254,29 @@ class TestStaleREMLClearing:
         cov, groups = spline_model._coef_covariance
         assert np.all(np.isfinite(cov))
         assert np.all(np.diag(cov) >= 0)
+
+    @pytest.mark.slow
+    def test_fit_path_clears_reml_state(self, poisson_data):
+        """After fit_reml() then fit_path(), REML attributes must be None."""
+        X, y, w = poisson_data
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.01,
+            features={
+                "x1": Spline(n_knots=8, penalty="ssp"),
+                "x2": Spline(n_knots=8, penalty="ssp"),
+                "x3": Categorical(),
+            },
+        )
+        model.fit_reml(X, y, sample_weight=w, max_reml_iter=10)
+        assert model._reml_lambdas is not None
+        assert model._reml_penalties is not None
+
+        # fit_path requires lambda1 > 0
+        model.penalty.lambda1 = 0.01
+        model.fit_path(X, y, sample_weight=w, n_lambda=3)
+
+        assert model._reml_lambdas is None
+        assert model._reml_penalties is None
+        assert model._reml_result is None

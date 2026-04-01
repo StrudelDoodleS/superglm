@@ -124,6 +124,7 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
     model._reml_lambdas = None
     model._reml_penalties = None
     model._reml_result = None
+    model._reml_profile = None
 
     # Auto-estimate NB theta if requested
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
@@ -255,6 +256,14 @@ def fit_path(
     model.__dict__.pop("_fit_active_info", None)
     model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
+
+    # Clear stale REML state so post-fit helpers don't use penalties
+    # from a previous fit_reml() call on this model instance.
+    model._reml_lambdas = None
+    model._reml_penalties = None
+    model._reml_result = None
+    model._reml_profile = None
+
     if not model_has_lambda1_targets(model):
         raise ValueError(
             "fit_path() requires at least one group targeted by the penalty. "
