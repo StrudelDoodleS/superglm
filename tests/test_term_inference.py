@@ -121,13 +121,13 @@ class TestTermInferenceSpline:
         ti = fitted_model.term_inference("age")
         assert ti.absorbs_intercept is True
 
-    def test_centering_mode_default_mean(self, fitted_model):
+    def test_centering_mode_default_native(self, fitted_model):
         ti = fitted_model.term_inference("age")
-        assert ti.centering_mode == "mean"
-
-    def test_centering_mode_native(self, fitted_model):
-        ti = fitted_model.term_inference("age", centering="native")
         assert ti.centering_mode == "training_mean_zero_unweighted"
+
+    def test_centering_mode_explicit_mean(self, fitted_model):
+        ti = fitted_model.term_inference("age", centering="mean")
+        assert ti.centering_mode == "mean"
 
 
 class TestTermInferenceSplineMetadata:
@@ -210,13 +210,13 @@ class TestTermInferenceCategorical:
         ti = fitted_model.term_inference("region")
         assert ti.x is None
 
-    def test_centering_mode_default_mean(self, fitted_model):
+    def test_centering_mode_default_native(self, fitted_model):
         ti = fitted_model.term_inference("region")
-        assert ti.centering_mode == "mean"
-
-    def test_centering_mode_native(self, fitted_model):
-        ti = fitted_model.term_inference("region", centering="native")
         assert ti.centering_mode == "base_level"
+
+    def test_centering_mode_explicit_mean(self, fitted_model):
+        ti = fitted_model.term_inference("region", centering="mean")
+        assert ti.centering_mode == "mean"
 
 
 class TestTermInferenceNumeric:
@@ -546,8 +546,8 @@ class TestInteractionInference:
 
 
 class TestCenteringMetadata:
-    def test_spline_default_mean_centering(self, sample_data):
-        """Default centering='mean' reports centering_mode='mean' and has geo-mean 1."""
+    def test_spline_default_native_centering(self, sample_data):
+        """Default centering='native' returns the canonical fitted term."""
         X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
@@ -556,11 +556,10 @@ class TestCenteringMetadata:
         )
         model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("age")
-        assert ti.centering_mode == "mean"
-        assert abs(np.mean(ti.log_relativity)) < 1e-10
+        assert ti.centering_mode == "training_mean_zero_unweighted"
 
-    def test_spline_native_training_mean_zero(self, sample_data):
-        """centering='native' preserves SSP training-mean-zero."""
+    def test_spline_explicit_mean_centering(self, sample_data):
+        """centering='mean' shifts so geometric mean of relativities = 1."""
         X, y, sample_weight = sample_data
         model = SuperGLM(
             penalty="group_lasso",
@@ -568,9 +567,19 @@ class TestCenteringMetadata:
             features={"age": Spline(n_knots=10, penalty="ssp")},
         )
         model.fit(X, y, sample_weight=sample_weight)
-        ti = model.term_inference("age", centering="native")
-        assert ti.centering_mode == "training_mean_zero_unweighted"
+        ti = model.term_inference("age", centering="mean")
+        assert ti.centering_mode == "mean"
+        assert abs(np.mean(ti.log_relativity)) < 1e-10
 
+    def test_reconstruct_matches_native_term_inference(self, sample_data):
+        """reconstruct_feature() and term_inference(centering='native') agree."""
+        X, y, sample_weight = sample_data
+        model = SuperGLM(
+            penalty="group_lasso",
+            selection_penalty=0.01,
+            features={"age": Spline(n_knots=10, penalty="ssp")},
+        )
+        model.fit(X, y, sample_weight=sample_weight)
         raw = model.reconstruct_feature("age")
-        mean_log_rel = np.mean(raw["log_relativity"])
-        assert abs(mean_log_rel) < 0.5  # relaxed tolerance for penalized fit
+        ti = model.term_inference("age", centering="native")
+        np.testing.assert_allclose(raw["log_relativity"], ti.log_relativity, atol=1e-12)

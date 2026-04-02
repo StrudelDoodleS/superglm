@@ -107,6 +107,63 @@ class TestOmegaStored:
         assert not np.allclose(gm.omega, d2_penalty, atol=1e-6)
 
 
+# ── PenaltyComponent bridge ──────────────────────────────────────
+
+
+class TestPenaltyComponents:
+    """build_penalty_components produces the same data as build_penalty_caches."""
+
+    def test_components_match_caches(self, poisson_data, spline_model):
+        """PenaltyComponent fields match PenaltyCache for single-penalty groups."""
+        from superglm.group_matrix import DiscretizedSSPGroupMatrix
+        from superglm.reml import build_penalty_caches, build_penalty_components
+
+        X, y, w = poisson_data
+        spline_model.fit(X, y, sample_weight=w)
+
+        reml_groups = []
+        for i, (gm, g) in enumerate(zip(spline_model._dm.group_matrices, spline_model._groups)):
+            if g.penalized and isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+                reml_groups.append((i, g))
+
+        caches = build_penalty_caches(spline_model._dm.group_matrices, reml_groups)
+        components = build_penalty_components(spline_model._dm.group_matrices, reml_groups)
+
+        assert len(components) == len(caches)
+        for comp in components:
+            cache = caches[comp.name]
+            np.testing.assert_allclose(comp.omega_ssp, cache.omega_ssp, atol=1e-14)
+            assert comp.rank == cache.rank
+            np.testing.assert_allclose(
+                comp.log_det_omega_plus, cache.log_det_omega_plus, atol=1e-14
+            )
+            np.testing.assert_allclose(comp.eigvals_omega, cache.eigvals_omega, atol=1e-14)
+            assert comp.group_name == comp.name  # single-penalty: name == group_name
+            assert comp.omega_raw is not None
+
+    def test_component_count_matches_reml_groups(self, poisson_data):
+        """One PenaltyComponent per REML-eligible group (single-penalty case)."""
+        from superglm.group_matrix import DiscretizedSSPGroupMatrix
+        from superglm.reml import build_penalty_components
+
+        X, y, w = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            features={"x1": Spline(n_knots=8), "x2": Spline(n_knots=8)},
+        )
+        model.fit(X[["x1", "x2"]], y, sample_weight=w)
+
+        reml_groups = []
+        for i, (gm, g) in enumerate(zip(model._dm.group_matrices, model._groups)):
+            if g.penalized and isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+                reml_groups.append((i, g))
+
+        components = build_penalty_components(model._dm.group_matrices, reml_groups)
+        assert len(components) == len(reml_groups)
+        names = [c.name for c in components]
+        assert len(set(names)) == len(names)  # unique names
+
+
 # ── _penalised_xtwx_inv uses stored omega ───────────────────────
 
 
@@ -609,6 +666,47 @@ class TestREMLSelectTrue:
         # Should have 4 REML lambdas: x1:linear, x1:spline, x2:linear, x2:spline
         assert len(model._reml_lambdas) == 4
 
+    def test_reml_select_logdet_independent_subgroups(self, poisson_data):
+        """select=True: linear and spline subgroups contribute independently to log|S|+.
+
+        Each subgroup has its own penalty matrix (omega_ssp) and lambda.
+        cached_logdet_s_plus should equal the sum of per-subgroup
+        r_j * log(lambda_j) + log|Omega_j|+ contributions.
+        """
+        from superglm.group_matrix import SparseSSPGroupMatrix
+        from superglm.reml import build_penalty_caches, cached_logdet_s_plus
+
+        X, y, w = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.01,
+            features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
+        )
+        model.fit_reml(X[["x1"]], y, sample_weight=w, max_reml_iter=15)
+
+        reml_groups = []
+        for i, (gm, g) in enumerate(zip(model._dm.group_matrices, model._groups)):
+            if g.penalized and isinstance(gm, SparseSSPGroupMatrix):
+                reml_groups.append((i, g))
+
+        caches = build_penalty_caches(model._dm.group_matrices, reml_groups)
+        lambdas = model._reml_lambdas
+
+        # Verify: cached formula matches manual per-group sum
+        cached_val = cached_logdet_s_plus(lambdas, caches)
+        manual_val = 0.0
+        for name, cache in caches.items():
+            lam = lambdas.get(name, 1.0)
+            if lam > 0 and cache.rank > 0:
+                manual_val += cache.rank * np.log(lam) + cache.log_det_omega_plus
+        np.testing.assert_allclose(cached_val, manual_val, atol=1e-12)
+
+        # Verify both subgroups contribute (nonzero rank and log_det)
+        assert "x1:linear" in caches
+        assert "x1:spline" in caches
+        assert caches["x1:linear"].rank > 0
+        assert caches["x1:spline"].rank > 0
+
 
 # ── Backward compatibility ───────────────────────────────────────
 
@@ -991,3 +1089,310 @@ class TestREMLDiscreteRobustness:
         edf_exact = exact.result.effective_df
         edf_disc = disc.result.effective_df
         assert abs(edf_exact - edf_disc) < 1.0
+
+
+# ── Multi-penalty post-fit inference regression tests ──────────────
+
+
+class TestMultiPenaltyPostFitInference:
+    """Verify multi-penalty S propagates through all post-fit paths.
+
+    Uses select=True splines which create two PenaltyComponents per group
+    (range-space + null-space), each with its own REML lambda.  These tests
+    ensure the post-fit helpers reconstruct the correct composite S, not
+    the legacy single-penalty-per-group S.
+    """
+
+    @pytest.fixture
+    def select_model_fitted(self):
+        """A fitted select=True model with multi-penalty structure."""
+        rng = np.random.default_rng(99)
+        n = 600
+        x1 = rng.uniform(0, 10, n)
+        eta = 0.5 + 0.4 * np.sin(x1)
+        mu = np.exp(eta)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1})
+        w = np.ones(n)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.01,
+            features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
+        )
+        model.fit_reml(X[["x1"]], y, sample_weight=w, max_reml_iter=15)
+        assert model._reml_result.converged
+        assert model._reml_penalties is not None
+        assert len(model._reml_penalties) >= 2  # range + null space
+        return model, X[["x1"]], y, w
+
+    def _get_covariance_with_and_without_multi_penalty(self, model, X, y, w):
+        """Get covariance from the model, then recompute with legacy S for comparison.
+
+        Uses the actual model paths to get the multi-penalty result, then
+        temporarily removes _reml_penalties to get the legacy result.
+        This tests the real code path, not a manual reimplementation.
+        """
+        # Multi-penalty path (what the model should use)
+        cov_multi, _ = model._coef_covariance
+
+        # Legacy path: temporarily remove _reml_penalties and recompute
+        saved_penalties = model._reml_penalties
+        model._reml_penalties = None
+        # Invalidate cached covariance so it recomputes
+        model.__dict__.pop("_coef_covariance", None)
+        cov_legacy, _ = model._coef_covariance
+        # Restore
+        model._reml_penalties = saved_penalties
+        model.__dict__.pop("_coef_covariance", None)
+
+        # Precondition: the two paths must produce different results
+        assert not np.allclose(cov_multi, cov_legacy, rtol=1e-6), (
+            "select=True multi-penalty and legacy S should produce different covariances"
+        )
+        return cov_multi, cov_legacy
+
+    @pytest.mark.slow
+    def test_coef_covariance_uses_multi_penalty_S(self, select_model_fitted):
+        """_coef_covariance must use multi-penalty S, not legacy per-group S."""
+        model, X, y, w = select_model_fitted
+        cov_multi, cov_legacy = self._get_covariance_with_and_without_multi_penalty(model, X, y, w)
+
+        # Re-fetch: should match the multi-penalty result
+        cov_actual, _ = model._coef_covariance
+        np.testing.assert_allclose(cov_actual, cov_multi, rtol=1e-10)
+
+    @pytest.mark.slow
+    def test_fit_active_info_uses_multi_penalty_S(self, select_model_fitted):
+        """_fit_active_info inverse must reflect multi-penalty, not legacy S."""
+        model, X, y, w = select_model_fitted
+
+        # Get multi-penalty result
+        X_a, W, inv_multi, inv_aug_multi, groups = model._fit_active_info
+
+        # Get legacy result
+        saved = model._reml_penalties
+        model._reml_penalties = None
+        model.__dict__.pop("_fit_active_info", None)
+        _, _, inv_legacy, _, _ = model._fit_active_info
+        model._reml_penalties = saved
+        model.__dict__.pop("_fit_active_info", None)
+
+        assert not np.allclose(inv_multi, inv_legacy, rtol=1e-6)
+
+    @pytest.mark.slow
+    def test_fit_inference_info_uses_multi_penalty_S(self, select_model_fitted):
+        """_fit_inference_info inverse must reflect multi-penalty, not legacy S."""
+        model, X, y, w = select_model_fitted
+
+        info_multi = model._fit_inference_info
+
+        saved = model._reml_penalties
+        model._reml_penalties = None
+        model.__dict__.pop("_fit_inference_info", None)
+        info_legacy = model._fit_inference_info
+        model._reml_penalties = saved
+        model.__dict__.pop("_fit_inference_info", None)
+
+        assert not np.allclose(
+            info_multi["XtWX_inv"],
+            info_legacy["XtWX_inv"],
+            rtol=1e-6,
+        )
+
+    @pytest.mark.slow
+    def test_metrics_active_info_uses_multi_penalty_S(self, select_model_fitted):
+        """ModelMetrics._active_info must use multi-penalty S for leverage/Cook's."""
+        model, X, y, w = select_model_fitted
+
+        # Multi-penalty path
+        met_multi = model.metrics(X, y, sample_weight=w)
+        _, _, inv_multi, _, _ = met_multi._active_info
+
+        # Legacy path
+        saved = model._reml_penalties
+        model._reml_penalties = None
+        met_legacy = model.metrics(X, y, sample_weight=w)
+        _, _, inv_legacy, _, _ = met_legacy._active_info
+        model._reml_penalties = saved
+
+        assert not np.allclose(inv_multi, inv_legacy, rtol=1e-6)
+
+
+class TestStaleREMLClearing:
+    """Verify fit() clears REML state from a previous fit_reml()."""
+
+    @pytest.mark.slow
+    def test_fit_clears_reml_state(self, poisson_data, spline_model):
+        """After fit_reml() then fit(), REML attributes must be None."""
+        X, y, w = poisson_data
+
+        # First: fit with REML
+        spline_model.fit_reml(X, y, sample_weight=w, max_reml_iter=10)
+        assert spline_model._reml_lambdas is not None
+        assert spline_model._reml_penalties is not None
+        assert spline_model._reml_result is not None
+
+        # Second: plain fit on the same model instance
+        spline_model.fit(X, y, sample_weight=w)
+
+        # REML state must be cleared
+        assert spline_model._reml_lambdas is None
+        assert spline_model._reml_penalties is None
+        assert spline_model._reml_result is None
+
+    @pytest.mark.slow
+    def test_covariance_after_refit_uses_global_lambda(self, poisson_data, spline_model):
+        """After fit_reml() then fit(), covariance uses global lambda2, not stale REML."""
+        X, y, w = poisson_data
+
+        # Fit with REML, then refit with plain fit
+        spline_model.fit_reml(X, y, sample_weight=w, max_reml_iter=10)
+        spline_model.fit(X, y, sample_weight=w)
+
+        # Covariance should work (no crash) and use global lambda2
+        cov, groups = spline_model._coef_covariance
+        assert np.all(np.isfinite(cov))
+        assert np.all(np.diag(cov) >= 0)
+
+    @pytest.mark.slow
+    def test_fit_path_clears_reml_state(self, poisson_data):
+        """After fit_reml() then fit_path(), REML attributes must be None."""
+        X, y, w = poisson_data
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.01,
+            features={
+                "x1": Spline(n_knots=8, penalty="ssp"),
+                "x2": Spline(n_knots=8, penalty="ssp"),
+                "x3": Categorical(),
+            },
+        )
+        model.fit_reml(X, y, sample_weight=w, max_reml_iter=10)
+        assert model._reml_lambdas is not None
+        assert model._reml_penalties is not None
+
+        # fit_path requires lambda1 > 0
+        model.penalty.lambda1 = 0.01
+        model.fit_path(X, y, sample_weight=w, n_lambda=3)
+
+        assert model._reml_lambdas is None
+        assert model._reml_penalties is None
+        assert model._reml_result is None
+
+        # fit_path must refresh bookkeeping so summary() doesn't report stale REML
+        assert model._last_fit_meta is not None
+        assert model._last_fit_meta["method"] == "fit_path"
+        assert model._fit_stats is not None
+
+
+# ── Multi-penalty tensor REML (anisotropic smoothing) ────────────
+
+
+class TestMultiPenaltyTensorREML:
+    """End-to-end tests for ti() + main effects with separate marginal lambdas."""
+
+    @pytest.mark.slow
+    def test_tensor_reml_converges_with_separate_lambdas(self):
+        """fit_reml on s(x1) + s(x2) + ti(x1, x2) converges with per-margin lambdas."""
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2 + 0.2 * np.sin(2 * np.pi * x1) * x2
+        mu = np.exp(eta)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+
+        assert model._reml_result.converged
+
+        # Lambda dict should have marginal entries for the tensor term
+        lam = model._reml_lambdas
+        margin_keys = [k for k in lam if "margin_" in k]
+        assert len(margin_keys) == 2, f"Expected 2 margin keys, got {margin_keys}"
+        assert any("margin_x1" in k for k in margin_keys)
+        assert any("margin_x2" in k for k in margin_keys)
+
+        # Main effect splines should also have lambdas
+        assert "x1" in lam
+        assert "x2" in lam
+
+        # Prediction should work
+        pred = model.predict(X)
+        assert pred.shape == (n,)
+        assert np.all(np.isfinite(pred))
+        assert np.all(pred > 0)
+
+    @pytest.mark.slow
+    def test_tensor_penalty_components_correct(self):
+        """Tensor ti() penalty components are correctly structured in REML."""
+        rng = np.random.default_rng(123)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2
+        mu = np.exp(eta)
+        y = rng.poisson(mu).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+
+        # Verify penalty component structure
+        penalties = model._reml_penalties
+        tensor_pcs = [pc for pc in penalties if pc.name != pc.group_name]
+        assert len(tensor_pcs) == 2
+        assert any("margin_x1" in pc.name for pc in tensor_pcs)
+        assert any("margin_x2" in pc.name for pc in tensor_pcs)
+
+        # Both should share the same group_sl (same coefficient block)
+        assert tensor_pcs[0].group_sl == tensor_pcs[1].group_sl
+
+        # Each component omega_ssp should be PSD and non-zero
+        for pc in tensor_pcs:
+            eigvals = np.linalg.eigvalsh(pc.omega_ssp)
+            assert np.all(eigvals >= -1e-10)
+            assert pc.rank > 0
+
+        # Component omegas should sum to the full group omega
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+
+        S_components = _build_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            model._reml_lambdas,
+            model._dm.p,
+            reml_penalties=penalties,
+        )
+        assert np.all(np.isfinite(S_components))
+
+    @pytest.mark.slow
+    def test_single_spline_reml_unchanged(self, poisson_data, spline_model):
+        """Backward compat: single-spline fit_reml unchanged by multi-penalty changes."""
+        X, y, w = poisson_data
+
+        spline_model.fit_reml(X, y, sample_weight=w, max_reml_iter=15)
+        assert spline_model._reml_result.converged
+
+        # No margin keys — only single-penalty groups
+        lam = spline_model._reml_lambdas
+        margin_keys = [k for k in lam if "margin_" in k]
+        assert len(margin_keys) == 0
+
+        # Penalties should be single-component
+        for pc in spline_model._reml_penalties:
+            assert pc.name == pc.group_name

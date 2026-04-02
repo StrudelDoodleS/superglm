@@ -768,7 +768,9 @@ class TensorInteraction:
         S2 = m2.penalty
         return B1, B2, S1, S2
 
-    def _build_group_infos(self, omega: NDArray) -> GroupInfo | list[GroupInfo]:
+    def _build_group_infos(
+        self, omega: NDArray, S1: NDArray, S2: NDArray
+    ) -> GroupInfo | list[GroupInfo]:
         n_cols = self._p1 * self._p2
         if self._decompose:
             eigvals, eigvecs = np.linalg.eigh(omega)
@@ -801,11 +803,19 @@ class TensorInteraction:
                 ),
             ]
 
+        # Non-decompose: emit separate marginal penalty components for
+        # anisotropic REML (each marginal gets its own lambda).
+        omega_1 = np.kron(S1, np.eye(self._p2))
+        omega_2 = np.kron(np.eye(self._p1), S2)
         return GroupInfo(
             columns=None,
             n_cols=n_cols,
             penalty_matrix=omega,
             reparametrize=True,
+            penalty_components=[
+                (f"margin_{self.feat1_name}", omega_1),
+                (f"margin_{self.feat2_name}", omega_2),
+            ],
         )
 
     def build(
@@ -822,7 +832,7 @@ class TensorInteraction:
 
         # Tensor product penalty on the centered marginal spaces.
         omega = np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
-        infos = self._build_group_infos(omega)
+        infos = self._build_group_infos(omega, S1, S2)
         if isinstance(infos, list):
             for info in infos:
                 info.columns = T
@@ -842,7 +852,7 @@ class TensorInteraction:
         m1, m2 = self._prepare_marginal_infos(x1, x2, parent_specs)
         S1, S2 = m1.penalty, m2.penalty
         omega = np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
-        infos = self._build_group_infos(omega)
+        infos = self._build_group_infos(omega, S1, S2)
 
         support1, idx1 = _discretize_column(x1, int(n_bins[0]))
         support2, idx2 = _discretize_column(x2, int(n_bins[1]))

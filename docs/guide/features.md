@@ -10,6 +10,7 @@ Spline(kind="ns", k=10)                   # 9-column natural spline (k-1 after i
 Spline(kind="cr", k=10)                   # 9-column cubic regression spline (k-1 after identifiability)
 Spline(kind="bs", k=14, select=True)       # mgcv double penalty: spline-vs-linear selection
 Spline(kind="cr", k=12, select=True)       # CR with double penalty selection
+Spline(kind="cr", k=12, m=(1, 2))         # separate 1st- and 2nd-order penalties
 ```
 
 | Kind | Basis | Penalty | Constraints | Built cols |
@@ -19,6 +20,29 @@ Spline(kind="cr", k=12, select=True)       # CR with double penalty selection
 | `"cr"` | B-spline | Integrated f'' squared | Natural + identifiability | `k - 1` |
 
 `k` matches mgcv's `k` for all kinds. The built column count is always `k - 1` because the identifiability constraint (unweighted sum-to-zero) removes one direction. mgcv absorbs this via a side constraint instead of physically removing the column.
+
+### Multi-order penalties with `m=`
+
+`m` can be either a single integer or a tuple of integers. With a tuple, the
+spline emits multiple penalty components on the same coefficient block, each
+with its own REML smoothing parameter.
+
+- `kind="cr"` uses integrated derivative penalties.
+- `kind="bs"` and `kind="ns"` use difference penalties.
+
+Examples:
+
+```python
+Spline(kind="cr", k=12, m=2)        # default cubic-regression-spline penalty
+Spline(kind="cr", k=12, m=(1, 2))   # first + second derivative penalties
+Spline(kind="bs", k=14, m=(2, 3))   # second + third difference penalties
+```
+
+Current limitations:
+
+- `select=True + m=(...)` is not yet supported.
+- tensor interactions with multi-order spline parents are not yet supported.
+- `kind="cr_cardinal"` currently supports only `m=2`.
 
 ### What `ssp` means here
 

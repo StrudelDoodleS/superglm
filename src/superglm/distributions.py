@@ -28,6 +28,8 @@ class Distribution(Protocol):
 
     Optional: variance_derivative (V'(μ), used by REML W(ρ) correction;
     if absent, the correction is skipped for custom distribution objects).
+    variance_second_derivative (V''(μ), used by second-order W(ρ)
+    correction; Wood 2011, Appendix D).
     """
 
     @property
@@ -72,6 +74,10 @@ class Poisson:
         """V'(μ) = 1."""
         return np.ones_like(mu)
 
+    def variance_second_derivative(self, mu: NDArray) -> NDArray:
+        """V''(μ) = 0. Wood (2011) Appendix D."""
+        return np.zeros_like(mu)
+
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Unit deviance: 2[y log(y/μ) - (y - μ)]."""
         d = np.zeros_like(y, dtype=float)
@@ -104,6 +110,10 @@ class Gaussian:
         """V'(μ) = 0."""
         return np.zeros_like(mu)
 
+    def variance_second_derivative(self, mu: NDArray) -> NDArray:
+        """V''(μ) = 0. Wood (2011) Appendix D."""
+        return np.zeros_like(mu)
+
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Gaussian unit deviance: (y - μ)^2."""
         return (y - mu) ** 2
@@ -134,6 +144,10 @@ class Gamma:
     def variance_derivative(self, mu: NDArray) -> NDArray:
         """V'(μ) = 2μ."""
         return 2.0 * mu
+
+    def variance_second_derivative(self, mu: NDArray) -> NDArray:
+        """V''(μ) = 2. Wood (2011) Appendix D."""
+        return 2.0 * np.ones_like(mu)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Unit deviance: 2[-log(y/μ) + (y - μ)/μ]."""
@@ -179,6 +193,10 @@ class NegativeBinomial:
     def variance_derivative(self, mu: NDArray) -> NDArray:
         """V'(μ) = 1 + 2μ/θ."""
         return 1.0 + 2.0 * mu / self.theta
+
+    def variance_second_derivative(self, mu: NDArray) -> NDArray:
+        """V''(μ) = 2/θ. Wood (2011) Appendix D."""
+        return (2.0 / self.theta) * np.ones_like(mu)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """NB2 unit deviance."""
@@ -230,6 +248,10 @@ class Binomial:
         """V'(μ) = 1 − 2μ."""
         return 1.0 - 2.0 * mu
 
+    def variance_second_derivative(self, mu: NDArray) -> NDArray:
+        """V''(μ) = -2. Wood (2011) Appendix D."""
+        return -2.0 * np.ones_like(mu)
+
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Bernoulli unit deviance: 2[y log(y/μ) + (1-y) log((1-y)/(1-μ))]."""
         mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
@@ -273,6 +295,10 @@ class Tweedie:
     def variance_derivative(self, mu: NDArray) -> NDArray:
         """V'(μ) = p·μᵖ⁻¹."""
         return self.p * np.power(mu, self.p - 1)
+
+    def variance_second_derivative(self, mu: NDArray) -> NDArray:
+        """V''(μ) = p(p-1)·μᵖ⁻². Wood (2011) Appendix D."""
+        return self.p * (self.p - 1) * np.power(mu, self.p - 2)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Tweedie unit deviance."""

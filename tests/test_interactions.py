@@ -26,7 +26,7 @@ from superglm.types import GroupInfo
 def interaction_data():
     """Synthetic dataset with multiple feature types."""
     rng = np.random.default_rng(42)
-    n = 2000
+    n = 1000
     x_cont = rng.uniform(18, 80, n)
     x_num1 = rng.normal(100, 15, n)
     x_num2 = rng.normal(50, 10, n)

@@ -36,8 +36,14 @@ def refit_unpenalised(model, X, y, sample_weight=None, offset=None, keep_smoothi
     )
 
 
-def relativities(model, with_se=False, centering="mean"):
-    """Extract plot-ready relativity DataFrames for all features."""
+def relativities(model, with_se=False, centering="native"):
+    """Extract plot-ready relativity DataFrames for all features.
+
+    By default returns the canonical fitted term contributions under
+    the model's identifiability constraint (``centering="native"``).
+    Pass ``centering="mean"`` to shift so geometric mean of
+    relativities = 1 — a reporting convenience, not the fitted term.
+    """
     return _relativities(
         model._feature_order,
         model._interaction_order,
@@ -92,7 +98,7 @@ def term_inference(
     alpha=0.05,
     n_sim=10_000,
     seed=42,
-    centering="mean",
+    centering="native",
 ):
     """Per-term inference: curve, uncertainty, and metadata in one object."""
     if model._result is None:
@@ -154,7 +160,7 @@ def plot(
     alpha=0.05,
     n_sim=10_000,
     seed=42,
-    centering="mean",
+    centering="native",
     **kwargs,
 ):
     """Plot model terms."""
@@ -328,7 +334,7 @@ def plot_data(
     alpha=0.05,
     n_sim=10_000,
     seed=42,
-    centering="mean",
+    centering="native",
 ):
     """Return plain plot-ready data for one or more terms."""
     from superglm.plotting.data import build_interaction_plot_data, build_main_effect_plot_data

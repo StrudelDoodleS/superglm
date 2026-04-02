@@ -300,9 +300,10 @@ class SuperGLM:
         offset: NDArray | None = None,
         *,
         max_reml_iter: int = 20,
-        reml_tol: float = 1e-4,
+        reml_tol: float = 1e-6,
         lambda2_init: float | None = None,
         verbose: bool = False,
+        w_correction_order: int = 1,
     ) -> SuperGLM:
         """Fit with REML estimation of per-term smoothing parameters.
 
@@ -328,11 +329,16 @@ class SuperGLM:
         max_reml_iter : int
             Maximum REML outer iterations (default 20).
         reml_tol : float
-            Convergence tolerance on log-lambda (default 1e-4).
+            Convergence tolerance on log-lambda (default 1e-6).
         lambda2_init : float, optional
             Initial per-group lambda. Defaults to ``self.lambda2``.
         verbose : bool
             Print progress.
+        w_correction_order : int
+            Order of the W(rho) implicit-differentiation correction.
+            1 = first-order (default, fast). 2 = includes second-order
+            d²W/dη² Hessian cross-terms (Wood 2011 Appendix C, computed
+            via FD approximation). Only affects the exact REML path.
 
         Returns
         -------
@@ -349,6 +355,7 @@ class SuperGLM:
             reml_tol=reml_tol,
             lambda2_init=lambda2_init,
             verbose=verbose,
+            w_correction_order=w_correction_order,
         )
 
     # ── Properties ────────────────────────────────────────────────
@@ -483,17 +490,18 @@ class SuperGLM:
         )
 
     def relativities(
-        self, with_se: bool = False, centering: str = "mean"
+        self, with_se: bool = False, centering: str = "native"
     ) -> dict[str, pd.DataFrame]:
         """Extract plot-ready relativity DataFrames for all features.
 
         Parameters
         ----------
         centering : {"native", "mean"}
-            ``"native"`` preserves internal centering (SSP for splines,
-            base-level for categoricals). ``"mean"`` shifts so the geometric
-            mean of relativities = 1 across levels/grid — recommended for
-            underwriter-facing output where cross-feature comparability matters.
+            ``"native"`` (default) returns the canonical fitted term
+            contribution under the model's identifiability constraint.
+            ``"mean"`` is a reporting convenience that shifts so the
+            geometric mean of relativities = 1 — useful for cross-feature
+            comparison but not the fitted term decomposition.
         """
         return explain_ops.relativities(self, with_se, centering=centering)
 
@@ -526,16 +534,17 @@ class SuperGLM:
         alpha: float = 0.05,
         n_sim: int = 10_000,
         seed: int = 42,
-        centering: str = "mean",
+        centering: str = "native",
     ) -> TermInference | InteractionInference:
         """Per-term inference: curve, uncertainty, and metadata in one object.
 
         Parameters
         ----------
         centering : {"native", "mean"}
-            ``"native"`` preserves internal centering. ``"mean"`` shifts so
-            geometric mean of relativities = 1. Recommended for cross-feature
-            comparison.
+            ``"native"`` (default) returns the canonical fitted term
+            contribution under the model's identifiability constraint.
+            ``"mean"`` is a reporting convenience that shifts so the
+            geometric mean of relativities = 1.
         """
         return explain_ops.term_inference(
             self,
@@ -628,7 +637,7 @@ class SuperGLM:
         alpha: float = 0.05,
         n_sim: int = 10_000,
         seed: int = 42,
-        centering: str = "mean",
+        centering: str = "native",
         **kwargs,
     ):
         """Plot model terms.
@@ -666,10 +675,12 @@ class SuperGLM:
             the matplotlib renderer.
         scale : {"response", "link"}
             ``"response"`` (default) shows the fitted effect on the
-            inverse-link scale (relativities).  ``"link"`` shows the
-            additive link-scale contribution η(x) = Σ β_j B_j(x),
-            with optional basis decomposition overlays.  Only used
-            by the Plotly renderer.
+            inverse-link scale (relativities).  With ``centering="native"``,
+            this is the exponentiated fitted term contribution under the
+            model's identifiability constraint — not a portfolio-average
+            relativity. ``"link"`` shows the additive link-scale
+            contribution eta(x) = B(x) @ beta, with optional basis
+            decomposition overlays.  Only used by the Plotly renderer.
         ci_style : {"band", "lines"}
             Plotly CI presentation. ``"band"`` (default) draws filled
             confidence bands. ``"lines"`` draws line-only CI bounds with
@@ -685,6 +696,11 @@ class SuperGLM:
             terms (or ``terms=None``); use ``engine="matplotlib"`` for a
             single-term chart. Requires the ``plotly`` optional dependency
             (``pip install superglm[plotting]``).
+        centering : {"native", "mean"}
+            ``"native"`` (default) returns the canonical fitted term
+            contribution under the model's identifiability constraint.
+            ``"mean"`` is a reporting convenience that shifts so the
+            geometric mean of relativities = 1.
         n_points : int
             Grid resolution for spline/polynomial curves.
         figsize : tuple, optional
@@ -822,7 +838,7 @@ class SuperGLM:
         alpha: float = 0.05,
         n_sim: int = 10_000,
         seed: int = 42,
-        centering: str = "mean",
+        centering: str = "native",
     ) -> dict[str, Any]:
         """Return plain data needed to recreate SuperGLM plots.
 
@@ -836,6 +852,12 @@ class SuperGLM:
         contributions. For interactions, it includes the reconstructed effect
         data and, for continuous x continuous surfaces, optional density / HDR
         grid data when ``X`` and ``sample_weight`` are supplied.
+
+        With ``centering="native"`` (default), relativity values are
+        the exponentiated fitted term contributions under the model's
+        identifiability constraint — not portfolio-average relativities.
+        Pass ``centering="mean"`` for a reporting view where the
+        geometric mean of relativities = 1.
 
         Examples
         --------
@@ -997,6 +1019,7 @@ class SuperGLM:
         penalty_caches,
         sample_weight,
         offset_arr,
+        w_correction_order=1,
     ):
         return fit_ops.model_reml_w_correction(
             self,
@@ -1007,6 +1030,7 @@ class SuperGLM:
             penalty_caches,
             sample_weight,
             offset_arr,
+            w_correction_order=w_correction_order,
         )
 
     def _reml_laml_objective(
@@ -1035,6 +1059,7 @@ class SuperGLM:
         n_obs=0,
         phi_hat=1.0,
         dH_extra=None,
+        dH2_cross=None,
     ):
         return fit_ops.model_reml_direct_hessian(
             self,
@@ -1048,6 +1073,7 @@ class SuperGLM:
             n_obs,
             phi_hat,
             dH_extra,
+            dH2_cross,
         )
 
     def _optimize_direct_reml(

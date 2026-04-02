@@ -119,6 +119,13 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
     model._nb_profile_result = None
     model._tweedie_profile_result = None
 
+    # Clear stale REML state so post-fit helpers don't use penalties
+    # from a previous fit_reml() call on this model instance.
+    model._reml_lambdas = None
+    model._reml_penalties = None
+    model._reml_result = None
+    model._reml_profile = None
+
     # Auto-estimate NB theta if requested
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
         from superglm.nb_profile import estimate_nb_theta
@@ -249,6 +256,14 @@ def fit_path(
     model.__dict__.pop("_fit_active_info", None)
     model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
+
+    # Clear stale REML state so post-fit helpers don't use penalties
+    # from a previous fit_reml() call on this model instance.
+    model._reml_lambdas = None
+    model._reml_penalties = None
+    model._reml_result = None
+    model._reml_profile = None
+
     if not model_has_lambda1_targets(model):
         raise ValueError(
             "fit_path() requires at least one group targeted by the penalty. "
@@ -301,6 +316,16 @@ def fit_path(
     # Set model state to the last (least-regularized) fit
     model._result = result
 
+    eta = model._dm.matvec(result.beta) + result.intercept
+    if offset is not None:
+        eta = eta + offset
+    eta = stabilize_eta(eta, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    model._fit_stats = _compute_fit_stats(
+        y, mu, sample_weight, offset, model._distribution, model._link, result.phi
+    )
+    model._last_fit_meta = {"method": "fit_path", "discrete": model._discrete}
+
     return PathResult(
         lambda_seq=lambda_seq,
         coef_path=coef_path,
@@ -321,9 +346,17 @@ def model_compute_dW_deta(model, mu, eta, sample_weight):
 
 
 def model_reml_w_correction(
-    model, pirls_result, XtWX_S_inv, lambdas, reml_groups, penalty_caches, sample_weight, offset_arr
+    model,
+    pirls_result,
+    XtWX_S_inv,
+    lambdas,
+    reml_groups,
+    penalty_caches,
+    sample_weight,
+    offset_arr,
+    w_correction_order=1,
 ):
-    """First-order W(ρ) correction for REML derivatives."""
+    """W(ρ) correction for REML derivatives (first- or second-order)."""
     return reml_w_correction(
         model._dm,
         model._link,
@@ -336,6 +369,7 @@ def model_reml_w_correction(
         sample_weight,
         offset_arr,
         model._distribution,
+        w_correction_order=w_correction_order,
     )
 
 
@@ -355,6 +389,7 @@ def model_reml_laml_objective(
         offset_arr,
         XtWX=XtWX,
         penalty_caches=penalty_caches,
+        reml_penalties=getattr(model, "_reml_penalties", None),
     )
 
 
@@ -370,6 +405,7 @@ def model_reml_direct_gradient(
         reml_groups,
         penalty_ranks,
         phi_hat=phi_hat,
+        reml_penalties=getattr(model, "_reml_penalties", None),
     )
 
 
@@ -385,6 +421,7 @@ def model_reml_direct_hessian(
     n_obs=0,
     phi_hat=1.0,
     dH_extra=None,
+    dH2_cross=None,
 ):
     """Outer Hessian of the REML criterion w.r.t. log-lambdas."""
     return reml_direct_hessian(
@@ -400,6 +437,8 @@ def model_reml_direct_hessian(
         n_obs=n_obs,
         phi_hat=phi_hat,
         dH_extra=dH_extra,
+        dH2_cross=dH2_cross,
+        reml_penalties=getattr(model, "_reml_penalties", None),
     )
 
 
@@ -417,6 +456,8 @@ def model_optimize_direct_reml(
     verbose,
     penalty_caches=None,
     profile=None,
+    w_correction_order=1,
+    reml_penalties=None,
 ):
     """Optimize the direct REML objective via damped Newton (Wood 2011)."""
     return optimize_direct_reml(
@@ -439,6 +480,8 @@ def model_optimize_direct_reml(
         max_analytical_per_w=getattr(model, "_max_analytical_per_w", 30),
         select_snap=getattr(model, "_select_snap", True),
         direct_solve=getattr(model, "_direct_solve", "auto"),
+        w_correction_order=w_correction_order,
+        reml_penalties=reml_penalties,
     )
 
 
@@ -493,6 +536,7 @@ def model_optimize_efs_reml(
     reml_tol,
     verbose,
     penalty_caches=None,
+    reml_penalties=None,
 ):
     """EFS REML optimizer for the BCD path (lambda1 > 0)."""
     from superglm.model.base import rebuild_dm_with_lambdas
@@ -517,6 +561,7 @@ def model_optimize_efs_reml(
         rebuild_dm=lambda lambdas, sample_weight: rebuild_dm_with_lambdas(
             model, lambdas, sample_weight
         ),
+        reml_penalties=reml_penalties,
     )
     model._dm = dm
     return result
@@ -562,6 +607,7 @@ def model_run_reml_once(
             model, lambdas, sample_weight
         ),
         direct_solve=getattr(model, "_direct_solve", "auto"),
+        reml_penalties=getattr(model, "_reml_penalties", None),
     )
     model._dm = dm
     return result
@@ -575,9 +621,10 @@ def fit_reml(
     offset=None,
     *,
     max_reml_iter=20,
-    reml_tol=1e-4,
+    reml_tol=1e-6,
     lambda2_init=None,
     verbose=False,
+    w_correction_order=1,
 ):
     """Fit with REML estimation of per-term smoothing parameters."""
     from superglm.model.base import (
@@ -652,20 +699,34 @@ def fit_reml(
         )
         return model
 
-    # Initialize per-group lambdas
-    lam_init = lambda2_init if lambda2_init is not None else model.lambda2
-    lambdas = {g.name: lam_init for _, g in reml_groups}
+    # Build penalty components and caches (eigenstructure computed once)
+    from superglm.reml import build_penalty_caches, build_penalty_components
 
-    # Build penalty caches (eigenstructure computed once, reused across iterations)
-    from superglm.reml import build_penalty_caches
-
+    reml_penalties = build_penalty_components(model._dm.group_matrices, reml_groups)
     penalty_caches = build_penalty_caches(model._dm.group_matrices, reml_groups)
-    penalty_ranks = {name: cache.rank for name, cache in penalty_caches.items()}
+    penalty_ranks = {pc.name: pc.rank for pc in reml_penalties}
 
-    # Direct IRLS when lambda1=0 or unset (no L1 penalty → no BCD needed)
+    # Initialize per-component lambdas (penalty-indexed, not term-indexed)
+    lam_init = lambda2_init if lambda2_init is not None else model.lambda2
+    lambdas = {pc.name: lam_init for pc in reml_penalties}
+
+    # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
     offset_arr = offset if offset is not None else np.zeros(len(y))
     lam1 = model.penalty.lambda1
     use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
+
+    # Guard: shared-block multi-penalty terms (tensor marginals) are not yet
+    # supported on the BCD/EFS path. The non-direct optimizer rebuilds penalties
+    # via _coerce_reml_penalties which collapses omega_components to one per group.
+    if not use_direct:
+        has_shared_block = any(pc.name != pc.group_name for pc in reml_penalties)
+        if has_shared_block:
+            raise NotImplementedError(
+                "selection_penalty > 0 with shared-block multi-penalty terms "
+                "(e.g. tensor interactions) is not yet supported. Use "
+                "selection_penalty=0 for models with tensor interactions, "
+                "or remove the tensor term."
+            )
 
     if use_direct:
         best = model_optimize_direct_reml(
@@ -681,6 +742,8 @@ def fit_reml(
             verbose=verbose,
             penalty_caches=penalty_caches,
             profile=_profile,
+            w_correction_order=w_correction_order,
+            reml_penalties=reml_penalties,
         )
     else:
         best = model_optimize_efs_reml(
@@ -695,9 +758,11 @@ def fit_reml(
             reml_tol=reml_tol,
             verbose=verbose,
             penalty_caches=penalty_caches,
+            reml_penalties=reml_penalties,
         )
     model._result = best.pirls_result
     model._reml_lambdas = best.lambdas
+    model._reml_penalties = reml_penalties
     model._reml_result = best
     lambdas = best.lambdas
     n_reml_iter = best.n_reml_iter
@@ -711,9 +776,17 @@ def fit_reml(
         phi_fixed = 1.0
     else:
         p_dim = model._dm.p
-        S_final = _build_penalty_matrix(model._dm.group_matrices, model._groups, lambdas, p_dim)
+        S_final = _build_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            lambdas,
+            p_dim,
+            reml_penalties=reml_penalties,
+        )
         pq_final = float(best.pirls_result.beta @ S_final @ best.pirls_result.beta)
-        M_p = sum(penalty_ranks[g.name] for _, g in reml_groups)
+        from superglm.reml import compute_total_penalty_rank
+
+        M_p = compute_total_penalty_rank(reml_penalties)
         phi_fixed = max((best.pirls_result.deviance + pq_final) / max(len(y) - M_p, 1.0), 1e-10)
 
     corrected = PIRLSResult(
@@ -777,8 +850,15 @@ def _update_reml_r_inv(model, reml_groups, lambdas):
         if not hasattr(ispec, "set_reparametrisation"):
             continue
         fgroups = feature_groups(model, iname)
-        # Check if any group was updated by REML
-        updated = any(fg.name in lambdas for fg in fgroups)
+
+        # Check if any group was updated by REML (component-aware:
+        # multi-penalty tensor keys are "x1:x2:margin_x1" not "x1:x2")
+        def _has_lambda(fg):
+            if fg.name in lambdas:
+                return True
+            return any(k.startswith(f"{fg.name}:") for k in lambdas)
+
+        updated = any(_has_lambda(fg) for fg in fgroups)
         if not updated:
             continue
         if len(fgroups) > 1:

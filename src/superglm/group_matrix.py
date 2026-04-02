@@ -293,6 +293,7 @@ class SparseSSPGroupMatrix:
         "shape",
         "omega",
         "projection",
+        "omega_components",
     )
 
     def __init__(self, B_csr: sp.spmatrix, R_inv: NDArray):
@@ -305,6 +306,7 @@ class SparseSSPGroupMatrix:
         self.shape = (self.B.shape[0], self.R_inv.shape[1])
         self.omega = None  # (K, K) B-spline-space penalty, set externally
         self.projection = None  # (K, n_sub) projection matrix, set externally
+        self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
 
     def matvec(self, v: NDArray) -> NDArray:
         # B @ (R_inv @ v): tiny dense first, then sparse matvec
@@ -326,6 +328,7 @@ class SparseSSPGroupMatrix:
         sub = SparseSSPGroupMatrix(self.B[idx], self.R_inv)
         sub.omega = self.omega
         sub.projection = self.projection
+        sub.omega_components = self.omega_components
         return sub
 
 
@@ -373,6 +376,7 @@ class DiscretizedSSPGroupMatrix:
         "shape",
         "omega",
         "projection",
+        "omega_components",
     )
 
     def __init__(self, B_unique: NDArray, R_inv: NDArray, bin_idx: NDArray):
@@ -383,6 +387,7 @@ class DiscretizedSSPGroupMatrix:
         self.shape = (len(bin_idx), self.R_inv.shape[1])
         self.omega = None  # (K, K) B-spline-space penalty, set externally
         self.projection = None  # (K, n_sub) projection matrix, set externally
+        self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
 
     def matvec(self, v: NDArray) -> NDArray:
         # B_unique @ (R_inv @ v) is (n_bins,), scatter to (n,)
@@ -421,6 +426,7 @@ class DiscretizedSSPGroupMatrix:
         sub = DiscretizedSSPGroupMatrix(self.B_unique, self.R_inv, self.bin_idx[idx])
         sub.omega = self.omega
         sub.projection = self.projection
+        sub.omega_components = self.omega_components
         return sub
 
 
@@ -551,6 +557,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         )
         sub.omega = self.omega
         sub.projection = self.projection
+        sub.omega_components = self.omega_components
         return sub
 
 

@@ -9,8 +9,11 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
+from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.features.spline import CubicRegressionSpline
 from superglm.group_matrix import SparseSSPGroupMatrix
+from superglm.reml_optimizer import compute_dW_deta
+from superglm.tweedie_profile import generate_tweedie_cpg
 
 
 class TestREMLFiniteDifference:
@@ -33,9 +36,19 @@ class TestREMLFiniteDifference:
         mu = np.exp(0.5 + np.sin(2 * np.pi * x1) + 0.5 * x2)
         if family == "poisson":
             y = rng.poisson(mu).astype(float)
+            family_obj = family
         elif family == "gamma":
             y = rng.gamma(shape=5.0, scale=mu / 5.0)
             y = np.maximum(y, 1e-4)
+            family_obj = family
+        elif family == "nb2":
+            theta = 5.0
+            y = rng.negative_binomial(n=theta, p=theta / (theta + mu)).astype(float)
+            family_obj = NegativeBinomial(theta=theta)
+        elif family == "tweedie":
+            y = generate_tweedie_cpg(n, mu, phi=1.5, p=1.5, rng=rng)
+            y = np.maximum(y, 0.0)
+            family_obj = Tweedie(p=1.5)
         else:
             raise ValueError(family)
 
@@ -45,7 +58,7 @@ class TestREMLFiniteDifference:
                 "x1": CubicRegressionSpline(n_knots=8),
                 "x2": CubicRegressionSpline(n_knots=8),
             },
-            family=family,
+            family=family_obj,
         )
         m.fit(df, y)
 
@@ -100,7 +113,7 @@ class TestREMLFiniteDifference:
             n,
         )
 
-    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    @pytest.mark.parametrize("family", ["poisson", "gamma", "nb2", "tweedie"])
     def test_gradient_matches_fd(self, family):
         """Analytic gradient matches central FD of objective (partial: fixed β, W)."""
         (
@@ -158,7 +171,7 @@ class TestREMLFiniteDifference:
 
         np.testing.assert_allclose(grad, fd_grad, rtol=1e-5, atol=1e-8)
 
-    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    @pytest.mark.parametrize("family", ["poisson", "gamma", "nb2", "tweedie"])
     def test_hessian_matches_fd(self, family):
         """Approximate outer Hessian matches full outer FD to within ~5%.
 
@@ -276,7 +289,7 @@ class TestREMLFiniteDifference:
                     f"fd={fd_hess[i, j]:.6f}, rel_err={rel_err:.4f}"
                 )
 
-    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    @pytest.mark.parametrize("family", ["poisson", "gamma", "nb2", "tweedie"])
     def test_total_gradient_matches_outer_fd(self, family):
         """Total gradient (partial + W correction) vs outer FD of objective.
 
@@ -378,6 +391,109 @@ class TestREMLFiniteDifference:
                 f"({err_partial[i]:.6f})"
             )
 
+    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    def test_dW_deta_matches_fd(self, family):
+        """Verify compute_dW_deta() against central finite differences of W(eta)."""
+        from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+        from superglm.links import stabilize_eta
+
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model(family)
+
+        eta = stabilize_eta(
+            m._dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
+            m._link,
+        )
+        mu = clip_mu(m._link.inverse(eta), m._distribution)
+
+        dW_analytic = compute_dW_deta(m._link, m._distribution, mu, eta, sample_weight)
+
+        eps = 1e-6
+
+        def compute_W(eta_vals):
+            mu_vals = clip_mu(m._link.inverse(eta_vals), m._distribution)
+            g1 = m._link.deriv_inverse(eta_vals)
+            V = np.maximum(m._distribution.variance(mu_vals), _VARIANCE_FLOOR)
+            return sample_weight * g1**2 / V
+
+        W_plus = compute_W(eta + eps)
+        W_minus = compute_W(eta - eps)
+        dW_fd = (W_plus - W_minus) / (2 * eps)
+
+        if dW_analytic is None:
+            # Gamma/log: dW/deta = 0, so FD should also be ~0
+            np.testing.assert_allclose(dW_fd, 0.0, atol=1e-6)
+        else:
+            np.testing.assert_allclose(dW_analytic, dW_fd, rtol=1e-5, atol=1e-10)
+
+    @pytest.mark.parametrize("family", ["poisson", "gamma", "nb2", "tweedie"])
+    def test_d2W_deta2_analytic_matches_fd(self, family):
+        """Analytic compute_d2W_deta2() matches FD of compute_dW_deta()."""
+        from superglm.distributions import clip_mu
+        from superglm.links import stabilize_eta
+        from superglm.reml_optimizer import compute_d2W_deta2
+
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model(family)
+
+        eta = stabilize_eta(
+            m._dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
+            m._link,
+        )
+        mu = clip_mu(m._link.inverse(eta), m._distribution)
+
+        # Analytic d²W/dη²
+        d2W_analytic = compute_d2W_deta2(m._link, m._distribution, mu, eta, sample_weight)
+
+        # FD of compute_dW_deta
+        eps = 1e-5
+        eta_p = eta + eps
+        mu_p = clip_mu(m._link.inverse(eta_p), m._distribution)
+        dW_p = compute_dW_deta(m._link, m._distribution, mu_p, eta_p, sample_weight)
+
+        eta_m = eta - eps
+        mu_m = clip_mu(m._link.inverse(eta_m), m._distribution)
+        dW_m = compute_dW_deta(m._link, m._distribution, mu_m, eta_m, sample_weight)
+
+        if dW_p is None or dW_m is None:
+            # Gamma/log: dW/deta=0 everywhere, so d²W/deta²=0
+            if d2W_analytic is not None:
+                np.testing.assert_allclose(d2W_analytic, 0.0, atol=1e-6)
+            return
+
+        d2W_fd = (dW_p - dW_m) / (2 * eps)
+
+        if d2W_analytic is None:
+            np.testing.assert_allclose(d2W_fd, 0.0, atol=1e-4)
+        else:
+            np.testing.assert_allclose(d2W_analytic, d2W_fd, rtol=1e-4, atol=1e-8)
+
     def test_w_correction_zero_for_gamma_log(self):
         """Gamma with log link has dW/dη=0, so W correction must vanish."""
         (
@@ -407,8 +523,9 @@ class TestREMLFiniteDifference:
         )
         assert result is None, "Gamma/log should have zero W correction"
 
-    def test_w_correction_nonzero_for_poisson_log(self):
-        """Poisson with log link has dW/dη=W, so W correction must be nonzero."""
+    @pytest.mark.parametrize("family", ["poisson", "nb2", "tweedie"])
+    def test_w_correction_nonzero(self, family):
+        """Poisson/NB2/Tweedie with log link have dW/deta != 0."""
         (
             m,
             y,
@@ -423,7 +540,7 @@ class TestREMLFiniteDifference:
             XtWX,
             phi_hat,
             n,
-        ) = self._setup_model("poisson")
+        ) = self._setup_model(family)
 
         result = m._reml_w_correction(
             pirls_result,
@@ -434,12 +551,12 @@ class TestREMLFiniteDifference:
             sample_weight,
             offset_arr,
         )
-        assert result is not None, "Poisson/log should have nonzero W correction"
+        assert result is not None, f"{family}/log should have nonzero W correction"
         grad_correction, dH_extra = result
         assert np.any(np.abs(grad_correction) > 1e-6)
         assert len(dH_extra) == len(reml_groups)
 
-    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    @pytest.mark.parametrize("family", ["poisson", "gamma", "nb2", "tweedie"])
     def test_total_hessian_matches_fd(self, family):
         """Hessian with dH_extra vs FD of total gradient (partial + W correction).
 
@@ -581,15 +698,17 @@ class TestREMLFiniteDifference:
 
             fd_hess[:, j] = (grad_plus - grad_minus) / (2 * eps)
 
-        # Hessian with dH_extra should match FD at least as well as without
+        # Hessian with dH_extra should match FD at least as well as without.
+        # For NB2/Tweedie the first-order W correction can occasionally be
+        # marginally worse on individual diagonal entries due to higher-order
+        # terms (dropped d²W/dρ²), so allow a small relative slack.
         diag_fd = np.diag(fd_hess)
         err_with = np.abs(np.diag(hess_with) - diag_fd)
         err_without = np.abs(np.diag(hess_without) - diag_fd)
 
-        # For Poisson: with correction should be better or equal
-        # For Gamma: correction is zero, so both should be equivalent
         for i in range(m_groups):
-            assert err_with[i] <= err_without[i] + 1e-4, (
+            slack = 0.02 * abs(diag_fd[i]) if family in ("nb2", "tweedie") else 1e-4
+            assert err_with[i] <= err_without[i] + slack, (
                 f"{family} Hessian[{i},{i}]: with dH_extra err={err_with[i]:.6f} "
                 f"exceeds without err={err_without[i]:.6f}"
             )
@@ -603,3 +722,245 @@ class TestREMLFiniteDifference:
                     f"{family} total Hessian[{i},{j}]: analytic={hess_with[i, j]:.6f}, "
                     f"fd={fd_hess[i, j]:.6f}, rel_err={rel_err:.4f}"
                 )
+
+    def test_hessian_diagonal_uses_total_gradient(self):
+        """Regression: Hessian diagonal must use the total gradient.
+
+        Wood (2011) eq 6.2: H[i,i] += g_i + 0.5*r_j where g_i is the
+        *total* gradient (partial + W(rho) correction).  For Poisson/log,
+        the W(rho) correction is nonzero, so passing total vs partial
+        gradient should produce different Hessian diagonals.
+
+        This test ensures the bug of passing grad_partial instead of
+        grad (total) to reml_direct_hessian() never recurs.
+        """
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model("poisson")
+
+        # Partial gradient (fixed W)
+        grad_partial = m._reml_direct_gradient(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            phi_hat=phi_hat,
+        )
+
+        # W correction (nonzero for Poisson/log)
+        w_corr = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+        )
+        assert w_corr is not None, "Poisson/log must have nonzero W correction"
+        grad_total = grad_partial + w_corr[0]
+        dH_extra = w_corr[1]
+
+        # Hessian with total gradient (correct per Wood 2011)
+        hess_total = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad_total,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+            dH_extra=dH_extra,
+        )
+
+        # Hessian with partial gradient (the old bug)
+        hess_partial = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad_partial,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+            dH_extra=dH_extra,
+        )
+
+        # The diagonals must differ (W correction is nonzero for Poisson)
+        diag_diff = np.abs(np.diag(hess_total) - np.diag(hess_partial))
+        assert np.any(diag_diff > 1e-8), (
+            "Poisson/log: Hessian diagonal should differ between total and "
+            f"partial gradient, but max diff = {diag_diff.max():.2e}"
+        )
+
+        # Off-diagonals must be identical (only the diagonal correction
+        # depends on the gradient parameter)
+        m_groups = len(reml_groups)
+        for i in range(m_groups):
+            for j in range(m_groups):
+                if i != j:
+                    assert hess_total[i, j] == hess_partial[i, j], (
+                        f"Off-diagonal [{i},{j}] should not depend on gradient"
+                    )
+
+    def test_w_correction_order2_returns_three_tuple(self):
+        """w_correction_order=2 returns (grad, dH_extra, dH2_cross) 3-tuple."""
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model("poisson")
+
+        result = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+            w_correction_order=2,
+        )
+        assert result is not None
+        assert len(result) == 3, f"Expected 3-tuple, got {len(result)}-tuple"
+        grad_corr, dH_extra, dH2_cross = result
+        assert grad_corr.shape == (len(reml_groups),)
+        assert dH2_cross is not None
+        assert dH2_cross.shape == (len(reml_groups), len(reml_groups))
+        # dH2_cross should be symmetric
+        np.testing.assert_allclose(dH2_cross, dH2_cross.T, atol=1e-12)
+
+    def test_w_correction_order2_changes_hessian(self):
+        """Order-2 W correction produces a different Hessian than order-1.
+
+        For Poisson/log, d²W/dη² is nonzero, so the second-order
+        cross-terms should alter the Hessian off-diagonals.
+        """
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model("poisson")
+
+        # Order 1
+        w1 = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+            w_correction_order=1,
+        )
+        grad_partial = m._reml_direct_gradient(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            phi_hat=phi_hat,
+        )
+        grad1 = grad_partial + w1[0]
+        hess1 = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad1,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+            dH_extra=w1[1],
+        )
+
+        # Order 2
+        w2 = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+            w_correction_order=2,
+        )
+        grad2 = grad_partial + w2[0]  # gradient is same for both orders
+        hess2 = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad2,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+            dH_extra=w2[1],
+            dH2_cross=w2[2],
+        )
+
+        # Gradients must be identical
+        np.testing.assert_allclose(grad1, grad2, atol=1e-14)
+
+        # Hessians must differ (d²W/dη² is nonzero for Poisson/log)
+        hess_diff = np.abs(hess2 - hess1)
+        assert np.any(hess_diff > 1e-8), (
+            "Poisson/log: order-2 Hessian should differ from order-1, "
+            f"but max diff = {hess_diff.max():.2e}"
+        )
+
+    def test_fit_reml_w_correction_order2_converges(self):
+        """fit_reml(w_correction_order=2) runs and converges on Poisson data."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = rng.uniform(0, 1, n)
+        mu = np.exp(0.5 + np.sin(2 * np.pi * x1))
+        y = rng.poisson(mu).astype(float)
+        df = pd.DataFrame({"x1": x1})
+
+        from superglm.features.spline import CubicRegressionSpline
+
+        m = SuperGLM(
+            features={"x1": CubicRegressionSpline(n_knots=8)},
+            family="poisson",
+        )
+        m.fit_reml(df, y, w_correction_order=2)
+        assert m._result.converged

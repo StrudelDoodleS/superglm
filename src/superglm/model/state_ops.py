@@ -13,6 +13,26 @@ from superglm.inference import compute_coef_covariance
 from superglm.types import GroupSlice
 
 
+def _build_S_from_penalties(model, lam2) -> NDArray | None:
+    """Build full penalty matrix from model._reml_penalties if available.
+
+    Returns None if model has no stored reml_penalties (non-REML fit or
+    single-penalty where the legacy path is equivalent).
+    """
+    penalties = getattr(model, "_reml_penalties", None)
+    if penalties is None:
+        return None
+    from superglm.solvers.irls_direct import _build_penalty_matrix
+
+    return _build_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        lam2,
+        model._dm.p,
+        reml_penalties=penalties,
+    )
+
+
 def diagnostics(model) -> dict[str, Any]:
     """Per-group diagnostic dict for programmatic / audit access."""
     from superglm.features.spline import _SplineBase
@@ -267,7 +287,14 @@ def feature_groups(model, name: str) -> list[GroupSlice]:
 
 
 def reconstruct_feature(model, name: str) -> dict[str, Any]:
-    """Reconstruct a fitted feature's curve or effect on its original scale."""
+    """Reconstruct a fitted feature's curve or effect on its original scale.
+
+    Returns the canonical fitted term contribution — the raw
+    ``B(x) @ beta`` under the model's identifiability constraint.
+    For select=True splines, the linear and spline subgroups are
+    recombined into a single term. No post-hoc centering is applied;
+    this is the literal fitted decomposition that ``predict()`` uses.
+    """
     res = model.result
     groups = feature_groups(model, name)
     beta_combined = np.concatenate([res.beta[g.sl] for g in groups])
@@ -281,9 +308,10 @@ def reconstruct_feature(model, name: str) -> dict[str, Any]:
         )
     if in_main:
         return model._specs[name].reconstruct(beta_combined)
-    if in_inter:
+    elif in_inter:
         return model._interaction_specs[name].reconstruct(beta_combined)
-    raise KeyError(f"Feature not found: {name}")
+    else:
+        raise KeyError(f"Feature not found: {name}")
 
 
 def knot_summary(model) -> dict[str, dict[str, Any]]:
@@ -310,6 +338,7 @@ def knot_summary(model) -> dict[str, dict[str, Any]]:
 def coef_covariance(model):
     """Phi-scaled Bayesian covariance for active coefficients."""
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
+    S_full = _build_S_from_penalties(model, lam2)
     return compute_coef_covariance(
         model._dm,
         model._distribution,
@@ -319,6 +348,7 @@ def coef_covariance(model):
         model._fit_weights,
         model._fit_offset,
         lam2,
+        S_override=S_full,
     )
 
 
@@ -338,8 +368,14 @@ def fit_active_info(model):
     W = model._fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
+    S_full = _build_S_from_penalties(model, lam2)
     X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
-        model.result.beta, W, model._dm.group_matrices, model._groups, lam2
+        model.result.beta,
+        W,
+        model._dm.group_matrices,
+        model._groups,
+        lam2,
+        S_override=S_full,
     )
     return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
 
@@ -379,13 +415,19 @@ def fit_inference_info(model):
     W = model._fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
+    S_full = _build_S_from_penalties(model, lam2)
 
     # Gram path: per-group gram + cross-gram blocks, then invert.
     # O(n·p_g² per block + p³) — avoids the full n×p QR.
     # Returns XtWX and S directly so we don't need to recover them
     # from the (possibly truncated) pseudo-inverse.
     XtWX_inv, XtWX_inv_aug, active_groups, XtWX, S = _penalised_xtwx_inv_gram(
-        model.result.beta, W, model._dm.group_matrices, model._groups, lam2
+        model.result.beta,
+        W,
+        model._dm.group_matrices,
+        model._groups,
+        lam2,
+        S_override=S_full,
     )
 
     p_a = XtWX_inv.shape[0]

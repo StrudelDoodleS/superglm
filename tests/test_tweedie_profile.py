@@ -547,6 +547,7 @@ class TestEstimatePFitMode:
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
         assert model._last_fit_meta["method"] == "fit"
 
+    @pytest.mark.slow
     def test_fit_mode_reml_recovers_p(self):
         """fit_mode='reml' should recover p using REML fits."""
         X, y, p_true = _tweedie_data()
@@ -563,6 +564,7 @@ class TestEstimatePFitMode:
         assert model._last_fit_meta["method"] == "fit_reml"
         assert hasattr(model, "_reml_result")
 
+    @pytest.mark.slow
     def test_fit_mode_reml_recovers_p_mle_phi(self):
         """fit_mode='reml' should support phi_method='mle'."""
         X, y, p_true = _tweedie_data(n=1_500, seed=11)
@@ -591,6 +593,7 @@ class TestEstimatePFitMode:
         assert model._last_fit_meta["method"] == "fit"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
 
+    @pytest.mark.slow
     def test_fit_mode_inherit_from_reml(self):
         """After fit_reml(), inherit should use the REML path."""
         X, y, p_true = _tweedie_data()
@@ -644,6 +647,7 @@ class TestEstimatePFitMode:
         with pytest.raises(ValueError, match="tweedie"):
             model.estimate_p(X, y)
 
+    @pytest.mark.slow
     def test_reml_and_fit_agree_on_p(self):
         """REML and fit paths should agree on p estimate for the same data."""
         X, y, p_true = _tweedie_data()
@@ -752,6 +756,7 @@ class TestSearchMethods:
         assert result.method == "profile_opt"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
 
+    @pytest.mark.slow
     def test_low_p_boundary_regression(self):
         """Low-p profiles should not spuriously prefer the lower bound."""
         X, y, _ = _tweedie_data(n=2_200, p_true=1.25, seed=7)
@@ -858,6 +863,7 @@ class TestSearchMethods:
         )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
 
+    @pytest.mark.slow
     def test_grid_with_reml(self):
         """method='grid' should work with fit_mode='fit_reml'."""
         X, y, p_true = _tweedie_data()

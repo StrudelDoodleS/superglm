@@ -57,6 +57,7 @@ class PIRLSResult:
     phi: float
     effective_df: float
     iteration_log: list[IterationDiagnostics] | None = None
+    log_det_H: float | None = None  # log|X'WX + S| from _safe_decompose_H  # noqa: N815
 
 
 def _compute_group_hessians(
@@ -105,6 +106,7 @@ def _fit_pirls_inner(
     lambda2: float | dict[str, float] = 0.0,
     record_diagnostics: bool = False,
     convergence: str = "deviance",
+    S_override: NDArray | None = None,
 ) -> PIRLSResult:
     """Single-pass PIRLS fit with proximal Newton BCD inner solver."""
     n, p = dm.shape
@@ -375,7 +377,17 @@ def _fit_pirls_inner(
         if active_gms:
             p_a = col
             XtWX = _block_xtwx(active_gms, active_groups_edf, W)
-            S = _build_penalty_matrix(active_gms, active_groups_edf, lambda2, p_a)
+            if S_override is not None:
+                # S_override is full (p x p) — slice to active columns
+                active_idx = []
+                for ag in active_groups_edf:
+                    # Map active group back to original group for slicing
+                    orig_g = next(g for g in groups if g.name == ag.name)
+                    active_idx.extend(range(orig_g.start, orig_g.end))
+                active_idx = np.array(active_idx)
+                S = S_override[np.ix_(active_idx, active_idx)]
+            else:
+                S = _build_penalty_matrix(active_gms, active_groups_edf, lambda2, p_a)
             M = XtWX + S
             eigvals, eigvecs = np.linalg.eigh(M)
             # Keep the gram-path truncation aligned with the dense QR/SVD path:
@@ -448,6 +460,7 @@ def fit_pirls(
     lambda2: float | dict[str, float] = 0.0,
     record_diagnostics: bool = False,
     convergence: str = "deviance",
+    S_override: NDArray | None = None,
 ) -> PIRLSResult:
     """Fit a penalised GLM via PIRLS with proximal Newton BCD.
 
@@ -485,6 +498,7 @@ def fit_pirls(
         lambda2=lambda2,
         record_diagnostics=record_diagnostics,
         convergence=convergence,
+        S_override=S_override,
     )
 
     # Stage 2: if flavor, adjust weights and refit (warm-start both beta and intercept)
@@ -510,6 +524,7 @@ def fit_pirls(
             lambda2=lambda2,
             record_diagnostics=record_diagnostics,
             convergence=convergence,
+            S_override=S_override,
         )
 
     return result
