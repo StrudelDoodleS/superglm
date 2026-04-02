@@ -490,17 +490,18 @@ class SuperGLM:
         )
 
     def relativities(
-        self, with_se: bool = False, centering: str = "mean"
+        self, with_se: bool = False, centering: str = "native"
     ) -> dict[str, pd.DataFrame]:
         """Extract plot-ready relativity DataFrames for all features.
 
         Parameters
         ----------
         centering : {"native", "mean"}
-            ``"native"`` preserves internal centering (SSP for splines,
-            base-level for categoricals). ``"mean"`` shifts so the geometric
-            mean of relativities = 1 across levels/grid — recommended for
-            underwriter-facing output where cross-feature comparability matters.
+            ``"native"`` (default) returns the canonical fitted term
+            contribution under the model's identifiability constraint.
+            ``"mean"`` is a reporting convenience that shifts so the
+            geometric mean of relativities = 1 — useful for cross-feature
+            comparison but not the fitted term decomposition.
         """
         return explain_ops.relativities(self, with_se, centering=centering)
 
@@ -533,16 +534,17 @@ class SuperGLM:
         alpha: float = 0.05,
         n_sim: int = 10_000,
         seed: int = 42,
-        centering: str = "mean",
+        centering: str = "native",
     ) -> TermInference | InteractionInference:
         """Per-term inference: curve, uncertainty, and metadata in one object.
 
         Parameters
         ----------
         centering : {"native", "mean"}
-            ``"native"`` preserves internal centering. ``"mean"`` shifts so
-            geometric mean of relativities = 1. Recommended for cross-feature
-            comparison.
+            ``"native"`` (default) returns the canonical fitted term
+            contribution under the model's identifiability constraint.
+            ``"mean"`` is a reporting convenience that shifts so the
+            geometric mean of relativities = 1.
         """
         return explain_ops.term_inference(
             self,
@@ -635,7 +637,7 @@ class SuperGLM:
         alpha: float = 0.05,
         n_sim: int = 10_000,
         seed: int = 42,
-        centering: str = "mean",
+        centering: str = "native",
         **kwargs,
     ):
         """Plot model terms.
@@ -673,10 +675,12 @@ class SuperGLM:
             the matplotlib renderer.
         scale : {"response", "link"}
             ``"response"`` (default) shows the fitted effect on the
-            inverse-link scale (relativities).  ``"link"`` shows the
-            additive link-scale contribution η(x) = Σ β_j B_j(x),
-            with optional basis decomposition overlays.  Only used
-            by the Plotly renderer.
+            inverse-link scale (relativities).  With ``centering="native"``,
+            this is the exponentiated fitted term contribution under the
+            model's identifiability constraint — not a portfolio-average
+            relativity. ``"link"`` shows the additive link-scale
+            contribution eta(x) = B(x) @ beta, with optional basis
+            decomposition overlays.  Only used by the Plotly renderer.
         ci_style : {"band", "lines"}
             Plotly CI presentation. ``"band"`` (default) draws filled
             confidence bands. ``"lines"`` draws line-only CI bounds with
@@ -692,6 +696,11 @@ class SuperGLM:
             terms (or ``terms=None``); use ``engine="matplotlib"`` for a
             single-term chart. Requires the ``plotly`` optional dependency
             (``pip install superglm[plotting]``).
+        centering : {"native", "mean"}
+            ``"native"`` (default) returns the canonical fitted term
+            contribution under the model's identifiability constraint.
+            ``"mean"`` is a reporting convenience that shifts so the
+            geometric mean of relativities = 1.
         n_points : int
             Grid resolution for spline/polynomial curves.
         figsize : tuple, optional
@@ -829,7 +838,7 @@ class SuperGLM:
         alpha: float = 0.05,
         n_sim: int = 10_000,
         seed: int = 42,
-        centering: str = "mean",
+        centering: str = "native",
     ) -> dict[str, Any]:
         """Return plain data needed to recreate SuperGLM plots.
 
@@ -843,6 +852,12 @@ class SuperGLM:
         contributions. For interactions, it includes the reconstructed effect
         data and, for continuous x continuous surfaces, optional density / HDR
         grid data when ``X`` and ``sample_weight`` are supplied.
+
+        With ``centering="native"`` (default), relativity values are
+        the exponentiated fitted term contributions under the model's
+        identifiability constraint — not portfolio-average relativities.
+        Pass ``centering="mean"`` for a reporting view where the
+        geometric mean of relativities = 1.
 
         Examples
         --------

@@ -35,6 +35,10 @@ item on that basis without human approval.
   Both known-scale and profiled-scale paths match paper.
 - `done` Profiled-scale handling for estimated-φ families.
   `0.5*(n-M_p)*log(D_p + Σλ_j β'S_j β)` at lines 213-223.
+- `partial` Shared-block multi-penalty profiled-scale finalization is not fully closed.
+  The direct objective / Hessian now use combined-penalty logic correctly,
+  but the post-fit `phi` finalization in `fit_reml()` still has an open
+  shared-block `M_p` bookkeeping bug for estimated-scale families.
 - `todo` Write equation references into the objective implementation comments.
 - `done` Every determinant term matches paper notation and sign convention.
   `log|X'WX+S| - log|S|₊` structure confirmed.
@@ -162,6 +166,9 @@ item on that basis without human approval.
 - `partial` Audit
   `optimize_discrete_reml_cached_w()` reml_optimizer.py:806-1220
   against the paper's POI/discrete iteration.
+- `partial` Known-scale shared-block multi-penalty discrete REML now works
+  for direct cached-W fits, but estimated-scale shared-block synthetic
+  coverage is still incomplete.
 - `todo` Write down the exact points where the repo switches from paper logic to local
   engineering choices.
 - `todo` Confirm the current line search / acceptance logic is consistent with the paper
@@ -205,6 +212,9 @@ item on that basis without human approval.
 
 - `done` Pivoted Cholesky before SVD fallback in irls_direct.py.
 - `done` SVD fallback uses masked division (no RuntimeWarning).
+- `engineering` Non-direct shared-block multi-penalty REML remains guarded.
+  `selection_penalty > 0` with tensor/shared-block penalties is an explicit
+  deferral until rebuild-time `PenaltyComponent` preservation is implemented.
 - `engineering` Eigenvalue floor eps^0.7 (Nocedal & Wright standard: eps^0.5).
   Retained as benchmarked heuristic. Not paper-mandated.
 - `engineering` SVD threshold 1e-10 * s_max. Higham suggests eps*p*s_max.

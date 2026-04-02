@@ -603,7 +603,7 @@ def relativities(
     *,
     with_se: bool = False,
     covariance_fn=None,
-    centering: str = "mean",
+    centering: str = "native",
     term_shifts: dict[str, float] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Extract plot-ready relativity DataFrames for all features.
@@ -627,11 +627,10 @@ def relativities(
     covariance_fn : callable, optional
         Zero-arg callable returning ``(Cov_active, active_groups)``.
     centering : {"native", "mean"}
-        ``"native"`` (default) preserves the model's internal centering
-        (SSP sum-to-zero for splines, base-level for categoricals).
-        ``"mean"`` shifts log-relativities so the geometric mean of
-        relativities equals 1, giving a consistent "1.0 = average" scale
-        across all features. Recommended for underwriter-facing output.
+        ``"native"`` (default) returns the canonical fitted term
+        contribution under the model's identifiability constraint.
+        ``"mean"`` is a reporting convenience that shifts
+        log-relativities so the geometric mean of relativities = 1.
 
     Returns
     -------
@@ -1070,7 +1069,7 @@ def term_inference(
     alpha: float = 0.05,
     n_sim: int = 10_000,
     seed: int = 42,
-    centering: str = "mean",
+    centering: str = "native",
 ) -> TermInference | InteractionInference:
     """Build a per-term inference object.
 
@@ -1105,8 +1104,10 @@ def term_inference(
     seed : int
         Random seed for simultaneous bands.
     centering : {"native", "mean"}
-        ``"native"`` (default) preserves internal centering.
-        ``"mean"`` shifts so geometric mean of relativities = 1.
+        ``"native"`` (default) returns the canonical fitted term
+        contribution under the model's identifiability constraint.
+        ``"mean"`` is a reporting convenience that shifts so the
+        geometric mean of relativities = 1.
 
     Returns
     -------
