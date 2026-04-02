@@ -68,6 +68,37 @@ def build_penalty_components(
     """
     components: list[PenaltyComponent] = []
     eps_thresh = np.finfo(float).eps ** (2 / 3)
+
+    def _rank_and_logdet(omega_raw: NDArray, omega_ssp: NDArray) -> tuple[float, float, NDArray]:
+        """Compute basis-invariant rank from raw penalty, log|Ω|₊ from SSP.
+
+        Rank is computed from the raw (basis-invariant) penalty to avoid
+        SSP-congruence sensitivity: R_inv.T @ Ω @ R_inv can shift near-null
+        eigenvalues above/below the threshold depending on which valid R_inv
+        was used. But log|Ω|₊ must stay in SSP coordinates because it enters
+        the REML objective as log|S|₊ - log|H|, where log|H| is also in SSP
+        coordinates. The 2*log|R_inv| factors cancel only when both terms
+        use the same basis.
+        """
+        # Rank from raw penalty (basis-invariant)
+        raw_eigvals = np.linalg.eigvalsh(omega_raw)
+        raw_thresh = eps_thresh * max(raw_eigvals.max(), 1e-12)
+        rank = float(np.sum(raw_eigvals > raw_thresh))
+
+        # log|Ω|₊ and eigvals from SSP penalty (same basis as log|H|)
+        ssp_eigvals = np.linalg.eigvalsh(omega_ssp)
+        # Use the raw-basis rank to select the top eigenvalues from SSP
+        n_pos = int(rank)
+        if n_pos > 0:
+            sorted_ssp = np.sort(ssp_eigvals)[::-1]
+            pos_eigvals = sorted_ssp[:n_pos]
+            log_det = float(np.sum(np.log(np.maximum(pos_eigvals, 1e-300))))
+        else:
+            pos_eigvals = np.array([])
+            log_det = 0.0
+
+        return rank, log_det, pos_eigvals
+
     for idx, g in reml_groups:
         gm = group_matrices[idx]
 
@@ -75,11 +106,7 @@ def build_penalty_components(
             # Multi-penalty path: N components share this coefficient block.
             for suffix, omega_j in gm.omega_components:
                 omega_ssp_j = gm.R_inv.T @ omega_j @ gm.R_inv
-                eigvals = np.linalg.eigvalsh(omega_ssp_j)
-                thresh = eps_thresh * max(eigvals.max(), 1e-12)
-                pos_eigvals = eigvals[eigvals > thresh]
-                rank = float(len(pos_eigvals))
-                log_det = float(np.sum(np.log(pos_eigvals))) if pos_eigvals.size else 0.0
+                rank, log_det, pos_eigvals = _rank_and_logdet(omega_j, omega_ssp_j)
                 components.append(
                     PenaltyComponent(
                         name=f"{g.name}:{suffix}",
@@ -94,13 +121,9 @@ def build_penalty_components(
                     )
                 )
         else:
-            # Single-penalty path (unchanged).
+            # Single-penalty path.
             omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-            eigvals = np.linalg.eigvalsh(omega_ssp)
-            thresh = eps_thresh * max(eigvals.max(), 1e-12)
-            pos_eigvals = eigvals[eigvals > thresh]
-            rank = float(len(pos_eigvals))
-            log_det = float(np.sum(np.log(pos_eigvals))) if pos_eigvals.size else 0.0
+            rank, log_det, pos_eigvals = _rank_and_logdet(gm.omega, omega_ssp)
             components.append(
                 PenaltyComponent(
                     name=g.name,
