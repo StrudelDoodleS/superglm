@@ -135,6 +135,7 @@ Spline(kind="ns", k=10)                   # 9-column natural spline (k-1 after i
 Spline(kind="cr", k=10)                   # 9-column cubic regression spline (k-1 after identifiability)
 Spline(kind="bs", k=14, select=True)       # mgcv double penalty: spline-vs-linear selection
 Spline(kind="cr", k=12, select=True)       # CR with double penalty selection
+Spline(kind="cr", k=12, m=(1, 2))         # separate first- and second-order penalties
 Spline(kind="bs", k=14, monotone="increasing")  # post-fit isotonic monotone constraint
 ```
 
@@ -156,6 +157,17 @@ Spline(kind="bs", k=14, monotone="increasing")  # post-fit isotonic monotone con
 | `"quantile_tempered"` | Weighted blend of quantile and uniform (`knot_alpha` controls mixing) |
 
 `select=True` (BS, CR, and CR cardinal) decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped. Not supported for NS (its constrained penalty has only 1 null eigenvalue).
+
+`m=` can be an integer or a tuple of integers. For example,
+`Spline(kind="cr", m=(1, 2))` emits separate derivative-order penalties on the
+same coefficient block, each with its own REML smoothing parameter.
+
+Current guard rails:
+
+- `select=True + m=(...)` is not yet supported.
+- tensor interactions with a multi-order spline parent are not yet supported.
+- `kind="cr_cardinal"` currently supports only the default `m=2`.
+- `selection_penalty > 0` with shared-block multi-penalty terms remains guarded.
 
 The concrete classes `BasisSpline`, `NaturalSpline`, and `CubicRegressionSpline` are also available for direct use.
 
@@ -358,9 +370,17 @@ model.plot(engine="plotly", X=df, sample_weight=exposure)
 payload = model.plot_data("DrivAge", X=df, sample_weight=exposure, show_knots=True)
 curve_df = payload["terms"][0]["effect"]
 
-# Relativity DataFrames — centering="mean" shifts so geometric mean = 1
-rels = model.relativities(with_se=True, centering="mean")
+# Relativity DataFrames — native is the default fitted-term view
+rels_native = model.relativities(with_se=True)
+
+# Optional reporting view — centering="mean" shifts so geometric mean = 1
+rels_mean = model.relativities(with_se=True, centering="mean")
 ```
+
+By default, `term_inference()`, `plot()`, `plot_data()`, and `relativities()`
+now return the canonical fitted term contribution under the model's
+identifiability constraint. Use `centering="mean"` only when you explicitly
+want a rebased reporting view for cross-feature comparison.
 
 ### Diagnostic plots
 

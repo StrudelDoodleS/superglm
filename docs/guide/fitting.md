@@ -49,6 +49,28 @@ Those are different tools:
 - `select=True` is the more REML-aligned way to let smooth terms shrink toward zero.
 - `selection_penalty > 0` is the sparse-additive path, best used for screening / compression rather than mgcv-style inference.
 
+## 5. Multi-order spline penalties
+
+Spline specs now support multiple derivative-order penalties on one term:
+
+```python
+features = {
+    "DrivAge": Spline(kind="cr", k=14, m=(1, 2)),
+    "VehAge": Spline(kind="bs", k=10, m=(2, 3)),
+}
+model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+model.fit_reml(df, y, sample_weight=exposure)
+```
+
+This gives each derivative order its own REML smoothing parameter.
+
+Current guard rails:
+
+- `select=True + m=(...)` is not yet supported.
+- tensor interactions with a multi-order spline parent are not yet supported.
+- `kind="cr_cardinal"` currently supports only the default `m=2`.
+- `selection_penalty > 0` with shared-block multi-penalty terms remains guarded.
+
 ## Regularisation path
 
 Fit a sequence of models from high to low regularisation with warm starts:
