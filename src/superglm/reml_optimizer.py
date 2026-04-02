@@ -1319,8 +1319,16 @@ def optimize_discrete_reml_cached_w(
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
         # Snap degenerate select=True groups to upper bound.
         sg_type = None
-        if reml_groups is not None:
+        if reml_groups is not None and i < len(reml_groups):
             sg_type = reml_groups[i][1].subgroup_type
+        elif reml_groups is not None:
+            # Multi-m: more penalty components than reml_groups.
+            # Look up the group via the penalty component's group_index.
+            pc = penalties[i]
+            for _, g in reml_groups:
+                if g.name == pc.group_name:
+                    sg_type = g.subgroup_type
+                    break
         if (
             select_snap
             and sg_type is not None

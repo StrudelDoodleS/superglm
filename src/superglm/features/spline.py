@@ -1641,6 +1641,12 @@ def Spline(
                 m=m,
             )
         else:  # cr_cardinal — defer multi-m
+            m_orders = (m,) if isinstance(m, int) else tuple(m)
+            if len(m_orders) > 1 or m_orders[0] != 2:
+                raise NotImplementedError(
+                    "kind='cr_cardinal' only supports m=2 (default). "
+                    "Use kind='cr' for multi-order or non-default derivative penalties."
+                )
             return cls(
                 n_knots=resolved_n_knots,
                 knot_strategy=knot_strategy,
