@@ -196,6 +196,9 @@ class _SplineBase:
         self._U_range: NDArray | None = None
         self._omega_range: NDArray | None = None
 
+        # Multi-m penalty components (set during build / build_knots_and_penalty)
+        self._penalty_components: list[tuple[str, NDArray]] | None = None
+
     def _prepare_eval_points(self, x: NDArray) -> tuple[NDArray, bool]:
         """Apply the configured extrapolation policy for basis evaluation."""
         x = np.asarray(x, dtype=np.float64).ravel()
@@ -380,6 +383,26 @@ class _SplineBase:
         constant direction instead, so identifiability is skipped.
         """
         return not self.select
+
+    def _build_multi_m_components(
+        self, x: NDArray, B: Any, final_projection: NDArray | None
+    ) -> list[tuple[str, NDArray]]:
+        """Build per-order penalty components projected through the same constraints.
+
+        Each per-order penalty is projected through the same constraint Z
+        and identifiability projection that was used for the summed penalty.
+        The constraint projections are basis-geometric (independent of the
+        specific penalty values), so they can be reused for each order.
+        """
+        components: list[tuple[str, NDArray]] = []
+        for order in self._m_orders:
+            omega_raw = self._build_penalty_for_order(order)
+            # Apply constraint projection (Z from natural boundary etc.)
+            _, omega_c, _, constraint_proj = self._apply_constraints(None, omega_raw)
+            # Apply identifiability projection
+            omega_c, _, _ = self._apply_identifiability(x, omega_c, constraint_proj)
+            components.append((f"d{order}", omega_c))
+        return components
 
     def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
         """Apply boundary constraints. Returns (B, omega, n_cols, projection).
@@ -577,12 +600,21 @@ class _SplineBase:
         B, omega, n_cols, projection = self._apply_constraints(B, omega)
         omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
         self._interaction_projection = projection
+
+        # Multi-m: build per-order penalty components through the same projection
+        penalty_components = None
+        if len(self._m_orders) > 1:
+            penalty_components = self._build_multi_m_components(x, B, projection)
+            # Summed penalty for R_inv
+            omega = sum(om for _, om in penalty_components)
+
         return GroupInfo(
             columns=B,
             n_cols=n_cols,
             penalty_matrix=omega,
             reparametrize=(self.penalty == "ssp"),
             projection=projection,
+            penalty_components=penalty_components,
         )
 
     def build_knots_and_penalty(
@@ -618,6 +650,14 @@ class _SplineBase:
 
         omega_c, n_cols, projection = self._apply_identifiability(x, omega_c, projection)
         self._interaction_projection = projection
+
+        # Multi-m: store per-order components for the discrete dm_builder to pick up
+        if len(self._m_orders) > 1:
+            self._penalty_components = self._build_multi_m_components(x, None, projection)
+            omega_c = sum(om for _, om in self._penalty_components)
+        else:
+            self._penalty_components = None
+
         return omega_c, n_cols, projection
 
     def transform(self, x: NDArray) -> NDArray:

@@ -533,6 +533,7 @@ def build_design_matrix(
                         penalty_matrix=omega,
                         reparametrize=(spec.penalty == "ssp"),
                         projection=projection_penalty,
+                        penalty_components=getattr(spec, "_penalty_components", None),
                     )
                 ]
         else:

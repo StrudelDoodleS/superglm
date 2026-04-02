@@ -287,13 +287,14 @@ def feature_groups(model, name: str) -> list[GroupSlice]:
 
 
 def _compute_term_centering_shift(model, name: str) -> float:
-    """Compute centering shift from the term's reconstruction grid.
+    """Compute grid-mean centering shift for a term (reporting transform).
 
-    Uses the mean of the term's log_relativity on its canonical
-    evaluation grid (the same grid returned by reconstruct). This
-    matches mgcv's convention where predict(type="terms") returns
-    effects centered on the evaluation domain, giving stable
-    relativities regardless of the training-data distribution.
+    Returns the mean of the term's log_relativity on its evaluation
+    grid. Used only by ``centering="mean"`` to shift relativities so
+    their geometric mean is 1 — a convenience for cross-feature
+    comparison in business output. This is **not** the canonical term
+    definition; the canonical term is the raw fitted contribution under
+    the model's identifiability constraint.
     """
     groups = feature_groups(model, name)
     beta_combined = np.concatenate([model.result.beta[g.sl] for g in groups])
@@ -313,10 +314,11 @@ def _compute_term_centering_shift(model, name: str) -> float:
 def reconstruct_feature(model, name: str) -> dict[str, Any]:
     """Reconstruct a fitted feature's curve or effect on its original scale.
 
-    Returns the canonical term effect centered by the training-data
-    weighted mean, so relativities are interpretable as deviations from
-    the portfolio average. For select=True splines, the linear and spline
-    subgroups are recombined before centering.
+    Returns the canonical fitted term contribution — the raw
+    ``B(x) @ beta`` under the model's identifiability constraint.
+    For select=True splines, the linear and spline subgroups are
+    recombined into a single term. No post-hoc centering is applied;
+    this is the literal fitted decomposition that ``predict()`` uses.
     """
     res = model.result
     groups = feature_groups(model, name)
@@ -330,18 +332,11 @@ def reconstruct_feature(model, name: str) -> dict[str, Any]:
             f"directly to disambiguate."
         )
     if in_main:
-        raw = model._specs[name].reconstruct(beta_combined)
+        return model._specs[name].reconstruct(beta_combined)
     elif in_inter:
-        raw = model._interaction_specs[name].reconstruct(beta_combined)
+        return model._interaction_specs[name].reconstruct(beta_combined)
     else:
         raise KeyError(f"Feature not found: {name}")
-
-    # Apply canonical training-data centering
-    shift = _compute_term_centering_shift(model, name)
-    if "log_relativity" in raw:
-        raw["log_relativity"] = raw["log_relativity"] - shift
-        raw["relativity"] = np.exp(raw["log_relativity"])
-    return raw
 
 
 def knot_summary(model) -> dict[str, dict[str, Any]]:

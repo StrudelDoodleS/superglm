@@ -36,20 +36,14 @@ def refit_unpenalised(model, X, y, sample_weight=None, offset=None, keep_smoothi
     )
 
 
-def relativities(model, with_se=False, centering="mean"):
+def relativities(model, with_se=False, centering="native"):
     """Extract plot-ready relativity DataFrames for all features.
 
-    Term effects use canonical training-data centering so relativities
-    represent deviations from the portfolio average. The ``centering``
-    parameter is accepted for backward compatibility but ignored.
+    By default returns the canonical fitted term contributions under
+    the model's identifiability constraint (``centering="native"``).
+    Pass ``centering="mean"`` to shift so geometric mean of
+    relativities = 1 — a reporting convenience, not the fitted term.
     """
-    from superglm.model.state_ops import _compute_term_centering_shift
-
-    # Compute canonical centering shifts for all terms
-    shifts: dict[str, float] = {}
-    for name in list(model._feature_order) + list(model._interaction_order):
-        shifts[name] = _compute_term_centering_shift(model, name)
-
     return _relativities(
         model._feature_order,
         model._interaction_order,
@@ -59,8 +53,7 @@ def relativities(model, with_se=False, centering="mean"):
         model.result,
         with_se=with_se,
         covariance_fn=(lambda: model._coef_covariance) if with_se else None,
-        centering="native",
-        term_shifts=shifts,
+        centering=centering,
     )
 
 
@@ -105,7 +98,7 @@ def term_inference(
     alpha=0.05,
     n_sim=10_000,
     seed=42,
-    centering="mean",
+    centering="native",
 ):
     """Per-term inference: curve, uncertainty, and metadata in one object."""
     if model._result is None:
@@ -167,7 +160,7 @@ def plot(
     alpha=0.05,
     n_sim=10_000,
     seed=42,
-    centering="mean",
+    centering="native",
     **kwargs,
 ):
     """Plot model terms."""
@@ -341,7 +334,7 @@ def plot_data(
     alpha=0.05,
     n_sim=10_000,
     seed=42,
-    centering="mean",
+    centering="native",
 ):
     """Return plain plot-ready data for one or more terms."""
     from superglm.plotting.data import build_interaction_plot_data, build_main_effect_plot_data
