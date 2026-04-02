@@ -982,3 +982,171 @@ class TestLogdetSharedBlock:
         result_old = cached_logdet_s_plus(lambdas, {"g": cache})
 
         np.testing.assert_allclose(result_new, result_old, rtol=1e-10)
+
+
+# ── Multi-order derivative penalty tests ──────────────────────
+
+
+class TestMultiOrderSplinePenalty:
+    """Verify Spline(m=...) produces correct penalties and REML integration."""
+
+    def test_single_m1_difference_penalty(self):
+        """Spline(kind='bs', m=1) produces 1st-difference penalty."""
+        from superglm.features.spline import BasisSpline
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 1, 200)
+        spec = BasisSpline(n_knots=6, m=1)
+        spec._place_knots(x)
+        omega = spec._build_penalty()
+        D1 = np.diff(np.eye(spec._n_basis), n=1, axis=0)
+        expected = D1.T @ D1
+        np.testing.assert_allclose(omega, expected, atol=1e-12)
+
+    def test_single_m3_difference_penalty(self):
+        """Spline(kind='bs', m=3) produces 3rd-difference penalty."""
+        from superglm.features.spline import BasisSpline
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 1, 200)
+        spec = BasisSpline(n_knots=6, m=3)
+        spec._place_knots(x)
+        omega = spec._build_penalty()
+        D3 = np.diff(np.eye(spec._n_basis), n=3, axis=0)
+        expected = D3.T @ D3
+        np.testing.assert_allclose(omega, expected, atol=1e-12)
+
+    def test_crs_m1_integrated_first_derivative(self):
+        """Spline(kind='cr', m=1) produces integrated f' penalty."""
+        from superglm.features.spline import CubicRegressionSpline
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 1, 200)
+        spec = CubicRegressionSpline(n_knots=6, m=1)
+        spec._place_knots(x)
+        omega = spec._build_penalty_for_order(1)
+        # Should be PSD
+        eigvals = np.linalg.eigvalsh(omega)
+        assert np.all(eigvals >= -1e-10)
+        # Null space: constants only (f'(const) = 0)
+        n_null = int(np.sum(eigvals < 1e-8))
+        assert n_null == 1  # constant function has zero first derivative
+
+    def test_default_m2_unchanged(self):
+        """Default Spline(m=2) produces identical penalty to before."""
+        from superglm import Spline
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 1, 200)
+
+        spec_default = Spline(kind="bs", n_knots=6)
+        spec_explicit = Spline(kind="bs", n_knots=6, m=2)
+
+        info_d = spec_default.build(x)
+        info_e = spec_explicit.build(x)
+
+        np.testing.assert_allclose(info_d.penalty_matrix, info_e.penalty_matrix, atol=1e-12)
+
+    def test_multi_m_emits_penalty_components(self):
+        """Spline(m=(1,2)) emits penalty_components with two entries."""
+        from superglm import Spline
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 1, 200)
+
+        spec = Spline(kind="cr", n_knots=6, m=(1, 2))
+        info = spec.build(x)
+
+        assert info.penalty_components is not None
+        assert len(info.penalty_components) == 2
+        suffixes = [s for s, _ in info.penalty_components]
+        assert "d1" in suffixes
+        assert "d2" in suffixes
+
+        # Components sum to penalty_matrix
+        comp_sum = sum(om for _, om in info.penalty_components)
+        np.testing.assert_allclose(comp_sum, info.penalty_matrix, atol=1e-12)
+
+    def test_multi_m_bs_emits_components(self):
+        """Spline(kind='bs', m=(2,3)) emits penalty_components."""
+        from superglm import Spline
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 1, 200)
+        spec = Spline(kind="bs", n_knots=8, m=(2, 3))
+        info = spec.build(x)
+
+        assert info.penalty_components is not None
+        assert len(info.penalty_components) == 2
+        suffixes = [s for s, _ in info.penalty_components]
+        assert "d2" in suffixes
+        assert "d3" in suffixes
+
+    def test_select_plus_multi_m_raises(self):
+        """select=True + multi-m raises NotImplementedError."""
+        from superglm import Spline
+
+        with pytest.raises(NotImplementedError, match="select=True with multi-order"):
+            Spline(kind="cr", n_knots=6, m=(1, 2), select=True)
+
+    def test_tensor_parent_multi_m_raises(self):
+        """Tensor parent with multi-m raises NotImplementedError."""
+        from superglm.features.spline import CubicRegressionSpline
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 1, 200)
+        spec = CubicRegressionSpline(n_knots=6, m=(1, 2))
+        spec.build(x)
+        with pytest.raises(NotImplementedError, match="Tensor interactions with multi-order"):
+            spec.tensor_marginal_ingredients(x)
+
+    @pytest.mark.slow
+    def test_fit_reml_multi_m_converges(self):
+        """fit_reml with Spline(m=(1,2)) converges with per-order lambdas."""
+        from superglm import Spline, SuperGLM
+
+        rng = np.random.default_rng(42)
+        n = 800
+        x = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            features={"x": Spline(kind="cr", n_knots=8, m=(1, 2))},
+        )
+        model.fit_reml(X, y, max_reml_iter=20)
+
+        assert model._reml_result.converged
+        lam = model._reml_lambdas
+        assert "x:d1" in lam
+        assert "x:d2" in lam
+
+        pred = model.predict(X)
+        assert np.all(np.isfinite(pred))
+        assert np.all(pred > 0)
+
+    @pytest.mark.slow
+    def test_fit_reml_multi_m_three_orders(self):
+        """fit_reml with m=(1,2,3) converges with three lambdas."""
+        from superglm import Spline, SuperGLM
+
+        rng = np.random.default_rng(42)
+        n = 800
+        x = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            features={"x": Spline(kind="cr", n_knots=8, m=(1, 2, 3))},
+        )
+        model.fit_reml(X, y, max_reml_iter=20)
+
+        assert model._reml_result.converged
+        lam = model._reml_lambdas
+        assert len([k for k in lam if k.startswith("x:")]) == 3
