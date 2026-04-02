@@ -34,6 +34,7 @@ def _penalised_xtwx_inv(
     group_matrices: list,
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
+    S_override: NDArray | None = None,
 ) -> tuple[NDArray, NDArray, NDArray, list[GroupSlice], list]:
     """Compute (X'WX + S)^{-1} via augmented QR + truncated SVD.
 
@@ -96,28 +97,40 @@ def _penalised_xtwx_inv(
 
     # Build sqrt(S) factor: L such that L'L = S (block-diagonal penalty)
     # Unpenalized groups (e.g. select=True null-space) get no penalty contribution.
-    S_rows = np.zeros((p_a, p_a))
-    for gm_orig, ag, gname in zip(active_gms, active_groups_out, active_group_names):
-        if isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix) and ag.penalized:
-            # Resolve per-group lambda
-            if isinstance(lambda2, dict):
-                lam_g = lambda2.get(gname, 0.0)
-            else:
-                lam_g = lambda2
+    if S_override is not None:
+        # S_override is full (p x p) — slice to active columns, then sqrt
+        active_idx = []
+        for ag, gname in zip(active_groups_out, active_group_names):
+            orig_g = next(g for g in groups if g.name == gname)
+            active_idx.extend(range(orig_g.start, orig_g.end))
+        active_idx_arr = np.array(active_idx)
+        S_active = S_override[np.ix_(active_idx_arr, active_idx_arr)]
+        eigvals_s, eigvecs_s = np.linalg.eigh(S_active)
+        eigvals_s = np.maximum(eigvals_s, 0.0)
+        S_rows = np.sqrt(eigvals_s)[:, None] * eigvecs_s.T  # sqrt(S)
+    else:
+        S_rows = np.zeros((p_a, p_a))
+        for gm_orig, ag, gname in zip(active_gms, active_groups_out, active_group_names):
+            if (
+                isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix)
+                and ag.penalized
+            ):
+                if isinstance(lambda2, dict):
+                    lam_g = lambda2.get(gname, 0.0)
+                else:
+                    lam_g = lambda2
 
-            # Use stored omega (correct for CRS, TensorInteraction, etc.)
-            # Fall back to second-difference penalty for backward compatibility.
-            R_inv = gm_orig.R_inv
-            omega = gm_orig.omega
-            if omega is None:
-                p_b = R_inv.shape[0]
-                omega = _second_diff_penalty(p_b)
+                R_inv = gm_orig.R_inv
+                omega = gm_orig.omega
+                if omega is None:
+                    p_b = R_inv.shape[0]
+                    omega = _second_diff_penalty(p_b)
 
-            S_g = lam_g * R_inv.T @ omega @ R_inv
-            eigvals_g, eigvecs_g = np.linalg.eigh(S_g)
-            eigvals_g = np.maximum(eigvals_g, 0.0)
-            L_g = np.sqrt(eigvals_g)[:, None] * eigvecs_g.T
-            S_rows[ag.sl, ag.sl] = L_g
+                S_g = lam_g * R_inv.T @ omega @ R_inv
+                eigvals_g, eigvecs_g = np.linalg.eigh(S_g)
+                eigvals_g = np.maximum(eigvals_g, 0.0)
+                L_g = np.sqrt(eigvals_g)[:, None] * eigvecs_g.T
+                S_rows[ag.sl, ag.sl] = L_g
 
     # Augmented QR: [sqrt(W)*X; sqrt(S)] → R'R = X'WX + S
     A = np.vstack([X_a * np.sqrt(W)[:, None], S_rows])
@@ -157,6 +170,7 @@ def _penalised_xtwx_inv_gram(
     group_matrices: list,
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
+    S_override: NDArray | None = None,
 ) -> tuple[NDArray, NDArray, list[GroupSlice], NDArray | None, NDArray | None]:
     """Fast (X'WX + S)^{-1} via per-group gram matrices.
 
@@ -211,20 +225,31 @@ def _penalised_xtwx_inv_gram(
     XtWX = _block_xtwx(active_gms, active_groups_out, W)
 
     # Add penalty S (same logic as _penalised_xtwx_inv)
-    S = np.zeros((p_a, p_a))
-    for gm_orig, ag, gname in zip(active_gms, active_groups_out, active_group_names):
-        if isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix) and ag.penalized:
-            if isinstance(lambda2, dict):
-                lam_g = lambda2.get(gname, 0.0)
-            else:
-                lam_g = lambda2
+    if S_override is not None:
+        active_idx = []
+        for ag, gname in zip(active_groups_out, active_group_names):
+            orig_g = next(g for g in groups if g.name == gname)
+            active_idx.extend(range(orig_g.start, orig_g.end))
+        active_idx_arr = np.array(active_idx)
+        S = S_override[np.ix_(active_idx_arr, active_idx_arr)]
+    else:
+        S = np.zeros((p_a, p_a))
+        for gm_orig, ag, gname in zip(active_gms, active_groups_out, active_group_names):
+            if (
+                isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix)
+                and ag.penalized
+            ):
+                if isinstance(lambda2, dict):
+                    lam_g = lambda2.get(gname, 0.0)
+                else:
+                    lam_g = lambda2
 
-            R_inv = gm_orig.R_inv
-            omega = gm_orig.omega
-            if omega is None:
-                p_b = R_inv.shape[0]
-                omega = _second_diff_penalty(p_b)
-            S[ag.sl, ag.sl] = lam_g * R_inv.T @ omega @ R_inv
+                R_inv = gm_orig.R_inv
+                omega = gm_orig.omega
+                if omega is None:
+                    p_b = R_inv.shape[0]
+                    omega = _second_diff_penalty(p_b)
+                S[ag.sl, ag.sl] = lam_g * R_inv.T @ omega @ R_inv
 
     # Invert (X'WX + S) via eigendecomposition.
     # Match the dense QR/SVD path: there we truncate singular values at
@@ -1025,6 +1050,21 @@ class ModelMetrics:
         else:
             self._mu = model.predict(X, offset=offset)
 
+    def _build_S_from_penalties(self, lam2) -> NDArray | None:
+        """Build full penalty matrix from model._reml_penalties if available."""
+        penalties = getattr(self._model, "_reml_penalties", None)
+        if penalties is None:
+            return None
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+
+        return _build_penalty_matrix(
+            self._dm.group_matrices,
+            self._groups,
+            lam2,
+            self._dm.p,
+            reml_penalties=penalties,
+        )
+
     # ── Scalar properties ─────────────────────────────────────────
 
     @property
@@ -1318,8 +1358,9 @@ class ModelMetrics:
         W = self._weights * dmu_deta**2 / V
 
         lam2 = getattr(self._model, "_reml_lambdas", None) or self._model.lambda2
+        S_full = self._build_S_from_penalties(lam2)
         X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
-            beta, W, self._dm.group_matrices, self._groups, lam2
+            beta, W, self._dm.group_matrices, self._groups, lam2, S_override=S_full
         )
         return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
 

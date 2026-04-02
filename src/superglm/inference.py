@@ -206,6 +206,7 @@ def compute_coef_covariance(
     fit_weights: NDArray,
     fit_offset: NDArray | None,
     lambda2: float | dict[str, float],
+    S_override: NDArray | None = None,
 ) -> tuple[NDArray, list[GroupSlice]]:
     """Phi-scaled Bayesian covariance for active coefficients.
 
@@ -229,7 +230,7 @@ def compute_coef_covariance(
     W = fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
     XtWX_S_inv, XtWX_S_inv_aug, active_groups, _, _ = _penalised_xtwx_inv_gram(
-        beta, W, dm.group_matrices, groups, lambda2
+        beta, W, dm.group_matrices, groups, lambda2, S_override=S_override
     )
     # Return the feature block of the augmented inverse for correct marginal SEs
     # that account for intercept estimation uncertainty.
@@ -602,7 +603,7 @@ def relativities(
     *,
     with_se: bool = False,
     covariance_fn=None,
-    centering: str = "mean",
+    centering: str = "native",
 ) -> dict[str, pd.DataFrame]:
     """Extract plot-ready relativity DataFrames for all features.
 
@@ -625,11 +626,10 @@ def relativities(
     covariance_fn : callable, optional
         Zero-arg callable returning ``(Cov_active, active_groups)``.
     centering : {"native", "mean"}
-        ``"native"`` (default) preserves the model's internal centering
-        (SSP sum-to-zero for splines, base-level for categoricals).
-        ``"mean"`` shifts log-relativities so the geometric mean of
-        relativities equals 1, giving a consistent "1.0 = average" scale
-        across all features. Recommended for underwriter-facing output.
+        ``"native"`` (default) returns the canonical fitted term
+        contribution under the model's identifiability constraint.
+        ``"mean"`` is a reporting convenience that shifts
+        log-relativities so the geometric mean of relativities = 1.
 
     Returns
     -------
@@ -654,8 +654,8 @@ def relativities(
 
     from superglm.features.ordered_categorical import OrderedCategorical
 
-    def _center_df(df: pd.DataFrame) -> pd.DataFrame:
-        """Apply mean centering to a relativity DataFrame if requested."""
+    def _center_df(df: pd.DataFrame, name: str = "") -> pd.DataFrame:
+        """Apply grid-mean centering if centering="mean"."""
         if centering != "mean" or "log_relativity" not in df.columns:
             return df
         log_rel = df["log_relativity"].values.copy()
@@ -690,7 +690,7 @@ def relativities(
                     specs,
                     interaction_specs,
                 )
-            out[name] = _center_df(df)
+            out[name] = _center_df(df, name)
             continue
 
         if "x" in raw:
@@ -713,7 +713,7 @@ def relativities(
                     interaction_specs,
                     n_points=len(raw["x"]),
                 )
-            out[name] = _center_df(df)
+            out[name] = _center_df(df, name)
         elif "levels" in raw:
             # Categorical
             levels = raw["levels"]
@@ -736,7 +736,7 @@ def relativities(
                     specs,
                     interaction_specs,
                 )
-            out[name] = _center_df(df)
+            out[name] = _center_df(df, name)
         elif "relativity_per_unit" in raw:
             # Numeric
             rel = raw["relativity_per_unit"]
@@ -1058,7 +1058,7 @@ def term_inference(
     alpha: float = 0.05,
     n_sim: int = 10_000,
     seed: int = 42,
-    centering: str = "mean",
+    centering: str = "native",
 ) -> TermInference | InteractionInference:
     """Build a per-term inference object.
 
@@ -1093,8 +1093,10 @@ def term_inference(
     seed : int
         Random seed for simultaneous bands.
     centering : {"native", "mean"}
-        ``"native"`` (default) preserves internal centering.
-        ``"mean"`` shifts so geometric mean of relativities = 1.
+        ``"native"`` (default) returns the canonical fitted term
+        contribution under the model's identifiability constraint.
+        ``"mean"`` is a reporting convenience that shifts so the
+        geometric mean of relativities = 1.
 
     Returns
     -------

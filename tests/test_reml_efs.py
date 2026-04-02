@@ -178,6 +178,9 @@ class TestEFSOptimizer:
         # Recompute objective with fresh caches from scratch
         reml_groups = [(i, g) for i, g in enumerate(model._groups) if g.penalized]
         fresh_caches = build_penalty_caches(model._dm.group_matrices, reml_groups)
+        from superglm.reml import build_penalty_components
+
+        fresh_penalties = build_penalty_components(model._dm.group_matrices, reml_groups)
         fresh_obj = reml_laml_objective(
             model._dm,
             model._distribution,
@@ -189,6 +192,7 @@ class TestEFSOptimizer:
             np.ones(n),
             np.zeros(n),
             penalty_caches=fresh_caches,
+            reml_penalties=fresh_penalties,
         )
 
         # Should match the stored objective closely

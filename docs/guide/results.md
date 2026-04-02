@@ -23,6 +23,14 @@ ti.edf                      # effective degrees of freedom
 ti.spline                   # SplineMetadata (interior_knots, boundary_knots, basis_dim, ...)
 ```
 
+By default this is the canonical fitted term contribution under the model's
+identifiability constraint. If you want a rebased reporting view where the
+geometric mean of relativities is 1, pass `centering="mean"` explicitly:
+
+```python
+ti = model.term_inference("DrivAge", centering="mean")
+```
+
 ## Plotting
 
 All plotting goes through `model.plot()`:
@@ -83,8 +91,15 @@ hdr_df = payload["density"]  # includes density + hdr_mass columns
 For manual access or export:
 
 ```python
-rels = model.relativities(with_se=True)
+rels = model.relativities(with_se=True)  # canonical fitted-term view
 # dict of {feature_name: DataFrame}
+```
+
+Use `centering="mean"` only when you explicitly want to rebase each term for
+reporting or cross-feature comparison:
+
+```python
+rels = model.relativities(with_se=True, centering="mean")
 ```
 
 ## Families

@@ -249,6 +249,14 @@ until λ stabilizes
 !!! tip "Recommended workflow for spline-based GAM models"
     Use `fit_reml()` with `select=True` on your spline terms. REML estimates a separate smoothing parameter per term, and `select=True` adds a double-penalty decomposition (linear + wiggly subgroups) that lets REML shrink irrelevant terms all the way to zero — mgcv-style automatic term selection without needing `selection_penalty > 0`.
 
+!!! note "Current multi-penalty guard rails"
+    The exact and discrete REML paths support shared-block multi-penalty terms
+    such as tensor margins and `Spline(m=(...))`. The sparse-additive
+    `selection_penalty > 0` path does not yet support those shared-block
+    multi-penalty combinations. Likewise, `select=True + m=(...)` is deferred
+    until the select architecture is refactored to use same-block penalty
+    components instead of split subgroups.
+
 So the rough historical ladder is:
 
 `OLS -> WLS -> IRLS -> P-IRLS -> nonsmooth inner solver -> REML/fREML`
