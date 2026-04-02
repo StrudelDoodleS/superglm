@@ -287,22 +287,27 @@ def feature_groups(model, name: str) -> list[GroupSlice]:
 
 
 def _compute_term_centering_shift(model, name: str) -> float:
-    """Compute weighted mean of a term's fitted partial over training data.
+    """Compute centering shift from the term's reconstruction grid.
 
-    This is the canonical centering shift: subtracting it makes the term
-    effect have weighted-mean zero over the training set, absorbing the
-    level difference into the intercept. For select=True terms, this
-    operates on the combined (linear+spline) partial, not the subgroups
-    separately.
+    Uses the mean of the term's log_relativity on its canonical
+    evaluation grid (the same grid returned by reconstruct). This
+    matches mgcv's convention where predict(type="terms") returns
+    effects centered on the evaluation domain, giving stable
+    relativities regardless of the training-data distribution.
     """
     groups = feature_groups(model, name)
-    partial = np.zeros(model._dm.n)
-    for g in groups:
-        idx = next(i for i, gg in enumerate(model._groups) if gg.name == g.name)
-        gm = model._dm.group_matrices[idx]
-        partial += gm.matvec(model.result.beta[g.sl])
-    weights = model._fit_weights
-    return float(np.average(partial, weights=weights))
+    beta_combined = np.concatenate([model.result.beta[g.sl] for g in groups])
+    in_main = name in model._specs
+    in_inter = name in model._interaction_specs
+    if in_main:
+        raw = model._specs[name].reconstruct(beta_combined)
+    elif in_inter:
+        raw = model._interaction_specs[name].reconstruct(beta_combined)
+    else:
+        return 0.0
+    if "log_relativity" in raw:
+        return float(np.mean(raw["log_relativity"]))
+    return 0.0
 
 
 def reconstruct_feature(model, name: str) -> dict[str, Any]:
