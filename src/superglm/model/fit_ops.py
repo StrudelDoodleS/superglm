@@ -749,6 +749,11 @@ def fit_reml(
         )
     model._result = best.pirls_result
     model._reml_lambdas = best.lambdas
+    # Rebuild penalties from the final DM so omega_ssp matches current R_inv.
+    # The EFS path rebuilds the DM (and R_inv) during optimization, so the
+    # pre-optimization reml_penalties have stale omega_ssp.
+    if not use_direct:
+        reml_penalties = build_penalty_components(model._dm.group_matrices, reml_groups)
     model._reml_penalties = reml_penalties
     model._reml_result = best
     lambdas = best.lambdas

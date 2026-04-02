@@ -1230,3 +1230,41 @@ class TestSelectionPenaltySharedBlock:
             f"Deviance mismatch: direct={dev_direct:.4f}, efs={dev_efs:.4f}, "
             f"rel_diff={rel_diff:.4f}"
         )
+
+    @pytest.mark.slow
+    def test_postfit_omega_ssp_consistent_with_dm(self):
+        """model._reml_penalties omega_ssp matches current R_inv after EFS fit."""
+        from superglm import Spline, SuperGLM
+        from superglm.group_matrix import SparseSSPGroupMatrix
+
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=1e-8,
+            features={
+                "x1": Spline(kind="cr", n_knots=6),
+                "x2": Spline(kind="cr", n_knots=6),
+            },
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+
+        # Every PenaltyComponent's omega_ssp must match R_inv.T @ omega_raw @ R_inv
+        for pc in model._reml_penalties:
+            gm = model._dm.group_matrices[pc.group_index]
+            if not isinstance(gm, SparseSSPGroupMatrix):
+                continue
+            expected = gm.R_inv.T @ pc.omega_raw @ gm.R_inv
+            np.testing.assert_allclose(
+                pc.omega_ssp,
+                expected,
+                atol=1e-10,
+                err_msg=f"Stale omega_ssp on {pc.name}",
+            )
