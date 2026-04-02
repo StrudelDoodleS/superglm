@@ -784,7 +784,9 @@ def fit_reml(
             reml_penalties=reml_penalties,
         )
         pq_final = float(best.pirls_result.beta @ S_final @ best.pirls_result.beta)
-        M_p = sum(penalty_ranks[g.name] for _, g in reml_groups)
+        from superglm.reml import compute_total_penalty_rank
+
+        M_p = compute_total_penalty_rank(reml_penalties)
         phi_fixed = max((best.pirls_result.deviance + pq_final) / max(len(y) - M_p, 1.0), 1e-10)
 
     corrected = PIRLSResult(
