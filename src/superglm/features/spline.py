@@ -118,6 +118,7 @@ class _SplineBase:
         select: bool = False,
         monotone: str | None = None,
         monotone_mode: str = "postfit",
+        m: int | tuple[int, ...] = 2,
     ):
         if monotone is not None and monotone not in ("increasing", "decreasing"):
             raise ValueError(
@@ -127,6 +128,16 @@ class _SplineBase:
             raise ValueError(f"monotone_mode must be 'postfit' or 'fit', got {monotone_mode!r}")
         self.monotone = monotone
         self.monotone_mode = monotone_mode
+
+        # Derivative penalty orders
+        self._m_orders = (m,) if isinstance(m, int) else tuple(m)
+        if not all(isinstance(o, int) and o >= 1 for o in self._m_orders):
+            raise ValueError(f"m must contain positive integers, got {m}")
+        if select and len(self._m_orders) > 1:
+            raise NotImplementedError(
+                "select=True with multi-order penalties (m tuple) is not yet supported. "
+                "Use a single m value with select=True, or use m=(1,2,...) without select."
+            )
 
         if knots is not None:
             knots = np.asarray(knots, dtype=np.float64).ravel()
@@ -644,6 +655,11 @@ class _SplineBase:
         marginal basis, penalty, and a projection from the raw B-spline
         space to the effective (centered) space.
         """
+        if len(self._m_orders) > 1:
+            raise NotImplementedError(
+                "Tensor interactions with multi-order penalty parents (m tuple) "
+                "are not yet supported. Use a single m value for tensor parent splines."
+            )
         x = np.asarray(x, dtype=np.float64).ravel()
 
         # 1. Raw basis
@@ -754,6 +770,7 @@ class BasisSpline(_SplineBase):
         knot_alpha: float = 0.2,
         monotone: str | None = None,
         monotone_mode: str = "postfit",
+        m: int | tuple[int, ...] = 2,
     ):
         super().__init__(
             n_knots,
@@ -769,6 +786,7 @@ class BasisSpline(_SplineBase):
             select=select,
             monotone=monotone,
             monotone_mode=monotone_mode,
+            m=m,
         )
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
@@ -802,9 +820,17 @@ class BasisSpline(_SplineBase):
         self._knots = np.concatenate([lower, inner, upper])
         self._n_basis = len(self._knots) - self.degree - 1
 
+    def _build_penalty_for_order(self, order: int) -> NDArray:
+        if order >= self._n_basis:
+            raise ValueError(
+                f"Difference order {order} >= n_basis {self._n_basis}. "
+                f"Increase n_knots or reduce m."
+            )
+        Dm = np.diff(np.eye(self._n_basis), n=order, axis=0)
+        return Dm.T @ Dm
+
     def _build_penalty(self) -> NDArray:
-        D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
-        return D2.T @ D2
+        return self._build_penalty_for_order(self._m_orders[0])
 
 
 class NaturalSpline(_SplineBase):
@@ -851,6 +877,7 @@ class NaturalSpline(_SplineBase):
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
+        m: int | tuple[int, ...] = 2,
     ):
         super().__init__(
             n_knots,
@@ -863,12 +890,21 @@ class NaturalSpline(_SplineBase):
             extrapolation,
             boundary,
             knot_alpha,
+            m=m,
         )
         self._Z: NDArray | None = None
 
+    def _build_penalty_for_order(self, order: int) -> NDArray:
+        if order >= self._n_basis:
+            raise ValueError(
+                f"Difference order {order} >= n_basis {self._n_basis}. "
+                f"Increase n_knots or reduce m."
+            )
+        Dm = np.diff(np.eye(self._n_basis), n=order, axis=0)
+        return Dm.T @ Dm
+
     def _build_penalty(self) -> NDArray:
-        D2 = np.diff(np.eye(self._n_basis), n=2, axis=0)
-        return D2.T @ D2
+        return self._build_penalty_for_order(self._m_orders[0])
 
     def _basis_matrix(self, x: NDArray):
         if self.extrapolation != "extend" or self.degree < 3:
@@ -929,7 +965,13 @@ class CubicRegressionSpline(_SplineBase):
         knot_alpha: float = 0.2,
         monotone: str | None = None,
         monotone_mode: str = "postfit",
+        m: int | tuple[int, ...] = 2,
     ):
+        m_orders = (m,) if isinstance(m, int) else tuple(m)
+        if any(o > 3 for o in m_orders):
+            raise ValueError(
+                f"CRS integrated derivative penalty requires m <= degree (3), got m={m}"
+            )
         super().__init__(
             n_knots,
             degree=3,
@@ -944,6 +986,7 @@ class CubicRegressionSpline(_SplineBase):
             select=select,
             monotone=monotone,
             monotone_mode=monotone_mode,
+            m=m,
         )
         self._Z: NDArray | None = None
 
@@ -963,35 +1006,40 @@ class CubicRegressionSpline(_SplineBase):
         )
         self._n_basis = len(self._knots) - self.degree - 1
 
-    def _build_penalty(self) -> NDArray:
-        """Integrated f'' squared penalty: omega_ij = int B_i''(x) B_j''(x) dx.
+    def _build_penalty_for_order(self, order: int) -> NDArray:
+        """Integrated f^(m) squared penalty via Gauss-Legendre quadrature.
 
-        Uses Gauss-Legendre quadrature over each knot interval.
-        For cubic B-splines, B'' is piecewise linear, so the product
-        is quadratic -- 3-point GL is more than sufficient.
+        omega_ij = int B_i^(m)(x) B_j^(m)(x) dx
+
+        For cubic B-splines, the m-th derivative is degree (3-m), so the
+        product is degree 2*(3-m). Quadrature with max(m+1, 3) points
+        is sufficient.
         """
         K = self._n_basis
         unique_knots = np.unique(self._knots)
         omega = np.zeros((K, K))
+        n_quad = max(order + 1, 3)
 
         for a, b in zip(unique_knots[:-1], unique_knots[1:]):
             if b - a < 1e-15:
                 continue
-            # 3-point Gauss-Legendre (exact for degree <= 5)
-            xi, wi = np.polynomial.legendre.leggauss(3)
+            xi, wi = np.polynomial.legendre.leggauss(n_quad)
             x_q = 0.5 * (b - a) * xi + 0.5 * (a + b)
             w_q = 0.5 * (b - a) * wi
 
-            D2_q = np.zeros((len(x_q), K))
+            Dm_q = np.zeros((len(x_q), K))
             for j in range(K):
                 c = np.zeros(K)
                 c[j] = 1.0
                 spl = BSpl(self._knots, c, self.degree)
-                D2_q[:, j] = spl(x_q, nu=2)
+                Dm_q[:, j] = spl(x_q, nu=order)
 
-            omega += D2_q.T @ (D2_q * w_q[:, None])
+            omega += Dm_q.T @ (Dm_q * w_q[:, None])
 
         return omega
+
+    def _build_penalty(self) -> NDArray:
+        return self._build_penalty_for_order(self._m_orders[0])
 
     def _basis_matrix(self, x: NDArray):
         if self.extrapolation != "extend":
@@ -1392,6 +1440,7 @@ def Spline(
     knot_alpha: float = 0.2,
     monotone: str | None = None,
     monotone_mode: str = "postfit",
+    m: int | tuple[int, ...] = 2,
 ) -> _SplineBase:
     """Create a spline feature spec.
 
@@ -1532,22 +1581,40 @@ def Spline(
             knot_alpha=knot_alpha,
             monotone=monotone,
             monotone_mode=monotone_mode,
+            m=m,
         )
     elif kind in ("cr", "cr_cardinal"):
-        return cls(
-            n_knots=resolved_n_knots,
-            knot_strategy=knot_strategy,
-            penalty=penalty,
-            select=select,
-            knots=knots,
-            discrete=discrete,
-            n_bins=n_bins,
-            extrapolation=extrapolation,
-            boundary=boundary,
-            knot_alpha=knot_alpha,
-            monotone=monotone,
-            monotone_mode=monotone_mode,
-        )
+        if kind == "cr":
+            return cls(
+                n_knots=resolved_n_knots,
+                knot_strategy=knot_strategy,
+                penalty=penalty,
+                select=select,
+                knots=knots,
+                discrete=discrete,
+                n_bins=n_bins,
+                extrapolation=extrapolation,
+                boundary=boundary,
+                knot_alpha=knot_alpha,
+                monotone=monotone,
+                monotone_mode=monotone_mode,
+                m=m,
+            )
+        else:  # cr_cardinal — defer multi-m
+            return cls(
+                n_knots=resolved_n_knots,
+                knot_strategy=knot_strategy,
+                penalty=penalty,
+                select=select,
+                knots=knots,
+                discrete=discrete,
+                n_bins=n_bins,
+                extrapolation=extrapolation,
+                boundary=boundary,
+                knot_alpha=knot_alpha,
+                monotone=monotone,
+                monotone_mode=monotone_mode,
+            )
     else:  # "ns"
         return cls(
             n_knots=resolved_n_knots,
@@ -1560,4 +1627,5 @@ def Spline(
             extrapolation=extrapolation,
             boundary=boundary,
             knot_alpha=knot_alpha,
+            m=m,
         )
