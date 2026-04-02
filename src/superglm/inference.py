@@ -604,7 +604,6 @@ def relativities(
     with_se: bool = False,
     covariance_fn=None,
     centering: str = "native",
-    term_shifts: dict[str, float] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Extract plot-ready relativity DataFrames for all features.
 
@@ -656,22 +655,12 @@ def relativities(
     from superglm.features.ordered_categorical import OrderedCategorical
 
     def _center_df(df: pd.DataFrame, name: str = "") -> pd.DataFrame:
-        """Apply centering to a relativity DataFrame.
-
-        When term_shifts is provided (canonical training-data centering),
-        uses the precomputed shift. Otherwise falls back to grid-mean
-        centering if centering="mean".
-        """
-        if "log_relativity" not in df.columns:
+        """Apply grid-mean centering if centering="mean"."""
+        if centering != "mean" or "log_relativity" not in df.columns:
             return df
-        if term_shifts is not None and name in term_shifts:
-            shift = term_shifts[name]
-        elif centering == "mean":
-            shift = float(np.mean(df["log_relativity"].values))
-        else:
-            return df
-        df = df.copy()
         log_rel = df["log_relativity"].values.copy()
+        shift = float(np.mean(log_rel))
+        df = df.copy()
         df["log_relativity"] = log_rel - shift
         df["relativity"] = _safe_exp(df["log_relativity"].values)
         return df

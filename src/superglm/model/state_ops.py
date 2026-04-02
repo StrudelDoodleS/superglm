@@ -286,31 +286,6 @@ def feature_groups(model, name: str) -> list[GroupSlice]:
     return [g for g in model._groups if g.feature_name == name]
 
 
-def _compute_term_centering_shift(model, name: str) -> float:
-    """Compute grid-mean centering shift for a term (reporting transform).
-
-    Returns the mean of the term's log_relativity on its evaluation
-    grid. Used only by ``centering="mean"`` to shift relativities so
-    their geometric mean is 1 — a convenience for cross-feature
-    comparison in business output. This is **not** the canonical term
-    definition; the canonical term is the raw fitted contribution under
-    the model's identifiability constraint.
-    """
-    groups = feature_groups(model, name)
-    beta_combined = np.concatenate([model.result.beta[g.sl] for g in groups])
-    in_main = name in model._specs
-    in_inter = name in model._interaction_specs
-    if in_main:
-        raw = model._specs[name].reconstruct(beta_combined)
-    elif in_inter:
-        raw = model._interaction_specs[name].reconstruct(beta_combined)
-    else:
-        return 0.0
-    if "log_relativity" in raw:
-        return float(np.mean(raw["log_relativity"]))
-    return 0.0
-
-
 def reconstruct_feature(model, name: str) -> dict[str, Any]:
     """Reconstruct a fitted feature's curve or effect on its original scale.
 
