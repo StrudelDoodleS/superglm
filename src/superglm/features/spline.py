@@ -133,12 +133,12 @@ class _SplineBase:
         self._m_orders = (m,) if isinstance(m, int) else tuple(m)
         if not all(isinstance(o, int) and o >= 1 for o in self._m_orders):
             raise ValueError(f"m must contain positive integers, got {m}")
-        if select and len(self._m_orders) > 1:
+        if select and len(self._m_orders) > 1 and max(self._m_orders) > 2:
             raise NotImplementedError(
-                "select=True with multi-order penalties (m tuple) is not yet supported. "
-                "Use a single m value with select=True, or use m=(1,2,...) without select."
+                f"select=True with max(m)={max(self._m_orders)} > 2 is not supported "
+                f"(the constrained penalty would have {max(self._m_orders)} null eigenvalues, "
+                f"but select requires exactly 2). Use max(m) <= 2 with select=True."
             )
-
         if knots is not None:
             knots = np.asarray(knots, dtype=np.float64).ravel()
             if knots.ndim != 1 or len(knots) < 1:
@@ -544,15 +544,20 @@ class _SplineBase:
         self._omega_range = omega_range
 
     def _build_select(self, x: NDArray, B) -> GroupInfo:
-        """Build select=True GroupInfo with null+wiggle penalty components."""
-        omega = self._build_penalty()
-        _, omega_c, _, Z = self._apply_constraints(None, omega)
+        """Build select=True GroupInfo with null + wiggle/per-order penalty components."""
+        # Use the highest derivative order for eigendecomposition — it has
+        # the most null eigenvalues (constant + linear for m=2).
+        if len(self._m_orders) == 1:
+            omega_for_eigen = self._build_penalty()
+        else:
+            max_order = max(self._m_orders)
+            omega_for_eigen = self._build_penalty_for_order(max_order)
+        _, omega_c, _, Z = self._apply_constraints(None, omega_for_eigen)
 
         # Store the full constraint + identifiability projection for
         # interactions (SplineCategorical).  The main effect handles
         # constant removal via eigendecomposition, but interactions
         # need the standard identified projection to stay full-rank.
-        # BS: (K, K-1), CR: (K, K-3), CardinalCR: (K, K-1).
         self._interaction_projection = self._identifiability_projection(x, Z)
 
         self._eigendecompose_select(omega_c, Z)
@@ -563,24 +568,43 @@ class _SplineBase:
 
         # Combined projection: [U_null | U_range]
         U_combined = np.hstack([self._U_null, self._U_range])  # (K, n_combined)
+        # Constrained-space projections for per-order penalty mapping
+        U_null_c = self._U_null if Z is None else np.linalg.lstsq(Z, self._U_null, rcond=None)[0]
+        U_range_c = self._U_range if Z is None else np.linalg.lstsq(Z, self._U_range, rcond=None)[0]
+        U_combined_c = np.hstack([U_null_c, U_range_c])  # (d, n_combined)
 
-        # Penalty components in the combined basis (block-diagonal because
-        # U_null and U_range are orthogonal eigenvectors).
+        # Null-space selection penalty (identity on null block, zero on range)
         omega_null = np.zeros((n_combined, n_combined))
         omega_null[:n_null, :n_null] = np.eye(n_null)
 
-        omega_wiggle = np.zeros((n_combined, n_combined))
-        omega_wiggle[n_null:, n_null:] = self._omega_range
+        components: list[tuple[str, np.ndarray]] = [("null", omega_null)]
+        component_types: dict[str, str] = {"null": "selection"}
+
+        if len(self._m_orders) == 1:
+            # Single-m: one "wiggle" component (block-diagonal by construction)
+            omega_wiggle = np.zeros((n_combined, n_combined))
+            omega_wiggle[n_null:, n_null:] = self._omega_range
+            components.append(("wiggle", omega_wiggle))
+        else:
+            # Multi-m: project each per-order constrained penalty into the
+            # combined [U_null | U_range] basis.
+            for order in self._m_orders:
+                omega_raw_j = self._build_penalty_for_order(order)
+                _, omega_c_j, _, _ = self._apply_constraints(None, omega_raw_j)
+                omega_combined_j = U_combined_c.T @ omega_c_j @ U_combined_c
+                components.append((f"d{order}", omega_combined_j))
+
+        penalty_matrix = sum(omega for _, omega in components)
 
         return GroupInfo(
             columns=B,
             n_cols=n_combined,
-            penalty_matrix=omega_null + omega_wiggle,
+            penalty_matrix=penalty_matrix,
             reparametrize=True,
             penalized=True,
             projection=U_combined,
-            penalty_components=[("null", omega_null), ("wiggle", omega_wiggle)],
-            component_types={"null": "selection"},
+            penalty_components=components,
+            component_types=component_types,
         )
 
     def build(
@@ -646,7 +670,14 @@ class _SplineBase:
 
         if self.select:
             Z = projection  # constraint projection (or None)
-            self._eigendecompose_select(omega_c, Z)
+            # For multi-m, eigendecompose the highest-order penalty (most nulls)
+            if len(self._m_orders) > 1:
+                max_order = max(self._m_orders)
+                omega_for_eigen = self._build_penalty_for_order(max_order)
+                _, omega_c_eigen, _, _ = self._apply_constraints(None, omega_for_eigen)
+                self._eigendecompose_select(omega_c_eigen, Z)
+            else:
+                self._eigendecompose_select(omega_c, Z)
             # Store constraint + identifiability projection for interactions
             self._interaction_projection = self._identifiability_projection(x, Z)
             return omega_c, n_cols, projection
