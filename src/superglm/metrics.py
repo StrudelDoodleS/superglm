@@ -332,13 +332,18 @@ def build_coef_rows(
         PolynomialCategorical,
         PolynomialInteraction,
         SplineCategorical,
+        TensorInteraction,
     )
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
     from superglm.group_matrix import CategoricalGroupMatrix
-    from superglm.inference import feature_se_from_cov, spline_group_enrichment
+    from superglm.inference import (
+        _resolve_group_lambda,
+        feature_se_from_cov,
+        spline_group_enrichment,
+    )
 
     beta = result.beta
 
@@ -683,6 +688,7 @@ def build_coef_rows(
                 except Exception:
                     pass
 
+                _edf_map = _get_group_edf_map()
                 rows.append(
                     _CoefRow(
                         name=g.name,
@@ -694,6 +700,8 @@ def build_coef_rows(
                         wald_chi2=stat,
                         wald_p=p_val,
                         ref_df=ref_df,
+                        edf=_edf_map.get(g.name) if _edf_map else None,
+                        smoothing_lambda=_resolve_group_lambda(g.name, reml_lambdas, lambda2),
                     )
                 )
             else:
@@ -846,6 +854,7 @@ def build_coef_rows(
                     p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
                 except np.linalg.LinAlgError:
                     pass
+                _edf_map = _get_group_edf_map()
                 rows.append(
                     _CoefRow(
                         name=g.name,
@@ -857,6 +866,8 @@ def build_coef_rows(
                         wald_chi2=stat,
                         wald_p=p_val,
                         ref_df=ref_df,
+                        edf=_edf_map.get(g.name) if _edf_map else None,
+                        smoothing_lambda=_resolve_group_lambda(g.name, reml_lambdas, lambda2),
                     )
                 )
             else:
@@ -868,6 +879,65 @@ def build_coef_rows(
                         n_params=g.size,
                         active=False,
                         group_norm=0.0,
+                    )
+                )
+
+        elif isinstance(spec, TensorInteraction):
+            _edf_map = _get_group_edf_map()
+            ti_edf = _edf_map.get(g.name) if _edf_map else None
+            ti_lam = _resolve_group_lambda(g.name, reml_lambdas, lambda2)
+            if active:
+                stat = float("nan")
+                p_val = float("nan")
+                ref_df = float(g.size)
+
+                ag = next(a for a in active_groups if a.name == g.name)
+                aug_sl = slice(1 + ag.start, 1 + ag.end)
+                V_b_j = (
+                    XtWX_inv_aug[aug_sl, aug_sl]
+                    if known_scale
+                    else phi * XtWX_inv_aug[aug_sl, aug_sl]
+                )
+
+                from superglm.wood_pvalue import wood_test_smooth
+
+                R_a = _get_R_factor()
+                edf, edf1 = _get_influence_edf()
+                edf1_j = float(np.sum(edf1[ag.sl]))
+                X_j = R_a[:, ag.sl]
+                res_df = -1.0 if known_scale else float(n_obs - np.sum(edf))
+
+                try:
+                    stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
+                except Exception:
+                    pass
+
+                rows.append(
+                    _CoefRow(
+                        name=g.name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=g.size,
+                        active=True,
+                        group_norm=float(np.linalg.norm(b_g)),
+                        wald_chi2=stat,
+                        wald_p=p_val,
+                        ref_df=ref_df,
+                        edf=ti_edf,
+                        smoothing_lambda=ti_lam,
+                    )
+                )
+            else:
+                rows.append(
+                    _CoefRow(
+                        name=g.name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=g.size,
+                        active=False,
+                        group_norm=0.0,
+                        edf=0.0,
+                        smoothing_lambda=ti_lam,
                     )
                 )
 
