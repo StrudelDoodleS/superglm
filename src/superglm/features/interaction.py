@@ -700,7 +700,26 @@ class TensorInteraction:
 
     @staticmethod
     def _marginal_from_spec(spec, x: NDArray, n_knots_override: int | None) -> TensorMarginalInfo:
-        """Get marginal ingredients from a parent spec, optionally overriding n_knots."""
+        """Get marginal ingredients from a parent spec, optionally overriding n_knots.
+
+        Enforces the mgcv te()/ti() contract on the original spec before
+        any cloning, so unsupported configurations (select, multi-m) can't
+        bypass the check via n_knots override reconstruction.
+        """
+        # Reject unsupported parent configs before cloning
+        reasons: list[str] = []
+        if getattr(spec, "select", False):
+            reasons.append("select=True")
+        if hasattr(spec, "_m_orders") and len(spec._m_orders) > 1:
+            reasons.append(f"m={spec._m_orders}")
+        if reasons:
+            detail = " and ".join(reasons)
+            raise NotImplementedError(
+                f"Tensor interactions require single-penalty parent smooths, but "
+                f"{type(spec).__name__} was configured with {detail}. "
+                "This matches the mgcv te()/ti() marginal-smooth contract."
+            )
+
         if n_knots_override is not None and n_knots_override != spec.n_knots:
             kwargs: dict = dict(
                 n_knots=n_knots_override,
@@ -803,10 +822,11 @@ class TensorInteraction:
                 ),
             ]
 
-        # Non-decompose: emit separate marginal penalty components for
-        # anisotropic REML (each marginal gets its own lambda).
+        # Non-decompose: emit one penalty component per marginal,
+        # matching mgcv te()/ti() single-penalty marginal contract.
         omega_1 = np.kron(S1, np.eye(self._p2))
         omega_2 = np.kron(np.eye(self._p1), S2)
+
         return GroupInfo(
             columns=None,
             n_cols=n_cols,
