@@ -1247,7 +1247,7 @@ class TestTensorMarginalParentGeometry:
         s2.build(x2)
 
         ti = TensorInteraction("a", "b")
-        with pytest.raises(TypeError, match="CardinalCRSpline"):
+        with pytest.raises(NotImplementedError, match="CardinalCRSpline"):
             ti.build(x1, x2, {"a": s1, "b": s2})
 
     def test_cr_n_knots_override(self):

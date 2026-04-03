@@ -1032,5 +1032,5 @@ class TestCRSelectInteraction:
 
 class TestNSSelectRejection:
     def test_ns_select_raises_not_implemented(self):
-        with pytest.raises(NotImplementedError, match="select=True is not yet supported"):
+        with pytest.raises(NotImplementedError, match="select=True is not supported"):
             Spline(kind="ns", select=True)

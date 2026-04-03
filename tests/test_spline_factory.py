@@ -169,7 +169,7 @@ class TestSplineValidation:
             Spline(kind="cr", k=2)
 
     def test_select_ns_raises_not_implemented(self):
-        with pytest.raises(NotImplementedError, match="select=True is not yet supported"):
+        with pytest.raises(NotImplementedError, match="select=True is not supported"):
             Spline(kind="ns", n_knots=8, select=True)
 
     def test_select_cr_succeeds(self):
