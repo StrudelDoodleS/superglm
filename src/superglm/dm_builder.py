@@ -381,6 +381,7 @@ def _process_info(
             gm.omega_components = [
                 (suffix, P @ omega_j @ P.T) for suffix, omega_j in info.penalty_components
             ]
+            gm.component_types = info.component_types
 
     elif info.reparametrize and info.penalty_matrix is not None:
         B_for = B_unique if use_discrete else info.columns
@@ -409,6 +410,7 @@ def _process_info(
             gm = DenseGroupMatrix(info.columns @ R_inv)
         if info.penalty_components is not None and hasattr(gm, "omega_components"):
             gm.omega_components = info.penalty_components
+            gm.component_types = info.component_types
 
     else:
         n_cols = info.n_cols
@@ -506,23 +508,24 @@ def build_design_matrix(
             if getattr(spec, "select", False):
                 n_null = 1
                 n_range = spec._U_range.shape[1]
+                n_combined = n_null + n_range
+                U_combined = np.hstack([spec._U_null, spec._U_range])
+
+                omega_null = np.zeros((n_combined, n_combined))
+                omega_null[:n_null, :n_null] = np.eye(n_null)
+                omega_wiggle = np.zeros((n_combined, n_combined))
+                omega_wiggle[n_null:, n_null:] = spec._omega_range
+
                 infos = [
                     GroupInfo(
                         columns=None,
-                        n_cols=n_null,
-                        penalty_matrix=np.eye(n_null),
-                        reparametrize=False,
-                        penalized=True,
-                        subgroup_name="linear",
-                        projection=spec._U_null,
-                    ),
-                    GroupInfo(
-                        columns=None,
-                        n_cols=n_range,
-                        penalty_matrix=spec._omega_range,
+                        n_cols=n_combined,
+                        penalty_matrix=omega_null + omega_wiggle,
                         reparametrize=True,
-                        subgroup_name="spline",
-                        projection=spec._U_range,
+                        penalized=True,
+                        projection=U_combined,
+                        penalty_components=[("null", omega_null), ("wiggle", omega_wiggle)],
+                        component_types={"null": "selection"},
                     ),
                 ]
             else:
@@ -771,6 +774,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
+            new_gm.component_types = gm.component_types
             new_gms.append(new_gm)
         elif isinstance(gm, DiscretizedTensorGroupMatrix) and _group_has_lambda(gm, g, lambdas):
             if gm.omega is None:
@@ -798,6 +802,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
+            new_gm.component_types = gm.component_types
             new_gms.append(new_gm)
         elif isinstance(gm, DiscretizedSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
             if gm.omega is None:
@@ -816,6 +821,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
+            new_gm.component_types = gm.component_types
             new_gms.append(new_gm)
         else:
             new_gms.append(gm)

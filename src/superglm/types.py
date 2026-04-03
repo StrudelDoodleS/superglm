@@ -59,6 +59,9 @@ class GroupInfo:
     # Each omega is in the same basis as penalty_matrix (projected when projection present).
     # penalty_matrix should equal the sum of the component omegas.
     penalty_components: list[tuple[str, NDArray]] | None = None
+    # Optional mapping suffix → component_type for penalty_components.
+    # E.g. {"null": "selection"} marks null-space penalty as selection penalty.
+    component_types: dict[str, str] | None = None
 
     def __post_init__(self):
         if self.columns is None:
@@ -151,6 +154,7 @@ class PenaltyComponent:
     rank: float = 0.0
     log_det_omega_plus: float = 0.0
     eigvals_omega: NDArray | None = None  # positive eigenvalues of omega_ssp
+    component_type: str | None = None  # "selection" for null-space select penalty
 
 
 # ── Tensor marginal ingredients ────────────────────────────────

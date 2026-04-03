@@ -647,12 +647,12 @@ class TestREMLSelectTrue:
         )
         model.fit_reml(X[["x1"]], y, sample_weight=w, max_reml_iter=15)
         assert model._reml_result.converged
-        # Both linear and spline subgroups should have REML lambdas
-        assert "x1:linear" in model._reml_lambdas
-        assert "x1:spline" in model._reml_lambdas
+        # Both null and wiggle components should have REML lambdas
+        assert "x1:null" in model._reml_lambdas
+        assert "x1:wiggle" in model._reml_lambdas
 
-    def test_reml_select_true_linear_lambda_differs(self, poisson_data):
-        """Linear and spline subgroups should get different REML lambdas."""
+    def test_reml_select_true_null_lambda_differs(self, poisson_data):
+        """Null and wiggle components should get different REML lambdas."""
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
@@ -663,14 +663,14 @@ class TestREMLSelectTrue:
             },
         )
         model.fit_reml(X[["x1", "x2"]], y, sample_weight=w, max_reml_iter=15)
-        # Should have 4 REML lambdas: x1:linear, x1:spline, x2:linear, x2:spline
+        # Should have 4 REML lambdas: x1:null, x1:wiggle, x2:null, x2:wiggle
         assert len(model._reml_lambdas) == 4
 
-    def test_reml_select_logdet_independent_subgroups(self, poisson_data):
-        """select=True: linear and spline subgroups contribute independently to log|S|+.
+    def test_reml_select_logdet_independent_components(self, poisson_data):
+        """select=True: null and wiggle components contribute independently to log|S|+.
 
-        Each subgroup has its own penalty matrix (omega_ssp) and lambda.
-        cached_logdet_s_plus should equal the sum of per-subgroup
+        Each component has its own penalty matrix (omega_ssp) and lambda.
+        cached_logdet_s_plus should equal the sum of per-component
         r_j * log(lambda_j) + log|Omega_j|+ contributions.
         """
         from superglm.group_matrix import SparseSSPGroupMatrix
@@ -701,11 +701,11 @@ class TestREMLSelectTrue:
                 manual_val += cache.rank * np.log(lam) + cache.log_det_omega_plus
         np.testing.assert_allclose(cached_val, manual_val, atol=1e-12)
 
-        # Verify both subgroups contribute (nonzero rank and log_det)
-        assert "x1:linear" in caches
-        assert "x1:spline" in caches
-        assert caches["x1:linear"].rank > 0
-        assert caches["x1:spline"].rank > 0
+        # Verify both components contribute (nonzero rank and log_det)
+        assert "x1:null" in caches
+        assert "x1:wiggle" in caches
+        assert caches["x1:null"].rank > 0
+        assert caches["x1:wiggle"].rank > 0
 
 
 # ── Backward compatibility ───────────────────────────────────────
@@ -1102,9 +1102,6 @@ class TestMultiPenaltyPostFitInference:
     single-penalty-per-group path looks up lambda2.get("x1:x2") which
     misses the component keys "x1:x2:margin_x1", "x1:x2:margin_x2",
     guaranteeing the two S constructions differ.
-
-    (Previous fixture used select=True, but its per-subgroup group names
-    matched the lambda keys, so legacy and multi-penalty S were identical.)
     """
 
     @pytest.fixture

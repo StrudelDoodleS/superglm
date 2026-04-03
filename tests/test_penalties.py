@@ -262,32 +262,22 @@ class TestPenaltyFeatureHelpers:
     def test_matches_feature_name_and_group_name(self):
         groups = [
             GroupSlice(
-                "age:linear",
+                "age",
                 0,
-                1,
-                weight=1.0,
-                feature_name="age",
-                subgroup_type="linear",
-            ),
-            GroupSlice(
-                "age:spline",
-                1,
                 4,
-                weight=np.sqrt(3),
+                weight=np.sqrt(4),
                 feature_name="age",
-                subgroup_type="spline",
             ),
             GroupSlice("region", 4, 6, weight=np.sqrt(2), feature_name="region"),
         ]
         pen_feature = GroupLasso(lambda1=0.1, features=["age"])
         assert penalty_targets_group(pen_feature, groups[0])
-        assert penalty_targets_group(pen_feature, groups[1])
-        assert not penalty_targets_group(pen_feature, groups[2])
+        assert not penalty_targets_group(pen_feature, groups[1])
 
-        pen_group = GroupLasso(lambda1=0.1, features=["age:spline"])
+        # Group name matching (exact group name)
+        pen_group = GroupLasso(lambda1=0.1, features=["region"])
         assert not penalty_targets_group(pen_group, groups[0])
         assert penalty_targets_group(pen_group, groups[1])
-        assert not penalty_targets_group(pen_group, groups[2])
 
     def test_validate_penalty_features_raises_on_unknown_name(self):
         groups = [GroupSlice("region", 0, 2, feature_name="region")]
