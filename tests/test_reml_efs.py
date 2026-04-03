@@ -88,9 +88,9 @@ class TestEFSOptimizer:
         model.fit_reml(X, y, max_reml_iter=20)
 
         assert model._reml_result.converged
-        # Both linear (rank 1) and spline subgroups should have lambdas
-        assert "x1:linear" in model._reml_lambdas
-        assert "x1:spline" in model._reml_lambdas
+        # Both null (rank 1) and wiggle components should have lambdas
+        assert "x1:null" in model._reml_lambdas
+        assert "x1:wiggle" in model._reml_lambdas
         for name, lam in model._reml_lambdas.items():
             assert np.isfinite(lam), f"Non-finite lambda for {name}"
             assert lam > 0, f"Non-positive lambda for {name}"

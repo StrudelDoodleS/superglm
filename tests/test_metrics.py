@@ -1540,9 +1540,9 @@ class TestBasisDetail:
         )
         model.fit_reml(X, y)
         s = model.summary(detail="full")
-        # Both :linear and :spline subgroups should be present
+        # Single group with multi-penalty components (null + wiggle)
         subgroup_names = [g.name for g in model._groups if g.feature_name == "x"]
-        assert len(subgroup_names) == 2  # x:linear, x:spline
+        assert len(subgroup_names) == 1  # single "x" group
         for name in subgroup_names:
             # Active subgroups should have basis detail
             g = next(g for g in model._groups if g.name == name)

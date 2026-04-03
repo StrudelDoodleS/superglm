@@ -294,6 +294,7 @@ class SparseSSPGroupMatrix:
         "omega",
         "projection",
         "omega_components",
+        "component_types",
     )
 
     def __init__(self, B_csr: sp.spmatrix, R_inv: NDArray):
@@ -307,6 +308,7 @@ class SparseSSPGroupMatrix:
         self.omega = None  # (K, K) B-spline-space penalty, set externally
         self.projection = None  # (K, n_sub) projection matrix, set externally
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
+        self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
 
     def matvec(self, v: NDArray) -> NDArray:
         # B @ (R_inv @ v): tiny dense first, then sparse matvec
@@ -329,6 +331,7 @@ class SparseSSPGroupMatrix:
         sub.omega = self.omega
         sub.projection = self.projection
         sub.omega_components = self.omega_components
+        sub.component_types = self.component_types
         return sub
 
 
@@ -377,6 +380,7 @@ class DiscretizedSSPGroupMatrix:
         "omega",
         "projection",
         "omega_components",
+        "component_types",
     )
 
     def __init__(self, B_unique: NDArray, R_inv: NDArray, bin_idx: NDArray):
@@ -388,6 +392,7 @@ class DiscretizedSSPGroupMatrix:
         self.omega = None  # (K, K) B-spline-space penalty, set externally
         self.projection = None  # (K, n_sub) projection matrix, set externally
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
+        self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
 
     def matvec(self, v: NDArray) -> NDArray:
         # B_unique @ (R_inv @ v) is (n_bins,), scatter to (n,)
@@ -427,6 +432,7 @@ class DiscretizedSSPGroupMatrix:
         sub.omega = self.omega
         sub.projection = self.projection
         sub.omega_components = self.omega_components
+        sub.component_types = self.component_types
         return sub
 
 
@@ -558,6 +564,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         sub.omega = self.omega
         sub.projection = self.projection
         sub.omega_components = self.omega_components
+        sub.component_types = self.component_types
         return sub
 
 

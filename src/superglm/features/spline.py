@@ -543,8 +543,8 @@ class _SplineBase:
         self._U_range = Z @ U_range if Z is not None else U_range  # (K, n_range)
         self._omega_range = omega_range
 
-    def _build_select(self, x: NDArray, B) -> list[GroupInfo]:
-        """Build select=True GroupInfos: [linear, spline] subgroups."""
+    def _build_select(self, x: NDArray, B) -> GroupInfo:
+        """Build select=True GroupInfo with null+wiggle penalty components."""
         omega = self._build_penalty()
         _, omega_c, _, Z = self._apply_constraints(None, omega)
 
@@ -559,26 +559,29 @@ class _SplineBase:
 
         n_null = 1
         n_range = self._U_range.shape[1]
+        n_combined = n_null + n_range
 
-        return [
-            GroupInfo(
-                columns=B,
-                n_cols=n_null,
-                penalty_matrix=np.eye(n_null),
-                reparametrize=False,
-                penalized=True,
-                subgroup_name="linear",
-                projection=self._U_null,
-            ),
-            GroupInfo(
-                columns=B,
-                n_cols=n_range,
-                penalty_matrix=self._omega_range,
-                reparametrize=True,
-                subgroup_name="spline",
-                projection=self._U_range,
-            ),
-        ]
+        # Combined projection: [U_null | U_range]
+        U_combined = np.hstack([self._U_null, self._U_range])  # (K, n_combined)
+
+        # Penalty components in the combined basis (block-diagonal because
+        # U_null and U_range are orthogonal eigenvectors).
+        omega_null = np.zeros((n_combined, n_combined))
+        omega_null[:n_null, :n_null] = np.eye(n_null)
+
+        omega_wiggle = np.zeros((n_combined, n_combined))
+        omega_wiggle[n_null:, n_null:] = self._omega_range
+
+        return GroupInfo(
+            columns=B,
+            n_cols=n_combined,
+            penalty_matrix=omega_null + omega_wiggle,
+            reparametrize=True,
+            penalized=True,
+            projection=U_combined,
+            penalty_components=[("null", omega_null), ("wiggle", omega_wiggle)],
+            component_types={"null": "selection"},
+        )
 
     def build(
         self, x: NDArray, sample_weight: NDArray | None = None

@@ -92,12 +92,13 @@ class TestSplineMode:
         assert result.n_cols > 0
         assert result.penalty_matrix is not None
 
-    def test_build_select_returns_list(self, age_band_data):
+    def test_build_select_returns_single_group_with_components(self, age_band_data):
         X, y, sample_weight, midpoints, _ = age_band_data
         spec = OrderedCategorical(values=midpoints, basis="spline", n_knots=3, select=True)
         result = spec.build(X["age_band"].values, sample_weight=sample_weight)
-        assert isinstance(result, list)
-        assert len(result) == 2  # linear + spline subgroups
+        assert not isinstance(result, list)
+        assert result.penalty_components is not None
+        assert len(result.penalty_components) == 2  # null + wiggle
 
     def test_transform_shape(self, age_band_data):
         X, y, sample_weight, midpoints, _ = age_band_data

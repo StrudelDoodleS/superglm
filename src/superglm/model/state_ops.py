@@ -137,7 +137,9 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         penalty_name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", type(penalty).__name__)
 
     # Append "+ SEL" if any select=True splines are present
-    has_select = any(g.subgroup_type is not None for g in model._groups)
+    has_select = any(
+        getattr(model._specs.get(g.feature_name), "select", False) for g in model._groups
+    )
     penalty_abbrevs: dict[str, str] = {}  # abbrev -> full name
     if has_select:
         short = {"Group Lasso": "GL", "Sparse Group Lasso": "SGL", "Group Elastic Net": "GEN"}

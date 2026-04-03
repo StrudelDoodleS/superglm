@@ -1630,6 +1630,32 @@ def _resolve_term_lambda(
     return lambda2
 
 
+def _resolve_group_lambda(
+    group_name: str,
+    reml_lambdas: dict[str, float] | None,
+    lambda2: float | dict | None,
+) -> float | None:
+    """Look up REML lambda for a group, handling multi-penalty component keys.
+
+    For single-penalty groups, returns ``reml_lambdas[group_name]`` directly.
+    For multi-penalty groups (e.g. select=True, multi-m), the keys are
+    ``"group:suffix"``; returns the geometric mean of all component lambdas
+    as the representative smoothing level.
+    """
+    if reml_lambdas:
+        if group_name in reml_lambdas:
+            return reml_lambdas[group_name]
+        comp_keys = [k for k in reml_lambdas if k.startswith(f"{group_name}:")]
+        if comp_keys:
+            import numpy as np
+
+            vals = [reml_lambdas[k] for k in comp_keys]
+            return float(np.exp(np.mean(np.log(np.maximum(vals, 1e-300)))))
+    if isinstance(lambda2, int | float):
+        return float(lambda2)
+    return None
+
+
 def spline_group_enrichment(
     group_name: str,
     spec,
@@ -1647,10 +1673,7 @@ def spline_group_enrichment(
     dict with keys: edf, smoothing_lambda, spline_kind, knot_strategy, boundary.
     """
     edf = group_edf.get(group_name) if group_edf else None
-    if reml_lambdas and group_name in reml_lambdas:
-        lam: float | None = reml_lambdas[group_name]
-    else:
-        lam = float(lambda2) if isinstance(lambda2, int | float) else None
+    lam = _resolve_group_lambda(group_name, reml_lambdas, lambda2)
     return {
         "edf": edf,
         "smoothing_lambda": lam,
