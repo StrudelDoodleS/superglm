@@ -1103,10 +1103,10 @@ class TestMultiOrderSplinePenalty:
         np.testing.assert_allclose(comp_sum, result.penalty_matrix, atol=1e-12)
 
     def test_select_plus_multi_m_high_order_raises(self):
-        """select=True + m=(1,2,3) raises because max(m)=3 has 3 null eigenvalues."""
+        """select=True + m=(1,2,3) on BS raises (current capability policy)."""
         from superglm import Spline
 
-        with pytest.raises(NotImplementedError, match="max\\(m\\)=3"):
+        with pytest.raises(NotImplementedError, match="not supported for BasisSpline"):
             Spline(kind="bs", n_knots=8, m=(1, 2, 3), select=True)
 
     @pytest.mark.slow

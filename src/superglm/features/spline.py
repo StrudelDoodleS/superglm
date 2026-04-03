@@ -61,6 +61,13 @@ class _SplineBase:
     Subclasses must implement ``_build_penalty()`` and may override
     ``_apply_constraints()`` to add boundary constraints.
 
+    Basis capability attributes (override in subclasses):
+        _penalty_semantics : how the penalty is computed
+        _max_penalty_order : static upper bound on m (None = K-dependent)
+        _multi_m_supported : whether tuple m is allowed
+        _select_supported : whether select=True is allowed at all
+        _tensor_supported : whether tensor marginal ingredients are available
+
     Parameters
     ----------
     n_knots : int
@@ -103,6 +110,65 @@ class _SplineBase:
         native continuation. ``"error"`` raises on out-of-range values.
     """
 
+    # ── Basis capability metadata (override in subclasses) ────────
+    _penalty_semantics: str = "difference"
+    _max_penalty_order: int | None = None  # None = K-dependent (phase 2)
+    _multi_m_supported: bool = True
+    _select_supported: bool = True
+    _tensor_supported: bool = True
+
+    def _select_compatible(self, m_orders: tuple[int, ...]) -> bool:
+        """Whether select=True is supported with these m orders.
+
+        Default (BS): supported when max(m_orders) <= 2.
+        Subclasses override for different null-space structures.
+        """
+        if not self._select_supported:
+            return False
+        return max(m_orders) <= 2
+
+    # ── Validation ────────────────────────────────────────────────
+
+    def _validate_m_orders(self) -> None:
+        """Phase 1: static m validation. Called from __init__."""
+        if len(self._m_orders) > 1 and not self._multi_m_supported:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support multi-order penalties "
+                f"(m tuple). Use a single m value."
+            )
+        if self._max_penalty_order is not None:
+            for o in self._m_orders:
+                if o > self._max_penalty_order:
+                    raise ValueError(
+                        f"{type(self).__name__} supports penalty orders "
+                        f"up to {self._max_penalty_order}, got m={o}."
+                    )
+
+    def _validate_m_orders_build(self) -> None:
+        """Phase 2: dimension-dependent m validation. Called after knot placement."""
+        for o in self._m_orders:
+            if o >= self._n_basis:
+                raise ValueError(
+                    f"Penalty order m={o} requires at least {o + 1} basis functions, "
+                    f"but this spline has n_basis={self._n_basis}. "
+                    f"Increase n_knots or reduce m."
+                )
+
+    def _validate_select(self) -> None:
+        """Phase 1: static select validation. Called from __init__."""
+        if not self.select:
+            return
+        if not self._select_compatible(self._m_orders):
+            if not self._select_supported:
+                raise NotImplementedError(
+                    f"select=True is not supported for {type(self).__name__}."
+                )
+            raise NotImplementedError(
+                f"select=True with m={self._m_orders} is not supported for "
+                f"{type(self).__name__}. "
+                f"This is a current capability policy, not a mathematical impossibility."
+            )
+
     def __init__(
         self,
         n_knots: int = 10,
@@ -129,16 +195,14 @@ class _SplineBase:
         self.monotone = monotone
         self.monotone_mode = monotone_mode
 
+        self.select = select
+
         # Derivative penalty orders
         self._m_orders = (m,) if isinstance(m, int) else tuple(m)
         if not all(isinstance(o, int) and o >= 1 for o in self._m_orders):
             raise ValueError(f"m must contain positive integers, got {m}")
-        if select and len(self._m_orders) > 1 and max(self._m_orders) > 2:
-            raise NotImplementedError(
-                f"select=True with max(m)={max(self._m_orders)} > 2 is not supported "
-                f"(the constrained penalty would have {max(self._m_orders)} null eigenvalues, "
-                f"but select requires exactly 2). Use max(m) <= 2 with select=True."
-            )
+        self._validate_m_orders()
+        self._validate_select()
         if knots is not None:
             knots = np.asarray(knots, dtype=np.float64).ravel()
             if knots.ndim != 1 or len(knots) < 1:
@@ -154,7 +218,7 @@ class _SplineBase:
         self.degree = degree
         self.knot_strategy = knot_strategy
         self.penalty = penalty
-        self.select = select
+        # self.select already set above (before validation)
         self.discrete = discrete
         self.n_bins = n_bins
         if extrapolation not in {"clip", "extend", "error"}:
@@ -618,6 +682,7 @@ class _SplineBase:
             )
         x = np.asarray(x, dtype=np.float64).ravel()
         self._place_knots(x)
+        self._validate_m_orders_build()
         B = self._basis_matrix(x).tocsr()
 
         if self.select:
@@ -665,6 +730,7 @@ class _SplineBase:
         """
         x = np.asarray(x, dtype=np.float64).ravel()
         self._place_knots(x)
+        self._validate_m_orders_build()
         omega = self._build_penalty()
         _, omega_c, n_cols, projection = self._apply_constraints(None, omega)
 
@@ -729,6 +795,11 @@ class _SplineBase:
         marginal basis, penalty, and a projection from the raw B-spline
         space to the effective (centered) space.
         """
+        if not self._tensor_supported:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support tensor marginal ingredients. "
+                f"Use kind='cr' or kind='bs' for tensor product interactions."
+            )
         if len(self._m_orders) > 1:
             raise NotImplementedError(
                 "Tensor interactions with multi-order penalty parents (m tuple) "
@@ -923,21 +994,9 @@ class NaturalSpline(_SplineBase):
     boundary constraints reduce the penalty null space to 1 dimension
     (constant only), so ``select=True`` is not supported — use
     ``kind="cr"`` or ``kind="bs"`` for double-penalty selection.
-
-    Parameters
-    ----------
-    n_knots : int
-        Number of interior knots.
-    degree : int
-        B-spline polynomial degree.
-    knot_strategy : str
-        "uniform" (default), "quantile", "quantile_rows", or
-        "quantile_tempered".
-    penalty : str
-        "ssp" enables SSP reparametrisation, "none" disables it.
-    knots : array-like or None
-        Explicit interior knot positions.
     """
+
+    _select_supported = False
 
     def __init__(
         self,
@@ -945,6 +1004,7 @@ class NaturalSpline(_SplineBase):
         degree: int = 3,
         knot_strategy: str = "uniform",
         penalty: str = "ssp",
+        select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
@@ -964,6 +1024,7 @@ class NaturalSpline(_SplineBase):
             extrapolation,
             boundary,
             knot_alpha,
+            select=select,
             m=m,
         )
         self._Z: NDArray | None = None
@@ -1006,24 +1067,16 @@ class CubicRegressionSpline(_SplineBase):
     The penalty matrix is the wiggliness penalty: omega_ij = int B_i''(x) B_j''(x) dx,
     computed via Gauss-Legendre quadrature over each knot interval.
 
-    Parameters
-    ----------
-    n_knots : int
-        Number of interior knots.
-    knot_strategy : str
-        "uniform" (default), "quantile", "quantile_rows", or
-        "quantile_tempered".
-    penalty : str
-        "ssp" enables SSP reparametrisation, "none" disables it.
-    select : bool
-        If True, decompose into linear + wiggly subgroups (double penalty).
-    knots : array-like or None
-        Explicit interior knot positions.
-    monotone : str or None
-        Monotonicity constraint direction.
-    monotone_mode : str
-        ``"postfit"`` (default) or ``"fit"`` (not yet implemented).
+    Multi-order penalties (m tuple) are a SuperGLM extension, not strict
+    mgcv ``bs="cr"`` parity.
     """
+
+    _penalty_semantics = "integrated_derivative"
+    _max_penalty_order = 3
+
+    def _select_compatible(self, m_orders: tuple[int, ...]) -> bool:
+        """CR: natural constraints always produce 2 null eigenvalues."""
+        return True  # any m <= 3 works with select
 
     def __init__(
         self,
@@ -1041,11 +1094,6 @@ class CubicRegressionSpline(_SplineBase):
         monotone_mode: str = "postfit",
         m: int | tuple[int, ...] = 2,
     ):
-        m_orders = (m,) if isinstance(m, int) else tuple(m)
-        if any(o > 3 for o in m_orders):
-            raise ValueError(
-                f"CRS integrated derivative penalty requires m <= degree (3), got m={m}"
-            )
         super().__init__(
             n_knots,
             degree=3,
@@ -1164,6 +1212,15 @@ class CardinalCRSpline(_SplineBase):
         ``"postfit"`` (default) or ``"fit"`` (not yet implemented).
     """
 
+    _penalty_semantics = "fixed"
+    _max_penalty_order = 2
+    _multi_m_supported = False
+    _tensor_supported = False
+
+    def _select_compatible(self, m_orders: tuple[int, ...]) -> bool:
+        """CardinalCR: only m=(2,) supports select."""
+        return m_orders == (2,)
+
     def __init__(
         self,
         n_knots: int = 10,
@@ -1178,6 +1235,7 @@ class CardinalCRSpline(_SplineBase):
         knot_alpha: float = 0.2,
         monotone: str | None = None,
         monotone_mode: str = "postfit",
+        m: int | tuple[int, ...] = 2,
     ):
         super().__init__(
             n_knots,
@@ -1193,6 +1251,7 @@ class CardinalCRSpline(_SplineBase):
             select=select,
             monotone=monotone,
             monotone_mode=monotone_mode,
+            m=m,
         )
         self._cr_knots: NDArray | None = None
         self._cr_M: NDArray | None = None
@@ -1420,11 +1479,7 @@ class CardinalCRSpline(_SplineBase):
             "coefficients_original": beta_orig,
         }
 
-    def tensor_marginal_ingredients(self, x: NDArray) -> TensorMarginalInfo:
-        raise TypeError(
-            "CardinalCRSpline does not support tensor marginal ingredients. "
-            "Use kind='cr' or kind='bs' for tensor product interactions."
-        )
+    # tensor_marginal_ingredients: rejected by base class via _tensor_supported = False
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1562,10 +1617,10 @@ def Spline(
         ``"ssp"`` enables SSP reparametrisation (default), ``"none"``
         disables it.
     select : bool
-        If True, decompose into linear + wiggly subgroups for
-        double-penalty selection. Supported for ``"bs"``, ``"cr"``, and
-        ``"cr_cardinal"``.  Not supported for ``"ns"`` (its constrained
-        penalty has only 1 null eigenvalue).
+        If True, add a null-space selection penalty (mgcv-style double
+        penalty). Support depends on basis and ``m``:
+        ``"bs"`` (max(m)<=2), ``"cr"`` (any m<=3), ``"cr_cardinal"``
+        (m=2 only). Not supported for ``"ns"``.
     knots : array-like, optional
         Explicit interior knot positions. Overrides ``k`` / ``n_knots``.
     discrete : bool, optional
@@ -1611,13 +1666,6 @@ def Spline(
     if k is not None and n_knots is not None:
         raise ValueError(
             "Cannot specify both k and n_knots. Use k (public basis size) or n_knots (interior knots), not both."
-        )
-
-    if select and kind == "ns":
-        raise NotImplementedError(
-            "select=True is not yet supported for kind='ns'. "
-            "The NaturalSpline penalty has only 1 null eigenvalue after "
-            "boundary constraints. Use kind='cr' or kind='bs' with select=True."
         )
 
     if monotone is not None and kind == "ns":
@@ -1674,13 +1722,7 @@ def Spline(
                 monotone_mode=monotone_mode,
                 m=m,
             )
-        else:  # cr_cardinal — defer multi-m
-            m_orders = (m,) if isinstance(m, int) else tuple(m)
-            if len(m_orders) > 1 or m_orders[0] != 2:
-                raise NotImplementedError(
-                    "kind='cr_cardinal' only supports m=2 (default). "
-                    "Use kind='cr' for multi-order or non-default derivative penalties."
-                )
+        else:  # cr_cardinal
             return cls(
                 n_knots=resolved_n_knots,
                 knot_strategy=knot_strategy,
@@ -1694,6 +1736,7 @@ def Spline(
                 knot_alpha=knot_alpha,
                 monotone=monotone,
                 monotone_mode=monotone_mode,
+                m=m,
             )
     else:  # "ns"
         return cls(
@@ -1701,6 +1744,7 @@ def Spline(
             degree=degree,
             knot_strategy=knot_strategy,
             penalty=penalty,
+            select=select,
             knots=knots,
             discrete=discrete,
             n_bins=n_bins,
