@@ -1082,12 +1082,84 @@ class TestMultiOrderSplinePenalty:
         assert "d2" in suffixes
         assert "d3" in suffixes
 
-    def test_select_plus_multi_m_raises(self):
-        """select=True + multi-m raises NotImplementedError."""
+    def test_select_plus_multi_m_builds(self):
+        """select=True + multi-m produces null + per-order components."""
         from superglm import Spline
 
-        with pytest.raises(NotImplementedError, match="select=True with multi-order"):
-            Spline(kind="cr", n_knots=6, m=(1, 2), select=True)
+        spec = Spline(kind="cr", n_knots=8, m=(1, 2), select=True)
+        result = spec.build(np.linspace(0, 1, 200))
+
+        assert result.penalty_components is not None
+        suffixes = [s for s, _ in result.penalty_components]
+        assert "null" in suffixes
+        assert "d1" in suffixes
+        assert "d2" in suffixes
+        assert len(suffixes) == 3
+
+        assert result.component_types == {"null": "selection"}
+
+        # Components must sum to penalty_matrix
+        comp_sum = sum(omega for _, omega in result.penalty_components)
+        np.testing.assert_allclose(comp_sum, result.penalty_matrix, atol=1e-12)
+
+    def test_select_plus_multi_m_high_order_raises(self):
+        """select=True + m=(1,2,3) on BS raises (current capability policy)."""
+        from superglm import Spline
+
+        with pytest.raises(NotImplementedError, match="not supported for BasisSpline"):
+            Spline(kind="bs", n_knots=8, m=(1, 2, 3), select=True)
+
+    @pytest.mark.slow
+    def test_select_plus_multi_m_fit_converges(self):
+        """Spline(select=True, m=(1,2)) converges with separate lambdas."""
+        from superglm import Spline, SuperGLM
+
+        rng = np.random.default_rng(42)
+        n = 800
+        x = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            features={"x": Spline(kind="cr", n_knots=8, m=(1, 2), select=True)},
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+
+        assert model._reml_result.converged
+        lam = model._reml_lambdas
+        # Should have null + d1 + d2 lambda keys
+        assert "x:null" in lam
+        assert "x:d1" in lam
+        assert "x:d2" in lam
+
+    @pytest.mark.slow
+    def test_select_plus_multi_m_discrete_converges(self):
+        """select=True + multi-m works on the discrete path."""
+        from superglm import Spline, SuperGLM
+
+        rng = np.random.default_rng(42)
+        n = 800
+        x = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            discrete=True,
+            features={"x": Spline(kind="cr", n_knots=8, m=(1, 2), select=True)},
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+
+        assert model._reml_result.converged
+        lam = model._reml_lambdas
+        assert "x:null" in lam
+        assert "x:d1" in lam
+        assert "x:d2" in lam
 
     def test_tensor_parent_multi_m_raises(self):
         """Tensor parent with multi-m raises NotImplementedError."""

@@ -510,21 +510,46 @@ def build_design_matrix(
                 n_range = spec._U_range.shape[1]
                 n_combined = n_null + n_range
                 U_combined = np.hstack([spec._U_null, spec._U_range])
+                Z = projection_penalty  # constraint projection
 
                 omega_null = np.zeros((n_combined, n_combined))
                 omega_null[:n_null, :n_null] = np.eye(n_null)
-                omega_wiggle = np.zeros((n_combined, n_combined))
-                omega_wiggle[n_null:, n_null:] = spec._omega_range
 
+                components: list[tuple[str, np.ndarray]] = [("null", omega_null)]
+
+                if len(spec._m_orders) > 1:
+                    # Multi-m: project each per-order penalty into combined basis
+                    U_null_c = (
+                        spec._U_null
+                        if Z is None
+                        else np.linalg.lstsq(Z, spec._U_null, rcond=None)[0]
+                    )
+                    U_range_c = (
+                        spec._U_range
+                        if Z is None
+                        else np.linalg.lstsq(Z, spec._U_range, rcond=None)[0]
+                    )
+                    U_combined_c = np.hstack([U_null_c, U_range_c])
+                    for order in spec._m_orders:
+                        omega_raw_j = spec._build_penalty_for_order(order)
+                        _, omega_c_j, _, _ = spec._apply_constraints(None, omega_raw_j)
+                        omega_combined_j = U_combined_c.T @ omega_c_j @ U_combined_c
+                        components.append((f"d{order}", omega_combined_j))
+                else:
+                    omega_wiggle = np.zeros((n_combined, n_combined))
+                    omega_wiggle[n_null:, n_null:] = spec._omega_range
+                    components.append(("wiggle", omega_wiggle))
+
+                penalty_matrix = sum(omega for _, omega in components)
                 infos = [
                     GroupInfo(
                         columns=None,
                         n_cols=n_combined,
-                        penalty_matrix=omega_null + omega_wiggle,
+                        penalty_matrix=penalty_matrix,
                         reparametrize=True,
                         penalized=True,
                         projection=U_combined,
-                        penalty_components=[("null", omega_null), ("wiggle", omega_wiggle)],
+                        penalty_components=components,
                         component_types={"null": "selection"},
                     ),
                 ]
