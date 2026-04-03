@@ -45,8 +45,6 @@ def term_importance(
         Columns: term, feature, subgroup_type, variance_eta, sd_eta,
         edf, lambda, group_norm.
     """
-    from superglm.features.spline import _SplineBase
-
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling term_importance().")
 
@@ -82,19 +80,7 @@ def term_importance(
 
         if spec is not None:
             B_g = spec.transform(np.asarray(X[g.feature_name]))
-            # For select=True, need to extract the right columns
-            if isinstance(spec, _SplineBase) and spec.select:
-                # Groups share the same B matrix; slice by group's local range
-                feature_groups = [fg for fg in model._groups if fg.feature_name == g.feature_name]
-                local_start = 0
-                for fg in feature_groups:
-                    if fg.name == g.name:
-                        break
-                    local_start += fg.size
-                local_sl = slice(local_start, local_start + g.size)
-                eta_g = B_g[:, local_sl] @ b_g
-            else:
-                eta_g = B_g @ b_g
+            eta_g = B_g @ b_g
         elif ispec is not None:
             p1, p2 = ispec.parent_names
             B_g = ispec.transform(np.asarray(X[p1]), np.asarray(X[p2]))

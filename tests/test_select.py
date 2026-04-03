@@ -29,44 +29,63 @@ def simple_data():
 
 
 class TestSelectBuild:
-    def test_select_creates_two_group_infos(self):
-        """Spline(select=True).build() returns a list of 2 GroupInfos."""
+    def test_select_creates_single_group_info_with_penalty_components(self):
+        """Spline(select=True).build() returns a single GroupInfo with penalty_components."""
         sp = Spline(n_knots=10, select=True)
         result = sp.build(np.linspace(0, 1, 100))
-        assert isinstance(result, list)
-        assert len(result) == 2
+        assert not isinstance(result, list)
+        assert result.penalty_components is not None
+        assert len(result.penalty_components) == 2
 
-    def test_select_subgroup_names(self):
+    def test_select_component_suffixes(self):
         sp = Spline(n_knots=10, select=True)
         result = sp.build(np.linspace(0, 1, 100))
-        assert result[0].subgroup_name == "linear"
-        assert result[1].subgroup_name == "spline"
+        suffixes = [name for name, _ in result.penalty_components]
+        assert suffixes == ["null", "wiggle"]
 
-    def test_select_null_space_size(self):
-        """Null space is 1 (linear only, constant removed for identifiability)."""
+    def test_select_component_types(self):
+        """The null component must carry component_type='selection'."""
+        sp = Spline(n_knots=10, select=True)
+        result = sp.build(np.linspace(0, 1, 100))
+        assert result.component_types is not None
+        assert result.component_types.get("null") == "selection"
+        # wiggle should not have a component_type entry (or not "selection")
+        assert "wiggle" not in result.component_types
+
+    def test_select_combined_n_cols(self):
+        """Combined n_cols = 1 (null) + n_range."""
         for nk in [5, 10, 20]:
             sp = Spline(n_knots=nk, select=True)
             result = sp.build(np.linspace(0, 1, 200))
-            assert result[0].n_cols == 1, f"null space should be 1 for n_knots={nk}"
-
-    def test_select_range_space_size(self):
-        sp = Spline(n_knots=10, select=True)
-        result = sp.build(np.linspace(0, 1, 100))
-        n_basis = sp._n_basis
-        assert result[1].n_cols == n_basis - 2
+            n_basis = sp._n_basis
+            n_range = n_basis - 2  # K - 2 for BS (partition of unity removes 1, null removes 1)
+            expected = 1 + n_range
+            assert result.n_cols == expected, (
+                f"Expected n_cols={expected} for n_knots={nk}, got {result.n_cols}"
+            )
 
     def test_select_projections_orthogonal(self):
         """U_null and U_range should have orthonormal columns."""
         sp = Spline(n_knots=10, select=True)
         sp.build(np.linspace(0, 1, 100))
         U_null = sp._U_null  # (K, 1)
-        U_range = sp._U_range  # (K, K-2)
+        U_range = sp._U_range  # (K, n_range)
         # U_null is orthogonal to U_range
         cross = U_null.T @ U_range
         np.testing.assert_allclose(cross, 0.0, atol=1e-10)
         # Both have orthonormal columns
         np.testing.assert_allclose(U_null.T @ U_null, np.eye(1), atol=1e-10)
         np.testing.assert_allclose(U_range.T @ U_range, np.eye(U_range.shape[1]), atol=1e-10)
+
+    def test_select_combined_projection_structure(self):
+        """Combined projection's first column (null) and remaining (range) are orthogonal."""
+        sp = Spline(n_knots=10, select=True)
+        result = sp.build(np.linspace(0, 1, 100))
+        U = result.projection  # (K, n_combined)
+        U_null_part = U[:, :1]
+        U_range_part = U[:, 1:]
+        cross = U_null_part.T @ U_range_part
+        np.testing.assert_allclose(cross, 0.0, atol=1e-10)
 
     def test_select_null_space_centered(self):
         """Null-space linear component should be orthogonal to the constant."""
@@ -77,17 +96,37 @@ class TestSelectBuild:
         proj = sp._U_null.T @ ones
         np.testing.assert_allclose(proj, 0.0, atol=1e-10)
 
-    def test_select_range_penalty_diagonal(self):
-        """Range-space penalty should be diagonal with the nonzero eigenvalues."""
+    def test_select_penalty_matrix_equals_component_sum(self):
+        """The combined penalty_matrix must equal the sum of component omegas."""
         sp = Spline(n_knots=10, select=True)
         result = sp.build(np.linspace(0, 1, 100))
-        omega_range = result[1].penalty_matrix
-        assert omega_range is not None
+        omega_sum = sum(omega for _, omega in result.penalty_components)
+        np.testing.assert_allclose(result.penalty_matrix, omega_sum, atol=1e-14)
+
+    def test_select_wiggle_component_positive_diagonal(self):
+        """Wiggle component's nonzero block should have positive diagonal entries."""
+        sp = Spline(n_knots=10, select=True)
+        result = sp.build(np.linspace(0, 1, 100))
+        _, omega_wiggle = result.penalty_components[1]
+        # The wiggle block is in the lower-right (after the 1-col null space)
+        wiggle_block = omega_wiggle[1:, 1:]
         # Should be diagonal
-        off_diag = omega_range - np.diag(np.diag(omega_range))
+        off_diag = wiggle_block - np.diag(np.diag(wiggle_block))
         np.testing.assert_allclose(off_diag, 0.0, atol=1e-10)
         # All diagonal entries should be positive
-        assert np.all(np.diag(omega_range) > 0)
+        assert np.all(np.diag(wiggle_block) > 0)
+
+    def test_select_reparametrize_flag(self):
+        """select=True GroupInfo must have reparametrize=True."""
+        sp = Spline(n_knots=10, select=True)
+        result = sp.build(np.linspace(0, 1, 100))
+        assert result.reparametrize is True
+
+    def test_select_no_subgroup_name(self):
+        """select=True GroupInfo must not have a subgroup_name."""
+        sp = Spline(n_knots=10, select=True)
+        result = sp.build(np.linspace(0, 1, 100))
+        assert result.subgroup_name is None
 
 
 class TestSelectDefaults:
@@ -106,8 +145,8 @@ class TestSelectDefaults:
 
 
 class TestSelectModel:
-    def test_select_creates_two_groups(self, simple_data):
-        """Model with select=True spline creates 2 groups per feature."""
+    def test_select_creates_one_group_per_feature(self, simple_data):
+        """Model with select=True spline creates 1 group per feature (combined null+wiggle)."""
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
@@ -119,14 +158,12 @@ class TestSelectModel:
         )
         m.fit(X, y, sample_weight=sample_weight)
         group_names = [g.name for g in m._groups]
-        assert "signal:linear" in group_names
-        assert "signal:spline" in group_names
-        assert "noise:linear" in group_names
-        assert "noise:spline" in group_names
-        assert len(m._groups) == 4
+        assert "signal" in group_names
+        assert "noise" in group_names
+        assert len(m._groups) == 2
 
     def test_select_feature_name(self, simple_data):
-        """All subgroups have correct feature_name."""
+        """Group has correct feature_name."""
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
@@ -146,9 +183,8 @@ class TestSelectModel:
         )
         m.fit(X, y, sample_weight=sample_weight)
         groups = m._feature_groups("signal")
-        assert len(groups) == 2
-        assert groups[0].name == "signal:linear"
-        assert groups[1].name == "signal:spline"
+        assert len(groups) == 1
+        assert groups[0].name == "signal"
 
     def test_select_predict_matches_no_select(self, simple_data):
         """Predictions with select=True should be close to select=False."""
@@ -209,35 +245,29 @@ class TestSelectModel:
         )
         m.fit(X, y, sample_weight=sample_weight)
         s = m.diagnostics()
-        assert "signal:linear" in s
-        assert "signal:spline" in s
+        # Single group named "signal" (not "signal:linear" / "signal:spline")
+        assert "signal" in s
 
 
 class TestSelectSparsity:
-    def test_high_lambda_zeros_range(self, simple_data):
-        """At high lambda, the range (wiggly) space should be zeroed first."""
+    def test_high_lambda_zeros_group(self, simple_data):
+        """At high lambda, the combined group should be zeroed (double penalty)."""
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
-            selection_penalty=50.0,
+            selection_penalty=1e4,
         )
         m.fit(X, y, sample_weight=sample_weight)
         s = m.diagnostics()
-        # At high lambda1, group lasso selection should be happening.
-        # The 1-col linear subgroup (weight ∝ sqrt(1)) gets zeroed at a lower lambda
-        # than the multi-col spline subgroup (weight ∝ sqrt(K-2)), so at this lambda
-        # the linear group should be zeroed or both should be heavily shrunk.
-        range_norm = s["signal:spline"]["group_norm"]
-        linear_norm = s["signal:linear"]["group_norm"]
-        assert linear_norm < 1e-10 or range_norm < 1e-10, (
-            f"Expected at least one subgroup zeroed at selection_penalty=50: "
-            f"range={range_norm:.6f}, linear={linear_norm:.6f}"
+        group_norm = s["signal"]["group_norm"]
+        assert group_norm < 1e-6, (
+            f"Expected group zeroed at selection_penalty=1e4: group_norm={group_norm:.6f}"
         )
 
-    def test_very_high_lambda_zeros_both(self, simple_data):
-        """At very high lambda, both linear and spline subgroups are zeroed (double penalty)."""
+    def test_very_high_lambda_zeros_group(self, simple_data):
+        """At very high lambda, the combined group is zeroed (double penalty)."""
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
@@ -247,9 +277,8 @@ class TestSelectSparsity:
         )
         m.fit(X, y, sample_weight=sample_weight)
         s = m.diagnostics()
-        # Both subgroups are penalized — zeroed at very high lambda
-        assert s["signal:linear"]["group_norm"] < 1e-10
-        assert s["signal:spline"]["group_norm"] < 1e-10
+        # Combined group is penalized — zeroed at very high lambda
+        assert s["signal"]["group_norm"] < 1e-10
 
 
 class TestSelectPath:
@@ -291,25 +320,8 @@ class TestSelectCovariance:
         total_active_cols = sum(ag.size for ag in active_groups)
         assert XtWX_inv.shape[0] == total_active_cols
 
-    def test_penalized_linear_in_active_groups(self, simple_data):
-        """Penalized :linear subgroups appear in active_groups with penalized=True (double penalty)."""
-        X, y, sample_weight = simple_data
-        m = SuperGLM(
-            family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
-            spline_penalty=1.0,
-            selection_penalty=0.1,
-        )
-        m.fit(X, y, sample_weight=sample_weight)
-        metrics = m.metrics(X, y, sample_weight=sample_weight)
-        _, _, _, _, active_groups = metrics._active_info
-
-        linear_ags = [ag for ag in active_groups if ag.subgroup_type == "linear"]
-        assert len(linear_ags) == 1
-        assert linear_ags[0].penalized is True
-
-    def test_subgroup_type_propagated(self, simple_data):
-        """GroupSlice.subgroup_type is set correctly on fitted model groups."""
+    def test_subgroup_type_is_none(self, simple_data):
+        """GroupSlice.subgroup_type is None for select=True (single combined group)."""
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
@@ -317,14 +329,12 @@ class TestSelectCovariance:
             spline_penalty=1.0,
         )
         m.fit(X, y, sample_weight=sample_weight)
-        linear_g = next(g for g in m._groups if g.name == "signal:linear")
-        spline_g = next(g for g in m._groups if g.name == "signal:spline")
-        assert linear_g.subgroup_type == "linear"
-        assert spline_g.subgroup_type == "spline"
+        signal_g = next(g for g in m._groups if g.name == "signal")
+        assert signal_g.subgroup_type is None
 
 
 class TestSelectAdaptive:
-    """3B. Adaptive + split-linear combination."""
+    """3B. Adaptive + select combination."""
 
     def test_adaptive_select_finite_weights(self, simple_data):
         """Adaptive(expon=2) with select=True produces finite weights."""
@@ -339,7 +349,7 @@ class TestSelectAdaptive:
         m.fit(X, y, sample_weight=sample_weight)
         # Adaptive weights are applied during fit — must converge with valid result
         assert m.result.converged, (
-            f"Adaptive split-linear fit failed to converge in {m.result.n_iter} iters"
+            f"Adaptive select fit failed to converge in {m.result.n_iter} iters"
         )
         assert np.isfinite(m.result.deviance)
         assert m.result.deviance > 0
@@ -350,7 +360,7 @@ class TestSelectAdaptive:
         assert np.all(pred > 0)
 
     def test_adaptive_select_noise_zeroed(self, simple_data):
-        """At moderate lambda with Adaptive(expon=2), noise spline should be zeroed."""
+        """At moderate lambda with Adaptive(expon=2), noise group should be zeroed."""
         X, y, sample_weight = simple_data
         pen = GroupLasso(lambda1=10.0, flavor=Adaptive(expon=2))
         m = SuperGLM(
@@ -363,15 +373,15 @@ class TestSelectAdaptive:
             spline_penalty=1.0,
         )
         m.fit(X, y, sample_weight=sample_weight)
-        noise_spline = next(g for g in m._groups if g.name == "noise:spline")
-        assert np.linalg.norm(m.result.beta[noise_spline.sl]) < 1e-10
+        noise_g = next(g for g in m._groups if g.name == "noise")
+        assert np.linalg.norm(m.result.beta[noise_g.sl]) < 1e-10
 
 
 class TestSelectEffectiveDf:
     """3C. Effective DF with penalized groups (double penalty)."""
 
     def test_high_lambda_edf_minimal(self, simple_data):
-        """At very high lambda, all subgroups (including linear) are zeroed — only intercept remains."""
+        """At very high lambda, all groups are zeroed — only intercept remains."""
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
@@ -392,7 +402,7 @@ class TestSelectLambdaMax:
     """3D. lambda_max with penalized groups (double penalty)."""
 
     def test_lambda_max_all_penalized(self, simple_data):
-        """With double penalty, all groups (including :linear) are penalized."""
+        """With double penalty, all groups are penalized."""
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
@@ -410,10 +420,10 @@ class TestSelectLambdaMax:
 
 
 class TestSelectSummaryOutput:
-    """3E. Summary output for mixed active/inactive subgroups."""
+    """3E. Summary output for select=True (single combined group)."""
 
-    def test_summary_linear_active_spline_inactive(self, simple_data):
-        """When :spline is zeroed but :linear is active, summary shows correct labels."""
+    def test_summary_inactive_group(self, simple_data):
+        """When the combined group is zeroed, summary shows inactive."""
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
@@ -425,14 +435,11 @@ class TestSelectSummaryOutput:
         metrics = m.metrics(X, y, sample_weight=sample_weight)
         summary = metrics.summary()
         text = str(summary)
-        # Linear subgroup should show as active with chi2 test
-        assert "[linear, 1 params" in text
-        # Spline subgroup should show as inactive
-        assert "[spline" in text
+        # Combined group shows as spline with inactive label
         assert "inactive" in text
 
-    def test_summary_html_subgroup_labels(self, simple_data):
-        """HTML summary also uses correct linear/spline labels."""
+    def test_summary_html_group_label(self, simple_data):
+        """HTML summary shows the combined group correctly."""
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
@@ -444,20 +451,19 @@ class TestSelectSummaryOutput:
         metrics = m.metrics(X, y, sample_weight=sample_weight)
         summary = metrics.summary()
         html = summary._repr_html_()
-        assert "[linear, 1 params" in html
         assert "inactive" in html
 
 
 class TestSelectFeatureSE:
-    """3F. feature_se with select=True subgroups."""
+    """3F. feature_se with select=True."""
 
     def test_feature_se_reml_select_nonlinear_dgp(self):
-        """feature_se works with REML select=True when both subgroups are active.
+        """feature_se works with REML select=True when the group is active.
 
         Uses fit_reml() with selection_penalty=0 (direct solver, no BCD aliasing).
-        On a purely nonlinear DGP, REML drives the linear subgroup's lambda
-        high (no signal) while keeping the spline lambda moderate (real signal).
-        Both subgroups remain active (no L1 sparsity); the test verifies that
+        On a purely nonlinear DGP, REML drives the null component's lambda
+        high (no signal) while keeping the wiggle lambda moderate (real signal).
+        The combined group remains active (no L1 sparsity); the test verifies that
         feature_se returns finite, non-negative SEs through the full covariance
         code path.
         """
@@ -476,10 +482,10 @@ class TestSelectFeatureSE:
         )
         m.fit_reml(X, y, sample_weight=sample_weight, max_reml_iter=20)
 
-        # Spline subgroup should have captured the nonlinear signal
-        spline_g = next(g for g in m._groups if g.name == "signal:spline")
-        assert np.linalg.norm(m.result.beta[spline_g.sl]) > 1e-6, (
-            "Expected spline subgroup to be active for nonlinear DGP"
+        # Combined group should have captured the nonlinear signal
+        signal_g = next(g for g in m._groups if g.name == "signal")
+        assert np.linalg.norm(m.result.beta[signal_g.sl]) > 1e-6, (
+            "Expected signal group to be active for nonlinear DGP"
         )
 
         metrics = m.metrics(X, y, sample_weight=sample_weight)
@@ -492,7 +498,7 @@ class TestSelectFeatureSE:
         assert np.max(se) > 0
 
     def test_feature_se_both_zeroed(self):
-        """feature_se returns all-zero SEs when both subgroups are zeroed.
+        """feature_se returns all-zero SEs when the combined group is zeroed.
 
         Tests the early-return branch in metrics.feature_se when all
         coefficients for a feature are exactly zero.
@@ -508,11 +514,11 @@ class TestSelectFeatureSE:
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
-            selection_penalty=1e6,  # extreme penalty → both subgroups zeroed
+            selection_penalty=1e6,  # extreme penalty → group zeroed
         )
         m.fit(X, y, sample_weight=sample_weight)
 
-        # Precondition: both subgroups zeroed
+        # Precondition: group zeroed
         for g in m._groups:
             assert np.linalg.norm(m.result.beta[g.sl]) < 1e-10
 
@@ -522,8 +528,8 @@ class TestSelectFeatureSE:
         assert np.all(np.isfinite(se))
         np.testing.assert_allclose(se, 0.0, atol=1e-10)
 
-    def test_feature_se_both_active(self, simple_data):
-        """feature_se works when both :linear and :spline are active."""
+    def test_feature_se_active(self, simple_data):
+        """feature_se works when the combined select group is active."""
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
@@ -571,14 +577,14 @@ class TestSelectNoiseSuppressionREML:
         _, _, _, _, active_groups = metrics_obj._active_info
         group_edf = {ag.name: float(np.sum(edf[ag.sl])) for ag in active_groups}
 
-        # Noise groups: EDF < 0.05 (effectively inactive; tolerance accounts for
+        # Noise group: EDF < 0.05 (effectively inactive; tolerance accounts for
         # Newton convergence path which may not fully penalize noise groups)
         for g in model._groups:
             if "noise" in g.name.lower():
                 noise_edf = group_edf.get(g.name, 0.0)
                 assert noise_edf < 0.05, f"{g.name} EDF={noise_edf:.4f}, expected < 0.05"
 
-        # Signal groups should retain meaningful EDF
+        # Signal group should retain meaningful EDF
         signal_edf = sum(
             group_edf.get(g.name, 0.0) for g in model._groups if "signal" in g.name.lower()
         )
@@ -641,23 +647,23 @@ class TestSplitLinearSnapWeakSignal:
             if g.name not in group_edf:
                 group_edf[g.name] = 0.0
 
-        # Noise: both subgroups should be effectively dead (EDF < 0.5 total)
-        noise_total_edf = group_edf.get("noise:linear", 0) + group_edf.get("noise:spline", 0)
+        # Noise: combined group should be effectively dead (EDF < 0.5)
+        noise_total_edf = group_edf.get("noise", 0)
         assert noise_total_edf < 0.5, f"Noise total EDF={noise_total_edf:.3f}, expected < 0.5"
 
         # Noise lambdas should be very large (heavily penalized)
-        for name in ["noise:linear", "noise:spline"]:
+        for name in ["noise:null", "noise:wiggle"]:
             if name in lambdas:
                 assert lambdas[name] > 1e2, f"{name} lambda={lambdas[name]:.1g}, expected > 1e2"
 
         # Weak signal: should retain nontrivial EDF (not snapped out)
-        weak_total_edf = group_edf.get("weak:linear", 0) + group_edf.get("weak:spline", 0)
+        weak_total_edf = group_edf.get("weak", 0)
         assert weak_total_edf > 2.0, (
             f"Weak signal EDF={weak_total_edf:.3f}, expected > 2.0 (falsely suppressed?)"
         )
 
         # Strong signal: should be well-fit
-        strong_total_edf = group_edf.get("strong:linear", 0) + group_edf.get("strong:spline", 0)
+        strong_total_edf = group_edf.get("strong", 0)
         assert strong_total_edf > 5.0, f"Strong signal EDF={strong_total_edf:.3f}, expected > 5.0"
 
 
@@ -667,20 +673,26 @@ class TestSplitLinearSnapWeakSignal:
 class TestCRSelect:
     """Tests for CubicRegressionSpline with select=True."""
 
-    def test_cr_select_build_returns_two_groups(self):
+    def test_cr_select_build_returns_single_group_with_components(self):
         sp = Spline(kind="cr", n_knots=10, select=True)
         result = sp.build(np.linspace(0, 1, 100))
-        assert isinstance(result, list)
-        assert len(result) == 2
-        assert result[0].subgroup_name == "linear"
-        assert result[1].subgroup_name == "spline"
+        assert not isinstance(result, list)
+        assert result.penalty_components is not None
+        assert len(result.penalty_components) == 2
+        suffixes = [name for name, _ in result.penalty_components]
+        assert suffixes == ["null", "wiggle"]
 
-    def test_cr_select_null_space_size(self):
-        """Null space is 1 (linear only, constant removed)."""
+    def test_cr_select_combined_n_cols(self):
+        """Combined n_cols = 1 (null) + n_range."""
         for nk in [5, 10, 20]:
             sp = Spline(kind="cr", n_knots=nk, select=True)
             result = sp.build(np.linspace(0, 1, 200))
-            assert result[0].n_cols == 1, f"null space should be 1 for n_knots={nk}"
+            # Compute expected from _U_range
+            n_range = sp._U_range.shape[1]
+            expected = 1 + n_range
+            assert result.n_cols == expected, (
+                f"Expected n_cols={expected} for n_knots={nk}, got {result.n_cols}"
+            )
 
     def test_cr_select_range_space_size(self):
         """Range space has K-4 columns (K raw, -2 constraints, -2 null)."""
@@ -688,7 +700,10 @@ class TestCRSelect:
         result = sp.build(np.linspace(0, 1, 100))
         K = sp._n_basis
         expected_range = K - 2 - 2  # -2 constraints, -2 null eigenvalues
-        assert result[1].n_cols == expected_range
+        n_range = sp._U_range.shape[1]
+        assert n_range == expected_range
+        # Combined: 1 + n_range
+        assert result.n_cols == 1 + expected_range
 
     def test_cr_select_projections_orthogonal(self):
         sp = Spline(kind="cr", n_knots=10, select=True)
@@ -699,6 +714,20 @@ class TestCRSelect:
         np.testing.assert_allclose(cross, 0.0, atol=1e-10)
         np.testing.assert_allclose(U_null.T @ U_null, np.eye(1), atol=1e-10)
         np.testing.assert_allclose(U_range.T @ U_range, np.eye(U_range.shape[1]), atol=1e-10)
+
+    def test_cr_select_component_types(self):
+        """CR select=True must have component_types={'null': 'selection'}."""
+        sp = Spline(kind="cr", n_knots=10, select=True)
+        result = sp.build(np.linspace(0, 1, 100))
+        assert result.component_types is not None
+        assert result.component_types.get("null") == "selection"
+
+    def test_cr_select_penalty_matrix_equals_sum(self):
+        """CR select=True penalty_matrix must equal sum of components."""
+        sp = Spline(kind="cr", n_knots=10, select=True)
+        result = sp.build(np.linspace(0, 1, 100))
+        omega_sum = sum(omega for _, omega in result.penalty_components)
+        np.testing.assert_allclose(result.penalty_matrix, omega_sum, atol=1e-14)
 
     def test_cr_select_fit_close_to_no_select(self):
         """Predictions with select=True should be close to select=False."""
@@ -773,13 +802,15 @@ class TestCardinalCRSelect:
     def test_cr_cardinal_select_build(self):
         sp = Spline(kind="cr_cardinal", n_knots=10, select=True)
         result = sp.build(np.linspace(0, 10, 200))
-        assert isinstance(result, list)
-        assert len(result) == 2
-        assert result[0].subgroup_name == "linear"
-        assert result[1].subgroup_name == "spline"
+        assert not isinstance(result, list)
+        assert result.penalty_components is not None
+        assert len(result.penalty_components) == 2
+        suffixes = [name for name, _ in result.penalty_components]
+        assert suffixes == ["null", "wiggle"]
         K = sp._n_basis
-        assert result[0].n_cols == 1
-        assert result[1].n_cols == K - 2
+        n_range = sp._U_range.shape[1]
+        assert result.n_cols == 1 + n_range
+        assert result.n_cols == K - 2 + 1  # K - 2 range + 1 null
 
     def test_cr_cardinal_select_fit(self):
         """CardinalCR select=True fit works end-to-end."""
@@ -803,7 +834,7 @@ class TestCardinalCRSelect:
 
 
 class TestCRSelectInteraction:
-    """Regression test: CR select=True parent inside spline×categorical interaction."""
+    """Regression test: CR select=True parent inside spline x categorical interaction."""
 
     def test_cr_select_interaction_projection_includes_identifiability(self):
         """CR select=True _interaction_projection is (K, K-3): constraints + identifiability."""
@@ -831,7 +862,7 @@ class TestCRSelectInteraction:
         assert np.linalg.matrix_rank(cross) == P1.shape[1]
 
     def test_cr_select_spline_categorical_fit(self):
-        """CR select=True parent with spline×categorical interaction fits correctly."""
+        """CR select=True parent with spline x categorical interaction fits correctly."""
         from superglm.features.categorical import Categorical
 
         rng = np.random.default_rng(42)
@@ -869,7 +900,7 @@ class TestCRSelectInteraction:
             )
 
     def test_cr_select_interaction_full_rank(self):
-        """CR select=True + spline×categorical must produce a full-rank design."""
+        """CR select=True + spline x categorical must produce a full-rank design."""
         from superglm.features.categorical import Categorical
 
         rng = np.random.default_rng(42)
@@ -908,7 +939,7 @@ class TestCRSelectInteraction:
         assert sp._interaction_projection.shape == (K, K - 1)
 
     def test_bs_select_interaction_full_rank(self):
-        """BS select=True + spline×categorical must produce a full-rank design."""
+        """BS select=True + spline x categorical must produce a full-rank design."""
         from superglm.features.categorical import Categorical
 
         rng = np.random.default_rng(42)

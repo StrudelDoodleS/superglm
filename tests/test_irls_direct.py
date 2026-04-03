@@ -200,7 +200,7 @@ class TestREMLDirect:
         assert m._reml_result.converged
 
     def test_reml_direct_select_true(self, select_data):
-        """REML + select=True + selection_penalty=0: should estimate both linear and spline lambdas."""
+        """REML + select=True + selection_penalty=0: should estimate both null and wiggle lambdas."""
         X, y, w = select_data
         m = SuperGLM(
             family="poisson",
@@ -215,11 +215,11 @@ class TestREMLDirect:
         assert hasattr(m, "_reml_lambdas")
         lambdas = m._reml_lambdas
 
-        # Should have entries for linear and spline subgroups
-        linear_keys = [k for k in lambdas if ":linear" in k]
-        spline_keys = [k for k in lambdas if ":spline" in k]
-        assert len(linear_keys) >= 1
-        assert len(spline_keys) >= 1
+        # Should have entries for null and wiggle penalty components
+        null_keys = [k for k in lambdas if ":null" in k]
+        wiggle_keys = [k for k in lambdas if ":wiggle" in k]
+        assert len(null_keys) >= 1
+        assert len(wiggle_keys) >= 1
 
     def test_reml_direct_all_lambdas_estimated(self, select_data):
         """With direct solver, ALL lambdas are REML-estimated including 1-col groups."""
@@ -235,9 +235,9 @@ class TestREMLDirect:
         m.fit_reml(X, y, sample_weight=w, max_reml_iter=15)
 
         lambdas = m._reml_lambdas
-        # 1-col linear subgroups should have been estimated (not stuck at initial value)
-        linear_keys = [k for k in lambdas if ":linear" in k]
-        for key in linear_keys:
+        # Null-space components (rank-1) should have been estimated (not stuck at initial value)
+        null_keys = [k for k in lambdas if ":null" in k]
+        for key in null_keys:
             # Lambda should differ from the initial value (0.1 default)
             # It may be close, but shouldn't be exactly the default
             assert lambdas[key] > 0
