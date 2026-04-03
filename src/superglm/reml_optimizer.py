@@ -35,6 +35,7 @@ from superglm.reml import (
     REMLResult,
     _map_beta_between_bases,
     build_penalty_caches,
+    build_penalty_components,
     cached_logdet_s_plus,
     compute_logdet_s_derivatives,
     compute_logdet_s_plus,
@@ -1779,11 +1780,7 @@ def optimize_efs_reml(
     dm = rebuild_dm(lambdas, sample_weight)
     penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
     penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
-    penalties = _coerce_reml_penalties(
-        reml_groups=reml_groups,
-        group_matrices=dm.group_matrices,
-        penalty_caches=penalty_caches,
-    )
+    penalties = build_penalty_components(dm.group_matrices, reml_groups)
     warm_beta = _map_beta_between_bases(boot_result.beta, old_gms, dm.group_matrices, groups)
     warm_intercept = float(boot_result.intercept)
 
@@ -1985,11 +1982,7 @@ def optimize_efs_reml(
             # R_inv changed → recompute penalties + caches (basis-dependent)
             penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
             penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
-            penalties = _coerce_reml_penalties(
-                reml_groups=reml_groups,
-                group_matrices=dm.group_matrices,
-                penalty_caches=penalty_caches,
-            )
+            penalties = build_penalty_components(dm.group_matrices, reml_groups)
             cheap_iter = False
         else:
             # Cheap: re-invert cached X'WX + S only (O(p³), no data pass)
@@ -2002,11 +1995,7 @@ def optimize_efs_reml(
         dm = rebuild_dm(lambdas, sample_weight)
         # R_inv changed → refresh caches and penalties for the objective computation
         penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
-        penalties = _coerce_reml_penalties(
-            reml_groups=reml_groups,
-            group_matrices=dm.group_matrices,
-            penalty_caches=penalty_caches,
-        )
+        penalties = build_penalty_components(dm.group_matrices, reml_groups)
 
     final_result = fit_pirls(
         X=dm,
@@ -2181,8 +2170,15 @@ def run_reml_once(
             )
             active_groups = list(groups)
         elif not use_direct:
+            S_rro = _build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                lambdas,
+                dm.p,
+                reml_penalties=penalties_rro,
+            )
             XtWX_S_inv, _, active_groups, _, _ = _penalised_xtwx_inv_gram(
-                beta, W, dm.group_matrices, groups, lambdas
+                beta, W, dm.group_matrices, groups, lambdas, S_override=S_rro
             )
 
         inv_phi = 1.0
@@ -2215,7 +2211,7 @@ def run_reml_once(
             )
             quad = float(beta_g @ omega_ssp @ beta_g)
 
-            ag = next((a for a in active_groups if a.name == pc.name), None)
+            ag = next((a for a in active_groups if a.name == pc.group_name), None)
             if ag is None:
                 continue
 
@@ -2292,11 +2288,7 @@ def run_reml_once(
             # R_inv changed → refresh penalties + caches (basis-dependent)
             penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
             penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
-            penalties_rro = _coerce_reml_penalties(
-                reml_groups=reml_groups,
-                group_matrices=dm.group_matrices,
-                penalty_caches=penalty_caches,
-            )
+            penalties_rro = build_penalty_components(dm.group_matrices, reml_groups)
             cheap_iter = False
         else:
             cheap_iter = True
@@ -2305,6 +2297,8 @@ def run_reml_once(
 
     if cheap_iter and converged and not use_direct:
         dm = rebuild_dm(lambdas, sample_weight)
+        # R_inv changed → refresh penalties so S_final_rro uses current basis
+        penalties_rro = build_penalty_components(dm.group_matrices, reml_groups)
 
     S_final_rro = _build_penalty_matrix(
         dm.group_matrices, groups, lambdas, dm.p, reml_penalties=penalties_rro
