@@ -1150,3 +1150,121 @@ class TestMultiOrderSplinePenalty:
         assert model._reml_result.converged
         lam = model._reml_lambdas
         assert len([k for k in lam if k.startswith("x:")]) == 3
+
+
+class TestSelectionPenaltySharedBlock:
+    """selection_penalty > 0 with shared-block multi-penalty terms (PR 1)."""
+
+    @pytest.mark.slow
+    def test_tensor_selection_penalty_efs_converges(self):
+        """Tensor + selection_penalty > 0 converges on EFS path."""
+        from superglm import Spline, SuperGLM
+
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * np.cos(2 * np.pi * x2)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=1e-8,
+            features={
+                "x1": Spline(kind="cr", n_knots=6),
+                "x2": Spline(kind="cr", n_knots=6),
+            },
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+
+        assert model._reml_result.converged
+        # Tensor term should have per-marginal lambdas
+        lam = model._reml_lambdas
+        tensor_keys = [k for k in lam if "x1:x2" in k]
+        assert len(tensor_keys) >= 2, f"Expected >=2 tensor lambda keys, got {tensor_keys}"
+
+    @pytest.mark.slow
+    def test_tensor_selection_penalty_parity(self):
+        """EFS and direct paths produce similar deviance for tensor models."""
+        from superglm import Spline, SuperGLM
+
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        # Direct path (selection_penalty=0)
+        m_direct = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            features={
+                "x1": Spline(kind="cr", n_knots=6),
+                "x2": Spline(kind="cr", n_knots=6),
+            },
+            interactions=[("x1", "x2")],
+        )
+        m_direct.fit_reml(X, y, max_reml_iter=30)
+
+        # EFS path (selection_penalty > 0 but tiny)
+        m_efs = SuperGLM(
+            family="poisson",
+            selection_penalty=1e-10,
+            features={
+                "x1": Spline(kind="cr", n_knots=6),
+                "x2": Spline(kind="cr", n_knots=6),
+            },
+            interactions=[("x1", "x2")],
+        )
+        m_efs.fit_reml(X, y, max_reml_iter=30)
+
+        # Deviance should be similar (tiny selection penalty shouldn't change much)
+        dev_direct = m_direct._result.deviance
+        dev_efs = m_efs._result.deviance
+        rel_diff = abs(dev_direct - dev_efs) / max(dev_direct, 1.0)
+        assert rel_diff < 0.05, (
+            f"Deviance mismatch: direct={dev_direct:.4f}, efs={dev_efs:.4f}, "
+            f"rel_diff={rel_diff:.4f}"
+        )
+
+    @pytest.mark.slow
+    def test_postfit_omega_ssp_consistent_with_dm(self):
+        """model._reml_penalties omega_ssp matches current R_inv after EFS fit."""
+        from superglm import Spline, SuperGLM
+        from superglm.group_matrix import SparseSSPGroupMatrix
+
+        rng = np.random.default_rng(42)
+        n = 800
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=1e-8,
+            features={
+                "x1": Spline(kind="cr", n_knots=6),
+                "x2": Spline(kind="cr", n_knots=6),
+            },
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+
+        # Every PenaltyComponent's omega_ssp must match R_inv.T @ omega_raw @ R_inv
+        for pc in model._reml_penalties:
+            gm = model._dm.group_matrices[pc.group_index]
+            if not isinstance(gm, SparseSSPGroupMatrix):
+                continue
+            expected = gm.R_inv.T @ pc.omega_raw @ gm.R_inv
+            np.testing.assert_allclose(
+                pc.omega_ssp,
+                expected,
+                atol=1e-10,
+                err_msg=f"Stale omega_ssp on {pc.name}",
+            )
