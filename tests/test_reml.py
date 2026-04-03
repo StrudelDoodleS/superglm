@@ -1097,34 +1097,43 @@ class TestREMLDiscreteRobustness:
 class TestMultiPenaltyPostFitInference:
     """Verify multi-penalty S propagates through all post-fit paths.
 
-    Uses select=True splines which create two PenaltyComponents per group
-    (range-space + null-space), each with its own REML lambda.  These tests
-    ensure the post-fit helpers reconstruct the correct composite S, not
-    the legacy single-penalty-per-group S.
+    Uses a tensor interaction which creates shared-block PenaltyComponents
+    (margin_x1 + margin_x2 on one coefficient block).  The legacy
+    single-penalty-per-group path looks up lambda2.get("x1:x2") which
+    misses the component keys "x1:x2:margin_x1", "x1:x2:margin_x2",
+    guaranteeing the two S constructions differ.
+
+    (Previous fixture used select=True, but its per-subgroup group names
+    matched the lambda keys, so legacy and multi-penalty S were identical.)
     """
 
     @pytest.fixture
     def select_model_fitted(self):
-        """A fitted select=True model with multi-penalty structure."""
+        """A fitted tensor model with shared-block multi-penalty structure."""
         rng = np.random.default_rng(99)
         n = 600
-        x1 = rng.uniform(0, 10, n)
-        eta = 0.5 + 0.4 * np.sin(x1)
-        mu = np.exp(eta)
-        y = rng.poisson(mu).astype(float)
-        X = pd.DataFrame({"x1": x1})
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
         w = np.ones(n)
 
         model = SuperGLM(
             family="poisson",
-            selection_penalty=0.01,
-            features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
+            features={
+                "x1": Spline(kind="cr", n_knots=6),
+                "x2": Spline(kind="cr", n_knots=6),
+            },
+            interactions=[("x1", "x2")],
         )
-        model.fit_reml(X[["x1"]], y, sample_weight=w, max_reml_iter=15)
+        model.fit_reml(X, y, sample_weight=w, max_reml_iter=30)
         assert model._reml_result.converged
         assert model._reml_penalties is not None
-        assert len(model._reml_penalties) >= 2  # range + null space
-        return model, X[["x1"]], y, w
+        # Tensor creates shared-block components (margin_x1, margin_x2)
+        shared = [pc for pc in model._reml_penalties if pc.name != pc.group_name]
+        assert len(shared) >= 2
+        return model, X, y, w
 
     def _get_covariance_with_and_without_multi_penalty(self, model, X, y, w):
         """Get covariance from the model, then recompute with legacy S for comparison.
