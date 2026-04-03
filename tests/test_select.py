@@ -454,6 +454,68 @@ class TestSelectSummaryOutput:
         assert "inactive" in html
 
 
+class TestSelectLambdaReporting:
+    """3E-bis. Reported lambdas match fitted REML values for select terms."""
+
+    @pytest.mark.slow
+    def test_summary_lambda_matches_reml(self):
+        """summary() reports fitted REML lambda, not scalar default."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        m = SuperGLM(
+            family="poisson",
+            features={"x": Spline(n_knots=8, select=True)},
+        )
+        m.fit_reml(X, y, max_reml_iter=20)
+
+        # Fitted lambdas should not be the scalar default (0.1)
+        lam = m._reml_lambdas
+        assert "x:null" in lam
+        assert "x:wiggle" in lam
+
+        # Summary should report a lambda derived from the fitted values
+        summary = m.summary()
+        rows = summary._coef_rows
+        x_row = next(r for r in rows if r.name == "x")
+        reported = x_row.smoothing_lambda
+        assert reported is not None
+        # Must differ from the scalar lambda2 default
+        assert reported != m.lambda2, (
+            f"Summary lambda {reported} equals scalar default {m.lambda2} — "
+            "fitted REML values not propagated"
+        )
+
+    @pytest.mark.slow
+    def test_term_importance_lambda_matches_reml(self):
+        """term_importance() reports fitted REML lambda, not scalar default."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        m = SuperGLM(
+            family="poisson",
+            features={"x": Spline(n_knots=8, select=True)},
+        )
+        m.fit_reml(X, y, max_reml_iter=20)
+
+        diag = m.term_importance(X)
+        x_row = diag[diag["term"] == "x"].iloc[0]
+        reported = x_row["lambda"]
+        assert reported is not None
+        assert reported != m.lambda2, (
+            f"term_importance lambda {reported} equals scalar default {m.lambda2} — "
+            "fitted REML values not propagated"
+        )
+
+
 class TestSelectFeatureSE:
     """3F. feature_se with select=True."""
 

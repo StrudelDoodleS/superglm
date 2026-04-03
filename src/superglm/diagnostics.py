@@ -53,6 +53,12 @@ def term_importance(
     w_sum = np.sum(weights)
     group_edf = model._group_edf or {}
     reml_lam = getattr(model, "_reml_lambdas", None) or {}
+    lambda2 = getattr(model, "lambda2", None)
+
+    def _diag_lambda(g_name):
+        from superglm.inference import _resolve_group_lambda
+
+        return _resolve_group_lambda(g_name, reml_lam, lambda2)
 
     rows = []
     for g in model._groups:
@@ -68,7 +74,7 @@ def term_importance(
                     "variance_eta": 0.0,
                     "sd_eta": 0.0,
                     "edf": group_edf.get(g.name),
-                    "lambda": reml_lam.get(g.name) if isinstance(reml_lam, dict) else None,
+                    "lambda": _diag_lambda(g.name),
                     "group_norm": norm_g,
                 }
             )
@@ -101,7 +107,7 @@ def term_importance(
                 "variance_eta": var_eta,
                 "sd_eta": float(np.sqrt(var_eta)),
                 "edf": group_edf.get(g.name),
-                "lambda": reml_lam.get(g.name) if isinstance(reml_lam, dict) else None,
+                "lambda": _diag_lambda(g.name),
                 "group_norm": norm_g,
             }
         )
