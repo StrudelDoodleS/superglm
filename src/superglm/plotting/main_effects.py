@@ -34,7 +34,7 @@ from superglm.plotting.common import (
 )
 
 if TYPE_CHECKING:
-    from superglm.inference import TermInference
+    from superglm.inference.term import TermInference
 
 
 def plot_relativities(

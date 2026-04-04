@@ -214,8 +214,8 @@ def compute_coef_covariance(
     - Cov_active: (p_active, p_active) = phi * (X'WX + S)^{-1}
     - active_groups: list of GroupSlice re-indexed to Cov_active columns
     """
+    from superglm.inference.covariance import _penalised_xtwx_inv_gram
     from superglm.links import stabilize_eta
-    from superglm.metrics import _penalised_xtwx_inv_gram
 
     beta = result.beta
     eta = dm.matvec(beta) + result.intercept

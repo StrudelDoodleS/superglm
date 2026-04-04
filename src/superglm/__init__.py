@@ -35,9 +35,8 @@ sklearn-compatible API:
 
 from superglm import families
 from superglm.constraints import MonotoneRepairer, MonotoneRepairResult
-from superglm.davies import psum_chisq, satterthwaite
-from superglm.diagnostics import SplineRedundancyReport
-from superglm.discretize import DiscretizationResult, discretization_impact
+from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
+from superglm.diagnostics.spline_checks import SplineRedundancyReport
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping, collapse_levels
@@ -60,7 +59,9 @@ from superglm.features.spline import (
     Spline,
     n_knots_from_k,
 )
-from superglm.inference import InteractionInference, SmoothCurve, SplineMetadata, TermInference
+from superglm.inference.metrics import ModelMetrics
+from superglm.inference.summary import ModelSummary
+from superglm.inference.term import InteractionInference, SmoothCurve, SplineMetadata, TermInference
 from superglm.links import (
     CauchitLink,
     CloglogLink,
@@ -74,10 +75,25 @@ from superglm.links import (
     ProbitLink,
     SqrtLink,
 )
-from superglm.metrics import ModelMetrics
 from superglm.model import PathResult, SuperGLM
 from superglm.model_selection import CrossValidationResult, cross_validate
-from superglm.model_tests import (
+from superglm.penalties.flavors import Adaptive
+from superglm.penalties.group_elastic_net import GroupElasticNet
+from superglm.penalties.group_lasso import GroupLasso
+from superglm.penalties.ridge import Ridge
+from superglm.penalties.sparse_group_lasso import SparseGroupLasso
+from superglm.profiling.nb import NBProfileResult, estimate_nb_theta
+from superglm.profiling.tweedie import (
+    TweedieProfileResult,
+    estimate_phi,
+    estimate_tweedie_p,
+    generate_tweedie_cpg,
+    tweedie_logpdf,
+)
+from superglm.reml import REMLResult
+from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
+from superglm.stats.davies import psum_chisq, satterthwaite
+from superglm.stats.model_tests import (
     DispersionTestResult,
     ScoreTestZIResult,
     VuongTestResult,
@@ -87,22 +103,7 @@ from superglm.model_tests import (
     vuong_test,
     zero_inflation_index,
 )
-from superglm.nb_profile import NBProfileResult, estimate_nb_theta
-from superglm.penalties.flavors import Adaptive
-from superglm.penalties.group_elastic_net import GroupElasticNet
-from superglm.penalties.group_lasso import GroupLasso
-from superglm.penalties.ridge import Ridge
-from superglm.penalties.sparse_group_lasso import SparseGroupLasso
-from superglm.reml import REMLResult
-from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
-from superglm.summary import ModelSummary
-from superglm.tweedie_profile import (
-    TweedieProfileResult,
-    estimate_phi,
-    estimate_tweedie_p,
-    generate_tweedie_cpg,
-    tweedie_logpdf,
-)
+from superglm.stats.wood_pvalue import wood_test_smooth
 from superglm.validation import (
     DoubleLiftChartResult,
     LiftChartResult,
@@ -113,7 +114,6 @@ from superglm.validation import (
     lorenz_curve,
     loss_ratio_chart,
 )
-from superglm.wood_pvalue import wood_test_smooth
 
 __all__ = [
     "families",
@@ -204,5 +204,4 @@ __all__ = [
     "dispersion_test",
     "vuong_test",
 ]
-__version__ = "0.8.1"
-# Harness artifact cleanup
+__version__ = "0.8.2"

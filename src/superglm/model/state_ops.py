@@ -9,7 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR
-from superglm.inference import compute_coef_covariance
+from superglm.inference.term import compute_coef_covariance
 from superglm.types import GroupSlice
 
 
@@ -36,7 +36,7 @@ def _build_S_from_penalties(model, lam2) -> NDArray | None:
 def diagnostics(model) -> dict[str, Any]:
     """Per-group diagnostic dict for programmatic / audit access."""
     from superglm.features.spline import _SplineBase
-    from superglm.inference import spline_group_enrichment
+    from superglm.inference.term import spline_group_enrichment
 
     res = model.result
     group_edf = model._group_edf
@@ -78,8 +78,8 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
     """Rich model summary with coefficient table (statsmodels-style)."""
     from scipy.special import gammaln
 
-    from superglm.metrics import build_basis_detail, build_coef_rows
-    from superglm.summary import ModelSummary
+    from superglm.inference.coef_tables import build_basis_detail, build_coef_rows
+    from superglm.inference.summary import ModelSummary
 
     if model._fit_stats is None:
         raise RuntimeError("No fit stats — call fit() or fit_reml() first.")
@@ -357,8 +357,8 @@ def coef_covariance(model):
 def fit_active_info(model):
     """Active design columns, weights, and (X'WX+S)^{-1} from fit state."""
     from superglm.distributions import clip_mu
+    from superglm.inference.covariance import _penalised_xtwx_inv
     from superglm.links import stabilize_eta
-    from superglm.metrics import _penalised_xtwx_inv
 
     eta = model._dm.matvec(model.result.beta) + model.result.intercept
     if model._fit_offset is not None:
@@ -403,8 +403,8 @@ def fit_inference_info(model):
     import scipy.linalg
 
     from superglm.distributions import clip_mu
+    from superglm.inference.covariance import _penalised_xtwx_inv_gram
     from superglm.links import stabilize_eta
-    from superglm.metrics import _penalised_xtwx_inv_gram
 
     # Compute working weights — one O(n) pass
     eta = model._dm.matvec(model.result.beta) + model.result.intercept

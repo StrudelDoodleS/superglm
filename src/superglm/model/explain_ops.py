@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from superglm.inference import drop1 as _drop1
-from superglm.inference import (
+from superglm.inference.term import drop1 as _drop1
+from superglm.inference.term import (
     feature_se_from_cov,
 )
-from superglm.inference import refit_unpenalised as _refit_unpenalised
-from superglm.inference import relativities as _relativities
-from superglm.inference import simultaneous_bands as _simultaneous_bands
-from superglm.inference import term_inference as _term_inference
+from superglm.inference.term import refit_unpenalised as _refit_unpenalised
+from superglm.inference.term import relativities as _relativities
+from superglm.inference.term import simultaneous_bands as _simultaneous_bands
+from superglm.inference.term import term_inference as _term_inference
 
 
 def metrics(model, X, y, sample_weight=None, offset=None):
     """Compute comprehensive diagnostics for the fitted model."""
-    from superglm.metrics import ModelMetrics
+    from superglm.inference.metrics import ModelMetrics
 
     return ModelMetrics(model, X, y, sample_weight, offset)
 
@@ -429,7 +429,7 @@ def plot_data(
 
 def term_importance(model, X, sample_weight=None):
     """Weighted variance of each term's contribution to eta."""
-    from superglm.diagnostics import term_importance as _term_importance
+    from superglm.diagnostics.term_diagnostics import term_importance as _term_importance
 
     return _term_importance(model, X, sample_weight)
 
@@ -446,7 +446,9 @@ def term_drop_diagnostics(
     y_val=None,
 ):
     """Drop-term diagnostics wrapper."""
-    from superglm.diagnostics import term_drop_diagnostics as _term_drop_diagnostics
+    from superglm.diagnostics.term_diagnostics import (
+        term_drop_diagnostics as _term_drop_diagnostics,
+    )
 
     return _term_drop_diagnostics(
         model,
@@ -462,13 +464,13 @@ def term_drop_diagnostics(
 
 def spline_redundancy(model, X, sample_weight=None):
     """Spline redundancy diagnostics."""
-    from superglm.diagnostics import spline_redundancy as _spline_redundancy
+    from superglm.diagnostics.spline_checks import spline_redundancy as _spline_redundancy
 
     return _spline_redundancy(model, X, sample_weight)
 
 
 def discretization_impact(model, X, y, sample_weight=None, **kwargs):
     """Analyse the impact of discretizing spline/polynomial curves."""
-    from superglm.discretize import discretization_impact as _disc_impact
+    from superglm.diagnostics.discretize import discretization_impact as _disc_impact
 
     return _disc_impact(model, X, y, sample_weight, **kwargs)
