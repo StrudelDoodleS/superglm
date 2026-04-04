@@ -175,7 +175,6 @@ class TensorMarginalInfo:
     projection: NDArray  # (K_raw, K_eff) raw→centered+constrained projection
     K_eff: int  # effective column count
     degree: int  # B-spline degree (for basis eval at new points)
-    penalty_components: list[tuple[str, NDArray]] | None = None
 
 
 # ── Discretized tensor build result ─────────────────────────────
