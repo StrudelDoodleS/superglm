@@ -103,15 +103,7 @@ class LossRatioChartResult:
 
 # ── Private helpers ──────────────────────────────────────────────
 
-
-def _ensure_array(a) -> NDArray:
-    return np.asarray(a, dtype=float)
-
-
-def _default_weights(w, n: int) -> NDArray:
-    if w is None:
-        return np.ones(n, dtype=float)
-    return _ensure_array(w)
+from superglm._utils import _default_weights, _ensure_array  # noqa: E402
 
 
 def _quantile_bins(sort_values: NDArray, weights: NDArray, n_bins: int) -> NDArray:

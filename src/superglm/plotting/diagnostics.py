@@ -154,7 +154,7 @@ def _simulate_response(family, mu, phi, sample_weight, rng) -> NDArray | None:
         return nbinom_dist.rvs(n=theta, p=p_nb, random_state=rng).astype(float)
 
     if isinstance(family, Tweedie):
-        from superglm.tweedie_profile import generate_tweedie_cpg
+        from superglm.profiling.tweedie import generate_tweedie_cpg
 
         return generate_tweedie_cpg(len(mu), mu, phi, family.p, rng=rng)
 
@@ -468,7 +468,7 @@ def _panel_qq_envelope(ax, model, m, mu, w, qresid, n, n_sim, seed, rng):
     sim_w = w[sim_idx] if sim_idx is not None else w
 
     try:
-        from superglm.metrics import ModelMetrics
+        from superglm.inference.metrics import ModelMetrics
 
         sim_sorted = np.empty((sim_n, n_grid))
         for i in range(sim_n):

@@ -14,16 +14,12 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
 )
 from superglm.links import Link, stabilize_eta
-from superglm.reml_optimizer import (
-    compute_dW_deta,
-    optimize_direct_reml,
-    optimize_efs_reml,
-    reml_direct_gradient,
-    reml_direct_hessian,
-    reml_laml_objective,
-    reml_w_correction,
-    run_reml_once,
-)
+from superglm.reml.direct import optimize_direct_reml
+from superglm.reml.efs import optimize_efs_reml
+from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
+from superglm.reml.objective import reml_laml_objective
+from superglm.reml.runner import run_reml_once
+from superglm.reml.w_derivatives import compute_dW_deta, reml_w_correction
 from superglm.solvers.irls_direct import (
     _build_penalty_matrix,
     fit_irls_direct,
@@ -128,7 +124,7 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
 
     # Auto-estimate NB theta if requested
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
-        from superglm.nb_profile import estimate_nb_theta
+        from superglm.profiling.nb import estimate_nb_theta
 
         nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
@@ -501,7 +497,7 @@ def model_optimize_discrete_reml_cached_w(
     profile=None,
 ):
     """Cached-W fREML optimizer for the discrete path."""
-    from superglm.reml_optimizer import optimize_discrete_reml_cached_w
+    from superglm.reml.discrete import optimize_discrete_reml_cached_w
 
     return optimize_discrete_reml_cached_w(
         model._dm,
@@ -642,7 +638,7 @@ def fit_reml(
 
     # Auto-estimate NB theta if requested
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
-        from superglm.nb_profile import estimate_nb_theta
+        from superglm.profiling.nb import estimate_nb_theta
 
         nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
@@ -700,7 +696,7 @@ def fit_reml(
         return model
 
     # Build penalty components and caches (eigenstructure computed once)
-    from superglm.reml import build_penalty_caches, build_penalty_components
+    from superglm.reml.penalty_algebra import build_penalty_caches, build_penalty_components
 
     reml_penalties = build_penalty_components(model._dm.group_matrices, reml_groups)
     penalty_caches = build_penalty_caches(model._dm.group_matrices, reml_groups)
@@ -776,7 +772,7 @@ def fit_reml(
             reml_penalties=reml_penalties,
         )
         pq_final = float(best.pirls_result.beta @ S_final @ best.pirls_result.beta)
-        from superglm.reml import compute_total_penalty_rank
+        from superglm.reml.penalty_algebra import compute_total_penalty_rank
 
         M_p = compute_total_penalty_rank(reml_penalties)
         phi_fixed = max((best.pirls_result.deviance + pq_final) / max(len(y) - M_p, 1.0), 1e-10)

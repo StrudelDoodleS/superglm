@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm.inference import TermInference
+from superglm.inference.term import TermInference
 from superglm.plotting.common import (
     _EXP_EDGE_LW,
     _LINE_WIDTH,

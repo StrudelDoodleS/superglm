@@ -1,47 +1,23 @@
-"""REML smoothing parameter estimation.
+"""REML penalty eigenstructure and log-determinant algebra.
 
-Estimates per-term smoothing parameters (lambda_j) from the data. The
-direct ``lambda1=0`` path optimizes a Laplace-approximate REML/LAML
-criterion over log-lambdas, while the mixed penalized-selection path
-retains the Wood (2011) fixed-point update around PIRLS.
-
-Coexists with group lasso: REML controls within-group smoothness
-(per-term lambda_j), group lasso controls between-group selection
-(lambda1). They are orthogonal.
+Pre-computes per-term penalty eigenstructure (Wood 2011 Section 3.1) and
+provides log|S|₊ / ∂log|S|₊ / ∂²log|S|₊ for both single and multi-penalty
+groups.
 
 References
 ----------
 - Wood (2011): Fast stable restricted maximum likelihood and marginal
   likelihood estimation of semiparametric generalized linear models.
   JRSS-B 73(1), 3-36.
-- Wood (2017): Generalized Additive Models, 2nd ed., Ch 6.2.
-- Wood & Fasiolo (2017): A generalized Fellner-Schall method for smoothing
-  parameter optimization. Biometrics 73(4), 1071-1081.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+from superglm.reml.result import PenaltyCache
 from superglm.types import PenaltyComponent
-
-
-@dataclass
-class PenaltyCache:
-    """Pre-computed per-group penalty eigenstructure for REML optimization.
-
-    Computed once at ``fit_reml()`` entry and reused across all Newton /
-    fixed-point iterations, avoiding redundant eigendecompositions of Ω.
-    """
-
-    omega_ssp: NDArray  # (p_g, p_g) = R_inv.T @ omega @ R_inv
-    log_det_omega_plus: float  # log|Ω|₊ (constant across lambda iterations)
-    rank: float  # rank(Ω) = r_j
-    eigvals_omega: NDArray  # positive eigenvalues of Ω_ssp
 
 
 def build_penalty_components(
@@ -224,7 +200,7 @@ def compute_logdet_s_plus(
     a coefficient block, calls similarity_transform_logdet to compute
     log|Σ λ_j Ω_j|₊ correctly.
     """
-    from superglm.multi_penalty import similarity_transform_logdet
+    from superglm.reml.multi_penalty import similarity_transform_logdet
 
     total = 0.0
     for group_name, indices in _group_penalties(penalties).items():
@@ -254,7 +230,7 @@ def compute_logdet_s_derivatives(
     For single-component groups, r_j = rank(Ω_j) (the fast shortcut).
     For multi-component groups, uses logdet_s_gradient / logdet_s_hessian.
     """
-    from superglm.multi_penalty import (
+    from superglm.reml.multi_penalty import (
         logdet_s_gradient,
         logdet_s_hessian,
         similarity_transform_logdet,
@@ -282,40 +258,3 @@ def compute_logdet_s_derivatives(
                     name_j = penalties[global_j].name
                     hess_dict[(name_i, name_j)] = float(hess[local_i, local_j])
     return r_dict, hess_dict
-
-
-@dataclass
-class REMLResult:
-    """Result of REML smoothing parameter estimation."""
-
-    lambdas: dict[str, float]  # group_name -> estimated lambda_j
-    pirls_result: object  # PIRLSResult from final iteration
-    n_reml_iter: int
-    converged: bool
-    lambda_history: list[dict[str, float]] = field(default_factory=list)
-    objective: float | None = None
-
-
-def _map_beta_between_bases(
-    beta: NDArray,
-    old_gms: list,
-    new_gms: list,
-    groups: list,
-) -> NDArray:
-    """Map coefficient vector from old SSP basis to new when R_inv changes.
-
-    For SSP groups, coefficients are in the reparametrised space:
-    beta_bspline = R_inv_old @ beta_old. When R_inv changes (due to a new
-    lambda), we solve for the new beta: beta_new = R_inv_new^{-1} @ beta_bspline.
-
-    Non-SSP groups are copied unchanged.
-    """
-    beta_new = beta.copy()
-    for gm_old, gm_new, g in zip(old_gms, new_gms, groups):
-        if isinstance(gm_old, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix) and isinstance(
-            gm_new, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix
-        ):
-            # Map through B-spline space: old_R_inv @ beta_old = new_R_inv @ beta_new
-            beta_bspline = gm_old.R_inv @ beta_new[g.sl]
-            beta_new[g.sl] = np.linalg.lstsq(gm_new.R_inv, beta_bspline, rcond=None)[0]
-    return beta_new

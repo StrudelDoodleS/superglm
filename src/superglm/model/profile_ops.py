@@ -22,7 +22,7 @@ def estimate_p(
     **kwargs,
 ):
     """Estimate Tweedie p via profile likelihood, refit, and return result."""
-    from superglm.tweedie_profile import estimate_tweedie_p
+    from superglm.profiling.tweedie import estimate_tweedie_p
 
     # Resolve to internal method name: "fit" or "fit_reml"
     _VALID_FIT_MODES = {"fit", "reml", "inherit"}
@@ -104,7 +104,7 @@ def estimate_p(
 
 def estimate_theta(model, X, y, sample_weight=None, offset=None, **kwargs):
     """Estimate NB theta via profile likelihood, refit, and return result."""
-    from superglm.nb_profile import estimate_nb_theta
+    from superglm.profiling.nb import estimate_nb_theta
 
     result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset, **kwargs)
     model.family = NegativeBinomial(theta=result.theta_hat)
