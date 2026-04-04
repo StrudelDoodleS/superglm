@@ -800,17 +800,24 @@ class _SplineBase:
                 f"{type(self).__name__} does not support tensor marginal ingredients. "
                 f"Use kind='cr' or kind='bs' for tensor product interactions."
             )
+        reasons: list[str] = []
+        if self.select:
+            reasons.append("select=True")
         if len(self._m_orders) > 1:
+            reasons.append(f"m={self._m_orders}")
+        if reasons:
+            detail = " and ".join(reasons)
             raise NotImplementedError(
-                "Tensor interactions with multi-order penalty parents (m tuple) "
-                "are not yet supported. Use a single m value for tensor parent splines."
+                f"Tensor interactions require single-penalty parent smooths, but "
+                f"{type(self).__name__} was configured with {detail}. "
+                "This matches the mgcv te()/ti() marginal-smooth contract."
             )
         x = np.asarray(x, dtype=np.float64).ravel()
 
         # 1. Raw basis
         B_raw = self._raw_basis_matrix(x)  # (n, K)
 
-        # 2. Penalty in raw space
+        # 2. Penalty in raw space (single-penalty, multi-m rejected above)
         omega = self._build_penalty()  # (K, K)
 
         # 3. Apply boundary constraints (e.g. natural f''=0)
