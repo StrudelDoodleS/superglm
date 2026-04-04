@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm.inference import SmoothCurve, TermInference
+from superglm.inference.term import SmoothCurve, TermInference
 from superglm.plotting.common import _exposure_kde, _kde_2d
 from superglm.plotting.interactions import _highest_density_mass_field, _reconstruct_interaction
 

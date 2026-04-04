@@ -17,9 +17,9 @@ from superglm.types import FeatureSpec
 from . import base, explain_ops, fit_ops, monotone_ops, profile_ops, state_ops
 
 if TYPE_CHECKING:
-    from superglm.discretize import DiscretizationResult
-    from superglm.inference import InteractionInference, TermInference
-    from superglm.metrics import ModelMetrics
+    from superglm.diagnostics.discretize import DiscretizationResult
+    from superglm.inference.metrics import ModelMetrics
+    from superglm.inference.term import InteractionInference, TermInference
     from superglm.model.fit_ops import PathResult
     from superglm.types import GroupSlice
 
