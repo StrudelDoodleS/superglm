@@ -897,6 +897,89 @@ class TestTensorPenaltyComponentEmission:
         for info in infos:
             assert info.penalty_components is None
 
+    def test_multi_m_parent_raises(self):
+        """Tensor interactions reject multi-penalty parent smooths."""
+        from superglm.features.interaction import TensorInteraction
+        from superglm.features.spline import CubicRegressionSpline
+
+        rng = np.random.default_rng(42)
+        n = 200
+        x1, x2 = rng.uniform(0, 1, n), rng.uniform(0, 1, n)
+
+        spec1 = CubicRegressionSpline(n_knots=4, m=(1, 2))
+        spec2 = CubicRegressionSpline(n_knots=4)
+        spec1.build_knots_and_penalty(x1, np.ones(n))
+        spec2.build_knots_and_penalty(x2, np.ones(n))
+
+        ti = TensorInteraction("x1", "x2", n_knots=(4, 4))
+        with pytest.raises(NotImplementedError, match="single-penalty parent smooths"):
+            ti.build(x1, x2, {"x1": spec1, "x2": spec2})
+
+    def test_tensor_multi_m_parent_fit_raises(self):
+        """fit_reml rejects multi-penalty tensor parents."""
+        from superglm import Spline, SuperGLM
+
+        rng = np.random.default_rng(42)
+        n = 200
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x1": Spline(kind="cr", n_knots=6, m=(1, 2)),
+                "x2": Spline(kind="cr", n_knots=6),
+            },
+            interactions=[("x1", "x2")],
+        )
+        with pytest.raises(NotImplementedError, match="single-penalty parent smooths"):
+            model.fit_reml(X, y, max_reml_iter=30)
+
+    def test_tensor_multi_m_parent_discrete_raises(self):
+        """Discrete path also rejects multi-penalty tensor parents."""
+        from superglm import Spline, SuperGLM
+
+        rng = np.random.default_rng(42)
+        n = 200
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            discrete=True,
+            features={
+                "x1": Spline(kind="cr", n_knots=6, m=(1, 2)),
+                "x2": Spline(kind="cr", n_knots=6),
+            },
+            interactions=[("x1", "x2")],
+        )
+        with pytest.raises(NotImplementedError, match="single-penalty parent smooths"):
+            model.fit_reml(X, y, max_reml_iter=30)
+
+    def test_tensor_n_knots_override_multi_m_raises(self):
+        """n_knots override still rejects multi-penalty tensor parents."""
+        from superglm.features.interaction import TensorInteraction
+        from superglm.features.spline import CubicRegressionSpline
+
+        rng = np.random.default_rng(42)
+        n = 200
+        x1, x2 = rng.uniform(0, 1, n), rng.uniform(0, 1, n)
+
+        spec1 = CubicRegressionSpline(n_knots=8, m=(1, 2))
+        spec2 = CubicRegressionSpline(n_knots=8)
+        spec1.build_knots_and_penalty(x1, np.ones(n))
+        spec2.build_knots_and_penalty(x2, np.ones(n))
+
+        ti = TensorInteraction("x1", "x2", n_knots=(4, 4))
+        with pytest.raises(NotImplementedError, match="single-penalty parent smooths"):
+            ti.build(x1, x2, {"x1": spec1, "x2": spec2})
+
 
 # ── log|S|+ correctness for shared-block penalties ────────────
 
@@ -1162,14 +1245,14 @@ class TestMultiOrderSplinePenalty:
         assert "x:d2" in lam
 
     def test_tensor_parent_multi_m_raises(self):
-        """Tensor parent with multi-m raises NotImplementedError."""
+        """Tensor parents with multi-order penalties are rejected."""
         from superglm.features.spline import CubicRegressionSpline
 
         rng = np.random.default_rng(42)
         x = rng.uniform(0, 1, 200)
         spec = CubicRegressionSpline(n_knots=6, m=(1, 2))
         spec.build(x)
-        with pytest.raises(NotImplementedError, match="Tensor interactions with multi-order"):
+        with pytest.raises(NotImplementedError, match="single-penalty parent smooths"):
             spec.tensor_marginal_ingredients(x)
 
     @pytest.mark.slow

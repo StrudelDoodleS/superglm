@@ -1250,6 +1250,33 @@ class TestTensorMarginalParentGeometry:
         with pytest.raises(NotImplementedError, match="CardinalCRSpline"):
             ti.build(x1, x2, {"a": s1, "b": s2})
 
+    def test_select_parent_raises(self):
+        """Tensor interactions reject select=True parent smooths."""
+        s1 = Spline(kind="cr", n_knots=5, select=True)
+        s2 = Spline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b")
+        with pytest.raises(NotImplementedError, match="single-penalty parent smooths"):
+            ti.build(x1, x2, {"a": s1, "b": s2})
+
+    def test_select_parent_discrete_raises(self):
+        """Discrete tensor path also rejects select=True parent smooths."""
+        s1 = Spline(kind="cr", n_knots=5, select=True, discrete=True)
+        s2 = Spline(n_knots=5, discrete=True)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        ones = np.ones_like(x1)
+        s1.build_knots_and_penalty(x1, ones)
+        s2.build_knots_and_penalty(x2, ones)
+
+        ti = TensorInteraction("a", "b")
+        with pytest.raises(NotImplementedError, match="single-penalty parent smooths"):
+            ti.build_discrete(x1, x2, {"a": s1, "b": s2}, n_bins=(16, 16))
+
     def test_cr_n_knots_override(self):
         """CRS parents with n_knots override should not raise TypeError."""
         s1 = CubicRegressionSpline(n_knots=5)
@@ -1264,6 +1291,19 @@ class TestTensorMarginalParentGeometry:
         # CRS(n_knots=7): K=11, natural removes 2, centering removes 1 → K_eff=8
         assert ti._marginal1.K_eff == 8
         assert info.n_cols == 8 * 8
+
+    def test_select_parent_n_knots_override_raises(self):
+        """select=True parent with n_knots override is still rejected."""
+        s1 = Spline(kind="cr", n_knots=8, select=True)
+        s2 = Spline(n_knots=8)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b", n_knots=(5, 5))
+        with pytest.raises(NotImplementedError, match="single-penalty parent smooths"):
+            ti.build(x1, x2, {"a": s1, "b": s2})
 
     def test_n_knots_override_preserves_knot_alpha(self):
         """Overridden marginals should use the parent's knot_alpha."""
