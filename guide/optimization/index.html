@@ -1,0 +1,3698 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Penalised GLMs for insurance pricing">
+      
+      
+        <meta name="author" content="Max Hicks">
+      
+      
+      
+        <link rel="prev" href="../fitting/">
+      
+      
+        <link rel="next" href="../families/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.5">
+    
+    
+      
+        <title>REML & Solvers - SuperGLM</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#how-to-think-about-reml-and-the-solvers" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="SuperGLM" class="md-header__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SuperGLM
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              REML & Solvers
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="SuperGLM" class="md-nav__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    SuperGLM
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fitting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fitting Modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#contents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contents
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1-the-story-in-one-ladder" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. The story in one ladder
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1. The story in one ladder">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#11-ols" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.1 OLS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#12-wls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.2 WLS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#13-irls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.3 IRLS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#14-p-irls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.4 P-IRLS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#15-p-irls-plus-sparse-penalties" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.5 P-IRLS plus sparse penalties
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#16-reml-and-freml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.6 REML and fREML
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-solver-map" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Solver map
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-why-outer-and-inner-solvers-are-not-actually-crazy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Why outer and inner solvers are not actually crazy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-why-irls-exists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Why IRLS exists
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-what-pirls-means-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. What PIRLS means here
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-why-an-inner-solver-is-needed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Why an inner solver is needed
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Why an inner solver is needed">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-smooth-case-selection_penalty-0" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 Smooth case: selection_penalty = 0
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#62-nonsmooth-case-selection_penalty-0" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 Nonsmooth case: selection_penalty &gt; 0
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-what-proximal-newton-bcd-means" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. What "proximal Newton BCD" means
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="7. What &#34;proximal Newton BCD&#34; means">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#71-proximal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.1 Proximal
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#72-newton" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.2 Newton
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#73-bcd" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.3 BCD
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-why-this-choice-is-reasonable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Why this choice is reasonable
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="8. Why this choice is reasonable">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#81-why-not-plain-coordinate-descent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 Why not plain coordinate descent?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#82-why-not-proximal-gradient-or-fista" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2 Why not proximal gradient or FISTA?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#83-why-not-l-bfgs-or-l-bfgs-b" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.3 Why not L-BFGS or L-BFGS-B?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#84-why-not-admm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.4 Why not ADMM?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#85-why-not-a-full-proximal-newton-solve-over-all-coefficients-at-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.5 Why not a full proximal Newton solve over all coefficients at once?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-performance-and-discretization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Performance and discretization
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="9. Performance and discretization">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#91-where-the-time-really-goes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.1 Where the time really goes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#92-discretization-what-it-does-and-what-it-does-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2 Discretization: what it does and what it does not do
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="9.2 Discretization: what it does and what it does not do">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#921-what-it-does-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2.1 What it does not do
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#922-what-it-does-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2.2 What it does do
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#923-why-this-matters-in-practice" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2.3 Why this matters in practice
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#924-why-the-p-x-p-solve-is-often-still-fine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2.4 Why the p x p solve is often still fine
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10-where-reml-comes-in" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. Where REML comes in
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11-why-reml-has-to-be-outside-pirls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11. Why REML has to be outside PIRLS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#12-what-the-reml-objective-is-doing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12. What the REML objective is doing
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="12. What the REML objective is doing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#121-reml-gradient-and-hessian" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12.1 REML gradient and Hessian
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#13-the-three-reml-paths-in-this-repo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13. The three REML paths in this repo
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="13. The three REML paths in this repo">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#131-direct-reml-newton" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.1 Direct REML (Newton)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#132-discrete-cached-w-reml-freml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.2 Discrete cached-W REML (fREML)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#133-efs-reml-fellner-schall-for-sparse-models" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.3 EFS REML (Fellner-Schall for sparse models)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#14-compared-to-other-software" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14. Compared to other software
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#15-why-reml-on-top-of-proximal-newton-bcd-is-a-coherent-design" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        15. Why "REML on top of proximal Newton BCD" is a coherent design
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#16-reading-order-in-the-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16. Reading order in the code
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#17-appendix-demystifying-the-implementation-heavy-parts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17. Appendix: demystifying the implementation-heavy parts
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="17. Appendix: demystifying the implementation-heavy parts">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#171-cached-w-what-is-actually-being-cached" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.1 Cached W: what is actually being cached?
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="17.1 Cached W: what is actually being cached?">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1711-when-is-that-cache-valid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.1.1 When is that cache valid?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#172-why-the-dead-group-logic-exists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.2 Why the "dead group" logic exists
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#173-qr-why-is-there-qr-code-in-metricspy-if-the-fitter-uses-choleskyeigendecomposition" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.3 QR: why is there QR code in metrics.py if the fitter uses Cholesky/eigendecomposition?
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="17.3 QR: why is there QR code in metrics.py if the fitter uses Cholesky/eigendecomposition?">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1731-why-use-qr-there" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.3.1 Why use QR there?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#174-kernels-what-are-they-really-doing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4 Kernels: what are they really doing?
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="17.4 Kernels: what are they really doing?">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1741-_fused_bincount_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4.1 _fused_bincount_2
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1742-_weighted_bincount_2d" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4.2 _weighted_bincount_2d
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1743-_csr_weighted_bincount" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4.3 _csr_weighted_bincount
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1744-_disc_disc_2d_hist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4.4 _disc_disc_2d_hist
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1745-_block_xtwx_rhs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4.5 _block_xtwx_rhs
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#175-a-good-way-to-read-this-code-without-getting-lost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.5 A good way to read this code without getting lost
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../interactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/mtpl2_frequency_walkthrough/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MTPL2 Frequency Modelling Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/plotting_diagnostics_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Plotting Utilities — Full Inspection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/ordered_categorical_smoothing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smoothing Ordered Categorical Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/tweedie_profile_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tweedie Power Parameter Estimation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/penalties/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Penalties
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#contents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contents
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1-the-story-in-one-ladder" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. The story in one ladder
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1. The story in one ladder">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#11-ols" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.1 OLS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#12-wls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.2 WLS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#13-irls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.3 IRLS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#14-p-irls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.4 P-IRLS
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#15-p-irls-plus-sparse-penalties" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.5 P-IRLS plus sparse penalties
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#16-reml-and-freml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.6 REML and fREML
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-solver-map" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Solver map
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-why-outer-and-inner-solvers-are-not-actually-crazy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Why outer and inner solvers are not actually crazy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-why-irls-exists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Why IRLS exists
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-what-pirls-means-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. What PIRLS means here
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-why-an-inner-solver-is-needed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Why an inner solver is needed
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Why an inner solver is needed">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-smooth-case-selection_penalty-0" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 Smooth case: selection_penalty = 0
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#62-nonsmooth-case-selection_penalty-0" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 Nonsmooth case: selection_penalty &gt; 0
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-what-proximal-newton-bcd-means" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. What "proximal Newton BCD" means
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="7. What &#34;proximal Newton BCD&#34; means">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#71-proximal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.1 Proximal
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#72-newton" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.2 Newton
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#73-bcd" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.3 BCD
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-why-this-choice-is-reasonable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Why this choice is reasonable
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="8. Why this choice is reasonable">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#81-why-not-plain-coordinate-descent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 Why not plain coordinate descent?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#82-why-not-proximal-gradient-or-fista" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2 Why not proximal gradient or FISTA?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#83-why-not-l-bfgs-or-l-bfgs-b" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.3 Why not L-BFGS or L-BFGS-B?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#84-why-not-admm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.4 Why not ADMM?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#85-why-not-a-full-proximal-newton-solve-over-all-coefficients-at-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.5 Why not a full proximal Newton solve over all coefficients at once?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-performance-and-discretization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Performance and discretization
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="9. Performance and discretization">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#91-where-the-time-really-goes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.1 Where the time really goes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#92-discretization-what-it-does-and-what-it-does-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2 Discretization: what it does and what it does not do
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="9.2 Discretization: what it does and what it does not do">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#921-what-it-does-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2.1 What it does not do
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#922-what-it-does-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2.2 What it does do
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#923-why-this-matters-in-practice" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2.3 Why this matters in practice
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#924-why-the-p-x-p-solve-is-often-still-fine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2.4 Why the p x p solve is often still fine
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10-where-reml-comes-in" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. Where REML comes in
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11-why-reml-has-to-be-outside-pirls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11. Why REML has to be outside PIRLS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#12-what-the-reml-objective-is-doing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12. What the REML objective is doing
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="12. What the REML objective is doing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#121-reml-gradient-and-hessian" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12.1 REML gradient and Hessian
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#13-the-three-reml-paths-in-this-repo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13. The three REML paths in this repo
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="13. The three REML paths in this repo">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#131-direct-reml-newton" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.1 Direct REML (Newton)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#132-discrete-cached-w-reml-freml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.2 Discrete cached-W REML (fREML)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#133-efs-reml-fellner-schall-for-sparse-models" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.3 EFS REML (Fellner-Schall for sparse models)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#14-compared-to-other-software" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14. Compared to other software
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#15-why-reml-on-top-of-proximal-newton-bcd-is-a-coherent-design" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        15. Why "REML on top of proximal Newton BCD" is a coherent design
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#16-reading-order-in-the-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16. Reading order in the code
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#17-appendix-demystifying-the-implementation-heavy-parts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17. Appendix: demystifying the implementation-heavy parts
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="17. Appendix: demystifying the implementation-heavy parts">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#171-cached-w-what-is-actually-being-cached" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.1 Cached W: what is actually being cached?
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="17.1 Cached W: what is actually being cached?">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1711-when-is-that-cache-valid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.1.1 When is that cache valid?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#172-why-the-dead-group-logic-exists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.2 Why the "dead group" logic exists
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#173-qr-why-is-there-qr-code-in-metricspy-if-the-fitter-uses-choleskyeigendecomposition" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.3 QR: why is there QR code in metrics.py if the fitter uses Cholesky/eigendecomposition?
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="17.3 QR: why is there QR code in metrics.py if the fitter uses Cholesky/eigendecomposition?">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1731-why-use-qr-there" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.3.1 Why use QR there?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#174-kernels-what-are-they-really-doing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4 Kernels: what are they really doing?
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="17.4 Kernels: what are they really doing?">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1741-_fused_bincount_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4.1 _fused_bincount_2
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1742-_weighted_bincount_2d" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4.2 _weighted_bincount_2d
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1743-_csr_weighted_bincount" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4.3 _csr_weighted_bincount
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1744-_disc_disc_2d_hist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4.4 _disc_disc_2d_hist
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1745-_block_xtwx_rhs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4.5 _block_xtwx_rhs
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#175-a-good-way-to-read-this-code-without-getting-lost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.5 A good way to read this code without getting lost
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="how-to-think-about-reml-and-the-solvers">How To Think About REML and the Solvers<a class="headerlink" href="#how-to-think-about-reml-and-the-solvers" title="Permanent link">&para;</a></h1>
+<p>If the optimization stack feels like too many acronyms piled on top of each other, the clean mental model is:</p>
+<ul>
+<li><code>IRLS</code> turns a nonlinear GLM problem into a sequence of weighted least-squares problems.</li>
+<li><code>PIRLS</code> is that same idea after adding penalties.</li>
+<li>when <code>selection_penalty &gt; 0</code>, the penalized weighted least-squares subproblem is nonsmooth, so it needs an inner solver</li>
+<li>this repo uses proximal Newton block coordinate descent for that inner solve</li>
+<li><code>REML</code> sits outside all of that and chooses the smoothing parameters</li>
+</ul>
+<p>So the stack is not:</p>
+<p><code>REML versus PIRLS versus BCD</code></p>
+<p>It is:</p>
+<p><code>REML outside PIRLS outside a block solver</code></p>
+<h2 id="contents">Contents<a class="headerlink" href="#contents" title="Permanent link">&para;</a></h2>
+<p>Use this like a chaptered reference: skim sections <code>1</code> to <code>3</code> for the big picture, then
+jump to the solver layer you care about.</p>
+<ul>
+<li><a href="#1-the-story-in-one-ladder">1. The story in one ladder</a><ul>
+<li><a href="#11-ols">1.1 OLS</a></li>
+<li><a href="#12-wls">1.2 WLS</a></li>
+<li><a href="#13-irls">1.3 IRLS</a></li>
+<li><a href="#14-p-irls">1.4 P-IRLS</a></li>
+<li><a href="#15-p-irls-plus-sparse-penalties">1.5 P-IRLS plus sparse penalties</a></li>
+<li><a href="#16-reml-and-freml">1.6 REML and fREML</a></li>
+</ul>
+</li>
+<li><a href="#2-solver-map">2. Solver map</a></li>
+<li><a href="#3-why-outer-and-inner-solvers-are-not-actually-crazy">3. Why outer and inner solvers are not actually crazy</a></li>
+<li><a href="#4-why-irls-exists">4. Why IRLS exists</a></li>
+<li><a href="#5-what-pirls-means-here">5. What PIRLS means here</a></li>
+<li><a href="#6-why-an-inner-solver-is-needed">6. Why an inner solver is needed</a><ul>
+<li><a href="#61-smooth-case-selection_penalty-0">6.1 Smooth case: selection_penalty = 0</a></li>
+<li><a href="#62-nonsmooth-case-selection_penalty-0">6.2 Nonsmooth case: selection_penalty &gt; 0</a></li>
+</ul>
+</li>
+<li><a href="#7-what-proximal-newton-bcd-means">7. What "proximal Newton BCD" means</a><ul>
+<li><a href="#71-proximal">7.1 Proximal</a></li>
+<li><a href="#72-newton">7.2 Newton</a></li>
+<li><a href="#73-bcd">7.3 BCD</a></li>
+</ul>
+</li>
+<li><a href="#8-why-this-choice-is-reasonable">8. Why this choice is reasonable</a><ul>
+<li><a href="#81-why-not-plain-coordinate-descent">8.1 Why not plain coordinate descent?</a></li>
+<li><a href="#82-why-not-proximal-gradient-or-fista">8.2 Why not proximal gradient or FISTA?</a></li>
+<li><a href="#83-why-not-l-bfgs-or-l-bfgs-b">8.3 Why not L-BFGS or L-BFGS-B?</a></li>
+<li><a href="#84-why-not-admm">8.4 Why not ADMM?</a></li>
+<li><a href="#85-why-not-a-full-proximal-newton-solve-over-all-coefficients-at-once">8.5 Why not a full proximal Newton solve over all coefficients at once?</a></li>
+</ul>
+</li>
+<li><a href="#9-performance-and-discretization">9. Performance and discretization</a><ul>
+<li><a href="#91-where-the-time-really-goes">9.1 Where the time really goes</a></li>
+<li><a href="#92-discretization-what-it-does-and-what-it-does-not-do">9.2 Discretization: what it does and what it does not do</a></li>
+</ul>
+</li>
+<li><a href="#10-where-reml-comes-in">10. Where REML comes in</a></li>
+<li><a href="#11-why-reml-has-to-be-outside-pirls">11. Why REML has to be outside PIRLS</a></li>
+<li><a href="#12-what-the-reml-objective-is-doing">12. What the REML objective is doing</a><ul>
+<li><a href="#121-reml-gradient-and-hessian">12.1 REML gradient and Hessian</a></li>
+</ul>
+</li>
+<li><a href="#13-the-three-reml-paths-in-this-repo">13. The three REML paths in this repo</a><ul>
+<li><a href="#131-direct-reml-newton">13.1 Direct REML (Newton)</a></li>
+<li><a href="#132-discrete-cached-w-reml-freml">13.2 Discrete cached-W REML (fREML)</a></li>
+<li><a href="#133-efs-reml-fellner-schall-for-sparse-models">13.3 EFS REML (Fellner-Schall for sparse models)</a></li>
+</ul>
+</li>
+<li><a href="#14-compared-to-other-software">14. Compared to other software</a></li>
+<li><a href="#15-why-reml-on-top-of-proximal-newton-bcd-is-a-coherent-design">15. Why "REML on top of proximal Newton BCD" is a coherent design</a></li>
+<li><a href="#16-reading-order-in-the-code">16. Reading order in the code</a></li>
+<li><a href="#17-appendix-demystifying-the-implementation-heavy-parts">17. Appendix: demystifying the implementation-heavy parts</a><ul>
+<li><a href="#171-cached-w-what-is-actually-being-cached">17.1 Cached W: what is actually being cached?</a></li>
+<li><a href="#172-why-the-dead-group-logic-exists">17.2 Why the "dead group" logic exists</a></li>
+<li><a href="#173-qr-why-is-there-qr-code-in-metricspy-if-the-fitter-uses-choleskyeigendecomposition">17.3 QR: why is there QR code in <code>metrics.py</code> if the fitter uses Cholesky/eigendecomposition?</a></li>
+<li><a href="#174-kernels-what-are-they-really-doing">17.4 Kernels: what are they really doing?</a></li>
+<li><a href="#175-a-good-way-to-read-this-code-without-getting-lost">17.5 A good way to read this code without getting lost</a></li>
+</ul>
+</li>
+</ul>
+<h2 id="1-the-story-in-one-ladder">1. The story in one ladder<a class="headerlink" href="#1-the-story-in-one-ladder" title="Permanent link">&para;</a></h2>
+<p>One good way to make the stack feel intuitive is to view it as a historical build-up rather than a pile of acronyms.</p>
+<h3 id="11-ols">1.1 OLS<a class="headerlink" href="#11-ols" title="Permanent link">&para;</a></h3>
+<p>Start with ordinary least squares: <code>min_beta ||y - X beta||^2</code></p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a># ── OLS: one solve, no iteration ──────────────────────────────
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>β = solve(XᵀX, Xᵀy)            # normal equations: (XᵀX)β = Xᵀy
+</code></pre></div>
+<p>This is the easy world: quadratic objective, one global solve, no iteration.</p>
+<h3 id="12-wls">1.2 WLS<a class="headerlink" href="#12-wls" title="Permanent link">&para;</a></h3>
+<p>Then you realize observations should not contribute equally. WLS introduces a diagonal weight matrix <span class="arithmatex">\(\mathbf{W} = \text{diag}(w_1, \ldots, w_n)\)</span> that controls how much each observation influences the fit.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a># ── WLS: same as OLS but with observation weights ─────────────
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a># W = diag(w₁, ..., wₙ)       # diagonal weight matrix
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>β = solve(XᵀWX, XᵀWy)          # weighted normal equations
+</code></pre></div>
+<p>Still linear algebra, still one solve. The only change is that <span class="arithmatex">\(\mathbf{X}^\top\mathbf{X}\)</span> becomes <span class="arithmatex">\(\mathbf{X}^\top\mathbf{W}\mathbf{X}\)</span> and <span class="arithmatex">\(\mathbf{X}^\top\mathbf{y}\)</span> becomes <span class="arithmatex">\(\mathbf{X}^\top\mathbf{W}\mathbf{y}\)</span>.</p>
+<p><strong>Where do the weights come from?</strong> Three common sources, each with a different interpretation:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Weight</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Inverse-variance</td>
+<td><span class="arithmatex">\(w_i = 1 / \text{Var}(y_i)\)</span></td>
+<td>More precise observations contribute more — this is the classical GLS motivation</td>
+</tr>
+<tr>
+<td>Frequency / exposure</td>
+<td><span class="arithmatex">\(w_i = e_i\)</span> (e.g. policy-years)</td>
+<td>Observation <span class="arithmatex">\(i\)</span> represents <span class="arithmatex">\(e_i\)</span> units of exposure, so its expected count scales linearly: <span class="arithmatex">\(\text{E}[y_i] = e_i \cdot \lambda_i\)</span></td>
+</tr>
+<tr>
+<td>IRLS working weights</td>
+<td><span class="arithmatex">\(w_i = e_i \cdot (\mathrm{d}\mu/\mathrm{d}\eta)^2 / V(\mu_i)\)</span></td>
+<td>Local curvature of the GLM log-likelihood — this is the weight that makes the WLS subproblem equivalent to one Fisher-scoring step</td>
+</tr>
+</tbody>
+</table>
+<p>In the IRLS ladder below, the third type is what appears. The weights are not fixed — they are recomputed at each iteration from the current fit. That is the whole point of "iteratively <strong>reweighted</strong>" least squares.</p>
+<p>In insurance pricing, the frequency/exposure weights <span class="arithmatex">\(e_i\)</span> enter as a multiplier on the IRLS working weights. A policy observed for 3 years contributes 3x the information of a policy observed for 1 year. The product <span class="arithmatex">\(w_i = e_i \cdot (\mathrm{d}\mu/\mathrm{d}\eta)^2 / V(\mu_i)\)</span> combines both the exposure and the local curvature into a single diagonal weight.</p>
+<h3 id="13-irls">1.3 IRLS<a class="headerlink" href="#13-irls" title="Permanent link">&para;</a></h3>
+<p>Then you move from Gaussian least squares to a GLM. The likelihood is not quadratic anymore.</p>
+<p>The classic trick: near the current fit, replace the GLM with a weighted least-squares problem.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a># ── IRLS: iteratively reweighted least squares ────────────────
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a># g       = link function (e.g. log, logit)
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a># g⁻¹     = inverse link (e.g. exp, expit)
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a># V(μ)    = variance function (e.g. μ for Poisson, μ(1−μ) for Binomial)
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>η = X β₀                             # linear predictor
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>μ = g⁻¹(η)                           # predicted mean on response scale
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>for t in 1, 2, ...:
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>    dμ/dη = (g⁻¹)′(η)               # derivative of inverse link
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>    Wᵢ = wᵢ ⋅ (dμ/dη)² / V(μ)       # working weights (Fisher information)
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>    zᵢ = ηᵢ + (yᵢ − μᵢ) / (dμ/dη)  # working response (pseudo-data)
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>
+<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>    β = solve(XᵀWX, XᵀWz)           # solve one WLS problem
+<a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>
+<a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>    η = Xβ                            # update linear predictor
+<a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>    μ = g⁻¹(η)                        # update predicted mean
+<a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>
+<a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>    if converged(deviance):            # check relative deviance change
+<a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a>        break
+</code></pre></div>
+<p>For canonical links the working weights simplify:</p>
+<ul>
+<li>Poisson/log: <code>W_i = w_i ⋅ mu_i</code></li>
+<li>Binomial/logit: <code>W_i = w_i ⋅ mu_i ⋅ (1 - mu_i)</code></li>
+</ul>
+<p>And for Gamma/log (not canonical — the canonical link is inverse, but log is the standard choice in practice):</p>
+<ul>
+<li>Gamma/log: <code>W_i = w_i</code> (constant — one of the reasons Gamma/log converges fast)</li>
+</ul>
+<p>This is the first place the "outer loop / inner solve" idea appears naturally:</p>
+<ul>
+<li>outer loop updates <code>W</code> and <code>z</code> (the local quadratic approximation)</li>
+<li>inner solve solves the current WLS problem</li>
+</ul>
+<h3 id="14-p-irls">1.4 P-IRLS<a class="headerlink" href="#14-p-irls" title="Permanent link">&para;</a></h3>
+<p>Now add a smooth quadratic penalty <code>S = sum_j lambda_j S_j</code> (block-diagonal smoothing matrix):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a># ── P-IRLS: penalized IRLS ───────────────────────────────────
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a># S = block-diagonal smoothing penalty (one block per spline term)
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a># λⱼ controls the roughness penalty for term j
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>for t in 1, 2, ...:
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    W, z = working_quantities(η, μ, y)
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>    β = solve(XᵀWX + S, XᵀWz)      # penalized normal equations
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>    η = Xβ
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>    μ = g⁻¹(η)
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>    if converged(deviance):
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>        break
+</code></pre></div>
+<p>Still one <code>p x p</code> linear solve per iteration. The penalty <code>S</code> regularises the spline coefficients, preventing overfitting without needing to choose knots carefully.</p>
+<h3 id="15-p-irls-plus-sparse-penalties">1.5 P-IRLS plus sparse penalties<a class="headerlink" href="#15-p-irls-plus-sparse-penalties" title="Permanent link">&para;</a></h3>
+<p>Now add group lasso or sparse group lasso. The subproblem becomes:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a># ── P-IRLS + group lasso ─────────────────────────────────────
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a># Objective at each IRLS step:
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>#   ½ ‖W¹ᐟ²(z − Xβ)‖²                   ← data fit
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>#   + ½ βᵀSβ                              ← smoothness penalty (quadratic)
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>#   + λ₁ Σ_g wg ‖βg‖₂                    ← group lasso (nonsmooth!)
+</code></pre></div>
+<p>The last term is not differentiable at zero — it has a kink where entire coefficient groups hit the origin.</p>
+<p>This is the point where the subproblem stops being "just linear algebra" because the penalty is nonsmooth at zero.</p>
+<p>That is why you need a dedicated inner coefficient solver.</p>
+<h3 id="16-reml-and-freml">1.6 REML and fREML<a class="headerlink" href="#16-reml-and-freml" title="Permanent link">&para;</a></h3>
+<p>Finally, ask a higher-level question:</p>
+<blockquote>
+<p>not just "what coefficients fit best for this penalty?"
+but "what smoothness penalty should I use?"</p>
+</blockquote>
+<p>That creates a new outer optimization problem over the smoothing parameters.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a># ── REML: conceptual outer loop ───────────────────────────────
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a># Goal: choose smoothness parameters λ, not just coefficients β
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>initialize λ
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>repeat:
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    β̂, μ, W = solve the inner GLM at current λ
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>        # IRLS / PIRLS gives the fitted coefficients and local geometry
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>    H = XᵀWX + S(λ)
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>        # penalized Hessian at the current fit
+<a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>
+<a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>    obj, grad, hess = evaluate REML criterion from β̂, W, H
+<a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a>        # &quot;is this amount of smoothness too wiggly or too stiff?&quot;
+<a id="__codelineno-5-15" name="__codelineno-5-15" href="#__codelineno-5-15"></a>
+<a id="__codelineno-5-16" name="__codelineno-5-16" href="#__codelineno-5-16"></a>    λ = update_smoothing_parameters(obj, grad, hess)
+<a id="__codelineno-5-17" name="__codelineno-5-17" href="#__codelineno-5-17"></a>        # Newton / Fellner-Schall / damped step on log λ
+<a id="__codelineno-5-18" name="__codelineno-5-18" href="#__codelineno-5-18"></a>
+<a id="__codelineno-5-19" name="__codelineno-5-19" href="#__codelineno-5-19"></a>until λ and the REML objective stabilize
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a># ── fREML: same outer goal, fewer expensive refreshes ─────────
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a># Key idea: if W is nearly unchanged, reuse weighted summaries
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>initialize λ
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>repeat:
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    β̂, μ, W = run a full inner fit
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>    cache XᵀWX, XᵀWz, XᵀW1, ΣW, ΣWz
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>    repeat a few cheap smoothing updates:
+<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>        hold W fixed
+<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>        change only S(λ)
+<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a>        re-solve from cached summaries
+<a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a>        update λ
+<a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a>
+<a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a>    if λ changed enough that W is no longer trustworthy:
+<a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a>        refresh with another full inner fit
+<a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a>
+<a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a>until λ stabilizes
+</code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Conceptually</p>
+<p><code>REML</code> is "fit coefficients, score the current smoothness, update the smoothness, repeat."
+<code>fREML</code> is the same outer idea, but engineered to reduce repeated full data passes
+by reusing weighted summaries when the IRLS geometry has not changed much.</p>
+</div>
+<div class="admonition tip">
+<p class="admonition-title">Recommended workflow for spline-based GAM models</p>
+<p>Use <code>fit_reml()</code> with <code>select=True</code> on your spline terms. REML estimates a separate smoothing parameter per term, and <code>select=True</code> adds a double-penalty decomposition (linear + wiggly subgroups) that lets REML shrink irrelevant terms all the way to zero — mgcv-style automatic term selection without needing <code>selection_penalty &gt; 0</code>.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Current multi-penalty guard rails</p>
+<p>The exact and discrete REML paths support shared-block multi-penalty terms
+such as tensor margins and <code>Spline(m=(...))</code>. The sparse-additive
+<code>selection_penalty &gt; 0</code> path does not yet support those shared-block
+multi-penalty combinations. Likewise, <code>select=True + m=(...)</code> is deferred
+until the select architecture is refactored to use same-block penalty
+components instead of split subgroups.</p>
+</div>
+<p>So the rough historical ladder is:</p>
+<p><code>OLS -&gt; WLS -&gt; IRLS -&gt; P-IRLS -&gt; nonsmooth inner solver -&gt; REML/fREML</code></p>
+<p>That is the story of how the stack grows. The rest of this guide does not try
+to retell every rung in full detail. It just zooms in on the three transitions
+that matter for this repo:</p>
+<ul>
+<li>how IRLS turns a GLM into a penalized WLS problem</li>
+<li>why the nonsmooth PIRLS subproblem needs its own inner solver</li>
+<li>why REML has to sit outside the coefficient fit</li>
+</ul>
+<h2 id="2-solver-map">2. Solver map<a class="headerlink" href="#2-solver-map" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Main question</th>
+<th>Solves for</th>
+<th>Why it exists</th>
+<th>In this repo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GLM likelihood</td>
+<td>How should the mean depend on the predictors?</td>
+<td><code>beta</code>, intercept</td>
+<td>The base statistical model</td>
+<td><code>fit()</code>, <code>fit_reml()</code></td>
+</tr>
+<tr>
+<td>IRLS / PIRLS</td>
+<td>What quadratic surrogate should represent the GLM right now?</td>
+<td>working weights <code>W</code>, working response <code>z</code></td>
+<td>GLM loss is not quadratic</td>
+<td><code>src/superglm/solvers/pirls.py</code>, <code>src/superglm/solvers/irls_direct.py</code></td>
+</tr>
+<tr>
+<td>Inner coefficient solver</td>
+<td>For fixed <code>W</code> and <code>z</code>, what coefficients solve the penalized WLS problem?</td>
+<td><code>beta</code>, intercept</td>
+<td>penalties may be nonsmooth</td>
+<td>direct solve or proximal Newton BCD</td>
+</tr>
+<tr>
+<td>REML / fREML</td>
+<td>How smooth should each smooth term be?</td>
+<td>per-term <code>lambda_j</code></td>
+<td>the inner fit does not choose smoothness for you</td>
+<td><code>src/superglm/reml_optimizer.py</code></td>
+</tr>
+</tbody>
+</table>
+<div class="admonition tip">
+<p class="admonition-title">If you remember one thing</p>
+<p><code>IRLS</code> fits coefficients for fixed penalties. <code>REML</code> fits the penalties themselves.</p>
+</div>
+<h2 id="3-why-outer-and-inner-solvers-are-not-actually-crazy">3. Why outer and inner solvers are not actually crazy<a class="headerlink" href="#3-why-outer-and-inner-solvers-are-not-actually-crazy" title="Permanent link">&para;</a></h2>
+<p>At first glance, nested solvers look like engineering excess. But they usually mean the model has genuinely separable layers.</p>
+<p>Here the layers are real:</p>
+<ul>
+<li>the GLM likelihood is nonlinear, so it needs repeated local quadratic updates</li>
+<li>the sparse penalty is nonsmooth, so the weighted least-squares subproblem needs a prox-capable inner solver</li>
+<li>the smoothness parameters are hyperparameters of the penalized fit, so they need their own outer optimization</li>
+</ul>
+<p>So the nesting is not arbitrary complexity. It is the optimization structure implied by the model.</p>
+<h2 id="4-why-irls-exists">4. Why IRLS exists<a class="headerlink" href="#4-why-irls-exists" title="Permanent link">&para;</a></h2>
+<p>A GLM maximises a log-likelihood that is nonlinear in <span class="arithmatex">\(\boldsymbol{\beta}\)</span>. IRLS replaces it with a sequence of WLS problems by taking a local Fisher-scoring approximation at each iteration.</p>
+<p>The working weights encode the local curvature of the GLM likelihood:</p>
+<div class="arithmatex">\[
+W_i = w_i \cdot \frac{(\mathrm{d}\mu_i / \mathrm{d}\eta_i)^2}{V(\mu_i)}
+\]</div>
+<p>The working response linearises the residual around the current fit:</p>
+<div class="arithmatex">\[
+z_i = \eta_i + \frac{y_i - \mu_i}{\mathrm{d}\mu_i / \mathrm{d}\eta_i}
+\]</div>
+<p>The P-IRLS update (with smoothing penalty <span class="arithmatex">\(\mathbf{S}\)</span>) solves the augmented system for the intercept <span class="arithmatex">\(\alpha\)</span> and coefficients <span class="arithmatex">\(\boldsymbol{\beta}\)</span> simultaneously:</p>
+<div class="arithmatex">\[
+\begin{pmatrix} \sum W_i &amp; \mathbf{1}^\top \mathbf{W} \mathbf{X} \\ \mathbf{X}^\top \mathbf{W} \mathbf{1} &amp; \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S} \end{pmatrix} \begin{pmatrix} \alpha \\ \boldsymbol{\beta} \end{pmatrix} = \begin{pmatrix} \sum W_i z_i \\ \mathbf{X}^\top \mathbf{W} \mathbf{z} \end{pmatrix}
+\]</div>
+<p>That is the whole IRLS idea. Each outer iteration does four things:</p>
+<ol>
+<li>compute <span class="arithmatex">\(\mathbf{W}\)</span> and <span class="arithmatex">\(\mathbf{z}\)</span> from the current fit</li>
+<li>solve one penalized weighted least-squares problem</li>
+<li>update <span class="arithmatex">\(\eta\)</span> and <span class="arithmatex">\(\mu\)</span></li>
+<li>stop when the deviance stabilizes</li>
+</ol>
+<p>So the only reason IRLS feels complicated at first is that the weights are
+endogenous. Once <span class="arithmatex">\(\mathbf{W}\)</span> and <span class="arithmatex">\(\mathbf{z}\)</span> are fixed, the subproblem is
+just weighted least squares again.</p>
+<h2 id="5-what-pirls-means-here">5. What PIRLS means here<a class="headerlink" href="#5-what-pirls-means-here" title="Permanent link">&para;</a></h2>
+<p>In the GAM literature, <code>PIRLS</code> usually means "penalized IRLS": IRLS plus a smooth quadratic penalty.</p>
+<p>In this repo, that basic idea is still true, but there is an extra wrinkle:</p>
+<ul>
+<li>the spline smoothness penalty is quadratic</li>
+<li>the group-lasso style selection penalty is nonsmooth</li>
+</ul>
+<p>So "PIRLS" in the code really means:</p>
+<blockquote>
+<p>build the penalized weighted least-squares subproblem, then hand it to the appropriate inner solver</p>
+</blockquote>
+<p>That is why the repo has two inner paths:</p>
+<ul>
+<li><code>fit_irls_direct()</code> when the subproblem is smooth enough to solve directly</li>
+<li><code>_fit_pirls_inner()</code> when the subproblem includes a nonsmooth group penalty</li>
+</ul>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a># ── PIRLS dispatch ─────────────────────────────────────────────
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a># At fit time, the solver is chosen automatically:
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>if selection_penalty == 0:
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    # All penalties are quadratic (smoothing only)
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>    # → one dense (p+1)×(p+1) solve per IRLS iteration
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>    result, H⁻¹ = fit_irls_direct(X, y, W, S)
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>else:
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>    # Group lasso / sparse group lasso penalty is nonsmooth
+<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>    # → proximal Newton BCD inner loop per IRLS iteration
+<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>    result = fit_pirls(X, y, W, S, penalty)
+</code></pre></div>
+<h2 id="6-why-an-inner-solver-is-needed">6. Why an inner solver is needed<a class="headerlink" href="#6-why-an-inner-solver-is-needed" title="Permanent link">&para;</a></h2>
+<p>For fixed <span class="arithmatex">\(\mathbf{W}\)</span> and <span class="arithmatex">\(\mathbf{z}\)</span>, the penalized subproblem is:</p>
+<div class="arithmatex">\[
+\min_{\boldsymbol{\beta}} \; \frac{1}{2} \|\mathbf{W}^{1/2}(\mathbf{z} - \alpha\mathbf{1} - \mathbf{X}\boldsymbol{\beta})\|^2 + \frac{1}{2}\boldsymbol{\beta}^\top \mathbf{S} \boldsymbol{\beta} + P(\boldsymbol{\beta})
+\]</div>
+<p>Now split by penalty type.</p>
+<h3 id="61-smooth-case-selection_penalty-0">6.1 Smooth case: selection_penalty = 0<a class="headerlink" href="#61-smooth-case-selection_penalty-0" title="Permanent link">&para;</a></h3>
+<p>If there is no group lasso penalty, <span class="arithmatex">\(P(\boldsymbol{\beta}) = 0\)</span> and the whole objective is quadratic. The solution is a single linear system:</p>
+<div class="arithmatex">\[
+\boldsymbol{\beta} = (\mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S})^{-1} \mathbf{X}^\top \mathbf{W} \mathbf{z}
+\]</div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a># ── Direct IRLS: smooth penalties only ─────────────────────────
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a># S = block-diagonal smoothing penalty (one block per spline)
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a># Uses gram-based ops: XᵀWX via per-group gram + cross_gram
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>#   → O(n_bins ⋅ K²) for discretized groups, not O(n ⋅ p²)
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>η = α + Xβ
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>μ = g⁻¹(η)
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>for t in 1, 2, ...:
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>    W, z = working_quantities(η, μ, y)
+<a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>
+<a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>    # Form augmented (p+1)×(p+1) system from cached summaries
+<a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a>    XᵀWX, XᵀW1, XᵀWz = block_xtwx_rhs(groups, W, Wz)
+<a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a>
+<a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a>    M = [[ΣWᵢ,   XᵀW1  ],           # intercept row
+<a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a>         [XᵀW1,  XᵀWX + S]]          # coefficient rows
+<a id="__codelineno-8-17" name="__codelineno-8-17" href="#__codelineno-8-17"></a>    rhs = [ΣWᵢzᵢ, XᵀWz]
+<a id="__codelineno-8-18" name="__codelineno-8-18" href="#__codelineno-8-18"></a>
+<a id="__codelineno-8-19" name="__codelineno-8-19" href="#__codelineno-8-19"></a>    α, β = solve(M, rhs)              # one eigh or Cholesky
+<a id="__codelineno-8-20" name="__codelineno-8-20" href="#__codelineno-8-20"></a>
+<a id="__codelineno-8-21" name="__codelineno-8-21" href="#__codelineno-8-21"></a>    η = α + Xβ
+<a id="__codelineno-8-22" name="__codelineno-8-22" href="#__codelineno-8-22"></a>    μ = g⁻¹(η)
+<a id="__codelineno-8-23" name="__codelineno-8-23" href="#__codelineno-8-23"></a>    if converged(deviance): break
+</code></pre></div>
+<p>The repo uses this in <code>src/superglm/solvers/irls_direct.py</code>. Typical iteration counts: 5-7 for Poisson/log, even with <code>select=True</code> double-penalty terms.</p>
+<h3 id="62-nonsmooth-case-selection_penalty-0">6.2 Nonsmooth case: selection_penalty &gt; 0<a class="headerlink" href="#62-nonsmooth-case-selection_penalty-0" title="Permanent link">&para;</a></h3>
+<p>If <span class="arithmatex">\(\lambda_1 &gt; 0\)</span>, the penalty includes a group lasso term:</p>
+<div class="arithmatex">\[
+P(\boldsymbol{\beta}) = \lambda_1 \sum_g w_g \|\boldsymbol{\beta}_g\|_2
+\]</div>
+<p>This is not differentiable at <span class="arithmatex">\(\boldsymbol{\beta}_g = \mathbf{0}\)</span> — it has a kink where entire coefficient groups hit the origin.</p>
+<p>That means a plain Newton or Cholesky solve is no longer enough. You need a method that can handle:</p>
+<ul>
+<li>exact zeros (entire groups removed)</li>
+<li>whole groups turning on and off</li>
+<li>warm starts across IRLS and lambda paths</li>
+</ul>
+<p>That is what the inner proximal solver is for.</p>
+<h2 id="7-what-proximal-newton-bcd-means">7. What "proximal Newton BCD" means<a class="headerlink" href="#7-what-proximal-newton-bcd-means" title="Permanent link">&para;</a></h2>
+<p>This name sounds more complicated than the actual algorithm.</p>
+<p>For one PIRLS outer step, the code loops over coefficient groups and does:</p>
+<ol>
+<li>hold <span class="arithmatex">\(\mathbf{W}\)</span> and <span class="arithmatex">\(\mathbf{z}\)</span> fixed</li>
+<li>update the intercept in closed form</li>
+<li>for each group <span class="arithmatex">\(g\)</span>, compute the local gradient and block Hessian</li>
+<li>take a Newton step for that block</li>
+<li>apply the proximal operator of the group penalty</li>
+<li>update the residual cheaply</li>
+</ol>
+<p>The gradient and Hessian for group <span class="arithmatex">\(g\)</span> are:</p>
+<div class="arithmatex">\[
+\nabla_g = -\mathbf{X}_g^\top \mathbf{W} \mathbf{r}, \qquad \mathbf{H}_g = \mathbf{X}_g^\top \mathbf{W} \mathbf{X}_g
+\]</div>
+<p>where <span class="arithmatex">\(\mathbf{r} = \mathbf{z} - \alpha\mathbf{1} - \mathbf{X}\boldsymbol{\beta}\)</span> is the working residual. The Newton direction is <span class="arithmatex">\(\mathbf{d}_g = \mathbf{H}_g^{-1} \nabla_g\)</span>, and the proximal operator enforces group sparsity:</p>
+<div class="arithmatex">\[
+\boldsymbol{\beta}_g^{\text{new}} = \text{prox}_{\lambda_1 w_g / L_g}\!\left(\boldsymbol{\beta}_g - \mathbf{d}_g\right) = \left(1 - \frac{\lambda_1 w_g / L_g}{\|\boldsymbol{\beta}_g - \mathbf{d}_g\|_2}\right)_+ (\boldsymbol{\beta}_g - \mathbf{d}_g)
+\]</div>
+<p>where <span class="arithmatex">\(L_g\)</span> is the maximum eigenvalue of <span class="arithmatex">\(\mathbf{H}_g\)</span> (local Lipschitz constant).</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a># ── Proximal Newton BCD: one PIRLS outer step ─────────────────
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a># W, z fixed from the current IRLS approximation
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a># r = z − α1 − Xβ (working residual)
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>for inner in 1, 2, ..., max_bcd:
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>    # Intercept update (closed form, unpenalised)
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>    δ = ΣWᵢrᵢ / ΣWᵢ
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>    α += δ
+<a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a>    r -= δ
+<a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>
+<a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a>    # BCD cycle: one Newton+prox step per group
+<a id="__codelineno-9-12" name="__codelineno-9-12" href="#__codelineno-9-12"></a>    for g in groups:
+<a id="__codelineno-9-13" name="__codelineno-9-13" href="#__codelineno-9-13"></a>        βg_old = βg
+<a id="__codelineno-9-14" name="__codelineno-9-14" href="#__codelineno-9-14"></a>        ∇g     = −Xgᵀ(W ⊙ r)               # group gradient
+<a id="__codelineno-9-15" name="__codelineno-9-15" href="#__codelineno-9-15"></a>        dg     = chol_solve(Hg, ∇g)          # Newton direction: Hg⁻¹∇g
+<a id="__codelineno-9-16" name="__codelineno-9-16" href="#__codelineno-9-16"></a>        βg_cand = βg_old − dg                # candidate (no penalty)
+<a id="__codelineno-9-17" name="__codelineno-9-17" href="#__codelineno-9-17"></a>        βg_new  = prox(βg_cand, λ₁wg/Lg)    # group soft-threshold
+<a id="__codelineno-9-18" name="__codelineno-9-18" href="#__codelineno-9-18"></a>
+<a id="__codelineno-9-19" name="__codelineno-9-19" href="#__codelineno-9-19"></a>        # Cheap residual update (no full matvec)
+<a id="__codelineno-9-20" name="__codelineno-9-20" href="#__codelineno-9-20"></a>        if βg_new ≠ βg_old:
+<a id="__codelineno-9-21" name="__codelineno-9-21" href="#__codelineno-9-21"></a>            r -= Xg(βg_new − βg_old)
+<a id="__codelineno-9-22" name="__codelineno-9-22" href="#__codelineno-9-22"></a>            βg = βg_new
+<a id="__codelineno-9-23" name="__codelineno-9-23" href="#__codelineno-9-23"></a>
+<a id="__codelineno-9-24" name="__codelineno-9-24" href="#__codelineno-9-24"></a>    if max|β − β_prev| &lt; tol: break
+</code></pre></div>
+<p>The words in the name mean:</p>
+<h3 id="71-proximal">7.1 Proximal<a class="headerlink" href="#71-proximal" title="Permanent link">&para;</a></h3>
+<p>The penalty is handled by its proximal operator rather than by pretending it is smooth. For ordinary group lasso, the prox is block soft-thresholding. That gives exact zeros.</p>
+<h3 id="72-newton">7.2 Newton<a class="headerlink" href="#72-newton" title="Permanent link">&para;</a></h3>
+<p>The update uses local curvature, not just a gradient. The block Hessian <span class="arithmatex">\(\mathbf{H}_g\)</span> makes this much more aggressive than a first-order proximal-gradient method.</p>
+<h3 id="73-bcd">7.3 BCD<a class="headerlink" href="#73-bcd" title="Permanent link">&para;</a></h3>
+<p>Block coordinate descent. The coefficient vector is partitioned by feature groups, and the algorithm updates one group at a time. That is natural here because the design matrix, penalty, and group activation/deactivation are all group-structured.</p>
+<p>See <code>src/superglm/solvers/pirls.py</code>.</p>
+<p>So the solver is not doing anything exotic. It is just:</p>
+<blockquote>
+<p>take a good quadratic step for one group, then enforce the nonsmooth penalty exactly</p>
+</blockquote>
+<h2 id="8-why-this-choice-is-reasonable">8. Why this choice is reasonable<a class="headerlink" href="#8-why-this-choice-is-reasonable" title="Permanent link">&para;</a></h2>
+<p>For this repo's problem shape, proximal Newton BCD is a defensible choice.</p>
+<h3 id="81-why-not-plain-coordinate-descent">8.1 Why not plain coordinate descent?<a class="headerlink" href="#81-why-not-plain-coordinate-descent" title="Permanent link">&para;</a></h3>
+<p>Plain coordinate descent is strongest when the penalty is coordinate-separable and the updates are scalar, like glmnet-style lasso.</p>
+<p>Your problem is group-structured, so block updates are a more natural fit than scalar updates.</p>
+<h3 id="82-why-not-proximal-gradient-or-fista">8.2 Why not proximal gradient or FISTA?<a class="headerlink" href="#82-why-not-proximal-gradient-or-fista" title="Permanent link">&para;</a></h3>
+<p>Those are simpler, but they only use first-order information. For IRLS subproblems, you already have a strong quadratic structure available. Ignoring that curvature usually means more iterations.</p>
+<h3 id="83-why-not-l-bfgs-or-l-bfgs-b">8.3 Why not L-BFGS or L-BFGS-B?<a class="headerlink" href="#83-why-not-l-bfgs-or-l-bfgs-b" title="Permanent link">&para;</a></h3>
+<p>Those are good smooth optimizers. The moment you want exact group sparsity, they are awkward:</p>
+<ul>
+<li>you either smooth the penalty</li>
+<li>or use subgradient tricks</li>
+<li>or give up exact zeros during the solve</li>
+</ul>
+<p>That is a bad trade here because exact zero groups are the point of the penalty.</p>
+<h3 id="84-why-not-admm">8.4 Why not ADMM?<a class="headerlink" href="#84-why-not-admm" title="Permanent link">&para;</a></h3>
+<p>ADMM is a very useful splitting method, especially when:</p>
+<ul>
+<li>the problem is huge</li>
+<li>the structure is awkward</li>
+<li>there are multiple coupled constraints</li>
+<li>distributed or decomposed computation matters</li>
+</ul>
+<p>But it also brings:</p>
+<ul>
+<li>another tuning parameter</li>
+<li>primal and dual residual bookkeeping</li>
+<li>more splitting machinery than the current problem really needs</li>
+<li>weaker appeal when the groups are modest and the local Newton blocks are cheap</li>
+</ul>
+<p>For this repo, ADMM would be a plausible alternative, but not an obviously better one.</p>
+<h3 id="85-why-not-a-full-proximal-newton-solve-over-all-coefficients-at-once">8.5 Why not a full proximal Newton solve over all coefficients at once?<a class="headerlink" href="#85-why-not-a-full-proximal-newton-solve-over-all-coefficients-at-once" title="Permanent link">&para;</a></h3>
+<p>You could try it, but then you lose the cheap group-local structure and make each step heavier. The block version keeps the good part of Newton without turning every update into a large global solve.</p>
+<h2 id="9-performance-and-discretization">9. Performance and discretization<a class="headerlink" href="#9-performance-and-discretization" title="Permanent link">&para;</a></h2>
+<h3 id="91-where-the-time-really-goes">9.1 Where the time really goes<a class="headerlink" href="#91-where-the-time-really-goes" title="Permanent link">&para;</a></h3>
+<p>It is easy to fixate on the scary-looking <code>O(p^3)</code> solve cost and miss where the practical runtime often lives.</p>
+<p>A useful split is:</p>
+<ol>
+<li>building weighted summaries like <code>X'WX</code>, <code>X'Wz</code>, and <code>X'W1</code></li>
+<li>solving the resulting <code>p x p</code> system once those summaries are available</li>
+</ol>
+<p>In spline-heavy GLM fitting, especially with repeated PIRLS and REML iterations, the repeated observation-level aggregation work is often the more painful part.</p>
+<p>So the real performance question is often:</p>
+<blockquote>
+<p>how do I avoid redoing expensive data passes and weighted Gram construction over and over?</p>
+</blockquote>
+<p>not just:</p>
+<blockquote>
+<p>how do I shrink the asymptotic cost of the final dense solve?</p>
+</blockquote>
+<h3 id="92-discretization-what-it-does-and-what-it-does-not-do">9.2 Discretization: what it does and what it does not do<a class="headerlink" href="#92-discretization-what-it-does-and-what-it-does-not-do" title="Permanent link">&para;</a></h3>
+<p>Discretization is easy to misunderstand, so it is worth being explicit.</p>
+<h4 id="921-what-it-does-not-do">9.2.1 What it does not do<a class="headerlink" href="#921-what-it-does-not-do" title="Permanent link">&para;</a></h4>
+<p>It does <strong>not</strong> fundamentally reduce the coefficient dimension <code>p</code>.</p>
+<p>So if you end up solving a dense <code>p x p</code> system, discretization does not magically change that asymptotic solve into a tiny problem just by itself.</p>
+<p>The coefficient-space solve is still a coefficient-space solve.</p>
+<h4 id="922-what-it-does-do">9.2.2 What it does do<a class="headerlink" href="#922-what-it-does-do" title="Permanent link">&para;</a></h4>
+<p>It compresses repeated basis work on the observation side.</p>
+<p>For discretized spline groups, the code stores:</p>
+<ul>
+<li>a basis evaluated at <code>n_bins</code> support points or bin centers</li>
+<li>an observation-to-bin index</li>
+</ul>
+<p>instead of repeatedly treating every observation as having its own distinct basis row.</p>
+<p>That means operations like:</p>
+<ul>
+<li><code>X'WX</code></li>
+<li><code>X'W</code></li>
+<li><code>X'Wz</code></li>
+</ul>
+<p>can be formed by:</p>
+<ol>
+<li>aggregating weights by bin</li>
+<li>doing small dense linear algebra on the binned basis</li>
+<li>scattering or gathering only when needed</li>
+</ol>
+<p>That is exactly what <code>DiscretizedSSPGroupMatrix</code> in <code>src/superglm/group_matrix.py</code>
+is built for. Here <code>SSP</code> just means the spline is stored in the repo's
+reparameterized penalized form: sparse basis <code>B</code>, small dense transform
+<code>R_inv</code>, and penalty matrix <code>omega</code>, rather than one fully materialized dense
+design block.</p>
+<h4 id="923-why-this-matters-in-practice">9.2.3 Why this matters in practice<a class="headerlink" href="#923-why-this-matters-in-practice" title="Permanent link">&para;</a></h4>
+<p>For discretized spline groups, the expensive matrix-building work can move from repeated <span class="arithmatex">\(O(n)\)</span> passes on the full basis to something much closer to:</p>
+<ul>
+<li>one <span class="arithmatex">\(O(n)\)</span> aggregation by bin (weighted bincounts)</li>
+<li>then <span class="arithmatex">\(O(n_{\text{bins}} \cdot K^2)\)</span> dense work in basis space</li>
+</ul>
+<p>where <span class="arithmatex">\(n_{\text{bins}} \ll n\)</span> (typically 256 bins vs 678k observations) and <span class="arithmatex">\(K\)</span> is the local basis size for that group (typically 9-13).</p>
+<p>So discretization helps most with:</p>
+<ul>
+<li>weighted Gram construction (<span class="arithmatex">\(\mathbf{X}_g^\top \mathbf{W} \mathbf{X}_g\)</span>)</li>
+<li>repeated PIRLS updates</li>
+<li>repeated REML objective evaluations</li>
+<li>cached-<span class="arithmatex">\(\mathbf{W}\)</span> continuation in the fast REML path</li>
+</ul>
+<h4 id="924-why-the-p-x-p-solve-is-often-still-fine">9.2.4 Why the p x p solve is often still fine<a class="headerlink" href="#924-why-the-p-x-p-solve-is-often-still-fine" title="Permanent link">&para;</a></h4>
+<p>In many models here, <span class="arithmatex">\(p\)</span> is not enormous. It is often tens or low hundreds, not millions.</p>
+<p>That means a Cholesky or eigendecomposition of a <span class="arithmatex">\(p \times p\)</span> matrix is not free, but it is often not the part that kills you.</p>
+<p>The real win is usually:</p>
+<ul>
+<li>reduce repeated data passes</li>
+<li>reduce repeated basis aggregation</li>
+<li>cache weighted summaries when <span class="arithmatex">\(\mathbf{W}\)</span> is unchanged</li>
+</ul>
+<p>That is the whole point of the discrete cached-<span class="arithmatex">\(\mathbf{W}\)</span> REML path.</p>
+<h2 id="10-where-reml-comes-in">10. Where REML comes in<a class="headerlink" href="#10-where-reml-comes-in" title="Permanent link">&para;</a></h2>
+<p>Everything above assumes the smoothness penalties are already known.</p>
+<p>That is the next big question:</p>
+<blockquote>
+<p>how large should the smoothing penalties be?</p>
+</blockquote>
+<p>The inner solve does not answer that. It only answers:</p>
+<blockquote>
+<p>for this value of <span class="arithmatex">\(\lambda\)</span>, what is the best coefficient vector?</p>
+</blockquote>
+<p>REML answers the higher-level question:</p>
+<blockquote>
+<p>which <span class="arithmatex">\(\lambda\)</span> values make the smooths appropriately flexible without overfitting?</p>
+</blockquote>
+<p>That is why REML must be an outer loop.</p>
+<h2 id="11-why-reml-has-to-be-outside-pirls">11. Why REML has to be outside PIRLS<a class="headerlink" href="#11-why-reml-has-to-be-outside-pirls" title="Permanent link">&para;</a></h2>
+<p>The REML objective depends on the fitted coefficients and the local weighted geometry.</p>
+<p>For one candidate set of smoothing parameters, you need:</p>
+<ol>
+<li>the fitted <span class="arithmatex">\(\hat{\boldsymbol{\beta}}(\boldsymbol{\lambda})\)</span></li>
+<li>the current IRLS weights <span class="arithmatex">\(\mathbf{W}\)</span></li>
+<li>the penalized Hessian <span class="arithmatex">\(\mathbf{H} = \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}(\boldsymbol{\lambda})\)</span></li>
+</ol>
+<p>You only get those after solving the inner GLM problem.</p>
+<p>So the nesting is inevitable:</p>
+<ul>
+<li>inner fit gives you <span class="arithmatex">\(\hat{\boldsymbol{\beta}}\)</span>, <span class="arithmatex">\(\mathbf{W}\)</span>, and <span class="arithmatex">\(\mathbf{H}\)</span></li>
+<li>outer REML uses those to score the smoothing parameters</li>
+<li>then proposes new smoothing parameters</li>
+<li>then reruns the inner fit</li>
+</ul>
+<p>That is why <code>fit_reml()</code> is "refit-heavy". It is solving a different optimization problem on top of the coefficient problem.</p>
+<h2 id="12-what-the-reml-objective-is-doing">12. What the REML objective is doing<a class="headerlink" href="#12-what-the-reml-objective-is-doing" title="Permanent link">&para;</a></h2>
+<p>In this repo, <code>reml_laml_objective()</code> in <code>src/superglm/reml_optimizer.py</code> evaluates a Laplace-approximate REML criterion (Wood 2011).</p>
+<p>This section stays intentionally short. A full REML derivation turns into a paper-sized detour;
+the main thing this guide needs is the role each term plays in the outer optimization.</p>
+<p>For a known-scale family (<span class="arithmatex">\(\phi = 1\)</span>, e.g. Poisson):</p>
+<div class="arithmatex">\[
+\mathcal{V}(\boldsymbol{\rho}) = -\ell(\hat{\boldsymbol{\beta}}) + \tfrac{1}{2}\hat{\boldsymbol{\beta}}^\top \mathbf{S} \hat{\boldsymbol{\beta}} + \tfrac{1}{2}\log|\mathbf{H}| - \tfrac{1}{2}\log|\mathbf{S}|_+
+\]</div>
+<p>where <span class="arithmatex">\(\boldsymbol{\rho} = \log\boldsymbol{\lambda}\)</span>. For estimated-scale families (Gamma, Tweedie), a <span class="arithmatex">\(\phi\)</span>-profiled version replaces the NLL with a scale-free deviance term.</p>
+<p>Here <span class="arithmatex">\(|\mathbf{S}|_+\)</span> means the pseudo-determinant of <span class="arithmatex">\(\mathbf{S}\)</span>: the product of its strictly positive eigenvalues only.
+The <code>+</code> matters because spline penalties usually have a null space, so <span class="arithmatex">\(\mathbf{S}\)</span> is often rank-deficient. For example,
+constant or linear directions may be left unpenalized, which gives exact zero eigenvalues that should be excluded from the
+log-determinant term. In the code, this is the same idea as <code>log_det_omega_plus</code> and <code>cached_logdet_s_plus(...)</code> in
+<code>src/superglm/reml.py</code>.</p>
+<p>The four terms:</p>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><span class="arithmatex">\(-\ell(\hat{\boldsymbol{\beta}})\)</span></td>
+<td>Fit the data (negative log-likelihood)</td>
+</tr>
+<tr>
+<td><span class="arithmatex">\(\hat{\boldsymbol{\beta}}^\top \mathbf{S} \hat{\boldsymbol{\beta}}\)</span></td>
+<td>Penalize wiggliness</td>
+</tr>
+<tr>
+<td>(\log</td>
+<td>\mathbf{H}</td>
+</tr>
+<tr>
+<td>(-\log</td>
+<td>\mathbf{S}</td>
+</tr>
+</tbody>
+</table>
+<p>REML is not "just another regularizer". It is an empirical-Bayes criterion for picking the smoothness parameters — it integrates out <span class="arithmatex">\(\boldsymbol{\beta}\)</span> via a Laplace approximation and optimizes the resulting marginal likelihood.</p>
+<h3 id="121-reml-gradient-and-hessian">12.1 REML gradient and Hessian<a class="headerlink" href="#121-reml-gradient-and-hessian" title="Permanent link">&para;</a></h3>
+<p>The partial gradient with respect to <span class="arithmatex">\(\rho_j = \log\lambda_j\)</span> at fixed <span class="arithmatex">\(\mathbf{W}\)</span> is:</p>
+<div class="arithmatex">\[
+\frac{\partial \mathcal{V}}{\partial \rho_j} = \frac{1}{2}\left(\lambda_j \left(\frac{1}{\phi}\hat{\boldsymbol{\beta}}_g^\top \boldsymbol{\Omega}_g \hat{\boldsymbol{\beta}}_g + \text{tr}(\mathbf{H}^{-1}_{[g,g]} \boldsymbol{\Omega}_g)\right) - r_g\right)
+\]</div>
+<p>where <span class="arithmatex">\(\boldsymbol{\Omega}_g\)</span> is the penalty basis for group <span class="arithmatex">\(g\)</span> and <span class="arithmatex">\(r_g\)</span> is the penalty rank. Setting the gradient to zero gives the Fellner-Schall fixed-point update:</p>
+<div class="arithmatex">\[
+\lambda_j^{\text{new}} = \frac{r_g}{\frac{1}{\phi}\hat{\boldsymbol{\beta}}_g^\top \boldsymbol{\Omega}_g \hat{\boldsymbol{\beta}}_g + \text{tr}(\mathbf{H}^{-1}_{[g,g]} \boldsymbol{\Omega}_g)}
+\]</div>
+<p>The numerator is the penalty rank (degrees of freedom available). The denominator balances the current coefficient energy (<span class="arithmatex">\(\hat{\boldsymbol{\beta}}\)</span> term) against the posterior uncertainty (trace term). When the signal is strong, the <span class="arithmatex">\(\hat{\boldsymbol{\beta}}\)</span> term dominates and <span class="arithmatex">\(\lambda\)</span> stays small. When the signal is weak, the trace dominates and <span class="arithmatex">\(\lambda\)</span> grows large.</p>
+<p>For the Newton path, the Hessian is:</p>
+<div class="arithmatex">\[
+\frac{\partial^2 \mathcal{V}}{\partial \rho_i \partial \rho_j} = -\frac{1}{2}\text{tr}(\mathbf{H}^{-1}\mathbf{S}_i \mathbf{H}^{-1}\mathbf{S}_j) + [\text{diagonal correction}]
+\]</div>
+<p>with an optional first-order <span class="arithmatex">\(W(\boldsymbol{\rho})\)</span> correction that accounts for <span class="arithmatex">\(\mathrm{d}\mathbf{W}/\mathrm{d}\boldsymbol{\rho}\)</span> via the implicit function theorem.</p>
+<h2 id="13-the-three-reml-paths-in-this-repo">13. The three REML paths in this repo<a class="headerlink" href="#13-the-three-reml-paths-in-this-repo" title="Permanent link">&para;</a></h2>
+<h3 id="131-direct-reml-newton">13.1 Direct REML (Newton)<a class="headerlink" href="#131-direct-reml-newton" title="Permanent link">&para;</a></h3>
+<p>When <code>selection_penalty = 0</code>, the inner problem is smooth. The repo uses direct IRLS plus a damped Newton outer loop on <span class="arithmatex">\(\boldsymbol{\rho} = \log\boldsymbol{\lambda}\)</span>, with Armijo line search.</p>
+<p>That is <code>optimize_direct_reml()</code>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a># ── Direct REML: Newton on log-λ ──────────────────────────────
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a># Phase 1: fixed-point warmup (3 iterations)
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a># Phase 2: Newton with gradient, Hessian, line search
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a># Bootstrap: fit once at minimal penalty, take one FP step
+<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>β̂, H⁻¹ = fit_irls_direct(X, y, W, S=10⁻⁴)
+<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>for j in each group:
+<a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>    ρⱼ = log(rⱼ / (β̂gᵀ Ωg β̂g + tr(H⁻¹[g,g] Ωg)))
+<a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>
+<a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>for iter in 1, 2, ..., max_reml_iter:
+<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>    λ = exp(ρ)
+<a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a>    β̂, H⁻¹, XᵀWX = fit_irls_direct(X, y, W, S(λ))
+<a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a>
+<a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a>    if iter ≤ 3:
+<a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a>        # Fixed-point warmup (cheap, no Hessian needed)
+<a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a>        for j in each group:
+<a id="__codelineno-10-17" name="__codelineno-10-17" href="#__codelineno-10-17"></a>            ρⱼ = log(rⱼ / (β̂gᵀΩgβ̂g + tr(H⁻¹[g,g] Ωg)))
+<a id="__codelineno-10-18" name="__codelineno-10-18" href="#__codelineno-10-18"></a>
+<a id="__codelineno-10-19" name="__codelineno-10-19" href="#__codelineno-10-19"></a>    else:
+<a id="__codelineno-10-20" name="__codelineno-10-20" href="#__codelineno-10-20"></a>        # Newton phase: gradient + Hessian + W(ρ) correction
+<a id="__codelineno-10-21" name="__codelineno-10-21" href="#__codelineno-10-21"></a>        ∇ = reml_gradient(β̂, H⁻¹, λ)
+<a id="__codelineno-10-22" name="__codelineno-10-22" href="#__codelineno-10-22"></a>        ∇ += w_correction(dW/dη, dβ̂/dρ)     # IFT
+<a id="__codelineno-10-23" name="__codelineno-10-23" href="#__codelineno-10-23"></a>        ℋ = reml_hessian(H⁻¹, λ, ∇)
+<a id="__codelineno-10-24" name="__codelineno-10-24" href="#__codelineno-10-24"></a>        δ = −solve(ℋ, ∇)                     # Newton step
+<a id="__codelineno-10-25" name="__codelineno-10-25" href="#__codelineno-10-25"></a>        δ = clip(δ, −5, 5)                    # trust region
+<a id="__codelineno-10-26" name="__codelineno-10-26" href="#__codelineno-10-26"></a>
+<a id="__codelineno-10-27" name="__codelineno-10-27" href="#__codelineno-10-27"></a>        # Armijo line search: refit at trial ρ
+<a id="__codelineno-10-28" name="__codelineno-10-28" href="#__codelineno-10-28"></a>        for step in 1.0, 0.5, 0.25, ...:
+<a id="__codelineno-10-29" name="__codelineno-10-29" href="#__codelineno-10-29"></a>            ρ_trial = ρ + step ⋅ δ
+<a id="__codelineno-10-30" name="__codelineno-10-30" href="#__codelineno-10-30"></a>            obj_trial = reml_objective(ρ_trial)
+<a id="__codelineno-10-31" name="__codelineno-10-31" href="#__codelineno-10-31"></a>            if obj_trial ≤ obj + 10⁻⁴ ⋅ step ⋅ (∇ᵀδ):
+<a id="__codelineno-10-32" name="__codelineno-10-32" href="#__codelineno-10-32"></a>                ρ = ρ_trial; break
+<a id="__codelineno-10-33" name="__codelineno-10-33" href="#__codelineno-10-33"></a>
+<a id="__codelineno-10-34" name="__codelineno-10-34" href="#__codelineno-10-34"></a>    if |projected ∇| &lt; tol: break
+</code></pre></div>
+<p>This is the cleanest path mathematically. The <span class="arithmatex">\(W(\boldsymbol{\rho})\)</span> correction (enabled after warmup) accounts for the fact that changing <span class="arithmatex">\(\boldsymbol{\lambda}\)</span> changes <span class="arithmatex">\(\hat{\boldsymbol{\beta}}\)</span>, which changes <span class="arithmatex">\(\boldsymbol{\mu}\)</span>, which changes <span class="arithmatex">\(\mathbf{W}\)</span>.</p>
+<p>In this repo: <code>src/superglm/reml_optimizer.py::optimize_direct_reml</code>.</p>
+<h3 id="132-discrete-cached-w-reml-freml">13.2 Discrete cached-W REML (fREML)<a class="headerlink" href="#132-discrete-cached-w-reml-freml" title="Permanent link">&para;</a></h3>
+<p>When <code>discrete=True</code>, the expensive part is repeatedly rebuilding <span class="arithmatex">\(\mathbf{X}^\top \mathbf{W} \mathbf{X}\)</span> from <span class="arithmatex">\(n\)</span> observations.</p>
+<p>So the repo caches the weighted summaries after each IRLS convergence and does multiple analytical <span class="arithmatex">\(\boldsymbol{\lambda}\)</span> updates before refreshing <span class="arithmatex">\(\mathbf{W}\)</span>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a># ── Cached-W fREML: minimize data passes ──────────────────────
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a># Key insight: changing S(λ) with fixed W is O(p³),
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>#              but refreshing W requires O(n) data passes.
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>for w_iter in 1, 2, ...:
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>    # Expensive: full IRLS to convergence (data passes through n obs)
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>    β̂, H⁻¹, XᵀWX = fit_irls_direct(X, y, W, S(λ))
+<a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>    cache(XᵀWX, XᵀWz, XᵀW1, ΣW, ΣWz)              # save for reuse
+<a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>
+<a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>    # Cheap inner loop: analytical λ updates at fixed W
+<a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a>    for inner in 1, 2, ..., 30:
+<a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a>        S_new = build_penalty(λ)
+<a id="__codelineno-11-13" name="__codelineno-11-13" href="#__codelineno-11-13"></a>        # Re-solve p×p system from cached summaries (no data pass!)
+<a id="__codelineno-11-14" name="__codelineno-11-14" href="#__codelineno-11-14"></a>        M = [[ΣW, XᵀW1], [XᵀW1, XᵀWX + S_new]]
+<a id="__codelineno-11-15" name="__codelineno-11-15" href="#__codelineno-11-15"></a>        α, β̂ = cholesky_solve(M, [ΣWz, XᵀWz])
+<a id="__codelineno-11-16" name="__codelineno-11-16" href="#__codelineno-11-16"></a>        H⁻¹ = invert(XᵀWX + S_new)
+<a id="__codelineno-11-17" name="__codelineno-11-17" href="#__codelineno-11-17"></a>
+<a id="__codelineno-11-18" name="__codelineno-11-18" href="#__codelineno-11-18"></a>        # Fellner-Schall fixed-point update
+<a id="__codelineno-11-19" name="__codelineno-11-19" href="#__codelineno-11-19"></a>        for j in each group:
+<a id="__codelineno-11-20" name="__codelineno-11-20" href="#__codelineno-11-20"></a>            λⱼ = rⱼ / (β̂gᵀΩgβ̂g + tr(H⁻¹[g,g] Ωg))
+<a id="__codelineno-11-21" name="__codelineno-11-21" href="#__codelineno-11-21"></a>            if dead_group(β̂gᵀΩgβ̂g ≪ tr):
+<a id="__codelineno-11-22" name="__codelineno-11-22" href="#__codelineno-11-22"></a>                λⱼ → ceiling                  # snap degenerate
+<a id="__codelineno-11-23" name="__codelineno-11-23" href="#__codelineno-11-23"></a>
+<a id="__codelineno-11-24" name="__codelineno-11-24" href="#__codelineno-11-24"></a>        if max|Δρ| &lt; 0.01: break
+<a id="__codelineno-11-25" name="__codelineno-11-25" href="#__codelineno-11-25"></a>
+<a id="__codelineno-11-26" name="__codelineno-11-26" href="#__codelineno-11-26"></a>    if only_dead_groups_changed:
+<a id="__codelineno-11-27" name="__codelineno-11-27" href="#__codelineno-11-27"></a>        skip_irls_next_iter = True             # analytical continuation
+<a id="__codelineno-11-28" name="__codelineno-11-28" href="#__codelineno-11-28"></a>
+<a id="__codelineno-11-29" name="__codelineno-11-29" href="#__codelineno-11-29"></a>    if converged: break
+</code></pre></div>
+<p>The mental model is:</p>
+<ul>
+<li>if <span class="arithmatex">\(\mathbf{W}\)</span> changes, the local geometry changed and you need fresh weighted summaries (expensive)</li>
+<li>if only <span class="arithmatex">\(\mathbf{S}(\boldsymbol{\lambda})\)</span> changes, you can reuse the same weighted geometry and do cheap <span class="arithmatex">\(p \times p\)</span> algebra (free)</li>
+</ul>
+<p>In this repo: <code>src/superglm/reml_optimizer.py::optimize_discrete_reml_cached_w</code>.</p>
+<h3 id="133-efs-reml-fellner-schall-for-sparse-models">13.3 EFS REML (Fellner-Schall for sparse models)<a class="headerlink" href="#133-efs-reml-fellner-schall-for-sparse-models" title="Permanent link">&para;</a></h3>
+<p>When <code>selection_penalty &gt; 0</code>, the inner fit uses BCD and the active set can change. The repo uses the generalized Fellner-Schall (EFS) fixed-point update from Wood &amp; Fasiolo (2017) instead of the exact Newton outer loop.</p>
+<p>That is <code>optimize_efs_reml()</code>.</p>
+<p>This Anderson step is internal to the EFS log-<span class="arithmatex">\(\lambda\)</span> update. It is not a
+separate user-tunable acceleration setting on the PIRLS solver.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a># ── EFS REML: fixed-point with Anderson acceleration ──────────
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a># Used when selection_penalty &gt; 0 (group lasso + REML smoothing)
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>for iter in 1, 2, ...:
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>    if large_change:
+<a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>        # Full tier: rebuild design matrix + PIRLS with BCD
+<a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a>        dm = rebuild_design_matrix(λ)          # R_inv depends on λ
+<a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a>        β̂ = fit_pirls(X, y, W, S, penalty)    # BCD inner solver
+<a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a>        XᵀWX = build_xtwx(W)                  # cache for reuse
+<a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a>    else:
+<a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a>        # Cheap tier: re-invert cached XᵀWX + S only (O(p³))
+<a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a>        H⁻¹ = invert(XᵀWX + S(λ))
+<a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a>
+<a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a>    # EFS fixed-point update (same formula as Fellner-Schall)
+<a id="__codelineno-12-15" name="__codelineno-12-15" href="#__codelineno-12-15"></a>    for j in each group:
+<a id="__codelineno-12-16" name="__codelineno-12-16" href="#__codelineno-12-16"></a>        if ‖β̂g‖ &lt; ε: continue                 # L₁ killed this group
+<a id="__codelineno-12-17" name="__codelineno-12-17" href="#__codelineno-12-17"></a>        λⱼ = rⱼ / (β̂gᵀΩgβ̂g + tr(H⁻¹[g,g] Ωg))
+<a id="__codelineno-12-18" name="__codelineno-12-18" href="#__codelineno-12-18"></a>        λⱼ = clamp(λⱼ, max_log_step=5)
+<a id="__codelineno-12-19" name="__codelineno-12-19" href="#__codelineno-12-19"></a>
+<a id="__codelineno-12-20" name="__codelineno-12-20" href="#__codelineno-12-20"></a>    # Anderson(1) acceleration on log-λ scale
+<a id="__codelineno-12-21" name="__codelineno-12-21" href="#__codelineno-12-21"></a>    λ = anderson_accelerate(λ, λ_new)
+<a id="__codelineno-12-22" name="__codelineno-12-22" href="#__codelineno-12-22"></a>
+<a id="__codelineno-12-23" name="__codelineno-12-23" href="#__codelineno-12-23"></a>    if max|Δlog λ| &lt; tol: break
+</code></pre></div>
+<p>So when both sparsity and smoothness selection are active:</p>
+<ul>
+<li>PIRLS + BCD handles coefficient sparsity (which features survive)</li>
+<li>EFS REML handles smoothness (how wiggly the survivors are)</li>
+</ul>
+<p>In this repo: <code>src/superglm/reml_optimizer.py::optimize_efs_reml</code>.</p>
+<h2 id="14-compared-to-other-software">14. Compared to other software<a class="headerlink" href="#14-compared-to-other-software" title="Permanent link">&para;</a></h2>
+<p>There is no single universal "meta" that every library follows, because libraries are solving slightly different problems.</p>
+<p>But for spline-based GAM smoothness selection, <code>REML</code> and <code>fREML</code> are absolutely mainstream choices, especially in the <code>mgcv</code> tradition.</p>
+<p>At the same time:</p>
+<ul>
+<li>many libraries do cross-validation instead of REML</li>
+<li>many penalized GLM libraries focus on coefficient regularization and do not try to estimate smoothness parameters at all</li>
+<li>some libraries support splines but stop at fixed lambdas or grid search</li>
+</ul>
+<p>So the right way to think about it is:</p>
+<div class="admonition note">
+<p class="admonition-title">A practical rule</p>
+<p><code>REML</code> and <code>fREML</code> are standard, high-quality choices for spline smoothness estimation. They are not the universal default for every penalized regression library.</p>
+</div>
+<p>That is why comparing directly to something like <code>glum</code> is only partly fair:</p>
+<ul>
+<li><code>glum</code> is primarily about penalized GLMs</li>
+<li>this repo is trying to do penalized GLMs and GAM-style smoothing parameter estimation</li>
+</ul>
+<p>Those overlap, but they are not the same target.</p>
+<p>If you want the broad "story of the field" summary, it is roughly:</p>
+<ul>
+<li>classical GLM software focused on IRLS for coefficient fitting</li>
+<li>spline GAM software added P-IRLS plus GCV, UBRE, and REML for smoothness selection</li>
+<li>large-<code>n</code> GAM software added fREML, discretization, and cached weighted summaries to avoid repeated full data passes</li>
+<li>sparse penalized GLM software focused on coordinate or block-descent paths with fixed regularization parameters</li>
+<li>this repo is trying to hybridize those traditions: GAM-style smoothing selection plus sparse-group style coefficient selection</li>
+</ul>
+<h2 id="15-why-reml-on-top-of-proximal-newton-bcd-is-a-coherent-design">15. Why "REML on top of proximal Newton BCD" is a coherent design<a class="headerlink" href="#15-why-reml-on-top-of-proximal-newton-bcd-is-a-coherent-design" title="Permanent link">&para;</a></h2>
+<p>The whole stack becomes much easier to reason about once you separate the jobs:</p>
+<ul>
+<li><code>IRLS</code> handles nonlinearity of the GLM likelihood</li>
+<li>proximal Newton BCD handles the nonsmooth sparse penalty inside the penalized WLS subproblem</li>
+<li><code>REML</code> handles smoothness selection outside the coefficient fit</li>
+</ul>
+<p>Each layer solves a different problem.</p>
+<p>That means the architecture is not overengineered for the sake of it. It is just the natural decomposition of:</p>
+<ol>
+<li>nonlinear likelihood</li>
+<li>nonsmooth coefficient penalty</li>
+<li>unknown smoothness parameters</li>
+</ol>
+<h2 id="16-reading-order-in-the-code">16. Reading order in the code<a class="headerlink" href="#16-reading-order-in-the-code" title="Permanent link">&para;</a></h2>
+<p>If you want to understand the implementation from top to bottom, read in this order:</p>
+<ol>
+<li><code>src/superglm/model/fit_ops.py::fit</code></li>
+<li><code>src/superglm/solvers/pirls.py::_fit_pirls_inner</code></li>
+<li><code>src/superglm/solvers/irls_direct.py::fit_irls_direct</code></li>
+<li><code>src/superglm/model/fit_ops.py::fit_reml</code></li>
+<li><code>src/superglm/reml_optimizer.py::reml_laml_objective</code></li>
+<li><code>src/superglm/reml_optimizer.py::optimize_direct_reml</code></li>
+<li><code>src/superglm/reml_optimizer.py::optimize_discrete_reml_cached_w</code></li>
+<li><code>src/superglm/reml_optimizer.py::optimize_efs_reml</code></li>
+</ol>
+<div class="admonition tip">
+<p class="admonition-title">Three questions to keep in your head</p>
+<p><code>IRLS</code>: what weighted least-squares problem is the GLM pretending to be right now?</p>
+<p><code>Inner solver</code>: for that weighted least-squares problem, how do I solve the coefficient optimization with the penalties I actually have?</p>
+<p><code>REML</code>: after I know how to fit coefficients for fixed penalties, how do I choose the smoothness penalties themselves?</p>
+</div>
+<h2 id="17-appendix-demystifying-the-implementation-heavy-parts">17. Appendix: demystifying the implementation-heavy parts<a class="headerlink" href="#17-appendix-demystifying-the-implementation-heavy-parts" title="Permanent link">&para;</a></h2>
+<p>This section is about the parts that often feel "agent-generated" or hard to parse when you first read the source.</p>
+<h3 id="171-cached-w-what-is-actually-being-cached">17.1 Cached W: what is actually being cached?<a class="headerlink" href="#171-cached-w-what-is-actually-being-cached" title="Permanent link">&para;</a></h3>
+<p>The cached-<span class="arithmatex">\(\mathbf{W}\)</span> idea in the fast REML path is simpler than it looks.</p>
+<p>For one fixed set of IRLS weights <span class="arithmatex">\(\mathbf{W}\)</span>, the coefficient problem only depends on the data through a few weighted summaries:</p>
+<table>
+<thead>
+<tr>
+<th>Cached quantity</th>
+<th>Size</th>
+<th>Cost to build</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><span class="arithmatex">\(\mathbf{X}^\top \mathbf{W} \mathbf{X}\)</span></td>
+<td><span class="arithmatex">\(p \times p\)</span></td>
+<td><span class="arithmatex">\(O(n \cdot p^2)\)</span> or <span class="arithmatex">\(O(n_{\text{bins}} \cdot K^2)\)</span></td>
+</tr>
+<tr>
+<td><span class="arithmatex">\(\mathbf{X}^\top \mathbf{W} \mathbf{z}\)</span></td>
+<td><span class="arithmatex">\(p\)</span></td>
+<td><span class="arithmatex">\(O(n \cdot p)\)</span></td>
+</tr>
+<tr>
+<td><span class="arithmatex">\(\mathbf{X}^\top \mathbf{W} \mathbf{1}\)</span></td>
+<td><span class="arithmatex">\(p\)</span></td>
+<td><span class="arithmatex">\(O(n \cdot p)\)</span></td>
+</tr>
+<tr>
+<td><span class="arithmatex">\(\sum W_i\)</span></td>
+<td>scalar</td>
+<td><span class="arithmatex">\(O(n)\)</span></td>
+</tr>
+<tr>
+<td><span class="arithmatex">\(\sum W_i z_i\)</span></td>
+<td>scalar</td>
+<td><span class="arithmatex">\(O(n)\)</span></td>
+</tr>
+</tbody>
+</table>
+<p>Those are exactly the quantities saved out of <code>fit_irls_direct()</code> for reuse.</p>
+<p>Once you have them, changing the smoothing penalty only changes the penalty matrix <span class="arithmatex">\(\mathbf{S}(\boldsymbol{\lambda})\)</span>. It does <strong>not</strong> force you to revisit all <span class="arithmatex">\(n\)</span> observations immediately.</p>
+<p>So with fixed <span class="arithmatex">\(\mathbf{W}\)</span>, the augmented system is just:</p>
+<div class="arithmatex">\[
+\begin{pmatrix} \sum W_i &amp; \mathbf{X}^\top \mathbf{W} \mathbf{1} \\ \mathbf{X}^\top \mathbf{W} \mathbf{1} &amp; \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}(\boldsymbol{\lambda}) \end{pmatrix} \begin{pmatrix} \alpha \\ \boldsymbol{\beta} \end{pmatrix} = \begin{pmatrix} \sum W_i z_i \\ \mathbf{X}^\top \mathbf{W} \mathbf{z} \end{pmatrix}
+\]</div>
+<p>That means you can try new lambdas by doing one <span class="arithmatex">\(O(p^3)\)</span> Cholesky solve on cached summaries, instead of rebuilding all weighted summaries from scratch at <span class="arithmatex">\(O(n)\)</span> cost.</p>
+<h4 id="1711-when-is-that-cache-valid">17.1.1 When is that cache valid?<a class="headerlink" href="#1711-when-is-that-cache-valid" title="Permanent link">&para;</a></h4>
+<p>Only while <span class="arithmatex">\(\mathbf{W}\)</span> is effectively unchanged.</p>
+<p>That is why the fast REML path alternates between:</p>
+<ul>
+<li>expensive IRLS refreshes, which update <span class="arithmatex">\(\mathbf{W}\)</span> (<span class="arithmatex">\(O(n)\)</span> per iteration)</li>
+<li>cheap analytical continuation steps, which keep <span class="arithmatex">\(\mathbf{W}\)</span> fixed and only change <span class="arithmatex">\(\mathbf{S}(\boldsymbol{\lambda})\)</span> (<span class="arithmatex">\(O(p^3)\)</span> per step)</li>
+</ul>
+<p>The cache is not magic. It is just:</p>
+<blockquote>
+<p>if the observation-side geometry has not changed, do not recompute it</p>
+</blockquote>
+<h3 id="172-why-the-dead-group-logic-exists">17.2 Why the "dead group" logic exists<a class="headerlink" href="#172-why-the-dead-group-logic-exists" title="Permanent link">&para;</a></h3>
+<p>In the fast REML path, some groups are detected as effectively dead: their coefficient energy is tiny relative to the trace term.</p>
+<p>The practical interpretation is:</p>
+<ul>
+<li>that smooth component is already basically gone</li>
+<li>pushing its lambda higher will not materially change the fitted mean</li>
+<li>so it will not materially change <code>W</code></li>
+</ul>
+<p>That is why the code can sometimes keep nudging those lambdas upward without a full IRLS refresh.</p>
+<p>It is a pragmatic shortcut, not a new statistical principle.</p>
+<h3 id="173-qr-why-is-there-qr-code-in-metricspy-if-the-fitter-uses-choleskyeigendecomposition">17.3 QR: why is there QR code in <code>metrics.py</code> if the fitter uses Cholesky/eigendecomposition?<a class="headerlink" href="#173-qr-why-is-there-qr-code-in-metricspy-if-the-fitter-uses-choleskyeigendecomposition" title="Permanent link">&para;</a></h3>
+<p>Because the QR code is mostly for diagnostics and inference, not for the hot fitting path.</p>
+<p>The main QR block is in <code>src/superglm/metrics.py</code>. It builds an augmented matrix:</p>
+<div class="arithmatex">\[
+\mathbf{A} = \begin{pmatrix} \mathbf{W}^{1/2} \mathbf{X}_a \\ \mathbf{S}^{1/2} \end{pmatrix}
+\]</div>
+<p>so that <span class="arithmatex">\(\mathbf{A}^\top \mathbf{A} = \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}\)</span>. Then a reduced QR decomposition gives <span class="arithmatex">\(\mathbf{A} = \mathbf{Q}\mathbf{R}\)</span>, which implies:</p>
+<div class="arithmatex">\[
+\mathbf{R}^\top \mathbf{R} = \mathbf{A}^\top \mathbf{A} = \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}
+\]</div>
+<p>So QR is being used as a numerically stable way to factor the penalized normal equations when computing:</p>
+<ul>
+<li>coefficient covariance: <span class="arithmatex">\(\hat{\phi} \cdot (\mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S})^{-1}\)</span></li>
+<li>leverage and effective degrees of freedom</li>
+<li>inference summaries (SEs, Wood smooth tests)</li>
+</ul>
+<p>It is not the main coefficient-fitting method for the core solver.</p>
+<h4 id="1731-why-use-qr-there">17.3.1 Why use QR there?<a class="headerlink" href="#1731-why-use-qr-there" title="Permanent link">&para;</a></h4>
+<p>Because for diagnostics, you often care more about stability than raw speed.</p>
+<p>The QR path is basically saying:</p>
+<blockquote>
+<p>I want a reliable factorization of the penalized weighted design, even if the active design is a bit awkward or nearly rank-deficient</p>
+</blockquote>
+<p>There is also pivoted QR in <code>src/superglm/wood_pvalue.py</code>, but that is again an inference thing, not a fitting thing. There QR is used to move a smooth term into a numerically stable test space before doing Wood-style significance calculations.</p>
+<h3 id="174-kernels-what-are-they-really-doing">17.4 Kernels: what are they really doing?<a class="headerlink" href="#174-kernels-what-are-they-really-doing" title="Permanent link">&para;</a></h3>
+<p>The kernels in <code>src/superglm/group_matrix.py</code> look intimidating because they are low-level and optimized, but conceptually they are mostly just "fast weighted aggregation."</p>
+<h4 id="1741-_fused_bincount_2">17.4.1 <code>_fused_bincount_2</code><a class="headerlink" href="#1741-_fused_bincount_2" title="Permanent link">&para;</a></h4>
+<p>This computes binwise sums of <code>W</code> and <code>Wz</code> in one pass.</p>
+<p>Instead of:</p>
+<ul>
+<li>pass once for <code>W</code></li>
+<li>pass again for <code>Wz</code></li>
+</ul>
+<p>it does both together.</p>
+<h4 id="1742-_weighted_bincount_2d">17.4.2 <code>_weighted_bincount_2d</code><a class="headerlink" href="#1742-_weighted_bincount_2d" title="Permanent link">&para;</a></h4>
+<p>This aggregates a dense matrix by bin with weights, without materializing the big temporary <code>W[:, None] * M</code>.</p>
+<p>So it is mostly an allocation-avoidance kernel.</p>
+<h4 id="1743-_csr_weighted_bincount">17.4.3 <code>_csr_weighted_bincount</code><a class="headerlink" href="#1743-_csr_weighted_bincount" title="Permanent link">&para;</a></h4>
+<p>Same idea, but for sparse CSR matrices.</p>
+<p>It avoids densifying sparse groups just to do weighted aggregation.</p>
+<h4 id="1744-_disc_disc_2d_hist">17.4.4 <code>_disc_disc_2d_hist</code><a class="headerlink" href="#1744-_disc_disc_2d_hist" title="Permanent link">&para;</a></h4>
+<p>This builds a 2D weighted histogram for two discretized groups.</p>
+<p>That lets the code compute cross-products between two discretized groups without reconstructing full observation-level matrices.</p>
+<h4 id="1745-_block_xtwx_rhs">17.4.5 <code>_block_xtwx_rhs</code><a class="headerlink" href="#1745-_block_xtwx_rhs" title="Permanent link">&para;</a></h4>
+<p>This is the main orchestration routine.</p>
+<p>Its job is:</p>
+<ul>
+<li>build <code>X'WX</code></li>
+<li>build <code>X'W</code></li>
+<li>build <code>X'Wz</code></li>
+</ul>
+<p>block by block, using the cheapest kernel available for each group-pair type.</p>
+<p>So if you want one sentence for the whole kernel layer, it is:</p>
+<blockquote>
+<p>these kernels are just specialized ways of building weighted cross-products and weighted right-hand sides without materializing expensive temporary matrices</p>
+</blockquote>
+<h3 id="175-a-good-way-to-read-this-code-without-getting-lost">17.5 A good way to read this code without getting lost<a class="headerlink" href="#175-a-good-way-to-read-this-code-without-getting-lost" title="Permanent link">&para;</a></h3>
+<p>If you try to understand the kernels line by line first, the code will feel cryptic.</p>
+<p>A better order is:</p>
+<ol>
+<li>Understand the mathematical target:</li>
+<li><code>X'WX</code></li>
+<li><code>X'Wz</code></li>
+<li><code>X'W1</code></li>
+<li>Understand why discretization replaces observation-level work with bin-level work.</li>
+<li>Only then read the kernels as implementation details for those targets.</li>
+</ol>
+<p>Do the same with the QR code:</p>
+<ol>
+<li>first understand that it wants <code>(X'WX + S)^{-1}</code></li>
+<li>then understand the identity <code>A'A = X'WX + S</code></li>
+<li>only then read the QR factorization</li>
+</ol>
+<p>That order makes the source much less opaque.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="../../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

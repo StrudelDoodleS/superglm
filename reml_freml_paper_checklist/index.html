@@ -1,0 +1,1716 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Penalised GLMs for insurance pricing">
+      
+      
+        <meta name="author" content="Max Hicks">
+      
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.5">
+    
+    
+      
+        <title>REML / fREML Paper Checklist - SuperGLM</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#reml-freml-paper-checklist" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SuperGLM" class="md-header__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SuperGLM
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              REML / fREML Paper Checklist
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SuperGLM" class="md-nav__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../images/logo.png" alt="logo">
+
+    </a>
+    SuperGLM
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/fitting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fitting Modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/optimization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/interactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/mtpl2_frequency_walkthrough/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MTPL2 Frequency Modelling Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/plotting_diagnostics_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Plotting Utilities — Full Inspection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/ordered_categorical_smoothing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smoothing Ordered Categorical Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/tweedie_profile_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tweedie Power Parameter Estimation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/penalties/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Penalties
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#status-legend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status Legend
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#wood-2011-direct-reml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Wood 2011: Direct REML
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Wood 2011: Direct REML">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#objective-section-2-equations-4-5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Objective (Section 2, Equations 4-5)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gradient-section-34" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gradient (Section 3.4)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#hessian-section-35-appendix-b" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hessian (Section 3.5, Appendix B)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#wrho-implicit-differentiation-appendix-c-d" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W(rho) / Implicit Differentiation (Appendix C-D)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#newton-optimization-loop-section-3-section-62" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Newton / Optimization Loop (Section 3, Section 6.2)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#reparameterization-stability-section-31-appendix-b" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reparameterization / Stability (Section 3.1, Appendix B)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#select-penalties-section-53" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Select Penalties (Section 5.3)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#validation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Validation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#wood-goude-shaw-2015-freml-discrete-large-data-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Wood, Goude, Shaw 2015: fREML / Discrete Large-Data Path
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Wood, Goude, Shaw 2015: fREML / Discrete Large-Data Path">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#poi-working-model-outer-loop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        POI / Working-Model Outer Loop
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cached-augmented-solves" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cached Augmented Solves
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#discretized-matrix-machinery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discretized Matrix Machinery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#accuracy-envelope" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Accuracy Envelope
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#benchmarks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Benchmarks
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-numerical-work" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared Numerical Work
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#documentation-deliverables" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Documentation Deliverables
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="reml-freml-paper-checklist">REML / fREML Paper Checklist<a class="headerlink" href="#reml-freml-paper-checklist" title="Permanent link">&para;</a></h1>
+<p>This checklist is the working spec for pushing SuperGLM toward paper-complete
+implementations of:</p>
+<ul>
+<li>Wood (2011): direct REML / ML for penalized GLMs</li>
+<li>Wood, Goude, Shaw (2015): large-data / discrete fREML</li>
+</ul>
+<p>The rule for this document is simple:</p>
+<ul>
+<li>If the paper gives a mathematical or algorithmic requirement, capture it here.</li>
+<li>If the repo already implements it, mark it <code>done</code>.</li>
+<li>If it is partial, mark it <code>partial</code> and point at the code.</li>
+<li>If the paper is silent and we are making an engineering choice, say so explicitly.</li>
+</ul>
+<h2 id="status-legend">Status Legend<a class="headerlink" href="#status-legend" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>todo</code> — not yet started</li>
+<li><code>partial</code> — partly implemented</li>
+<li><code>done</code> — implemented</li>
+<li><code>n/a</code> — not applicable to this repo</li>
+<li><code>engineering</code> — intentionally not implemented by explicit human decision</li>
+</ul>
+<p>Agents can recommend an <code>engineering</code> deferral, but must not close a paper
+item on that basis without human approval.</p>
+<hr />
+<h2 id="wood-2011-direct-reml">Wood 2011: Direct REML<a class="headerlink" href="#wood-2011-direct-reml" title="Permanent link">&para;</a></h2>
+<h3 id="objective-section-2-equations-4-5">Objective (Section 2, Equations 4-5)<a class="headerlink" href="#objective-section-2-equations-4-5" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>done</code> Laplace-approximate REML/ML objective.
+  <code>reml_laml_objective()</code> reml_optimizer.py:167-226.
+  Both known-scale and profiled-scale paths match paper.</li>
+<li><code>done</code> Profiled-scale handling for estimated-φ families.
+  <code>0.5*(n-M_p)*log(D_p + Σλ_j β'S_j β)</code> at lines 213-223.</li>
+<li><code>partial</code> Shared-block multi-penalty profiled-scale finalization is not fully closed.
+  The direct objective / Hessian now use combined-penalty logic correctly,
+  but the post-fit <code>phi</code> finalization in <code>fit_reml()</code> still has an open
+  shared-block <code>M_p</code> bookkeeping bug for estimated-scale families.</li>
+<li><code>todo</code> Write equation references into the objective implementation comments.</li>
+<li><code>done</code> Every determinant term matches paper notation and sign convention.
+  <code>log|X'WX+S| - log|S|₊</code> structure confirmed.</li>
+</ul>
+<h3 id="gradient-section-34">Gradient (Section 3.4)<a class="headerlink" href="#gradient-section-34" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>done</code> Fixed-W gradient.
+  <code>reml_direct_gradient()</code> reml_optimizer.py:234-255.
+  <code>∂V/∂ρ_j = 0.5(λ_j(β'Ω_j β/φ + tr(H⁻¹Ω_j)) - r_j)</code> matches paper.</li>
+<li><code>todo</code> Link each implemented term to the paper equation / appendix source.</li>
+<li><code>done</code> Chain rule on log-lambda scale is correct (implicit: ∂/∂ρ = λ ∂/∂λ).</li>
+</ul>
+<h3 id="hessian-section-35-appendix-b">Hessian (Section 3.5, Appendix B)<a class="headerlink" href="#hessian-section-35-appendix-b" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>done</code> Total gradient in diagonal correction (Eq 6.2).
+  Line 622 passes <code>grad</code> (partial + W correction) to <code>reml_direct_hessian()</code>.
+  Regression test: <code>test_hessian_diagonal_uses_total_gradient</code>.</li>
+<li><code>done</code> Outer Hessian via implicit-differentiation Jacobian.
+  <code>hess[i,j] = -0.5 * sum(F_i * F_j.T)</code> at line 307.
+  Equivalent to paper's Appendix B K/T matrix formulation — same result,
+  different route (outer product of H⁻¹ dH_j vs explicit trace products).</li>
+<li><code>done</code> Penalty quadratic Hessian.
+  <code>S_beta.T @ H_inv @ S_beta</code> at lines 313-317.</li>
+<li><code>done</code> Profiled-scale Hessian correction.
+  <code>hess -= 0.5*(n-M_p)*outer(q,q)/(D+pq)²</code> at lines 319-325.</li>
+<li><code>todo</code> Write down exactly which Hessian terms come from direct vs implicit
+  differentiation, per paper appendix.</li>
+<li><code>todo</code> Add a checklist item per Hessian term from the paper appendices.</li>
+</ul>
+<h3 id="wrho-implicit-differentiation-appendix-c-d">W(rho) / Implicit Differentiation (Appendix C-D)<a class="headerlink" href="#wrho-implicit-differentiation-appendix-c-d" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>done</code> dW/dη computation.
+  <code>compute_dW_deta()</code> reml_optimizer.py:54-80.
+  <code>dW_i/dη = w_i(2(d²μ/dη²)(dμ/dη)⁻¹ - V'(μ)/V(μ))</code> matches Appendix D.</li>
+<li><code>done</code> First-order IFT chain: dβ̂/dρ → dη/dρ → dW → C_j → gradient correction.
+  <code>reml_w_correction()</code> reml_optimizer.py:88-159.</li>
+<li><code>done</code> <strong>Second-order W(rho) correction: analytic, paper-complete.</strong>
+  <code>w_correction_order=1</code> (default): first-order only.
+  <code>w_correction_order=2</code>: full Section 3.4 / 3.5.1 implementation:</li>
+<li>Analytic d²W/dη² via <code>deriv3_inverse</code> + <code>variance_second_derivative</code>
+    (FD fallback for custom links without these methods)</li>
+<li>Full d²β̂/(dρ_j dρ_k) from Section 3.4 including the f^{jk} term,
+    cross-penalty products λ_j S_j dβ̂/dρ_k, and the δ_jk correction</li>
+<li>Complete ∂²w/(∂ρ_j ∂ρ_k) = (d²w/dη²)(dη_j)(dη_k) + (dw/dη)(d²η_jk)
+    — both terms, not just the first
+  MTPL2 benchmark: 41% overhead, 0.0013 deviance difference.</li>
+<li><code>done</code> dH_extra incorporated into Hessian off-diagonals (line 290-291).</li>
+<li><code>todo</code> Add FD tests isolating W(rho) contributions by family/link
+  (Poisson/log, Binomial/logit, Tweedie/log, NB2/log).</li>
+</ul>
+<h3 id="newton-optimization-loop-section-3-section-62">Newton / Optimization Loop (Section 3, Section 6.2)<a class="headerlink" href="#newton-optimization-loop-section-3-section-62" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>done</code> Compound convergence criterion: grad + obj change.
+  <code>score_scale = max(1+|obj|, 1)</code> at line 590. Both paths.</li>
+<li><code>done</code> Modified Newton via eigendecomposition + eigenvalue flooring.
+  Lines 656-662. Floor at eps^0.7.</li>
+<li><code>done</code> Armijo line search with step halving.
+  Lines 674-737. c=1e-4, max 8 halvings.</li>
+<li><code>done</code> Steepest descent fallback.
+  Lines 726-736.</li>
+<li><code>engineering</code> Active-set freezing of converged components.
+  Lines 631-640. Not in Wood (2011); practical stabilization.
+  Tolerance <code>freeze_tol = 0.1 * _tol</code> is heuristic.</li>
+<li><code>engineering</code> Proportional step cap (max_newton_step=5.0).
+  Lines 669-671. Not in paper; prevents wild log-lambda jumps.</li>
+<li><code>done</code> Bootstrap initialization with minimal penalty.
+  Lines 421-439.</li>
+</ul>
+<h3 id="reparameterization-stability-section-31-appendix-b">Reparameterization / Stability (Section 3.1, Appendix B)<a class="headerlink" href="#reparameterization-stability-section-31-appendix-b" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>done</code> SSP reparameterization absorbs Ω into design matrix.
+  <code>compute_R_inv()</code> dm_builder.py:53-67.
+  <code>R_inv = inv(chol(G + λΩ + εI)')</code> with ε=1e-8.</li>
+<li><code>done</code> Cached log|S|₊ computation.
+  <code>cached_logdet_s_plus()</code> reml.py:79-93.
+  <code>log|S|₊ = Σ_j(r_j log λ_j + log|Ω_j|₊)</code> — stable form from Section 3.1.</li>
+<li><code>done</code> Penalty caches precomputed once per fit.
+  <code>build_penalty_caches()</code> reml.py:46-76.</li>
+<li><code>partial</code> <strong>Appendix B similarity transform: Slice 3A done, 3B scoped.</strong>
+  Current simplified approach (per-group eigendecomposition) is correct
+  for SSP (single penalty per group). Slice 3A cleanup done:</li>
+<li>Unified log-det: reml_laml_objective accepts precomputed log_det_H</li>
+<li>Adaptive threshold: eps^{2/3} * max replaces fixed 1e-8</li>
+<li>Select=True double-penalty verified with targeted test
+  Slice 3B (full Appendix B similarity transform) is scoped as
+  <strong>foundational architecture for multi-penalty REML</strong> — multiple
+  penalties per term, tensor extensions, general determinant/rank.
+  Not needed for current SSP structure; deferred to dedicated session.</li>
+<li><code>engineering</code> R_inv regularization ε=1e-8 is fixed, not adaptive.
+  Paper is silent on the exact regularization constant.</li>
+</ul>
+<h3 id="select-penalties-section-53">Select Penalties (Section 5.3)<a class="headerlink" href="#select-penalties-section-53" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>done</code> Null-space penalty reparameterization for select=True.
+  dm_builder.py:495-516.</li>
+<li><code>engineering</code> <code>select_snap</code> heuristic snaps degenerate groups to upper λ bound.
+  reml_optimizer.py:466-472. Not from paper.</li>
+</ul>
+<h3 id="validation">Validation<a class="headerlink" href="#validation" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>done</code> FD gradient test (fixed-W partial gradient).
+  test_reml_fd.py: <code>test_gradient_matches_fd</code>.</li>
+<li><code>done</code> FD Hessian test (outer Hessian, ~5% tolerance).
+  test_reml_fd.py: <code>test_hessian_matches_fd</code>.</li>
+<li><code>done</code> Total gradient vs outer FD test.
+  test_reml_fd.py: <code>test_total_gradient_matches_outer_fd</code>.</li>
+<li><code>done</code> Total Hessian (with dH_extra) vs FD test.
+  test_reml_fd.py: <code>test_total_hessian_matches_fd</code>.</li>
+<li><code>done</code> Hessian diagonal uses total gradient (regression test).
+  test_reml_fd.py: <code>test_hessian_diagonal_uses_total_gradient</code>.</li>
+<li><code>done</code> W correction zero for Gamma/log, nonzero for Poisson/log.
+  test_reml_fd.py: <code>test_w_correction_zero_for_gamma_log</code>,
+  <code>test_w_correction_nonzero_for_poisson_log</code>.</li>
+<li><code>done</code> Expand FD coverage to NB2, Tweedie (23 tests, up from 11).</li>
+<li><code>done</code> FD test of dW/dη for Poisson/log and Gamma/log.</li>
+<li><code>todo</code> Expand FD coverage to Binomial.</li>
+<li><code>todo</code> Add stress tests for rank deficiency, extreme lambdas, near-collinearity.</li>
+</ul>
+<hr />
+<h2 id="wood-goude-shaw-2015-freml-discrete-large-data-path">Wood, Goude, Shaw 2015: fREML / Discrete Large-Data Path<a class="headerlink" href="#wood-goude-shaw-2015-freml-discrete-large-data-path" title="Permanent link">&para;</a></h2>
+<h3 id="poi-working-model-outer-loop">POI / Working-Model Outer Loop<a class="headerlink" href="#poi-working-model-outer-loop" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>partial</code> Audit
+  <code>optimize_discrete_reml_cached_w()</code> reml_optimizer.py:806-1220
+  against the paper's POI/discrete iteration.</li>
+<li><code>partial</code> Known-scale shared-block multi-penalty discrete REML now works
+  for direct cached-W fits, but estimated-scale shared-block synthetic
+  coverage is still incomplete.</li>
+<li><code>todo</code> Write down the exact points where the repo switches from paper logic to local
+  engineering choices.</li>
+<li><code>todo</code> Confirm the current line search / acceptance logic is consistent with the paper
+  or explicitly documented as an adaptation.</li>
+</ul>
+<h3 id="cached-augmented-solves">Cached Augmented Solves<a class="headerlink" href="#cached-augmented-solves" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>partial</code> Audit
+  <code>_solve_cached_augmented()</code> reml_optimizer.py:768.</li>
+<li><code>todo</code> Confirm the cached solve path preserves the paper's intended objective
+  approximation rather than introducing extra drift.</li>
+</ul>
+<h3 id="discretized-matrix-machinery">Discretized Matrix Machinery<a class="headerlink" href="#discretized-matrix-machinery" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>partial</code> Audit
+  <code>DiscretizedSSPGroupMatrix</code> group_matrix.py:359.</li>
+<li><code>partial</code> Audit
+  <code>_block_xtwx()</code> group_matrix.py:755
+  and related <code>tabmat</code>-backed paths.</li>
+<li><code>todo</code> Confirm that the discrete path does not accidentally densify or violate the
+  paper's intended large-data cost structure.</li>
+</ul>
+<h3 id="accuracy-envelope">Accuracy Envelope<a class="headerlink" href="#accuracy-envelope" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>todo</code> Define exact-vs-discrete drift metrics:
+  objective, lambda, EDF, deviance, fitted values.</li>
+<li><code>todo</code> Add exact-vs-discrete regression tests with explicit tolerances.</li>
+<li><code>todo</code> Add a policy for when to warn or fall back to exact REML.</li>
+<li><code>todo</code> Document what <code>discrete=True</code> means mathematically in SuperGLM.</li>
+</ul>
+<h3 id="benchmarks">Benchmarks<a class="headerlink" href="#benchmarks" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>todo</code> Benchmark MTPL2 exact vs discrete.</li>
+<li><code>todo</code> Benchmark synthetic ill-conditioned cases.</li>
+<li><code>todo</code> Benchmark estimated-scale families.</li>
+<li><code>todo</code> Benchmark highly smooth and highly rough regimes.</li>
+</ul>
+<hr />
+<h2 id="shared-numerical-work">Shared Numerical Work<a class="headerlink" href="#shared-numerical-work" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>done</code> Pivoted Cholesky before SVD fallback in irls_direct.py.</li>
+<li><code>done</code> SVD fallback uses masked division (no RuntimeWarning).</li>
+<li><code>engineering</code> Non-direct shared-block multi-penalty REML remains guarded.
+  <code>selection_penalty &gt; 0</code> with tensor/shared-block penalties is an explicit
+  deferral until rebuild-time <code>PenaltyComponent</code> preservation is implemented.</li>
+<li><code>engineering</code> Eigenvalue floor eps^0.7 (Nocedal &amp; Wright standard: eps^0.5).
+  Retained as benchmarked heuristic. Not paper-mandated.</li>
+<li><code>engineering</code> SVD threshold 1e-10 * s_max. Higham suggests eps<em>p</em>s_max.
+  Retained as benchmarked heuristic.</li>
+<li><code>engineering</code> EFS uphill-step guard is stale-basis heuristic, not monotonicity.
+  reml_optimizer.py:1458-1497. Documented limitation.</li>
+<li><code>todo</code> Benchmark-backed rationale for retained heuristic thresholds.</li>
+</ul>
+<hr />
+<h2 id="documentation-deliverables">Documentation Deliverables<a class="headerlink" href="#documentation-deliverables" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>done</code> Keep this checklist current as items move from <code>todo</code> to <code>done</code>.</li>
+<li><code>todo</code> Add a short provenance note in the eventual PR description: paper-driven
+  implementation audit, not source-driven parity work.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "search.highlight"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>
