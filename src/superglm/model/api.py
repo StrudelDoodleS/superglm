@@ -55,7 +55,7 @@ class SuperGLM:
         discrete: bool = False,
         n_bins: int | dict[str, int] = 256,
         # Convergence
-        tol: float = 1e-8,
+        tol: float = 1e-6,
         max_iter: int = 100,
         convergence: str = "deviance",
     ):
