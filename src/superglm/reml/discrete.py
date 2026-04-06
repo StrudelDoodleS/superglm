@@ -188,11 +188,16 @@ def optimize_discrete_reml_cached_w(
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
     boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
 
+    # Store original fixed lambda values for exact restoration after exp->clip
+    fixed_lambdas: dict[str, float] = {}
+    for i, pc in enumerate(penalties):
+        if not estimated_mask[i]:
+            fixed_lambdas[pc.name] = float(lambdas[pc.name])
+
     rho = np.zeros(m, dtype=np.float64)
     for i, pc in enumerate(penalties):
         if not estimated_mask[i]:
-            # Fixed lambda: pin rho to the fixed value (clipped to valid range)
-            fixed_val = float(lambdas[pc.name])
+            fixed_val = fixed_lambdas[pc.name]
             rho[i] = np.clip(np.log(max(fixed_val, 1e-6)), log_lo, log_hi)
             continue
         omega_ssp = pc.omega_ssp
@@ -230,6 +235,7 @@ def optimize_discrete_reml_cached_w(
         cand_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
             cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+        cand_lambdas.update(fixed_lambdas)
 
         # --- Step 1: One PIRLS step (W update) ---
         # Pre-build S once for this candidate
@@ -387,6 +393,7 @@ def optimize_discrete_reml_cached_w(
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
                 trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+            trial_lambdas.update(fixed_lambdas)
 
             # Solve augmented system analytically (O(p^3), no data pass)
             S_trial = _build_penalty_matrix(
@@ -484,6 +491,7 @@ def optimize_discrete_reml_cached_w(
     final_lambdas = lambdas.copy()
     for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
         final_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+    final_lambdas.update(fixed_lambdas)
     S_final = _build_penalty_matrix(
         dm.group_matrices, groups, final_lambdas, dm.p, reml_penalties=penalties
     )

@@ -106,6 +106,15 @@ def _compute_fit_stats(
 
 def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
     """Fit the model to data."""
+    # lambda_policy is only supported in fit_reml(); reject here.
+    for name, spec in model._specs.items():
+        lp = getattr(spec, "_lambda_policy", None)
+        if lp is not None:
+            raise NotImplementedError(
+                f"lambda_policy on feature '{name}' is only supported with "
+                f"fit_reml(), not fit(). Use fit_reml() or remove lambda_policy."
+            )
+
     if model._splines is not None and not model._specs:
         from superglm.model.base import auto_detect
 

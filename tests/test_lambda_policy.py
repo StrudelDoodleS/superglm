@@ -198,3 +198,25 @@ class TestFitRemlLambdaPolicy:
         for k in model1._reml_lambdas:
             np.testing.assert_allclose(model1._reml_lambdas[k], model2._reml_lambdas[k], rtol=1e-6)
         np.testing.assert_allclose(model1._result.beta, model2._result.beta, rtol=1e-6)
+
+    @pytest.mark.slow
+    def test_off_lambda_is_exactly_zero(self, poisson_data):
+        """LambdaPolicy.off() yields exactly 0.0 in _reml_lambdas, not 1e-6."""
+        X, y, w = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(kind="cr", n_knots=8, lambda_policy=LambdaPolicy.off())},
+        )
+        model.fit_reml(X, y, sample_weight=w)
+        lam_val = next(iter(model._reml_lambdas.values()))
+        assert lam_val == 0.0, f"off() lambda should be 0.0, got {lam_val}"
+
+    def test_fit_rejects_lambda_policy(self, poisson_data):
+        """fit() raises NotImplementedError when lambda_policy is set."""
+        X, y, w = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(kind="cr", n_knots=8, lambda_policy=LambdaPolicy.fixed(1.0))},
+        )
+        with pytest.raises(NotImplementedError, match="fit_reml"):
+            model.fit(X, y, sample_weight=w)

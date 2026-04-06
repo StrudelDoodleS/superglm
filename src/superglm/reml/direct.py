@@ -161,11 +161,17 @@ def optimize_direct_reml(
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
     boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
 
+    # Store original fixed lambda values so they can be restored exactly
+    # after the exp(rho)->clip round-trip (which would clamp 0.0 to 1e-6).
+    fixed_lambdas: dict[str, float] = {}
+    for i, pc in enumerate(penalties):
+        if not estimated_mask[i]:
+            fixed_lambdas[pc.name] = float(lambdas[pc.name])
+
     rho = np.zeros(m, dtype=np.float64)
     for i, pc in enumerate(penalties):
         if not estimated_mask[i]:
-            # Fixed lambda: pin rho to the fixed value (clipped to valid range)
-            fixed_val = float(lambdas[pc.name])
+            fixed_val = fixed_lambdas[pc.name]
             rho[i] = np.clip(np.log(max(fixed_val, 1e-6)), log_lo, log_hi)
             continue
         gm = dm.group_matrices[pc.group_index]
@@ -204,6 +210,8 @@ def optimize_direct_reml(
         cand_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
             cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+        # Restore exact fixed values (exp->clip would clamp 0.0 to 1e-6)
+        cand_lambdas.update(fixed_lambdas)
 
         # Pre-build penalty matrix S once for this lambda candidate
         S_cand = _build_penalty_matrix(
@@ -420,6 +428,7 @@ def optimize_direct_reml(
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
                 trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+            trial_lambdas.update(fixed_lambdas)
 
             _n_linesearch_fits += 1
             S_trial = _build_penalty_matrix(
