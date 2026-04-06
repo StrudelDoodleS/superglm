@@ -270,6 +270,14 @@ class SuperGLM:
             raise ValueError(
                 f"convergence must be 'deviance' or 'coefficients', got {resolved_convergence!r}"
             )
+        if convergence == "coefficients":
+            import warnings
+
+            warnings.warn(
+                "convergence='coefficients' is experimental. Near-separated levels "
+                "may cause slow convergence.",
+                stacklevel=2,
+            )
 
         return fit_ops.fit(
             self,
