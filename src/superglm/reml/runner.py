@@ -121,6 +121,7 @@ def run_reml_once(
     reml_penalties: list[PenaltyComponent] | None = None,
     estimated_names: set[str] | None = None,
     pirls_tol: float = 1e-6,
+    max_pirls_iter: int = 100,
 ) -> tuple[REMLResult, DesignMatrix]:
     """Run a single REML fixed-point outer loop from a chosen initial lambda scale.
 
@@ -214,6 +215,7 @@ def run_reml_once(
                 active_set=active_set,
                 lambda2=lambdas,
                 tol=pirls_tol,
+                max_iter_outer=max_pirls_iter,
             )
             beta = pirls_result.beta
             intercept = pirls_result.intercept
@@ -404,6 +406,7 @@ def run_reml_once(
             active_set=active_set,
             lambda2=lambdas,
             tol=pirls_tol,
+            max_iter_outer=max_pirls_iter,
         )
 
     final_caches = penalty_caches if use_direct else None

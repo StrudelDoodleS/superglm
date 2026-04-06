@@ -263,12 +263,9 @@ class SuperGLM:
             The fitted model (self).
         """
         # Resolve fit controls: explicit kwargs > constructor fallback
-        if tol is not None:
-            self._tol = tol
-        if max_iter is not None:
-            self._max_iter = max_iter
-        if convergence is not None:
-            self._convergence = convergence
+        resolved_tol = tol if tol is not None else self._tol
+        resolved_max_iter = max_iter if max_iter is not None else self._max_iter
+        resolved_convergence = convergence if convergence is not None else self._convergence
 
         return fit_ops.fit(
             self,
@@ -276,6 +273,9 @@ class SuperGLM:
             y,
             sample_weight,
             offset,
+            tol=resolved_tol,
+            max_iter=resolved_max_iter,
+            convergence=resolved_convergence,
             record_diagnostics=record_diagnostics,
         )
 
@@ -345,6 +345,12 @@ class SuperGLM:
             Maximum REML outer iterations (default 20).
         reml_tol : float
             Convergence tolerance on log-lambda (default 1e-6).
+        pirls_tol : float, optional
+            Inner PIRLS/IRLS convergence tolerance. Defaults to
+            constructor ``tol`` (1e-6). Pass explicitly to override.
+        max_pirls_iter : int, optional
+            Maximum inner PIRLS iterations per REML step. Defaults to
+            constructor ``max_iter`` (100).
         lambda2_init : float, optional
             Initial per-group lambda. Defaults to ``self.lambda2``.
         verbose : bool

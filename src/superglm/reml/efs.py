@@ -63,6 +63,7 @@ def optimize_efs_reml(
     reml_penalties: list[PenaltyComponent] | None = None,
     estimated_names: set[str] | None = None,
     pirls_tol: float = 1e-6,
+    max_pirls_iter: int = 100,
 ) -> tuple[REMLResult, DesignMatrix]:
     """EFS (generalized Fellner-Schall) REML optimizer for the BCD path.
 
@@ -108,6 +109,7 @@ def optimize_efs_reml(
         active_set=active_set,
         lambda2=boot_lambdas,
         tol=pirls_tol,
+        max_iter_outer=max_pirls_iter,
     )
 
     # Compute W and X'WX from bootstrap fit
@@ -200,6 +202,7 @@ def optimize_efs_reml(
                 active_set=active_set,
                 lambda2=lambdas,
                 tol=pirls_tol,
+                max_iter_outer=max_pirls_iter,
             )
             beta = pirls_result.beta
             intercept = pirls_result.intercept
@@ -394,6 +397,7 @@ def optimize_efs_reml(
         active_set=active_set,
         lambda2=lambdas,
         tol=pirls_tol,
+        max_iter_outer=max_pirls_iter,
     )
 
     reml_result = REMLResult(
