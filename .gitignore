@@ -48,6 +48,9 @@ TESTING_AUDIT_PLAN.md
 ISSUE_WORKING_WEIGHTS.md
 REML_IMPLEMENTATION_PLAN.md
 
+# Superpowers skill artifacts
+docs/superpowers/
+
 # Agentic harness artifacts
 .harness/
 PLAN.md
