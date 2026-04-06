@@ -48,6 +48,14 @@ TESTING_AUDIT_PLAN.md
 ISSUE_WORKING_WEIGHTS.md
 REML_IMPLEMENTATION_PLAN.md
 
+# scratch/ is a playground for local dev only — not for public release.
+# Benchmarks, experiments, R comparisons, and throwaway scripts live here.
+scratch/
+
+# Superpowers skill artifacts
+docs/superpowers/
+docs/reml_freml_paper_checklist.md
+
 # Agentic harness artifacts
 .harness/
 PLAN.md
