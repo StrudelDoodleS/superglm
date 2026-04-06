@@ -545,6 +545,7 @@ def model_optimize_efs_reml(
     penalty_caches=None,
     reml_penalties=None,
     estimated_names=None,
+    pirls_tol=1e-6,
 ):
     """EFS REML optimizer for the BCD path (lambda1 > 0)."""
     from superglm.model.base import rebuild_dm_with_lambdas
@@ -571,6 +572,7 @@ def model_optimize_efs_reml(
         ),
         reml_penalties=reml_penalties,
         estimated_names=estimated_names,
+        pirls_tol=pirls_tol,
     )
     model._dm = dm
     return result
@@ -590,6 +592,7 @@ def model_run_reml_once(
     verbose,
     use_direct,
     penalty_caches=None,
+    pirls_tol=1e-6,
 ):
     """Run a single REML fixed-point outer loop from a chosen initial lambda scale."""
     from superglm.model.base import rebuild_dm_with_lambdas
@@ -617,6 +620,7 @@ def model_run_reml_once(
         ),
         direct_solve=getattr(model, "_direct_solve", "auto"),
         reml_penalties=getattr(model, "_reml_penalties", None),
+        pirls_tol=pirls_tol,
     )
     model._dm = dm
     return result
@@ -769,6 +773,7 @@ def fit_reml(
                 penalty_caches=penalty_caches,
                 reml_penalties=reml_penalties,
                 estimated_names=estimated_names,
+                pirls_tol=model._tol,
             )
     elif use_direct:
         best = model_optimize_direct_reml(
@@ -803,6 +808,7 @@ def fit_reml(
             penalty_caches=penalty_caches,
             reml_penalties=reml_penalties,
             estimated_names=estimated_names,
+            pirls_tol=model._tol,
         )
     model._result = best.pirls_result
     model._reml_lambdas = best.lambdas
