@@ -266,6 +266,10 @@ class SuperGLM:
         resolved_tol = tol if tol is not None else self._tol
         resolved_max_iter = max_iter if max_iter is not None else self._max_iter
         resolved_convergence = convergence if convergence is not None else self._convergence
+        if resolved_convergence not in ("deviance", "coefficients"):
+            raise ValueError(
+                f"convergence must be 'deviance' or 'coefficients', got {resolved_convergence!r}"
+            )
 
         return fit_ops.fit(
             self,

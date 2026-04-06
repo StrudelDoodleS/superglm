@@ -731,6 +731,8 @@ def fit_reml(
             offset=offset,
             active_set=model._active_set,
             lambda2=model.lambda2,
+            tol=pirls_tol,
+            max_iter_outer=max_pirls_iter,
         )
         return model
 
