@@ -635,6 +635,8 @@ def fit_reml(
     *,
     max_reml_iter=20,
     reml_tol=1e-6,
+    pirls_tol=1e-6,
+    max_pirls_iter=100,
     lambda2_init=None,
     verbose=False,
     w_correction_order=1,
@@ -773,7 +775,7 @@ def fit_reml(
                 penalty_caches=penalty_caches,
                 reml_penalties=reml_penalties,
                 estimated_names=estimated_names,
-                pirls_tol=model._tol,
+                pirls_tol=pirls_tol,
             )
     elif use_direct:
         best = model_optimize_direct_reml(

@@ -117,7 +117,9 @@ class SuperGLM:
         n_bins : int or dict[str, int]
             Number of discretization bins per feature when ``discrete=True``.
         tol : float
-            Convergence tolerance for IRLS / PIRLS.  Default ``1e-8``.
+            Convergence tolerance for IRLS / PIRLS.  Default ``1e-6``.
+            Can also be set per-call via ``fit(tol=...)`` or
+            ``fit_reml(pirls_tol=...)``.  Fit-time values take precedence.
             Larger values (e.g. ``1e-6``) converge faster but may stop
             before near-separated coefficients have stabilised.
         max_iter : int
@@ -210,6 +212,9 @@ class SuperGLM:
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
+        tol: float | None = None,
+        max_iter: int | None = None,
+        convergence: str | None = None,
         record_diagnostics: bool = False,
     ) -> SuperGLM:
         """Fit the model to data.
@@ -257,6 +262,14 @@ class SuperGLM:
         SuperGLM
             The fitted model (self).
         """
+        # Resolve fit controls: explicit kwargs > constructor fallback
+        if tol is not None:
+            self._tol = tol
+        if max_iter is not None:
+            self._max_iter = max_iter
+        if convergence is not None:
+            self._convergence = convergence
+
         return fit_ops.fit(
             self,
             X,
@@ -301,6 +314,8 @@ class SuperGLM:
         *,
         max_reml_iter: int = 20,
         reml_tol: float = 1e-6,
+        pirls_tol: float | None = None,
+        max_pirls_iter: int | None = None,
         lambda2_init: float | None = None,
         verbose: bool = False,
         w_correction_order: int = 1,
@@ -345,6 +360,10 @@ class SuperGLM:
         SuperGLM
             The fitted model (self).
         """
+        # Resolve PIRLS controls: explicit kwargs > constructor fallback
+        resolved_pirls_tol = pirls_tol if pirls_tol is not None else self._tol
+        resolved_max_pirls_iter = max_pirls_iter if max_pirls_iter is not None else self._max_iter
+
         return fit_ops.fit_reml(
             self,
             X,
@@ -353,6 +372,8 @@ class SuperGLM:
             offset,
             max_reml_iter=max_reml_iter,
             reml_tol=reml_tol,
+            pirls_tol=resolved_pirls_tol,
+            max_pirls_iter=resolved_max_pirls_iter,
             lambda2_init=lambda2_init,
             verbose=verbose,
             w_correction_order=w_correction_order,
