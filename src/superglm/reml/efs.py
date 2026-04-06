@@ -61,6 +61,7 @@ def optimize_efs_reml(
     penalty_caches: dict | None = None,
     rebuild_dm: Any = None,
     reml_penalties: list[PenaltyComponent] | None = None,
+    estimated_names: set[str] | None = None,
 ) -> tuple[REMLResult, DesignMatrix]:
     """EFS (generalized Fellner-Schall) REML optimizer for the BCD path.
 
@@ -85,7 +86,9 @@ def optimize_efs_reml(
         group_matrices=dm.group_matrices,
         penalty_caches=penalty_caches,
     )
-    reml_update_names = [pc.name for pc in penalties]
+    reml_update_names = [
+        pc.name for pc in penalties if estimated_names is None or pc.name in estimated_names
+    ]
     n = len(y)
 
     # -- Bootstrap: one PIRLS with minimal penalty -> one EFS step --
@@ -132,6 +135,9 @@ def optimize_efs_reml(
     H_boot_inv, _, _ = _safe_decompose_H(H_boot)
 
     for pc in penalties:
+        # Skip fixed-lambda components — never update their value
+        if estimated_names is not None and pc.name not in estimated_names:
+            continue
         beta_g = boot_result.beta[pc.group_sl]
         if np.linalg.norm(beta_g) < 1e-12:
             continue
@@ -222,6 +228,10 @@ def optimize_efs_reml(
         # -- EFS lambda update --
         lambdas_new = lambdas.copy()
         for pc in penalties:
+            # Skip fixed-lambda components — never update their value
+            if estimated_names is not None and pc.name not in estimated_names:
+                continue
+
             beta_g = beta[pc.group_sl]
 
             # Skip zeroed groups (L1 penalty killed them)
@@ -309,6 +319,8 @@ def optimize_efs_reml(
             )
             if obj_trial > obj_curr + 1e-8 * max(abs(obj_curr), 1.0):
                 for pc in penalties:
+                    if estimated_names is not None and pc.name not in estimated_names:
+                        continue
                     log_old = np.log(max(lambdas[pc.name], 1e-10))
                     log_new = np.log(max(lambdas_new[pc.name], 1e-10))
                     lambdas_new[pc.name] = float(

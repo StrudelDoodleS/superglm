@@ -119,6 +119,7 @@ def run_reml_once(
     rebuild_dm: Any = None,
     direct_solve: str = "auto",
     reml_penalties: list[PenaltyComponent] | None = None,
+    estimated_names: set[str] | None = None,
 ) -> tuple[REMLResult, DesignMatrix]:
     """Run a single REML fixed-point outer loop from a chosen initial lambda scale.
 
@@ -138,9 +139,15 @@ def run_reml_once(
             penalty_caches=penalty_caches,
         )
     if use_direct:
-        reml_update_names = [pc.name for pc in penalties_rro]
+        reml_update_names = [
+            pc.name for pc in penalties_rro if estimated_names is None or pc.name in estimated_names
+        ]
     else:
-        reml_update_names = [pc.name for pc in penalties_rro if pc.rank > 1]
+        reml_update_names = [
+            pc.name
+            for pc in penalties_rro
+            if pc.rank > 1 and (estimated_names is None or pc.name in estimated_names)
+        ]
 
     warm_beta = None
     warm_intercept = None
@@ -256,6 +263,9 @@ def run_reml_once(
 
         lambdas_new = lambdas.copy()
         for pc in penalties_rro:
+            # Skip fixed-lambda components — never update their value
+            if estimated_names is not None and pc.name not in estimated_names:
+                continue
             if not use_direct and pc.rank <= 1:
                 continue
 
