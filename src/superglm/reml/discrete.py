@@ -93,6 +93,7 @@ def optimize_discrete_reml_cached_w(
     max_analytical_per_w: int = 30,
     select_snap: bool = True,
     reml_penalties: list[PenaltyComponent] | None = None,
+    estimated_names: set[str] | None = None,
 ) -> REMLResult:
     """POI fREML optimizer for the discrete path.
 
@@ -121,6 +122,12 @@ def optimize_discrete_reml_cached_w(
     scale_known = getattr(distribution, "scale_known", True)
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
+    # estimated_mask[i] = True  => component i is free to be optimized
+    #                     False => component i has a fixed lambda (policy)
+    if estimated_names is not None:
+        estimated_mask = np.array([pc.name in estimated_names for pc in penalties])
+    else:
+        estimated_mask = np.ones(m, dtype=bool)
     log_lo, log_hi = np.log(1e-6), np.log(1e10)
     p = dm.p
 
@@ -181,8 +188,18 @@ def optimize_discrete_reml_cached_w(
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
     boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
 
+    # Store original fixed lambda values for exact restoration after exp->clip
+    fixed_lambdas: dict[str, float] = {}
+    for i, pc in enumerate(penalties):
+        if not estimated_mask[i]:
+            fixed_lambdas[pc.name] = float(lambdas[pc.name])
+
     rho = np.zeros(m, dtype=np.float64)
     for i, pc in enumerate(penalties):
+        if not estimated_mask[i]:
+            fixed_val = fixed_lambdas[pc.name]
+            rho[i] = np.clip(np.log(max(fixed_val, 1e-6)), log_lo, log_hi)
+            continue
         omega_ssp = pc.omega_ssp
         if omega_ssp is None:
             gm = dm.group_matrices[pc.group_index]
@@ -218,6 +235,7 @@ def optimize_discrete_reml_cached_w(
         cand_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
             cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+        cand_lambdas.update(fixed_lambdas)
 
         # --- Step 1: One PIRLS step (W update) ---
         # Pre-build S once for this candidate
@@ -320,14 +338,20 @@ def optimize_discrete_reml_cached_w(
 
         proj_grad_d = grad.copy()
         for i in range(m):
-            if rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
+            if not estimated_mask[i]:
+                # Fixed lambda — always zero out gradient contribution
+                proj_grad_d[i] = 0.0
+            elif rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
                 proj_grad_d[i] = 0.0
             elif rho_clipped[i] <= log_lo + 0.01 and grad[i] > 0:
                 proj_grad_d[i] = 0.0
 
         frozen_d = np.zeros(m, dtype=bool)
         for i in range(m):
-            if (
+            if not estimated_mask[i]:
+                # Fixed lambda — always freeze
+                frozen_d[i] = True
+            elif (
                 abs(proj_grad_d[i]) < freeze_tol_d * score_scale_d
                 and abs(hess[i, i]) < freeze_tol_d * score_scale_d
             ):
@@ -369,6 +393,7 @@ def optimize_discrete_reml_cached_w(
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
                 trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+            trial_lambdas.update(fixed_lambdas)
 
             # Solve augmented system analytically (O(p^3), no data pass)
             S_trial = _build_penalty_matrix(
@@ -431,10 +456,11 @@ def optimize_discrete_reml_cached_w(
 
         if not accepted:
             # Steepest descent fallback: unit-length in infinity norm
-            grad_max_d = float(np.max(np.abs(grad)))
+            # Use proj_grad_d so that fixed components are not moved.
+            grad_max_d = float(np.max(np.abs(proj_grad_d)))
             if grad_max_d > 1e-12:
                 rho = np.clip(
-                    rho - grad / grad_max_d,
+                    rho - proj_grad_d / grad_max_d,
                     log_lo,
                     log_hi,
                 )
@@ -465,6 +491,7 @@ def optimize_discrete_reml_cached_w(
     final_lambdas = lambdas.copy()
     for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
         final_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+    final_lambdas.update(fixed_lambdas)
     S_final = _build_penalty_matrix(
         dm.group_matrices, groups, final_lambdas, dm.p, reml_penalties=penalties
     )

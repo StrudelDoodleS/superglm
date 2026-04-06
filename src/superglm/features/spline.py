@@ -15,7 +15,7 @@ import scipy.sparse as sp
 from numpy.typing import ArrayLike, NDArray
 from scipy.interpolate import BSpline as BSpl
 
-from superglm.types import GroupInfo, TensorMarginalInfo
+from superglm.types import GroupInfo, LambdaPolicy, TensorMarginalInfo
 
 
 def _weighted_quantile_knots(x: NDArray, n_knots: int, alpha: float) -> NDArray:
@@ -185,6 +185,7 @@ class _SplineBase:
         monotone: str | None = None,
         monotone_mode: str = "postfit",
         m: int | tuple[int, ...] = 2,
+        lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     ):
         if monotone is not None and monotone not in ("increasing", "decreasing"):
             raise ValueError(
@@ -262,6 +263,9 @@ class _SplineBase:
 
         # Multi-m penalty components (set during build / build_knots_and_penalty)
         self._penalty_components: list[tuple[str, NDArray]] | None = None
+
+        # Lambda policy (user-specified)
+        self._lambda_policy = lambda_policy
 
     def _prepare_eval_points(self, x: NDArray) -> tuple[NDArray, bool]:
         """Apply the configured extrapolation policy for basis evaluation."""
@@ -607,6 +611,34 @@ class _SplineBase:
         self._U_range = Z @ U_range if Z is not None else U_range  # (K, n_range)
         self._omega_range = omega_range
 
+    def _resolve_lambda_policies(self, info: GroupInfo) -> dict[str, LambdaPolicy] | None:
+        """Resolve lambda_policy parameter into a per-component dict."""
+        if self._lambda_policy is None:
+            return None
+
+        # Determine valid component names
+        if info.penalty_components is not None:
+            valid_names = {name for name, _ in info.penalty_components}
+        else:
+            # Single-penalty spline: use canonical name "wiggle"
+            valid_names = {"wiggle"}
+
+        if isinstance(self._lambda_policy, LambdaPolicy):
+            return {name: self._lambda_policy for name in valid_names}
+
+        # Dict: validate keys, fill unspecified with estimate
+        policy_dict = self._lambda_policy
+        unknown = set(policy_dict) - valid_names
+        if unknown:
+            raise ValueError(
+                f"lambda_policy contains unknown component names: {unknown}. "
+                f"Valid names: {sorted(valid_names)}"
+            )
+        result = {}
+        for name in valid_names:
+            result[name] = policy_dict.get(name, LambdaPolicy.estimate())
+        return result
+
     def _build_select(self, x: NDArray, B) -> GroupInfo:
         """Build select=True GroupInfo with null + wiggle/per-order penalty components."""
         # Use the highest derivative order for eigendecomposition — it has
@@ -660,7 +692,7 @@ class _SplineBase:
 
         penalty_matrix = sum(omega for _, omega in components)
 
-        return GroupInfo(
+        info = GroupInfo(
             columns=B,
             n_cols=n_combined,
             penalty_matrix=penalty_matrix,
@@ -670,6 +702,8 @@ class _SplineBase:
             penalty_components=components,
             component_types=component_types,
         )
+        info.lambda_policies = self._resolve_lambda_policies(info)
+        return info
 
     def build(
         self, x: NDArray, sample_weight: NDArray | None = None
@@ -700,7 +734,7 @@ class _SplineBase:
             # Summed penalty for R_inv
             omega = sum(om for _, om in penalty_components)
 
-        return GroupInfo(
+        info = GroupInfo(
             columns=B,
             n_cols=n_cols,
             penalty_matrix=omega,
@@ -708,6 +742,12 @@ class _SplineBase:
             projection=projection,
             penalty_components=penalty_components,
         )
+        # Promote single-penalty spline to explicit component when lambda_policy is set
+        if self._lambda_policy is not None and info.penalty_components is None:
+            info.penalty_components = [("wiggle", info.penalty_matrix)]
+            info.component_types = {"wiggle": "difference"}
+        info.lambda_policies = self._resolve_lambda_policies(info)
+        return info
 
     def build_knots_and_penalty(
         self, x: NDArray, sample_weight: NDArray | None = None
@@ -923,6 +963,7 @@ class BasisSpline(_SplineBase):
         monotone: str | None = None,
         monotone_mode: str = "postfit",
         m: int | tuple[int, ...] = 2,
+        lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     ):
         super().__init__(
             n_knots,
@@ -939,6 +980,7 @@ class BasisSpline(_SplineBase):
             monotone=monotone,
             monotone_mode=monotone_mode,
             m=m,
+            lambda_policy=lambda_policy,
         )
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
@@ -1019,6 +1061,7 @@ class NaturalSpline(_SplineBase):
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
         m: int | tuple[int, ...] = 2,
+        lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     ):
         super().__init__(
             n_knots,
@@ -1033,6 +1076,7 @@ class NaturalSpline(_SplineBase):
             knot_alpha,
             select=select,
             m=m,
+            lambda_policy=lambda_policy,
         )
         self._Z: NDArray | None = None
 
@@ -1100,6 +1144,7 @@ class CubicRegressionSpline(_SplineBase):
         monotone: str | None = None,
         monotone_mode: str = "postfit",
         m: int | tuple[int, ...] = 2,
+        lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     ):
         super().__init__(
             n_knots,
@@ -1116,6 +1161,7 @@ class CubicRegressionSpline(_SplineBase):
             monotone=monotone,
             monotone_mode=monotone_mode,
             m=m,
+            lambda_policy=lambda_policy,
         )
         self._Z: NDArray | None = None
 
@@ -1243,6 +1289,7 @@ class CardinalCRSpline(_SplineBase):
         monotone: str | None = None,
         monotone_mode: str = "postfit",
         m: int | tuple[int, ...] = 2,
+        lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     ):
         super().__init__(
             n_knots,
@@ -1259,6 +1306,7 @@ class CardinalCRSpline(_SplineBase):
             monotone=monotone,
             monotone_mode=monotone_mode,
             m=m,
+            lambda_policy=lambda_policy,
         )
         self._cr_knots: NDArray | None = None
         self._cr_M: NDArray | None = None
@@ -1577,6 +1625,7 @@ def Spline(
     monotone: str | None = None,
     monotone_mode: str = "postfit",
     m: int | tuple[int, ...] = 2,
+    lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
 ) -> _SplineBase:
     """Create a spline feature spec.
 
@@ -1711,6 +1760,7 @@ def Spline(
             monotone=monotone,
             monotone_mode=monotone_mode,
             m=m,
+            lambda_policy=lambda_policy,
         )
     elif kind in ("cr", "cr_cardinal"):
         if kind == "cr":
@@ -1728,6 +1778,7 @@ def Spline(
                 monotone=monotone,
                 monotone_mode=monotone_mode,
                 m=m,
+                lambda_policy=lambda_policy,
             )
         else:  # cr_cardinal
             return cls(
@@ -1744,6 +1795,7 @@ def Spline(
                 monotone=monotone,
                 monotone_mode=monotone_mode,
                 m=m,
+                lambda_policy=lambda_policy,
             )
     else:  # "ns"
         return cls(
@@ -1759,4 +1811,5 @@ def Spline(
             boundary=boundary,
             knot_alpha=knot_alpha,
             m=m,
+            lambda_policy=lambda_policy,
         )

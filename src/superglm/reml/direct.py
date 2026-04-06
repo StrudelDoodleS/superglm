@@ -54,6 +54,7 @@ def optimize_direct_reml(
     direct_solve: str = "auto",
     w_correction_order: int = 1,
     reml_penalties: list[PenaltyComponent] | None = None,
+    estimated_names: set[str] | None = None,
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
 
@@ -93,11 +94,18 @@ def optimize_direct_reml(
             select_snap=select_snap,
             direct_solve=direct_solve,
             reml_penalties=penalties,
+            estimated_names=estimated_names,
         )
 
     scale_known = getattr(distribution, "scale_known", True)
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
+    # estimated_mask[i] = True  => component i is free to be optimized
+    #                     False => component i has a fixed lambda (policy)
+    if estimated_names is not None:
+        estimated_mask = np.array([pc.name in estimated_names for pc in penalties])
+    else:
+        estimated_mask = np.ones(m, dtype=bool)
     log_lo, log_hi = np.log(1e-6), np.log(1e10)
     max_newton_step = 5.0
     _eps = np.finfo(float).eps
@@ -153,8 +161,19 @@ def optimize_direct_reml(
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
     boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
 
+    # Store original fixed lambda values so they can be restored exactly
+    # after the exp(rho)->clip round-trip (which would clamp 0.0 to 1e-6).
+    fixed_lambdas: dict[str, float] = {}
+    for i, pc in enumerate(penalties):
+        if not estimated_mask[i]:
+            fixed_lambdas[pc.name] = float(lambdas[pc.name])
+
     rho = np.zeros(m, dtype=np.float64)
     for i, pc in enumerate(penalties):
+        if not estimated_mask[i]:
+            fixed_val = fixed_lambdas[pc.name]
+            rho[i] = np.clip(np.log(max(fixed_val, 1e-6)), log_lo, log_hi)
+            continue
         gm = dm.group_matrices[pc.group_index]
         omega_ssp = pc.omega_ssp if pc.omega_ssp is not None else gm.R_inv.T @ gm.omega @ gm.R_inv
         beta_g = boot_result.beta[pc.group_sl]
@@ -191,6 +210,8 @@ def optimize_direct_reml(
         cand_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
             cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+        # Restore exact fixed values (exp->clip would clamp 0.0 to 1e-6)
+        cand_lambdas.update(fixed_lambdas)
 
         # Pre-build penalty matrix S once for this lambda candidate
         S_cand = _build_penalty_matrix(
@@ -297,7 +318,10 @@ def optimize_direct_reml(
 
         proj_grad = grad.copy()
         for i in range(m):
-            if rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
+            if not estimated_mask[i]:
+                # Fixed lambda — always zero out gradient contribution
+                proj_grad[i] = 0.0
+            elif rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
                 proj_grad[i] = 0.0
             elif rho_clipped[i] <= log_lo + 0.01 and grad[i] > 0:
                 proj_grad[i] = 0.0
@@ -350,7 +374,10 @@ def optimize_direct_reml(
         freeze_tol = 0.1 * _tol
         frozen = np.zeros(m, dtype=bool)
         for i in range(m):
-            if (
+            if not estimated_mask[i]:
+                # Fixed lambda — always freeze
+                frozen[i] = True
+            elif (
                 abs(proj_grad[i]) < freeze_tol * score_scale
                 and abs(hess[i, i]) < freeze_tol * score_scale
             ):
@@ -401,6 +428,7 @@ def optimize_direct_reml(
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
                 trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+            trial_lambdas.update(fixed_lambdas)
 
             _n_linesearch_fits += 1
             S_trial = _build_penalty_matrix(
@@ -454,10 +482,11 @@ def optimize_direct_reml(
 
         if not accepted:
             # Steepest descent fallback: unit-length in infinity norm
-            grad_max = float(np.max(np.abs(grad)))
+            # Use proj_grad so that fixed components are not moved.
+            grad_max = float(np.max(np.abs(proj_grad)))
             if grad_max > 1e-12:
                 rho = np.clip(
-                    rho_clipped - grad / grad_max,
+                    rho_clipped - proj_grad / grad_max,
                     log_lo,
                     log_hi,
                 )

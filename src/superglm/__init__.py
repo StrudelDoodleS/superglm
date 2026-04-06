@@ -104,6 +104,7 @@ from superglm.stats.model_tests import (
     zero_inflation_index,
 )
 from superglm.stats.wood_pvalue import wood_test_smooth
+from superglm.types import LambdaPolicy
 from superglm.validation import (
     DoubleLiftChartResult,
     LiftChartResult,
@@ -166,6 +167,7 @@ __all__ = [
     "Adaptive",
     "NBProfileResult",
     "REMLResult",
+    "LambdaPolicy",
     "estimate_nb_theta",
     "estimate_tweedie_p",
     "TweedieProfileResult",

@@ -104,8 +104,33 @@ def _compute_fit_stats(
     )
 
 
-def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
+def fit(
+    model,
+    X,
+    y,
+    sample_weight=None,
+    offset=None,
+    *,
+    tol=None,
+    max_iter=None,
+    convergence=None,
+    record_diagnostics=False,
+):
     """Fit the model to data."""
+    # Resolve fit controls: explicit kwargs > constructor fallback
+    tol = tol if tol is not None else model._tol
+    max_iter = max_iter if max_iter is not None else model._max_iter
+    convergence = convergence if convergence is not None else model._convergence
+
+    # lambda_policy is only supported in fit_reml(); reject here.
+    for name, spec in model._specs.items():
+        lp = getattr(spec, "_lambda_policy", None)
+        if lp is not None:
+            raise NotImplementedError(
+                f"lambda_policy on feature '{name}' is only supported with "
+                f"fit_reml(), not fit(). Use fit_reml() or remove lambda_policy."
+            )
+
     if model._splines is not None and not model._specs:
         from superglm.model.base import auto_detect
 
@@ -173,11 +198,11 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
             groups=model._groups,
             lambda2=model.lambda2,
             offset=offset,
-            max_iter=model._max_iter,
-            tol=model._tol,
+            max_iter=max_iter,
+            tol=tol,
             record_diagnostics=record_diagnostics,
             direct_solve=model._direct_solve,
-            convergence=model._convergence,
+            convergence=convergence,
         )
     else:
         model._result = fit_pirls(
@@ -189,12 +214,12 @@ def fit(model, X, y, sample_weight=None, offset=None, record_diagnostics=False):
             groups=model._groups,
             penalty=model.penalty,
             offset=offset,
-            max_iter_outer=model._max_iter,
-            tol=model._tol,
+            max_iter_outer=max_iter,
+            tol=tol,
             active_set=model._active_set,
             lambda2=model.lambda2,
             record_diagnostics=record_diagnostics,
-            convergence=model._convergence,
+            convergence=convergence,
         )
 
     # Fix phi for known-scale families (Poisson): phi is always 1.0.
@@ -454,6 +479,7 @@ def model_optimize_direct_reml(
     profile=None,
     w_correction_order=1,
     reml_penalties=None,
+    estimated_names=None,
 ):
     """Optimize the direct REML objective via damped Newton (Wood 2011)."""
     return optimize_direct_reml(
@@ -478,6 +504,7 @@ def model_optimize_direct_reml(
         direct_solve=getattr(model, "_direct_solve", "auto"),
         w_correction_order=w_correction_order,
         reml_penalties=reml_penalties,
+        estimated_names=estimated_names,
     )
 
 
@@ -533,6 +560,9 @@ def model_optimize_efs_reml(
     verbose,
     penalty_caches=None,
     reml_penalties=None,
+    estimated_names=None,
+    pirls_tol=1e-6,
+    max_pirls_iter=100,
 ):
     """EFS REML optimizer for the BCD path (lambda1 > 0)."""
     from superglm.model.base import rebuild_dm_with_lambdas
@@ -558,6 +588,9 @@ def model_optimize_efs_reml(
             model, lambdas, sample_weight
         ),
         reml_penalties=reml_penalties,
+        estimated_names=estimated_names,
+        pirls_tol=pirls_tol,
+        max_pirls_iter=max_pirls_iter,
     )
     model._dm = dm
     return result
@@ -577,6 +610,8 @@ def model_run_reml_once(
     verbose,
     use_direct,
     penalty_caches=None,
+    pirls_tol=1e-6,
+    max_pirls_iter=100,
 ):
     """Run a single REML fixed-point outer loop from a chosen initial lambda scale."""
     from superglm.model.base import rebuild_dm_with_lambdas
@@ -604,6 +639,8 @@ def model_run_reml_once(
         ),
         direct_solve=getattr(model, "_direct_solve", "auto"),
         reml_penalties=getattr(model, "_reml_penalties", None),
+        pirls_tol=pirls_tol,
+        max_pirls_iter=max_pirls_iter,
     )
     model._dm = dm
     return result
@@ -618,6 +655,8 @@ def fit_reml(
     *,
     max_reml_iter=20,
     reml_tol=1e-6,
+    pirls_tol=1e-6,
+    max_pirls_iter=100,
     lambda2_init=None,
     verbose=False,
     w_correction_order=1,
@@ -692,6 +731,8 @@ def fit_reml(
             offset=offset,
             active_set=model._active_set,
             lambda2=model.lambda2,
+            tol=pirls_tol,
+            max_iter_outer=max_pirls_iter,
         )
         return model
 
@@ -703,15 +744,63 @@ def fit_reml(
     penalty_ranks = {pc.name: pc.rank for pc in reml_penalties}
 
     # Initialize per-component lambdas (penalty-indexed, not term-indexed)
+    # Partition into fixed (policy.mode == "fixed") and estimated components.
     lam_init = lambda2_init if lambda2_init is not None else model.lambda2
-    lambdas = {pc.name: lam_init for pc in reml_penalties}
+    lambdas = {}
+    estimated_names: set[str] = set()
+    for pc in reml_penalties:
+        if pc.lambda_policy is not None and pc.lambda_policy.mode == "fixed":
+            lambdas[pc.name] = float(pc.lambda_policy.value)
+        else:
+            lambdas[pc.name] = lam_init
+            estimated_names.add(pc.name)
 
     # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
     offset_arr = offset if offset is not None else np.zeros(len(y))
     lam1 = model.penalty.lambda1
     use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
 
-    if use_direct:
+    if not estimated_names:
+        # All lambdas are fixed — skip REML optimizer; one PIRLS solve at fixed lambdas.
+        # Pass estimated_names=set() so the optimizer does a single evaluation pass
+        # and never moves any lambda.
+        if use_direct:
+            best = model_optimize_direct_reml(
+                model,
+                y,
+                sample_weight,
+                offset_arr,
+                reml_groups,
+                penalty_ranks,
+                lambdas,
+                max_reml_iter=1,
+                reml_tol=1.0,  # tol=1.0 ensures convergence after 1 iter
+                verbose=verbose,
+                penalty_caches=penalty_caches,
+                profile=_profile,
+                w_correction_order=w_correction_order,
+                reml_penalties=reml_penalties,
+                estimated_names=estimated_names,
+            )
+        else:
+            best = model_optimize_efs_reml(
+                model,
+                y,
+                sample_weight,
+                offset_arr,
+                reml_groups,
+                penalty_ranks,
+                lambdas,
+                max_reml_iter=1,
+                reml_tol=1.0,
+                verbose=verbose,
+                penalty_caches=penalty_caches,
+                reml_penalties=reml_penalties,
+                estimated_names=estimated_names,
+                pirls_tol=pirls_tol,
+                max_pirls_iter=max_pirls_iter,
+            )
+    elif use_direct:
         best = model_optimize_direct_reml(
             model,
             y,
@@ -727,6 +816,7 @@ def fit_reml(
             profile=_profile,
             w_correction_order=w_correction_order,
             reml_penalties=reml_penalties,
+            estimated_names=estimated_names,
         )
     else:
         best = model_optimize_efs_reml(
@@ -742,6 +832,9 @@ def fit_reml(
             verbose=verbose,
             penalty_caches=penalty_caches,
             reml_penalties=reml_penalties,
+            estimated_names=estimated_names,
+            pirls_tol=pirls_tol,
+            max_pirls_iter=max_pirls_iter,
         )
     model._result = best.pirls_result
     model._reml_lambdas = best.lambdas
