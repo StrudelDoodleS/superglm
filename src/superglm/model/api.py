@@ -275,7 +275,10 @@ class SuperGLM:
 
             warnings.warn(
                 "convergence='coefficients' is experimental. Near-separated levels "
-                "may cause slow convergence.",
+                "have no finite MLE, so coefficient-based convergence may not "
+                "terminate or may produce numerically unstable results. "
+                "Use convergence='deviance' (default) for production fits.",
+                UserWarning,
                 stacklevel=2,
             )
 
