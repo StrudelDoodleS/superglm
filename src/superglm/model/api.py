@@ -55,7 +55,7 @@ class SuperGLM:
         discrete: bool = False,
         n_bins: int | dict[str, int] = 256,
         # Convergence
-        tol: float = 1e-8,
+        tol: float = 1e-6,
         max_iter: int = 100,
         convergence: str = "deviance",
     ):
@@ -117,7 +117,9 @@ class SuperGLM:
         n_bins : int or dict[str, int]
             Number of discretization bins per feature when ``discrete=True``.
         tol : float
-            Convergence tolerance for IRLS / PIRLS.  Default ``1e-8``.
+            Convergence tolerance for IRLS / PIRLS.  Default ``1e-6``.
+            Can also be set per-call via ``fit(tol=...)`` or
+            ``fit_reml(pirls_tol=...)``.  Fit-time values take precedence.
             Larger values (e.g. ``1e-6``) converge faster but may stop
             before near-separated coefficients have stabilised.
         max_iter : int
@@ -210,6 +212,9 @@ class SuperGLM:
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
+        tol: float | None = None,
+        max_iter: int | None = None,
+        convergence: str | None = None,
         record_diagnostics: bool = False,
     ) -> SuperGLM:
         """Fit the model to data.
@@ -257,12 +262,35 @@ class SuperGLM:
         SuperGLM
             The fitted model (self).
         """
+        # Resolve fit controls: explicit kwargs > constructor fallback
+        resolved_tol = tol if tol is not None else self._tol
+        resolved_max_iter = max_iter if max_iter is not None else self._max_iter
+        resolved_convergence = convergence if convergence is not None else self._convergence
+        if resolved_convergence not in ("deviance", "coefficients"):
+            raise ValueError(
+                f"convergence must be 'deviance' or 'coefficients', got {resolved_convergence!r}"
+            )
+        if convergence == "coefficients":
+            import warnings
+
+            warnings.warn(
+                "convergence='coefficients' is experimental. Near-separated levels "
+                "have no finite MLE, so coefficient-based convergence may not "
+                "terminate or may produce numerically unstable results. "
+                "Use convergence='deviance' (default) for production fits.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         return fit_ops.fit(
             self,
             X,
             y,
             sample_weight,
             offset,
+            tol=resolved_tol,
+            max_iter=resolved_max_iter,
+            convergence=resolved_convergence,
             record_diagnostics=record_diagnostics,
         )
 
@@ -301,6 +329,8 @@ class SuperGLM:
         *,
         max_reml_iter: int = 20,
         reml_tol: float = 1e-6,
+        pirls_tol: float | None = None,
+        max_pirls_iter: int | None = None,
         lambda2_init: float | None = None,
         verbose: bool = False,
         w_correction_order: int = 1,
@@ -330,6 +360,12 @@ class SuperGLM:
             Maximum REML outer iterations (default 20).
         reml_tol : float
             Convergence tolerance on log-lambda (default 1e-6).
+        pirls_tol : float, optional
+            Inner PIRLS/IRLS convergence tolerance. Defaults to
+            constructor ``tol`` (1e-6). Pass explicitly to override.
+        max_pirls_iter : int, optional
+            Maximum inner PIRLS iterations per REML step. Defaults to
+            constructor ``max_iter`` (100).
         lambda2_init : float, optional
             Initial per-group lambda. Defaults to ``self.lambda2``.
         verbose : bool
@@ -345,6 +381,10 @@ class SuperGLM:
         SuperGLM
             The fitted model (self).
         """
+        # Resolve PIRLS controls: explicit kwargs > constructor fallback
+        resolved_pirls_tol = pirls_tol if pirls_tol is not None else self._tol
+        resolved_max_pirls_iter = max_pirls_iter if max_pirls_iter is not None else self._max_iter
+
         return fit_ops.fit_reml(
             self,
             X,
@@ -353,6 +393,8 @@ class SuperGLM:
             offset,
             max_reml_iter=max_reml_iter,
             reml_tol=reml_tol,
+            pirls_tol=resolved_pirls_tol,
+            max_pirls_iter=resolved_max_pirls_iter,
             lambda2_init=lambda2_init,
             verbose=verbose,
             w_correction_order=w_correction_order,

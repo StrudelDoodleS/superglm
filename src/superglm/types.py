@@ -8,11 +8,46 @@ The solver never sees feature types — only GroupInfo objects.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
+
+
+# ── Per-component lambda control ────────────────────────────────
+@dataclass(frozen=True)
+class LambdaPolicy:
+    """Per-penalty-component lambda control for REML.
+
+    Two modes:
+    - ``estimate``: lambda optimised by REML, initialised from ``lambda2_init``.
+    - ``fixed(value)``: lambda held at ``value`` throughout fitting.
+
+    ``off()`` is sugar for ``fixed(0.0)`` — the penalty component contributes
+    nothing to the penalty matrix.
+    """
+
+    mode: Literal["estimate", "fixed"]
+    value: float | None = None
+
+    def __post_init__(self):
+        if self.mode == "fixed" and self.value is None:
+            raise ValueError("LambdaPolicy(mode='fixed') requires a value")
+        if self.mode not in ("estimate", "fixed"):
+            raise ValueError(f"Invalid LambdaPolicy mode: {self.mode!r}")
+
+    @classmethod
+    def estimate(cls) -> LambdaPolicy:
+        return cls(mode="estimate")
+
+    @classmethod
+    def fixed(cls, value: float) -> LambdaPolicy:
+        return cls(mode="fixed", value=float(value))
+
+    @classmethod
+    def off(cls) -> LambdaPolicy:
+        return cls.fixed(0.0)
 
 
 # ── What a feature spec must provide ────────────────────────────
@@ -62,6 +97,8 @@ class GroupInfo:
     # Optional mapping suffix → component_type for penalty_components.
     # E.g. {"null": "selection"} marks null-space penalty as selection penalty.
     component_types: dict[str, str] | None = None
+    # Optional per-component lambda control; keys match penalty_components suffixes.
+    lambda_policies: dict[str, LambdaPolicy] | None = None
 
     def __post_init__(self):
         if self.columns is None:
@@ -155,6 +192,7 @@ class PenaltyComponent:
     log_det_omega_plus: float = 0.0
     eigvals_omega: NDArray | None = None  # positive eigenvalues of omega_ssp
     component_type: str | None = None  # "selection" for null-space select penalty
+    lambda_policy: LambdaPolicy | None = None  # per-component lambda control
 
 
 # ── Tensor marginal ingredients ────────────────────────────────

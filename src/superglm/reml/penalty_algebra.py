@@ -81,6 +81,7 @@ def build_penalty_components(
         if getattr(gm, "omega_components", None) is not None:
             # Multi-penalty path: N components share this coefficient block.
             ct_map = getattr(gm, "component_types", None) or {}
+            lp_map = getattr(gm, "lambda_policies", None) or {}
             for suffix, omega_j in gm.omega_components:
                 omega_ssp_j = gm.R_inv.T @ omega_j @ gm.R_inv
                 rank, log_det, pos_eigvals = _rank_and_logdet(omega_j, omega_ssp_j)
@@ -96,10 +97,12 @@ def build_penalty_components(
                         log_det_omega_plus=log_det,
                         eigvals_omega=pos_eigvals,
                         component_type=ct_map.get(suffix),
+                        lambda_policy=lp_map.get(suffix),
                     )
                 )
         else:
             # Single-penalty path.
+            lp_map = getattr(gm, "lambda_policies", None) or {}
             omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
             rank, log_det, pos_eigvals = _rank_and_logdet(gm.omega, omega_ssp)
             components.append(
@@ -113,6 +116,7 @@ def build_penalty_components(
                     rank=rank,
                     log_det_omega_plus=log_det,
                     eigvals_omega=pos_eigvals,
+                    lambda_policy=lp_map.get(g.name) or lp_map.get("_default"),
                 )
             )
     return components

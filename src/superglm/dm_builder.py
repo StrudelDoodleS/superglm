@@ -382,6 +382,8 @@ def _process_info(
                 (suffix, P @ omega_j @ P.T) for suffix, omega_j in info.penalty_components
             ]
             gm.component_types = info.component_types
+            if info.lambda_policies is not None:
+                gm.lambda_policies = info.lambda_policies
 
     elif info.reparametrize and info.penalty_matrix is not None:
         B_for = B_unique if use_discrete else info.columns
@@ -411,6 +413,8 @@ def _process_info(
         if info.penalty_components is not None and hasattr(gm, "omega_components"):
             gm.omega_components = info.penalty_components
             gm.component_types = info.component_types
+            if info.lambda_policies is not None:
+                gm.lambda_policies = info.lambda_policies
 
     else:
         n_cols = info.n_cols

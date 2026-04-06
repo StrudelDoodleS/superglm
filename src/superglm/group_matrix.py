@@ -295,6 +295,7 @@ class SparseSSPGroupMatrix:
         "projection",
         "omega_components",
         "component_types",
+        "lambda_policies",
     )
 
     def __init__(self, B_csr: sp.spmatrix, R_inv: NDArray):
@@ -309,6 +310,7 @@ class SparseSSPGroupMatrix:
         self.projection = None  # (K, n_sub) projection matrix, set externally
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
         self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
+        self.lambda_policies = None  # dict[suffix, LambdaPolicy] for multi-penalty, set externally
 
     def matvec(self, v: NDArray) -> NDArray:
         # B @ (R_inv @ v): tiny dense first, then sparse matvec
@@ -381,6 +383,7 @@ class DiscretizedSSPGroupMatrix:
         "projection",
         "omega_components",
         "component_types",
+        "lambda_policies",
     )
 
     def __init__(self, B_unique: NDArray, R_inv: NDArray, bin_idx: NDArray):
@@ -393,6 +396,7 @@ class DiscretizedSSPGroupMatrix:
         self.projection = None  # (K, n_sub) projection matrix, set externally
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
         self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
+        self.lambda_policies = None  # dict[suffix, LambdaPolicy] for multi-penalty, set externally
 
     def matvec(self, v: NDArray) -> NDArray:
         # B_unique @ (R_inv @ v) is (n_bins,), scatter to (n,)
