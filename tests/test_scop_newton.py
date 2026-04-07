@@ -82,9 +82,12 @@ class TestSCOPNewtonStep:
             if result.step_norm < 1e-8:
                 break
 
-        # Converged gamma should be monotone increasing
-        gamma_eff = reparam.forward(beta)
-        assert np.all(np.diff(gamma_eff) >= -1e-10)
+        # forward() returns exp(beta_eff) = positive increments (all > 0).
+        # Monotonicity of the actual curve is guaranteed by construction:
+        # gamma_raw = Sigma @ (beta_1, exp(beta_eff)) is monotone increasing
+        # because all increments are positive.
+        beta_tilde_eff = reparam.forward(beta)
+        assert np.all(beta_tilde_eff > 0), "All increments should be positive"
 
     def test_fisher_fallback_on_bad_hessian(self):
         """If Newton Hessian is unusable, falls back to Fisher step."""

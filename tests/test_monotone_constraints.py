@@ -300,6 +300,8 @@ class TestPSplineSCOPConstraints:
         rng = np.random.default_rng(42)
         # beta in solver-space: length n_cols = q-1
         beta_eff = rng.standard_normal(info.n_cols)
-        gamma_eff = info.scop_reparameterization.forward(beta_eff)
-        # gamma_eff coefficients should be monotone (q_eff length)
-        assert np.all(np.diff(gamma_eff) >= 0)
+        coeffs = info.scop_reparameterization.forward(beta_eff)
+        # forward() returns exp(beta_eff) = positive increments.
+        # All > 0 guarantees monotonicity when multiplied by the
+        # B_centered = (B @ Sigma)[:, 1:] design block.
+        assert np.all(coeffs > 0)

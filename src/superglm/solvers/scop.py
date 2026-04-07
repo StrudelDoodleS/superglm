@@ -211,30 +211,32 @@ class SCOPSolverReparam:
         return beta_raw
 
     def forward(self, beta_eff: NDArray) -> NDArray:
-        """Forward map: beta_eff -> gamma_eff (effective coefficients).
+        """Forward map: beta_eff -> coefficients that multiply B_centered.
 
-        Returns the q_eff-dimensional vector that multiplies B_centered
-        in the linear predictor: eta_scop = B_centered @ gamma_eff.
+        Since B_centered = (B @ Sigma)[:, 1:] - col_means, the Sigma
+        cumulative sum is already baked into the design matrix. The
+        coefficients are therefore beta_tilde_eff = exp(beta_eff),
+        the positive increment block — NOT gamma = Sigma @ beta_tilde
+        (which would apply the cumulative sum twice).
 
-        Computed as gamma_raw[1:] from the embedded raw SCOP chain.
-        (gamma_raw[0] is the constant level absorbed into the intercept
-        via centering.)
+        Returns (q_eff,) vector: eta_scop = B_centered @ forward(beta_eff).
         """
-        gamma_raw = self.raw_reparam.forward(self._embed(beta_eff))
-        return gamma_raw[1:]  # drop constant component
-
-    def beta_tilde_eff(self, beta_eff: NDArray) -> NDArray:
-        """Effective positivity-transformed vector: exp(beta_eff)."""
         return np.exp(np.clip(beta_eff, -500, 500))
 
-    def jacobian(self, beta_eff: NDArray) -> NDArray:
-        """Jacobian d(gamma_eff)/d(beta_eff), shape (q_eff, q_eff).
+    def beta_tilde_eff(self, beta_eff: NDArray) -> NDArray:
+        """Effective positivity-transformed vector: exp(beta_eff).
 
-        Rows 1..q_raw-1 and columns 1..q_raw-1 of the raw Jacobian
-        (dropping both the constant output row and the beta_1 input column).
+        Same as forward() — kept for semantic clarity.
         """
-        J_raw = self.raw_reparam.jacobian(self._embed(beta_eff))
-        return J_raw[1:, 1:]  # (q_eff, q_eff)
+        return self.forward(beta_eff)
+
+    def jacobian(self, beta_eff: NDArray) -> NDArray:
+        """Jacobian d(forward)/d(beta_eff), shape (q_eff, q_eff).
+
+        Since forward(beta_eff) = exp(beta_eff) element-wise, the
+        Jacobian is diagonal: diag(exp(beta_eff)).
+        """
+        return np.diag(np.exp(np.clip(beta_eff, -500, 500)))
 
     def penalty_matrix(self) -> NDArray:
         """Penalty matrix in solver space (q_eff x q_eff).

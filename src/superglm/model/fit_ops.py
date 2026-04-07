@@ -203,6 +203,14 @@ def fit(
     if len(_monotone_engines) > 1:
         raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
 
+    # Guard: multiple SCOP terms in one model are not yet supported
+    # (sequential Gauss-Seidel sweep does not converge reliably).
+    _n_scop = sum(1 for g in model._groups if g.monotone_engine == "scop")
+    if _n_scop > 1:
+        raise NotImplementedError(
+            "Multiple SCOP monotone terms in the same model are not yet supported."
+        )
+
     # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed),
     # or when any group has monotone constraints (constrained QP / SCOP Newton).
     _has_constraints = any(g.constraints is not None for g in model._groups)
