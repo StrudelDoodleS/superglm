@@ -249,3 +249,22 @@ class TestMonotoneUnsupportedCombinations:
         )
         with pytest.raises(NotImplementedError, match="smoothness selection"):
             model.fit_reml(df[["x"]], df["y"])
+
+    def test_monotone_with_discrete_raises(self):
+        """discrete=True + monotone_mode='fit' is not supported."""
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 1, n)
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="discrete=True"):
+            model.fit(df[["x"]], df["y"])

@@ -517,6 +517,16 @@ def build_design_matrix(
         bin_idx = None
         exposure_agg = None
 
+        if (
+            use_discrete
+            and getattr(spec, "monotone", None) is not None
+            and getattr(spec, "monotone_mode", "postfit") == "fit"
+        ):
+            raise NotImplementedError(
+                "Monotone fit-time constraints are not supported with "
+                "discrete=True. Use discrete=False or monotone_mode='postfit'."
+            )
+
         if use_discrete:
             omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
                 x_col, sample_weight
