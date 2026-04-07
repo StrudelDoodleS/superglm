@@ -54,6 +54,7 @@ from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import (
     BasisSpline,
+    BSplineSmooth,
     CubicRegressionSpline,
     NaturalSpline,
     PSpline,
@@ -147,6 +148,7 @@ __all__ = [
     "Spline",
     "PSpline",
     "BasisSpline",
+    "BSplineSmooth",
     "NaturalSpline",
     "CubicRegressionSpline",
     "Categorical",

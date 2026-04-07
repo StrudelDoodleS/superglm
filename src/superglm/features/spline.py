@@ -1033,6 +1033,145 @@ class PSpline(_SplineBase):
 BasisSpline = PSpline
 
 
+class BSplineSmooth(_SplineBase):
+    """B-spline smooth with integrated-derivative penalty.
+
+    Same raw B-spline basis as ``PSpline``, but penalised via the
+    *integrated squared m-th derivative* rather than the discrete
+    difference penalty.  This is the analogue of mgcv's ``"bs"`` smooth.
+
+    The penalty matrix is::
+
+        omega_ij = int B_i^(m)(x) B_j^(m)(x) dx
+
+    computed by Gauss--Legendre quadrature over each knot span.  ``m``
+    is the integrated derivative order (default 2 = integrated
+    second-derivative penalty).  Compare with ``PSpline`` where ``m``
+    is the finite-difference order on the coefficient vector.
+
+    Cubic by default (``degree=3``) but general degree is allowed.
+
+    Parameters
+    ----------
+    n_knots : int
+        Number of interior knots.
+    degree : int
+        B-spline polynomial degree.
+    knot_strategy : str
+        ``"uniform"`` or ``"quantile"``.
+    penalty : str
+        ``"ssp"`` enables SSP reparametrisation, ``"none"`` for raw.
+    select : bool
+        If True, add double-penalty shrinkage (null + range space).
+    knots : array-like or None
+        Explicit interior knot positions.
+    monotone : str or None
+        Monotonicity constraint direction.
+    monotone_mode : str
+        ``"postfit"`` (default) applies isotonic regression after fitting.
+    m : int or tuple of int
+        Integrated derivative order(s) for the penalty.
+    lambda_policy : LambdaPolicy or dict or None
+        Per-component lambda control.
+    """
+
+    _penalty_semantics = "integrated_derivative"
+    _max_penalty_order: int | None = None  # validated at build time
+
+    def __init__(
+        self,
+        n_knots: int = 10,
+        degree: int = 3,
+        knot_strategy: str = "uniform",
+        penalty: str = "ssp",
+        select: bool = False,
+        knots: ArrayLike | None = None,
+        discrete: bool | None = None,
+        n_bins: int | None = None,
+        extrapolation: str = "clip",
+        boundary: tuple[float, float] | None = None,
+        knot_alpha: float = 0.2,
+        monotone: str | None = None,
+        monotone_mode: str = "postfit",
+        m: int | tuple[int, ...] = 2,
+        lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
+    ):
+        super().__init__(
+            n_knots,
+            degree,
+            knot_strategy,
+            penalty,
+            knots,
+            discrete,
+            n_bins,
+            extrapolation,
+            boundary,
+            knot_alpha,
+            select=select,
+            monotone=monotone,
+            monotone_mode=monotone_mode,
+            m=m,
+            lambda_policy=lambda_policy,
+        )
+
+    def _assemble_knot_vector(self, interior: NDArray) -> None:
+        """Open knot vector with 0.001*range edge padding.
+
+        Identical to PSpline's open-knot assembly: extends the knot
+        vector beyond the data range at regular spacing rather than
+        repeating boundary knots.
+        """
+        xr = self._hi - self._lo
+        lo_eff = self._lo - 0.001 * xr
+        hi_eff = self._hi + 0.001 * xr
+
+        inner = np.concatenate([[lo_eff], interior, [hi_eff]])
+
+        dx_lo = inner[1] - inner[0]
+        dx_hi = inner[-1] - inner[-2]
+
+        lower = lo_eff - dx_lo * np.arange(self.degree, 0, -1)
+        upper = hi_eff + dx_hi * np.arange(1, self.degree + 1)
+
+        self._knots = np.concatenate([lower, inner, upper])
+        self._n_basis = len(self._knots) - self.degree - 1
+
+    def _build_penalty_for_order(self, order: int) -> NDArray:
+        """Integrated f^(m) squared penalty via Gauss-Legendre quadrature.
+
+        omega_ij = int B_i^(m)(x) B_j^(m)(x) dx
+
+        For degree-d B-splines, the m-th derivative is degree (d-m), so
+        the product is degree 2*(d-m).  Quadrature with max(m+1, d)
+        points is sufficient.
+        """
+        K = self._n_basis
+        unique_knots = np.unique(self._knots)
+        omega = np.zeros((K, K))
+        n_quad = max(order + 1, self.degree)
+
+        for a, b in zip(unique_knots[:-1], unique_knots[1:]):
+            if b - a < 1e-15:
+                continue
+            xi, wi = np.polynomial.legendre.leggauss(n_quad)
+            x_q = 0.5 * (b - a) * xi + 0.5 * (a + b)
+            w_q = 0.5 * (b - a) * wi
+
+            Dm_q = np.zeros((len(x_q), K))
+            for j in range(K):
+                c = np.zeros(K)
+                c[j] = 1.0
+                spl = BSpl(self._knots, c, self.degree)
+                Dm_q[:, j] = spl(x_q, nu=order)
+
+            omega += Dm_q.T @ (Dm_q * w_q[:, None])
+
+        return omega
+
+    def _build_penalty(self) -> NDArray:
+        return self._build_penalty_for_order(self._m_orders[0])
+
+
 class NaturalSpline(_SplineBase):
     """Natural P-spline: f''=0 at boundaries, linear tails.
 
