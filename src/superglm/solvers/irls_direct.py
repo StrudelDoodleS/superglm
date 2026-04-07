@@ -37,6 +37,7 @@ from superglm.group_matrix import (
 from superglm.links import Link, stabilize_eta
 from superglm.solvers.constrained_qp import solve_constrained_qp
 from superglm.solvers.pirls import IterationDiagnostics, PIRLSResult
+from superglm.solvers.scop_newton import scop_newton_step
 from superglm.types import GroupSlice, PenaltyComponent
 
 logger = logging.getLogger(__name__)
@@ -166,18 +167,24 @@ def _build_penalty_matrix(
     for gm, g in zip(group_matrices, groups):
         if not g.penalized:
             continue
-        if not isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
-            continue
-        omega = gm.omega
-        if omega is None:
-            continue
 
         if isinstance(lambda2, dict):
             lam_g = lambda2.get(g.name, 0.0)
         else:
             lam_g = lambda2
 
-        S[g.sl, g.sl] = lam_g * gm.R_inv.T @ omega @ gm.R_inv
+        if lam_g == 0:
+            continue
+
+        if isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+            omega = gm.omega
+            if omega is None:
+                continue
+            S[g.sl, g.sl] = lam_g * gm.R_inv.T @ omega @ gm.R_inv
+        elif g.scop_reparameterization is not None:
+            # SCOP terms bypass SSP — penalty is already in solver coordinates.
+            S_scop = g.scop_reparameterization.penalty_matrix()
+            S[g.sl, g.sl] = lam_g * S_scop
 
     return S
 
@@ -434,9 +441,62 @@ def fit_irls_direct(
     has_constraints = any(g.constraints is not None for g in groups)
     prev_active_set: list[int] | None = None
 
+    # ── SCOP monotone engine support ──
+    _has_scop = any(g.monotone_engine == "scop" for g in groups)
+    # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
+    _scop_state: dict[int, dict] = {}
+    if _has_scop:
+        for gi, g in enumerate(groups):
+            if g.monotone_engine == "scop":
+                reparam = g.scop_reparameterization
+                B_scop = gms[gi].toarray()  # (n, q_eff)
+                S_scop = reparam.penalty_matrix()
+                _scop_state[gi] = {
+                    "reparam": reparam,
+                    "B_scop": B_scop,
+                    "S_scop": S_scop,
+                    "beta_scop": None,  # initialized on first iteration
+                    "beta_scop_prev": None,
+                }
+        # Build mask of non-SCOP column indices for the reduced system
+        _non_scop_cols = []
+        _non_scop_groups_idx = []
+        for gi, g in enumerate(groups):
+            if gi not in _scop_state:
+                _non_scop_cols.extend(range(g.start, g.end))
+                _non_scop_groups_idx.append(gi)
+        _non_scop_cols = np.array(_non_scop_cols, dtype=int)
+        _p_reduced = len(_non_scop_cols)
+        # Build reduced penalty matrix for non-SCOP groups
+        _S_reduced = S[np.ix_(_non_scop_cols, _non_scop_cols)]
+        # Build mapping from reduced beta index to full beta index
+        _reduced_to_full = _non_scop_cols
+        # Build reduced group slices (re-indexed for reduced system)
+        _reduced_groups: list[GroupSlice] = []
+        _reduced_gms = []
+        col_offset_r = 0
+        for gi in _non_scop_groups_idx:
+            g = groups[gi]
+            sz = g.size
+            _reduced_groups.append(
+                GroupSlice(
+                    name=g.name,
+                    start=col_offset_r,
+                    end=col_offset_r + sz,
+                    weight=g.weight,
+                    penalized=g.penalized,
+                    feature_name=g.feature_name,
+                    subgroup_type=g.subgroup_type,
+                    constraints=g.constraints,
+                    monotone_engine=g.monotone_engine,
+                )
+            )
+            _reduced_gms.append(gms[gi])
+            col_offset_r += sz
+
     # QR pre-computation: materialise full design matrix once
-    # Constrained QP requires Gram path — force it if constraints present
-    _use_qr = direct_solve == "qr" and not has_constraints
+    # Constrained QP / SCOP requires Gram path — force it if constraints present
+    _use_qr = direct_solve == "qr" and not has_constraints and not _has_scop
     if _use_qr:
         has_disc = any(isinstance(gm, DiscretizedSSPGroupMatrix) for gm in gms)
         if has_disc:
@@ -516,64 +576,153 @@ def fit_irls_direct(
             # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
             _t0 = time.perf_counter()
             z_off = z - offset
-            Wz = W * z_off
-            sum_W = float(np.sum(W))
 
-            # Combined gram + rmatvec: shares O(n) bincount for discretized groups
-            XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz, tabmat_split=_tabmat_split)
+            if _has_scop:
+                # ── SCOP block-coordinate path ──────────────────────────
+                # Step 1: Compute SCOP contribution to eta from current state
+                eta_scop = np.zeros(n)
+                for gi, st in _scop_state.items():
+                    if st["beta_scop"] is None:
+                        # Initialize SCOP beta on first iteration
+                        st["beta_scop"] = st["reparam"].qp_initialize(
+                            st["B_scop"],
+                            z_off,
+                            lambda_penalty=lambda2,
+                            weights=W,
+                        )
+                    gamma_eff = st["reparam"].forward(st["beta_scop"])
+                    eta_scop += st["B_scop"] @ gamma_eff
 
-            # Build augmented system (p+1, p+1)
-            M_aug = np.empty((p + 1, p + 1))
-            M_aug[0, 0] = sum_W
-            M_aug[0, 1:] = XtW1
-            M_aug[1:, 0] = XtW1
-            M_aug[1:, 1:] = XtWX + S
+                # Step 2: Adjust working response by removing SCOP contribution
+                z_adj = z_off - eta_scop
+                Wz_adj = W * z_adj
+                sum_W = float(np.sum(W))
 
-            # RHS: X_aug' W (z - offset)
-            rhs = np.empty(p + 1)
-            rhs[0] = float(np.sum(Wz))
-            rhs[1:] = XtWz
-            _t_gram += time.perf_counter() - _t0
-
-            # Solve — constrained QP or Cholesky with SVD fallback
-            _t0 = time.perf_counter()
-            if has_constraints:
-                # Assemble model-level constraint matrix from per-group constraints
-                A_blocks: list[np.ndarray] = []
-                b_blocks: list[np.ndarray] = []
-                for g in groups:
-                    if g.constraints is not None:
-                        A_model = np.zeros((g.constraints.n_constraints, p))
-                        A_model[:, g.sl] = g.constraints.A
-                        A_blocks.append(A_model)
-                        b_blocks.append(g.constraints.b)
-
-                A_all = np.vstack(A_blocks)
-                b_all = np.concatenate(b_blocks)
-
-                # Profile out intercept (unconstrained):
-                # intercept = (rhs[0] - XtW1 @ beta) / sum_W
-                # Reduced system: H = XtWX + S, g_vec = XtWz - XtW1*(sum_Wz/sum_W)
-                H = M_aug[1:, 1:]  # XtWX + S
-                g_vec = rhs[1:] - rhs[0] * M_aug[0, 1:] / M_aug[0, 0]
-
-                qp_result = solve_constrained_qp(
-                    H,
-                    g_vec,
-                    A_all,
-                    b_all,
-                    active_set_init=prev_active_set,
+                # Step 3: Build reduced Gram system (non-SCOP columns only)
+                XtWX_r, XtW1_r, XtWz_r = _block_xtwx_rhs(
+                    _reduced_gms,
+                    _reduced_groups,
+                    W,
+                    Wz_adj,
+                    tabmat_split=None,
                 )
-                beta = qp_result.beta
-                intercept = float((rhs[0] - XtW1 @ beta) / sum_W)
-                prev_active_set = qp_result.active_set
-                _used_svd = False
-                _cond_est = 0.0
+
+                # Build augmented (p_reduced+1, p_reduced+1) system
+                M_aug_r = np.empty((_p_reduced + 1, _p_reduced + 1))
+                M_aug_r[0, 0] = sum_W
+                M_aug_r[0, 1:] = XtW1_r
+                M_aug_r[1:, 0] = XtW1_r
+                M_aug_r[1:, 1:] = XtWX_r + _S_reduced
+
+                rhs_r = np.empty(_p_reduced + 1)
+                rhs_r[0] = float(np.sum(Wz_adj))
+                rhs_r[1:] = XtWz_r
+                _t_gram += time.perf_counter() - _t0
+
+                # Step 4: Solve for unconstrained coefficients
+                _t0 = time.perf_counter()
+                beta_aug_r, _cond_est, _used_svd = _robust_solve(M_aug_r, rhs_r)
+                intercept = float(beta_aug_r[0])
+                beta_reduced = beta_aug_r[1:]
+
+                # Scatter reduced beta back into full beta vector
+                beta = np.zeros(p)
+                beta[_reduced_to_full] = beta_reduced
+                _t_solve += time.perf_counter() - _t0
+
+                # Step 5: Compute residual for SCOP Newton step
+                eta_unconstrained = np.zeros(n)
+                for gi_r, gi in enumerate(_non_scop_groups_idx):
+                    g = groups[gi]
+                    eta_unconstrained += gms[gi].matvec(beta[g.sl])
+                eta_unconstrained += intercept
+
+                # Step 6: Apply SCOP Newton step for each SCOP group
+                for gi, st in _scop_state.items():
+                    z_scop = z_off - eta_unconstrained
+                    # Remove contributions from other SCOP groups
+                    for gi2, st2 in _scop_state.items():
+                        if gi2 != gi:
+                            gamma2 = st2["reparam"].forward(st2["beta_scop"])
+                            z_scop = z_scop - st2["B_scop"] @ gamma2
+
+                    st["beta_scop_prev"] = st["beta_scop"].copy()
+                    result = scop_newton_step(
+                        B_scop=st["B_scop"],
+                        W=W,
+                        z=z_scop,
+                        beta_scop=st["beta_scop"],
+                        reparam=st["reparam"],
+                        S_scop=st["S_scop"],
+                        lambda2=lambda2,
+                    )
+                    st["beta_scop"] = result.beta_new
+
+                # Step 7: Write gamma_eff (mapped coefficients) into full beta
+                for gi, st in _scop_state.items():
+                    g = groups[gi]
+                    gamma_eff = st["reparam"].forward(st["beta_scop"])
+                    beta[g.sl] = gamma_eff
+
             else:
-                beta_aug, _cond_est, _used_svd = _robust_solve(M_aug, rhs)
-                intercept = float(beta_aug[0])
-                beta = beta_aug[1:]
-            _t_solve += time.perf_counter() - _t0
+                Wz = W * z_off
+                sum_W = float(np.sum(W))
+
+                # Combined gram + rmatvec: shares O(n) bincount for discretized groups
+                XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz, tabmat_split=_tabmat_split)
+
+                # Build augmented system (p+1, p+1)
+                M_aug = np.empty((p + 1, p + 1))
+                M_aug[0, 0] = sum_W
+                M_aug[0, 1:] = XtW1
+                M_aug[1:, 0] = XtW1
+                M_aug[1:, 1:] = XtWX + S
+
+                # RHS: X_aug' W (z - offset)
+                rhs = np.empty(p + 1)
+                rhs[0] = float(np.sum(Wz))
+                rhs[1:] = XtWz
+                _t_gram += time.perf_counter() - _t0
+
+                # Solve — constrained QP or Cholesky with SVD fallback
+                _t0 = time.perf_counter()
+                if has_constraints:
+                    # Assemble model-level constraint matrix from per-group constraints
+                    A_blocks: list[np.ndarray] = []
+                    b_blocks: list[np.ndarray] = []
+                    for g in groups:
+                        if g.constraints is not None:
+                            A_model = np.zeros((g.constraints.n_constraints, p))
+                            A_model[:, g.sl] = g.constraints.A
+                            A_blocks.append(A_model)
+                            b_blocks.append(g.constraints.b)
+
+                    A_all = np.vstack(A_blocks)
+                    b_all = np.concatenate(b_blocks)
+
+                    # Profile out intercept (unconstrained):
+                    # intercept = (rhs[0] - XtW1 @ beta) / sum_W
+                    # Reduced system: H = XtWX + S, g_vec = XtWz - XtW1*(sum_Wz/sum_W)
+                    H = M_aug[1:, 1:]  # XtWX + S
+                    g_vec = rhs[1:] - rhs[0] * M_aug[0, 1:] / M_aug[0, 0]
+
+                    qp_result = solve_constrained_qp(
+                        H,
+                        g_vec,
+                        A_all,
+                        b_all,
+                        active_set_init=prev_active_set,
+                    )
+                    beta = qp_result.beta
+                    intercept = float((rhs[0] - XtW1 @ beta) / sum_W)
+                    prev_active_set = qp_result.active_set
+                    _used_svd = False
+                    _cond_est = 0.0
+                else:
+                    beta_aug, _cond_est, _used_svd = _robust_solve(M_aug, rhs)
+                    intercept = float(beta_aug[0])
+                    beta = beta_aug[1:]
+                _t_solve += time.perf_counter() - _t0
 
             # Warning for auto mode: suggest QR after repeated SVD fallbacks
             if _used_svd:
@@ -618,6 +767,15 @@ def fit_irls_direct(
                 )
                 if dev <= dev_prev:
                     break
+            # Sync SCOP state after step halving: interpolate in working space
+            if _has_scop and n_halvings > 0:
+                frac = 0.5**n_halvings
+                for gi, st in _scop_state.items():
+                    if st["beta_scop_prev"] is not None:
+                        st["beta_scop"] = (1 - frac) * st["beta_scop_prev"] + frac * st["beta_scop"]
+                    # Re-write gamma_eff into beta for consistent eta
+                    g = groups[gi]
+                    beta[g.sl] = st["reparam"].forward(st["beta_scop"])
 
         # Record per-iteration diagnostics
         if record_diagnostics:
@@ -683,7 +841,8 @@ def fit_irls_direct(
         profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
 
     # QR path: compute gram quantities once at convergence for REML/edf/cache.
-    if _use_qr:
+    if _use_qr or _has_scop:
+        # QR path and SCOP path need a full-system Gram for edf / caching.
         z_off = z - offset
         Wz = W * z_off
         sum_W = float(np.sum(W))

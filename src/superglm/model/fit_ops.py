@@ -198,12 +198,30 @@ def fit(
             "Set selection_penalty=0 or use monotone_mode='postfit'."
         )
 
+    # Guard: SCOP + QP monotone engines cannot coexist in the same model.
+    _monotone_engines = {g.monotone_engine for g in model._groups if g.monotone_engine is not None}
+    if len(_monotone_engines) > 1:
+        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
+
+    # Guard: multiple SCOP terms in one model are not yet supported
+    # (sequential Gauss-Seidel sweep does not converge reliably).
+    _n_scop = sum(1 for g in model._groups if g.monotone_engine == "scop")
+    if _n_scop > 1:
+        raise NotImplementedError(
+            "Multiple SCOP monotone terms in the same model are not yet supported."
+        )
+
     # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed),
-    # or when any group has monotone constraints (constrained QP needs full Gram).
+    # or when any group has monotone constraints (constrained QP / SCOP Newton).
     _has_constraints = any(g.constraints is not None for g in model._groups)
-    if _has_constraints or (
-        model.penalty.lambda1 is not None
-        and (model.penalty.lambda1 == 0 or not has_lambda1_targets)
+    _has_scop = any(g.monotone_engine == "scop" for g in model._groups)
+    if (
+        _has_constraints
+        or _has_scop
+        or (
+            model.penalty.lambda1 is not None
+            and (model.penalty.lambda1 == 0 or not has_lambda1_targets)
+        )
     ):
         model._result, _ = fit_irls_direct(
             X=model._dm,

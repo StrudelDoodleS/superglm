@@ -8,11 +8,14 @@ The solver never sees feature types — only GroupInfo objects.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from superglm.solvers.scop import SCOPSolverReparam
 
 
 # ── Linear inequality constraints ──────────────────────────────
@@ -141,6 +144,10 @@ class GroupInfo:
     constraints: LinearConstraintSet | None = None
     monotone_engine: str | None = None
     raw_to_solver_map: NDArray | None = None
+    # SCOP reparameterization for monotone P-splines (Phase 3).
+    # Solver-space (q_eff = q_raw - 1 dimensional) — the solver calls
+    # forward(), jacobian(), penalty_matrix() directly without dimension translation.
+    scop_reparameterization: SCOPSolverReparam | None = None
 
     def __post_init__(self):
         if self.columns is None:
@@ -197,6 +204,7 @@ class GroupSlice:
     subgroup_type: str | None = None  # "linear", "spline", or None
     constraints: LinearConstraintSet | None = None
     monotone_engine: str | None = None
+    scop_reparameterization: SCOPSolverReparam | None = None
 
     def __post_init__(self):
         if not self.feature_name:

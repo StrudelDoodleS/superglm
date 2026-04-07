@@ -69,15 +69,15 @@ class TestSplineAPIParams:
         with pytest.raises(ValueError, match="monotone_mode must be"):
             Spline(monotone="increasing", monotone_mode="invalid")
 
-    def test_monotone_fit_mode_raises(self, increasing_poisson_data):
-        X, y, sample_weight = increasing_poisson_data
-        m = SuperGLM(
-            family="poisson",
-            features={"signal": Spline(monotone="increasing", monotone_mode="fit")},
-            selection_penalty=0.0,
-        )
-        with pytest.raises(NotImplementedError, match="does not support monotone_mode='fit'"):
-            m.fit(X, y, sample_weight=sample_weight)
+    def test_monotone_fit_mode_builds_scop(self):
+        """PSpline monotone_mode='fit' builds SCOP reparameterization."""
+        from superglm.features.spline import PSpline
+
+        s = PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")
+        x = np.linspace(0, 1, 200)
+        info = s.build(x)
+        assert info.scop_reparameterization is not None
+        assert info.monotone_engine == "scop"
 
     def test_monotone_ns_rejected(self):
         with pytest.raises(NotImplementedError, match="monotone is not supported for kind='ns'"):
