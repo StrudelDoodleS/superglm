@@ -1128,7 +1128,7 @@ class TestModelSummaryAPI:
         assert "edf" in d["x"]
         assert "smoothing_lambda" in d["x"]
         assert "spline_kind" in d["x"]
-        assert d["x"]["spline_kind"] == "BasisSpline"
+        assert d["x"]["spline_kind"] == "PSpline"
 
     def test_summary_spline_edf_in_text(self, fitted):
         model, _, _ = fitted

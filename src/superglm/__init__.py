@@ -16,7 +16,7 @@ Core API (explicit):
     model = SuperGLM(
         penalty="group_lasso", selection_penalty=0.01,
         features={
-            "driver_age": Spline(kind="bs", k=14),
+            "driver_age": Spline(kind="ps", k=14),
             "region": Categorical(base="most_exposed"),
             "density": Numeric(),
         },
@@ -54,8 +54,10 @@ from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import (
     BasisSpline,
+    BSplineSmooth,
     CubicRegressionSpline,
     NaturalSpline,
+    PSpline,
     Spline,
     n_knots_from_k,
 )
@@ -144,7 +146,9 @@ __all__ = [
     "PowerLink",
     "NegativeBinomialLink",
     "Spline",
+    "PSpline",
     "BasisSpline",
+    "BSplineSmooth",
     "NaturalSpline",
     "CubicRegressionSpline",
     "Categorical",

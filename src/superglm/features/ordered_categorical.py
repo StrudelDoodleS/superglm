@@ -104,7 +104,7 @@ class OrderedCategorical:
         values: dict[str, float] | None = None,
         order: list[str] | None = None,
         basis: str | Any = "spline",
-        kind: str = "bs",
+        kind: str = "ps",
         base: str = "most_exposed",
         n_knots: int = 5,
         degree: int = 3,
