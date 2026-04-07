@@ -1693,7 +1693,7 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     Parameters
     ----------
     kind : str
-        Spline kind: ``"bs"``, ``"ns"``, or ``"cr"``.
+        Spline kind: ``"ps"``, ``"bs"``, ``"ns"``, or ``"cr"``.
     k : int
         Basis dimension (number of basis functions before
         identifiability).  The built column count is always ``k - 1``.
@@ -1707,8 +1707,8 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
 
     Mapping
     -------
-    - ``"bs"``: ``n_knots = k - degree - 1``  (identifiability removes 1,
-      ``build().n_cols == k - 1``)
+    - ``"ps"``/``"bs"``: ``n_knots = k - degree - 1``  (identifiability
+      removes 1, ``build().n_cols == k - 1``)
     - ``"ns"``: ``n_knots = k - degree + 1``  (2 natural constraints +
       identifiability, ``build().n_cols == k - 1``)
     - ``"cr"``: ``n_knots = k - degree + 1``  (2 natural constraints +

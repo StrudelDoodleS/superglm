@@ -235,3 +235,57 @@ class TestPickle:
             np.asarray(info_after.columns.todense()),
         )
         np.testing.assert_allclose(info_before.penalty_matrix, info_after.penalty_matrix)
+
+
+# ---------------------------------------------------------------------------
+# m parameter semantics
+# ---------------------------------------------------------------------------
+
+
+class TestMParameterSemantics:
+    """m has different meanings for PSpline vs BSplineSmooth.
+
+    After the identifiability constraint (one column removed), the
+    null-space dimension of a 2nd-order penalty drops from 2 to 1.
+    Both PSpline (difference) and BSplineSmooth (derivative) share this
+    property but differ in their nonzero eigenvalue spectra.
+    """
+
+    def test_pspline_m_is_difference_order(self):
+        """PSpline m=2: second-difference penalty D2^T D2.
+
+        After identifiability constraint, null space has 1 zero eigenvalue.
+        """
+        s = PSpline(n_knots=8, m=2, penalty="none")
+        x = np.linspace(0, 1, 200)
+        info = s.build(x)
+        S = info.penalty_matrix
+        eigvals = np.linalg.eigvalsh(S)
+        n_zero = np.sum(np.abs(eigvals) < 1e-10)
+        assert n_zero == 1, f"Expected 1 zero eigenvalue for m=2 difference, got {n_zero}"
+
+    def test_bsplinesmooth_m_is_derivative_order(self):
+        """BSplineSmooth m=2: integrated second-derivative penalty.
+
+        After identifiability constraint, null space has 1 zero eigenvalue.
+        """
+        s = BSplineSmooth(n_knots=8, m=2, penalty="none")
+        x = np.linspace(0, 1, 200)
+        info = s.build(x)
+        S = info.penalty_matrix
+        eigvals = np.linalg.eigvalsh(S)
+        n_zero = np.sum(np.abs(eigvals) < 1e-10)
+        assert n_zero == 1, f"Expected 1 zero eigenvalue for m=2 derivative, got {n_zero}"
+
+    def test_nonzero_eigenvalues_differ(self):
+        """Nonzero eigenvalues should differ between PSpline and BSplineSmooth."""
+        x = np.linspace(0, 1, 200)
+        ps = PSpline(n_knots=8, m=2, penalty="none")
+        bs = BSplineSmooth(n_knots=8, m=2, penalty="none")
+        info_ps = ps.build(x)
+        info_bs = bs.build(x)
+        eig_ps = np.sort(np.linalg.eigvalsh(info_ps.penalty_matrix))
+        eig_bs = np.sort(np.linalg.eigvalsh(info_bs.penalty_matrix))
+        nonzero_ps = eig_ps[np.abs(eig_ps) > 1e-10]
+        nonzero_bs = eig_bs[np.abs(eig_bs) > 1e-10]
+        assert not np.allclose(nonzero_ps, nonzero_bs, rtol=0.1)
