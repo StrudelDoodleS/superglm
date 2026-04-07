@@ -8,7 +8,7 @@ penalty controls smoothness, not the knot count.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import scipy.sparse as sp
@@ -16,6 +16,9 @@ from numpy.typing import ArrayLike, NDArray
 from scipy.interpolate import BSpline as BSpl
 
 from superglm.types import GroupInfo, LambdaPolicy, LinearConstraintSet, TensorMarginalInfo
+
+if TYPE_CHECKING:
+    from superglm.solvers.scop import SCOPSolverReparam
 
 
 def _weighted_quantile_knots(x: NDArray, n_knots: int, alpha: float) -> NDArray:
@@ -710,7 +713,9 @@ class _SplineBase:
     ) -> GroupInfo | list[GroupInfo]:
         """Build B-spline basis and penalty matrix."""
         if self.monotone is not None and self.monotone_mode == "fit":
-            if not hasattr(self, "_build_monotone_constraints_raw"):
+            if not hasattr(self, "_build_monotone_constraints_raw") and not hasattr(
+                self, "_build_scop_reparameterization"
+            ):
                 raise NotImplementedError(
                     f"{type(self).__name__} does not support "
                     f"monotone_mode='fit'. Use monotone_mode='postfit'."
@@ -729,6 +734,26 @@ class _SplineBase:
             return self._build_select(x, B)
 
         omega = self._build_penalty()
+
+        # SCOP monotone path: bypass standard SSP, use SCAM-style centering
+        if (
+            self.monotone is not None
+            and self.monotone_mode == "fit"
+            and hasattr(self, "_build_scop_reparameterization")
+        ):
+            B_dense = B.toarray() if hasattr(B, "toarray") else B
+            B_centered, S_scop, scop_reparam = self._build_scop_reparameterization(B_dense, omega)
+            n_cols_scop = B_centered.shape[1]
+            return GroupInfo(
+                columns=B_centered,
+                n_cols=n_cols_scop,
+                penalty_matrix=S_scop,
+                reparametrize=False,
+                penalized=True,
+                scop_reparameterization=scop_reparam,
+                monotone_engine="scop",
+            )
+
         B, omega, n_cols, projection = self._apply_constraints(B, omega)
         omega, n_cols, projection = self._apply_identifiability(x, omega, projection)
         self._interaction_projection = projection
@@ -828,6 +853,10 @@ class _SplineBase:
     def transform(self, x: NDArray) -> NDArray:
         """Build design matrix using knots learned during build()."""
         B = self._basis_matrix(x).toarray()
+        if hasattr(self, "_scop_Sigma") and self._scop_Sigma is not None:
+            # SCOP monotone term: apply Sigma, drop constant column, center
+            X_sigma = B @ self._scop_Sigma
+            return X_sigma[:, 1:] - self._scop_col_means
         if self._R_inv is not None:
             B = B @ self._R_inv
         return B
@@ -836,10 +865,16 @@ class _SplineBase:
         self._R_inv = R_inv
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
-        beta_orig = self._R_inv @ beta if self._R_inv is not None else beta
         x_grid = np.linspace(self._lo, self._hi, n_points)
-        B_grid = self._basis_matrix(x_grid).toarray()
-        log_rels = B_grid @ beta_orig
+        if hasattr(self, "_scop_Sigma") and self._scop_Sigma is not None:
+            # SCOP term: beta is gamma_eff, reconstruct via centered design
+            B_grid = self.transform(x_grid)
+            log_rels = B_grid @ beta
+            beta_orig = beta
+        else:
+            beta_orig = self._R_inv @ beta if self._R_inv is not None else beta
+            B_grid = self._basis_matrix(x_grid).toarray()
+            log_rels = B_grid @ beta_orig
         return {
             "x": x_grid,
             "log_relativity": log_rels,
@@ -1049,6 +1084,39 @@ class PSpline(_BSplineBase):
             m=m,
             lambda_policy=lambda_policy,
         )
+
+    def _build_scop_reparameterization(
+        self, B: NDArray, omega: NDArray
+    ) -> tuple[NDArray, NDArray, SCOPSolverReparam]:
+        """Build SCOP reparameterization for monotone PSpline.
+
+        Returns (B_centered, S_scop, scop_reparam) where:
+        - B_centered: design matrix with SCAM-style centering (n, q_eff)
+        - S_scop: SCOP penalty matrix (first-difference on beta), (q_eff, q_eff)
+        - scop_reparam: solver-space SCOPSolverReparam
+        """
+        from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
+
+        q = self._n_basis
+        reparam = build_scop_reparam(q, direction=self.monotone)
+
+        # SCAM-style centering: B @ Sigma, drop constant column, center remaining
+        X_sigma = B @ reparam.Sigma
+        # Drop column 0 (constant level absorbed into intercept)
+        col_means = X_sigma[:, 1:].mean(axis=0)
+        X_centered = X_sigma[:, 1:] - col_means
+
+        # Store Sigma and centering for use in transform()
+        self._scop_Sigma = reparam.Sigma
+        self._scop_col_means = col_means
+
+        # Build solver-space reparam
+        solver_reparam = build_scop_solver_reparam(q, direction=self.monotone)
+
+        # SCOP penalty in solver space
+        S_scop = solver_reparam.penalty_matrix()
+
+        return X_centered, S_scop, solver_reparam
 
     def _build_penalty_for_order(self, order: int) -> NDArray:
         if order >= self._n_basis:

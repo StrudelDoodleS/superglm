@@ -627,6 +627,7 @@ def build_design_matrix(
                     subgroup_type=info.subgroup_name,
                     constraints=info.constraints,
                     monotone_engine=info.monotone_engine,
+                    scop_reparameterization=info.scop_reparameterization,
                 )
             )
             col_offset += n_cols

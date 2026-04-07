@@ -77,6 +77,9 @@ def _penalised_xtwx_inv(
                     penalized=g.penalized,
                     feature_name=g.feature_name,
                     subgroup_type=g.subgroup_type,
+                    constraints=g.constraints,
+                    monotone_engine=g.monotone_engine,
+                    scop_reparameterization=g.scop_reparameterization,
                 )
             )
             col += p_g
@@ -107,26 +110,33 @@ def _penalised_xtwx_inv(
     else:
         S_rows = np.zeros((p_a, p_a))
         for gm_orig, ag, gname in zip(active_gms, active_groups_out, active_group_names):
-            if (
-                isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix)
-                and ag.penalized
-            ):
-                if isinstance(lambda2, dict):
-                    lam_g = lambda2.get(gname, 0.0)
-                else:
-                    lam_g = lambda2
+            if not ag.penalized:
+                continue
 
+            if isinstance(lambda2, dict):
+                lam_g = lambda2.get(gname, 0.0)
+            else:
+                lam_g = lambda2
+
+            if lam_g == 0:
+                continue
+
+            if isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
                 R_inv = gm_orig.R_inv
                 omega = gm_orig.omega
                 if omega is None:
                     p_b = R_inv.shape[0]
                     omega = _second_diff_penalty(p_b)
-
                 S_g = lam_g * R_inv.T @ omega @ R_inv
-                eigvals_g, eigvecs_g = np.linalg.eigh(S_g)
-                eigvals_g = np.maximum(eigvals_g, 0.0)
-                L_g = np.sqrt(eigvals_g)[:, None] * eigvecs_g.T
-                S_rows[ag.sl, ag.sl] = L_g
+            elif ag.scop_reparameterization is not None:
+                S_g = lam_g * ag.scop_reparameterization.penalty_matrix()
+            else:
+                continue
+
+            eigvals_g, eigvecs_g = np.linalg.eigh(S_g)
+            eigvals_g = np.maximum(eigvals_g, 0.0)
+            L_g = np.sqrt(eigvals_g)[:, None] * eigvecs_g.T
+            S_rows[ag.sl, ag.sl] = L_g
 
     # Augmented QR: [sqrt(W)*X; sqrt(S)] → R'R = X'WX + S
     A = np.vstack([X_a * np.sqrt(W)[:, None], S_rows])
@@ -206,6 +216,9 @@ def _penalised_xtwx_inv_gram(
                     penalized=g.penalized,
                     feature_name=g.feature_name,
                     subgroup_type=g.subgroup_type,
+                    constraints=g.constraints,
+                    monotone_engine=g.monotone_engine,
+                    scop_reparameterization=g.scop_reparameterization,
                 )
             )
             col += p_g
@@ -231,21 +244,27 @@ def _penalised_xtwx_inv_gram(
     else:
         S = np.zeros((p_a, p_a))
         for gm_orig, ag, gname in zip(active_gms, active_groups_out, active_group_names):
-            if (
-                isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix)
-                and ag.penalized
-            ):
-                if isinstance(lambda2, dict):
-                    lam_g = lambda2.get(gname, 0.0)
-                else:
-                    lam_g = lambda2
+            if not ag.penalized:
+                continue
 
+            if isinstance(lambda2, dict):
+                lam_g = lambda2.get(gname, 0.0)
+            else:
+                lam_g = lambda2
+
+            if lam_g == 0:
+                continue
+
+            if isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
                 R_inv = gm_orig.R_inv
                 omega = gm_orig.omega
                 if omega is None:
                     p_b = R_inv.shape[0]
                     omega = _second_diff_penalty(p_b)
                 S[ag.sl, ag.sl] = lam_g * R_inv.T @ omega @ R_inv
+            elif ag.scop_reparameterization is not None:
+                S_scop = ag.scop_reparameterization.penalty_matrix()
+                S[ag.sl, ag.sl] = lam_g * S_scop
 
     # Invert (X'WX + S) via eigendecomposition.
     # Match the dense QR/SVD path: there we truncate singular values at
