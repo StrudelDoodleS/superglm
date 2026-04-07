@@ -15,7 +15,7 @@ import scipy.sparse as sp
 from numpy.typing import ArrayLike, NDArray
 from scipy.interpolate import BSpline as BSpl
 
-from superglm.types import GroupInfo, LambdaPolicy, TensorMarginalInfo
+from superglm.types import GroupInfo, LambdaPolicy, LinearConstraintSet, TensorMarginalInfo
 
 
 def _weighted_quantile_knots(x: NDArray, n_knots: int, alpha: float) -> NDArray:
@@ -710,10 +710,11 @@ class _SplineBase:
     ) -> GroupInfo | list[GroupInfo]:
         """Build B-spline basis and penalty matrix."""
         if self.monotone is not None and self.monotone_mode == "fit":
-            raise NotImplementedError(
-                "Fit-time monotone constraints are not yet implemented. "
-                "Use monotone_mode='postfit' and call model.apply_monotone_postfit() after fitting."
-            )
+            if not hasattr(self, "_build_monotone_constraints_raw"):
+                raise NotImplementedError(
+                    f"{type(self).__name__} does not support "
+                    f"monotone_mode='fit'. Use monotone_mode='postfit'."
+                )
         x = np.asarray(x, dtype=np.float64).ravel()
         self._place_knots(x)
         self._validate_m_orders_build()
@@ -734,6 +735,22 @@ class _SplineBase:
             # Summed penalty for R_inv
             omega = sum(om for _, om in penalty_components)
 
+        # Monotone constraint emission: compose raw constraints through
+        # identifiability projection into post-identifiability space.
+        # NOTE: constraints are NOT solver-ready after build() — they become
+        # solver-coordinate only after the DM builder composes with R_inv.
+        constraints = None
+        monotone_engine = None
+        raw_to_solver_map = None
+        if self.monotone is not None and self.monotone_mode == "fit":
+            cs_raw = self._build_monotone_constraints_raw()
+            if projection is not None:
+                constraints = cs_raw.compose(projection)
+            else:
+                constraints = cs_raw
+            monotone_engine = "qp"
+            raw_to_solver_map = projection
+
         info = GroupInfo(
             columns=B,
             n_cols=n_cols,
@@ -741,6 +758,9 @@ class _SplineBase:
             reparametrize=(self.penalty == "ssp"),
             projection=projection,
             penalty_components=penalty_components,
+            constraints=constraints,
+            monotone_engine=monotone_engine,
+            raw_to_solver_map=raw_to_solver_map,
         )
         # Promote single-penalty spline to explicit component when lambda_policy is set
         if self._lambda_policy is not None and info.penalty_components is None:
@@ -1159,6 +1179,22 @@ class BSplineSmooth(_BSplineBase):
             omega += Dm_q.T @ (Dm_q * w_q[:, None])
 
         return omega
+
+    def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
+        """Build monotone constraints on raw B-spline coefficients.
+
+        For monotone increasing: D @ beta_raw >= 0 where D is the
+        first-difference matrix (beta_{i+1} - beta_i >= 0).
+        For monotone decreasing: -D @ beta_raw >= 0.
+
+        Returns constraints on K raw (pre-projection) coefficients.
+        """
+        K = self._n_basis
+        # First-difference matrix: row i = e_{i+1} - e_i
+        D = np.diff(np.eye(K), axis=0)
+        if self.monotone == "decreasing":
+            D = -D
+        return LinearConstraintSet(A=D, b=np.zeros(K - 1))
 
     def _build_penalty(self) -> NDArray:
         return self._build_penalty_for_order(self._m_orders[0])
