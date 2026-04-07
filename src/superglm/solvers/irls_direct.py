@@ -167,18 +167,24 @@ def _build_penalty_matrix(
     for gm, g in zip(group_matrices, groups):
         if not g.penalized:
             continue
-        if not isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
-            continue
-        omega = gm.omega
-        if omega is None:
-            continue
 
         if isinstance(lambda2, dict):
             lam_g = lambda2.get(g.name, 0.0)
         else:
             lam_g = lambda2
 
-        S[g.sl, g.sl] = lam_g * gm.R_inv.T @ omega @ gm.R_inv
+        if lam_g == 0:
+            continue
+
+        if isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+            omega = gm.omega
+            if omega is None:
+                continue
+            S[g.sl, g.sl] = lam_g * gm.R_inv.T @ omega @ gm.R_inv
+        elif g.scop_reparameterization is not None:
+            # SCOP terms bypass SSP — penalty is already in solver coordinates.
+            S_scop = g.scop_reparameterization.penalty_matrix()
+            S[g.sl, g.sl] = lam_g * S_scop
 
     return S
 

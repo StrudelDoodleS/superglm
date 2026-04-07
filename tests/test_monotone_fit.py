@@ -208,6 +208,38 @@ class TestMonotoneRegression:
         assert model._result.converged
 
 
+class TestSCOPPenaltyInEDF:
+    """SCOP penalty contributes to EDF and information criteria."""
+
+    @pytest.mark.slow
+    def test_edf_changes_with_lambda(self):
+        """Increasing lambda should reduce effective degrees of freedom."""
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model_low = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            spline_penalty=0.01,
+            features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+        )
+        model_low.fit(df[["x"]], df["y"])
+
+        model_high = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            spline_penalty=100.0,
+            features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+        )
+        model_high.fit(df[["x"]], df["y"])
+
+        # Higher penalty should give lower EDF
+        assert model_high._result.effective_df < model_low._result.effective_df
+
+
 class TestMonotoneUnsupportedCombinations:
     """Unsupported combinations raise NotImplementedError."""
 
