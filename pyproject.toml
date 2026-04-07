@@ -84,6 +84,9 @@ norecursedirs = ["scratch"]
 markers = [
     "slow: marks tests that fit real models (deselect with '-m \"not slow\"')",
 ]
+filterwarnings = [
+    "ignore:Spline\\(kind='bs'\\):FutureWarning",
+]
 
 # ── coverage ────────────────────────────────────────────────────
 [tool.coverage.run]

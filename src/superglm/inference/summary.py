@@ -36,7 +36,7 @@ class _CoefRow:
     # Enriched spline metadata
     edf: float | None = None
     smoothing_lambda: float | None = None
-    spline_kind: str | None = None  # "BasisSpline", "NaturalSpline", etc.
+    spline_kind: str | None = None  # "PSpline", "NaturalSpline", etc.
     knot_strategy: str | None = None
     boundary: tuple[float, float] | None = None
     # Monotonicity

@@ -1189,7 +1189,7 @@ class TestMultiOrderSplinePenalty:
         """select=True + m=(1,2,3) on BS raises (current capability policy)."""
         from superglm import Spline
 
-        with pytest.raises(NotImplementedError, match="not supported for BasisSpline"):
+        with pytest.raises(NotImplementedError, match="not supported for PSpline"):
             Spline(kind="bs", n_knots=8, m=(1, 2, 3), select=True)
 
     @pytest.mark.slow

@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 class SplineMetadata:
     """Knot and basis metadata for a spline term."""
 
-    kind: str  # e.g. "BasisSpline", "NaturalSpline", "CubicRegressionSpline"
+    kind: str  # e.g. "PSpline", "NaturalSpline", "CubicRegressionSpline"
     knot_strategy: str  # "uniform", "quantile", "quantile_tempered", "explicit"
     interior_knots: NDArray
     boundary: tuple[float, float]
