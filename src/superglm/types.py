@@ -15,6 +15,42 @@ import scipy.sparse as sp
 from numpy.typing import NDArray
 
 
+# ── Linear inequality constraints ──────────────────────────────
+@dataclass
+class LinearConstraintSet:
+    """Linear inequality constraints: A @ theta >= b.
+
+    Generic constraint representation, not spline-specific. The QP solver
+    operates on these without knowing which basis produced them.
+
+    Parameters
+    ----------
+    A : NDArray
+        Constraint matrix, shape (n_constraints, n_params).
+    b : NDArray
+        Right-hand side, shape (n_constraints,).
+    """
+
+    A: NDArray
+    b: NDArray
+
+    @property
+    def n_constraints(self) -> int:
+        return self.A.shape[0]
+
+    @property
+    def n_params(self) -> int:
+        return self.A.shape[1]
+
+    def is_feasible(self, theta: NDArray, tol: float = -1e-10) -> bool:
+        """Check whether theta satisfies all constraints (A @ theta >= b)."""
+        return bool(np.all(self.A @ theta - self.b >= tol))
+
+    def compose(self, P: NDArray) -> LinearConstraintSet:
+        """Map constraints through a projection: A_new = A @ P, b unchanged."""
+        return LinearConstraintSet(A=self.A @ P, b=self.b.copy())
+
+
 # ── Per-component lambda control ────────────────────────────────
 @dataclass(frozen=True)
 class LambdaPolicy:
@@ -99,6 +135,12 @@ class GroupInfo:
     component_types: dict[str, str] | None = None
     # Optional per-component lambda control; keys match penalty_components suffixes.
     lambda_policies: dict[str, LambdaPolicy] | None = None
+    # Monotone constraint metadata (Phase 2 QP engine).
+    # constraints are in post-identifiability space after build(); they become
+    # solver-ready only after the DM builder composes with R_inv.
+    constraints: LinearConstraintSet | None = None
+    monotone_engine: str | None = None
+    raw_to_solver_map: NDArray | None = None
 
     def __post_init__(self):
         if self.columns is None:
@@ -153,6 +195,8 @@ class GroupSlice:
     penalized: bool = True  # whether this group is subject to the penalty
     feature_name: str = ""  # parent feature name, defaults to name
     subgroup_type: str | None = None  # "linear", "spline", or None
+    constraints: LinearConstraintSet | None = None
+    monotone_engine: str | None = None
 
     def __post_init__(self):
         if not self.feature_name:

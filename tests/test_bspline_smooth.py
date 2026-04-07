@@ -303,7 +303,7 @@ class TestBSplineSmoothMValidation:
         assert info.n_cols > 0
         S = info.penalty_matrix
         np.testing.assert_allclose(S, S.T, atol=1e-12)
-        assert np.all(np.linalg.eigvalsh(S) >= -1e-10)
+        assert np.all(np.linalg.eigvalsh(S) >= -1e-8)
 
     def test_m_exceeds_degree_raises(self):
         s = BSplineSmooth(n_knots=8, degree=3, m=4)

@@ -35,6 +35,7 @@ from superglm.group_matrix import (
     _block_xtwx_rhs,
 )
 from superglm.links import Link, stabilize_eta
+from superglm.solvers.constrained_qp import solve_constrained_qp
 from superglm.solvers.pirls import IterationDiagnostics, PIRLSResult
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -429,8 +430,13 @@ def fit_irls_direct(
     else:
         S = _build_penalty_matrix(gms, groups, lambda2, p, reml_penalties=reml_penalties)
 
+    # ── Constrained QP support (monotone splines) ──
+    has_constraints = any(g.constraints is not None for g in groups)
+    prev_active_set: list[int] | None = None
+
     # QR pre-computation: materialise full design matrix once
-    _use_qr = direct_solve == "qr"
+    # Constrained QP requires Gram path — force it if constraints present
+    _use_qr = direct_solve == "qr" and not has_constraints
     if _use_qr:
         has_disc = any(isinstance(gm, DiscretizedSSPGroupMatrix) for gm in gms)
         if has_disc:
@@ -468,6 +474,7 @@ def fit_irls_direct(
 
     max_halving = 5  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
+
     for it in range(max_iter):
         # Save previous solution for step halving
         beta_prev = beta.copy()
@@ -528,12 +535,44 @@ def fit_irls_direct(
             rhs[1:] = XtWz
             _t_gram += time.perf_counter() - _t0
 
-            # Solve — Cholesky with SVD fallback
+            # Solve — constrained QP or Cholesky with SVD fallback
             _t0 = time.perf_counter()
-            beta_aug, _cond_est, _used_svd = _robust_solve(M_aug, rhs)
+            if has_constraints:
+                # Assemble model-level constraint matrix from per-group constraints
+                A_blocks: list[np.ndarray] = []
+                b_blocks: list[np.ndarray] = []
+                for g in groups:
+                    if g.constraints is not None:
+                        A_model = np.zeros((g.constraints.n_constraints, p))
+                        A_model[:, g.sl] = g.constraints.A
+                        A_blocks.append(A_model)
+                        b_blocks.append(g.constraints.b)
 
-            intercept = float(beta_aug[0])
-            beta = beta_aug[1:]
+                A_all = np.vstack(A_blocks)
+                b_all = np.concatenate(b_blocks)
+
+                # Profile out intercept (unconstrained):
+                # intercept = (rhs[0] - XtW1 @ beta) / sum_W
+                # Reduced system: H = XtWX + S, g_vec = XtWz - XtW1*(sum_Wz/sum_W)
+                H = M_aug[1:, 1:]  # XtWX + S
+                g_vec = rhs[1:] - rhs[0] * M_aug[0, 1:] / M_aug[0, 0]
+
+                qp_result = solve_constrained_qp(
+                    H,
+                    g_vec,
+                    A_all,
+                    b_all,
+                    active_set_init=prev_active_set,
+                )
+                beta = qp_result.beta
+                intercept = float((rhs[0] - XtW1 @ beta) / sum_W)
+                prev_active_set = qp_result.active_set
+                _used_svd = False
+                _cond_est = 0.0
+            else:
+                beta_aug, _cond_est, _used_svd = _robust_solve(M_aug, rhs)
+                intercept = float(beta_aug[0])
+                beta = beta_aug[1:]
             _t_solve += time.perf_counter() - _t0
 
             # Warning for auto mode: suggest QR after repeated SVD fallbacks

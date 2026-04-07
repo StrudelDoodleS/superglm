@@ -76,7 +76,7 @@ class TestSplineAPIParams:
             features={"signal": Spline(monotone="increasing", monotone_mode="fit")},
             selection_penalty=0.0,
         )
-        with pytest.raises(NotImplementedError, match="Fit-time monotone"):
+        with pytest.raises(NotImplementedError, match="does not support monotone_mode='fit'"):
             m.fit(X, y, sample_weight=sample_weight)
 
     def test_monotone_ns_rejected(self):
