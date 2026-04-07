@@ -344,6 +344,9 @@ def _process_info(
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
     R_inv: NDArray | None = None
+    # R_inv_local: SSP transform in post-identifiability space (projected -> solver).
+    # Used to compose constraints that are already in post-identifiability space.
+    R_inv_local: NDArray | None = None
 
     if info.projection is not None:
         P = info.projection
@@ -354,6 +357,8 @@ def _process_info(
             R_inv = P @ R_inv_local
         else:
             R_inv = P
+            # No SSP reparametrization — projected space IS solver space
+            R_inv_local = None
         n_cols = R_inv.shape[1]
         omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
         if use_tensor:
@@ -389,6 +394,8 @@ def _process_info(
         B_for = B_unique if use_discrete else info.columns
         exp_for = exposure_agg if use_discrete else sample_weight
         R_inv = compute_R_inv(B_for, info.penalty_matrix, exp_for, lambda2)
+        # No projection — constraints are in raw space, same as R_inv input
+        R_inv_local = R_inv
         n_cols = R_inv.shape[1]
         if use_tensor:
             gm = DiscretizedTensorGroupMatrix(
@@ -436,6 +443,16 @@ def _process_info(
             gm = SparseGroupMatrix(info.columns)
         else:
             gm = DenseGroupMatrix(info.columns)
+
+    # ── Compose constraints into solver coordinates ──
+    # Constraints from build() are in post-identifiability space (after projection).
+    # R_inv_local maps projected -> solver coords (SSP transform only).
+    if info.constraints is not None and R_inv_local is not None:
+        info.constraints = info.constraints.compose(R_inv_local)
+    # raw_to_solver_map from build() is the identifiability projection (raw -> projected).
+    # Extend it to the full chain (raw -> solver) by composing with R_inv_local.
+    if info.raw_to_solver_map is not None and R_inv_local is not None:
+        info.raw_to_solver_map = info.raw_to_solver_map @ R_inv_local
 
     return gm, R_inv, n_cols
 
@@ -598,6 +615,8 @@ def build_design_matrix(
                     penalized=info.penalized,
                     feature_name=name,
                     subgroup_type=info.subgroup_name,
+                    constraints=info.constraints,
+                    monotone_engine=info.monotone_engine,
                 )
             )
             col_offset += n_cols
@@ -681,6 +700,8 @@ def build_design_matrix(
                             penalized=info.penalized,
                             feature_name=iname,
                             subgroup_type=info.subgroup_name,
+                            constraints=info.constraints,
+                            monotone_engine=info.monotone_engine,
                         )
                     )
                     col_offset += n_cols
@@ -704,6 +725,8 @@ def build_design_matrix(
                             weight=np.sqrt(n_cols),
                             penalized=True,
                             feature_name=iname,
+                            constraints=info.constraints,
+                            monotone_engine=info.monotone_engine,
                         )
                     )
                     col_offset += n_cols
@@ -726,6 +749,8 @@ def build_design_matrix(
                     weight=np.sqrt(n_cols),
                     penalized=True,
                     feature_name=iname,
+                    constraints=result.constraints,
+                    monotone_engine=result.monotone_engine,
                 )
             )
             col_offset += n_cols

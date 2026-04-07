@@ -185,9 +185,12 @@ def fit(
     model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
 
-    # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed)
-    if model.penalty.lambda1 is not None and (
-        model.penalty.lambda1 == 0 or not has_lambda1_targets
+    # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed),
+    # or when any group has monotone constraints (constrained QP needs full Gram).
+    _has_constraints = any(g.constraints is not None for g in model._groups)
+    if _has_constraints or (
+        model.penalty.lambda1 is not None
+        and (model.penalty.lambda1 == 0 or not has_lambda1_targets)
     ):
         model._result, _ = fit_irls_direct(
             X=model._dm,
