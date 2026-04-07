@@ -905,7 +905,47 @@ class _SplineBase:
         )
 
 
-class PSpline(_SplineBase):
+class _BSplineBase(_SplineBase):
+    """Shared base for unconstrained B-spline smooths (PSpline, BSplineSmooth).
+
+    Provides the open knot-vector assembly used by both PSpline and
+    BSplineSmooth. CubicRegressionSpline has its own clamped knot assembly
+    and inherits from _SplineBase directly.
+    """
+
+    def _assemble_knot_vector(self, interior: NDArray) -> None:
+        """Open knot vector with 0.001*range edge padding.
+
+        Instead of repeating the boundary knot ``degree + 1`` times
+        (clamped construction), extend the knot vector beyond the data
+        range at regular spacing.  The internal effective boundary is
+        expanded by ``0.001 * range`` on each side.  This keeps the
+        spline basis open while leaving the public fitted boundary tied
+        to the observed training range.
+
+        The public boundary (``self._lo``, ``self._hi``) is unchanged,
+        so ``fitted_boundary``, clipping, and extrapolation still refer
+        to the data range.
+        """
+        xr = self._hi - self._lo
+        lo_eff = self._lo - 0.001 * xr
+        hi_eff = self._hi + 0.001 * xr
+
+        # Interior knots bracketed by the effective boundary
+        inner = np.concatenate([[lo_eff], interior, [hi_eff]])
+
+        # Extension spacing: use the nearest interior gap at each end
+        dx_lo = inner[1] - inner[0]
+        dx_hi = inner[-1] - inner[-2]
+
+        lower = lo_eff - dx_lo * np.arange(self.degree, 0, -1)
+        upper = hi_eff + dx_hi * np.arange(1, self.degree + 1)
+
+        self._knots = np.concatenate([lower, inner, upper])
+        self._n_basis = len(self._knots) - self.degree - 1
+
+
+class PSpline(_BSplineBase):
     """P-spline: B-spline basis + discrete-difference penalty.
 
     This is the concrete P-spline implementation. For the recommended
@@ -985,37 +1025,6 @@ class PSpline(_SplineBase):
             lambda_policy=lambda_policy,
         )
 
-    def _assemble_knot_vector(self, interior: NDArray) -> None:
-        """Open knot vector with 0.001*range edge padding.
-
-        Instead of repeating the boundary knot ``degree + 1`` times
-        (clamped construction), extend the knot vector beyond the data
-        range at regular spacing.  The internal effective boundary is
-        expanded by ``0.001 * range`` on each side.  This keeps the
-        spline basis open while leaving the public fitted boundary tied
-        to the observed training range.
-
-        The public boundary (``self._lo``, ``self._hi``) is unchanged,
-        so ``fitted_boundary``, clipping, and extrapolation still refer
-        to the data range.
-        """
-        xr = self._hi - self._lo
-        lo_eff = self._lo - 0.001 * xr
-        hi_eff = self._hi + 0.001 * xr
-
-        # Interior knots bracketed by the effective boundary
-        inner = np.concatenate([[lo_eff], interior, [hi_eff]])
-
-        # Extension spacing: use the nearest interior gap at each end
-        dx_lo = inner[1] - inner[0]
-        dx_hi = inner[-1] - inner[-2]
-
-        lower = lo_eff - dx_lo * np.arange(self.degree, 0, -1)
-        upper = hi_eff + dx_hi * np.arange(1, self.degree + 1)
-
-        self._knots = np.concatenate([lower, inner, upper])
-        self._n_basis = len(self._knots) - self.degree - 1
-
     def _build_penalty_for_order(self, order: int) -> NDArray:
         if order >= self._n_basis:
             raise ValueError(
@@ -1033,7 +1042,7 @@ class PSpline(_SplineBase):
 BasisSpline = PSpline
 
 
-class BSplineSmooth(_SplineBase):
+class BSplineSmooth(_BSplineBase):
     """B-spline smooth with integrated-derivative penalty.
 
     Same raw B-spline basis as ``PSpline``, but penalised via the
@@ -1113,28 +1122,6 @@ class BSplineSmooth(_SplineBase):
             m=m,
             lambda_policy=lambda_policy,
         )
-
-    def _assemble_knot_vector(self, interior: NDArray) -> None:
-        """Open knot vector with 0.001*range edge padding.
-
-        Identical to PSpline's open-knot assembly: extends the knot
-        vector beyond the data range at regular spacing rather than
-        repeating boundary knots.
-        """
-        xr = self._hi - self._lo
-        lo_eff = self._lo - 0.001 * xr
-        hi_eff = self._hi + 0.001 * xr
-
-        inner = np.concatenate([[lo_eff], interior, [hi_eff]])
-
-        dx_lo = inner[1] - inner[0]
-        dx_hi = inner[-1] - inner[-2]
-
-        lower = lo_eff - dx_lo * np.arange(self.degree, 0, -1)
-        upper = hi_eff + dx_hi * np.arange(1, self.degree + 1)
-
-        self._knots = np.concatenate([lower, inner, upper])
-        self._n_basis = len(self._knots) - self.degree - 1
 
     def _build_penalty_for_order(self, order: int) -> NDArray:
         """Integrated f^(m) squared penalty via Gauss-Legendre quadrature.
