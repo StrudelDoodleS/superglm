@@ -185,6 +185,19 @@ def fit(
     model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
 
+    # Monotone fit-time constraints are incompatible with selection_penalty (lambda1).
+    # The constrained QP solver path ignores lambda1 — reject explicitly.
+    if (
+        any(g.monotone_engine is not None for g in model._groups)
+        and model.penalty.lambda1 is not None
+        and model.penalty.lambda1 > 0
+        and has_lambda1_targets
+    ):
+        raise NotImplementedError(
+            "Monotone fit-time constraints are not supported with selection_penalty > 0. "
+            "Set selection_penalty=0 or use monotone_mode='postfit'."
+        )
+
     # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed),
     # or when any group has monotone constraints (constrained QP needs full Gram).
     _has_constraints = any(g.constraints is not None for g in model._groups)
@@ -720,6 +733,14 @@ def fit_reml(
             and gm.omega is not None
         ):
             reml_groups.append((i, g))
+
+    # Monotone fit-time constraints are not yet compatible with automatic REML.
+    if any(g.monotone_engine is not None for g in model._groups):
+        raise NotImplementedError(
+            "Automatic smoothness selection is not yet available when monotone "
+            "fit-time terms are present. Supply fixed smoothing parameters via "
+            "the lambda argument, or use monotone_mode='postfit'."
+        )
 
     if not reml_groups:
         logger.warning("fit_reml: no REML-eligible groups found, falling back to fit()")

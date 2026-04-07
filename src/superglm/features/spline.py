@@ -715,6 +715,11 @@ class _SplineBase:
                     f"{type(self).__name__} does not support "
                     f"monotone_mode='fit'. Use monotone_mode='postfit'."
                 )
+            if self.select:
+                raise NotImplementedError(
+                    "Monotone fit-time constraints are not supported with "
+                    "select=True. Use select=False or monotone_mode='postfit'."
+                )
         x = np.asarray(x, dtype=np.float64).ravel()
         self._place_knots(x)
         self._validate_m_orders_build()

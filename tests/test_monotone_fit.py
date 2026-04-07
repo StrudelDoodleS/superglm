@@ -202,3 +202,46 @@ class TestMonotoneRegression:
         )
         model.fit(df[["x"]], df["y"])
         assert model._result.converged
+
+
+class TestMonotoneUnsupportedCombinations:
+    """Unsupported combinations raise NotImplementedError."""
+
+    def test_monotone_with_selection_penalty_raises(self):
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 1, n)
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0.1,
+            features={
+                "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="selection_penalty"):
+            model.fit(df[["x"]], df["y"])
+
+    def test_monotone_with_select_true_raises(self):
+        s = BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit", select=True)
+        x = np.linspace(0, 1, 200)
+        with pytest.raises(NotImplementedError, match="select=True"):
+            s.build(x)
+
+    def test_monotone_fit_reml_raises(self):
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 1, n)
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            features={
+                "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="smoothness selection"):
+            model.fit_reml(df[["x"]], df["y"])
