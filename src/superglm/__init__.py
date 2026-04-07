@@ -56,6 +56,7 @@ from superglm.features.spline import (
     BasisSpline,
     CubicRegressionSpline,
     NaturalSpline,
+    PSpline,
     Spline,
     n_knots_from_k,
 )
@@ -144,6 +145,7 @@ __all__ = [
     "PowerLink",
     "NegativeBinomialLink",
     "Spline",
+    "PSpline",
     "BasisSpline",
     "NaturalSpline",
     "CubicRegressionSpline",

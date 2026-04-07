@@ -138,7 +138,7 @@ class TestTermInferenceSplineMetadata:
 
     def test_spline_kind(self, fitted_model):
         ti = fitted_model.term_inference("age")
-        assert ti.spline.kind == "BasisSpline"
+        assert ti.spline.kind == "PSpline"
 
     def test_knot_strategy(self, fitted_model):
         ti = fitted_model.term_inference("age")
@@ -359,7 +359,7 @@ class TestEnrichedSummary:
         spline_rows = [r for r in s._coef_rows if r.is_spline]
         assert len(spline_rows) >= 1
         row = spline_rows[0]
-        assert row.spline_kind == "BasisSpline"
+        assert row.spline_kind == "PSpline"
         assert row.knot_strategy == "uniform"
         assert row.boundary is not None
         assert row.edf is not None
@@ -382,7 +382,7 @@ class TestModelDiagnosticsSplineKeys:
     def test_spline_group_values(self, fitted_model):
         s = fitted_model.diagnostics()
         age_entry = s["age"]
-        assert age_entry["spline_kind"] == "BasisSpline"
+        assert age_entry["spline_kind"] == "PSpline"
         assert age_entry["knot_strategy"] == "uniform"
         assert age_entry["edf"] is not None
         assert age_entry["edf"] > 0
@@ -491,7 +491,7 @@ class TestModelDiagnosticsSplineKeys:
 class TestSplineKinds:
     @pytest.mark.parametrize(
         "kind,expected_class",
-        [("bs", "BasisSpline"), ("ns", "NaturalSpline"), ("cr", "CubicRegressionSpline")],
+        [("bs", "PSpline"), ("ns", "NaturalSpline"), ("cr", "CubicRegressionSpline")],
     )
     def test_term_inference_spline_kind(self, sample_data, kind, expected_class):
         X, y, sample_weight = sample_data

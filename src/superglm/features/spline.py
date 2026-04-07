@@ -905,13 +905,15 @@ class _SplineBase:
         )
 
 
-class BasisSpline(_SplineBase):
-    """P-spline: B-spline basis + second-difference penalty.
+class PSpline(_SplineBase):
+    """P-spline: B-spline basis + discrete-difference penalty.
 
-    This is the concrete B-spline / P-spline implementation. For the
-    recommended public API, use :func:`Spline` which dispatches to
-    ``BasisSpline``, ``NaturalSpline``, or ``CubicRegressionSpline``
-    based on ``kind``.
+    This is the concrete P-spline implementation. For the recommended
+    public API, use :func:`Spline` which dispatches to ``PSpline``,
+    ``NaturalSpline``, or ``CubicRegressionSpline`` based on ``kind``.
+
+    The ``m`` parameter controls the discrete difference order(s) for the
+    penalty (default 2, second-difference).
 
     Parameters
     ----------
@@ -1025,6 +1027,10 @@ class BasisSpline(_SplineBase):
 
     def _build_penalty(self) -> NDArray:
         return self._build_penalty_for_order(self._m_orders[0])
+
+
+# Backward-compatible alias — existing code using BasisSpline still works.
+BasisSpline = PSpline
 
 
 class NaturalSpline(_SplineBase):
@@ -1542,7 +1548,8 @@ class CardinalCRSpline(_SplineBase):
 # ═══════════════════════════════════════════════════════════════════
 
 _KIND_MAP = {
-    "bs": BasisSpline,
+    "bs": PSpline,
+    "ps": PSpline,
     "ns": NaturalSpline,
     "cr": CubicRegressionSpline,
     "cr_cardinal": CardinalCRSpline,
@@ -1584,7 +1591,7 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     if kind not in _KIND_MAP:
         raise ValueError(f"Unknown spline kind {kind!r}, expected one of {sorted(_KIND_MAP)}")
 
-    if kind == "bs":
+    if kind in ("bs", "ps"):
         n_knots = k - degree - 1
         min_k = degree + 2  # need at least 1 interior knot
     elif kind == "cr_cardinal":
@@ -1608,7 +1615,7 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
 
 
 def Spline(
-    kind: str = "bs",
+    kind: str = "ps",
     *,
     k: int | None = None,
     n_knots: int | None = None,
@@ -1630,7 +1637,7 @@ def Spline(
     """Create a spline feature spec.
 
     This is the recommended public API for creating spline features.
-    Dispatches to ``BasisSpline``, ``NaturalSpline``, or
+    Dispatches to ``PSpline``, ``NaturalSpline``, or
     ``CubicRegressionSpline`` based on ``kind``.
 
     Parameters
@@ -1638,8 +1645,11 @@ def Spline(
     kind : str
         Spline type:
 
-        - ``"bs"`` — P-spline (B-spline basis + second-difference penalty).
-          Default. Equivalent to ``BasisSpline``.
+        - ``"ps"`` — P-spline (B-spline basis + discrete-difference penalty).
+          Default. Equivalent to ``PSpline``.
+        - ``"bs"`` — **Deprecated** alias for ``"ps"``. Currently creates a
+          P-spline (same as ``"ps"``). In a future release, ``"bs"`` will
+          create a proper B-spline smooth with integrated-derivative penalty.
         - ``"ns"`` — Natural P-spline (f''=0 at boundaries, linear tails).
           Equivalent to ``NaturalSpline``.
         - ``"cr"`` — Cubic regression spline (integrated f'' penalty +
@@ -1705,15 +1715,15 @@ def Spline(
     Returns
     -------
     _SplineBase
-        A concrete spline feature spec (``BasisSpline``,
+        A concrete spline feature spec (``PSpline``,
         ``NaturalSpline``, or ``CubicRegressionSpline``).
 
     Examples
     --------
-    >>> Spline(kind="bs", k=20)           # 20-column P-spline
+    >>> Spline(kind="ps", k=20)           # 20-column P-spline
     >>> Spline(kind="cr", k=10)           # 9-column cubic regression spline (k-1)
     >>> Spline(kind="ns", n_knots=8)      # 8 interior knots, natural spline
-    >>> Spline(n_knots=10, penalty="ssp")  # backward-compatible, defaults to "bs"
+    >>> Spline(n_knots=10, penalty="ssp")  # backward-compatible, defaults to "ps"
     >>> Spline(kind="cr", k=12, select=True)  # CR with double-penalty selection
     """
     if kind not in _KIND_MAP:
@@ -1727,7 +1737,20 @@ def Spline(
     if monotone is not None and kind == "ns":
         raise NotImplementedError(
             "monotone is not supported for kind='ns'. "
-            "Use kind='cr' or kind='bs' with monotone='increasing' or 'decreasing'."
+            "Use kind='cr' or kind='ps' with monotone='increasing' or 'decreasing'."
+        )
+
+    # Deprecation warning for kind="bs"
+    if kind == "bs":
+        import warnings
+
+        warnings.warn(
+            "Spline(kind='bs') currently creates a P-spline (discrete-difference "
+            "penalty). Use kind='ps' for this behavior. In a future release, "
+            "kind='bs' will create a proper B-spline smooth with "
+            "integrated-derivative penalty.",
+            FutureWarning,
+            stacklevel=2,
         )
 
     # Resolve n_knots
@@ -1744,7 +1767,7 @@ def Spline(
     # Dispatch to concrete class
     cls = _KIND_MAP[kind]
 
-    if kind == "bs":
+    if kind in ("bs", "ps"):
         return cls(
             n_knots=resolved_n_knots,
             degree=degree,
