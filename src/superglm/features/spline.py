@@ -1394,6 +1394,24 @@ class CubicRegressionSpline(_SplineBase):
             return super()._basis_matrix(x)
         return self._linear_tail_basis_matrix(x)
 
+    def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
+        """Build monotone constraints on raw B-spline coefficients.
+
+        CRS is built on a raw B-spline basis projected through a
+        natural-boundary Z matrix. Adjacent-coefficient-difference
+        constraints on the raw B-spline coefficients (D @ beta_raw >= 0)
+        guarantee monotonicity because B-spline functions with monotone
+        coefficients are monotone.
+
+        The composition through Z and identifiability is handled by
+        _SplineBase.build() via cs_raw.compose(projection).
+        """
+        K = self._n_basis
+        D = np.diff(np.eye(K), axis=0)
+        if self.monotone == "decreasing":
+            D = -D
+        return LinearConstraintSet(A=D, b=np.zeros(K - 1))
+
     def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
         """Natural boundary constraints: f''(lo) = f''(hi) = 0."""
         Z = self._natural_constraint_null_space()
