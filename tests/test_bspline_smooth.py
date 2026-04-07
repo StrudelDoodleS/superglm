@@ -289,3 +289,26 @@ class TestMParameterSemantics:
         nonzero_ps = eig_ps[np.abs(eig_ps) > 1e-10]
         nonzero_bs = eig_bs[np.abs(eig_bs) > 1e-10]
         assert not np.allclose(nonzero_ps, nonzero_bs, rtol=0.1)
+
+
+class TestBSplineSmoothMValidation:
+    """BSplineSmooth rejects m >= degree (derivative order too high)."""
+
+    def test_m_equals_degree_raises(self):
+        """m=3 on degree=3 B-spline: 3rd derivative is a step function."""
+        s = BSplineSmooth(n_knots=8, degree=3, m=3)
+        x = np.linspace(0, 1, 200)
+        with pytest.raises(ValueError, match="Derivative order.*>= spline degree"):
+            s.build(x)
+
+    def test_m_exceeds_degree_raises(self):
+        s = BSplineSmooth(n_knots=8, degree=3, m=4)
+        x = np.linspace(0, 1, 200)
+        with pytest.raises(ValueError, match="Derivative order.*>= spline degree"):
+            s.build(x)
+
+    def test_m_less_than_degree_ok(self):
+        s = BSplineSmooth(n_knots=8, degree=3, m=2)
+        x = np.linspace(0, 1, 200)
+        info = s.build(x)
+        assert info.n_cols > 0

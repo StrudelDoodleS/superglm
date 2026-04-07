@@ -838,7 +838,7 @@ class _SplineBase:
         if not self._tensor_supported:
             raise NotImplementedError(
                 f"{type(self).__name__} does not support tensor marginal ingredients. "
-                f"Use kind='cr' or kind='bs' for tensor product interactions."
+                f"Use kind='cr' or kind='ps' for tensor product interactions."
             )
         reasons: list[str] = []
         if self.select:
@@ -1085,7 +1085,7 @@ class BSplineSmooth(_BSplineBase):
     """
 
     _penalty_semantics = "integrated_derivative"
-    _max_penalty_order: int | None = None  # validated at build time
+    _max_penalty_order: int | None = None  # validated dynamically in _build_penalty_for_order
 
     def __init__(
         self,
@@ -1132,6 +1132,11 @@ class BSplineSmooth(_BSplineBase):
         the product is degree 2*(d-m).  Quadrature with max(m+1, d)
         points is sufficient.
         """
+        if order >= self.degree:
+            raise ValueError(
+                f"Derivative order {order} >= spline degree {self.degree}. "
+                f"Integrated-derivative penalty requires order < degree."
+            )
         K = self._n_basis
         unique_knots = np.unique(self._knots)
         omega = np.zeros((K, K))
@@ -1174,7 +1179,7 @@ class NaturalSpline(_SplineBase):
     integrated-f'' penalty of ``CubicRegressionSpline``.  The
     boundary constraints reduce the penalty null space to 1 dimension
     (constant only), so ``select=True`` is not supported — use
-    ``kind="cr"`` or ``kind="bs"`` for double-penalty selection.
+    ``kind="cr"`` or ``kind="ps"`` for double-penalty selection.
     """
 
     _select_supported = False
