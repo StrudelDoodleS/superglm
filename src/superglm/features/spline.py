@@ -1132,10 +1132,10 @@ class BSplineSmooth(_BSplineBase):
         the product is degree 2*(d-m).  Quadrature with max(m+1, d)
         points is sufficient.
         """
-        if order >= self.degree:
+        if order > self.degree:
             raise ValueError(
-                f"Derivative order {order} >= spline degree {self.degree}. "
-                f"Integrated-derivative penalty requires order < degree."
+                f"Derivative order {order} > spline degree {self.degree}. "
+                f"Integrated-derivative penalty requires order <= degree."
             )
         K = self._n_basis
         unique_knots = np.unique(self._knots)

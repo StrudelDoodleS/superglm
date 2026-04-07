@@ -292,19 +292,23 @@ class TestMParameterSemantics:
 
 
 class TestBSplineSmoothMValidation:
-    """BSplineSmooth rejects m >= degree (derivative order too high)."""
+    """BSplineSmooth rejects m > degree (derivative order too high)."""
 
-    def test_m_equals_degree_raises(self):
-        """m=3 on degree=3 B-spline: 3rd derivative is a step function."""
+    def test_m_equals_degree_ok(self):
+        """m=3 on degree=3 B-spline: 3rd derivative is piecewise constant,
+        so int (f''')^2 dx is well-defined."""
         s = BSplineSmooth(n_knots=8, degree=3, m=3)
         x = np.linspace(0, 1, 200)
-        with pytest.raises(ValueError, match="Derivative order.*>= spline degree"):
-            s.build(x)
+        info = s.build(x)
+        assert info.n_cols > 0
+        S = info.penalty_matrix
+        np.testing.assert_allclose(S, S.T, atol=1e-12)
+        assert np.all(np.linalg.eigvalsh(S) >= -1e-10)
 
     def test_m_exceeds_degree_raises(self):
         s = BSplineSmooth(n_knots=8, degree=3, m=4)
         x = np.linspace(0, 1, 200)
-        with pytest.raises(ValueError, match="Derivative order.*>= spline degree"):
+        with pytest.raises(ValueError, match="Derivative order.*> spline degree"):
             s.build(x)
 
     def test_m_less_than_degree_ok(self):

@@ -16,7 +16,7 @@ Core API (explicit):
     model = SuperGLM(
         penalty="group_lasso", selection_penalty=0.01,
         features={
-            "driver_age": Spline(kind="bs", k=14),
+            "driver_age": Spline(kind="ps", k=14),
             "region": Categorical(base="most_exposed"),
             "density": Numeric(),
         },
