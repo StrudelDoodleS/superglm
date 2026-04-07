@@ -34,6 +34,7 @@ class TestMonotoneFitBSplineSmooth:
         df = pd.DataFrame({"x": x, "y": y})
         model = SuperGLM(
             family=Gaussian(),
+            selection_penalty=0,
             features={
                 "x": BSplineSmooth(
                     n_knots=10,
@@ -59,11 +60,10 @@ class TestMonotoneFitBSplineSmooth:
         df = pd.DataFrame({"x": x, "y": y})
         model = SuperGLM(
             family=Gaussian(),
+            selection_penalty=0,
             features={"x": BSplineSmooth(n_knots=10)},
         )
         model.fit(df[["x"]], df["y"])
-        # Check it fitted (may not converge with BCD + default GroupLasso,
-        # but should still produce a fit with reasonable deviance)
         assert model._result.n_iter > 0
         assert model._result.deviance < 100
 
@@ -77,6 +77,7 @@ class TestMonotoneFitBSplineSmooth:
         df = pd.DataFrame({"x": x, "y": y})
         model = SuperGLM(
             family=Gaussian(),
+            selection_penalty=0,
             features={
                 "x": BSplineSmooth(
                     n_knots=10,
@@ -102,6 +103,7 @@ class TestMonotoneFitBSplineSmooth:
         df = pd.DataFrame({"x": x, "y": y})
         model = SuperGLM(
             family=Gaussian(),
+            selection_penalty=0,
             features={
                 "x": BSplineSmooth(
                     n_knots=8,
@@ -131,6 +133,7 @@ class TestMonotoneFitCRS:
         df = pd.DataFrame({"x": x, "y": y})
         model = SuperGLM(
             family=Gaussian(),
+            selection_penalty=0,
             features={
                 "x": CubicRegressionSpline(
                     n_knots=10,
@@ -161,6 +164,7 @@ class TestMonotoneMixedModel:
         df = pd.DataFrame({"x1": x1, "x2": x2, "y": y})
         model = SuperGLM(
             family=Gaussian(),
+            selection_penalty=0,
             features={
                 "x1": BSplineSmooth(
                     n_knots=8,
