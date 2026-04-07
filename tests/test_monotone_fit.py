@@ -10,7 +10,7 @@ import pytest
 
 from superglm import SuperGLM
 from superglm.families import Gaussian
-from superglm.features.spline import BSplineSmooth, CubicRegressionSpline
+from superglm.features.spline import BSplineSmooth, CubicRegressionSpline, PSpline
 
 
 class TestMonotoneFitBSplineSmooth:
@@ -268,3 +268,99 @@ class TestMonotoneUnsupportedCombinations:
         )
         with pytest.raises(NotImplementedError, match="discrete=True"):
             model.fit(df[["x"]], df["y"])
+
+
+# ── PSpline SCOP engine tests ─────────────────────────────────────────────────
+
+
+class TestMonotoneFitPSpline:
+    """PSpline with monotone_mode='fit' uses SCOP engine."""
+
+    @pytest.mark.slow
+    def test_predictions_are_monotone(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 1 / (1 + np.exp(-10 * (x - 0.5))) + rng.normal(0, 0.1, n)
+        df = pd.DataFrame({"x": x, "y": y})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+        )
+        model.fit(df[["x"]], df["y"])
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8), f"min diff = {np.diff(pred).min():.2e}"
+
+    @pytest.mark.slow
+    def test_decreasing(self):
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = np.exp(-3 * x) + rng.normal(0, 0.05, n)
+        df = pd.DataFrame({"x": x, "y": y})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={"x": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit")},
+        )
+        model.fit(df[["x"]], df["y"])
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) <= 1e-8)
+
+    @pytest.mark.slow
+    def test_mixed_scop_and_unconstrained(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = rng.uniform(0, 1, n)
+        y = 2 * x1 + np.sin(2 * np.pi * x2) + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2, "y": y})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8),
+            },
+        )
+        model.fit(df[["x1", "x2"]], df["y"])
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x1": x_grid, "x2": np.full(200, 0.5)}))
+        assert np.all(np.diff(pred) >= -1e-8)
+
+    @pytest.mark.slow
+    def test_unconstrained_pspline_unchanged(self):
+        rng = np.random.default_rng(42)
+        n = 300
+        x = rng.uniform(0, 1, n)
+        y = np.sin(2 * np.pi * x) + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={"x": PSpline(n_knots=8)},
+        )
+        model.fit(df[["x"]], df["y"])
+        assert model._result.converged
+
+    def test_scop_plus_qp_raises(self):
+        """SCOP + QP monotone in same model raises NotImplementedError."""
+        rng = np.random.default_rng(42)
+        n = 200
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        y = x1 + x2 + rng.normal(0, 0.1, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2, "y": y})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x1": PSpline(n_knots=5, monotone="increasing", monotone_mode="fit"),
+                "x2": BSplineSmooth(n_knots=5, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="SCOP.*QP"):
+            model.fit(df[["x1", "x2"]], df["y"])

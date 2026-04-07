@@ -204,6 +204,7 @@ class GroupSlice:
     subgroup_type: str | None = None  # "linear", "spline", or None
     constraints: LinearConstraintSet | None = None
     monotone_engine: str | None = None
+    scop_reparameterization: SCOPSolverReparam | None = None
 
     def __post_init__(self):
         if not self.feature_name:

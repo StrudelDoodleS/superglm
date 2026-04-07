@@ -853,6 +853,10 @@ class _SplineBase:
     def transform(self, x: NDArray) -> NDArray:
         """Build design matrix using knots learned during build()."""
         B = self._basis_matrix(x).toarray()
+        if hasattr(self, "_scop_Sigma") and self._scop_Sigma is not None:
+            # SCOP monotone term: apply Sigma, drop constant column, center
+            X_sigma = B @ self._scop_Sigma
+            return X_sigma[:, 1:] - self._scop_col_means
         if self._R_inv is not None:
             B = B @ self._R_inv
         return B
@@ -861,10 +865,16 @@ class _SplineBase:
         self._R_inv = R_inv
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
-        beta_orig = self._R_inv @ beta if self._R_inv is not None else beta
         x_grid = np.linspace(self._lo, self._hi, n_points)
-        B_grid = self._basis_matrix(x_grid).toarray()
-        log_rels = B_grid @ beta_orig
+        if hasattr(self, "_scop_Sigma") and self._scop_Sigma is not None:
+            # SCOP term: beta is gamma_eff, reconstruct via centered design
+            B_grid = self.transform(x_grid)
+            log_rels = B_grid @ beta
+            beta_orig = beta
+        else:
+            beta_orig = self._R_inv @ beta if self._R_inv is not None else beta
+            B_grid = self._basis_matrix(x_grid).toarray()
+            log_rels = B_grid @ beta_orig
         return {
             "x": x_grid,
             "log_relativity": log_rels,
@@ -1093,7 +1103,12 @@ class PSpline(_BSplineBase):
         # SCAM-style centering: B @ Sigma, drop constant column, center remaining
         X_sigma = B @ reparam.Sigma
         # Drop column 0 (constant level absorbed into intercept)
-        X_centered = X_sigma[:, 1:] - X_sigma[:, 1:].mean(axis=0)
+        col_means = X_sigma[:, 1:].mean(axis=0)
+        X_centered = X_sigma[:, 1:] - col_means
+
+        # Store Sigma and centering for use in transform()
+        self._scop_Sigma = reparam.Sigma
+        self._scop_col_means = col_means
 
         # Build solver-space reparam
         solver_reparam = build_scop_solver_reparam(q, direction=self.monotone)
