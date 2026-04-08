@@ -1618,10 +1618,9 @@ class TestSCOPEFSRegression:
         assert "x" in scop_pc_names, f"SCOP component 'x' not in stored penalties: {scop_pc_names}"
 
     @pytest.mark.slow
-    def test_stored_penalties_reproduce_objective(self):
-        """Stored reml_penalties can reconstruct the same REML objective the optimizer used."""
+    def test_stored_state_reproduces_objective(self):
+        """Stored model state reproduces the SCOP-aware REML objective without rerunning solver."""
         from superglm.reml.objective import reml_laml_objective
-        from superglm.solvers.irls_direct import fit_irls_direct
 
         rng = np.random.default_rng(42)
         n = 300
@@ -1639,32 +1638,50 @@ class TestSCOPEFSRegression:
         )
         model.fit_reml(df[["x"]], y)
 
-        # Recompute objective from stored state
-        result_out = fit_irls_direct(
-            X=model._dm,
-            y=y,
-            weights=np.ones(n),
-            family=model._distribution,
-            link=model._link,
-            groups=model._groups,
-            lambda2=model._reml_lambdas,
-            return_xtwx=True,
-            return_scop_state=True,
-            reml_penalties=model._reml_penalties,
+        # Verify scop_states is persisted on the REMLResult
+        assert model._reml_result.scop_states is not None
+        assert len(model._reml_result.scop_states) > 0
+
+        # Reconstruct XtWX from stored model state (no rerunning solver)
+        from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+        from superglm.group_matrix import _block_xtwx
+        from superglm.links import stabilize_eta
+
+        result = model._result
+        eta = model._dm.matvec(result.beta) + result.intercept
+        eta = stabilize_eta(eta + np.zeros(n), model._link)
+        mu = clip_mu(model._link.inverse(eta), model._distribution)
+        V = model._distribution.variance(mu)
+        dmu = model._link.deriv_inverse(eta)
+        W = np.ones(n) * dmu**2 / np.maximum(V, _VARIANCE_FLOOR)
+
+        XtWX = _block_xtwx(
+            model._dm.group_matrices,
+            model._groups,
+            W,
+            tabmat_split=model._dm.tabmat_split,
         )
-        pirls_result, _, XtWX, scop_states = result_out
-        obj = reml_laml_objective(
+
+        # Recompute objective from stored state only — no fit_irls_direct call
+        obj_recomputed = reml_laml_objective(
             model._dm,
             model._distribution,
             model._link,
             model._groups,
             y,
-            pirls_result,
+            result,
             model._reml_lambdas,
             np.ones(n),
             np.zeros(n),
             XtWX=XtWX,
             reml_penalties=model._reml_penalties,
-            scop_states=scop_states,
+            scop_states=model._reml_result.scop_states,
         )
-        assert np.isfinite(obj)
+
+        # Must match the objective stored during optimization
+        obj_stored = model._reml_result.objective
+        assert np.isfinite(obj_recomputed)
+        assert np.isfinite(obj_stored)
+        assert obj_recomputed == pytest.approx(obj_stored, rel=1e-8), (
+            f"Recomputed {obj_recomputed:.6f} != stored {obj_stored:.6f}"
+        )

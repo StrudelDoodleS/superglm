@@ -596,6 +596,7 @@ def optimize_scop_efs_reml(
         converged=converged,
         lambda_history=lambda_history,
         reml_penalties=final_all_pcs,
+        scop_states=final_scop_states if final_scop_states else None,
         objective=reml_laml_objective(
             dm,
             distribution,

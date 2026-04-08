@@ -35,6 +35,7 @@ class REMLResult:
     lambda_history: list[dict[str, float]] = field(default_factory=list)
     objective: float | None = None
     reml_penalties: list | None = None  # merged SSP + SCOP PenaltyComponents
+    scop_states: dict | None = None  # converged SCOP state for objective reproduction
 
 
 def _map_beta_between_bases(
