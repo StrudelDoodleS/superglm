@@ -25,6 +25,7 @@ from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
     DesignMatrix,
+    DiscretizedSCOPGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
     GroupMatrix,
@@ -437,6 +438,9 @@ def _process_info(
                 bin_idx,
                 tensor_id=tensor_id,
             )
+        elif use_discrete and info.scop_reparameterization is not None and bin_idx is not None:
+            # SCOP discrete: columns holds the bin-level centered design
+            gm = DiscretizedSCOPGroupMatrix(info.columns, bin_idx)
         elif info.cat_codes is not None:
             gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
         elif sp.issparse(info.columns):
@@ -517,15 +521,12 @@ def build_design_matrix(
         bin_idx = None
         exposure_agg = None
 
-        if (
+        _scop_discrete = (
             use_discrete
             and getattr(spec, "monotone", None) is not None
             and getattr(spec, "monotone_mode", "postfit") == "fit"
-        ):
-            raise NotImplementedError(
-                "Monotone fit-time constraints are not supported with "
-                "discrete=True. Use discrete=False or monotone_mode='postfit'."
-            )
+            and hasattr(spec, "_build_scop_reparameterization")
+        )
 
         if use_discrete:
             omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
@@ -536,7 +537,57 @@ def build_design_matrix(
             B_unique = spec._raw_basis_matrix(bin_centers)
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
 
-            if getattr(spec, "select", False):
+            # ── QP monotone constraint metadata (coefficient-space, survives discretization) ──
+            constraints = None
+            monotone_engine = None
+            raw_to_solver_map = None
+            if (
+                getattr(spec, "monotone", None) is not None
+                and getattr(spec, "monotone_mode", "postfit") == "fit"
+                and hasattr(spec, "_build_monotone_constraints_raw")
+            ):
+                cs_raw = spec._build_monotone_constraints_raw()
+                constraints = (
+                    cs_raw.compose(projection_penalty) if projection_penalty is not None else cs_raw
+                )
+                monotone_engine = "qp"
+                raw_to_solver_map = projection_penalty
+
+            if _scop_discrete:
+                # ── SCOP monotone + discrete: bin-level centered design ──
+                from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
+
+                q_raw = spec._n_basis
+                raw_reparam = build_scop_reparam(q_raw, direction=spec.monotone)
+                X_sigma_unique = B_unique @ raw_reparam.Sigma  # (n_bins, K)
+
+                # Centering weighted by bin counts (equivalent to full-data mean)
+                n_obs = len(bin_idx)
+                bin_counts = np.bincount(bin_idx, minlength=len(bin_centers))
+                col_means = (X_sigma_unique[:, 1:].T @ bin_counts) / n_obs
+                X_centered_unique = X_sigma_unique[:, 1:] - col_means  # (n_bins, q_eff)
+
+                # Store on spec for predict-time transform
+                spec._scop_Sigma = raw_reparam.Sigma
+                spec._scop_col_means = col_means
+
+                solver_reparam = build_scop_solver_reparam(q_raw, direction=spec.monotone)
+                S_scop = solver_reparam.penalty_matrix()
+                q_eff = X_centered_unique.shape[1]
+
+                infos = [
+                    GroupInfo(
+                        columns=X_centered_unique,  # bin-level centered design
+                        n_cols=q_eff,
+                        penalty_matrix=S_scop,
+                        reparametrize=False,
+                        penalized=True,
+                        scop_reparameterization=solver_reparam,
+                        monotone_engine="scop",
+                    )
+                ]
+
+            elif getattr(spec, "select", False):
                 n_null = 1
                 n_range = spec._U_range.shape[1]
                 n_combined = n_null + n_range
@@ -582,6 +633,9 @@ def build_design_matrix(
                         projection=U_combined,
                         penalty_components=components,
                         component_types={"null": "selection"},
+                        constraints=constraints,
+                        monotone_engine=monotone_engine,
+                        raw_to_solver_map=raw_to_solver_map,
                     ),
                 ]
             else:
@@ -593,11 +647,33 @@ def build_design_matrix(
                         reparametrize=(spec.penalty == "ssp"),
                         projection=projection_penalty,
                         penalty_components=getattr(spec, "_penalty_components", None),
+                        constraints=constraints,
+                        monotone_engine=monotone_engine,
+                        raw_to_solver_map=raw_to_solver_map,
                     )
                 ]
         else:
             result = spec.build(x_col, sample_weight=sample_weight)
             infos = result if isinstance(result, list) else [result]
+
+        # Resolve lambda_policies from the spec onto each GroupInfo.
+        # build() does this internally, but the discrete path constructs
+        # GroupInfo manually and needs an explicit resolution step.
+        #
+        # For single-penalty discrete groups, build_penalty_components uses
+        # the multi-penalty path (omega_components with "wiggle" suffix) when
+        # penalty_components is set. We need to ensure penalty_components is
+        # populated for single-penalty terms with lambda_policy, matching
+        # what build() does for non-discrete terms.
+        if hasattr(spec, "_lambda_policy") and spec._lambda_policy is not None:
+            for info in infos:
+                if info.lambda_policies is None:
+                    info.lambda_policies = spec._resolve_lambda_policies(info)
+                # Single-penalty terms need a synthetic penalty_components
+                # for the lambda_policy to flow through to build_penalty_components.
+                if info.penalty_components is None and info.penalty_matrix is not None:
+                    info.penalty_components = [("wiggle", info.penalty_matrix)]
+                    info.component_types = {"wiggle": "wiggle"}
 
         # Build GroupMatrix + GroupSlice for each subgroup
         r_inv_parts: list[NDArray] = []

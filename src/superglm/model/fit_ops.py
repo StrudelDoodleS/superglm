@@ -25,7 +25,7 @@ from superglm.solvers.irls_direct import (
     fit_irls_direct,
 )
 from superglm.solvers.pirls import PIRLSResult, fit_pirls
-from superglm.types import FitStats, GroupSlice
+from superglm.types import FitStats, GroupSlice, LambdaPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -705,9 +705,11 @@ def fit_reml(
     if model._splines is not None and not model._specs:
         auto_detect(model, X, sample_weight)
 
-    # Clear stale profile results from previous fit
+    # Clear stale results from previous fit
     model._nb_profile_result = None
     model._tweedie_profile_result = None
+    model._reml_result = None
+    model._reml_profile = None
 
     # Auto-estimate NB theta if requested
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
@@ -752,15 +754,9 @@ def fit_reml(
         ):
             reml_groups.append((i, g))
 
-    # Monotone fit-time constraints are not yet compatible with automatic REML.
-    if any(g.monotone_engine is not None for g in model._groups):
-        raise NotImplementedError(
-            "Automatic smoothness selection is not yet available when monotone "
-            "fit-time terms are present. Supply fixed smoothing parameters via "
-            "the lambda argument, or use monotone_mode='postfit'."
-        )
+    _has_monotone = any(g.monotone_engine is not None for g in model._groups)
 
-    if not reml_groups:
+    if not reml_groups and not _has_monotone:
         logger.warning("fit_reml: no REML-eligible groups found, falling back to fit()")
         model._result = fit_pirls(
             X=model._dm,
@@ -797,10 +793,99 @@ def fit_reml(
             lambdas[pc.name] = lam_init
             estimated_names.add(pc.name)
 
+    def _scop_fixed_lambda_value(spec) -> float | None:
+        """Return a fixed SCOP lambda value, or None if it should be estimated.
+
+        SCOP is a single-penalty smooth, so dict-style lambda_policy uses the
+        same canonical single-component name as other splines: "wiggle".
+        """
+        lp = getattr(spec, "_lambda_policy", None)
+        if lp is None:
+            return None
+        if isinstance(lp, LambdaPolicy):
+            return float(lp.value) if lp.mode == "fixed" else None
+
+        unknown = set(lp) - {"wiggle"}
+        if unknown:
+            raise ValueError(
+                f"lambda_policy contains unknown component names: {unknown}. "
+                "Valid names: ['wiggle']"
+            )
+
+        wiggle_lp = lp.get("wiggle", LambdaPolicy.estimate())
+        return float(wiggle_lp.value) if wiggle_lp.mode == "fixed" else None
+
+    # Check SCOP terms separately — they bypass SSP and don't enter reml_groups.
+    # SCOP terms need fixed lambda_policy to be used with fit_reml().
+    _scop_groups = [g for g in model._groups if g.monotone_engine == "scop" and g.penalized]
+    _any_unfixed_scop = False
+    for g in _scop_groups:
+        spec = model._specs.get(g.feature_name)
+        if spec is None:
+            _any_unfixed_scop = True
+            break
+        fixed_scop = _scop_fixed_lambda_value(spec)
+        if fixed_scop is None:
+            _any_unfixed_scop = True
+            break
+        # Inject fixed lambda for SCOP group into the lambda dict.
+        lambdas[g.name] = fixed_scop
+
+    # Monotone fit-time constraints are not compatible with automatic REML.
+    # When ALL penalized terms have fixed lambdas, we can skip the REML
+    # optimizer and call fit_irls_direct directly with fixed lambda values.
+    if _has_monotone and (estimated_names or _any_unfixed_scop):
+        raise NotImplementedError(
+            "Automatic smoothness selection is not yet available when monotone "
+            "fit-time terms are present. Supply fixed smoothing parameters via "
+            "lambda_policy=LambdaPolicy(mode='fixed', value=X), or use "
+            "monotone_mode='postfit'."
+        )
+
     # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
     offset_arr = offset if offset is not None else np.zeros(len(y))
     lam1 = model.penalty.lambda1
     use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
+
+    if _has_monotone:
+        # All lambdas are fixed (guard above ensures this).
+        # Call fit_irls_direct directly — the REML optimizer can't handle
+        # monotone constraints (QP / SCOP inner solvers).
+        result, XtWX_S_inv = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=lambdas,
+            offset=offset,
+            max_iter=max_pirls_iter,
+            tol=pirls_tol,
+            convergence="deviance",
+            reml_penalties=reml_penalties if reml_penalties else None,
+        )
+
+        model._result = result
+        model._reml_lambdas = lambdas
+        model._reml_penalties = reml_penalties
+
+        # Compute fit stats (mirrors the normal REML post-fit path).
+        eta = model._dm.matvec(result.beta) + result.intercept
+        if offset is not None:
+            eta = eta + offset
+        eta = stabilize_eta(eta, model._link)
+        mu = clip_mu(model._link.inverse(eta), model._distribution)
+
+        model._fit_stats = _compute_fit_stats(
+            y, mu, sample_weight, offset, model._distribution, model._link, result.phi
+        )
+        model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
+        # _reml_result and _reml_profile remain None (set at entry).
+        # The REML outer optimizer was not run — all lambdas were fixed.
+
+        logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
+        return model
 
     if not estimated_names:
         # All lambdas are fixed — skip REML optimizer; one PIRLS solve at fixed lambdas.

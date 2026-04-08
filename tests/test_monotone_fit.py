@@ -11,6 +11,7 @@ import pytest
 from superglm import SuperGLM
 from superglm.families import Gaussian
 from superglm.features.spline import BSplineSmooth, CubicRegressionSpline, PSpline
+from superglm.types import LambdaPolicy
 
 
 class TestMonotoneFitBSplineSmooth:
@@ -314,8 +315,8 @@ class TestMonotoneUnsupportedCombinations:
         with pytest.raises(NotImplementedError, match="smoothness selection"):
             model.fit_reml(df[["x"]], df["y"])
 
-    def test_monotone_with_discrete_raises(self):
-        """discrete=True + monotone_mode='fit' is not supported."""
+    def test_scop_monotone_with_discrete_works(self):
+        """discrete=True + SCOP monotone_mode='fit' is now supported."""
         rng = np.random.default_rng(42)
         n = 200
         x = rng.uniform(0, 1, n)
@@ -327,11 +328,13 @@ class TestMonotoneUnsupportedCombinations:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
             },
         )
-        with pytest.raises(NotImplementedError, match="discrete=True"):
-            model.fit(df[["x"]], df["y"])
+        model.fit(df[["x"]], df["y"])
+        x_grid = np.linspace(0, 1, 50)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8)
 
 
 # ── PSpline SCOP engine tests ─────────────────────────────────────────────────
@@ -428,3 +431,437 @@ class TestMonotoneFitPSpline:
         )
         with pytest.raises(NotImplementedError, match="SCOP.*QP"):
             model.fit(df[["x1", "x2"]], df["y"])
+
+
+# ── fit_reml with fixed lambda tests ────────────────────────────────────────────
+
+
+class TestMonotoneFixedLambdaREML:
+    """fit_reml() works with monotone terms when all lambdas are fixed."""
+
+    @pytest.mark.slow
+    def test_fit_reml_with_fixed_lambda_policy_qp(self):
+        """BSplineSmooth monotone with fixed lambda_policy works in fit_reml."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 1 / (1 + np.exp(-10 * (x - 0.5))) + rng.normal(0, 0.1, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": BSplineSmooth(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], df["y"])
+
+        # Predictions must be monotone increasing
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8), f"min diff = {np.diff(pred).min():.2e}"
+
+        # Model should have converged
+        assert model._result.converged
+
+        # REML lambdas should be set
+        assert model._reml_lambdas is not None
+
+    @pytest.mark.slow
+    def test_fit_reml_with_fixed_lambda_policy_scop(self):
+        """PSpline monotone with fixed lambda_policy works in fit_reml."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 1 / (1 + np.exp(-10 * (x - 0.5))) + rng.normal(0, 0.1, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], df["y"])
+
+        # Predictions must be monotone increasing
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8), f"min diff = {np.diff(pred).min():.2e}"
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+    def test_fit_reml_without_fixed_lambdas_raises_qp(self):
+        """fit_reml raises for QP monotone without fixed lambda."""
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 1, n)
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": BSplineSmooth(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="smoothness selection"):
+            model.fit_reml(df[["x"]], df["y"])
+
+    def test_fit_reml_without_fixed_lambdas_raises_scop(self):
+        """fit_reml raises for SCOP monotone without fixed lambda."""
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 1, n)
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="smoothness selection"):
+            model.fit_reml(df[["x"]], df["y"])
+
+    @pytest.mark.slow
+    def test_fit_reml_unchanged_without_monotone(self):
+        """Normal REML still works without monotone terms."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 1, n)
+        y = np.sin(2 * np.pi * x) + rng.normal(0, 0.3, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            features={"x": BSplineSmooth(n_knots=10)},
+        )
+        model.fit_reml(df[["x"]], df["y"])
+        assert model._result.converged
+
+
+# ── discrete + monotone + fit_reml intersection tests ─────────────────────────
+
+
+class TestDiscreteMonotoneREML:
+    """The full intersection: discrete=True + monotone + fit_reml(fixed lambda).
+
+    Tests at 250k rows to exercise the discretization performance path
+    at meaningful scale.
+    """
+
+    @pytest.mark.slow
+    def test_discrete_qp_monotone_fit_reml(self):
+        """BSplineSmooth: discrete + monotone + fit_reml with fixed lambda."""
+        rng = np.random.default_rng(42)
+        n = 250_000
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.3, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": BSplineSmooth(
+                    n_knots=10,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], df["y"])
+
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8), f"min diff = {np.diff(pred).min():.2e}"
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+        # Verify the term is actually discretized
+        from superglm.group_matrix import DiscretizedSSPGroupMatrix
+
+        gm = model._dm.group_matrices[0]
+        assert isinstance(gm, DiscretizedSSPGroupMatrix), (
+            f"Expected DiscretizedSSPGroupMatrix, got {type(gm).__name__}"
+        )
+
+    @pytest.mark.slow
+    def test_discrete_scop_monotone_fit_reml(self):
+        """PSpline: discrete + monotone + fit_reml with fixed lambda."""
+        rng = np.random.default_rng(42)
+        n = 250_000
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.3, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(
+                    n_knots=10,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], df["y"])
+
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8), f"min diff = {np.diff(pred).min():.2e}"
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+        # Verify the term used the discretized SCOP path
+        from superglm.group_matrix import DiscretizedSCOPGroupMatrix
+
+        gm = model._dm.group_matrices[0]
+        assert isinstance(gm, DiscretizedSCOPGroupMatrix), (
+            f"Expected DiscretizedSCOPGroupMatrix, got {type(gm).__name__}"
+        )
+
+
+# ── summary() monotone engine display tests ──────────────────────────────────────
+
+
+class TestSummaryMonotoneEngine:
+    """summary() shows monotone engine type (qp/scop) alongside direction."""
+
+    @pytest.mark.slow
+    def test_summary_shows_engine_for_qp(self):
+        """BSplineSmooth monotone summary shows 'qp' engine."""
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": BSplineSmooth(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+            },
+        )
+        model.fit(df[["x"]], df["y"])
+        summary_str = str(model.summary())
+
+        assert "qp" in summary_str.lower()
+        assert "mono=increasing (qp)" in summary_str
+
+    @pytest.mark.slow
+    def test_summary_shows_engine_for_scop(self):
+        """PSpline monotone summary shows 'scop' engine."""
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+            },
+        )
+        model.fit(df[["x"]], df["y"])
+        summary_str = str(model.summary())
+
+        assert "scop" in summary_str.lower()
+        assert "mono=increasing (scop)" in summary_str
+
+
+class TestDiscreteQPMonotone:
+    """discrete=True with QP monotone (BSplineSmooth/CRS)."""
+
+    @pytest.mark.slow
+    def test_discrete_bsplinesmooth_monotone(self):
+        rng = np.random.default_rng(42)
+        n = 1000
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={"x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit")},
+        )
+        model.fit(df[["x"]], df["y"])
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8)
+
+    @pytest.mark.slow
+    def test_discrete_crs_monotone(self):
+        rng = np.random.default_rng(42)
+        n = 1000
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": CubicRegressionSpline(n_knots=8, monotone="increasing", monotone_mode="fit")
+            },
+        )
+        model.fit(df[["x"]], df["y"])
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8)
+
+    @pytest.mark.slow
+    def test_discrete_qp_mixed_model(self):
+        """Monotone discrete + ordinary discrete in same model."""
+        rng = np.random.default_rng(42)
+        n = 1000
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = rng.uniform(0, 1, n)
+        y = 2 * x1 + np.sin(2 * np.pi * x2) + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2, "y": y})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x1": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8),
+            },
+        )
+        model.fit(df[["x1", "x2"]], df["y"])
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x1": x_grid, "x2": np.full(200, 0.5)}))
+        assert np.all(np.diff(pred) >= -1e-8)
+
+        # Verify both terms are discretized
+        from superglm.group_matrix import DiscretizedSSPGroupMatrix
+
+        gms = model._dm.group_matrices
+        groups = model._groups
+        for gm, g in zip(gms, groups):
+            assert isinstance(gm, DiscretizedSSPGroupMatrix), (
+                f"Term {g.feature_name} should be discretized, got {type(gm).__name__}"
+            )
+
+    @pytest.mark.slow
+    def test_discrete_vs_nondiscrete_parity(self):
+        """Discrete and non-discrete monotone fits should give similar results."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+        x_grid = np.linspace(0, 1, 200)
+        df_grid = pd.DataFrame({"x": x_grid})
+
+        model_dense = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=False,
+            features={"x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit")},
+        )
+        model_dense.fit(df[["x"]], df["y"])
+        pred_dense = model_dense.predict(df_grid)
+
+        model_disc = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={"x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit")},
+        )
+        model_disc.fit(df[["x"]], df["y"])
+        pred_disc = model_disc.predict(df_grid)
+
+        np.testing.assert_allclose(pred_dense, pred_disc, atol=0.05)
+
+
+class TestDiscreteSCOPMonotone:
+    @pytest.mark.slow
+    def test_discrete_pspline_monotone(self):
+        rng = np.random.default_rng(42)
+        n = 1000
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={"x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")},
+        )
+        model.fit(df[["x"]], df["y"])
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8)
+
+    @pytest.mark.slow
+    def test_discrete_scop_vs_nondiscrete_parity(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+        x_grid = np.linspace(0, 1, 200)
+        df_grid = pd.DataFrame({"x": x_grid})
+
+        model_dense = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=False,
+            features={"x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")},
+        )
+        model_dense.fit(df[["x"]], df["y"])
+        pred_dense = model_dense.predict(df_grid)
+
+        model_disc = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={"x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")},
+        )
+        model_disc.fit(df[["x"]], df["y"])
+        pred_disc = model_disc.predict(df_grid)
+
+        np.testing.assert_allclose(pred_dense, pred_disc, atol=0.05)

@@ -1,10 +1,11 @@
 """Per-group matrix wrappers for sparse/dense BCD operations.
 
-Four wrapper types with the same interface:
+Five wrapper types with the same interface:
 - DenseGroupMatrix: numeric features (single column) or dense fallback
 - SparseGroupMatrix: categoricals, non-SSP splines
 - SparseSSPGroupMatrix: SSP splines (factored: sparse B + dense R_inv)
 - DiscretizedSSPGroupMatrix: discretized SSP splines (binned B_unique + index)
+- DiscretizedSCOPGroupMatrix: discretized SCOP monotone splines (centered design at bin centers)
 
 DesignMatrix holds the list and provides full-matrix matvec/rmatvec.
 """
@@ -438,6 +439,57 @@ class DiscretizedSSPGroupMatrix:
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         return sub
+
+
+class DiscretizedSCOPGroupMatrix:
+    """Discretized SCOP group matrix: bin-level centered SCOP design.
+
+    Stores the centered SCOP design matrix evaluated at bin centers ``(n_bins, q_eff)``
+    plus a bin-index array ``(n,)`` mapping observations to bins.  SCOP terms bypass
+    SSP reparametrisation, so there is no ``R_inv`` — the columns are already in
+    solver space (the centered B @ Sigma block with column 0 dropped).
+
+    Operations follow the same scatter/gather pattern as DiscretizedSSPGroupMatrix
+    but without the R_inv sandwich.
+    """
+
+    __slots__ = (
+        "B_scop_unique",
+        "bin_idx",
+        "n_bins",
+        "shape",
+    )
+
+    def __init__(self, B_scop_unique: NDArray, bin_idx: NDArray):
+        self.B_scop_unique = np.asarray(B_scop_unique)  # (n_bins, q_eff)
+        self.bin_idx = np.asarray(bin_idx, dtype=np.intp)  # (n,)
+        self.n_bins = self.B_scop_unique.shape[0]
+        self.shape = (len(bin_idx), self.B_scop_unique.shape[1])
+
+    def matvec(self, v: NDArray) -> NDArray:
+        vals = self.B_scop_unique @ v  # (n_bins,)
+        return vals[self.bin_idx]
+
+    def rmatvec(self, w: NDArray) -> NDArray:
+        w_agg = np.bincount(self.bin_idx, weights=w, minlength=self.n_bins)
+        return self.B_scop_unique.T @ w_agg
+
+    def gram(self, W: NDArray) -> NDArray:
+        W_agg = np.bincount(self.bin_idx, weights=W, minlength=self.n_bins)
+        return self.B_scop_unique.T @ (self.B_scop_unique * W_agg[:, None])
+
+    def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+        W_agg, Wz_agg = _fused_bincount_2(self.bin_idx, W, Wz, self.n_bins)
+        BtW_agg = self.B_scop_unique.T @ W_agg
+        BtWz_agg = self.B_scop_unique.T @ Wz_agg
+        BtWB = self.B_scop_unique.T @ (self.B_scop_unique * W_agg[:, None])
+        return BtWB, BtW_agg, BtWz_agg
+
+    def toarray(self) -> NDArray:
+        return self.B_scop_unique[self.bin_idx]
+
+    def row_subset(self, idx: NDArray) -> DiscretizedSCOPGroupMatrix:
+        return DiscretizedSCOPGroupMatrix(self.B_scop_unique, self.bin_idx[idx])
 
 
 class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
