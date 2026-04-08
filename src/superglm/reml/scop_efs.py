@@ -653,7 +653,7 @@ def optimize_scop_efs_reml(
                 )
                 efs_prev_dlsp[name] = accepted_step
 
-        # Step 8: Convergence check
+        # Step 8: Convergence check — strict tolerance OR objective plateau
         changes = [
             abs(np.log(lambdas_new[pc.name]) - np.log(lambdas[pc.name]))
             for pc in all_pcs
@@ -661,15 +661,29 @@ def optimize_scop_efs_reml(
         ]
         max_change = max(changes) if changes else 0.0
 
+        # Plateau detection: objective flat and lambda changes small
+        obj_rel_change = 0.0
+        if len(objective_history) >= 2:
+            obj_prev = objective_history[-2]
+            obj_curr_val = objective_history[-1]
+            obj_rel_change = abs(obj_curr_val - obj_prev) / max(abs(obj_curr_val), 1.0)
+
+        # Converge on strict lambda tolerance
+        strict_converged = max_change < reml_tol
+        # OR: objective plateau — relative objective change < 1e-6 AND
+        # lambda changes < 0.01 (1% on log scale) for at least 2 iterations
+        plateau_converged = n_reml_iter >= 3 and obj_rel_change < 1e-6 and max_change < 0.01
+
         if verbose:
             lam_str = ", ".join(f"{pc.name}={lambdas_new[pc.name]:.4g}" for pc in all_pcs)
             print(
-                f"  SCOP REML iter={n_reml_iter}  max_change={max_change:.6f}  lambdas=[{lam_str}]"
+                f"  SCOP REML iter={n_reml_iter}  max_change={max_change:.6f}"
+                f"  obj_rel={obj_rel_change:.2e}  lambdas=[{lam_str}]"
             )
 
         lambda_history.append(lambdas_new.copy())
 
-        if max_change < reml_tol:
+        if strict_converged or plateau_converged:
             converged = True
             lambdas = lambdas_new
             break
