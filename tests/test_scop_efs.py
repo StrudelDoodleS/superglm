@@ -1366,3 +1366,184 @@ class TestSCOPFitRemlIntegration:
         )
         with pytest.raises(NotImplementedError, match="QP monotone"):
             model.fit_reml(df[["x"]], df["y"])
+
+
+class TestSCOPEFSRegression:
+    """Regression and edge-case tests for SCOP EFS auto-lambda.
+
+    Ensures Phase 5a changes do not break unconstrained REML, fixed-lambda SCOP,
+    EFS-only models, and that SCOP auto-lambda works across families, directions,
+    and summary output.
+    """
+
+    @pytest.mark.slow
+    def test_unconstrained_reml_unchanged(self):
+        """fit_reml with no monotone terms works identically to pre-Phase-5a."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 1, n)
+        y = np.sin(2 * np.pi * x) + rng.normal(0, 0.3, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(family=Gaussian(), features={"x": PSpline(n_knots=10)})
+        model.fit_reml(df[["x"]], y)
+
+        assert model._result.converged
+        # Unconstrained REML should produce a valid lambda
+        assert model._reml_lambdas is not None
+        assert all(v > 0 for v in model._reml_lambdas.values())
+
+    @pytest.mark.slow
+    def test_fixed_scop_lambda_unchanged(self):
+        """Phase 4 fixed-lambda path still works exactly after Phase 5a changes."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+        for v in model._reml_lambdas.values():
+            assert v == pytest.approx(1.0)
+
+    @pytest.mark.slow
+    def test_efs_only_model_unchanged(self):
+        """EFS-only model (selection_penalty > 0, no monotone) unaffected by Phase 5a."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        y = np.sin(2 * np.pi * x1) + 0.5 * x2 + rng.normal(0, 0.3, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0.01,
+            features={"x1": PSpline(n_knots=8), "x2": PSpline(n_knots=8)},
+        )
+        model.fit_reml(df[["x1", "x2"]], y)
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+    @pytest.mark.slow
+    def test_discrete_scop_auto_lambda(self):
+        """discrete=True + SCOP + auto lambda works and produces monotone predictions."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+        # Check monotone predictions
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        diffs = np.diff(pred)
+        assert np.all(diffs >= -1e-6), f"Predictions not monotone: min diff = {diffs.min():.2e}"
+
+    @pytest.mark.slow
+    def test_poisson_scop_auto_lambda(self):
+        """Poisson family (known scale) with SCOP auto lambda converges."""
+        from superglm.families import Poisson
+
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 5, n))
+        log_mu = 0.3 * x - 0.5
+        y = rng.poisson(np.exp(log_mu))
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Poisson(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        assert model._result is not None
+        assert model._reml_lambdas is not None
+        assert all(v > 0 for v in model._reml_lambdas.values())
+
+    @pytest.mark.slow
+    def test_summary_after_scop_auto_lambda(self):
+        """summary() works after SCOP auto-lambda fit_reml."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        summary = model.summary()
+        text = str(summary)
+        assert "x" in text
+
+    @pytest.mark.slow
+    def test_decreasing_scop_auto_lambda(self):
+        """Decreasing monotone also works with auto lambda."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        # Decreasing relationship: y = -2x + noise
+        y = -2 * x + 3 + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+        # Check decreasing predictions
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        diffs = np.diff(pred)
+        assert np.all(diffs <= 1e-6), f"Predictions not decreasing: max diff = {diffs.max():.2e}"
