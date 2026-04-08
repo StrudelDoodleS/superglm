@@ -363,6 +363,7 @@ def fit_irls_direct(
     convergence: str = "deviance",
     S_override: NDArray | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
+    return_scop_state: bool = False,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -708,6 +709,7 @@ def fit_irls_direct(
                         bin_idx=st["bin_idx"],
                     )
                     st["beta_scop"] = result.beta_new
+                    st["H_scop_penalized"] = result.H_penalized
 
                 # Step 7: Write gamma_eff (mapped coefficients) into full beta
                 for gi, st in _scop_state.items():
@@ -946,7 +948,28 @@ def fit_irls_direct(
         log_det_H=log_det_H,
     )
 
+    # Collect converged SCOP state for EFS outer loop
+    if return_scop_state and _has_scop:
+        scop_converged = {}
+        for gi, st in _scop_state.items():
+            scop_converged[gi] = {
+                "beta_eff": st["beta_scop"].copy(),
+                "H_scop_penalized": st.get("H_scop_penalized"),
+                "S_scop": st["S_scop"],
+                "B_scop": st["B_scop"],
+                "reparam": st["reparam"],
+                "bin_idx": st.get("bin_idx"),
+                "group_sl": groups[gi].sl,
+                "group_name": groups[gi].name,
+            }
+    else:
+        scop_converged = None
+
     if return_xtwx:
+        if scop_converged is not None:
+            return result, XtWX_S_inv_beta, XtWX_beta, scop_converged
         return result, XtWX_S_inv_beta, XtWX_beta
 
+    if scop_converged is not None:
+        return result, XtWX_S_inv_beta, scop_converged
     return result, XtWX_S_inv_beta

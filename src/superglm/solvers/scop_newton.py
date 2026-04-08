@@ -45,6 +45,9 @@ class SCOPNewtonResult:
     used_fisher_fallback: bool
     """True if the full Newton Hessian was not PD and Fisher scoring was used."""
 
+    H_penalized: NDArray | None = None
+    """(q_eff, q_eff) penalized Hessian from the Newton step, or None."""
+
 
 def _objective(
     B_scop: NDArray,
@@ -208,6 +211,7 @@ def scop_newton_step(
         objective_after=float(obj_new),
         step_norm=step_norm,
         used_fisher_fallback=used_fisher,
+        H_penalized=H_full,
     )
 
 
