@@ -41,6 +41,7 @@ class _CoefRow:
     boundary: tuple[float, float] | None = None
     # Monotonicity
     monotone: str | None = None  # "increasing", "decreasing", or None
+    monotone_engine: str | None = None  # "qp" or "scop"
     monotone_repaired: bool = False
     # Quasi-separation warning
     quasi_separated: bool = False
@@ -342,6 +343,8 @@ class ModelSummary:
                     detail_parts.append(f"curve SE: {row.curve_se_min:.2f}-{row.curve_se_max:.2f}")
                 if row.monotone is not None:
                     mono_str = f"mono={row.monotone}"
+                    if row.monotone_engine is not None:
+                        mono_str += f" ({row.monotone_engine})"
                     if row.monotone_repaired:
                         mono_str += ", repaired"
                     detail_parts.append(mono_str)
@@ -590,6 +593,8 @@ class ModelSummary:
                     )
                 if row.monotone is not None:
                     mono_str = f"mono={row.monotone}"
+                    if row.monotone_engine is not None:
+                        mono_str += f" ({row.monotone_engine})"
                     if row.monotone_repaired:
                         mono_str += ", repaired"
                     detail_parts.append(mono_str)

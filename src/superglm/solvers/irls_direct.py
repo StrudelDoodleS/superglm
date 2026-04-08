@@ -29,6 +29,7 @@ from numpy.typing import NDArray
 from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initial_mean
 from superglm.group_matrix import (
     DesignMatrix,
+    DiscretizedSCOPGroupMatrix,
     DiscretizedSSPGroupMatrix,
     GroupMatrix,
     SparseSSPGroupMatrix,
@@ -161,6 +162,14 @@ def _build_penalty_matrix(
                 pc.omega_ssp if pc.omega_ssp is not None else (gm.R_inv.T @ pc.omega_raw @ gm.R_inv)
             )
             S[pc.group_sl, pc.group_sl] += lam * omega_ssp
+
+        # Also add SCOP penalties (not in reml_penalties).
+        for gm, g in zip(group_matrices, groups):
+            if g.scop_reparameterization is not None and g.penalized:
+                lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                if lam_g > 0:
+                    S[g.sl, g.sl] += lam_g * g.scop_reparameterization.penalty_matrix()
+
         return S
 
     # Legacy single-penalty path (unchanged)
@@ -449,15 +458,28 @@ def fit_irls_direct(
         for gi, g in enumerate(groups):
             if g.monotone_engine == "scop":
                 reparam = g.scop_reparameterization
-                B_scop = gms[gi].toarray()  # (n, q_eff)
                 S_scop = reparam.penalty_matrix()
-                _scop_state[gi] = {
-                    "reparam": reparam,
-                    "B_scop": B_scop,
-                    "S_scop": S_scop,
-                    "beta_scop": None,  # initialized on first iteration
-                    "beta_scop_prev": None,
-                }
+                _gm = gms[gi]
+                if isinstance(_gm, DiscretizedSCOPGroupMatrix):
+                    # Bin-level: store unique design + bin_idx, avoid (n, q_eff) expansion
+                    _scop_state[gi] = {
+                        "reparam": reparam,
+                        "B_scop": _gm.B_scop_unique,  # (n_bins, q_eff)
+                        "S_scop": S_scop,
+                        "bin_idx": _gm.bin_idx,
+                        "beta_scop": None,
+                        "beta_scop_prev": None,
+                    }
+                else:
+                    B_scop = _gm.toarray()  # (n, q_eff)
+                    _scop_state[gi] = {
+                        "reparam": reparam,
+                        "B_scop": B_scop,
+                        "S_scop": S_scop,
+                        "bin_idx": None,
+                        "beta_scop": None,
+                        "beta_scop_prev": None,
+                    }
         # Build mask of non-SCOP column indices for the reduced system
         _non_scop_cols = []
         _non_scop_groups_idx = []
@@ -584,14 +606,37 @@ def fit_irls_direct(
                 for gi, st in _scop_state.items():
                     if st["beta_scop"] is None:
                         # Initialize SCOP beta on first iteration
-                        st["beta_scop"] = st["reparam"].qp_initialize(
-                            st["B_scop"],
-                            z_off,
-                            lambda_penalty=lambda2,
-                            weights=W,
+                        g_i = groups[gi]
+                        _lam_scop = (
+                            lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
                         )
+                        _bi = st["bin_idx"]
+                        if _bi is not None:
+                            # Discrete: aggregate to bin level for QP initialization
+                            _nb = st["B_scop"].shape[0]
+                            W_agg = np.bincount(_bi, weights=W, minlength=_nb)
+                            Wz_agg = np.bincount(_bi, weights=W * z_off, minlength=_nb)
+                            # Weighted-mean response at bin level
+                            with np.errstate(divide="ignore", invalid="ignore"):
+                                z_bin = np.where(W_agg > 0, Wz_agg / W_agg, 0.0)
+                            st["beta_scop"] = st["reparam"].qp_initialize(
+                                st["B_scop"],
+                                z_bin,
+                                lambda_penalty=_lam_scop,
+                                weights=W_agg,
+                            )
+                        else:
+                            st["beta_scop"] = st["reparam"].qp_initialize(
+                                st["B_scop"],
+                                z_off,
+                                lambda_penalty=_lam_scop,
+                                weights=W,
+                            )
                     gamma_eff = st["reparam"].forward(st["beta_scop"])
-                    eta_scop += st["B_scop"] @ gamma_eff
+                    _eta_g = st["B_scop"] @ gamma_eff
+                    if st["bin_idx"] is not None:
+                        _eta_g = _eta_g[st["bin_idx"]]
+                    eta_scop += _eta_g
 
                 # Step 2: Adjust working response by removing SCOP contribution
                 z_adj = z_off - eta_scop
@@ -644,9 +689,14 @@ def fit_irls_direct(
                     for gi2, st2 in _scop_state.items():
                         if gi2 != gi:
                             gamma2 = st2["reparam"].forward(st2["beta_scop"])
-                            z_scop = z_scop - st2["B_scop"] @ gamma2
+                            eta2 = st2["B_scop"] @ gamma2
+                            if st2["bin_idx"] is not None:
+                                eta2 = eta2[st2["bin_idx"]]
+                            z_scop = z_scop - eta2
 
                     st["beta_scop_prev"] = st["beta_scop"].copy()
+                    g_i = groups[gi]
+                    _lam_scop = lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
                     result = scop_newton_step(
                         B_scop=st["B_scop"],
                         W=W,
@@ -654,7 +704,8 @@ def fit_irls_direct(
                         beta_scop=st["beta_scop"],
                         reparam=st["reparam"],
                         S_scop=st["S_scop"],
-                        lambda2=lambda2,
+                        lambda2=_lam_scop,
+                        bin_idx=st["bin_idx"],
                     )
                     st["beta_scop"] = result.beta_new
 

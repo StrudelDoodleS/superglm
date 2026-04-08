@@ -271,6 +271,7 @@ def build_coef_rows(
         if isinstance(spec, _SplineBase):
             is_linear_subgroup = g.subgroup_type == "linear"
             _mono_dir = getattr(spec, "monotone", None)
+            _mono_engine = g.monotone_engine
             _mono_repaired = g.feature_name in _mono_repairs
             if active:
                 stat = float("nan")
@@ -335,6 +336,7 @@ def build_coef_rows(
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
                         monotone=_mono_dir,
+                        monotone_engine=_mono_engine,
                         monotone_repaired=_mono_repaired,
                     )
                 )
@@ -355,6 +357,7 @@ def build_coef_rows(
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
                         monotone=_mono_dir,
+                        monotone_engine=_mono_engine,
                         monotone_repaired=_mono_repaired,
                     )
                 )
