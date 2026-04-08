@@ -38,7 +38,7 @@ from superglm.group_matrix import (
 from superglm.links import Link, stabilize_eta
 from superglm.solvers.constrained_qp import solve_constrained_qp
 from superglm.solvers.pirls import IterationDiagnostics, PIRLSResult
-from superglm.solvers.scop_newton import scop_newton_step
+from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
 from superglm.types import GroupSlice, PenaltyComponent
 
 logger = logging.getLogger(__name__)
@@ -364,6 +364,7 @@ def fit_irls_direct(
     S_override: NDArray | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
     return_scop_state: bool = False,
+    _scop_joint: bool = True,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -683,33 +684,55 @@ def fit_irls_direct(
                     eta_unconstrained += gms[gi].matvec(beta[g.sl])
                 eta_unconstrained += intercept
 
-                # Step 6: Apply SCOP Newton step for each SCOP group
-                for gi, st in _scop_state.items():
-                    z_scop = z_off - eta_unconstrained
-                    # Remove contributions from other SCOP groups
-                    for gi2, st2 in _scop_state.items():
-                        if gi2 != gi:
-                            gamma2 = st2["reparam"].forward(st2["beta_scop"])
-                            eta2 = st2["B_scop"] @ gamma2
-                            if st2["bin_idx"] is not None:
-                                eta2 = eta2[st2["bin_idx"]]
-                            z_scop = z_scop - eta2
+                # Step 6: Apply SCOP Newton step
+                if _scop_joint:
+                    # Snapshot all beta_scop_prev BEFORE solving
+                    for gi, st in _scop_state.items():
+                        st["beta_scop_prev"] = st["beta_scop"].copy()
 
-                    st["beta_scop_prev"] = st["beta_scop"].copy()
-                    g_i = groups[gi]
-                    _lam_scop = lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
-                    result = scop_newton_step(
-                        B_scop=st["B_scop"],
-                        W=W,
-                        z=z_scop,
-                        beta_scop=st["beta_scop"],
-                        reparam=st["reparam"],
-                        S_scop=st["S_scop"],
-                        lambda2=_lam_scop,
-                        bin_idx=st["bin_idx"],
+                    # Joint Newton step for all SCOP groups simultaneously
+                    _z_scop = z_off - eta_unconstrained
+                    joint_results = scop_joint_newton_step(
+                        _scop_state,
+                        W,
+                        _z_scop,
+                        lambda2,
+                        groups,
+                        max_halving=10,
                     )
-                    st["beta_scop"] = result.beta_new
-                    st["H_scop_penalized"] = result.H_penalized
+                    for gi, jresult in joint_results.items():
+                        _scop_state[gi]["beta_scop"] = jresult.beta_new
+                        _scop_state[gi]["H_scop_penalized"] = jresult.H_penalized
+                else:
+                    # Sequential (existing code) — for parity comparison
+                    for gi, st in _scop_state.items():
+                        z_scop = z_off - eta_unconstrained
+                        # Remove contributions from other SCOP groups
+                        for gi2, st2 in _scop_state.items():
+                            if gi2 != gi:
+                                gamma2 = st2["reparam"].forward(st2["beta_scop"])
+                                eta2 = st2["B_scop"] @ gamma2
+                                if st2["bin_idx"] is not None:
+                                    eta2 = eta2[st2["bin_idx"]]
+                                z_scop = z_scop - eta2
+
+                        st["beta_scop_prev"] = st["beta_scop"].copy()
+                        g_i = groups[gi]
+                        _lam_scop = (
+                            lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                        )
+                        result = scop_newton_step(
+                            B_scop=st["B_scop"],
+                            W=W,
+                            z=z_scop,
+                            beta_scop=st["beta_scop"],
+                            reparam=st["reparam"],
+                            S_scop=st["S_scop"],
+                            lambda2=_lam_scop,
+                            bin_idx=st["bin_idx"],
+                        )
+                        st["beta_scop"] = result.beta_new
+                        st["H_scop_penalized"] = result.H_penalized
 
                 # Step 7: Write gamma_eff (mapped coefficients) into full beta
                 for gi, st in _scop_state.items():
