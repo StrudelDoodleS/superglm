@@ -835,14 +835,11 @@ def fit_reml(
         g.monotone_engine == "scop" for g in model._groups if g.monotone_engine
     )
 
-    # QP monotone with auto lambda → still raises (no Newton Hessian).
-    if _has_qp_monotone and (estimated_names or _any_unfixed_scop):
-        raise NotImplementedError(
-            "Automatic smoothness selection is not yet available when QP monotone "
-            "fit-time terms are present. Supply fixed smoothing parameters via "
-            "lambda_policy=LambdaPolicy(mode='fixed', value=X), or use "
-            "monotone_mode='postfit'."
-        )
+    # QP monotone with auto lambda → two-stage passthrough heuristic:
+    # Stage 1: run unconstrained REML to estimate lambdas
+    # Stage 2: refit with QP constraints at those lambdas
+    # This is a heuristic, not exact joint REML for constrained terms.
+    _qp_passthrough = _has_qp_monotone and bool(estimated_names)
 
     # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
     offset_arr = offset if offset is not None else np.zeros(len(y))
@@ -1043,6 +1040,32 @@ def fit_reml(
     lambdas = best.lambdas
     n_reml_iter = best.n_reml_iter
     converged = best.converged
+
+    # QP passthrough stage 2: final constrained refit at REML-estimated lambdas.
+    # REML estimated lambdas using unconstrained curvature (heuristic). Now refit
+    # once with QP constraints active to ensure final coefficients are monotone.
+    if _qp_passthrough:
+        qp_refit, _ = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=lambdas,
+            offset=offset_arr,
+            beta_init=model._result.beta,
+            intercept_init=float(model._result.intercept),
+            max_iter=max_pirls_iter,
+            tol=pirls_tol,
+            convergence="deviance",
+            reml_penalties=reml_penalties,
+        )
+        model._result = qp_refit
+        model._last_fit_meta = {
+            **(model._last_fit_meta or {}),
+            "lambda_strategy": "qp_passthrough",
+        }
 
     # Fix phi: known-scale families (Poisson) get phi=1.0;
     # estimated-scale families get REML profiled φ̂ instead of the raw
