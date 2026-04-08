@@ -424,6 +424,10 @@ def optimize_scop_efs_reml(
     warm_beta: NDArray | None = boot_result.beta.copy()
     warm_intercept: float = float(boot_result.intercept)
 
+    # Convergence diagnostics
+    inner_iter_history: list[int] = []
+    objective_history: list[float] = []
+
     # Anderson(1) acceleration state (on log-lambda scale)
     reml_update_names = [name for name in sorted(estimated_names) if name in lambdas]
     aa_prev_log_x: NDArray | None = None
@@ -460,6 +464,7 @@ def optimize_scop_efs_reml(
 
         beta = result.beta
         intercept = result.intercept
+        inner_iter_history.append(result.n_iter)
 
         # Step 2: Build penalty matrix
         S = _build_penalty_matrix(
@@ -531,6 +536,7 @@ def optimize_scop_efs_reml(
             reml_penalties=all_pcs,
             scop_states=scop_states,
         )
+        objective_history.append(float(obj_curr))
         obj_trial = reml_laml_objective(
             dm,
             distribution,
@@ -635,4 +641,6 @@ def optimize_scop_efs_reml(
             reml_penalties=final_all_pcs,
             scop_states=final_scop_states,
         ),
+        inner_iter_history=inner_iter_history,
+        objective_history=objective_history,
     )

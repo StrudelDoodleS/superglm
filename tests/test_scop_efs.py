@@ -2354,3 +2354,31 @@ class TestMultiSCOPIntegration:
         )
         with pytest.raises(NotImplementedError, match="QP monotone"):
             model.fit_reml(df[["x"]], y)
+
+    @pytest.mark.slow
+    def test_diagnostics_populated(self):
+        """Convergence diagnostics are populated after fit_reml."""
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        reml_result = model._reml_result
+        assert reml_result.inner_iter_history is not None
+        assert len(reml_result.inner_iter_history) > 0
+        assert all(isinstance(v, int) for v in reml_result.inner_iter_history)
+
+        assert reml_result.objective_history is not None
+        assert len(reml_result.objective_history) > 0
+        assert all(np.isfinite(v) for v in reml_result.objective_history)
