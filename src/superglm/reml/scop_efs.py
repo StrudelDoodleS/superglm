@@ -518,6 +518,7 @@ def optimize_scop_efs_reml(
     n_reml_iter = 0
     warm_beta: NDArray | None = boot_result.beta.copy()
     warm_intercept: float = float(boot_result.intercept)
+    warm_scop_states: dict[int, dict] | None = boot_scop_states if boot_scop_states else None
 
     # Convergence diagnostics
     inner_iter_history: list[int] = []
@@ -551,6 +552,7 @@ def optimize_scop_efs_reml(
             reml_penalties=reml_penalties,
             convergence=convergence,
             _scop_joint=_scop_joint,
+            scop_state_init=warm_scop_states,
         )
 
         if len(irls_out) == 4:
@@ -692,6 +694,7 @@ def optimize_scop_efs_reml(
         lambdas = lambdas_new
         warm_beta = beta.copy()
         warm_intercept = float(intercept)
+        warm_scop_states = scop_states if scop_states else None
 
     # -- Final refit --
     final_out = fit_irls_direct(
@@ -712,6 +715,7 @@ def optimize_scop_efs_reml(
         reml_penalties=reml_penalties,
         convergence=convergence,
         _scop_joint=_scop_joint,
+        scop_state_init=warm_scop_states,
     )
 
     if len(final_out) == 4:

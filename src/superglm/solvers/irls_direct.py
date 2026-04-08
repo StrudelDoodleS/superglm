@@ -365,6 +365,7 @@ def fit_irls_direct(
     reml_penalties: list[PenaltyComponent] | None = None,
     return_scop_state: bool = False,
     _scop_joint: bool = True,
+    scop_state_init: dict[int, dict] | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -462,24 +463,32 @@ def fit_irls_direct(
                 reparam = g.scop_reparameterization
                 S_scop = reparam.penalty_matrix()
                 _gm = gms[gi]
+
+                # Warm-start beta_scop from previous outer EFS iteration if available
+                warm_beta_scop = None
+                if scop_state_init is not None and gi in scop_state_init:
+                    prev = scop_state_init[gi]["beta_eff"]
+                    q_eff = S_scop.shape[0]
+                    if prev.shape == (q_eff,):
+                        warm_beta_scop = prev.copy()
+
                 if isinstance(_gm, DiscretizedSCOPGroupMatrix):
-                    # Bin-level: store unique design + bin_idx, avoid (n, q_eff) expansion
                     _scop_state[gi] = {
                         "reparam": reparam,
-                        "B_scop": _gm.B_scop_unique,  # (n_bins, q_eff)
+                        "B_scop": _gm.B_scop_unique,
                         "S_scop": S_scop,
                         "bin_idx": _gm.bin_idx,
-                        "beta_scop": None,
+                        "beta_scop": warm_beta_scop,
                         "beta_scop_prev": None,
                     }
                 else:
-                    B_scop = _gm.toarray()  # (n, q_eff)
+                    B_scop = _gm.toarray()
                     _scop_state[gi] = {
                         "reparam": reparam,
                         "B_scop": B_scop,
                         "S_scop": S_scop,
                         "bin_idx": None,
-                        "beta_scop": None,
+                        "beta_scop": warm_beta_scop,
                         "beta_scop_prev": None,
                     }
         # Build mask of non-SCOP column indices for the reduced system
