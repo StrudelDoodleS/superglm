@@ -64,13 +64,27 @@
 - Default `scop_states=None` preserves backward compatibility (all 161 REML tests unchanged)
 - 2 new slow integration tests: `test_objective_accepts_scop_state`, `test_objective_without_scop_state_unchanged`
 
+### Task 7: Full SCOP EFS outer loop
+- DONE
+- Added `optimize_scop_efs_reml()` to `src/superglm/reml/scop_efs.py`
+- Follows same structure as `optimize_efs_reml` but uses `fit_irls_direct` with SCOP Newton solver
+- Bootstrap phase: one IRLS with minimal penalty -> one EFS step for data-informed initial lambdas
+- Main loop: inner fit -> joint Hessian -> SCOP PCs -> phi estimate -> lambda updates -> step damping -> convergence check
+- Anderson(1) acceleration on log-lambda scale for faster convergence
+- Uphill-step guard via REML objective comparison with half-step damping
+- Exported from `superglm.reml.__init__`
+- 4 new slow integration tests:
+  - test_converges: returns REMLResult, converges within 20 iters
+  - test_lambda_responds_to_noise: higher noise -> higher lambda
+  - test_predictions_are_monotone: fitted values respect monotone constraint
+  - test_returns_reml_result_with_history: lambda_history has multiple entries with correct keys
+
 ## Outstanding
-- Task 7: Full SCOP EFS outer loop
 - Task 8: Wire fit_reml to SCOP EFS optimizer
 - Task 9: Regression and edge-case tests
 
 ## Test Results
-- `tests/test_scop_efs.py`: 30/30 pass (non-slow: 9 Task 2 + 7 Task 4 + 4 Task 3 + 5 Task 5; slow: 9 Task 1)
+- `tests/test_scop_efs.py`: 40/40 pass (non-slow: 9 Task 2 + 7 Task 4 + 4 Task 3 + 5 Task 5; slow: 9 Task 1)
 - `tests/test_monotone_fit.py` (non-slow): 7/7 pass
 - `tests/test_ssp_audit.py`: 2/2 pass
 - `tests/test_multi_penalty.py` (non-slow): 41/41 pass
