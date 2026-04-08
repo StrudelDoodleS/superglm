@@ -315,9 +315,24 @@ class TestMonotoneUnsupportedCombinations:
         with pytest.raises(NotImplementedError, match="smoothness selection"):
             model.fit_reml(df[["x"]], df["y"])
 
-    # NOTE: test_monotone_with_discrete_raises removed — discrete+monotone
-    # is now supported (monotone terms opt out of discretization).
-    # See TestMonotoneDiscrete for the replacement tests.
+    def test_monotone_with_discrete_raises(self):
+        """discrete=True + monotone_mode='fit' is not supported."""
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 1, n)
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="discrete=True"):
+            model.fit(df[["x"]], df["y"])
 
 
 # ── PSpline SCOP engine tests ─────────────────────────────────────────────────
@@ -605,120 +620,3 @@ class TestSummaryMonotoneEngine:
 
         assert "scop" in summary_str.lower()
         assert "mono=increasing (scop)" in summary_str
-
-
-class TestMonotoneDiscrete:
-    """Discrete mode with monotone fit-time constraints."""
-
-    @pytest.mark.slow
-    def test_discrete_qp_monotone(self):
-        """discrete=True + QP monotone produces monotone predictions."""
-        rng = np.random.default_rng(42)
-        n = 1000
-        x = np.sort(rng.uniform(0, 1, n))
-        y = 2 * x + rng.normal(0, 0.2, n)
-        df = pd.DataFrame({"x": x, "y": y})
-
-        model = SuperGLM(
-            family=Gaussian(),
-            selection_penalty=0,
-            discrete=True,
-            features={
-                "x": BSplineSmooth(
-                    n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
-                ),
-            },
-        )
-        model.fit(df[["x"]], df["y"])
-
-        x_grid = np.linspace(0, 1, 200)
-        pred = model.predict(pd.DataFrame({"x": x_grid}))
-        assert np.all(np.diff(pred) >= -1e-8)
-
-    @pytest.mark.slow
-    def test_discrete_scop_monotone(self):
-        """discrete=True + SCOP monotone produces monotone predictions."""
-        rng = np.random.default_rng(42)
-        n = 1000
-        x = np.sort(rng.uniform(0, 1, n))
-        y = 2 * x + rng.normal(0, 0.2, n)
-        df = pd.DataFrame({"x": x, "y": y})
-
-        model = SuperGLM(
-            family=Gaussian(),
-            selection_penalty=0,
-            discrete=True,
-            features={
-                "x": PSpline(
-                    n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
-                ),
-            },
-        )
-        model.fit(df[["x"]], df["y"])
-
-        x_grid = np.linspace(0, 1, 200)
-        pred = model.predict(pd.DataFrame({"x": x_grid}))
-        assert np.all(np.diff(pred) >= -1e-8)
-
-    @pytest.mark.slow
-    def test_mixed_discrete_monotone_opts_out(self):
-        """In a mixed model with discrete=True, the monotone term opts out
-        of discretization while the ordinary term still uses it."""
-        from superglm.group_matrix import DiscretizedSSPGroupMatrix
-
-        rng = np.random.default_rng(42)
-        n = 1000
-        x1 = np.sort(rng.uniform(0, 1, n))
-        x2 = rng.uniform(0, 1, n)
-        y = 2 * x1 + np.sin(2 * np.pi * x2) + rng.normal(0, 0.2, n)
-        df = pd.DataFrame({"x1": x1, "x2": x2, "y": y})
-
-        model = SuperGLM(
-            family=Gaussian(),
-            selection_penalty=0,
-            discrete=True,
-            features={
-                "x1": BSplineSmooth(
-                    n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
-                ),
-                "x2": PSpline(n_knots=8),  # ordinary, should use discrete
-            },
-        )
-        model.fit(df[["x1", "x2"]], df["y"])
-
-        # Monotone term predictions should be monotone
-        x_grid = np.linspace(0, 1, 200)
-        pred = model.predict(
-            pd.DataFrame(
-                {
-                    "x1": x_grid,
-                    "x2": np.full(200, 0.5),
-                }
-            )
-        )
-        assert np.all(np.diff(pred) >= -1e-8)
-
-        # Model should have converged
-        assert model._result.converged
-
-        # Verify the ordinary term (x2) actually used discretization.
-        # The monotone term (x1) should NOT be discretized.
-        gms = model._dm.group_matrices
-        groups = model._groups
-        for gm, g in zip(gms, groups):
-            if g.feature_name == "x1":
-                # Monotone term: should NOT be discretized
-                assert not isinstance(gm, DiscretizedSSPGroupMatrix), (
-                    f"Monotone term x1 should not be discretized, got {type(gm).__name__}"
-                )
-            elif g.feature_name == "x2":
-                # Ordinary term: SHOULD be discretized when discrete=True
-                assert isinstance(gm, DiscretizedSSPGroupMatrix), (
-                    f"Ordinary term x2 should be discretized, got {type(gm).__name__}"
-                )
