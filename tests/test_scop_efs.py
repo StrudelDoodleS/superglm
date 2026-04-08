@@ -1961,3 +1961,334 @@ class TestSCOPNewtonLineSearchSafety:
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
             model.fit_reml(df[["x1", "x2"]], y)
+
+
+# ---------------------------------------------------------------------------
+# Part 10: Multi-SCOP integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestMultiSCOPIntegration:
+    """Integration tests for models with multiple SCOP monotone terms.
+
+    Multi-SCOP models need generous max_iter because the EFS outer loop calls
+    multiple PIRLS fits and the SCOP Newton reparameterization slows
+    inner-loop convergence compared to ordinary splines.
+    """
+
+    @pytest.mark.slow
+    def test_two_scop_terms_auto_lambda(self):
+        """Two SCOP terms (x1 increasing, x2 decreasing), discrete=True, auto lambda.
+
+        Both lambdas should be estimated; predictions should respect monotonicity.
+        """
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x1 - 1.5 * x2 + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            max_iter=200,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x1", "x2"]], y)
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+        assert len(model._reml_lambdas) >= 2
+
+        # x1 partial effect: hold x2 at median, predictions should be increasing
+        x1_grid = np.linspace(0, 1, 200)
+        pred_df = pd.DataFrame({"x1": x1_grid, "x2": np.median(x2)})
+        pred = model.predict(pred_df)
+        diffs = np.diff(pred)
+        assert np.all(diffs >= -1e-6), (
+            f"x1 predictions not increasing: min diff = {diffs.min():.2e}"
+        )
+
+        # x2 partial effect: hold x1 at median, predictions should be decreasing
+        x2_grid = np.linspace(0, 1, 200)
+        pred_df = pd.DataFrame({"x1": np.median(x1), "x2": x2_grid})
+        pred = model.predict(pred_df)
+        diffs = np.diff(pred)
+        assert np.all(diffs <= 1e-6), f"x2 predictions not decreasing: max diff = {diffs.max():.2e}"
+
+    @pytest.mark.slow
+    def test_three_scop_terms(self):
+        """Three SCOP terms, all increasing, discrete=True, auto lambda."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = np.sort(rng.uniform(0, 1, n))
+        x3 = np.sort(rng.uniform(0, 1, n))
+        y = x1 + 0.5 * x2 + 0.3 * x3 + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2, "x3": x3})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            max_iter=500,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x3": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x1", "x2", "x3"]], y)
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+        assert len(model._reml_lambdas) >= 3
+
+    @pytest.mark.slow
+    def test_mixed_scop_and_ordinary_ssp(self):
+        """Two SCOP monotone + one ordinary PSpline, discrete=True.
+
+        All terms should get lambdas estimated.
+        """
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = np.sort(rng.uniform(0, 1, n))
+        x3 = rng.uniform(0, 1, n)
+        y = 2 * x1 - 1.5 * x2 + 0.5 * x3 + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2, "x3": x3})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            max_iter=500,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+                "x3": PSpline(n_knots=8),
+            },
+        )
+        model.fit_reml(df[["x1", "x2", "x3"]], y)
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+        # All three terms must have lambdas
+        assert len(model._reml_lambdas) >= 3
+
+    @pytest.mark.slow
+    def test_mixed_fixed_and_estimated_multi_scop(self):
+        """One SCOP estimated, one SCOP fixed at 5.0.
+
+        Fixed lambda must stay exactly 5.0.
+        """
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x1 - 1.5 * x2 + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+
+        fixed_val = 5.0
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            max_iter=200,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(
+                    n_knots=8,
+                    monotone="decreasing",
+                    monotone_mode="fit",
+                    lambda_policy=LambdaPolicy(mode="fixed", value=fixed_val),
+                ),
+            },
+        )
+        model.fit_reml(df[["x1", "x2"]], y)
+
+        assert model._result.converged
+        # x2 lambda must stay exactly at fixed value
+        x2_key = next(k for k in model._reml_lambdas if k.startswith("x2"))
+        assert model._reml_lambdas[x2_key] == pytest.approx(fixed_val)
+        # x1 lambda was estimated
+        x1_key = next(k for k in model._reml_lambdas if k.startswith("x1"))
+        assert model._reml_lambdas[x1_key] > 0
+
+    @pytest.mark.slow
+    def test_discrete_two_scop(self):
+        """discrete=True with 2 SCOP terms. Assert model fitted."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x1 - 1.5 * x2 + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            max_iter=200,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x1", "x2"]], y)
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+    @pytest.mark.slow
+    def test_stored_objective_reproduction_multi_scop(self):
+        """Reconstruct REML objective from stored model state (no solver rerun).
+
+        Must match model._reml_result.objective to rel=1e-8.
+        """
+        from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+        from superglm.group_matrix import _block_xtwx
+        from superglm.links import stabilize_eta
+        from superglm.reml.objective import reml_laml_objective
+
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x1 - 1.5 * x2 + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            max_iter=200,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x1", "x2"]], y)
+
+        result = model._result
+        sw = np.ones(n)
+        offset_arr = np.zeros(n)
+        eta = model._dm.matvec(result.beta) + result.intercept + offset_arr
+        eta = stabilize_eta(eta, model._link)
+        mu = clip_mu(model._link.inverse(eta), model._distribution)
+        V = model._distribution.variance(mu)
+        dmu = model._link.deriv_inverse(eta)
+        W = sw * dmu**2 / np.maximum(V, _VARIANCE_FLOOR)
+        XtWX = _block_xtwx(
+            model._dm.group_matrices,
+            model._groups,
+            W,
+            tabmat_split=model._dm.tabmat_split,
+        )
+
+        obj_recomputed = reml_laml_objective(
+            model._dm,
+            model._distribution,
+            model._link,
+            model._groups,
+            y,
+            result,
+            model._reml_lambdas,
+            sw,
+            offset_arr,
+            XtWX=XtWX,
+            reml_penalties=model._reml_penalties,
+            scop_states=model._reml_result.scop_states,
+        )
+        assert obj_recomputed == pytest.approx(model._reml_result.objective, rel=1e-8)
+
+    @pytest.mark.slow
+    def test_lambda_responds_to_noise_multi_scop(self):
+        """Two SCOP terms: low noise (sigma=0.1) vs high noise (sigma=1.0).
+
+        Higher noise should produce larger lambdas for both terms.
+        """
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = np.sort(rng.uniform(0, 1, n))
+
+        lambdas_by_noise = {}
+        for sigma in [0.1, 1.0]:
+            y = 2 * x1 - 1.5 * x2 + rng.normal(0, sigma, n)
+            df = pd.DataFrame({"x1": x1, "x2": x2})
+
+            model = SuperGLM(
+                family=Gaussian(),
+                selection_penalty=0,
+                discrete=True,
+                max_iter=200,
+                features={
+                    "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                    "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+                },
+            )
+            model.fit_reml(df[["x1", "x2"]], y)
+            lambdas_by_noise[sigma] = model._reml_lambdas.copy()
+
+        lam_lo = lambdas_by_noise[0.1]
+        lam_hi = lambdas_by_noise[1.0]
+
+        for key in lam_lo:
+            assert lam_hi[key] > lam_lo[key], (
+                f"Lambda for {key} did not increase with noise: "
+                f"lo={lam_lo[key]:.4f}, hi={lam_hi[key]:.4f}"
+            )
+
+    @pytest.mark.slow
+    def test_plain_fit_with_two_scop(self):
+        """fit() (not fit_reml) with 2 SCOP terms, discrete=True, fixed lambda.
+
+        Uses a loose tolerance (1e-3) because the SCOP Newton reparameterization
+        causes limit-cycle oscillations in the deviance convergence criterion
+        at ~2e-4 relative change. The solution quality is fine — deviance is
+        stable to 4 significant figures.
+        """
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x1 - 1.5 * x2 + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            spline_penalty=1.0,
+            discrete=True,
+            max_iter=200,
+            tol=1e-3,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+            },
+        )
+        model.fit(df[["x1", "x2"]], y)
+
+        assert model._result.converged
+
+        # x1 predictions should be increasing
+        x1_grid = np.linspace(0, 1, 200)
+        pred_df = pd.DataFrame({"x1": x1_grid, "x2": np.median(x2)})
+        pred = model.predict(pred_df)
+        diffs = np.diff(pred)
+        assert np.all(diffs >= -1e-6), (
+            f"x1 predictions not increasing: min diff = {diffs.min():.2e}"
+        )
+
+        # x2 predictions should be decreasing
+        x2_grid = np.linspace(0, 1, 200)
+        pred_df = pd.DataFrame({"x1": np.median(x1), "x2": x2_grid})
+        pred = model.predict(pred_df)
+        diffs = np.diff(pred)
+        assert np.all(diffs <= 1e-6), f"x2 predictions not decreasing: max diff = {diffs.max():.2e}"

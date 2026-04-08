@@ -289,6 +289,7 @@ def optimize_scop_efs_reml(
     max_pirls_iter: int = 100,
     verbose: bool = False,
     reml_penalties: list[PenaltyComponent] | None = None,
+    convergence: str = "deviance",
 ) -> REMLResult:
     """SCOP-aware EFS REML optimizer for monotone splines.
 
@@ -334,6 +335,8 @@ def optimize_scop_efs_reml(
         Print iteration progress.
     reml_penalties : list of PenaltyComponent, optional
         Pre-built penalty components for non-SCOP terms.
+    convergence : str
+        PIRLS convergence criterion: 'deviance' or 'coefficients'.
 
     Returns
     -------
@@ -363,6 +366,7 @@ def optimize_scop_efs_reml(
         return_xtwx=True,
         return_scop_state=True,
         reml_penalties=reml_penalties,
+        convergence=convergence,
     )
 
     # Unpack: with return_xtwx=True and SCOP -> 4-tuple
@@ -445,6 +449,7 @@ def optimize_scop_efs_reml(
             return_xtwx=True,
             return_scop_state=True,
             reml_penalties=reml_penalties,
+            convergence=convergence,
         )
 
         if len(irls_out) == 4:
@@ -595,6 +600,7 @@ def optimize_scop_efs_reml(
         return_xtwx=True,
         return_scop_state=True,
         reml_penalties=reml_penalties,
+        convergence=convergence,
     )
 
     if len(final_out) == 4:
