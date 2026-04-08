@@ -1,8 +1,7 @@
-"""Tests for SCOP state returned from fit_irls_direct.
+"""Tests for SCOP EFS infrastructure.
 
-Verifies that the return_scop_state=True parameter correctly exposes
-converged SCOP Newton state (beta_eff, H_scop_penalized, etc.) needed
-by the EFS outer loop for automatic smoothing selection.
+Part 1: Tests for SCOP state returned from fit_irls_direct.
+Part 2: Tests for build_scop_penalty_components.
 """
 
 import numpy as np
@@ -13,7 +12,9 @@ from superglm import SuperGLM
 from superglm.families import Gaussian
 from superglm.features.spline import PSpline
 from superglm.model.base import model_build_design_matrix
+from superglm.reml.scop_efs import build_scop_penalty_components
 from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.types import PenaltyComponent
 
 
 @pytest.fixture
@@ -248,3 +249,162 @@ class TestReturnSCOPState:
             q = len(state["beta_eff"])
             H = state["H_scop_penalized"]
             assert H.shape == (q, q), f"Expected ({q},{q}), got {H.shape}"
+
+
+# ---------------------------------------------------------------------------
+# Part 2: Tests for build_scop_penalty_components
+# ---------------------------------------------------------------------------
+
+
+def _first_diff_penalty(q):
+    """Build first-difference penalty D'D for q parameters."""
+    D = np.diff(np.eye(q), axis=0)
+    return D.T @ D
+
+
+class TestBuildSCOPPenaltyComponents:
+    """Tests for build_scop_penalty_components (pure unit tests, no model fitting)."""
+
+    def test_one_group_one_component(self):
+        """One SCOP group produces exactly one PenaltyComponent."""
+        q = 8
+        S = _first_diff_penalty(q)
+        scop_states = {
+            0: {
+                "S_scop": S,
+                "group_sl": slice(1, 1 + q),
+                "group_name": "x",
+                "beta_eff": np.zeros(q),
+            }
+        }
+        pcs = build_scop_penalty_components(scop_states)
+        assert len(pcs) == 1
+        assert isinstance(pcs[0], PenaltyComponent)
+
+    def test_omega_ssp_equals_S_scop(self):
+        """omega_ssp should be S_scop directly, not an SSP transform."""
+        q = 10
+        S = _first_diff_penalty(q)
+        scop_states = {
+            0: {
+                "S_scop": S,
+                "group_sl": slice(1, 1 + q),
+                "group_name": "x",
+                "beta_eff": np.zeros(q),
+            }
+        }
+        pcs = build_scop_penalty_components(scop_states)
+        np.testing.assert_array_equal(pcs[0].omega_ssp, S)
+        np.testing.assert_array_equal(pcs[0].omega_raw, S)
+
+    def test_rank_equals_q_minus_1(self):
+        """Rank of D'D on q params is q-1 (one null space dimension)."""
+        for q in [5, 8, 12, 20]:
+            S = _first_diff_penalty(q)
+            scop_states = {
+                0: {
+                    "S_scop": S,
+                    "group_sl": slice(0, q),
+                    "group_name": f"var_q{q}",
+                    "beta_eff": np.zeros(q),
+                }
+            }
+            pcs = build_scop_penalty_components(scop_states)
+            assert pcs[0].rank == q - 1, f"q={q}: expected rank {q - 1}, got {pcs[0].rank}"
+
+    def test_log_det_omega_plus_finite(self):
+        """log_det_omega_plus should be finite for a valid first-diff penalty."""
+        q = 10
+        S = _first_diff_penalty(q)
+        scop_states = {
+            0: {
+                "S_scop": S,
+                "group_sl": slice(0, q),
+                "group_name": "x",
+                "beta_eff": np.zeros(q),
+            }
+        }
+        pcs = build_scop_penalty_components(scop_states)
+        assert np.isfinite(pcs[0].log_det_omega_plus)
+
+    def test_name_and_group_name_match(self):
+        """pc.name and pc.group_name should match the group name from input."""
+        q = 6
+        S = _first_diff_penalty(q)
+        scop_states = {
+            3: {
+                "S_scop": S,
+                "group_sl": slice(5, 5 + q),
+                "group_name": "driver_age",
+                "beta_eff": np.zeros(q),
+            }
+        }
+        pcs = build_scop_penalty_components(scop_states)
+        assert pcs[0].name == "driver_age"
+        assert pcs[0].group_name == "driver_age"
+
+    def test_group_sl_matches_input(self):
+        """pc.group_sl should match the slice from scop_states."""
+        q = 7
+        sl = slice(10, 10 + q)
+        S = _first_diff_penalty(q)
+        scop_states = {
+            2: {
+                "S_scop": S,
+                "group_sl": sl,
+                "group_name": "age",
+                "beta_eff": np.zeros(q),
+            }
+        }
+        pcs = build_scop_penalty_components(scop_states)
+        assert pcs[0].group_sl == sl
+
+    def test_group_index_preserved(self):
+        """pc.group_index should match the key from scop_states."""
+        q = 5
+        S = _first_diff_penalty(q)
+        scop_states = {
+            7: {
+                "S_scop": S,
+                "group_sl": slice(0, q),
+                "group_name": "feat",
+                "beta_eff": np.zeros(q),
+            }
+        }
+        pcs = build_scop_penalty_components(scop_states)
+        assert pcs[0].group_index == 7
+
+    def test_multiple_groups(self):
+        """Multiple SCOP groups produce one PenaltyComponent each."""
+        states = {}
+        for i, (q, name) in enumerate([(6, "age"), (9, "income"), (4, "tenure")]):
+            S = _first_diff_penalty(q)
+            states[i] = {
+                "S_scop": S,
+                "group_sl": slice(i * 20, i * 20 + q),
+                "group_name": name,
+                "beta_eff": np.zeros(q),
+            }
+        pcs = build_scop_penalty_components(states)
+        assert len(pcs) == 3
+        assert [pc.name for pc in pcs] == ["age", "income", "tenure"]
+        # Check ranks
+        assert pcs[0].rank == 5  # q=6 -> rank=5
+        assert pcs[1].rank == 8  # q=9 -> rank=8
+        assert pcs[2].rank == 3  # q=4 -> rank=3
+
+    def test_eigvals_omega_length_matches_rank(self):
+        """eigvals_omega should have exactly rank positive eigenvalues."""
+        q = 10
+        S = _first_diff_penalty(q)
+        scop_states = {
+            0: {
+                "S_scop": S,
+                "group_sl": slice(0, q),
+                "group_name": "x",
+                "beta_eff": np.zeros(q),
+            }
+        }
+        pcs = build_scop_penalty_components(scop_states)
+        assert len(pcs[0].eigvals_omega) == int(pcs[0].rank)
+        assert np.all(pcs[0].eigvals_omega > 0)
