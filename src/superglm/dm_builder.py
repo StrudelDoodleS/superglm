@@ -25,6 +25,7 @@ from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
     DesignMatrix,
+    DiscretizedSCOPGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
     GroupMatrix,
@@ -437,6 +438,9 @@ def _process_info(
                 bin_idx,
                 tensor_id=tensor_id,
             )
+        elif use_discrete and info.scop_reparameterization is not None and bin_idx is not None:
+            # SCOP discrete: columns holds the bin-level centered design
+            gm = DiscretizedSCOPGroupMatrix(info.columns, bin_idx)
         elif info.cat_codes is not None:
             gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
         elif sp.issparse(info.columns):
@@ -517,16 +521,12 @@ def build_design_matrix(
         bin_idx = None
         exposure_agg = None
 
-        if (
+        _scop_discrete = (
             use_discrete
             and getattr(spec, "monotone", None) is not None
             and getattr(spec, "monotone_mode", "postfit") == "fit"
             and hasattr(spec, "_build_scop_reparameterization")
-        ):
-            raise NotImplementedError(
-                "SCOP monotone fit-time constraints are not yet supported with "
-                "discrete=True. Use discrete=False or monotone_mode='postfit'."
-            )
+        )
 
         if use_discrete:
             omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
@@ -553,7 +553,41 @@ def build_design_matrix(
                 monotone_engine = "qp"
                 raw_to_solver_map = projection_penalty
 
-            if getattr(spec, "select", False):
+            if _scop_discrete:
+                # ── SCOP monotone + discrete: bin-level centered design ──
+                from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
+
+                q_raw = spec._n_basis
+                raw_reparam = build_scop_reparam(q_raw, direction=spec.monotone)
+                X_sigma_unique = B_unique @ raw_reparam.Sigma  # (n_bins, K)
+
+                # Centering weighted by bin counts (equivalent to full-data mean)
+                n_obs = len(bin_idx)
+                bin_counts = np.bincount(bin_idx, minlength=len(bin_centers))
+                col_means = (X_sigma_unique[:, 1:].T @ bin_counts) / n_obs
+                X_centered_unique = X_sigma_unique[:, 1:] - col_means  # (n_bins, q_eff)
+
+                # Store on spec for predict-time transform
+                spec._scop_Sigma = raw_reparam.Sigma
+                spec._scop_col_means = col_means
+
+                solver_reparam = build_scop_solver_reparam(q_raw, direction=spec.monotone)
+                S_scop = solver_reparam.penalty_matrix()
+                q_eff = X_centered_unique.shape[1]
+
+                infos = [
+                    GroupInfo(
+                        columns=X_centered_unique,  # bin-level centered design
+                        n_cols=q_eff,
+                        penalty_matrix=S_scop,
+                        reparametrize=False,
+                        penalized=True,
+                        scop_reparameterization=solver_reparam,
+                        monotone_engine="scop",
+                    )
+                ]
+
+            elif getattr(spec, "select", False):
                 n_null = 1
                 n_range = spec._U_range.shape[1]
                 n_combined = n_null + n_range

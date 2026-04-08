@@ -54,10 +54,18 @@ def _objective(
     reparam: SCOPSolverReparam,
     S_scop: NDArray,
     lambda2: float,
+    bin_idx: NDArray | None = None,
 ) -> float:
-    """Penalized WLS objective for SCOP term."""
+    """Penalized WLS objective for SCOP term.
+
+    When *bin_idx* is provided, *B_scop* is ``(n_bins, q_eff)`` (bin-level
+    design) while *W* and *z* are observation-level ``(n,)``.  Predictions
+    are scattered via ``eta = (B_scop @ gamma_eff)[bin_idx]``.
+    """
     gamma_eff = reparam.forward(beta_scop)
     eta = B_scop @ gamma_eff
+    if bin_idx is not None:
+        eta = eta[bin_idx]
     residual = z - eta
     data_term = 0.5 * np.sum(W * residual**2)
     penalty_term = 0.5 * lambda2 * (beta_scop @ S_scop @ beta_scop)
@@ -73,17 +81,19 @@ def scop_newton_step(
     S_scop: NDArray,
     lambda2: float,
     max_halving: int = 10,
+    bin_idx: NDArray | None = None,
 ) -> SCOPNewtonResult:
     """One damped full Newton step on the SCOP penalized WLS objective.
 
     Parameters
     ----------
-    B_scop : (n, q_eff)
-        Centered design matrix for the SCOP term.
+    B_scop : (n, q_eff) or (n_bins, q_eff)
+        Centered design matrix for the SCOP term.  When *bin_idx* is provided
+        this is the bin-level design ``(n_bins, q_eff)``.
     W : (n,)
-        IRLS working weights.
+        IRLS working weights (always observation-level).
     z : (n,)
-        Working response.
+        Working response (always observation-level).
     beta_scop : (q_eff,)
         Current SCOP solver-space parameters.
     reparam : SCOPSolverReparam
@@ -94,6 +104,11 @@ def scop_newton_step(
         Penalty weight (non-negative).
     max_halving : int
         Maximum number of step halvings for line search.
+    bin_idx : (n,) array of int or None
+        If provided, *B_scop* is ``(n_bins, q_eff)`` and predictions are
+        scattered: ``eta = (B_scop @ gamma)[bin_idx]``.  Gradient and Hessian
+        are computed via bin-level aggregation to avoid the full ``(n, q_eff)``
+        matrix.
 
     Returns
     -------
@@ -106,6 +121,8 @@ def scop_newton_step(
     # --- Forward map and residual ---
     gamma_eff = reparam.forward(beta)
     eta = B_scop @ gamma_eff
+    if bin_idx is not None:
+        eta = eta[bin_idx]
     residual = z - eta
 
     obj_before = 0.5 * np.sum(W * residual**2) + 0.5 * lambda2 * (beta @ S_scop @ beta)
@@ -114,12 +131,21 @@ def scop_newton_step(
     J_eff = reparam.jacobian(beta)  # (q_eff, q_eff)
 
     # --- Weighted design in gamma space ---
-    # BtW = B^T diag(W), shape (q_eff, n)
-    BtW = B_scop.T * W[np.newaxis, :]  # (q_eff, n)
-    BtWB = BtW @ B_scop  # (q_eff, q_eff)
-
-    # Projected residual: r_eff = B^T @ (W * residual), shape (q_eff,)
-    r_eff = BtW @ residual
+    if bin_idx is not None:
+        # Aggregate weights and weighted residuals to bin level
+        n_bins = B_scop.shape[0]
+        W_agg = np.bincount(bin_idx, weights=W, minlength=n_bins)
+        Wr_agg = np.bincount(bin_idx, weights=W * residual, minlength=n_bins)
+        # B^T @ diag(W_agg) @ B  — equivalent to full B^T diag(W) B
+        BtWB = B_scop.T @ (B_scop * W_agg[:, None])
+        # B^T @ (W_agg * residual_agg) — but residual is already aggregated as Wr
+        r_eff = B_scop.T @ Wr_agg
+    else:
+        # BtW = B^T diag(W), shape (q_eff, n)
+        BtW = B_scop.T * W[np.newaxis, :]  # (q_eff, n)
+        BtWB = BtW @ B_scop  # (q_eff, q_eff)
+        # Projected residual: r_eff = B^T @ (W * residual), shape (q_eff,)
+        r_eff = BtW @ residual
 
     # --- Gradient ---
     # grad = -J^T @ r_eff + lambda * S @ beta
@@ -155,14 +181,14 @@ def scop_newton_step(
     # --- Damped step (step halving) ---
     alpha = 1.0
     beta_new = beta - alpha * step
-    obj_new = _objective(B_scop, W, z, beta_new, reparam, S_scop, lambda2)
+    obj_new = _objective(B_scop, W, z, beta_new, reparam, S_scop, lambda2, bin_idx=bin_idx)
 
     for _ in range(max_halving):
         if obj_new <= obj_before + 1e-14:
             break
         alpha *= 0.5
         beta_new = beta - alpha * step
-        obj_new = _objective(B_scop, W, z, beta_new, reparam, S_scop, lambda2)
+        obj_new = _objective(B_scop, W, z, beta_new, reparam, S_scop, lambda2, bin_idx=bin_idx)
 
     step_norm = float(np.linalg.norm(alpha * step))
 

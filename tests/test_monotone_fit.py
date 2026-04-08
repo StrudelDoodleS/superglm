@@ -315,8 +315,8 @@ class TestMonotoneUnsupportedCombinations:
         with pytest.raises(NotImplementedError, match="smoothness selection"):
             model.fit_reml(df[["x"]], df["y"])
 
-    def test_scop_monotone_with_discrete_raises(self):
-        """discrete=True + SCOP monotone_mode='fit' is not supported."""
+    def test_scop_monotone_with_discrete_works(self):
+        """discrete=True + SCOP monotone_mode='fit' is now supported."""
         rng = np.random.default_rng(42)
         n = 200
         x = rng.uniform(0, 1, n)
@@ -331,8 +331,10 @@ class TestMonotoneUnsupportedCombinations:
                 "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
             },
         )
-        with pytest.raises(NotImplementedError, match="SCOP"):
-            model.fit(df[["x"]], df["y"])
+        model.fit(df[["x"]], df["y"])
+        x_grid = np.linspace(0, 1, 50)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8)
 
 
 # ── PSpline SCOP engine tests ─────────────────────────────────────────────────
@@ -721,6 +723,56 @@ class TestDiscreteQPMonotone:
             selection_penalty=0,
             discrete=True,
             features={"x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit")},
+        )
+        model_disc.fit(df[["x"]], df["y"])
+        pred_disc = model_disc.predict(df_grid)
+
+        np.testing.assert_allclose(pred_dense, pred_disc, atol=0.05)
+
+
+class TestDiscreteSCOPMonotone:
+    @pytest.mark.slow
+    def test_discrete_pspline_monotone(self):
+        rng = np.random.default_rng(42)
+        n = 1000
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={"x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")},
+        )
+        model.fit(df[["x"]], df["y"])
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8)
+
+    @pytest.mark.slow
+    def test_discrete_scop_vs_nondiscrete_parity(self):
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+        x_grid = np.linspace(0, 1, 200)
+        df_grid = pd.DataFrame({"x": x_grid})
+
+        model_dense = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=False,
+            features={"x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")},
+        )
+        model_dense.fit(df[["x"]], df["y"])
+        pred_dense = model_dense.predict(df_grid)
+
+        model_disc = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={"x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")},
         )
         model_disc.fit(df[["x"]], df["y"])
         pred_disc = model_disc.predict(df_grid)
