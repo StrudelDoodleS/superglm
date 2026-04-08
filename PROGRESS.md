@@ -29,10 +29,8 @@
   - Mapping correctness, block-diagonal log-det additivity
   - Inverse validity, input immutability
 
-## Outstanding
-
 ### Task 3: SCOP-aware penalty quadratic
-- DONE
+- **Status**: DONE
 - Added `compute_scop_aware_penalty_quad()` to `src/superglm/reml/scop_efs.py`
 - Subtracts wrong gamma-space SCOP contribution, adds correct beta_eff-space contribution
 - Falls back to standard `beta @ S @ beta` when no SCOP terms present
@@ -42,15 +40,30 @@
   - test_no_scop_terms_fallback: empty scop_states gives standard quad
   - test_zero_lambda_scop_contributes_zero: lambda=0 contributes zero
 
+### Task 5: SCOP-aware EFS lambda update
+- **Status**: DONE
+- Added `_is_scop_component()` helper to `src/superglm/reml/scop_efs.py`
+- Added `scop_efs_lambda_update()` to `src/superglm/reml/scop_efs.py`
+- SSP components: quad uses gamma-space beta from result.beta
+- SCOP components: quad uses beta_eff from SCOP converged state
+- Trace term always uses H_joint_inv sliced at pc.group_sl
+- Uphill-step guard clips log-step to [-5, 5]
+- Near-zero beta guard returns lam_old unchanged
+- 5 new pure unit tests (no @pytest.mark.slow): all pass
+  - test_ssp_component_uses_gamma_space
+  - test_scop_component_uses_beta_eff (verifies different from gamma_eff, matches manual calc)
+  - test_uphill_guard_clips_log_step
+  - test_near_zero_beta_returns_old_lambda
+  - test_returns_positive (20-trial fuzz)
+
 ## Outstanding
-- Task 5: SCOP-aware EFS lambda update
 - Task 6: SCOP-aware REML objective
 - Task 7: Full SCOP EFS outer loop
 - Task 8: Wire fit_reml to SCOP EFS optimizer
 - Task 9: Regression and edge-case tests
 
 ## Test Results
-- `tests/test_scop_efs.py`: 25/25 pass (9 Task 1 + 9 Task 2 + 7 Task 4)
+- `tests/test_scop_efs.py`: 30/30 pass (non-slow: 9 Task 2 + 7 Task 4 + 4 Task 3 + 5 Task 5; slow: 9 Task 1)
 - `tests/test_monotone_fit.py` (non-slow): 7/7 pass
 - `tests/test_ssp_audit.py`: 2/2 pass
 - `tests/test_multi_penalty.py` (non-slow): 41/41 pass
