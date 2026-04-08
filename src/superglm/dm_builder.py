@@ -521,9 +521,10 @@ def build_design_matrix(
             use_discrete
             and getattr(spec, "monotone", None) is not None
             and getattr(spec, "monotone_mode", "postfit") == "fit"
+            and hasattr(spec, "_build_scop_reparameterization")
         ):
             raise NotImplementedError(
-                "Monotone fit-time constraints are not supported with "
+                "SCOP monotone fit-time constraints are not yet supported with "
                 "discrete=True. Use discrete=False or monotone_mode='postfit'."
             )
 
@@ -535,6 +536,22 @@ def build_design_matrix(
             bin_centers, bin_idx = _discretize_column(x_col, n_bins_feat)
             B_unique = spec._raw_basis_matrix(bin_centers)
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
+
+            # ── QP monotone constraint metadata (coefficient-space, survives discretization) ──
+            constraints = None
+            monotone_engine = None
+            raw_to_solver_map = None
+            if (
+                getattr(spec, "monotone", None) is not None
+                and getattr(spec, "monotone_mode", "postfit") == "fit"
+                and hasattr(spec, "_build_monotone_constraints_raw")
+            ):
+                cs_raw = spec._build_monotone_constraints_raw()
+                constraints = (
+                    cs_raw.compose(projection_penalty) if projection_penalty is not None else cs_raw
+                )
+                monotone_engine = "qp"
+                raw_to_solver_map = projection_penalty
 
             if getattr(spec, "select", False):
                 n_null = 1
@@ -582,6 +599,9 @@ def build_design_matrix(
                         projection=U_combined,
                         penalty_components=components,
                         component_types={"null": "selection"},
+                        constraints=constraints,
+                        monotone_engine=monotone_engine,
+                        raw_to_solver_map=raw_to_solver_map,
                     ),
                 ]
             else:
@@ -593,6 +613,9 @@ def build_design_matrix(
                         reparametrize=(spec.penalty == "ssp"),
                         projection=projection_penalty,
                         penalty_components=getattr(spec, "_penalty_components", None),
+                        constraints=constraints,
+                        monotone_engine=monotone_engine,
+                        raw_to_solver_map=raw_to_solver_map,
                     )
                 ]
         else:
