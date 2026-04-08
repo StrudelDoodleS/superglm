@@ -1741,3 +1741,122 @@ class TestSCOPEFSRegression:
         assert obj_wrapper == pytest.approx(obj_stored, rel=1e-8), (
             f"Wrapper {obj_wrapper:.6f} != stored {obj_stored:.6f}"
         )
+
+
+class TestSCOPNewtonLineSearchSafety:
+    """Newton step-halving rejects non-finite trial states cleanly."""
+
+    def _make_scop_inputs(self, q_eff=7, n=100, seed=42):
+        """Build synthetic SCOP Newton inputs."""
+        from superglm.solvers.scop import build_scop_solver_reparam
+
+        rng = np.random.default_rng(seed)
+        reparam = build_scop_solver_reparam(q_eff + 1, direction="increasing")
+        B_scop = rng.standard_normal((n, q_eff))
+        W = np.abs(rng.standard_normal(n)) + 0.1
+        beta_scop = rng.standard_normal(q_eff) * 0.3
+        gamma = reparam.forward(beta_scop)
+        z = B_scop @ gamma + rng.standard_normal(n) * 0.1
+        S_scop = reparam.penalty_matrix()
+        return B_scop, W, z, beta_scop, reparam, S_scop
+
+    def test_overflow_starting_point_noop_no_warning(self):
+        """Starting from huge beta_eff (overflow in exp) → no-op, no warning."""
+        import warnings
+
+        from superglm.solvers.scop_newton import scop_newton_step
+
+        B_scop, W, z, beta_scop, reparam, S_scop = self._make_scop_inputs()
+        beta_huge = np.full_like(beta_scop, 600.0)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            result = scop_newton_step(
+                B_scop,
+                W,
+                z,
+                beta_huge,
+                reparam,
+                S_scop,
+                lambda2=1.0,
+                max_halving=10,
+            )
+
+        # Step rejected entirely — beta unchanged
+        np.testing.assert_array_equal(result.beta_new, beta_huge)
+        assert result.step_norm == 0.0
+        assert result.objective_after == result.objective_before
+
+    def test_overflow_trial_halved_to_safety(self):
+        """Moderate beta_eff where full step overflows but halving recovers."""
+        import warnings
+
+        from superglm.solvers.scop_newton import scop_newton_step
+
+        B_scop, W, z, beta_scop, reparam, S_scop = self._make_scop_inputs()
+        # Moderate starting point — finite obj_before, but Newton step may overshoot
+        beta_mod = np.full_like(beta_scop, 3.0)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            result = scop_newton_step(
+                B_scop,
+                W,
+                z,
+                beta_mod,
+                reparam,
+                S_scop,
+                lambda2=1.0,
+                max_halving=20,
+            )
+
+        assert np.isfinite(result.objective_after)
+        assert result.objective_after <= result.objective_before + 1e-14
+
+    def test_exhausted_halvings_rejects_step(self):
+        """When all halvings fail, step is rejected: beta unchanged, step_norm=0."""
+        from superglm.solvers.scop_newton import scop_newton_step
+
+        B_scop, W, z, beta_scop, reparam, S_scop = self._make_scop_inputs()
+        # Very large beta_eff + tiny max_halving → all trials overflow
+        beta_huge = np.full_like(beta_scop, 700.0)
+
+        result = scop_newton_step(
+            B_scop,
+            W,
+            z,
+            beta_huge,
+            reparam,
+            S_scop,
+            lambda2=1.0,
+            max_halving=2,
+        )
+
+        np.testing.assert_array_equal(result.beta_new, beta_huge)
+        assert result.step_norm == 0.0
+        assert result.objective_after == result.objective_before
+
+    @pytest.mark.slow
+    def test_mixed_model_no_overflow_warning(self):
+        """Mixed SCOP + unconstrained model produces no RuntimeWarning."""
+        import warnings
+
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = rng.uniform(0, 1, n)
+        y = 2 * x1 + np.sin(2 * np.pi * x2) + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            discrete=True,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8),
+            },
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            model.fit_reml(df[["x1", "x2"]], y)
