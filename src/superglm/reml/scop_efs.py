@@ -530,6 +530,13 @@ def optimize_scop_efs_reml(
     efs_alpha: dict[str, float] = {name: 1.0 for name in estimated_names}
     efs_prev_dlsp: dict[str, float] = {}
 
+    # Staged freeze state: temporarily freeze converged SSP lambdas,
+    # iterate SCOP-only, then unfreeze for final joint cleanup.
+    active_names: set[str] = set(estimated_names)
+    frozen_names: set[str] = set()
+    _unfreeze_pending = False
+    _unfreeze_scheduled = False
+
     for reml_iter in range(max_reml_iter):
         n_reml_iter = reml_iter + 1
 
@@ -595,6 +602,7 @@ def optimize_scop_efs_reml(
             inv_phi = 1.0 / phi_hat
 
         # Step 6: Joint EFS lambda update (rEDF/pSp, scasm-style)
+        # Only update components in active_names (frozen ones are skipped)
         phi = 1.0 / inv_phi if inv_phi > 0 else 1.0
         lambdas_new, efs_alpha, raw_dlsp = _joint_efs_lambda_step(
             all_pcs,
@@ -602,7 +610,7 @@ def optimize_scop_efs_reml(
             H_joint_inv,
             phi,
             lambdas,
-            estimated_names,
+            active_names,
             scop_states,
             efs_alpha,
             efs_prev_dlsp,
@@ -655,11 +663,36 @@ def optimize_scop_efs_reml(
                 )
                 efs_prev_dlsp[name] = accepted_step
 
+        # Step 7b: Staged freezing — temporarily freeze converged components
+        # so SCOP-only iterations are cheap, then unfreeze for final cleanup.
+        freeze_threshold = 0.001  # log-scale
+        if n_reml_iter >= 3 and not _unfreeze_scheduled:
+            newly_frozen = []
+            for name in list(active_names):
+                if name in lambdas_new and name in lambdas:
+                    ch = abs(
+                        np.log(max(lambdas_new[name], 1e-10)) - np.log(max(lambdas[name], 1e-10))
+                    )
+                    if ch < freeze_threshold:
+                        newly_frozen.append(name)
+            for name in newly_frozen:
+                active_names.discard(name)
+                frozen_names.add(name)
+
+            # If we have frozen components and only SCOP remains active,
+            # schedule an unfreeze after SCOP stabilizes to re-couple
+            if frozen_names and active_names and len(active_names) < len(estimated_names):
+                _unfreeze_pending = True
+
         # Step 8: Convergence check — strict tolerance OR objective plateau
+        # Use all components (not just still-estimated) for convergence decision
         changes = [
             abs(np.log(lambdas_new[pc.name]) - np.log(lambdas[pc.name]))
             for pc in all_pcs
-            if lambdas[pc.name] > 0 and lambdas_new[pc.name] > 0
+            if pc.name in lambdas
+            and pc.name in lambdas_new
+            and lambdas[pc.name] > 0
+            and lambdas_new[pc.name] > 0
         ]
         max_change = max(changes) if changes else 0.0
 
@@ -669,6 +702,13 @@ def optimize_scop_efs_reml(
             obj_prev = objective_history[-2]
             obj_curr_val = objective_history[-1]
             obj_rel_change = abs(obj_curr_val - obj_prev) / max(abs(obj_curr_val), 1.0)
+
+        # Unfreeze: if SCOP-only iterations have stabilized, re-couple for final joint cleanup
+        if _unfreeze_pending and max_change < 0.01 and n_reml_iter >= 5:
+            active_names = set(estimated_names)
+            frozen_names.clear()
+            _unfreeze_scheduled = True
+            _unfreeze_pending = False
 
         # Converge on strict lambda tolerance
         strict_converged = max_change < reml_tol
