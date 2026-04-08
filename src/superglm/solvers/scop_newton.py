@@ -187,10 +187,11 @@ def scop_newton_step(
     else:
         eta_new = eta_bin_new
     res_new = z - eta_new
-    obj_new = 0.5 * np.sum(W * res_new**2) + 0.5 * lambda2 * (beta_new @ S_scop @ beta_new)
+    with np.errstate(over="ignore"):
+        obj_new = 0.5 * np.sum(W * res_new**2) + 0.5 * lambda2 * (beta_new @ S_scop @ beta_new)
 
     for _ in range(max_halving):
-        if obj_new <= obj_before + 1e-14:
+        if np.isfinite(obj_new) and obj_new <= obj_before + 1e-14:
             break
         alpha *= 0.5
         beta_new = beta - alpha * step
@@ -201,7 +202,8 @@ def scop_newton_step(
         else:
             eta_new = eta_bin_new
         res_new = z - eta_new
-        obj_new = 0.5 * np.sum(W * res_new**2) + 0.5 * lambda2 * (beta_new @ S_scop @ beta_new)
+        with np.errstate(over="ignore"):
+            obj_new = 0.5 * np.sum(W * res_new**2) + 0.5 * lambda2 * (beta_new @ S_scop @ beta_new)
 
     step_norm = float(np.linalg.norm(alpha * step))
 
