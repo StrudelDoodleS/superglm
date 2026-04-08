@@ -11,6 +11,7 @@ import pytest
 from superglm import SuperGLM
 from superglm.families import Gaussian
 from superglm.features.spline import BSplineSmooth, CubicRegressionSpline, PSpline
+from superglm.types import LambdaPolicy
 
 
 class TestMonotoneFitBSplineSmooth:
@@ -428,3 +429,135 @@ class TestMonotoneFitPSpline:
         )
         with pytest.raises(NotImplementedError, match="SCOP.*QP"):
             model.fit(df[["x1", "x2"]], df["y"])
+
+
+# ── fit_reml with fixed lambda tests ────────────────────────────────────────────
+
+
+class TestMonotoneFixedLambdaREML:
+    """fit_reml() works with monotone terms when all lambdas are fixed."""
+
+    @pytest.mark.slow
+    def test_fit_reml_with_fixed_lambda_policy_qp(self):
+        """BSplineSmooth monotone with fixed lambda_policy works in fit_reml."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 1 / (1 + np.exp(-10 * (x - 0.5))) + rng.normal(0, 0.1, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": BSplineSmooth(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], df["y"])
+
+        # Predictions must be monotone increasing
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8), f"min diff = {np.diff(pred).min():.2e}"
+
+        # Model should have converged
+        assert model._result.converged
+
+        # REML lambdas should be set
+        assert model._reml_lambdas is not None
+
+    @pytest.mark.slow
+    def test_fit_reml_with_fixed_lambda_policy_scop(self):
+        """PSpline monotone with fixed lambda_policy works in fit_reml."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 1 / (1 + np.exp(-10 * (x - 0.5))) + rng.normal(0, 0.1, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], df["y"])
+
+        # Predictions must be monotone increasing
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8), f"min diff = {np.diff(pred).min():.2e}"
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+    def test_fit_reml_without_fixed_lambdas_raises_qp(self):
+        """fit_reml raises for QP monotone without fixed lambda."""
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 1, n)
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": BSplineSmooth(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="smoothness selection"):
+            model.fit_reml(df[["x"]], df["y"])
+
+    def test_fit_reml_without_fixed_lambdas_raises_scop(self):
+        """fit_reml raises for SCOP monotone without fixed lambda."""
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 1, n)
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="smoothness selection"):
+            model.fit_reml(df[["x"]], df["y"])
+
+    @pytest.mark.slow
+    def test_fit_reml_unchanged_without_monotone(self):
+        """Normal REML still works without monotone terms."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = rng.uniform(0, 1, n)
+        y = np.sin(2 * np.pi * x) + rng.normal(0, 0.3, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            features={"x": BSplineSmooth(n_knots=10)},
+        )
+        model.fit_reml(df[["x"]], df["y"])
+        assert model._result.converged

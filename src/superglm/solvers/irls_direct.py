@@ -161,6 +161,14 @@ def _build_penalty_matrix(
                 pc.omega_ssp if pc.omega_ssp is not None else (gm.R_inv.T @ pc.omega_raw @ gm.R_inv)
             )
             S[pc.group_sl, pc.group_sl] += lam * omega_ssp
+
+        # Also add SCOP penalties (not in reml_penalties).
+        for gm, g in zip(group_matrices, groups):
+            if g.scop_reparameterization is not None and g.penalized:
+                lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                if lam_g > 0:
+                    S[g.sl, g.sl] += lam_g * g.scop_reparameterization.penalty_matrix()
+
         return S
 
     # Legacy single-penalty path (unchanged)
@@ -584,10 +592,14 @@ def fit_irls_direct(
                 for gi, st in _scop_state.items():
                     if st["beta_scop"] is None:
                         # Initialize SCOP beta on first iteration
+                        g_i = groups[gi]
+                        _lam_scop = (
+                            lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                        )
                         st["beta_scop"] = st["reparam"].qp_initialize(
                             st["B_scop"],
                             z_off,
-                            lambda_penalty=lambda2,
+                            lambda_penalty=_lam_scop,
                             weights=W,
                         )
                     gamma_eff = st["reparam"].forward(st["beta_scop"])
@@ -647,6 +659,8 @@ def fit_irls_direct(
                             z_scop = z_scop - st2["B_scop"] @ gamma2
 
                     st["beta_scop_prev"] = st["beta_scop"].copy()
+                    g_i = groups[gi]
+                    _lam_scop = lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
                     result = scop_newton_step(
                         B_scop=st["B_scop"],
                         W=W,
@@ -654,7 +668,7 @@ def fit_irls_direct(
                         beta_scop=st["beta_scop"],
                         reparam=st["reparam"],
                         S_scop=st["S_scop"],
-                        lambda2=lambda2,
+                        lambda2=_lam_scop,
                     )
                     st["beta_scop"] = result.beta_new
 
