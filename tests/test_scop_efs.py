@@ -1233,3 +1233,136 @@ class TestSCOPEFSOuterLoop:
         for entry in result.lambda_history:
             assert isinstance(entry, dict)
             assert "x" in entry
+
+
+# ── fit_reml integration tests ──────────────────────────────────────────────────
+
+from superglm.features.spline import BSplineSmooth  # noqa: E402
+from superglm.types import LambdaPolicy  # noqa: E402
+
+
+class TestSCOPFitRemlIntegration:
+    """Integration tests: fit_reml routes to SCOP EFS for auto-lambda monotone."""
+
+    @pytest.mark.slow
+    def test_fit_reml_scop_auto_lambda(self):
+        """fit_reml with SCOP monotone PSpline, no lambda_policy, discrete=True.
+
+        Should converge, estimate lambda, and produce monotone predictions.
+        """
+        rng = np.random.default_rng(42)
+        n = 400
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+        assert any(v > 0 for v in model._reml_lambdas.values())
+
+        # Predictions should be monotone increasing
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        diffs = np.diff(pred)
+        assert np.all(diffs >= -1e-8), f"Predictions not monotone: min diff = {diffs.min():.2e}"
+
+    @pytest.mark.slow
+    def test_fit_reml_mixed_scop_and_ssp(self):
+        """Mixed: SCOP monotone x1 + unconstrained PSpline x2, discrete=True.
+
+        Both terms should get lambdas, and x1 predictions should be monotone.
+        """
+        rng = np.random.default_rng(42)
+        n = 400
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = rng.uniform(0, 1, n)
+        y = 2 * x1 + np.sin(2 * np.pi * x2) + rng.normal(0, 0.3, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8),
+            },
+        )
+        model.fit_reml(df[["x1", "x2"]], y)
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+        # Both terms should have lambdas estimated
+        assert len(model._reml_lambdas) >= 2
+
+        # x1 partial effect should be monotone: hold x2 at median
+        x1_grid = np.linspace(0, 1, 200)
+        pred_df = pd.DataFrame({"x1": x1_grid, "x2": np.median(x2)})
+        pred = model.predict(pred_df)
+        diffs = np.diff(pred)
+        assert np.all(diffs >= -1e-6), (
+            f"x1 partial effect not monotone: min diff = {diffs.min():.2e}"
+        )
+
+    @pytest.mark.slow
+    def test_fixed_lambda_policy_still_works(self):
+        """Phase 4 path: SCOP with fixed lambda_policy still uses single-fit path."""
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        assert model._result.converged
+        # Lambda should be exactly 1.0 (fixed)
+        assert model._reml_lambdas is not None
+        for v in model._reml_lambdas.values():
+            assert v == 1.0
+
+    def test_qp_monotone_still_raises(self):
+        """BSplineSmooth with monotone still raises NotImplementedError for auto lambda."""
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 1, n)
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": BSplineSmooth(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="QP monotone"):
+            model.fit_reml(df[["x"]], df["y"])
