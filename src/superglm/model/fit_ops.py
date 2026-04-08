@@ -890,13 +890,15 @@ def fit_reml(
 
     if _any_unfixed_scop or (_has_scop_monotone and estimated_names):
         # SCOP with auto-lambda → SCOP EFS optimizer.
-        # Add unfixed SCOP group names to estimated_names.
+        # Add unfixed SCOP group names to estimated_names and set initial lambdas.
+        lam_init = lambda2_init if lambda2_init is not None else model.lambda2
         for g in model._groups:
             if g.monotone_engine == "scop" and g.penalized:
                 spec = model._specs.get(g.feature_name or g.name)
                 fixed_val = _scop_fixed_lambda_value(spec)
                 if fixed_val is None:
                     estimated_names.add(g.name)
+                    lambdas[g.name] = lam_init
 
         from superglm.reml.scop_efs import optimize_scop_efs_reml
 
