@@ -655,6 +655,75 @@ class TestAssembleJointHessian:
         assemble_joint_hessian(XtWX_plus_S, scop_states)
         np.testing.assert_array_equal(XtWX_plus_S, original_copy)
 
+    def test_two_scop_cross_blocks_scaled_by_both_jacobians(self):
+        """SCOP_i-SCOP_j cross-blocks get diag(j_i) @ H_ij @ diag(j_j)."""
+        p_linear = 4
+        q_a, q_b = 3, 5
+        p = p_linear + q_a + q_b
+        sl_lin = slice(0, p_linear)
+        sl_a = slice(p_linear, p_linear + q_a)
+        sl_b = slice(p_linear + q_a, p)
+
+        rng = np.random.default_rng(123)
+        A = rng.standard_normal((p, p))
+        XtWX_plus_S = A.T @ A + np.eye(p)
+
+        H_scop_a = rng.standard_normal((q_a, q_a))
+        H_scop_a = H_scop_a.T @ H_scop_a + 2 * np.eye(q_a)
+        H_scop_b = rng.standard_normal((q_b, q_b))
+        H_scop_b = H_scop_b.T @ H_scop_b + 2 * np.eye(q_b)
+
+        beta_eff_a = np.array([0.5, -0.3, 0.2])
+        beta_eff_b = np.array([0.1, -0.4, 0.6, -0.1, 0.3])
+        j_a = np.exp(beta_eff_a)
+        j_b = np.exp(beta_eff_b)
+
+        scop_states = {
+            0: {
+                "group_sl": sl_a,
+                "H_scop_penalized": H_scop_a,
+                "group_name": "age",
+                "beta_eff": beta_eff_a,
+            },
+            1: {
+                "group_sl": sl_b,
+                "H_scop_penalized": H_scop_b,
+                "group_name": "power",
+                "beta_eff": beta_eff_b,
+            },
+        }
+
+        H_joint, mapping = assemble_joint_hessian(XtWX_plus_S, scop_states)
+
+        # Each SCOP diagonal block replaced by its Newton Hessian
+        np.testing.assert_array_equal(H_joint[sl_a, sl_a], H_scop_a)
+        np.testing.assert_array_equal(H_joint[sl_b, sl_b], H_scop_b)
+
+        # SCOP_a-SCOP_b cross-block: H_ab(beta_eff) = diag(j_a) @ H_ab(gamma) @ diag(j_b)
+        H_ab_gamma = XtWX_plus_S[sl_a, sl_b]
+        expected_ab = np.diag(j_a) @ H_ab_gamma @ np.diag(j_b)
+        np.testing.assert_allclose(H_joint[sl_a, sl_b], expected_ab, rtol=1e-12)
+
+        # Symmetric: H_ba(beta_eff) = diag(j_b) @ H_ba(gamma) @ diag(j_a)
+        H_ba_gamma = XtWX_plus_S[sl_b, sl_a]
+        expected_ba = np.diag(j_b) @ H_ba_gamma @ np.diag(j_a)
+        np.testing.assert_allclose(H_joint[sl_b, sl_a], expected_ba, rtol=1e-12)
+
+        # Linear-SCOP cross-blocks still scaled by single Jacobian
+        expected_lin_a = XtWX_plus_S[sl_lin, sl_a] * j_a[np.newaxis, :]
+        np.testing.assert_allclose(H_joint[sl_lin, sl_a], expected_lin_a, rtol=1e-12)
+        expected_lin_b = XtWX_plus_S[sl_lin, sl_b] * j_b[np.newaxis, :]
+        np.testing.assert_allclose(H_joint[sl_lin, sl_b], expected_lin_b, rtol=1e-12)
+
+        # Linear diagonal block unchanged
+        np.testing.assert_array_equal(H_joint[sl_lin, sl_lin], XtWX_plus_S[sl_lin, sl_lin])
+
+        # Overall symmetry preserved
+        np.testing.assert_allclose(H_joint, H_joint.T, atol=1e-12)
+
+        # Mapping has both groups
+        assert "age" in mapping and "power" in mapping
+
 
 # ---------------------------------------------------------------------------
 # Part 3: Tests for compute_scop_aware_penalty_quad

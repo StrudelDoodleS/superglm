@@ -187,6 +187,21 @@ def assemble_joint_hessian(
             H_joint[np.ix_(other_idx, scop_idx)] *= j_diag[np.newaxis, :]
             H_joint[np.ix_(scop_idx, other_idx)] *= j_diag[:, np.newaxis]
 
+    # Transform SCOP-SCOP cross-blocks: H_ij(beta_eff) = diag(j_i) @ H_ij(gamma) @ diag(j_j)
+    scop_items = list(scop_states.items())
+    for idx_a in range(len(scop_items)):
+        gi_a, st_a = scop_items[idx_a]
+        sl_a = st_a["group_sl"]
+        j_a = np.exp(np.clip(st_a["beta_eff"], -500, 500))
+        for idx_b in range(idx_a + 1, len(scop_items)):
+            gi_b, st_b = scop_items[idx_b]
+            sl_b = st_b["group_sl"]
+            j_b = np.exp(np.clip(st_b["beta_eff"], -500, 500))
+            idx_a_arr = np.arange(sl_a.start, sl_a.stop)
+            idx_b_arr = np.arange(sl_b.start, sl_b.stop)
+            H_joint[np.ix_(idx_a_arr, idx_b_arr)] *= j_a[:, np.newaxis] * j_b[np.newaxis, :]
+            H_joint[np.ix_(idx_b_arr, idx_a_arr)] *= j_b[:, np.newaxis] * j_a[np.newaxis, :]
+
     return H_joint, mapping
 
 
