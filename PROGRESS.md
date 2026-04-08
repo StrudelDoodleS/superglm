@@ -31,7 +31,18 @@
 
 ## Outstanding
 
-- Task 3: SCOP-aware penalty quadratic
+### Task 3: SCOP-aware penalty quadratic
+- DONE
+- Added `compute_scop_aware_penalty_quad()` to `src/superglm/reml/scop_efs.py`
+- Subtracts wrong gamma-space SCOP contribution, adds correct beta_eff-space contribution
+- Falls back to standard `beta @ S @ beta` when no SCOP terms present
+- 4 new pure unit tests all pass:
+  - test_scop_only_model: verifies beta_eff space quad, shows it differs from naive gamma-space
+  - test_mixed_ssp_and_scop: mixed SSP + SCOP blocks computed correctly
+  - test_no_scop_terms_fallback: empty scop_states gives standard quad
+  - test_zero_lambda_scop_contributes_zero: lambda=0 contributes zero
+
+## Outstanding
 - Task 5: SCOP-aware EFS lambda update
 - Task 6: SCOP-aware REML objective
 - Task 7: Full SCOP EFS outer loop

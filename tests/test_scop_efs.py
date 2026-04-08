@@ -12,7 +12,11 @@ from superglm import SuperGLM
 from superglm.families import Gaussian
 from superglm.features.spline import PSpline
 from superglm.model.base import model_build_design_matrix
-from superglm.reml.scop_efs import assemble_joint_hessian, build_scop_penalty_components
+from superglm.reml.scop_efs import (
+    assemble_joint_hessian,
+    build_scop_penalty_components,
+    compute_scop_aware_penalty_quad,
+)
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.types import PenaltyComponent
 
@@ -605,3 +609,147 @@ class TestAssembleJointHessian:
 
         assemble_joint_hessian(XtWX_plus_S, scop_states)
         np.testing.assert_array_equal(XtWX_plus_S, original_copy)
+
+
+# ---------------------------------------------------------------------------
+# Part 3: Tests for compute_scop_aware_penalty_quad
+# ---------------------------------------------------------------------------
+
+
+class TestSCOPPenaltyQuad:
+    """Tests for compute_scop_aware_penalty_quad (pure unit tests, no model fitting)."""
+
+    def test_scop_only_model(self):
+        """Pure SCOP model: penalty_quad uses beta_eff, not gamma_eff.
+
+        For a SCOP-only model, the full penalty matrix S = lam * S_scop.
+        The naive quad is gamma_eff @ S @ gamma_eff (wrong).
+        The correct quad is lam * beta_eff @ S_scop @ beta_eff.
+        These should differ because gamma = exp(beta) != beta.
+        """
+        q = 8
+        S_scop = _first_diff_penalty(q)
+        lam = 2.5
+
+        rng = np.random.default_rng(42)
+        beta_eff = rng.standard_normal(q)
+        gamma_eff = np.exp(beta_eff)
+
+        # Full penalty matrix is just lam * S_scop for a single SCOP group
+        S_full = lam * S_scop
+
+        scop_states = {
+            0: {
+                "S_scop": S_scop,
+                "beta_eff": beta_eff,
+                "group_sl": slice(0, q),
+                "group_name": "x",
+            }
+        }
+        lambdas = {"x": lam}
+
+        # result_beta contains gamma_eff for SCOP groups
+        result_beta = gamma_eff.copy()
+
+        pq = compute_scop_aware_penalty_quad(result_beta, S_full, scop_states, lambdas)
+
+        # Should equal lam * beta_eff @ S_scop @ beta_eff
+        expected = lam * float(beta_eff @ S_scop @ beta_eff)
+        np.testing.assert_allclose(pq, expected, rtol=1e-12)
+
+        # Should differ from the naive gamma-space quad
+        naive_pq = float(gamma_eff @ S_full @ gamma_eff)
+        assert not np.isclose(pq, naive_pq, rtol=1e-6), (
+            "SCOP penalty quad should differ from naive gamma-space quad"
+        )
+
+    def test_mixed_ssp_and_scop(self):
+        """Mixed model: SSP part uses gamma (correct), SCOP part uses beta_eff.
+
+        Build a block-diagonal penalty matrix with an SSP block and a SCOP block.
+        Verify that the SSP contribution is gamma @ S_ssp @ gamma and the
+        SCOP contribution is lam_scop * beta_eff @ S_scop @ beta_eff.
+        """
+        q_ssp = 5
+        q_scop = 6
+        p = q_ssp + q_scop
+        lam_ssp = 1.5
+        lam_scop = 3.0
+
+        rng = np.random.default_rng(99)
+
+        # SSP block (linear group): coefficients are used as-is
+        S_ssp = _first_diff_penalty(q_ssp)
+        beta_ssp = rng.standard_normal(q_ssp)
+
+        # SCOP block
+        S_scop = _first_diff_penalty(q_scop)
+        beta_eff = rng.standard_normal(q_scop)
+        gamma_eff = np.exp(beta_eff)
+
+        # Full penalty matrix (block-diagonal)
+        S_full = np.zeros((p, p))
+        S_full[:q_ssp, :q_ssp] = lam_ssp * S_ssp
+        S_full[q_ssp:, q_ssp:] = lam_scop * S_scop
+
+        # result_beta: SSP coefficients as-is, SCOP as gamma_eff
+        result_beta = np.concatenate([beta_ssp, gamma_eff])
+
+        scop_states = {
+            1: {
+                "S_scop": S_scop,
+                "beta_eff": beta_eff,
+                "group_sl": slice(q_ssp, p),
+                "group_name": "mono_x",
+            }
+        }
+        lambdas = {"mono_x": lam_scop}
+
+        pq = compute_scop_aware_penalty_quad(result_beta, S_full, scop_states, lambdas)
+
+        # Expected: SSP contribution + SCOP contribution in beta_eff space
+        ssp_contrib = lam_ssp * float(beta_ssp @ S_ssp @ beta_ssp)
+        scop_contrib = lam_scop * float(beta_eff @ S_scop @ beta_eff)
+        expected = ssp_contrib + scop_contrib
+
+        np.testing.assert_allclose(pq, expected, rtol=1e-12)
+
+    def test_no_scop_terms_fallback(self):
+        """No SCOP terms: falls back to standard result.beta @ S @ result.beta."""
+        p = 10
+        rng = np.random.default_rng(77)
+        S = _first_diff_penalty(p)
+        beta = rng.standard_normal(p)
+
+        pq = compute_scop_aware_penalty_quad(beta, S, {}, {})
+
+        expected = float(beta @ S @ beta)
+        np.testing.assert_allclose(pq, expected, rtol=1e-14)
+
+    def test_zero_lambda_scop_contributes_zero(self):
+        """When lambda=0 for SCOP term, its contribution is zero."""
+        q = 7
+        S_scop = _first_diff_penalty(q)
+        lam = 0.0
+
+        rng = np.random.default_rng(123)
+        beta_eff = rng.standard_normal(q)
+        gamma_eff = np.exp(beta_eff)
+
+        # With lambda=0, the S_full SCOP block is all zeros
+        S_full = np.zeros((q, q))
+
+        scop_states = {
+            0: {
+                "S_scop": S_scop,
+                "beta_eff": beta_eff,
+                "group_sl": slice(0, q),
+                "group_name": "x",
+            }
+        }
+        lambdas = {"x": lam}
+
+        pq = compute_scop_aware_penalty_quad(gamma_eff, S_full, scop_states, lambdas)
+
+        # With lambda=0, both subtracting and adding contribute zero
+        np.testing.assert_allclose(pq, 0.0, atol=1e-15)
