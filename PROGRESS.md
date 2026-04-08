@@ -56,8 +56,15 @@
   - test_near_zero_beta_returns_old_lambda
   - test_returns_positive (20-trial fuzz)
 
+### Task 6: SCOP-aware REML objective
+- DONE
+- Added `scop_states: dict[int, dict] | None = None` parameter to `reml_laml_objective`
+- Penalty quad: dispatches to `compute_scop_aware_penalty_quad` when scop_states present
+- Log-det: dispatches to `assemble_joint_hessian` to replace SCOP blocks before eigendecomposition
+- Default `scop_states=None` preserves backward compatibility (all 161 REML tests unchanged)
+- 2 new slow integration tests: `test_objective_accepts_scop_state`, `test_objective_without_scop_state_unchanged`
+
 ## Outstanding
-- Task 6: SCOP-aware REML objective
 - Task 7: Full SCOP EFS outer loop
 - Task 8: Wire fit_reml to SCOP EFS optimizer
 - Task 9: Regression and edge-case tests

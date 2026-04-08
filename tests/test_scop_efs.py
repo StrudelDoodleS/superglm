@@ -959,3 +959,110 @@ class TestSCOPEFSLambdaUpdate:
 
             lam_new = scop_efs_lambda_update(pc, beta, H_joint_inv, inv_phi, lam_old, {})
             assert lam_new > 0, f"Trial {trial}: lambda={lam_new} is not positive"
+
+
+# ---------------------------------------------------------------------------
+# Part 6: Tests for SCOP-aware REML objective
+# ---------------------------------------------------------------------------
+
+
+class TestSCOPAwareObjective:
+    """Tests for reml_laml_objective with scop_states parameter."""
+
+    @pytest.mark.slow
+    def test_objective_accepts_scop_state(self, scop_model_inputs):
+        """reml_laml_objective with scop_states returns a finite float."""
+        from superglm.reml.objective import reml_laml_objective
+
+        model, y, sample_weight, offset = scop_model_inputs
+        offset_arr = offset if offset is not None else np.zeros_like(y)
+        lambdas = {"x": 1.0}
+
+        # Get PIRLS result + XtWX + scop_states
+        out = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=lambdas,
+            offset=offset,
+            return_xtwx=True,
+            return_scop_state=True,
+        )
+        result, _, XtWX, scop_states = out
+
+        val = reml_laml_objective(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            result=result,
+            lambdas=lambdas,
+            sample_weight=sample_weight,
+            offset_arr=offset_arr,
+            XtWX=XtWX,
+            scop_states=scop_states,
+        )
+        assert isinstance(val, float)
+        assert np.isfinite(val), f"Objective returned non-finite value: {val}"
+
+    @pytest.mark.slow
+    def test_objective_without_scop_state_unchanged(self, scop_model_inputs):
+        """Without scop_states (None), result matches the standard objective path."""
+        from superglm.reml.objective import reml_laml_objective
+
+        model, y, sample_weight, offset = scop_model_inputs
+        offset_arr = offset if offset is not None else np.zeros_like(y)
+        lambdas = {"x": 1.0}
+
+        # Get PIRLS result + XtWX (no scop_states needed for baseline)
+        out = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=lambdas,
+            offset=offset,
+            return_xtwx=True,
+        )
+        result, _, XtWX = out
+
+        # Call without scop_states (default None)
+        val_none = reml_laml_objective(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            result=result,
+            lambdas=lambdas,
+            sample_weight=sample_weight,
+            offset_arr=offset_arr,
+            XtWX=XtWX,
+        )
+
+        # Call with explicit scop_states=None
+        val_explicit_none = reml_laml_objective(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            result=result,
+            lambdas=lambdas,
+            sample_weight=sample_weight,
+            offset_arr=offset_arr,
+            XtWX=XtWX,
+            scop_states=None,
+        )
+
+        assert isinstance(val_none, float)
+        assert np.isfinite(val_none)
+        assert val_none == val_explicit_none, (
+            f"Default and explicit None should be identical: {val_none} vs {val_explicit_none}"
+        )
