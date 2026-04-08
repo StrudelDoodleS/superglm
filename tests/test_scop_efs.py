@@ -1685,3 +1685,59 @@ class TestSCOPEFSRegression:
         assert obj_recomputed == pytest.approx(obj_stored, rel=1e-8), (
             f"Recomputed {obj_recomputed:.6f} != stored {obj_stored:.6f}"
         )
+
+    @pytest.mark.slow
+    def test_model_wrapper_objective_matches_stored(self):
+        """model._reml_laml_objective wrapper reproduces stored objective for SCOP fits."""
+        from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+        from superglm.group_matrix import _block_xtwx
+        from superglm.links import stabilize_eta
+
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        # Reconstruct XtWX to call the wrapper
+        result = model._result
+        sw = np.ones(n)
+        offset_arr = np.zeros(n)
+        eta = model._dm.matvec(result.beta) + result.intercept + offset_arr
+        eta = stabilize_eta(eta, model._link)
+        mu = clip_mu(model._link.inverse(eta), model._distribution)
+        V = model._distribution.variance(mu)
+        dmu = model._link.deriv_inverse(eta)
+        W = sw * dmu**2 / np.maximum(V, _VARIANCE_FLOOR)
+        XtWX = _block_xtwx(
+            model._dm.group_matrices,
+            model._groups,
+            W,
+            tabmat_split=model._dm.tabmat_split,
+        )
+
+        # Call through the model wrapper (the path that was broken)
+        obj_wrapper = model._reml_laml_objective(
+            y,
+            result,
+            model._reml_lambdas,
+            sw,
+            offset_arr,
+            XtWX=XtWX,
+        )
+
+        obj_stored = model._reml_result.objective
+        assert np.isfinite(obj_wrapper)
+        assert obj_wrapper == pytest.approx(obj_stored, rel=1e-8), (
+            f"Wrapper {obj_wrapper:.6f} != stored {obj_stored:.6f}"
+        )

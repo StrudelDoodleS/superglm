@@ -432,6 +432,11 @@ def model_reml_laml_objective(
     model, y, result, lambdas, sample_weight, offset_arr, XtWX=None, penalty_caches=None
 ):
     """Laplace REML/LAML objective up to additive constants."""
+    scop_states = None
+    reml_result = getattr(model, "_reml_result", None)
+    if reml_result is not None:
+        scop_states = getattr(reml_result, "scop_states", None)
+
     return reml_laml_objective(
         model._dm,
         model._distribution,
@@ -445,6 +450,7 @@ def model_reml_laml_objective(
         XtWX=XtWX,
         penalty_caches=penalty_caches,
         reml_penalties=getattr(model, "_reml_penalties", None),
+        scop_states=scop_states,
     )
 
 
