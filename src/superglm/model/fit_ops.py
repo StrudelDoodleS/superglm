@@ -923,7 +923,7 @@ def fit_reml(
         # Post-fit housekeeping (same structure as other REML paths).
         model._result = best.pirls_result
         model._reml_lambdas = best.lambdas
-        model._reml_penalties = reml_penalties
+        model._reml_penalties = best.reml_penalties if best.reml_penalties else reml_penalties
         model._reml_result = best
 
         eta = model._dm.matvec(best.pirls_result.beta) + best.pirls_result.intercept

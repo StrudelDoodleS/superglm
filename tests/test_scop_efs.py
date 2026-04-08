@@ -449,6 +449,7 @@ class TestAssembleJointHessian:
                 "group_sl": scop_sl,
                 "H_scop_penalized": H_scop,
                 "group_name": "mono_x",
+                "beta_eff": np.zeros(q_scop),  # identity Jacobian
             }
         }
 
@@ -459,7 +460,7 @@ class TestAssembleJointHessian:
         assert not np.allclose(H_joint[scop_sl, scop_sl], original_scop_block)
 
     def test_linear_block_unchanged(self):
-        """Non-SCOP (linear) block must be unchanged after assembly."""
+        """Non-SCOP (linear) diagonal block must be unchanged after assembly."""
         p = 12
         q_scop = 5
         scop_sl = slice(7, 12)
@@ -471,24 +472,61 @@ class TestAssembleJointHessian:
 
         B = rng.standard_normal((q_scop, q_scop))
         H_scop = B.T @ B + np.eye(q_scop)
+        beta_eff = rng.standard_normal(q_scop) * 0.5
 
         scop_states = {
             0: {
                 "group_sl": scop_sl,
                 "H_scop_penalized": H_scop,
                 "group_name": "mono_x",
+                "beta_eff": beta_eff,
             }
         }
 
         H_joint, _ = assemble_joint_hessian(XtWX_plus_S, scop_states)
 
-        # Linear block unchanged
+        # Linear diagonal block unchanged
         np.testing.assert_array_equal(
             H_joint[linear_sl, linear_sl], XtWX_plus_S[linear_sl, linear_sl]
         )
-        # Off-diagonal blocks also unchanged
-        np.testing.assert_array_equal(H_joint[linear_sl, scop_sl], XtWX_plus_S[linear_sl, scop_sl])
-        np.testing.assert_array_equal(H_joint[scop_sl, linear_sl], XtWX_plus_S[scop_sl, linear_sl])
+
+    def test_cross_blocks_scaled_by_jacobian(self):
+        """Cross-blocks between linear and SCOP must be scaled by exp(beta_eff)."""
+        p = 10
+        q_scop = 4
+        scop_sl = slice(6, 10)
+        linear_sl = slice(0, 6)
+
+        rng = np.random.default_rng(77)
+        A = rng.standard_normal((p, p))
+        XtWX_plus_S = A.T @ A + np.eye(p)
+
+        B = rng.standard_normal((q_scop, q_scop))
+        H_scop = B.T @ B + np.eye(q_scop)
+        beta_eff = np.array([0.5, -0.3, 0.1, 0.8])
+        j_diag = np.exp(beta_eff)
+
+        scop_states = {
+            0: {
+                "group_sl": scop_sl,
+                "H_scop_penalized": H_scop,
+                "group_name": "mono_x",
+                "beta_eff": beta_eff,
+            }
+        }
+
+        H_joint, _ = assemble_joint_hessian(XtWX_plus_S, scop_states)
+
+        # Cross-block [linear, scop] should be original * j_diag (column-wise)
+        expected_cross = XtWX_plus_S[linear_sl, scop_sl] * j_diag[np.newaxis, :]
+        np.testing.assert_allclose(H_joint[linear_sl, scop_sl], expected_cross, rtol=1e-12)
+
+        # Cross-block [scop, linear] should be original * j_diag (row-wise)
+        expected_cross_t = XtWX_plus_S[scop_sl, linear_sl] * j_diag[:, np.newaxis]
+        np.testing.assert_allclose(H_joint[scop_sl, linear_sl], expected_cross_t, rtol=1e-12)
+
+        # Verify cross-blocks are NOT unchanged (they were transformed)
+        assert not np.allclose(H_joint[linear_sl, scop_sl], XtWX_plus_S[linear_sl, scop_sl])
 
     def test_mapping_correct(self):
         """Mapping dict has correct group_name -> slice entries."""
@@ -503,11 +541,13 @@ class TestAssembleJointHessian:
                 "group_sl": sl_a,
                 "H_scop_penalized": 2.0 * np.eye(5),
                 "group_name": "spline_a",
+                "beta_eff": np.zeros(5),
             },
             1: {
                 "group_sl": sl_b,
                 "H_scop_penalized": 3.0 * np.eye(5),
                 "group_name": "spline_b",
+                "beta_eff": np.zeros(5),
             },
         }
 
@@ -546,6 +586,7 @@ class TestAssembleJointHessian:
                 "group_sl": scop_sl,
                 "H_scop_penalized": H_scop,
                 "group_name": "mono_x",
+                "beta_eff": np.zeros(q_scop),  # j_diag=1, off-diag zero → block-additive
             }
         }
 
@@ -575,11 +616,13 @@ class TestAssembleJointHessian:
         C = rng.standard_normal((q_scop, q_scop))
         H_scop = C.T @ C + 2.0 * np.eye(q_scop)
 
+        beta_eff = rng.standard_normal(q_scop) * 0.3
         scop_states = {
             0: {
                 "group_sl": scop_sl,
                 "H_scop_penalized": H_scop,
                 "group_name": "mono_x",
+                "beta_eff": beta_eff,
             }
         }
 
@@ -605,6 +648,7 @@ class TestAssembleJointHessian:
                 "group_sl": scop_sl,
                 "H_scop_penalized": 5.0 * np.eye(q_scop),
                 "group_name": "mono_z",
+                "beta_eff": np.zeros(q_scop),
             }
         }
 
@@ -1547,3 +1591,80 @@ class TestSCOPEFSRegression:
         pred = model.predict(pd.DataFrame({"x": x_grid}))
         diffs = np.diff(pred)
         assert np.all(diffs <= 1e-6), f"Predictions not decreasing: max diff = {diffs.max():.2e}"
+
+    @pytest.mark.slow
+    def test_reml_penalties_stored_with_scop_components(self):
+        """model._reml_penalties includes SCOP PenaltyComponents after auto-lambda fit."""
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        # model._reml_penalties must include the SCOP penalty component
+        assert model._reml_penalties is not None
+        assert len(model._reml_penalties) > 0
+        scop_pc_names = [pc.name for pc in model._reml_penalties]
+        assert "x" in scop_pc_names, f"SCOP component 'x' not in stored penalties: {scop_pc_names}"
+
+    @pytest.mark.slow
+    def test_stored_penalties_reproduce_objective(self):
+        """Stored reml_penalties can reconstruct the same REML objective the optimizer used."""
+        from superglm.reml.objective import reml_laml_objective
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        # Recompute objective from stored state
+        result_out = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=np.ones(n),
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=model._reml_lambdas,
+            return_xtwx=True,
+            return_scop_state=True,
+            reml_penalties=model._reml_penalties,
+        )
+        pirls_result, _, XtWX, scop_states = result_out
+        obj = reml_laml_objective(
+            model._dm,
+            model._distribution,
+            model._link,
+            model._groups,
+            y,
+            pirls_result,
+            model._reml_lambdas,
+            np.ones(n),
+            np.zeros(n),
+            XtWX=XtWX,
+            reml_penalties=model._reml_penalties,
+            scop_states=scop_states,
+        )
+        assert np.isfinite(obj)

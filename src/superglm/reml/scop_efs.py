@@ -122,13 +122,21 @@ def assemble_joint_hessian(
     XtWX_plus_S: NDArray,
     scop_states: dict[int, dict],
 ) -> tuple[NDArray, dict[str, slice]]:
-    """Assemble block-diagonal joint Hessian from linear + SCOP blocks.
+    """Assemble joint Hessian in the beta_eff coordinate system.
 
-    The XtWX_plus_S matrix already has the SCOP block filled with
-    lambda * S_scop from _build_penalty_matrix. We REPLACE that block
-    with H_scop_penalized (the full Newton Hessian including data-term
-    curvature). Cross-terms between linear and SCOP blocks are not
-    included -- coupling is handled by the IRLS outer loop.
+    The XtWX_plus_S matrix is in gamma space for SCOP groups: the SCOP
+    diagonal block has only ``lambda * S_scop`` (missing data curvature),
+    and the cross-blocks ``X_linear^T W B_scop`` lack the SCOP Jacobian
+    factor ``diag(exp(beta_eff))``.
+
+    This function:
+
+    1. Replaces each SCOP diagonal block with ``H_scop_penalized`` (the
+       full Newton Hessian in beta_eff space, including data curvature).
+    2. Transforms cross-blocks to beta_eff space by scaling columns
+       (for ``H[other, scop]``) and rows (for ``H[scop, other]``) by
+       ``j_diag = exp(beta_eff)``, the diagonal of the SCOP Jacobian
+       ``d(gamma_eff)/d(beta_eff)``.
 
     Parameters
     ----------
@@ -136,27 +144,48 @@ def assemble_joint_hessian(
         The linear-system penalized Gram matrix.
     scop_states : dict
         SCOP converged state dict, keyed by group index. Each value
-        must contain "group_sl", "H_scop_penalized", "group_name".
+        must contain "group_sl", "H_scop_penalized", "group_name",
+        and "beta_eff".
 
     Returns
     -------
     H_joint : (p, p) ndarray
-        Joint Hessian with SCOP blocks replaced.
+        Joint Hessian with SCOP blocks and cross-blocks in beta_eff space.
     mapping : dict
         Maps group_name to the slice in H_joint for each SCOP group.
     """
     if not scop_states:
         return XtWX_plus_S, {}
 
+    p = XtWX_plus_S.shape[0]
     H_joint = XtWX_plus_S.copy()
     mapping = {}
+
+    # Collect all SCOP indices so we can identify "other" indices
+    scop_slices = []
+    for gi, st in scop_states.items():
+        scop_slices.append(st["group_sl"])
+
+    all_scop_idx = np.concatenate([np.arange(sl.start, sl.stop) for sl in scop_slices])
+    other_idx = np.setdiff1d(np.arange(p), all_scop_idx)
 
     for gi, st in scop_states.items():
         sl = st["group_sl"]
         H_scop = st["H_scop_penalized"]
         name = st["group_name"]
+        beta_eff = st["beta_eff"]
+        j_diag = np.exp(np.clip(beta_eff, -500, 500))
+
+        # Replace diagonal SCOP block with full Newton Hessian
         H_joint[sl, sl] = H_scop
         mapping[name] = sl
+
+        # Transform cross-blocks: gamma-space → beta_eff-space
+        # H[other, scop] = X_other^T W B_scop  →  scale columns by j_diag
+        if other_idx.size > 0:
+            scop_idx = np.arange(sl.start, sl.stop)
+            H_joint[np.ix_(other_idx, scop_idx)] *= j_diag[np.newaxis, :]
+            H_joint[np.ix_(scop_idx, other_idx)] *= j_diag[:, np.newaxis]
 
     return H_joint, mapping
 
@@ -566,6 +595,7 @@ def optimize_scop_efs_reml(
         n_reml_iter=n_reml_iter,
         converged=converged,
         lambda_history=lambda_history,
+        reml_penalties=final_all_pcs,
         objective=reml_laml_objective(
             dm,
             distribution,
