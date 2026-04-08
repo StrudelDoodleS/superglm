@@ -119,76 +119,86 @@ def scop_newton_step(
     beta = beta_scop.copy()
 
     # --- Forward map and residual ---
-    gamma_eff = reparam.forward(beta)
-    eta = B_scop @ gamma_eff
+    # forward() = exp(beta), jacobian is diagonal: diag(exp(beta))
+    gamma_eff = reparam.forward(beta)  # exp(beta), (q_eff,)
+    j_diag = gamma_eff  # d(exp(b))/db = exp(b) = gamma_eff
+
+    eta_bin = B_scop @ gamma_eff  # (n_bins,) or (n,)
     if bin_idx is not None:
-        eta = eta[bin_idx]
+        eta = eta_bin[bin_idx]  # scatter to (n,)
+    else:
+        eta = eta_bin
     residual = z - eta
 
-    obj_before = 0.5 * np.sum(W * residual**2) + 0.5 * lambda2 * (beta @ S_scop @ beta)
+    penalty_term = 0.5 * lambda2 * (beta @ S_scop @ beta)
+    obj_before = 0.5 * np.sum(W * residual**2) + penalty_term
 
-    # --- Jacobian ---
-    J_eff = reparam.jacobian(beta)  # (q_eff, q_eff)
-
-    # --- Weighted design in gamma space ---
+    # --- Weighted design products (exploit diagonal J) ---
+    # J_eff = diag(j_diag), so J^T @ BtWB @ J = diag(j) @ BtWB @ diag(j)
+    # and J^T @ r_eff = j_diag * r_eff (elementwise)
     if bin_idx is not None:
-        # Aggregate weights and weighted residuals to bin level
         n_bins = B_scop.shape[0]
         W_agg = np.bincount(bin_idx, weights=W, minlength=n_bins)
         Wr_agg = np.bincount(bin_idx, weights=W * residual, minlength=n_bins)
-        # B^T @ diag(W_agg) @ B  — equivalent to full B^T diag(W) B
-        BtWB = B_scop.T @ (B_scop * W_agg[:, None])
-        # B^T @ (W_agg * residual_agg) — but residual is already aggregated as Wr
-        r_eff = B_scop.T @ Wr_agg
+        BtWB = B_scop.T @ (B_scop * W_agg[:, None])  # (q_eff, q_eff)
+        r_eff = B_scop.T @ Wr_agg  # (q_eff,)
     else:
-        # BtW = B^T diag(W), shape (q_eff, n)
-        BtW = B_scop.T * W[np.newaxis, :]  # (q_eff, n)
-        BtWB = BtW @ B_scop  # (q_eff, q_eff)
-        # Projected residual: r_eff = B^T @ (W * residual), shape (q_eff,)
+        BtW = B_scop.T * W[np.newaxis, :]
+        BtWB = BtW @ B_scop
         r_eff = BtW @ residual
 
-    # --- Gradient ---
-    # grad = -J^T @ r_eff + lambda * S @ beta
-    grad_data = -(J_eff.T @ r_eff)
+    # --- Gradient (exploit diagonal J: J^T @ r = j * r) ---
+    grad_data = -(j_diag * r_eff)  # elementwise, not matrix multiply
     grad = grad_data + lambda2 * (S_scop @ beta)
 
-    # --- Gauss-Newton Hessian (first-order approximation) ---
-    H_gn = J_eff.T @ BtWB @ J_eff + lambda2 * S_scop
+    # --- Gauss-Newton Hessian (exploit diagonal J: J^T BtWB J = j j^T * BtWB) ---
+    jj = j_diag[:, None] * j_diag[None, :]  # (q_eff, q_eff) outer product
+    H_gn = jj * BtWB + lambda2 * S_scop  # elementwise Hadamard, not matmul
 
     # --- Second-order correction (full Newton) ---
-    # H_second is diagonal: H_second[i,i] = -(J_eff[:, i]^T @ r_eff)
-    # = grad_data[i] (the data part of the gradient, without penalty)
-    h_second_diag = grad_data  # shape (q_eff,)
-    H_full = H_gn + np.diag(h_second_diag)
+    # H_second[i,i] = grad_data[i] (diagonal correction)
+    H_full = H_gn + np.diag(grad_data)
 
     # --- Attempt full Newton step ---
     used_fisher = False
     step = _solve_step(H_full, grad)
     if step is None:
-        # Full Newton Hessian not PD -> fall back to Fisher (Gauss-Newton)
         used_fisher = True
-        # Add small ridge for numerical stability
         H_fisher = H_gn + 1e-8 * np.eye(q_eff)
         step = _solve_step(H_fisher, grad)
         if step is None:
-            # Even Fisher Hessian not PD (pathological case) -- add larger ridge
             H_fisher += 1e-4 * np.eye(q_eff)
             step = _solve_step(H_fisher, grad)
             if step is None:
-                # Last resort: steepest descent with tiny step
                 step = -1e-4 * grad
 
     # --- Damped step (step halving) ---
+    # Avoid recomputing full _objective() — inline the cheap parts.
+    # Only the data term changes; penalty term uses beta_new.
     alpha = 1.0
     beta_new = beta - alpha * step
-    obj_new = _objective(B_scop, W, z, beta_new, reparam, S_scop, lambda2, bin_idx=bin_idx)
+    gamma_new = reparam.forward(beta_new)
+    eta_bin_new = B_scop @ gamma_new
+    if bin_idx is not None:
+        eta_new = eta_bin_new[bin_idx]
+    else:
+        eta_new = eta_bin_new
+    res_new = z - eta_new
+    obj_new = 0.5 * np.sum(W * res_new**2) + 0.5 * lambda2 * (beta_new @ S_scop @ beta_new)
 
     for _ in range(max_halving):
         if obj_new <= obj_before + 1e-14:
             break
         alpha *= 0.5
         beta_new = beta - alpha * step
-        obj_new = _objective(B_scop, W, z, beta_new, reparam, S_scop, lambda2, bin_idx=bin_idx)
+        gamma_new = reparam.forward(beta_new)
+        eta_bin_new = B_scop @ gamma_new
+        if bin_idx is not None:
+            eta_new = eta_bin_new[bin_idx]
+        else:
+            eta_new = eta_bin_new
+        res_new = z - eta_new
+        obj_new = 0.5 * np.sum(W * res_new**2) + 0.5 * lambda2 * (beta_new @ S_scop @ beta_new)
 
     step_norm = float(np.linalg.norm(alpha * step))
 
