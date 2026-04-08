@@ -96,8 +96,22 @@
 - Added `TestSCOPFitRemlIntegration` class with 4 tests
 - All 77 tests pass across `test_scop_efs.py` + `test_monotone_fit.py`
 
+### Task 9: Regression and edge-case tests
+- DONE
+- Added `TestSCOPEFSRegression` class with 7 slow tests:
+  1. `test_unconstrained_reml_unchanged` — no monotone terms, standard REML
+  2. `test_fixed_scop_lambda_unchanged` — Phase 4 fixed-lambda path preserved
+  3. `test_efs_only_model_unchanged` — EFS-only (selection_penalty>0) unaffected
+  4. `test_discrete_scop_auto_lambda` — discrete + SCOP + auto lambda, monotone check
+  5. `test_poisson_scop_auto_lambda` — Poisson family with SCOP auto lambda
+  6. `test_summary_after_scop_auto_lambda` — summary() works after SCOP auto-lambda
+  7. `test_decreasing_scop_auto_lambda` — decreasing monotone with auto lambda
+- All 7 regression tests pass
+- Full non-slow suite: 1822 passed, 57 skipped, 0 failures
+
 ## Test Results
-- `tests/test_scop_efs.py`: 44/44 pass (40 existing + 4 new integration)
+- `tests/test_scop_efs.py`: 51/51 pass (40 unit + 4 integration + 7 regression)
 - `tests/test_monotone_fit.py`: 33/33 pass (1 modified: raises -> works)
 - `tests/test_ssp_audit.py`: 2/2 pass
 - `tests/test_multi_penalty.py` (non-slow): 41/41 pass
+- Full non-slow suite: 1822/1822 pass
