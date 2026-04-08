@@ -12,7 +12,7 @@ from superglm import SuperGLM
 from superglm.families import Gaussian
 from superglm.features.spline import PSpline
 from superglm.model.base import model_build_design_matrix
-from superglm.reml.scop_efs import build_scop_penalty_components
+from superglm.reml.scop_efs import assemble_joint_hessian, build_scop_penalty_components
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.types import PenaltyComponent
 
@@ -408,3 +408,200 @@ class TestBuildSCOPPenaltyComponents:
         pcs = build_scop_penalty_components(scop_states)
         assert len(pcs[0].eigvals_omega) == int(pcs[0].rank)
         assert np.all(pcs[0].eigvals_omega > 0)
+
+
+class TestAssembleJointHessian:
+    """Tests for assemble_joint_hessian."""
+
+    def test_no_scop_returns_original(self):
+        """Empty scop_states returns the original matrix and empty mapping."""
+        rng = np.random.default_rng(42)
+        p = 10
+        A = rng.standard_normal((p, p))
+        XtWX_plus_S = A.T @ A + np.eye(p)
+
+        H_joint, mapping = assemble_joint_hessian(XtWX_plus_S, {})
+        np.testing.assert_array_equal(H_joint, XtWX_plus_S)
+        assert mapping == {}
+
+    def test_scop_block_replaced(self):
+        """SCOP block in H_joint should equal H_scop_penalized, not the original."""
+        p = 12
+        q_scop = 5
+        scop_sl = slice(7, 12)  # last 5 cols
+
+        rng = np.random.default_rng(99)
+        A = rng.standard_normal((p, p))
+        XtWX_plus_S = A.T @ A + np.eye(p)
+        original_scop_block = XtWX_plus_S[scop_sl, scop_sl].copy()
+
+        # Build a distinct H_scop
+        B = rng.standard_normal((q_scop, q_scop))
+        H_scop = B.T @ B + 3.0 * np.eye(q_scop)
+
+        scop_states = {
+            0: {
+                "group_sl": scop_sl,
+                "H_scop_penalized": H_scop,
+                "group_name": "mono_x",
+            }
+        }
+
+        H_joint, mapping = assemble_joint_hessian(XtWX_plus_S, scop_states)
+
+        # SCOP block should be H_scop, not the original
+        np.testing.assert_array_equal(H_joint[scop_sl, scop_sl], H_scop)
+        assert not np.allclose(H_joint[scop_sl, scop_sl], original_scop_block)
+
+    def test_linear_block_unchanged(self):
+        """Non-SCOP (linear) block must be unchanged after assembly."""
+        p = 12
+        q_scop = 5
+        scop_sl = slice(7, 12)
+        linear_sl = slice(0, 7)
+
+        rng = np.random.default_rng(77)
+        A = rng.standard_normal((p, p))
+        XtWX_plus_S = A.T @ A + np.eye(p)
+
+        B = rng.standard_normal((q_scop, q_scop))
+        H_scop = B.T @ B + np.eye(q_scop)
+
+        scop_states = {
+            0: {
+                "group_sl": scop_sl,
+                "H_scop_penalized": H_scop,
+                "group_name": "mono_x",
+            }
+        }
+
+        H_joint, _ = assemble_joint_hessian(XtWX_plus_S, scop_states)
+
+        # Linear block unchanged
+        np.testing.assert_array_equal(
+            H_joint[linear_sl, linear_sl], XtWX_plus_S[linear_sl, linear_sl]
+        )
+        # Off-diagonal blocks also unchanged
+        np.testing.assert_array_equal(H_joint[linear_sl, scop_sl], XtWX_plus_S[linear_sl, scop_sl])
+        np.testing.assert_array_equal(H_joint[scop_sl, linear_sl], XtWX_plus_S[scop_sl, linear_sl])
+
+    def test_mapping_correct(self):
+        """Mapping dict has correct group_name -> slice entries."""
+        p = 15
+        sl_a = slice(5, 10)
+        sl_b = slice(10, 15)
+
+        XtWX_plus_S = np.eye(p)
+
+        scop_states = {
+            0: {
+                "group_sl": sl_a,
+                "H_scop_penalized": 2.0 * np.eye(5),
+                "group_name": "spline_a",
+            },
+            1: {
+                "group_sl": sl_b,
+                "H_scop_penalized": 3.0 * np.eye(5),
+                "group_name": "spline_b",
+            },
+        }
+
+        _, mapping = assemble_joint_hessian(XtWX_plus_S, scop_states)
+
+        assert "spline_a" in mapping
+        assert "spline_b" in mapping
+        assert mapping["spline_a"] == sl_a
+        assert mapping["spline_b"] == sl_b
+
+    def test_block_diagonal_logdet_additive(self):
+        """For true block-diagonal (zero off-diag), log|H| = sum of log|block|."""
+        p_lin = 4
+        q_scop = 6
+        p = p_lin + q_scop
+        scop_sl = slice(p_lin, p)
+
+        rng = np.random.default_rng(123)
+
+        # Build block-diagonal XtWX_plus_S (zeros in off-diagonal blocks)
+        A_lin = rng.standard_normal((p_lin, p_lin))
+        linear_block = A_lin.T @ A_lin + np.eye(p_lin)
+
+        XtWX_plus_S = np.zeros((p, p))
+        XtWX_plus_S[:p_lin, :p_lin] = linear_block
+        # Put placeholder in SCOP block (will be replaced)
+        XtWX_plus_S[scop_sl, scop_sl] = np.eye(q_scop)
+
+        # Build H_scop
+        B = rng.standard_normal((q_scop, q_scop))
+        S_scop = _first_diff_penalty(q_scop)
+        H_scop = B.T @ B + S_scop + 0.5 * np.eye(q_scop)
+
+        scop_states = {
+            0: {
+                "group_sl": scop_sl,
+                "H_scop_penalized": H_scop,
+                "group_name": "mono_x",
+            }
+        }
+
+        H_joint, _ = assemble_joint_hessian(XtWX_plus_S, scop_states)
+
+        # log|H_joint| should = log|linear_block| + log|H_scop|
+        _, logdet_joint = np.linalg.slogdet(H_joint)
+        _, logdet_linear = np.linalg.slogdet(linear_block)
+        _, logdet_scop = np.linalg.slogdet(H_scop)
+
+        np.testing.assert_allclose(logdet_joint, logdet_linear + logdet_scop, rtol=1e-10)
+
+    def test_inverse_valid(self):
+        """H_joint @ inv(H_joint) should approximate identity."""
+        p_lin = 5
+        q_scop = 7
+        p = p_lin + q_scop
+        scop_sl = slice(p_lin, p)
+
+        rng = np.random.default_rng(456)
+
+        # Build positive-definite XtWX_plus_S
+        A = rng.standard_normal((2 * p, p))
+        XtWX_plus_S = A.T @ A + np.eye(p)
+
+        # Build H_scop
+        C = rng.standard_normal((q_scop, q_scop))
+        H_scop = C.T @ C + 2.0 * np.eye(q_scop)
+
+        scop_states = {
+            0: {
+                "group_sl": scop_sl,
+                "H_scop_penalized": H_scop,
+                "group_name": "mono_x",
+            }
+        }
+
+        H_joint, _ = assemble_joint_hessian(XtWX_plus_S, scop_states)
+        H_joint_inv = np.linalg.inv(H_joint)
+        product = H_joint @ H_joint_inv
+
+        np.testing.assert_allclose(product, np.eye(p), atol=1e-10)
+
+    def test_original_matrix_not_mutated(self):
+        """assemble_joint_hessian must not modify the input matrix."""
+        p = 8
+        q_scop = 3
+        scop_sl = slice(5, 8)
+
+        rng = np.random.default_rng(789)
+        A = rng.standard_normal((p, p))
+        XtWX_plus_S = A.T @ A + np.eye(p)
+        original_copy = XtWX_plus_S.copy()
+
+        scop_states = {
+            0: {
+                "group_sl": scop_sl,
+                "H_scop_penalized": 5.0 * np.eye(q_scop),
+                "group_name": "mono_z",
+            }
+        }
+
+        assemble_joint_hessian(XtWX_plus_S, scop_states)
+        np.testing.assert_array_equal(XtWX_plus_S, original_copy)
