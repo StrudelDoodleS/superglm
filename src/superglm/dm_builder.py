@@ -522,10 +522,9 @@ def build_design_matrix(
             and getattr(spec, "monotone", None) is not None
             and getattr(spec, "monotone_mode", "postfit") == "fit"
         ):
-            raise NotImplementedError(
-                "Monotone fit-time constraints are not supported with "
-                "discrete=True. Use discrete=False or monotone_mode='postfit'."
-            )
+            # Monotone fit-time terms bypass discretization — use the
+            # non-discrete build path which emits constraint/SCOP metadata.
+            use_discrete = False
 
         if use_discrete:
             omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
