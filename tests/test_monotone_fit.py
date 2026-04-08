@@ -561,3 +561,62 @@ class TestMonotoneFixedLambdaREML:
         )
         model.fit_reml(df[["x"]], df["y"])
         assert model._result.converged
+
+
+# ── summary() monotone engine display tests ──────────────────────────────────────
+
+
+class TestSummaryMonotoneEngine:
+    """summary() shows monotone engine type (qp/scop) alongside direction."""
+
+    @pytest.mark.slow
+    def test_summary_shows_engine_for_qp(self):
+        """BSplineSmooth monotone summary shows 'qp' engine."""
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": BSplineSmooth(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+            },
+        )
+        model.fit(df[["x"]], df["y"])
+        summary_str = str(model.summary())
+
+        assert "qp" in summary_str.lower()
+        assert "mono=increasing (qp)" in summary_str
+
+    @pytest.mark.slow
+    def test_summary_shows_engine_for_scop(self):
+        """PSpline monotone summary shows 'scop' engine."""
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+            },
+        )
+        model.fit(df[["x"]], df["y"])
+        summary_str = str(model.summary())
+
+        assert "scop" in summary_str.lower()
+        assert "mono=increasing (scop)" in summary_str
