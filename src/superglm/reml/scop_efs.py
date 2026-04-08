@@ -330,7 +330,10 @@ def optimize_scop_efs_reml(
     lambdas = lambdas.copy()
 
     # -- Bootstrap: one IRLS with minimal penalty -> one EFS step --
-    boot_lambdas = {name: 1e-4 for name in lambdas}
+    # Fixed-policy lambdas keep their value; only estimated components get 1e-4.
+    boot_lambdas = {
+        name: (1e-4 if name in estimated_names else val) for name, val in lambdas.items()
+    }
     boot_out = fit_irls_direct(
         X=dm,
         y=y,

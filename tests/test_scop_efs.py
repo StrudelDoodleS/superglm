@@ -1389,6 +1389,38 @@ class TestSCOPFitRemlIntegration:
         for v in model._reml_lambdas.values():
             assert v == 1.0
 
+    @pytest.mark.slow
+    def test_mixed_fixed_and_estimated_lambda(self):
+        """Mixed model: fixed-lambda SSP + auto-lambda SCOP through EFS path."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = rng.uniform(0, 1, n)
+        y = 2 * x1 + np.sin(2 * np.pi * x2) + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+
+        fixed_val = 5.0
+        model = SuperGLM(
+            family=Gaussian(),
+            discrete=True,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(
+                    n_knots=8,
+                    lambda_policy=LambdaPolicy(mode="fixed", value=fixed_val),
+                ),
+            },
+        )
+        model.fit_reml(df[["x1", "x2"]], y)
+
+        assert model._result.converged
+        # x2 lambda must stay exactly at fixed value (SSP uses "x2:wiggle" key)
+        x2_key = next(k for k in model._reml_lambdas if k.startswith("x2"))
+        assert model._reml_lambdas[x2_key] == pytest.approx(fixed_val)
+        # x1 lambda was estimated
+        assert "x1" in model._reml_lambdas
+        assert model._reml_lambdas["x1"] > 0
+
     def test_qp_monotone_still_raises(self):
         """BSplineSmooth with monotone still raises NotImplementedError for auto lambda."""
         rng = np.random.default_rng(42)
