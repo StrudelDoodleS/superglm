@@ -791,18 +791,43 @@ def fit_reml(
             lambdas[pc.name] = lam_init
             estimated_names.add(pc.name)
 
+    def _scop_fixed_lambda_value(spec) -> float | None:
+        """Return a fixed SCOP lambda value, or None if it should be estimated.
+
+        SCOP is a single-penalty smooth, so dict-style lambda_policy uses the
+        same canonical single-component name as other splines: "wiggle".
+        """
+        lp = getattr(spec, "_lambda_policy", None)
+        if lp is None:
+            return None
+        if isinstance(lp, LambdaPolicy):
+            return float(lp.value) if lp.mode == "fixed" else None
+
+        unknown = set(lp) - {"wiggle"}
+        if unknown:
+            raise ValueError(
+                f"lambda_policy contains unknown component names: {unknown}. "
+                "Valid names: ['wiggle']"
+            )
+
+        wiggle_lp = lp.get("wiggle", LambdaPolicy.estimate())
+        return float(wiggle_lp.value) if wiggle_lp.mode == "fixed" else None
+
     # Check SCOP terms separately — they bypass SSP and don't enter reml_groups.
     # SCOP terms need fixed lambda_policy to be used with fit_reml().
     _scop_groups = [g for g in model._groups if g.monotone_engine == "scop" and g.penalized]
     _any_unfixed_scop = False
     for g in _scop_groups:
         spec = model._specs.get(g.feature_name)
-        lp = getattr(spec, "_lambda_policy", None) if spec is not None else None
-        if lp is None or not (isinstance(lp, LambdaPolicy) and lp.mode == "fixed"):
+        if spec is None:
+            _any_unfixed_scop = True
+            break
+        fixed_scop = _scop_fixed_lambda_value(spec)
+        if fixed_scop is None:
             _any_unfixed_scop = True
             break
         # Inject fixed lambda for SCOP group into the lambda dict.
-        lambdas[g.name] = float(lp.value)
+        lambdas[g.name] = fixed_scop
 
     # Monotone fit-time constraints are not compatible with automatic REML.
     # When ALL penalized terms have fixed lambdas, we can skip the REML
@@ -854,6 +879,8 @@ def fit_reml(
             y, mu, sample_weight, offset, model._distribution, model._link, result.phi
         )
         model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
+        # _reml_result and _reml_profile remain None (set at entry).
+        # The REML outer optimizer was not run — all lambdas were fixed.
 
         logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
         return model
