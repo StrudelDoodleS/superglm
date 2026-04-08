@@ -379,6 +379,7 @@ def optimize_scop_efs_reml(
     verbose: bool = False,
     reml_penalties: list[PenaltyComponent] | None = None,
     convergence: str = "deviance",
+    _scop_joint: bool = True,
 ) -> REMLResult:
     """SCOP-aware EFS REML optimizer for monotone splines.
 
@@ -456,6 +457,7 @@ def optimize_scop_efs_reml(
         return_scop_state=True,
         reml_penalties=reml_penalties,
         convergence=convergence,
+        _scop_joint=_scop_joint,
     )
 
     # Unpack: with return_xtwx=True and SCOP -> 4-tuple
@@ -520,6 +522,8 @@ def optimize_scop_efs_reml(
     # Convergence diagnostics
     inner_iter_history: list[int] = []
     objective_history: list[float] = []
+    scop_step_norms_history: list[dict[str, float]] = []
+    total_fisher_fallbacks = 0
 
     # Adaptive EFS step state (per-component)
     efs_alpha: dict[str, float] = {name: 1.0 for name in estimated_names}
@@ -546,6 +550,7 @@ def optimize_scop_efs_reml(
             return_scop_state=True,
             reml_penalties=reml_penalties,
             convergence=convergence,
+            _scop_joint=_scop_joint,
         )
 
         if len(irls_out) == 4:
@@ -557,6 +562,14 @@ def optimize_scop_efs_reml(
         beta = result.beta
         intercept = result.intercept
         inner_iter_history.append(result.n_iter)
+
+        # Collect SCOP diagnostics from this inner fit
+        step_norms_this_iter: dict[str, float] = {}
+        for gi, st in scop_states.items():
+            step_norms_this_iter[st["group_name"]] = st.get("last_step_norm", 0.0)
+            if st.get("last_fisher_fallback", False):
+                total_fisher_fallbacks += 1
+        scop_step_norms_history.append(step_norms_this_iter)
 
         # Step 2: Build penalty matrix
         S = _build_penalty_matrix(
@@ -684,6 +697,7 @@ def optimize_scop_efs_reml(
         return_scop_state=True,
         reml_penalties=reml_penalties,
         convergence=convergence,
+        _scop_joint=_scop_joint,
     )
 
     if len(final_out) == 4:
@@ -720,4 +734,6 @@ def optimize_scop_efs_reml(
         ),
         inner_iter_history=inner_iter_history,
         objective_history=objective_history,
+        scop_step_norms=scop_step_norms_history if scop_step_norms_history else None,
+        scop_fisher_fallbacks=total_fisher_fallbacks,
     )

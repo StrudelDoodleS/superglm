@@ -703,6 +703,8 @@ def fit_irls_direct(
                     for gi, jresult in joint_results.items():
                         _scop_state[gi]["beta_scop"] = jresult.beta_new
                         _scop_state[gi]["H_scop_penalized"] = jresult.H_penalized
+                        _scop_state[gi]["last_step_norm"] = jresult.step_norm
+                        _scop_state[gi]["last_fisher_fallback"] = jresult.used_fisher_fallback
                 else:
                     # Sequential (existing code) — for parity comparison
                     for gi, st in _scop_state.items():
@@ -984,6 +986,8 @@ def fit_irls_direct(
                 "bin_idx": st.get("bin_idx"),
                 "group_sl": groups[gi].sl,
                 "group_name": groups[gi].name,
+                "last_step_norm": st.get("last_step_norm", 0.0),
+                "last_fisher_fallback": st.get("last_fisher_fallback", False),
             }
     else:
         scop_converged = None

@@ -2383,6 +2383,11 @@ class TestMultiSCOPIntegration:
         assert len(reml_result.objective_history) > 0
         assert all(np.isfinite(v) for v in reml_result.objective_history)
 
+        # SCOP-specific diagnostics
+        assert reml_result.scop_step_norms is not None
+        assert len(reml_result.scop_step_norms) > 0
+        assert isinstance(reml_result.scop_fisher_fallbacks, int)
+
 
 # ---------------------------------------------------------------------------
 # Joint SCOP Newton step tests
