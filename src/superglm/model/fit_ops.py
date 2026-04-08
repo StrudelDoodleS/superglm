@@ -432,6 +432,11 @@ def model_reml_laml_objective(
     model, y, result, lambdas, sample_weight, offset_arr, XtWX=None, penalty_caches=None
 ):
     """Laplace REML/LAML objective up to additive constants."""
+    scop_states = None
+    reml_result = getattr(model, "_reml_result", None)
+    if reml_result is not None:
+        scop_states = getattr(reml_result, "scop_states", None)
+
     return reml_laml_objective(
         model._dm,
         model._distribution,
@@ -445,6 +450,7 @@ def model_reml_laml_objective(
         XtWX=XtWX,
         penalty_caches=penalty_caches,
         reml_penalties=getattr(model, "_reml_penalties", None),
+        scop_states=scop_states,
     )
 
 
@@ -831,12 +837,16 @@ def fit_reml(
         # Inject fixed lambda for SCOP group into the lambda dict.
         lambdas[g.name] = fixed_scop
 
-    # Monotone fit-time constraints are not compatible with automatic REML.
-    # When ALL penalized terms have fixed lambdas, we can skip the REML
-    # optimizer and call fit_irls_direct directly with fixed lambda values.
-    if _has_monotone and (estimated_names or _any_unfixed_scop):
+    # Monotone routing — dispatch based on engine type.
+    _has_qp_monotone = any(g.monotone_engine == "qp" for g in model._groups if g.monotone_engine)
+    _has_scop_monotone = any(
+        g.monotone_engine == "scop" for g in model._groups if g.monotone_engine
+    )
+
+    # QP monotone with auto lambda → still raises (no Newton Hessian).
+    if _has_qp_monotone and (estimated_names or _any_unfixed_scop):
         raise NotImplementedError(
-            "Automatic smoothness selection is not yet available when monotone "
+            "Automatic smoothness selection is not yet available when QP monotone "
             "fit-time terms are present. Supply fixed smoothing parameters via "
             "lambda_policy=LambdaPolicy(mode='fixed', value=X), or use "
             "monotone_mode='postfit'."
@@ -847,10 +857,9 @@ def fit_reml(
     lam1 = model.penalty.lambda1
     use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
 
-    if _has_monotone:
-        # All lambdas are fixed (guard above ensures this).
-        # Call fit_irls_direct directly — the REML optimizer can't handle
-        # monotone constraints (QP / SCOP inner solvers).
+    if _has_monotone and not _any_unfixed_scop and not estimated_names:
+        # All lambdas are fixed (Phase 4 path) — single fit_irls_direct call.
+        # No REML optimizer needed.
         result, XtWX_S_inv = fit_irls_direct(
             X=model._dm,
             y=y,
@@ -885,6 +894,70 @@ def fit_reml(
         # The REML outer optimizer was not run — all lambdas were fixed.
 
         logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
+        return model
+
+    if _any_unfixed_scop or (_has_scop_monotone and estimated_names):
+        # SCOP with auto-lambda → SCOP EFS optimizer.
+        # Add unfixed SCOP group names to estimated_names.
+        for g in model._groups:
+            if g.monotone_engine == "scop" and g.penalized:
+                spec = model._specs.get(g.feature_name or g.name)
+                fixed_val = _scop_fixed_lambda_value(spec)
+                if fixed_val is None:
+                    estimated_names.add(g.name)
+
+        from superglm.reml.scop_efs import optimize_scop_efs_reml
+
+        best = optimize_scop_efs_reml(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            sample_weight=sample_weight,
+            offset_arr=offset_arr,
+            lambdas=lambdas,
+            estimated_names=estimated_names,
+            max_reml_iter=max_reml_iter,
+            reml_tol=reml_tol,
+            pirls_tol=pirls_tol,
+            max_pirls_iter=max_pirls_iter,
+            verbose=verbose,
+            reml_penalties=reml_penalties,
+        )
+
+        # Post-fit housekeeping (same structure as other REML paths).
+        model._result = best.pirls_result
+        model._reml_lambdas = best.lambdas
+        model._reml_penalties = best.reml_penalties if best.reml_penalties else reml_penalties
+        model._reml_result = best
+
+        eta = model._dm.matvec(best.pirls_result.beta) + best.pirls_result.intercept
+        if offset is not None:
+            eta = eta + offset
+        eta = stabilize_eta(eta, model._link)
+        mu = clip_mu(model._link.inverse(eta), model._distribution)
+
+        model._fit_stats = _compute_fit_stats(
+            y,
+            mu,
+            sample_weight,
+            offset,
+            model._distribution,
+            model._link,
+            best.pirls_result.phi,
+        )
+        model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
+
+        _profile["total_s"] = _time.perf_counter() - _t_total_start
+        _profile["n_reml_iter"] = best.n_reml_iter
+        _profile["converged"] = best.converged
+        model._reml_profile = _profile
+
+        logger.info(
+            f"REML SCOP EFS converged={best.converged} in {best.n_reml_iter} iters, "
+            f"lambdas={best.lambdas}"
+        )
         return model
 
     if not estimated_names:

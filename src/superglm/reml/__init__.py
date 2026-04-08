@@ -47,6 +47,7 @@ from superglm.reml.penalty_algebra import (  # noqa: F401
 )
 from superglm.reml.result import PenaltyCache, REMLResult, _map_beta_between_bases  # noqa: F401
 from superglm.reml.runner import run_reml_once  # noqa: F401
+from superglm.reml.scop_efs import optimize_scop_efs_reml  # noqa: F401
 from superglm.reml.w_derivatives import (  # noqa: F401
     compute_d2W_deta2,
     compute_dW_deta,
