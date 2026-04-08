@@ -40,7 +40,6 @@ class REMLResult:
     objective_history: list[float] | None = None  # REML objective per outer step
     scop_step_norms: list[dict[str, float]] | None = None  # per-group Newton step_norm per step
     scop_fisher_fallbacks: int = 0  # total Fisher-fallback count
-    scop_halving_count: int = 0  # total step-halving count
 
 
 def _map_beta_between_bases(

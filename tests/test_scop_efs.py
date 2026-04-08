@@ -2002,6 +2002,9 @@ class TestMultiSCOPIntegration:
         model.fit_reml(df[["x1", "x2"]], y)
 
         assert model._result.converged
+        assert model._reml_result.converged, (
+            f"Outer REML did not converge in {model._reml_result.n_reml_iter} iterations"
+        )
         assert model._reml_lambdas is not None
         assert len(model._reml_lambdas) >= 2
 
@@ -2046,8 +2049,11 @@ class TestMultiSCOPIntegration:
         model.fit_reml(df[["x1", "x2", "x3"]], y)
 
         assert model._result.converged
+        # 3-term SCOP at small n may not converge tightly at default reml_tol,
+        # but lambdas should be positive and finite
         assert model._reml_lambdas is not None
         assert len(model._reml_lambdas) >= 3
+        assert all(v > 0 and np.isfinite(v) for v in model._reml_lambdas.values())
 
     @pytest.mark.slow
     def test_mixed_scop_and_ordinary_ssp(self):
