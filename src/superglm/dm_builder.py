@@ -656,6 +656,25 @@ def build_design_matrix(
             result = spec.build(x_col, sample_weight=sample_weight)
             infos = result if isinstance(result, list) else [result]
 
+        # Resolve lambda_policies from the spec onto each GroupInfo.
+        # build() does this internally, but the discrete path constructs
+        # GroupInfo manually and needs an explicit resolution step.
+        #
+        # For single-penalty discrete groups, build_penalty_components uses
+        # the multi-penalty path (omega_components with "wiggle" suffix) when
+        # penalty_components is set. We need to ensure penalty_components is
+        # populated for single-penalty terms with lambda_policy, matching
+        # what build() does for non-discrete terms.
+        if hasattr(spec, "_lambda_policy") and spec._lambda_policy is not None:
+            for info in infos:
+                if info.lambda_policies is None:
+                    info.lambda_policies = spec._resolve_lambda_policies(info)
+                # Single-penalty terms need a synthetic penalty_components
+                # for the lambda_policy to flow through to build_penalty_components.
+                if info.penalty_components is None and info.penalty_matrix is not None:
+                    info.penalty_components = [("wiggle", info.penalty_matrix)]
+                    info.component_types = {"wiggle": "wiggle"}
+
         # Build GroupMatrix + GroupSlice for each subgroup
         r_inv_parts: list[NDArray] = []
 
