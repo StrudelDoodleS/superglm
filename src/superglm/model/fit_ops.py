@@ -203,14 +203,6 @@ def fit(
     if len(_monotone_engines) > 1:
         raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
 
-    # Guard: multiple SCOP terms in one model are not yet supported
-    # (sequential Gauss-Seidel sweep does not converge reliably).
-    _n_scop = sum(1 for g in model._groups if g.monotone_engine == "scop")
-    if _n_scop > 1:
-        raise NotImplementedError(
-            "Multiple SCOP monotone terms in the same model are not yet supported."
-        )
-
     # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed),
     # or when any group has monotone constraints (constrained QP / SCOP Newton).
     _has_constraints = any(g.constraints is not None for g in model._groups)
@@ -822,18 +814,18 @@ def fit_reml(
         return float(wiggle_lp.value) if wiggle_lp.mode == "fixed" else None
 
     # Check SCOP terms separately — they bypass SSP and don't enter reml_groups.
-    # SCOP terms need fixed lambda_policy to be used with fit_reml().
+    # Inject fixed SCOP lambdas; flag any unfixed for the EFS optimizer.
     _scop_groups = [g for g in model._groups if g.monotone_engine == "scop" and g.penalized]
     _any_unfixed_scop = False
     for g in _scop_groups:
         spec = model._specs.get(g.feature_name)
         if spec is None:
             _any_unfixed_scop = True
-            break
+            continue
         fixed_scop = _scop_fixed_lambda_value(spec)
         if fixed_scop is None:
             _any_unfixed_scop = True
-            break
+            continue
         # Inject fixed lambda for SCOP group into the lambda dict.
         lambdas[g.name] = fixed_scop
 
@@ -898,13 +890,15 @@ def fit_reml(
 
     if _any_unfixed_scop or (_has_scop_monotone and estimated_names):
         # SCOP with auto-lambda → SCOP EFS optimizer.
-        # Add unfixed SCOP group names to estimated_names.
+        # Add unfixed SCOP group names to estimated_names and set initial lambdas.
+        lam_init = lambda2_init if lambda2_init is not None else model.lambda2
         for g in model._groups:
             if g.monotone_engine == "scop" and g.penalized:
                 spec = model._specs.get(g.feature_name or g.name)
                 fixed_val = _scop_fixed_lambda_value(spec)
                 if fixed_val is None:
                     estimated_names.add(g.name)
+                    lambdas[g.name] = lam_init
 
         from superglm.reml.scop_efs import optimize_scop_efs_reml
 
@@ -924,6 +918,7 @@ def fit_reml(
             max_pirls_iter=max_pirls_iter,
             verbose=verbose,
             reml_penalties=reml_penalties,
+            convergence=model._convergence,
         )
 
         # Post-fit housekeeping (same structure as other REML paths).
