@@ -42,6 +42,7 @@ def reml_laml_objective(
     log_det_H: float | None = None,
     S_override: NDArray | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
+    scop_states: dict[int, dict] | None = None,
 ) -> float:
     """Laplace REML/LAML objective up to additive constants.
 
@@ -74,7 +75,12 @@ def reml_laml_objective(
         S = _build_penalty_matrix(
             dm.group_matrices, groups, lambdas, p, reml_penalties=reml_penalties
         )
-    penalty_quad = float(result.beta @ S @ result.beta)
+    if scop_states:
+        from superglm.reml.scop_efs import compute_scop_aware_penalty_quad
+
+        penalty_quad = compute_scop_aware_penalty_quad(result.beta, S, scop_states, lambdas)
+    else:
+        penalty_quad = float(result.beta @ S @ result.beta)
 
     # log|S|_+ -- use multi-penalty-aware path when reml_penalties available
     if reml_penalties is not None:
@@ -90,6 +96,14 @@ def reml_laml_objective(
     # log|H| = log|X'WX + S| -- reuse precomputed value if available
     if log_det_H is not None:
         logdet_m = log_det_H
+    elif scop_states:
+        from superglm.reml.scop_efs import assemble_joint_hessian
+
+        H_joint, _ = assemble_joint_hessian(XtWX + S, scop_states)
+        eigvals_m = np.linalg.eigvalsh(H_joint)
+        thresh_m = 1e-10 * max(eigvals_m.max(), 1e-12)
+        pos_m = eigvals_m[eigvals_m > thresh_m]
+        logdet_m = float(np.sum(np.log(pos_m))) if pos_m.size else 0.0
     else:
         M = XtWX + S
         eigvals_m = np.linalg.eigvalsh(M)

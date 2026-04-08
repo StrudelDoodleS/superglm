@@ -45,6 +45,9 @@ class SCOPNewtonResult:
     used_fisher_fallback: bool
     """True if the full Newton Hessian was not PD and Fisher scoring was used."""
 
+    H_penalized: NDArray | None = None
+    """(q_eff, q_eff) penalized Hessian from the Newton step, or None."""
+
 
 def _objective(
     B_scop: NDArray,
@@ -70,6 +73,39 @@ def _objective(
     data_term = 0.5 * np.sum(W * residual**2)
     penalty_term = 0.5 * lambda2 * (beta_scop @ S_scop @ beta_scop)
     return float(data_term + penalty_term)
+
+
+def _safe_trial_objective(
+    B_scop: NDArray,
+    W: NDArray,
+    z: NDArray,
+    beta_trial: NDArray,
+    reparam: SCOPSolverReparam,
+    S_scop: NDArray,
+    lambda2: float,
+    bin_idx: NDArray | None,
+) -> float:
+    """Evaluate trial-step objective, returning np.inf on any non-finite quantity.
+
+    Overflow in exp(beta_eff), residual**2, or the penalty term is treated
+    as a rejected line-search proposal rather than a warning-producing path.
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        gamma_trial = reparam.forward(beta_trial)
+        if not np.all(np.isfinite(gamma_trial)):
+            return np.inf
+        eta_bin = B_scop @ gamma_trial
+        if bin_idx is not None:
+            eta_trial = eta_bin[bin_idx]
+        else:
+            eta_trial = eta_bin
+        res = z - eta_trial
+        data_term = 0.5 * np.sum(W * res**2)
+        penalty_term = 0.5 * lambda2 * float(beta_trial @ S_scop @ beta_trial)
+        obj = data_term + penalty_term
+    if not np.isfinite(obj):
+        return np.inf
+    return float(obj)
 
 
 def scop_newton_step(
@@ -130,8 +166,19 @@ def scop_newton_step(
         eta = eta_bin
     residual = z - eta
 
-    penalty_term = 0.5 * lambda2 * (beta @ S_scop @ beta)
-    obj_before = 0.5 * np.sum(W * residual**2) + penalty_term
+    obj_before = _safe_trial_objective(B_scop, W, z, beta, reparam, S_scop, lambda2, bin_idx)
+
+    # If the starting point is already non-finite, we cannot compute a
+    # meaningful gradient or Hessian.  Return a no-op.
+    if not np.isfinite(obj_before):
+        return SCOPNewtonResult(
+            beta_new=beta,
+            objective_before=np.inf,
+            objective_after=np.inf,
+            step_norm=0.0,
+            used_fisher_fallback=False,
+            H_penalized=lambda2 * S_scop,
+        )
 
     # --- Weighted design products (exploit diagonal J) ---
     # J_eff = diag(j_diag), so J^T @ BtWB @ J = diag(j) @ BtWB @ diag(j)
@@ -173,34 +220,30 @@ def scop_newton_step(
                 step = -1e-4 * grad
 
     # --- Damped step (step halving) ---
-    # Avoid recomputing full _objective() — inline the cheap parts.
-    # Only the data term changes; penalty term uses beta_new.
+    # Non-finite trial states (overflow in exp(beta_eff), residual**2, etc.)
+    # are treated as rejected line-search proposals, never as accepted iterates.
     alpha = 1.0
-    beta_new = beta - alpha * step
-    gamma_new = reparam.forward(beta_new)
-    eta_bin_new = B_scop @ gamma_new
-    if bin_idx is not None:
-        eta_new = eta_bin_new[bin_idx]
-    else:
-        eta_new = eta_bin_new
-    res_new = z - eta_new
-    obj_new = 0.5 * np.sum(W * res_new**2) + 0.5 * lambda2 * (beta_new @ S_scop @ beta_new)
+    accepted = False
 
-    for _ in range(max_halving):
-        if obj_new <= obj_before + 1e-14:
+    for _ in range(max_halving + 1):  # +1 for the initial full step
+        beta_trial = beta - alpha * step
+        obj_trial = _safe_trial_objective(
+            B_scop, W, z, beta_trial, reparam, S_scop, lambda2, bin_idx
+        )
+        if np.isfinite(obj_trial) and obj_trial <= obj_before + 1e-14:
+            accepted = True
             break
         alpha *= 0.5
-        beta_new = beta - alpha * step
-        gamma_new = reparam.forward(beta_new)
-        eta_bin_new = B_scop @ gamma_new
-        if bin_idx is not None:
-            eta_new = eta_bin_new[bin_idx]
-        else:
-            eta_new = eta_bin_new
-        res_new = z - eta_new
-        obj_new = 0.5 * np.sum(W * res_new**2) + 0.5 * lambda2 * (beta_new @ S_scop @ beta_new)
 
-    step_norm = float(np.linalg.norm(alpha * step))
+    if accepted:
+        beta_new = beta_trial
+        obj_new = obj_trial
+        step_norm = float(np.linalg.norm(alpha * step))
+    else:
+        # All halvings failed — reject the step entirely
+        beta_new = beta
+        obj_new = obj_before
+        step_norm = 0.0
 
     return SCOPNewtonResult(
         beta_new=beta_new,
@@ -208,6 +251,7 @@ def scop_newton_step(
         objective_after=float(obj_new),
         step_norm=step_norm,
         used_fisher_fallback=used_fisher,
+        H_penalized=H_full,
     )
 
 
