@@ -83,8 +83,21 @@
 - Task 8: Wire fit_reml to SCOP EFS optimizer
 - Task 9: Regression and edge-case tests
 
+### Task 8: Wire fit_reml to SCOP EFS optimizer
+- DONE
+- Replaced blanket `NotImplementedError` with engine-specific routing:
+  - QP monotone (BSplineSmooth) still raises (no Newton Hessian)
+  - SCOP monotone with unfixed lambda -> `optimize_scop_efs_reml`
+  - SCOP monotone with all fixed lambdas -> Phase 4 single-fit path
+  - No monotone -> existing direct/EFS paths unchanged
+- Moved `offset_arr` computation before SCOP routing (was after guard)
+- Post-fit housekeeping: _result, _reml_lambdas, _reml_penalties, _reml_result, _fit_stats, _reml_profile
+- Changed `test_fit_reml_without_fixed_lambdas_raises_scop` to `test_fit_reml_without_fixed_lambdas_works_scop`
+- Added `TestSCOPFitRemlIntegration` class with 4 tests
+- All 77 tests pass across `test_scop_efs.py` + `test_monotone_fit.py`
+
 ## Test Results
-- `tests/test_scop_efs.py`: 40/40 pass (non-slow: 9 Task 2 + 7 Task 4 + 4 Task 3 + 5 Task 5; slow: 9 Task 1)
-- `tests/test_monotone_fit.py` (non-slow): 7/7 pass
+- `tests/test_scop_efs.py`: 44/44 pass (40 existing + 4 new integration)
+- `tests/test_monotone_fit.py`: 33/33 pass (1 modified: raises -> works)
 - `tests/test_ssp_audit.py`: 2/2 pass
 - `tests/test_multi_penalty.py` (non-slow): 41/41 pass
