@@ -1066,3 +1066,170 @@ class TestSCOPAwareObjective:
         assert val_none == val_explicit_none, (
             f"Default and explicit None should be identical: {val_none} vs {val_explicit_none}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Part 7: Tests for optimize_scop_efs_reml (full SCOP EFS outer loop)
+# ---------------------------------------------------------------------------
+
+from superglm.reml.result import REMLResult  # noqa: E402
+from superglm.reml.scop_efs import optimize_scop_efs_reml  # noqa: E402
+
+
+class TestSCOPEFSOuterLoop:
+    """Tests for the full SCOP-aware EFS outer loop."""
+
+    @pytest.fixture
+    def scop_reml_model(self):
+        """Build SCOP model inputs for REML outer loop tests."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 1 / (1 + np.exp(-10 * (x - 0.5))) + rng.normal(0, 0.1, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+        )
+        y_out, sample_weight, offset = model_build_design_matrix(model, df, y, np.ones(n), None)
+        offset_arr = np.zeros(n) if offset is None else np.array(offset)
+        return model, y_out, np.array(sample_weight), offset_arr, df
+
+    @pytest.mark.slow
+    def test_converges(self, scop_reml_model):
+        """optimize_scop_efs_reml should return REMLResult and converge."""
+        model, y, sample_weight, offset, _ = scop_reml_model
+        lambdas = {"x": 1.0}
+        estimated_names = {"x"}
+
+        result = optimize_scop_efs_reml(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            sample_weight=sample_weight,
+            offset_arr=offset,
+            lambdas=lambdas,
+            estimated_names=estimated_names,
+            max_reml_iter=20,
+            reml_tol=1e-6,
+            verbose=False,
+        )
+
+        assert isinstance(result, REMLResult)
+        # Should converge or at least finish within max_reml_iter
+        assert result.converged or result.n_reml_iter < 20
+
+    @pytest.mark.slow
+    def test_lambda_responds_to_noise(self, scop_reml_model):
+        """Higher noise should produce higher lambda (more smoothing)."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x = np.sort(rng.uniform(0, 1, n))
+
+        results = {}
+        for noise_label, sigma in [("low", 0.1), ("high", 1.0)]:
+            y = 1 / (1 + np.exp(-10 * (x - 0.5))) + rng.normal(0, sigma, n)
+            df = pd.DataFrame({"x": x})
+
+            model = SuperGLM(
+                family=Gaussian(),
+                selection_penalty=0,
+                discrete=True,
+                features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+            )
+            y_out, sw, off = model_build_design_matrix(model, df, y, np.ones(n), None)
+
+            res = optimize_scop_efs_reml(
+                dm=model._dm,
+                distribution=model._distribution,
+                link=model._link,
+                groups=model._groups,
+                y=y_out,
+                sample_weight=np.array(sw),
+                offset_arr=np.array(off) if off is not None else np.zeros(n),
+                lambdas={"x": 1.0},
+                estimated_names={"x"},
+                max_reml_iter=20,
+                reml_tol=1e-6,
+            )
+            results[noise_label] = res
+
+        lam_lo = results["low"].lambdas["x"]
+        lam_hi = results["high"].lambdas["x"]
+        assert lam_hi > lam_lo, (
+            f"Expected lambda_high > lambda_low, got {lam_hi:.4g} vs {lam_lo:.4g}"
+        )
+
+    @pytest.mark.slow
+    def test_predictions_are_monotone(self, scop_reml_model):
+        """After EFS convergence, predictions should be monotonically increasing."""
+        model, y, sample_weight, offset, df = scop_reml_model
+        lambdas = {"x": 1.0}
+
+        result = optimize_scop_efs_reml(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            sample_weight=sample_weight,
+            offset_arr=offset,
+            lambdas=lambdas,
+            estimated_names={"x"},
+            max_reml_iter=20,
+            reml_tol=1e-6,
+        )
+
+        # Compute fitted values using final coefficients
+        beta = result.pirls_result.beta
+        intercept = result.pirls_result.intercept
+        eta = model._dm.matvec(beta) + intercept
+        if offset is not None:
+            eta = eta + offset
+
+        mu = model._link.inverse(eta)
+
+        # x is sorted, so fitted values should be monotone increasing
+        x = df["x"].values
+        sort_idx = np.argsort(x)
+        mu_sorted = mu[sort_idx]
+        diffs = np.diff(mu_sorted)
+        assert np.all(diffs >= -1e-6), f"Predictions not monotone: min diff = {diffs.min():.2e}"
+
+    @pytest.mark.slow
+    def test_returns_reml_result_with_history(self, scop_reml_model):
+        """Result should have lambda_history with multiple entries and correct keys."""
+        model, y, sample_weight, offset, _ = scop_reml_model
+        lambdas = {"x": 1.0}
+
+        result = optimize_scop_efs_reml(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            sample_weight=sample_weight,
+            offset_arr=offset,
+            lambdas=lambdas,
+            estimated_names={"x"},
+            max_reml_iter=20,
+            reml_tol=1e-6,
+        )
+
+        assert isinstance(result, REMLResult)
+        assert len(result.lambda_history) > 1, (
+            f"Expected multiple history entries, got {len(result.lambda_history)}"
+        )
+        assert isinstance(result.lambdas, dict)
+        assert "x" in result.lambdas
+        assert result.lambdas["x"] > 0
+
+        # Each history entry should be a dict with "x" key
+        for entry in result.lambda_history:
+            assert isinstance(entry, dict)
+            assert "x" in entry

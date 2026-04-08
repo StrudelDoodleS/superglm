@@ -12,10 +12,17 @@ Biometrics 73(4), 1071-1081.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.types import PenaltyComponent
+from superglm.group_matrix import DesignMatrix
+from superglm.reml.objective import reml_laml_objective
+from superglm.reml.penalty_algebra import compute_total_penalty_rank
+from superglm.reml.result import REMLResult
+from superglm.solvers.irls_direct import _build_penalty_matrix, _safe_decompose_H, fit_irls_direct
+from superglm.types import GroupSlice, PenaltyComponent
 
 
 def build_scop_penalty_components(
@@ -219,3 +226,358 @@ def scop_efs_lambda_update(
     lam_new = lam_old * float(np.exp(log_step))
 
     return lam_new
+
+
+def optimize_scop_efs_reml(
+    dm: DesignMatrix,
+    distribution: Any,
+    link: Any,
+    groups: list[GroupSlice],
+    y: NDArray,
+    sample_weight: NDArray,
+    offset_arr: NDArray,
+    lambdas: dict[str, float],
+    estimated_names: set[str],
+    *,
+    max_reml_iter: int = 20,
+    reml_tol: float = 1e-6,
+    pirls_tol: float = 1e-6,
+    max_pirls_iter: int = 100,
+    verbose: bool = False,
+    reml_penalties: list[PenaltyComponent] | None = None,
+) -> REMLResult:
+    """SCOP-aware EFS REML optimizer for monotone splines.
+
+    Implements the Fellner-Schall fixed-point iteration (Wood & Fasiolo 2017)
+    using ``fit_irls_direct`` with SCOP Newton inner solver. Each outer
+    iteration:
+
+    1. Fit via ``fit_irls_direct(return_xtwx=True, return_scop_state=True)``
+    2. Build the joint Hessian with SCOP Newton blocks replacing linear blocks
+    3. Compute EFS lambda updates using SCOP-aware quad and trace terms
+    4. Step-damp via REML objective comparison
+    5. Check convergence on max abs log-lambda change
+
+    Parameters
+    ----------
+    dm : DesignMatrix
+        Design matrix (discretized for SCOP).
+    distribution : Distribution
+        GLM family.
+    link : Link
+        Link function.
+    groups : list of GroupSlice
+        Group definitions for each feature.
+    y : ndarray
+        Response vector.
+    sample_weight : ndarray
+        Sample weights (exposure/frequency).
+    offset_arr : ndarray
+        Offset vector.
+    lambdas : dict
+        Initial smoothing parameters keyed by group name.
+    estimated_names : set of str
+        Names of lambda components to estimate (others held fixed).
+    max_reml_iter : int
+        Maximum outer EFS iterations.
+    reml_tol : float
+        Convergence tolerance on max abs log-lambda change.
+    pirls_tol : float
+        Convergence tolerance for inner IRLS solver.
+    max_pirls_iter : int
+        Maximum inner IRLS iterations.
+    verbose : bool
+        Print iteration progress.
+    reml_penalties : list of PenaltyComponent, optional
+        Pre-built penalty components for non-SCOP terms.
+
+    Returns
+    -------
+    REMLResult
+        Result with estimated lambdas, final PIRLS result, convergence info.
+    """
+    scale_known = getattr(distribution, "scale_known", True)
+    n = len(y)
+    lambdas = lambdas.copy()
+
+    # -- Bootstrap: one IRLS with minimal penalty -> one EFS step --
+    boot_lambdas = {name: 1e-4 for name in lambdas}
+    boot_out = fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=sample_weight,
+        family=distribution,
+        link=link,
+        groups=groups,
+        lambda2=boot_lambdas,
+        offset=offset_arr,
+        tol=pirls_tol,
+        max_iter=max_pirls_iter,
+        return_xtwx=True,
+        return_scop_state=True,
+        reml_penalties=reml_penalties,
+    )
+
+    # Unpack: with return_xtwx=True and SCOP -> 4-tuple
+    if len(boot_out) == 4:
+        boot_result, boot_H_inv, boot_XtWX, boot_scop_states = boot_out
+    else:
+        boot_result, boot_H_inv, boot_XtWX = boot_out
+        boot_scop_states = {}
+
+    # Build penalty matrix
+    S_boot = _build_penalty_matrix(
+        dm.group_matrices, groups, boot_lambdas, dm.p, reml_penalties=reml_penalties
+    )
+
+    # Build SCOP penalty components and merge with reml_penalties
+    scop_pcs = build_scop_penalty_components(boot_scop_states)
+    all_pcs = list(reml_penalties or []) + scop_pcs
+
+    # Assemble joint Hessian for bootstrap
+    H_joint_boot, _ = assemble_joint_hessian(boot_XtWX + S_boot, boot_scop_states)
+    H_joint_inv_boot, _, _ = _safe_decompose_H(H_joint_boot)
+
+    # Estimate phi for estimated-scale families
+    boot_inv_phi = 1.0
+    if not scale_known:
+        pq_boot = compute_scop_aware_penalty_quad(
+            boot_result.beta, S_boot, boot_scop_states, boot_lambdas
+        )
+        M_p = compute_total_penalty_rank(all_pcs)
+        boot_phi = max((boot_result.deviance + pq_boot) / max(n - M_p, 1.0), 1e-10)
+        boot_inv_phi = 1.0 / boot_phi
+
+    # One EFS fixed-point step on bootstrap beta
+    for pc in all_pcs:
+        if pc.name not in estimated_names:
+            continue
+        lam_new = scop_efs_lambda_update(
+            pc,
+            boot_result.beta,
+            H_joint_inv_boot,
+            boot_inv_phi,
+            boot_lambdas.get(pc.name, 1e-4),
+            boot_scop_states,
+        )
+        lambdas[pc.name] = float(np.clip(lam_new, 1e-6, 1e10))
+
+    if verbose:
+        lam_str = ", ".join(f"{pc.name}={lambdas[pc.name]:.4g}" for pc in all_pcs)
+        print(f"  SCOP REML bootstrap: lambdas=[{lam_str}]")
+
+    # -- Main EFS loop --
+    lambda_history: list[dict[str, float]] = [lambdas.copy()]
+    converged = False
+    n_reml_iter = 0
+    warm_beta: NDArray | None = boot_result.beta.copy()
+    warm_intercept: float = float(boot_result.intercept)
+
+    # Anderson(1) acceleration state (on log-lambda scale)
+    reml_update_names = [name for name in sorted(estimated_names) if name in lambdas]
+    aa_prev_log_x: NDArray | None = None
+    aa_prev_log_gx: NDArray | None = None
+
+    for reml_iter in range(max_reml_iter):
+        n_reml_iter = reml_iter + 1
+
+        # Step 1: Inner fit with SCOP state
+        irls_out = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=sample_weight,
+            family=distribution,
+            link=link,
+            groups=groups,
+            lambda2=lambdas,
+            offset=offset_arr,
+            beta_init=warm_beta,
+            intercept_init=warm_intercept,
+            tol=pirls_tol,
+            max_iter=max_pirls_iter,
+            return_xtwx=True,
+            return_scop_state=True,
+            reml_penalties=reml_penalties,
+        )
+
+        if len(irls_out) == 4:
+            result, H_inv, XtWX, scop_states = irls_out
+        else:
+            result, H_inv, XtWX = irls_out
+            scop_states = {}
+
+        beta = result.beta
+        intercept = result.intercept
+
+        # Step 2: Build penalty matrix
+        S = _build_penalty_matrix(
+            dm.group_matrices, groups, lambdas, dm.p, reml_penalties=reml_penalties
+        )
+
+        # Step 3: Joint Hessian
+        H_joint, _ = assemble_joint_hessian(XtWX + S, scop_states)
+        H_joint_inv, log_det_H_joint, _ = _safe_decompose_H(H_joint)
+
+        # Step 4: Build SCOP PCs and merge
+        scop_pcs = build_scop_penalty_components(scop_states)
+        all_pcs = list(reml_penalties or []) + scop_pcs
+
+        # Step 5: Estimate phi for estimated-scale families
+        inv_phi = 1.0
+        if not scale_known:
+            pq = compute_scop_aware_penalty_quad(beta, S, scop_states, lambdas)
+            M_p = compute_total_penalty_rank(all_pcs)
+            phi_hat = max((result.deviance + pq) / max(n - M_p, 1.0), 1e-10)
+            inv_phi = 1.0 / phi_hat
+
+        # Step 6: Lambda updates
+        lambdas_new = lambdas.copy()
+        for pc in all_pcs:
+            if pc.name not in estimated_names:
+                continue
+            lam_new = scop_efs_lambda_update(
+                pc,
+                beta,
+                H_joint_inv,
+                inv_phi,
+                lambdas[pc.name],
+                scop_states,
+            )
+            lambdas_new[pc.name] = float(np.clip(lam_new, 1e-6, 1e10))
+
+        # Anderson(1) acceleration on log-lambda
+        if aa_prev_log_x is not None and len(reml_update_names) > 0:
+            log_x = np.array([np.log(lambdas[n_]) for n_ in reml_update_names])
+            log_gx = np.array([np.log(lambdas_new[n_]) for n_ in reml_update_names])
+            f_curr = log_gx - log_x
+            f_prev = aa_prev_log_gx - aa_prev_log_x
+            df = f_curr - f_prev
+            df_sq = float(np.dot(df, df))
+            if df_sq > 1e-20:
+                theta = float(-np.dot(f_curr, df) / df_sq)
+                theta = max(-0.5, min(theta, 2.0))
+                log_acc = (1.0 + theta) * log_gx - theta * aa_prev_log_gx
+                for i, name in enumerate(reml_update_names):
+                    lambdas_new[name] = float(np.clip(np.exp(log_acc[i]), 1e-6, 1e10))
+
+        if len(reml_update_names) > 0:
+            aa_prev_log_x = np.array([np.log(lambdas[n_]) for n_ in reml_update_names])
+            aa_prev_log_gx = np.array([np.log(lambdas_new[n_]) for n_ in reml_update_names])
+
+        # Step 7: Uphill-step guard via REML objective comparison
+        obj_curr = reml_laml_objective(
+            dm,
+            distribution,
+            link,
+            groups,
+            y,
+            result,
+            lambdas,
+            sample_weight,
+            offset_arr,
+            XtWX=XtWX,
+            reml_penalties=all_pcs,
+            scop_states=scop_states,
+        )
+        obj_trial = reml_laml_objective(
+            dm,
+            distribution,
+            link,
+            groups,
+            y,
+            result,
+            lambdas_new,
+            sample_weight,
+            offset_arr,
+            XtWX=XtWX,
+            reml_penalties=all_pcs,
+            scop_states=scop_states,
+        )
+        if obj_trial > obj_curr + 1e-8 * max(abs(obj_curr), 1.0):
+            # Half-step on log scale
+            for pc in all_pcs:
+                if pc.name not in estimated_names:
+                    continue
+                log_old = np.log(max(lambdas[pc.name], 1e-10))
+                log_new = np.log(max(lambdas_new[pc.name], 1e-10))
+                lambdas_new[pc.name] = float(np.clip(np.exp(0.5 * (log_old + log_new)), 1e-6, 1e10))
+            # Update AA state after damping
+            if len(reml_update_names) > 0:
+                aa_prev_log_gx = np.array([np.log(lambdas_new[n_]) for n_ in reml_update_names])
+
+        # Step 8: Convergence check
+        changes = [
+            abs(np.log(lambdas_new[pc.name]) - np.log(lambdas[pc.name]))
+            for pc in all_pcs
+            if lambdas[pc.name] > 0 and lambdas_new[pc.name] > 0
+        ]
+        max_change = max(changes) if changes else 0.0
+
+        if verbose:
+            lam_str = ", ".join(f"{pc.name}={lambdas_new[pc.name]:.4g}" for pc in all_pcs)
+            print(
+                f"  SCOP REML iter={n_reml_iter}  max_change={max_change:.6f}  lambdas=[{lam_str}]"
+            )
+
+        lambda_history.append(lambdas_new.copy())
+
+        if max_change < reml_tol:
+            converged = True
+            lambdas = lambdas_new
+            break
+
+        # Step 9: Warm start for next iteration
+        lambdas = lambdas_new
+        warm_beta = beta.copy()
+        warm_intercept = float(intercept)
+
+    # -- Final refit --
+    final_out = fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=sample_weight,
+        family=distribution,
+        link=link,
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset_arr,
+        beta_init=warm_beta,
+        intercept_init=warm_intercept,
+        tol=pirls_tol,
+        max_iter=max_pirls_iter,
+        return_xtwx=True,
+        return_scop_state=True,
+        reml_penalties=reml_penalties,
+    )
+
+    if len(final_out) == 4:
+        final_result, _, final_XtWX, final_scop_states = final_out
+    else:
+        final_result, _, final_XtWX = final_out
+        final_scop_states = {}
+
+    # Build final PCs for objective
+    final_scop_pcs = build_scop_penalty_components(final_scop_states)
+    final_all_pcs = list(reml_penalties or []) + final_scop_pcs
+
+    return REMLResult(
+        lambdas=lambdas,
+        pirls_result=final_result,
+        n_reml_iter=n_reml_iter,
+        converged=converged,
+        lambda_history=lambda_history,
+        objective=reml_laml_objective(
+            dm,
+            distribution,
+            link,
+            groups,
+            y,
+            final_result,
+            lambdas,
+            sample_weight,
+            offset_arr,
+            XtWX=final_XtWX,
+            reml_penalties=final_all_pcs,
+            scop_states=final_scop_states,
+        ),
+    )
