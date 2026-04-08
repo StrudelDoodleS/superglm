@@ -565,6 +565,93 @@ class TestMonotoneFixedLambdaREML:
         assert model._result.converged
 
 
+# ── discrete + monotone + fit_reml intersection tests ─────────────────────────
+
+
+class TestDiscreteMonotoneREML:
+    """The full intersection: discrete=True + monotone + fit_reml(fixed lambda).
+
+    Tests at 250k rows to exercise the discretization performance path
+    at meaningful scale.
+    """
+
+    @pytest.mark.slow
+    def test_discrete_qp_monotone_fit_reml(self):
+        """BSplineSmooth: discrete + monotone + fit_reml with fixed lambda."""
+        rng = np.random.default_rng(42)
+        n = 250_000
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.3, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": BSplineSmooth(
+                    n_knots=10,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], df["y"])
+
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8), f"min diff = {np.diff(pred).min():.2e}"
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+        # Verify the term is actually discretized
+        from superglm.group_matrix import DiscretizedSSPGroupMatrix
+
+        gm = model._dm.group_matrices[0]
+        assert isinstance(gm, DiscretizedSSPGroupMatrix), (
+            f"Expected DiscretizedSSPGroupMatrix, got {type(gm).__name__}"
+        )
+
+    @pytest.mark.slow
+    def test_discrete_scop_monotone_fit_reml(self):
+        """PSpline: discrete + monotone + fit_reml with fixed lambda."""
+        rng = np.random.default_rng(42)
+        n = 250_000
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.3, n)
+        df = pd.DataFrame({"x": x, "y": y})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(
+                    n_knots=10,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], df["y"])
+
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-8), f"min diff = {np.diff(pred).min():.2e}"
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+        # Verify the term used the discretized SCOP path
+        from superglm.group_matrix import DiscretizedSCOPGroupMatrix
+
+        gm = model._dm.group_matrices[0]
+        assert isinstance(gm, DiscretizedSCOPGroupMatrix), (
+            f"Expected DiscretizedSCOPGroupMatrix, got {type(gm).__name__}"
+        )
+
+
 # ── summary() monotone engine display tests ──────────────────────────────────────
 
 
