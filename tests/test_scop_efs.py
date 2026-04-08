@@ -2292,3 +2292,65 @@ class TestMultiSCOPIntegration:
         pred = model.predict(pred_df)
         diffs = np.diff(pred)
         assert np.all(diffs <= 1e-6), f"x2 predictions not decreasing: max diff = {diffs.max():.2e}"
+
+    @pytest.mark.slow
+    def test_single_scop_still_works(self):
+        """Single SCOP term regression — no breakage from multi-SCOP changes."""
+        rng = np.random.default_rng(42)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-6)
+
+    @pytest.mark.slow
+    def test_no_scop_model_unchanged(self):
+        """No SCOP terms — completely unaffected."""
+        rng = np.random.default_rng(42)
+        n = 300
+        x = rng.uniform(0, 1, n)
+        y = np.sin(2 * np.pi * x) + rng.normal(0, 0.3, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            features={"x": PSpline(n_knots=10)},
+        )
+        model.fit_reml(df[["x"]], y)
+        assert model._result.converged
+
+    @pytest.mark.slow
+    def test_qp_monotone_still_raises(self):
+        """QP monotone auto-lambda still raises NotImplementedError."""
+        from superglm.features.spline import BSplineSmooth
+
+        rng = np.random.default_rng(42)
+        n = 200
+        x = rng.uniform(0, 1, n)
+        y = 2 * x + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="QP monotone"):
+            model.fit_reml(df[["x"]], y)
