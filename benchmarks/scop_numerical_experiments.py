@@ -49,11 +49,15 @@ class ExperimentRow:
 
 def _min_monotone_diff(model: SuperGLM, feature_name: str) -> float:
     spec = model._specs[feature_name]
-    group = next(g for g in model._groups if g.feature_name == feature_name)
-    beta = model.result.beta[group.sl]
+    groups = [g for g in model._groups if g.feature_name == feature_name]
+    beta = np.concatenate([model.result.beta[g.sl] for g in groups])
     grid = np.linspace(spec._lo, spec._hi, 400)
     eta = np.asarray(spec.transform(grid) @ beta, dtype=np.float64)
     return float(np.min(np.diff(eta)))
+
+
+def _min_monotone_diff_all(model: SuperGLM, feature_names: list[str]) -> float:
+    return min(_min_monotone_diff(model, feature_name) for feature_name in feature_names)
 
 
 def _max_abs_log_lambda_diff(ref: dict[str, float], other: dict[str, float]) -> float:
@@ -66,10 +70,15 @@ def _max_abs_log_lambda_diff(ref: dict[str, float], other: dict[str, float]) -> 
 
 
 def _fit_model(
-    X: pd.DataFrame, y: np.ndarray, w: np.ndarray, features: dict[str, object]
+    X: pd.DataFrame,
+    y: np.ndarray,
+    w: np.ndarray,
+    features: dict[str, object],
+    *,
+    max_reml_iter: int,
 ) -> SuperGLM:
     model = SuperGLM(family="poisson", discrete=True, features=features)
-    model.fit_reml(X, y, sample_weight=w, max_reml_iter=20)
+    model.fit_reml(X, y, sample_weight=w, max_reml_iter=max_reml_iter)
     return model
 
 
@@ -82,15 +91,16 @@ def _run_mode(
     w: np.ndarray,
     features: dict[str, object],
     compare_X: pd.DataFrame,
-    monotone_feature: str,
+    monotone_features: list[str],
     direct_pred: np.ndarray,
     direct_lambdas: dict[str, float],
+    max_reml_iter: int,
 ) -> ExperimentRow:
     reset_scop_prototype()
     configure_scop_prototype(**prototype_cfg)
     try:
         t0 = time.perf_counter()
-        model = _fit_model(X, y, w, features)
+        model = _fit_model(X, y, w, features, max_reml_iter=max_reml_iter)
         runtime_s = time.perf_counter() - t0
     finally:
         reset_scop_prototype()
@@ -111,41 +121,78 @@ def _run_mode(
         pred_rmse_vs_direct=rmse,
         pred_corr_vs_direct=corr,
         max_abs_log_lambda_diff=_max_abs_log_lambda_diff(direct_lambdas, rr.lambdas),
-        min_monotone_diff=_min_monotone_diff(model, monotone_feature),
+        min_monotone_diff=_min_monotone_diff_all(model, monotone_features),
     )
 
 
 def _synthetic_case(
     n: int, n_scop: int, k: int, seed: int
-) -> tuple[str, pd.DataFrame, np.ndarray, np.ndarray, dict[str, object], str]:
+) -> tuple[str, pd.DataFrame, np.ndarray, np.ndarray, dict[str, object], list[str]]:
     X, y, exposure = make_dataset(n=n, n_scop=n_scop, seed=seed)
     features = make_features(n_scop=n_scop, k=k, monotone=True)
-    return f"synthetic_n{n}_scop{n_scop}_k{k}", X, y, exposure, features, "x1"
+    monotone_features = [f"x{j + 1}" for j in range(n_scop)]
+    return f"synthetic_n{n}_scop{n_scop}_k{k}", X, y, exposure, features, monotone_features
 
 
-def _mtpl2_case() -> tuple[str, pd.DataFrame, np.ndarray, np.ndarray, dict[str, object], str]:
+def _load_mtpl2() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     df = pd.read_csv(MTPL2_PATH)
     exposure = df["Exposure"].to_numpy(dtype=np.float64)
     y = df["y_freq"].to_numpy(dtype=np.float64)
+    return df, y, exposure
+
+
+def _mtpl2_case_one_scop() -> tuple[
+    str, pd.DataFrame, np.ndarray, np.ndarray, dict[str, object], list[str]
+]:
+    df, y, exposure = _load_mtpl2()
     features = {
+        "DrivAge": Spline(kind="cr", k=16),
+        "VehAge": Spline(kind="cr", k=12),
+        "BonusMalus": PSpline(n_knots=12, monotone="increasing", monotone_mode="fit"),
+        "LogDensity": Spline(kind="cr", k=10),
+        "Area": Categorical(base="first"),
+    }
+    return "mtpl2_freq_1scop_bonusmalus", df, y, exposure, features, ["BonusMalus"]
+
+
+def _mtpl2_case_two_scop(
+    second_scop: str = "LogDensity",
+) -> tuple[str, pd.DataFrame, np.ndarray, np.ndarray, dict[str, object], list[str]]:
+    df, y, exposure = _load_mtpl2()
+    monotone_features = ["BonusMalus", second_scop]
+    features: dict[str, object] = {
         "DrivAge": Spline(kind="cr", k=16),
         "VehAge": Spline(kind="cr", k=12),
         "BonusMalus": PSpline(n_knots=12, monotone="increasing", monotone_mode="fit"),
         "Area": Categorical(base="first"),
     }
-    return "mtpl2_bonusmalus", df, y, exposure, features, "BonusMalus"
+    if second_scop == "LogDensity":
+        features["LogDensity"] = PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")
+    elif second_scop == "VehAge":
+        features["VehAge"] = PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")
+    else:
+        raise ValueError(
+            f"Unsupported second_scop={second_scop!r}; expected 'LogDensity' or 'VehAge'"
+        )
+    return (
+        f"mtpl2_freq_2scop_bonusmalus_{second_scop.lower()}",
+        df,
+        y,
+        exposure,
+        features,
+        monotone_features,
+    )
 
 
-def run_suite() -> pd.DataFrame:
+def run_suite(*, max_reml_iter: int, mtpl2_second_scop: str) -> pd.DataFrame:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     cases = [
-        _synthetic_case(n=100_000, n_scop=6, k=14, seed=202601),
         _synthetic_case(n=100_000, n_scop=10, k=14, seed=202602),
-        _synthetic_case(n=500_000, n_scop=2, k=14, seed=202603),
     ]
     if MTPL2_PATH.exists():
-        cases.append(_mtpl2_case())
+        cases.append(_mtpl2_case_one_scop())
+        cases.append(_mtpl2_case_two_scop(second_scop=mtpl2_second_scop))
 
     modes = [
         ("direct", {}),
@@ -181,10 +228,10 @@ def run_suite() -> pd.DataFrame:
     ]
 
     rows: list[ExperimentRow] = []
-    for case_name, X, y, w, features, monotone_feature in cases:
+    for case_name, X, y, w, features, monotone_features in cases:
         print(f"\n=== {case_name} ===")
         t0 = time.perf_counter()
-        direct_model = _fit_model(X, y, w, features)
+        direct_model = _fit_model(X, y, w, features, max_reml_iter=max_reml_iter)
         direct_runtime_s = time.perf_counter() - t0
         direct_rr = direct_model._reml_result
         compare_idx = np.linspace(0, len(X) - 1, min(len(X), 4096), dtype=np.intp)
@@ -203,7 +250,7 @@ def run_suite() -> pd.DataFrame:
             pred_rmse_vs_direct=0.0,
             pred_corr_vs_direct=1.0,
             max_abs_log_lambda_diff=0.0,
-            min_monotone_diff=_min_monotone_diff(direct_model, monotone_feature),
+            min_monotone_diff=_min_monotone_diff_all(direct_model, monotone_features),
         )
         direct_row.runtime_s = direct_runtime_s
         rows.append(direct_row)
@@ -224,9 +271,10 @@ def run_suite() -> pd.DataFrame:
                 w=w,
                 features=features,
                 compare_X=compare_X,
-                monotone_feature=monotone_feature,
+                monotone_features=monotone_features,
                 direct_pred=direct_pred,
                 direct_lambdas=direct_lambdas,
+                max_reml_iter=max_reml_iter,
             )
             row.case_name = case_name
             rows.append(row)
@@ -244,8 +292,15 @@ def run_suite() -> pd.DataFrame:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.parse_args()
-    run_suite()
+    parser.add_argument("--max-reml-iter", type=int, default=20)
+    parser.add_argument(
+        "--mtpl2-second-scop",
+        choices=["LogDensity", "VehAge"],
+        default="LogDensity",
+        help="Second monotone feature for the 2-SCOP MTPL2 stress case.",
+    )
+    args = parser.parse_args()
+    run_suite(max_reml_iter=args.max_reml_iter, mtpl2_second_scop=args.mtpl2_second_scop)
 
 
 if __name__ == "__main__":
