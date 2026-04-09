@@ -1518,6 +1518,46 @@ class TestSCOPFitRemlIntegration:
         pred = model.predict(pd.DataFrame({"x": x_grid}))
         assert np.all(np.diff(pred) >= -1e-6)
 
+        # Metadata should record passthrough strategy
+        assert model._last_fit_meta.get("lambda_strategy") == "qp_passthrough"
+
+    @pytest.mark.slow
+    def test_qp_passthrough_lambdas_match_unconstrained(self):
+        """QP passthrough lambdas should be close to unconstrained REML lambdas."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = rng.uniform(0, 1, n)
+        y = 2 * x1 + np.sin(2 * np.pi * x2) + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+
+        # Unconstrained REML
+        model_uc = SuperGLM(
+            family=Gaussian(),
+            features={
+                "x1": BSplineSmooth(n_knots=8),
+                "x2": PSpline(n_knots=8),
+            },
+        )
+        model_uc.fit_reml(df[["x1", "x2"]], y)
+
+        # QP passthrough
+        model_qp = SuperGLM(
+            family=Gaussian(),
+            features={
+                "x1": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8),
+            },
+        )
+        model_qp.fit_reml(df[["x1", "x2"]], y)
+
+        # x2 lambda should be similar (same term, unconstrained in both)
+        # x1 lambda should be in the same ballpark (same penalty structure)
+        x2_key_uc = next(k for k in model_uc._reml_lambdas if k.startswith("x2"))
+        x2_key_qp = next(k for k in model_qp._reml_lambdas if k.startswith("x2"))
+        ratio = model_qp._reml_lambdas[x2_key_qp] / model_uc._reml_lambdas[x2_key_uc]
+        assert 0.1 < ratio < 10, f"x2 lambda ratio too far: {ratio:.2f}"
+
 
 class TestSCOPEFSRegression:
     """Regression and edge-case tests for SCOP EFS auto-lambda.

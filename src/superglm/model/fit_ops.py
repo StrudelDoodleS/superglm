@@ -836,10 +836,23 @@ def fit_reml(
     )
 
     # QP monotone with auto lambda → two-stage passthrough heuristic:
-    # Stage 1: run unconstrained REML to estimate lambdas
-    # Stage 2: refit with QP constraints at those lambdas
+    # Stage 1: run unconstrained REML (temporarily strip QP constraints)
+    # Stage 2: constrained refit at estimated lambdas
     # This is a heuristic, not exact joint REML for constrained terms.
     _qp_passthrough = _has_qp_monotone and bool(estimated_names)
+
+    # Stage 1 setup: temporarily disable QP constraints so REML runs fully
+    # unconstrained. Save the original state to restore for stage 2.
+    _qp_saved_state: list[tuple] = []
+    if _qp_passthrough:
+        for gi, g in enumerate(model._groups):
+            if g.monotone_engine == "qp":
+                _qp_saved_state.append((gi, g.monotone_engine, g.constraints))
+                g.monotone_engine = None
+                g.constraints = None
+        # Re-check monotone flags with QP stripped
+        _has_monotone = any(g.monotone_engine is not None for g in model._groups)
+        _has_qp_monotone = False
 
     # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
     offset_arr = offset if offset is not None else np.zeros(len(y))
@@ -1041,10 +1054,15 @@ def fit_reml(
     n_reml_iter = best.n_reml_iter
     converged = best.converged
 
-    # QP passthrough stage 2: final constrained refit at REML-estimated lambdas.
-    # REML estimated lambdas using unconstrained curvature (heuristic). Now refit
-    # once with QP constraints active to ensure final coefficients are monotone.
+    # QP passthrough stage 2: restore constraints and refit.
+    # REML ran fully unconstrained (stage 1). Now restore QP constraints
+    # and refit once at the estimated lambdas to get monotone coefficients.
     if _qp_passthrough:
+        # Restore QP constraint state
+        for gi, engine, constraints in _qp_saved_state:
+            model._groups[gi].monotone_engine = engine
+            model._groups[gi].constraints = constraints
+
         qp_refit, _ = fit_irls_direct(
             X=model._dm,
             y=y,
@@ -1062,10 +1080,6 @@ def fit_reml(
             reml_penalties=reml_penalties,
         )
         model._result = qp_refit
-        model._last_fit_meta = {
-            **(model._last_fit_meta or {}),
-            "lambda_strategy": "qp_passthrough",
-        }
 
     # Fix phi: known-scale families (Poisson) get phi=1.0;
     # estimated-scale families get REML profiled φ̂ instead of the raw
@@ -1118,7 +1132,10 @@ def fit_reml(
         y, mu, sample_weight, offset, model._distribution, model._link, model._result.phi
     )
 
-    model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
+    meta = {"method": "fit_reml", "discrete": model._discrete}
+    if _qp_passthrough:
+        meta["lambda_strategy"] = "qp_passthrough"
+    model._last_fit_meta = meta
 
     logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")
     return model
