@@ -460,20 +460,30 @@ def fit_irls_direct(
     if _has_scop:
         for gi, g in enumerate(groups):
             if g.monotone_engine == "scop":
+                cached_scop_state = scop_state_init.get(gi) if scop_state_init is not None else None
                 reparam = g.scop_reparameterization
-                S_scop = reparam.penalty_matrix()
+                cached_S_scop = (
+                    None if cached_scop_state is None else cached_scop_state.get("S_scop")
+                )
+                if isinstance(cached_S_scop, np.ndarray) and cached_S_scop.shape == (
+                    g.size,
+                    g.size,
+                ):
+                    S_scop = cached_S_scop
+                else:
+                    S_scop = reparam.penalty_matrix()
                 _gm = gms[gi]
 
                 # Warm-start beta_scop from previous outer EFS iteration if available
                 warm_beta_scop = None
-                if scop_state_init is not None and gi in scop_state_init:
-                    prev = scop_state_init[gi]["beta_eff"]
+                if cached_scop_state is not None:
+                    prev = cached_scop_state["beta_eff"]
                     q_eff = S_scop.shape[0]
                     if prev.shape == (q_eff,):
                         warm_beta_scop = prev.copy()
 
                 if isinstance(_gm, DiscretizedSCOPGroupMatrix):
-                    _scop_state[gi] = {
+                    state = {
                         "reparam": reparam,
                         "B_scop": _gm.B_scop_unique,
                         "S_scop": S_scop,
@@ -483,7 +493,7 @@ def fit_irls_direct(
                     }
                 else:
                     B_scop = _gm.toarray()
-                    _scop_state[gi] = {
+                    state = {
                         "reparam": reparam,
                         "B_scop": B_scop,
                         "S_scop": S_scop,
@@ -491,6 +501,15 @@ def fit_irls_direct(
                         "beta_scop": warm_beta_scop,
                         "beta_scop_prev": None,
                     }
+                if cached_scop_state is not None:
+                    for key in (
+                        "penalty_rank",
+                        "penalty_log_det_omega_plus",
+                        "penalty_eigvals_omega",
+                    ):
+                        if key in cached_scop_state:
+                            state[key] = cached_scop_state[key]
+                _scop_state[gi] = state
         # Build mask of non-SCOP column indices for the reduced system
         _non_scop_cols = []
         _non_scop_groups_idx = []
@@ -749,6 +768,7 @@ def fit_irls_direct(
                 for gi, st in _scop_state.items():
                     g = groups[gi]
                     gamma_eff = st["reparam"].forward(st["beta_scop"])
+                    st["gamma_eff"] = gamma_eff
                     beta[g.sl] = gamma_eff
 
             else:
@@ -992,11 +1012,15 @@ def fit_irls_direct(
                 "S_scop": st["S_scop"],
                 "B_scop": st["B_scop"],
                 "reparam": st["reparam"],
+                "gamma_eff": st.get("gamma_eff"),
                 "bin_idx": st.get("bin_idx"),
                 "group_sl": groups[gi].sl,
                 "group_name": groups[gi].name,
                 "last_step_norm": st.get("last_step_norm", 0.0),
                 "last_fisher_fallback": st.get("last_fisher_fallback", False),
+                "penalty_rank": st.get("penalty_rank"),
+                "penalty_log_det_omega_plus": st.get("penalty_log_det_omega_plus"),
+                "penalty_eigvals_omega": st.get("penalty_eigvals_omega"),
             }
     else:
         scop_converged = None

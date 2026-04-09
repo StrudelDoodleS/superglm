@@ -415,6 +415,86 @@ class TestBuildSCOPPenaltyComponents:
         assert np.all(pcs[0].eigvals_omega > 0)
 
 
+class TestSCOPPenaltyMetadataCache:
+    """Tests for cached SCOP penalty/state metadata."""
+
+    def test_reuses_cached_penalty_metadata(self, monkeypatch):
+        """A populated SCOP state cache should avoid recomputing eigvalsh."""
+        q = 9
+        S = _first_diff_penalty(q)
+        scop_states = {
+            0: {
+                "S_scop": S,
+                "group_sl": slice(0, q),
+                "group_name": "x",
+                "beta_eff": np.zeros(q),
+            }
+        }
+        first = build_scop_penalty_components(scop_states)
+        assert scop_states[0]["penalty_rank"] == first[0].rank
+        assert np.isfinite(scop_states[0]["penalty_log_det_omega_plus"])
+        np.testing.assert_allclose(scop_states[0]["penalty_eigvals_omega"], first[0].eigvals_omega)
+
+        def _fail_eigvalsh(_S):
+            raise AssertionError("eigvalsh should not be called when cache is populated")
+
+        monkeypatch.setattr(np.linalg, "eigvalsh", _fail_eigvalsh)
+        second = build_scop_penalty_components(scop_states)
+        assert second[0].rank == first[0].rank
+        assert second[0].log_det_omega_plus == first[0].log_det_omega_plus
+        np.testing.assert_allclose(second[0].eigvals_omega, first[0].eigvals_omega)
+
+
+class TestSCOPStateCaching:
+    """Tests for cached SCOP artifacts reused across outer EFS iterations."""
+
+    @pytest.mark.slow
+    def test_fit_irls_direct_propagates_cached_penalty_metadata(self, scop_model_inputs):
+        """Warm-started SCOP state should retain cached penalty metadata and gamma."""
+        model, y, sample_weight, offset = scop_model_inputs
+        out = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2={"x": 1.0},
+            offset=offset,
+            return_scop_state=True,
+        )
+        _, _, scop_states = out
+        build_scop_penalty_components(scop_states)
+
+        out2 = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2={"x": 1.0},
+            offset=offset,
+            return_scop_state=True,
+            scop_state_init=scop_states,
+        )
+        _, _, scop_states2 = out2
+
+        assert scop_states2[0]["penalty_rank"] == scop_states[0]["penalty_rank"]
+        assert (
+            scop_states2[0]["penalty_log_det_omega_plus"]
+            == scop_states[0]["penalty_log_det_omega_plus"]
+        )
+        np.testing.assert_allclose(
+            scop_states2[0]["penalty_eigvals_omega"],
+            scop_states[0]["penalty_eigvals_omega"],
+        )
+        np.testing.assert_allclose(
+            scop_states2[0]["gamma_eff"],
+            np.exp(np.clip(scop_states2[0]["beta_eff"], -500, 500)),
+        )
+
+
 class TestAssembleJointHessian:
     """Tests for assemble_joint_hessian."""
 
@@ -2744,6 +2824,59 @@ class TestJointSCOPNewton:
         expected = B1_full.T @ (B2_full * W[:, None])
 
         np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+    def test_discretized_joint_objective_cache_matches_observation_objective(self):
+        """Cached discretized objective must match the observation-level oracle."""
+        from superglm.solvers.scop_newton import (
+            _build_joint_objective_cache,
+            _joint_objective_from_gammas,
+            _safe_joint_objective,
+        )
+
+        scop_states, W, z = self._build_two_group_inputs(discretized=True)
+        scop_items = sorted(scop_states.items())
+        betas = [st["beta_scop"] for _, st in scop_items]
+        beta_joint = np.concatenate(betas)
+        slices = []
+        offset = 0
+        for beta_i in betas:
+            slices.append(slice(offset, offset + len(beta_i)))
+            offset += len(beta_i)
+        lambdas_list = [1.0, 0.5]
+
+        cache = _build_joint_objective_cache(scop_items, W, z)
+        assert cache is not None
+
+        gammas = []
+        for _, st in scop_items:
+            gamma = st["reparam"].forward(st["beta_scop"])
+            gammas.append(gamma)
+        cache.diag_btwb = []
+        cache.cross_btwb = {}
+        for idx, (_, st) in enumerate(scop_items):
+            B = st["B_scop"]
+            bin_idx = st["bin_idx"]
+            w_agg = np.bincount(bin_idx, weights=W, minlength=B.shape[0])
+            cache.diag_btwb.append(B.T @ (B * w_agg[:, None]))
+        for left in range(len(scop_items)):
+            st_left = scop_items[left][1]
+            for right in range(left + 1, len(scop_items)):
+                st_right = scop_items[right][1]
+                w_2d = np.zeros((st_left["B_scop"].shape[0], st_right["B_scop"].shape[0]))
+                np.add.at(w_2d, (st_left["bin_idx"], st_right["bin_idx"]), W)
+                cache.cross_btwb[(left, right)] = st_left["B_scop"].T @ w_2d @ st_right["B_scop"]
+
+        obj_cached = _joint_objective_from_gammas(
+            gammas,
+            beta_joint,
+            slices,
+            lambdas_list,
+            scop_items,
+            cache,
+        )
+        obj_oracle = _safe_joint_objective(scop_items, W, z, beta_joint, slices, lambdas_list)
+
+        np.testing.assert_allclose(obj_cached, obj_oracle, rtol=1e-10, atol=1e-12)
 
     def test_cross_gram_dense_dense(self):
         """Cross-gram for two dense groups matches naive matmul."""
