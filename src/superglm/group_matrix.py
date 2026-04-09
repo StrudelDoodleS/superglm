@@ -630,6 +630,7 @@ GroupMatrix = (
     | CategoricalGroupMatrix
     | SparseSSPGroupMatrix
     | DiscretizedSSPGroupMatrix
+    | DiscretizedSCOPGroupMatrix
     | DiscretizedTensorGroupMatrix
 )
 
@@ -769,6 +770,28 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     ):
         return _cross_gram_tensor_main(gm_j, gm_i, W)
 
+    if isinstance(gm_i, DiscretizedSCOPGroupMatrix) and isinstance(
+        gm_j, DiscretizedSCOPGroupMatrix
+    ):
+        n_joint = gm_i.n_bins * gm_j.n_bins
+        if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
+            W_2d = _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+            return gm_i.B_scop_unique.T @ W_2d @ gm_j.B_scop_unique
+
+    if isinstance(gm_i, DiscretizedSSPGroupMatrix) and isinstance(gm_j, DiscretizedSCOPGroupMatrix):
+        n_joint = gm_i.n_bins * gm_j.n_bins
+        if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
+            W_2d = _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+            BtWB = gm_i.B_unique.T @ W_2d @ gm_j.B_scop_unique
+            return gm_i.R_inv.T @ BtWB
+
+    if isinstance(gm_i, DiscretizedSCOPGroupMatrix) and isinstance(gm_j, DiscretizedSSPGroupMatrix):
+        n_joint = gm_i.n_bins * gm_j.n_bins
+        if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
+            W_2d = _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+            BtWB = gm_i.B_scop_unique.T @ W_2d @ gm_j.B_unique
+            return BtWB @ gm_j.R_inv
+
     if isinstance(gm_i, DiscretizedSSPGroupMatrix) and isinstance(gm_j, DiscretizedSSPGroupMatrix):
         n_joint = gm_i.n_bins * gm_j.n_bins
         if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
@@ -776,6 +799,14 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
             W_2d = _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
             BtWB = gm_i.B_unique.T @ W_2d @ gm_j.B_unique
             return gm_i.R_inv.T @ BtWB @ gm_j.R_inv
+
+    if isinstance(gm_i, DiscretizedSCOPGroupMatrix):
+        WX_agg = _agg_by_bin(gm_j, gm_i.bin_idx, W, gm_i.n_bins)
+        return gm_i.B_scop_unique.T @ WX_agg
+
+    if isinstance(gm_j, DiscretizedSCOPGroupMatrix):
+        WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins)
+        return (gm_j.B_scop_unique.T @ WX_agg).T
 
     # Disc × non-disc: batch aggregate by disc bins, then dense matmuls.
     # Avoids per-column rmatvec loop, toarray() for sparse groups, and
@@ -814,7 +845,9 @@ def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
     sqrt(W)).  Dense and Sparse groups use sqrt(W) internally, which fails
     for negative W, so we fall back to explicit W[:, None] * X for those.
     """
-    if isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+    if isinstance(
+        gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix | DiscretizedSCOPGroupMatrix
+    ):
         return gm.gram(W)
     if isinstance(gm, CategoricalGroupMatrix):
         return gm.gram(W)  # bincount-based diagonal, handles any-sign W
@@ -875,7 +908,7 @@ def _block_xtwx_rhs(
     for i, (gm_i, g_i) in enumerate(zip(gms, groups)):
         sl_i = slice(g_i.start, g_i.end)
         # Diagonal block + rmatvecs via shared bincount
-        if isinstance(gm_i, DiscretizedSSPGroupMatrix):
+        if isinstance(gm_i, DiscretizedSSPGroupMatrix | DiscretizedSCOPGroupMatrix):
             gram_i, xtw_i, xtwz_i = gm_i.gram_rmatvec(W, Wz)
             XtWX[sl_i, sl_i] = gram_i
             XtW1[sl_i] = xtw_i
@@ -942,7 +975,7 @@ def _build_tabmat_split(gms: list[GroupMatrix]):
       - SparseSSPGroupMatrix → tabmat.DenseMatrix (must materialize B @ R_inv)
       - DenseGroupMatrix → tabmat.DenseMatrix (already dense)
     """
-    if any(isinstance(gm, DiscretizedSSPGroupMatrix) for gm in gms):
+    if any(isinstance(gm, DiscretizedSSPGroupMatrix | DiscretizedSCOPGroupMatrix) for gm in gms):
         return None
 
     # All low-cardinality categoricals: the built-in bincount gram (O(n) per

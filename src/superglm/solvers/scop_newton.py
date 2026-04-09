@@ -22,12 +22,29 @@ the sequential Gauss-Seidel loop that causes slow convergence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.linalg import cho_factor, cho_solve
+from scipy.sparse.linalg import LinearOperator, minres
 
+from superglm.group_matrix import _disc_disc_2d_hist
 from superglm.solvers.scop import SCOPSolverReparam
+
+
+@dataclass
+class _SCOPPrototypeConfig:
+    """Private prototype switches for numerical experiments on the joint solve."""
+
+    solve_mode: Literal["direct", "minres", "minres_inexact"] = "direct"
+    iterative_q_total_min: int = 96
+    iterative_rtol: float = 1e-10
+    iterative_maxiter: int | None = None
+    cross_block_rel_tol: float = 0.0
+
+
+_PROTOTYPE_CONFIG = _SCOPPrototypeConfig()
 
 
 @dataclass
@@ -51,6 +68,72 @@ class SCOPNewtonResult:
 
     H_penalized: NDArray | None = None
     """(q_eff, q_eff) penalized Hessian from the Newton step, or None."""
+
+    linear_solver: str = "direct"
+    """Linear solver used for the Newton direction."""
+
+    linear_iterations: int = 0
+    """Iteration count for iterative solvers, else 0."""
+
+    dropped_cross_blocks: int = 0
+    """Number of cross-group blocks dropped by prototype sparsification."""
+
+
+@dataclass
+class _JointObjectiveCache:
+    """Cached exact objective algebra for multi-SCOP problems."""
+
+    half_zwz: float
+    btwz: list[NDArray]
+    diag_btwb: list[NDArray] | None = None
+    cross_btwb: dict[tuple[int, int], NDArray] | None = None
+
+
+def configure_scop_prototype(
+    *,
+    solve_mode: Literal["direct", "minres", "minres_inexact"] | None = None,
+    iterative_q_total_min: int | None = None,
+    iterative_rtol: float | None = None,
+    iterative_maxiter: int | None = None,
+    cross_block_rel_tol: float | None = None,
+) -> None:
+    """Configure private prototype switches for SCOP numerical experiments."""
+    global _PROTOTYPE_CONFIG
+    cfg = _PROTOTYPE_CONFIG
+    if solve_mode is not None:
+        cfg.solve_mode = solve_mode
+    if iterative_q_total_min is not None:
+        cfg.iterative_q_total_min = iterative_q_total_min
+    if iterative_rtol is not None:
+        cfg.iterative_rtol = iterative_rtol
+    if iterative_maxiter is not None:
+        cfg.iterative_maxiter = iterative_maxiter
+    if cross_block_rel_tol is not None:
+        cfg.cross_block_rel_tol = cross_block_rel_tol
+
+
+def reset_scop_prototype() -> None:
+    """Reset prototype switches to the exact direct-solve defaults."""
+    global _PROTOTYPE_CONFIG
+    _PROTOTYPE_CONFIG = _SCOPPrototypeConfig()
+
+
+def get_scop_prototype_config() -> dict[str, object]:
+    """Return the current private prototype configuration."""
+    cfg = _PROTOTYPE_CONFIG
+    return {
+        "solve_mode": cfg.solve_mode,
+        "iterative_q_total_min": cfg.iterative_q_total_min,
+        "iterative_rtol": cfg.iterative_rtol,
+        "iterative_maxiter": cfg.iterative_maxiter,
+        "cross_block_rel_tol": cfg.cross_block_rel_tol,
+    }
+
+
+def set_scop_prototype_config(cfg: dict[str, object]) -> None:
+    """Replace the private prototype configuration from a config dict."""
+    reset_scop_prototype()
+    configure_scop_prototype(**cfg)
 
 
 def _objective(
@@ -268,6 +351,132 @@ def _solve_step(H: NDArray, grad: NDArray) -> NDArray | None:
         return None
 
 
+def _build_minres_preconditioner(
+    scop_items: list[tuple[int, dict]],
+    joint_slices: list[slice],
+    BtWBs: list[NDArray],
+    j_diags: list[NDArray],
+    lambdas_list: list[float],
+) -> LinearOperator:
+    """Build a block-Jacobi inverse preconditioner for MINRES.
+
+    Uses the positive semidefinite Gauss-Newton diagonal blocks plus a small
+    ridge, falling back to a diagonal inverse if Cholesky still fails.
+    """
+    block_solvers: list[tuple[str, object]] = []
+    for idx, (_, st) in enumerate(scop_items):
+        j_i = j_diags[idx]
+        jj_ii = j_i[:, None] * j_i[None, :]
+        block = jj_ii * BtWBs[idx] + lambdas_list[idx] * st["S_scop"]
+        eye = np.eye(block.shape[0])
+        solved = False
+        for ridge in (1e-10, 1e-8, 1e-6, 1e-4):
+            try:
+                fac = cho_factor(block + ridge * eye)
+                block_solvers.append(("chol", fac))
+                solved = True
+                break
+            except np.linalg.LinAlgError:
+                continue
+        if not solved:
+            diag = np.maximum(np.abs(np.diag(block)), 1e-8)
+            block_solvers.append(("diag", 1.0 / diag))
+
+    size = joint_slices[-1].stop if joint_slices else 0
+
+    def _matvec(v: NDArray) -> NDArray:
+        out = np.empty_like(v)
+        for sl_i, (kind, solver) in zip(joint_slices, block_solvers, strict=True):
+            block_v = v[sl_i]
+            if kind == "chol":
+                out[sl_i] = cho_solve(solver, block_v)
+            else:
+                out[sl_i] = solver * block_v
+        return out
+
+    return LinearOperator((size, size), matvec=_matvec, dtype=np.float64)
+
+
+def _solve_step_minres(
+    H: NDArray,
+    grad: NDArray,
+    scop_items: list[tuple[int, dict]],
+    joint_slices: list[slice],
+    BtWBs: list[NDArray],
+    j_diags: list[NDArray],
+    lambdas_list: list[float],
+    *,
+    rtol: float,
+    maxiter: int | None,
+    allow_inexact: bool,
+) -> tuple[NDArray | None, int]:
+    """Solve H @ step = grad with MINRES and a block-Jacobi preconditioner."""
+    iters = 0
+
+    def _callback(_x: NDArray) -> None:
+        nonlocal iters
+        iters += 1
+
+    A = LinearOperator(H.shape, matvec=lambda v: H @ v, dtype=np.float64)
+    M = _build_minres_preconditioner(scop_items, joint_slices, BtWBs, j_diags, lambdas_list)
+    step, info = minres(
+        A,
+        grad,
+        M=M,
+        rtol=rtol,
+        maxiter=maxiter,
+        callback=_callback,
+        check=False,
+    )
+
+    residual = np.linalg.norm(H @ step - grad)
+    grad_norm = max(np.linalg.norm(grad), 1e-300)
+    tol_mult = 10.0 if allow_inexact else 1.0
+    residual_tol = tol_mult * max(rtol, 1e-12) * grad_norm
+    if info == 0 and np.isfinite(residual) and residual <= residual_tol:
+        return step, iters
+    if allow_inexact and np.isfinite(residual) and residual <= residual_tol:
+        return step, iters
+    return None, iters
+
+
+def _solve_joint_step(
+    H: NDArray,
+    grad: NDArray,
+    scop_items: list[tuple[int, dict]],
+    joint_slices: list[slice],
+    BtWBs: list[NDArray],
+    j_diags: list[NDArray],
+    lambdas_list: list[float],
+) -> tuple[NDArray | None, str, int]:
+    """Solve the joint Newton direction using the active prototype policy."""
+    cfg = _PROTOTYPE_CONFIG
+    q_total = H.shape[0]
+
+    use_iterative = cfg.solve_mode != "direct" and q_total >= cfg.iterative_q_total_min
+    if not use_iterative:
+        return _solve_step(H, grad), "direct", 0
+
+    allow_inexact = cfg.solve_mode == "minres_inexact"
+    step, iters = _solve_step_minres(
+        H,
+        grad,
+        scop_items,
+        joint_slices,
+        BtWBs,
+        j_diags,
+        lambdas_list,
+        rtol=cfg.iterative_rtol,
+        maxiter=cfg.iterative_maxiter,
+        allow_inexact=allow_inexact,
+    )
+    if step is not None:
+        solver_name = "minres_inexact" if allow_inexact else "minres"
+        return step, solver_name, iters
+
+    return _solve_step(H, grad), "direct_fallback", iters
+
+
 # ---------------------------------------------------------------------------
 # Joint multi-group SCOP Newton step
 # ---------------------------------------------------------------------------
@@ -311,6 +520,168 @@ def _safe_joint_objective(
     return float(obj) if np.isfinite(obj) else np.inf
 
 
+def _joint_objective_from_eta(
+    W: NDArray,
+    z_scop: NDArray,
+    total_eta: NDArray,
+    beta_joint: NDArray,
+    slices: list[slice],
+    lambdas_list: list[float],
+    scop_items: list[tuple[int, dict]],
+) -> float:
+    """Evaluate the joint SCOP objective from cached total eta.
+
+    This is mathematically identical to ``_safe_joint_objective`` but reuses
+    the already assembled SCOP contribution when the caller has it.
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        penalty = 0.0
+        for (_, st), sl_i, lam_i in zip(scop_items, slices, lambdas_list):
+            beta_i = beta_joint[sl_i]
+            penalty += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
+        residual = z_scop - total_eta
+        data_term = 0.5 * np.sum(W * residual**2)
+        obj = data_term + penalty
+    return float(obj) if np.isfinite(obj) else np.inf
+
+
+def _build_joint_objective_cache(
+    scop_items: list[tuple[int, dict]],
+    W: NDArray,
+    z_scop: NDArray,
+) -> _JointObjectiveCache:
+    """Build exact objective caches shared by all SCOP objective evaluations."""
+    Wz = W * z_scop
+    btwz: list[NDArray] = []
+    for _, st in scop_items:
+        if st["bin_idx"] is not None:
+            wz_agg = np.bincount(st["bin_idx"], weights=Wz, minlength=st["B_scop"].shape[0])
+            btwz.append(st["B_scop"].T @ wz_agg)
+        else:
+            btwz.append(st["B_scop"].T @ Wz)
+    return _JointObjectiveCache(
+        half_zwz=0.5 * float(np.sum(W * z_scop**2)),
+        btwz=btwz,
+    )
+
+
+def _joint_objective_from_bin_etas(
+    eta_bins: list[NDArray],
+    beta_joint: NDArray,
+    slices: list[slice],
+    lambdas_list: list[float],
+    scop_items: list[tuple[int, dict]],
+    cache: _JointObjectiveCache,
+) -> float:
+    """Evaluate the exact joint objective from discretized bin-level etas."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        penalty = 0.0
+        data_term = cache.half_zwz
+        for idx, ((_, st), sl_i, lam_i, eta_bin_i) in enumerate(
+            zip(scop_items, slices, lambdas_list, eta_bins)
+        ):
+            beta_i = beta_joint[sl_i]
+            penalty += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
+            data_term -= float(eta_bin_i @ cache.wz_aggs[idx])
+            data_term += 0.5 * float(eta_bin_i @ (cache.w_aggs[idx] * eta_bin_i))
+
+        for a in range(len(eta_bins)):
+            eta_a = eta_bins[a]
+            for b in range(a + 1, len(eta_bins)):
+                data_term += float(eta_a @ cache.w_2ds[(a, b)] @ eta_bins[b])
+
+        obj = data_term + penalty
+    return float(obj) if np.isfinite(obj) else np.inf
+
+
+def _joint_objective_from_gammas(
+    gammas: list[NDArray],
+    beta_joint: NDArray,
+    slices: list[slice],
+    lambdas_list: list[float],
+    scop_items: list[tuple[int, dict]],
+    cache: _JointObjectiveCache,
+) -> float:
+    """Evaluate the exact joint objective from gamma-space quadratic forms."""
+    if cache.diag_btwb is None or cache.cross_btwb is None:
+        raise ValueError("quadratic objective cache missing BtWB blocks")
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        penalty = 0.0
+        data_term = cache.half_zwz
+        for idx, ((_, st), sl_i, lam_i, gamma_i) in enumerate(
+            zip(scop_items, slices, lambdas_list, gammas)
+        ):
+            beta_i = beta_joint[sl_i]
+            penalty += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
+            data_term -= float(gamma_i @ cache.btwz[idx])
+            data_term += 0.5 * float(gamma_i @ cache.diag_btwb[idx] @ gamma_i)
+
+        for a in range(len(gammas)):
+            gamma_a = gammas[a]
+            for b in range(a + 1, len(gammas)):
+                data_term += float(gamma_a @ cache.cross_btwb[(a, b)] @ gammas[b])
+
+        obj = data_term + penalty
+    return float(obj) if np.isfinite(obj) else np.inf
+
+
+def _safe_joint_trial_objective(
+    scop_items: list[tuple[int, dict]],
+    W: NDArray,
+    z_scop: NDArray,
+    beta_trial: NDArray,
+    slices: list[slice],
+    lambdas_list: list[float],
+    total_eta_current: NDArray,
+    gammas_current: list[NDArray],
+    objective_cache: _JointObjectiveCache | None = None,
+) -> float:
+    """Evaluate a trial joint objective reusing the current SCOP state.
+
+    Instead of rebuilding the whole objective from scratch, this keeps the
+    current total SCOP contribution and only applies per-group trial deltas.
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        if objective_cache is not None:
+            gammas_trial: list[NDArray] = []
+            for (_, st), sl_i, lam_i in zip(scop_items, slices, lambdas_list):
+                beta_i = beta_trial[sl_i]
+                gamma_trial = st["reparam"].forward(beta_i)
+                if not np.all(np.isfinite(gamma_trial)):
+                    return np.inf
+                gammas_trial.append(gamma_trial)
+            obj = _joint_objective_from_gammas(
+                gammas_trial,
+                beta_trial,
+                slices,
+                lambdas_list,
+                scop_items,
+                objective_cache,
+            )
+            return float(obj) if np.isfinite(obj) else np.inf
+
+        total_eta = total_eta_current.copy()
+        for (_, st), sl_i, lam_i, gamma_curr in zip(
+            scop_items, slices, lambdas_list, gammas_current
+        ):
+            beta_i = beta_trial[sl_i]
+            gamma_trial = st["reparam"].forward(beta_i)
+            if not np.all(np.isfinite(gamma_trial)):
+                return np.inf
+            gamma_delta = gamma_trial - gamma_curr
+            eta_delta = st["B_scop"] @ gamma_delta
+            if st["bin_idx"] is not None:
+                eta_delta = eta_delta[st["bin_idx"]]
+            total_eta += eta_delta
+        residual = z_scop - total_eta
+        obj = 0.5 * np.sum(W * residual**2)
+        for (_, st), sl_i, lam_i in zip(scop_items, slices, lambdas_list):
+            beta_i = beta_trial[sl_i]
+            obj += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
+    return float(obj) if np.isfinite(obj) else np.inf
+
+
 def _compute_cross_gram(
     st_i: dict,
     st_j: dict,
@@ -336,8 +707,7 @@ def _compute_cross_gram(
         # Both discretized: 2D weight histogram
         nb_i = B_i.shape[0]
         nb_j = B_j.shape[0]
-        W_2d = np.zeros((nb_i, nb_j))
-        np.add.at(W_2d, (bi_i, bi_j), W)
+        W_2d = _disc_disc_2d_hist(bi_i, bi_j, W, nb_i, nb_j)
         return B_i.T @ W_2d @ B_j
     elif bi_i is None and bi_j is None:
         # Both dense
@@ -415,6 +785,7 @@ def scop_joint_newton_step(
         offset += q_i
 
     q_total = offset
+    objective_cache = _build_joint_objective_cache(scop_items, W, z_scop)
 
     # --- Step 1: Forward map, per-group j_diag, compute shared residual ---
     betas = []
@@ -425,7 +796,8 @@ def scop_joint_newton_step(
         betas.append(beta_i)
         gamma_i = st["reparam"].forward(beta_i)
         j_diags.append(gamma_i)  # d(exp(b))/db = exp(b) = gamma
-        eta_i = st["B_scop"] @ gamma_i
+        eta_bin_i = st["B_scop"] @ gamma_i
+        eta_i = eta_bin_i
         if st["bin_idx"] is not None:
             eta_i = eta_i[st["bin_idx"]]
         etas.append(eta_i)
@@ -436,28 +808,8 @@ def scop_joint_newton_step(
         total_scop_eta += eta_i
     residual = z_scop - total_scop_eta
 
-    # --- Check starting objective ---
-    beta_joint = np.concatenate(betas)
-    obj_before = _safe_joint_objective(
-        scop_items, W, z_scop, beta_joint, joint_slices, lambdas_list
-    )
-
-    if not np.isfinite(obj_before):
-        # Non-finite starting point: return no-op for all groups
-        results = {}
-        for idx, (gi, st) in enumerate(scop_items):
-            q_i = q_effs[idx]
-            results[gi] = SCOPNewtonResult(
-                beta_new=st["beta_scop"].copy(),
-                objective_before=np.inf,
-                objective_after=np.inf,
-                step_norm=0.0,
-                used_fisher_fallback=False,
-                H_penalized=lambdas_list[idx] * st["S_scop"],
-            )
-        return results
-
     # --- Step 2: Per-group BtWB and gradient ---
+    beta_joint = np.concatenate(betas)
     BtWBs = []
     r_effs = []
     grad_datas = []
@@ -485,6 +837,8 @@ def scop_joint_newton_step(
     # --- Step 3: Assemble joint Hessian and gradient ---
     H = np.zeros((q_total, q_total))
     grad = np.zeros(q_total)
+    dropped_cross_blocks = 0
+    cross_btwb: dict[tuple[int, int], NDArray] = {}
 
     for idx, (gi, st) in enumerate(scop_items):
         sl_i = joint_slices[idx]
@@ -494,12 +848,15 @@ def scop_joint_newton_step(
 
         # Diagonal block: J^T BtWB J + lambda*S + diag(grad_data)
         jj_ii = j_i[:, None] * j_i[None, :]
-        H[sl_i, sl_i] = jj_ii * BtWBs[idx] + lam_i * st["S_scop"] + np.diag(grad_datas[idx])
+        block = jj_ii * BtWBs[idx] + lam_i * st["S_scop"]
+        block[np.diag_indices_from(block)] += grad_datas[idx]
+        H[sl_i, sl_i] = block
 
         # Gradient
         grad[sl_i] = grad_datas[idx] + lam_i * (st["S_scop"] @ beta_i)
 
     # Cross-group blocks
+    cfg = _PROTOTYPE_CONFIG
     for a in range(n_groups):
         for b in range(a + 1, n_groups):
             gi_a, st_a = scop_items[a]
@@ -510,13 +867,68 @@ def scop_joint_newton_step(
             j_b = j_diags[b]
 
             BtWB_ab = _compute_cross_gram(st_a, st_b, W)
-            cross = np.diag(j_a) @ BtWB_ab @ np.diag(j_b)
+            cross_btwb[(a, b)] = BtWB_ab
+            if cfg.cross_block_rel_tol > 0.0:
+                norm_scale = np.sqrt(
+                    np.linalg.norm(BtWBs[a], ord="fro") * np.linalg.norm(BtWBs[b], ord="fro")
+                )
+                if norm_scale > 0.0:
+                    rel_cross = np.linalg.norm(BtWB_ab, ord="fro") / norm_scale
+                    if rel_cross < cfg.cross_block_rel_tol:
+                        dropped_cross_blocks += 1
+                        continue
+            cross = BtWB_ab * j_a[:, np.newaxis] * j_b[np.newaxis, :]
             H[sl_a, sl_b] = cross
             H[sl_b, sl_a] = cross.T
 
+    # --- Check starting objective ---
+    if objective_cache is not None:
+        objective_cache.diag_btwb = BtWBs
+        objective_cache.cross_btwb = cross_btwb
+        obj_before = _joint_objective_from_gammas(
+            j_diags,
+            beta_joint,
+            joint_slices,
+            lambdas_list,
+            scop_items,
+            objective_cache,
+        )
+    else:
+        obj_before = _joint_objective_from_eta(
+            W,
+            z_scop,
+            total_scop_eta,
+            beta_joint,
+            joint_slices,
+            lambdas_list,
+            scop_items,
+        )
+
+    if not np.isfinite(obj_before):
+        # Non-finite starting point: return no-op for all groups
+        results = {}
+        for idx, (gi, st) in enumerate(scop_items):
+            results[gi] = SCOPNewtonResult(
+                beta_new=st["beta_scop"].copy(),
+                objective_before=np.inf,
+                objective_after=np.inf,
+                step_norm=0.0,
+                used_fisher_fallback=False,
+                H_penalized=lambdas_list[idx] * st["S_scop"],
+            )
+        return results
+
     # --- Step 4: Solve ---
     used_fisher = False
-    step = _solve_step(H, grad)
+    step, linear_solver, linear_iterations = _solve_joint_step(
+        H,
+        grad,
+        scop_items,
+        joint_slices,
+        BtWBs,
+        j_diags,
+        lambdas_list,
+    )
 
     if step is None:
         # Fisher fallback: drop second-order diag(grad_data) terms
@@ -524,14 +936,34 @@ def scop_joint_newton_step(
         H_gn = H.copy()
         for idx in range(n_groups):
             sl_i = joint_slices[idx]
-            H_gn[sl_i, sl_i] -= np.diag(grad_datas[idx])
+            H_block = H_gn[sl_i, sl_i].copy()
+            H_block[np.diag_indices_from(H_block)] -= grad_datas[idx]
+            H_gn[sl_i, sl_i] = H_block
         H_fisher = H_gn + 1e-8 * np.eye(q_total)
-        step = _solve_step(H_fisher, grad)
+        step, linear_solver, linear_iterations = _solve_joint_step(
+            H_fisher,
+            grad,
+            scop_items,
+            joint_slices,
+            BtWBs,
+            j_diags,
+            lambdas_list,
+        )
         if step is None:
             H_fisher += 1e-4 * np.eye(q_total)
-            step = _solve_step(H_fisher, grad)
+            step, linear_solver, linear_iterations = _solve_joint_step(
+                H_fisher,
+                grad,
+                scop_items,
+                joint_slices,
+                BtWBs,
+                j_diags,
+                lambdas_list,
+            )
             if step is None:
                 step = -1e-4 * grad
+                linear_solver = "gradient_fallback"
+                linear_iterations = 0
 
     # --- Step 5: Joint line search ---
     alpha = 1.0
@@ -539,8 +971,16 @@ def scop_joint_newton_step(
 
     for _ in range(max_halving + 1):
         beta_trial = beta_joint - alpha * step
-        obj_trial = _safe_joint_objective(
-            scop_items, W, z_scop, beta_trial, joint_slices, lambdas_list
+        obj_trial = _safe_joint_trial_objective(
+            scop_items,
+            W,
+            z_scop,
+            beta_trial,
+            joint_slices,
+            lambdas_list,
+            total_scop_eta,
+            j_diags,
+            objective_cache,
         )
         if np.isfinite(obj_trial) and obj_trial <= obj_before + 1e-14:
             accepted = True
@@ -574,6 +1014,9 @@ def scop_joint_newton_step(
             step_norm=step_norm_i,
             used_fisher_fallback=used_fisher,
             H_penalized=H_block_i,
+            linear_solver=linear_solver,
+            linear_iterations=linear_iterations,
+            dropped_cross_blocks=dropped_cross_blocks,
         )
 
     return results

@@ -23,7 +23,7 @@ repos:
     hooks:
       - id: pytest
         name: pytest-fast
-        entry: python -m pytest tests/ -q -m "not slow"
+        entry: env PYTHONPATH=src python -m pytest tests/ -q -m "not slow"
         language: system
         pass_filenames: false
         always_run: true
