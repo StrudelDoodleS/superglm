@@ -65,10 +65,9 @@ def _get_scop_penalty_metadata(st: dict) -> tuple[float, float, NDArray]:
 def _scop_jacobian_diag(st: dict) -> NDArray:
     """Return diag(d gamma / d beta_eff), reusing cached gamma where available."""
     gamma_eff = st.get("gamma_eff")
-    q_eff = st["S_scop"].shape[0]
     if gamma_eff is not None:
         gamma_eff = np.asarray(gamma_eff, dtype=np.float64)
-        if gamma_eff.shape == (q_eff,) and np.all(np.isfinite(gamma_eff)):
+        if gamma_eff.ndim == 1 and np.all(np.isfinite(gamma_eff)):
             return gamma_eff
     beta_eff = np.asarray(st["beta_eff"], dtype=np.float64)
     return np.exp(np.clip(beta_eff, -500, 500))
