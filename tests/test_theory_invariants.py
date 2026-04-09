@@ -8,7 +8,7 @@ from superglm import SuperGLM
 from superglm.distributions import clip_mu
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
-from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
+from superglm.features.spline import CubicRegressionSpline, NaturalSpline, PSpline, Spline
 from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
@@ -339,6 +339,72 @@ class TestBackendLinearAlgebraInvariants:
         xtwx_block = _block_xtwx(model._dm.group_matrices, model._groups, W)
         X_dense = model._dm.toarray()
         xtwx_dense = X_dense.T @ (X_dense * W[:, None])
+
+        np.testing.assert_allclose(xtwx_block, xtwx_dense, atol=1e-10)
+
+    def test_two_discretized_scop_block_xtwx_matches_dense(self):
+        """Full XtWX with two discretized SCOP groups should match dense oracle."""
+        rng = np.random.default_rng(19)
+        n = 400
+        X = pd.DataFrame(
+            {
+                "x1": rng.uniform(0, 1, n),
+                "x2": rng.uniform(0, 1, n),
+            }
+        )
+        eta = -0.4 + 0.4 * np.log1p(4 * X["x1"].to_numpy()) + 0.3 * np.log1p(5 * X["x2"].to_numpy())
+        y = rng.poisson(np.exp(eta)).astype(float)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=7, monotone="increasing", monotone_mode="fit"),
+            },
+        )
+        model.fit_reml(X, y, max_reml_iter=6)
+
+        W = rng.uniform(0.5, 2.0, n)
+        xtwx_block = _block_xtwx(model._dm.group_matrices, model._groups, W)
+        xtwx_dense = model._dm.toarray().T @ (model._dm.toarray() * W[:, None])
+
+        np.testing.assert_allclose(xtwx_block, xtwx_dense, atol=1e-10)
+
+    def test_mixed_discretized_scop_block_xtwx_matches_dense(self):
+        """Mixed SCOP + discretized SSP + categorical XtWX should match dense oracle."""
+        rng = np.random.default_rng(23)
+        n = 500
+        X = pd.DataFrame(
+            {
+                "s": rng.uniform(0, 1, n),
+                "z": rng.uniform(0, 1, n),
+                "area": rng.choice(["a", "b", "c"], size=n),
+            }
+        )
+        eta = (
+            -0.2
+            + 0.5 * np.log1p(6 * X["s"].to_numpy())
+            + 0.2 * np.sin(2 * np.pi * X["z"].to_numpy())
+        )
+        y = rng.poisson(np.exp(eta)).astype(float)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "s": PSpline(n_knots=9, monotone="increasing", monotone_mode="fit"),
+                "z": Spline(kind="cr", k=10),
+                "area": Categorical(base="first"),
+            },
+        )
+        model.fit_reml(X, y, max_reml_iter=6)
+
+        W = rng.uniform(0.5, 2.0, n)
+        xtwx_block = _block_xtwx(model._dm.group_matrices, model._groups, W)
+        xtwx_dense = model._dm.toarray().T @ (model._dm.toarray() * W[:, None])
 
         np.testing.assert_allclose(xtwx_block, xtwx_dense, atol=1e-10)
 
