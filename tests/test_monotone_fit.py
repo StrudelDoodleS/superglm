@@ -299,21 +299,23 @@ class TestMonotoneUnsupportedCombinations:
         with pytest.raises(NotImplementedError, match="select=True"):
             s.build(x)
 
-    def test_monotone_fit_reml_raises(self):
+    def test_monotone_fit_reml_qp_passthrough(self):
+        """QP monotone in fit_reml works via passthrough heuristic."""
         rng = np.random.default_rng(42)
         n = 200
-        x = rng.uniform(0, 1, n)
+        x = np.sort(rng.uniform(0, 1, n))
         y = 2 * x + rng.normal(0, 0.2, n)
-        df = pd.DataFrame({"x": x, "y": y})
+        df = pd.DataFrame({"x": x})
 
         model = SuperGLM(
             family=Gaussian(),
+            selection_penalty=0,
             features={
                 "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
             },
         )
-        with pytest.raises(NotImplementedError, match="smoothness selection"):
-            model.fit_reml(df[["x"]], df["y"])
+        model.fit_reml(df[["x"]], y)
+        assert model._result.converged
 
     def test_scop_monotone_with_discrete_works(self):
         """discrete=True + SCOP monotone_mode='fit' is now supported."""
@@ -504,13 +506,13 @@ class TestMonotoneFixedLambdaREML:
         assert model._result.converged
         assert model._reml_lambdas is not None
 
-    def test_fit_reml_without_fixed_lambdas_raises_qp(self):
-        """fit_reml raises for QP monotone without fixed lambda."""
+    def test_fit_reml_without_fixed_lambdas_works_qp(self):
+        """fit_reml works for QP monotone via passthrough heuristic."""
         rng = np.random.default_rng(42)
         n = 200
-        x = rng.uniform(0, 1, n)
+        x = np.sort(rng.uniform(0, 1, n))
         y = 2 * x + rng.normal(0, 0.2, n)
-        df = pd.DataFrame({"x": x, "y": y})
+        df = pd.DataFrame({"x": x})
 
         model = SuperGLM(
             family=Gaussian(),
@@ -523,8 +525,8 @@ class TestMonotoneFixedLambdaREML:
                 ),
             },
         )
-        with pytest.raises(NotImplementedError, match="smoothness selection"):
-            model.fit_reml(df[["x"]], df["y"])
+        model.fit_reml(df[["x"]], y)
+        assert model._result.converged
 
     @pytest.mark.slow
     def test_fit_reml_without_fixed_lambdas_works_scop(self):
