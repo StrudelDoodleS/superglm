@@ -22,13 +22,29 @@ the sequential Gauss-Seidel loop that causes slow convergence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.linalg import cho_factor, cho_solve
+from scipy.sparse.linalg import LinearOperator, minres
 
 from superglm.group_matrix import _disc_disc_2d_hist
 from superglm.solvers.scop import SCOPSolverReparam
+
+
+@dataclass
+class _SCOPPrototypeConfig:
+    """Private prototype switches for numerical experiments on the joint solve."""
+
+    solve_mode: Literal["direct", "minres", "minres_inexact"] = "direct"
+    iterative_q_total_min: int = 96
+    iterative_rtol: float = 1e-10
+    iterative_maxiter: int | None = None
+    cross_block_rel_tol: float = 0.0
+
+
+_PROTOTYPE_CONFIG = _SCOPPrototypeConfig()
 
 
 @dataclass
@@ -52,6 +68,44 @@ class SCOPNewtonResult:
 
     H_penalized: NDArray | None = None
     """(q_eff, q_eff) penalized Hessian from the Newton step, or None."""
+
+    linear_solver: str = "direct"
+    """Linear solver used for the Newton direction."""
+
+    linear_iterations: int = 0
+    """Iteration count for iterative solvers, else 0."""
+
+    dropped_cross_blocks: int = 0
+    """Number of cross-group blocks dropped by prototype sparsification."""
+
+
+def configure_scop_prototype(
+    *,
+    solve_mode: Literal["direct", "minres", "minres_inexact"] | None = None,
+    iterative_q_total_min: int | None = None,
+    iterative_rtol: float | None = None,
+    iterative_maxiter: int | None = None,
+    cross_block_rel_tol: float | None = None,
+) -> None:
+    """Configure private prototype switches for SCOP numerical experiments."""
+    global _PROTOTYPE_CONFIG
+    cfg = _PROTOTYPE_CONFIG
+    if solve_mode is not None:
+        cfg.solve_mode = solve_mode
+    if iterative_q_total_min is not None:
+        cfg.iterative_q_total_min = iterative_q_total_min
+    if iterative_rtol is not None:
+        cfg.iterative_rtol = iterative_rtol
+    if iterative_maxiter is not None:
+        cfg.iterative_maxiter = iterative_maxiter
+    if cross_block_rel_tol is not None:
+        cfg.cross_block_rel_tol = cross_block_rel_tol
+
+
+def reset_scop_prototype() -> None:
+    """Reset prototype switches to the exact direct-solve defaults."""
+    global _PROTOTYPE_CONFIG
+    _PROTOTYPE_CONFIG = _SCOPPrototypeConfig()
 
 
 def _objective(
@@ -267,6 +321,132 @@ def _solve_step(H: NDArray, grad: NDArray) -> NDArray | None:
         return cho_solve((L, low), grad)
     except np.linalg.LinAlgError:
         return None
+
+
+def _build_minres_preconditioner(
+    scop_items: list[tuple[int, dict]],
+    joint_slices: list[slice],
+    BtWBs: list[NDArray],
+    j_diags: list[NDArray],
+    lambdas_list: list[float],
+) -> LinearOperator:
+    """Build a block-Jacobi inverse preconditioner for MINRES.
+
+    Uses the positive semidefinite Gauss-Newton diagonal blocks plus a small
+    ridge, falling back to a diagonal inverse if Cholesky still fails.
+    """
+    block_solvers: list[tuple[str, object]] = []
+    for idx, (_, st) in enumerate(scop_items):
+        j_i = j_diags[idx]
+        jj_ii = j_i[:, None] * j_i[None, :]
+        block = jj_ii * BtWBs[idx] + lambdas_list[idx] * st["S_scop"]
+        eye = np.eye(block.shape[0])
+        solved = False
+        for ridge in (1e-10, 1e-8, 1e-6, 1e-4):
+            try:
+                fac = cho_factor(block + ridge * eye)
+                block_solvers.append(("chol", fac))
+                solved = True
+                break
+            except np.linalg.LinAlgError:
+                continue
+        if not solved:
+            diag = np.maximum(np.abs(np.diag(block)), 1e-8)
+            block_solvers.append(("diag", 1.0 / diag))
+
+    size = joint_slices[-1].stop if joint_slices else 0
+
+    def _matvec(v: NDArray) -> NDArray:
+        out = np.empty_like(v)
+        for sl_i, (kind, solver) in zip(joint_slices, block_solvers, strict=True):
+            block_v = v[sl_i]
+            if kind == "chol":
+                out[sl_i] = cho_solve(solver, block_v)
+            else:
+                out[sl_i] = solver * block_v
+        return out
+
+    return LinearOperator((size, size), matvec=_matvec, dtype=np.float64)
+
+
+def _solve_step_minres(
+    H: NDArray,
+    grad: NDArray,
+    scop_items: list[tuple[int, dict]],
+    joint_slices: list[slice],
+    BtWBs: list[NDArray],
+    j_diags: list[NDArray],
+    lambdas_list: list[float],
+    *,
+    rtol: float,
+    maxiter: int | None,
+    allow_inexact: bool,
+) -> tuple[NDArray | None, int]:
+    """Solve H @ step = grad with MINRES and a block-Jacobi preconditioner."""
+    iters = 0
+
+    def _callback(_x: NDArray) -> None:
+        nonlocal iters
+        iters += 1
+
+    A = LinearOperator(H.shape, matvec=lambda v: H @ v, dtype=np.float64)
+    M = _build_minres_preconditioner(scop_items, joint_slices, BtWBs, j_diags, lambdas_list)
+    step, info = minres(
+        A,
+        grad,
+        M=M,
+        rtol=rtol,
+        maxiter=maxiter,
+        callback=_callback,
+        check=False,
+    )
+
+    residual = np.linalg.norm(H @ step - grad)
+    grad_norm = max(np.linalg.norm(grad), 1e-300)
+    tol_mult = 10.0 if allow_inexact else 1.0
+    residual_tol = tol_mult * max(rtol, 1e-12) * grad_norm
+    if info == 0 and np.isfinite(residual) and residual <= residual_tol:
+        return step, iters
+    if allow_inexact and np.isfinite(residual) and residual <= residual_tol:
+        return step, iters
+    return None, iters
+
+
+def _solve_joint_step(
+    H: NDArray,
+    grad: NDArray,
+    scop_items: list[tuple[int, dict]],
+    joint_slices: list[slice],
+    BtWBs: list[NDArray],
+    j_diags: list[NDArray],
+    lambdas_list: list[float],
+) -> tuple[NDArray | None, str, int]:
+    """Solve the joint Newton direction using the active prototype policy."""
+    cfg = _PROTOTYPE_CONFIG
+    q_total = H.shape[0]
+
+    use_iterative = cfg.solve_mode != "direct" and q_total >= cfg.iterative_q_total_min
+    if not use_iterative:
+        return _solve_step(H, grad), "direct", 0
+
+    allow_inexact = cfg.solve_mode == "minres_inexact"
+    step, iters = _solve_step_minres(
+        H,
+        grad,
+        scop_items,
+        joint_slices,
+        BtWBs,
+        j_diags,
+        lambdas_list,
+        rtol=cfg.iterative_rtol,
+        maxiter=cfg.iterative_maxiter,
+        allow_inexact=allow_inexact,
+    )
+    if step is not None:
+        solver_name = "minres_inexact" if allow_inexact else "minres"
+        return step, solver_name, iters
+
+    return _solve_step(H, grad), "direct_fallback", iters
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +733,7 @@ def scop_joint_newton_step(
     # --- Step 3: Assemble joint Hessian and gradient ---
     H = np.zeros((q_total, q_total))
     grad = np.zeros(q_total)
+    dropped_cross_blocks = 0
 
     for idx, (gi, st) in enumerate(scop_items):
         sl_i = joint_slices[idx]
@@ -570,6 +751,7 @@ def scop_joint_newton_step(
         grad[sl_i] = grad_datas[idx] + lam_i * (st["S_scop"] @ beta_i)
 
     # Cross-group blocks
+    cfg = _PROTOTYPE_CONFIG
     for a in range(n_groups):
         for b in range(a + 1, n_groups):
             gi_a, st_a = scop_items[a]
@@ -580,13 +762,30 @@ def scop_joint_newton_step(
             j_b = j_diags[b]
 
             BtWB_ab = _compute_cross_gram(st_a, st_b, W)
+            if cfg.cross_block_rel_tol > 0.0:
+                norm_scale = np.sqrt(
+                    np.linalg.norm(BtWBs[a], ord="fro") * np.linalg.norm(BtWBs[b], ord="fro")
+                )
+                if norm_scale > 0.0:
+                    rel_cross = np.linalg.norm(BtWB_ab, ord="fro") / norm_scale
+                    if rel_cross < cfg.cross_block_rel_tol:
+                        dropped_cross_blocks += 1
+                        continue
             cross = BtWB_ab * j_a[:, np.newaxis] * j_b[np.newaxis, :]
             H[sl_a, sl_b] = cross
             H[sl_b, sl_a] = cross.T
 
     # --- Step 4: Solve ---
     used_fisher = False
-    step = _solve_step(H, grad)
+    step, linear_solver, linear_iterations = _solve_joint_step(
+        H,
+        grad,
+        scop_items,
+        joint_slices,
+        BtWBs,
+        j_diags,
+        lambdas_list,
+    )
 
     if step is None:
         # Fisher fallback: drop second-order diag(grad_data) terms
@@ -598,12 +797,30 @@ def scop_joint_newton_step(
             H_block[np.diag_indices_from(H_block)] -= grad_datas[idx]
             H_gn[sl_i, sl_i] = H_block
         H_fisher = H_gn + 1e-8 * np.eye(q_total)
-        step = _solve_step(H_fisher, grad)
+        step, linear_solver, linear_iterations = _solve_joint_step(
+            H_fisher,
+            grad,
+            scop_items,
+            joint_slices,
+            BtWBs,
+            j_diags,
+            lambdas_list,
+        )
         if step is None:
             H_fisher += 1e-4 * np.eye(q_total)
-            step = _solve_step(H_fisher, grad)
+            step, linear_solver, linear_iterations = _solve_joint_step(
+                H_fisher,
+                grad,
+                scop_items,
+                joint_slices,
+                BtWBs,
+                j_diags,
+                lambdas_list,
+            )
             if step is None:
                 step = -1e-4 * grad
+                linear_solver = "gradient_fallback"
+                linear_iterations = 0
 
     # --- Step 5: Joint line search ---
     alpha = 1.0
@@ -653,6 +870,9 @@ def scop_joint_newton_step(
             step_norm=step_norm_i,
             used_fisher_fallback=used_fisher,
             H_penalized=H_block_i,
+            linear_solver=linear_solver,
+            linear_iterations=linear_iterations,
+            dropped_cross_blocks=dropped_cross_blocks,
         )
 
     return results

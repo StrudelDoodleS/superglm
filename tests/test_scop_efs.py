@@ -2854,3 +2854,68 @@ class TestJointSCOPNewton:
         for gi, result in joint_results.items():
             assert result.objective_after <= result.objective_before + 1e-14
             assert np.all(np.isfinite(result.beta_new))
+
+    def test_minres_matches_direct_on_two_group_problem(self):
+        """Iterative MINRES prototype should match direct solve closely."""
+        from superglm.solvers.scop_newton import (
+            configure_scop_prototype,
+            reset_scop_prototype,
+            scop_joint_newton_step,
+        )
+
+        scop_states, W, z = self._build_two_group_inputs()
+        groups = self._make_mock_groups(scop_states)
+
+        try:
+            reset_scop_prototype()
+            direct_results = scop_joint_newton_step(
+                scop_states, W, z, {"x1": 1.0, "x2": 0.5}, groups
+            )
+
+            configure_scop_prototype(
+                solve_mode="minres",
+                iterative_q_total_min=1,
+                iterative_rtol=1e-12,
+                iterative_maxiter=200,
+            )
+            iter_results = scop_joint_newton_step(scop_states, W, z, {"x1": 1.0, "x2": 0.5}, groups)
+        finally:
+            reset_scop_prototype()
+
+        for gi in direct_results:
+            np.testing.assert_allclose(
+                iter_results[gi].beta_new,
+                direct_results[gi].beta_new,
+                rtol=1e-8,
+                atol=1e-10,
+            )
+            np.testing.assert_allclose(
+                iter_results[gi].objective_after,
+                direct_results[gi].objective_after,
+                rtol=1e-10,
+                atol=1e-12,
+            )
+            assert iter_results[gi].linear_solver == "minres"
+            assert iter_results[gi].linear_iterations > 0
+
+    def test_cross_block_truncation_keeps_objective_finite(self):
+        """Prototype cross-block dropping still returns a usable step."""
+        from superglm.solvers.scop_newton import (
+            configure_scop_prototype,
+            reset_scop_prototype,
+            scop_joint_newton_step,
+        )
+
+        scop_states, W, z = self._build_two_group_inputs()
+        groups = self._make_mock_groups(scop_states)
+
+        try:
+            configure_scop_prototype(cross_block_rel_tol=10.0)
+            results = scop_joint_newton_step(scop_states, W, z, {"x1": 1.0, "x2": 0.5}, groups)
+        finally:
+            reset_scop_prototype()
+
+        for result in results.values():
+            assert np.isfinite(result.objective_after)
+            assert result.objective_after <= result.objective_before + 1e-8
+            assert result.dropped_cross_blocks >= 1
