@@ -1139,6 +1139,11 @@ def fit_reml(
         meta["lambda_strategy"] = "qp_passthrough"
     model._last_fit_meta = meta
 
+    # Safety: ensure QP constraints are always restored (idempotent if already done).
+    for gi, engine, constraints in _qp_saved_state:
+        model._groups[gi].monotone_engine = engine
+        model._groups[gi].constraints = constraints
+
     logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")
     return model
 
