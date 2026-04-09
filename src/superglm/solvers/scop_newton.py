@@ -27,6 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.linalg import cho_factor, cho_solve
 
+from superglm.group_matrix import _disc_disc_2d_hist
 from superglm.solvers.scop import SCOPSolverReparam
 
 
@@ -311,6 +312,68 @@ def _safe_joint_objective(
     return float(obj) if np.isfinite(obj) else np.inf
 
 
+def _joint_objective_from_eta(
+    W: NDArray,
+    z_scop: NDArray,
+    total_eta: NDArray,
+    beta_joint: NDArray,
+    slices: list[slice],
+    lambdas_list: list[float],
+    scop_items: list[tuple[int, dict]],
+) -> float:
+    """Evaluate the joint SCOP objective from cached total eta.
+
+    This is mathematically identical to ``_safe_joint_objective`` but reuses
+    the already assembled SCOP contribution when the caller has it.
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        penalty = 0.0
+        for (_, st), sl_i, lam_i in zip(scop_items, slices, lambdas_list):
+            beta_i = beta_joint[sl_i]
+            penalty += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
+        residual = z_scop - total_eta
+        data_term = 0.5 * np.sum(W * residual**2)
+        obj = data_term + penalty
+    return float(obj) if np.isfinite(obj) else np.inf
+
+
+def _safe_joint_trial_objective(
+    scop_items: list[tuple[int, dict]],
+    W: NDArray,
+    z_scop: NDArray,
+    beta_trial: NDArray,
+    slices: list[slice],
+    lambdas_list: list[float],
+    total_eta_current: NDArray,
+    gammas_current: list[NDArray],
+) -> float:
+    """Evaluate a trial joint objective reusing the current SCOP state.
+
+    Instead of rebuilding the whole objective from scratch, this keeps the
+    current total SCOP contribution and only applies per-group trial deltas.
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        total_eta = total_eta_current.copy()
+        penalty = 0.0
+        for (_, st), sl_i, lam_i, gamma_curr in zip(
+            scop_items, slices, lambdas_list, gammas_current
+        ):
+            beta_i = beta_trial[sl_i]
+            gamma_trial = st["reparam"].forward(beta_i)
+            if not np.all(np.isfinite(gamma_trial)):
+                return np.inf
+            gamma_delta = gamma_trial - gamma_curr
+            eta_delta = st["B_scop"] @ gamma_delta
+            if st["bin_idx"] is not None:
+                eta_delta = eta_delta[st["bin_idx"]]
+            total_eta += eta_delta
+            penalty += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
+        residual = z_scop - total_eta
+        data_term = 0.5 * np.sum(W * residual**2)
+        obj = data_term + penalty
+    return float(obj) if np.isfinite(obj) else np.inf
+
+
 def _compute_cross_gram(
     st_i: dict,
     st_j: dict,
@@ -336,8 +399,7 @@ def _compute_cross_gram(
         # Both discretized: 2D weight histogram
         nb_i = B_i.shape[0]
         nb_j = B_j.shape[0]
-        W_2d = np.zeros((nb_i, nb_j))
-        np.add.at(W_2d, (bi_i, bi_j), W)
+        W_2d = _disc_disc_2d_hist(bi_i, bi_j, W, nb_i, nb_j)
         return B_i.T @ W_2d @ B_j
     elif bi_i is None and bi_j is None:
         # Both dense
@@ -438,8 +500,14 @@ def scop_joint_newton_step(
 
     # --- Check starting objective ---
     beta_joint = np.concatenate(betas)
-    obj_before = _safe_joint_objective(
-        scop_items, W, z_scop, beta_joint, joint_slices, lambdas_list
+    obj_before = _joint_objective_from_eta(
+        W,
+        z_scop,
+        total_scop_eta,
+        beta_joint,
+        joint_slices,
+        lambdas_list,
+        scop_items,
     )
 
     if not np.isfinite(obj_before):
@@ -494,7 +562,9 @@ def scop_joint_newton_step(
 
         # Diagonal block: J^T BtWB J + lambda*S + diag(grad_data)
         jj_ii = j_i[:, None] * j_i[None, :]
-        H[sl_i, sl_i] = jj_ii * BtWBs[idx] + lam_i * st["S_scop"] + np.diag(grad_datas[idx])
+        block = jj_ii * BtWBs[idx] + lam_i * st["S_scop"]
+        block[np.diag_indices_from(block)] += grad_datas[idx]
+        H[sl_i, sl_i] = block
 
         # Gradient
         grad[sl_i] = grad_datas[idx] + lam_i * (st["S_scop"] @ beta_i)
@@ -510,7 +580,7 @@ def scop_joint_newton_step(
             j_b = j_diags[b]
 
             BtWB_ab = _compute_cross_gram(st_a, st_b, W)
-            cross = np.diag(j_a) @ BtWB_ab @ np.diag(j_b)
+            cross = BtWB_ab * j_a[:, np.newaxis] * j_b[np.newaxis, :]
             H[sl_a, sl_b] = cross
             H[sl_b, sl_a] = cross.T
 
@@ -524,7 +594,9 @@ def scop_joint_newton_step(
         H_gn = H.copy()
         for idx in range(n_groups):
             sl_i = joint_slices[idx]
-            H_gn[sl_i, sl_i] -= np.diag(grad_datas[idx])
+            H_block = H_gn[sl_i, sl_i].copy()
+            H_block[np.diag_indices_from(H_block)] -= grad_datas[idx]
+            H_gn[sl_i, sl_i] = H_block
         H_fisher = H_gn + 1e-8 * np.eye(q_total)
         step = _solve_step(H_fisher, grad)
         if step is None:
@@ -539,8 +611,15 @@ def scop_joint_newton_step(
 
     for _ in range(max_halving + 1):
         beta_trial = beta_joint - alpha * step
-        obj_trial = _safe_joint_objective(
-            scop_items, W, z_scop, beta_trial, joint_slices, lambdas_list
+        obj_trial = _safe_joint_trial_objective(
+            scop_items,
+            W,
+            z_scop,
+            beta_trial,
+            joint_slices,
+            lambdas_list,
+            total_scop_eta,
+            j_diags,
         )
         if np.isfinite(obj_trial) and obj_trial <= obj_before + 1e-14:
             accepted = True
