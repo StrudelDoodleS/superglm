@@ -1558,6 +1558,34 @@ class TestSCOPFitRemlIntegration:
         ratio = model_qp._reml_lambdas[x2_key_qp] / model_uc._reml_lambdas[x2_key_uc]
         assert 0.1 < ratio < 10, f"x2 lambda ratio too far: {ratio:.2f}"
 
+    @pytest.mark.slow
+    def test_qp_passthrough_noisy_data_monotone(self):
+        """QP passthrough produces monotone predictions even on noisy data."""
+        # Use a seed/noise level that makes unconstrained fit non-monotone
+        rng = np.random.default_rng(6)
+        n = 120
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.8, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": BSplineSmooth(
+                    n_knots=10,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        diffs = np.diff(pred)
+        assert np.all(diffs >= -1e-6), f"QP passthrough not monotone: min diff = {diffs.min():.2e}"
+
 
 class TestSCOPEFSRegression:
     """Regression and edge-case tests for SCOP EFS auto-lambda.

@@ -1054,33 +1054,6 @@ def fit_reml(
     n_reml_iter = best.n_reml_iter
     converged = best.converged
 
-    # QP passthrough stage 2: restore constraints and refit.
-    # REML ran fully unconstrained (stage 1). Now restore QP constraints
-    # and refit once at the estimated lambdas to get monotone coefficients.
-    if _qp_passthrough:
-        # Restore QP constraint state
-        for gi, engine, constraints in _qp_saved_state:
-            model._groups[gi].monotone_engine = engine
-            model._groups[gi].constraints = constraints
-
-        qp_refit, _ = fit_irls_direct(
-            X=model._dm,
-            y=y,
-            weights=sample_weight,
-            family=model._distribution,
-            link=model._link,
-            groups=model._groups,
-            lambda2=lambdas,
-            offset=offset_arr,
-            beta_init=model._result.beta,
-            intercept_init=float(model._result.intercept),
-            max_iter=max_pirls_iter,
-            tol=pirls_tol,
-            convergence="deviance",
-            reml_penalties=reml_penalties,
-        )
-        model._result = qp_refit
-
     # Fix phi: known-scale families (Poisson) get phi=1.0;
     # estimated-scale families get REML profiled φ̂ instead of the raw
     # PIRLS phi = dev/(n-edf) which doesn't include the penalty.
@@ -1102,14 +1075,43 @@ def fit_reml(
         M_p = compute_total_penalty_rank(reml_penalties)
         phi_fixed = max((best.pirls_result.deviance + pq_final) / max(len(y) - M_p, 1.0), 1e-10)
 
+    # QP passthrough stage 2: restore constraints and refit at estimated lambdas.
+    # This happens AFTER phi computation (which uses unconstrained REML quantities)
+    # but BEFORE the final corrected PIRLSResult is built.
+    if _qp_passthrough:
+        for gi, engine, constraints in _qp_saved_state:
+            model._groups[gi].monotone_engine = engine
+            model._groups[gi].constraints = constraints
+
+        qp_refit, _ = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=lambdas,
+            offset=offset_arr,
+            beta_init=best.pirls_result.beta,
+            intercept_init=float(best.pirls_result.intercept),
+            max_iter=max_pirls_iter,
+            tol=pirls_tol,
+            convergence="deviance",
+            reml_penalties=reml_penalties,
+        )
+        # Use constrained refit for the final result
+        final_pirls = qp_refit
+    else:
+        final_pirls = best.pirls_result
+
     corrected = PIRLSResult(
-        beta=best.pirls_result.beta,
-        intercept=best.pirls_result.intercept,
-        n_iter=best.pirls_result.n_iter,
-        deviance=best.pirls_result.deviance,
-        converged=best.pirls_result.converged,
+        beta=final_pirls.beta,
+        intercept=final_pirls.intercept,
+        n_iter=final_pirls.n_iter,
+        deviance=final_pirls.deviance,
+        converged=final_pirls.converged,
         phi=phi_fixed,
-        effective_df=best.pirls_result.effective_df,
+        effective_df=final_pirls.effective_df,
     )
     model._result = corrected
     model._reml_result.pirls_result = corrected
