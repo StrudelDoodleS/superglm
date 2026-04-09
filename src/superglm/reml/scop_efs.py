@@ -25,6 +25,54 @@ from superglm.solvers.irls_direct import _build_penalty_matrix, _safe_decompose_
 from superglm.types import GroupSlice, PenaltyComponent
 
 
+def _get_scop_penalty_metadata(st: dict) -> tuple[float, float, NDArray]:
+    """Return cached SCOP penalty metadata, computing it once if needed."""
+    cached_rank = st.get("penalty_rank")
+    cached_log_det = st.get("penalty_log_det_omega_plus")
+    cached_eigvals = st.get("penalty_eigvals_omega")
+    if cached_rank is not None and cached_log_det is not None and cached_eigvals is not None:
+        eigvals = np.asarray(cached_eigvals, dtype=np.float64)
+        rank = float(cached_rank)
+        if (
+            eigvals.ndim == 1
+            and len(eigvals) == int(rank)
+            and np.all(eigvals > 0.0)
+            and np.isfinite(cached_log_det)
+        ):
+            return rank, float(cached_log_det), eigvals
+
+    S_scop = st["S_scop"]
+    eps_thresh = np.finfo(float).eps ** (2 / 3)
+    eigvals = np.linalg.eigvalsh(S_scop)
+    thresh = eps_thresh * max(eigvals.max(), 1e-12)
+    rank = float(np.sum(eigvals > thresh))
+    n_pos = int(rank)
+
+    if n_pos > 0:
+        sorted_eig = np.sort(eigvals)[::-1]
+        pos_eigvals = np.asarray(sorted_eig[:n_pos], dtype=np.float64)
+        log_det = float(np.sum(np.log(np.maximum(pos_eigvals, 1e-300))))
+    else:
+        pos_eigvals = np.array([], dtype=np.float64)
+        log_det = 0.0
+
+    st["penalty_rank"] = rank
+    st["penalty_log_det_omega_plus"] = log_det
+    st["penalty_eigvals_omega"] = pos_eigvals
+    return rank, log_det, pos_eigvals
+
+
+def _scop_jacobian_diag(st: dict) -> NDArray:
+    """Return diag(d gamma / d beta_eff), reusing cached gamma where available."""
+    gamma_eff = st.get("gamma_eff")
+    if gamma_eff is not None:
+        gamma_eff = np.asarray(gamma_eff, dtype=np.float64)
+        if gamma_eff.ndim == 1 and np.all(np.isfinite(gamma_eff)):
+            return gamma_eff
+    beta_eff = np.asarray(st["beta_eff"], dtype=np.float64)
+    return np.exp(np.clip(beta_eff, -500, 500))
+
+
 def build_scop_penalty_components(
     scop_states: dict[int, dict],
 ) -> list[PenaltyComponent]:
@@ -43,23 +91,11 @@ def build_scop_penalty_components(
     -------
     list[PenaltyComponent]
     """
-    eps_thresh = np.finfo(float).eps ** (2 / 3)
     components = []
 
     for gi, st in scop_states.items():
         S_scop = st["S_scop"]
-        eigvals = np.linalg.eigvalsh(S_scop)
-        thresh = eps_thresh * max(eigvals.max(), 1e-12)
-        rank = float(np.sum(eigvals > thresh))
-        n_pos = int(rank)
-
-        if n_pos > 0:
-            sorted_eig = np.sort(eigvals)[::-1]
-            pos_eigvals = sorted_eig[:n_pos]
-            log_det = float(np.sum(np.log(np.maximum(pos_eigvals, 1e-300))))
-        else:
-            pos_eigvals = np.array([])
-            log_det = 0.0
+        rank, log_det, pos_eigvals = _get_scop_penalty_metadata(st)
 
         pc = PenaltyComponent(
             name=st["group_name"],
@@ -173,8 +209,7 @@ def assemble_joint_hessian(
         sl = st["group_sl"]
         H_scop = st["H_scop_penalized"]
         name = st["group_name"]
-        beta_eff = st["beta_eff"]
-        j_diag = np.exp(np.clip(beta_eff, -500, 500))
+        j_diag = _scop_jacobian_diag(st)
 
         # Replace diagonal SCOP block with full Newton Hessian
         H_joint[sl, sl] = H_scop
@@ -192,11 +227,11 @@ def assemble_joint_hessian(
     for idx_a in range(len(scop_items)):
         gi_a, st_a = scop_items[idx_a]
         sl_a = st_a["group_sl"]
-        j_a = np.exp(np.clip(st_a["beta_eff"], -500, 500))
+        j_a = _scop_jacobian_diag(st_a)
         for idx_b in range(idx_a + 1, len(scop_items)):
             gi_b, st_b = scop_items[idx_b]
             sl_b = st_b["group_sl"]
-            j_b = np.exp(np.clip(st_b["beta_eff"], -500, 500))
+            j_b = _scop_jacobian_diag(st_b)
             idx_a_arr = np.arange(sl_a.start, sl_a.stop)
             idx_b_arr = np.arange(sl_b.start, sl_b.stop)
             H_joint[np.ix_(idx_a_arr, idx_b_arr)] *= j_a[:, np.newaxis] * j_b[np.newaxis, :]
