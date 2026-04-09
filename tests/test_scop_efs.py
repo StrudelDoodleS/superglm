@@ -1490,13 +1490,13 @@ class TestSCOPFitRemlIntegration:
         assert "x1" in model._reml_lambdas
         assert model._reml_lambdas["x1"] > 0
 
-    def test_qp_monotone_still_raises(self):
-        """BSplineSmooth with monotone still raises NotImplementedError for auto lambda."""
+    def test_qp_monotone_passthrough(self):
+        """BSplineSmooth with QP monotone works via passthrough heuristic."""
         rng = np.random.default_rng(42)
         n = 200
-        x = rng.uniform(0, 1, n)
+        x = np.sort(rng.uniform(0, 1, n))
         y = 2 * x + rng.normal(0, 0.2, n)
-        df = pd.DataFrame({"x": x, "y": y})
+        df = pd.DataFrame({"x": x})
 
         model = SuperGLM(
             family=Gaussian(),
@@ -1509,8 +1509,82 @@ class TestSCOPFitRemlIntegration:
                 ),
             },
         )
-        with pytest.raises(NotImplementedError, match="QP monotone"):
-            model.fit_reml(df[["x"]], df["y"])
+        model.fit_reml(df[["x"]], y)
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+
+        # Predictions should be monotone
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-6)
+
+        # Metadata should record passthrough strategy
+        assert model._last_fit_meta.get("lambda_strategy") == "qp_passthrough"
+
+    @pytest.mark.slow
+    def test_qp_passthrough_lambdas_match_unconstrained(self):
+        """QP passthrough lambdas should be close to unconstrained REML lambdas."""
+        rng = np.random.default_rng(42)
+        n = 500
+        x1 = np.sort(rng.uniform(0, 1, n))
+        x2 = rng.uniform(0, 1, n)
+        y = 2 * x1 + np.sin(2 * np.pi * x2) + rng.normal(0, 0.2, n)
+        df = pd.DataFrame({"x1": x1, "x2": x2})
+
+        # Unconstrained REML
+        model_uc = SuperGLM(
+            family=Gaussian(),
+            features={
+                "x1": BSplineSmooth(n_knots=8),
+                "x2": PSpline(n_knots=8),
+            },
+        )
+        model_uc.fit_reml(df[["x1", "x2"]], y)
+
+        # QP passthrough
+        model_qp = SuperGLM(
+            family=Gaussian(),
+            features={
+                "x1": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x2": PSpline(n_knots=8),
+            },
+        )
+        model_qp.fit_reml(df[["x1", "x2"]], y)
+
+        # x2 lambda should be similar (same term, unconstrained in both)
+        # x1 lambda should be in the same ballpark (same penalty structure)
+        x2_key_uc = next(k for k in model_uc._reml_lambdas if k.startswith("x2"))
+        x2_key_qp = next(k for k in model_qp._reml_lambdas if k.startswith("x2"))
+        ratio = model_qp._reml_lambdas[x2_key_qp] / model_uc._reml_lambdas[x2_key_uc]
+        assert 0.1 < ratio < 10, f"x2 lambda ratio too far: {ratio:.2f}"
+
+    @pytest.mark.slow
+    def test_qp_passthrough_noisy_data_monotone(self):
+        """QP passthrough produces monotone predictions even on noisy data."""
+        # Use a seed/noise level that makes unconstrained fit non-monotone
+        rng = np.random.default_rng(6)
+        n = 120
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 2 * x + rng.normal(0, 0.8, n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x": BSplineSmooth(
+                    n_knots=10,
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        diffs = np.diff(pred)
+        assert np.all(diffs >= -1e-6), f"QP passthrough not monotone: min diff = {diffs.min():.2e}"
 
 
 class TestSCOPEFSRegression:
@@ -2341,13 +2415,13 @@ class TestMultiSCOPIntegration:
         assert model._result.converged
 
     @pytest.mark.slow
-    def test_qp_monotone_still_raises(self):
-        """QP monotone auto-lambda still raises NotImplementedError."""
+    def test_qp_monotone_passthrough_regression(self):
+        """QP monotone auto-lambda via passthrough works and produces monotone predictions."""
         from superglm.features.spline import BSplineSmooth
 
         rng = np.random.default_rng(42)
         n = 200
-        x = rng.uniform(0, 1, n)
+        x = np.sort(rng.uniform(0, 1, n))
         y = 2 * x + rng.normal(0, 0.2, n)
         df = pd.DataFrame({"x": x})
 
@@ -2358,8 +2432,12 @@ class TestMultiSCOPIntegration:
                 "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
             },
         )
-        with pytest.raises(NotImplementedError, match="QP monotone"):
-            model.fit_reml(df[["x"]], y)
+        model.fit_reml(df[["x"]], y)
+        assert model._result.converged
+
+        x_grid = np.linspace(0, 1, 200)
+        pred = model.predict(pd.DataFrame({"x": x_grid}))
+        assert np.all(np.diff(pred) >= -1e-6)
 
     @pytest.mark.slow
     def test_diagnostics_populated(self):
