@@ -23,7 +23,7 @@ def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42):
     eta = 5.0 + 0.3 * (cat == "hi") - 0.2 * (cat == "lo") + 0.1 * (cat == "mid")
     mu = np.exp(eta) * exposure
 
-    from superglm.tweedie_profile import generate_tweedie_cpg
+    from superglm.profiling.tweedie import generate_tweedie_cpg
 
     y = generate_tweedie_cpg(n, mu=mu, phi=2.0, p=1.5, rng=rng)
     y[cat == "rare"] = 0.0  # force near-separation

@@ -157,8 +157,7 @@ class TestEFSOptimizer:
 
     def test_efs_objective_consistent_after_cheap_exit(self):
         """REML objective should use fresh penalty caches after final DM rebuild."""
-        from superglm.reml import build_penalty_caches
-        from superglm.reml_optimizer import reml_laml_objective
+        from superglm.reml import build_penalty_caches, reml_laml_objective
 
         rng = np.random.default_rng(42)
         n = 800

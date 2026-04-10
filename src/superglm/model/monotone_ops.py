@@ -1,11 +1,11 @@
-"""Post-fit monotone repair operations for SuperGLM."""
+"""Legacy post-fit monotone repair operations for SuperGLM."""
 
 from __future__ import annotations
 
 import numpy as np
 
 
-def apply_monotone_postfit(
+def monotonize(
     model,
     X,
     sample_weight=None,
@@ -13,7 +13,7 @@ def apply_monotone_postfit(
     *,
     n_grid: int = 500,
 ):
-    """Find all monotone-annotated splines, repair them, store results.
+    """Repair monotone-annotated spline terms after fitting.
 
     Iterates ``model._specs`` for ``_SplineBase`` instances with
     ``monotone is not None``. Idempotent: skips features already repaired.
@@ -40,7 +40,7 @@ def apply_monotone_postfit(
     from superglm.features.spline import _SplineBase
 
     if model._result is None:
-        raise RuntimeError("Model must be fitted before calling apply_monotone_postfit().")
+        raise RuntimeError("Model must be fitted before calling monotonize().")
 
     # Initialize storage if needed
     if not hasattr(model, "_monotone_repairs"):
@@ -97,3 +97,15 @@ def apply_monotone_postfit(
                 pass
 
     return model
+
+
+def apply_monotone_postfit(
+    model,
+    X,
+    sample_weight=None,
+    offset=None,
+    *,
+    n_grid: int = 500,
+):
+    """Compatibility alias for :func:`monotonize`."""
+    return monotonize(model, X, sample_weight, offset, n_grid=n_grid)

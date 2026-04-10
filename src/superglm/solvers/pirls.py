@@ -187,7 +187,7 @@ def _fit_pirls_inner(
             beta_before = beta.copy()
 
             # Update intercept (closed form, unpenalised)
-            delta_int = np.sum(W * r) / np.sum(W)
+            delta_int: float = float(np.sum(W * r) / np.sum(W))
             intercept += delta_int
             r -= delta_int
 
@@ -230,7 +230,7 @@ def _fit_pirls_inner(
                         group_active[gi] = True
 
             # Check inner convergence
-            change = np.max(np.abs(beta - beta_before))
+            change: float = float(np.max(np.abs(beta - beta_before)))
             if change < tol * 0.01:
                 break
 
@@ -352,7 +352,7 @@ def _fit_pirls_inner(
 
     if has_smoothing:
         # Exact: 1 + trace((X'WX + S)^{-1} X'WX) using final PIRLS working weights.
-        from superglm.solvers.irls_direct import _build_penalty_matrix
+        from superglm.reml.penalty_algebra import build_penalty_matrix
 
         active_groups_edf: list[GroupSlice] = []
         active_gms: list[GroupMatrix] = []
@@ -379,7 +379,7 @@ def _fit_pirls_inner(
             XtWX = _block_xtwx(active_gms, active_groups_edf, W)
             if S_override is not None:
                 # S_override is full (p x p) — slice to active columns
-                active_idx = []
+                active_idx: list[int] = []
                 for ag in active_groups_edf:
                     # Map active group back to original group for slicing
                     orig_g = next(g for g in groups if g.name == ag.name)
@@ -387,14 +387,15 @@ def _fit_pirls_inner(
                 active_idx = np.array(active_idx)
                 S = S_override[np.ix_(active_idx, active_idx)]
             else:
-                S = _build_penalty_matrix(active_gms, active_groups_edf, lambda2, p_a)
+                S = build_penalty_matrix(active_gms, active_groups_edf, lambda2, p_a)
             M = XtWX + S
             eigvals, eigvecs = np.linalg.eigh(M)
             # Keep the gram-path truncation aligned with the dense QR/SVD path:
             # singular-value cutoff ``rtol * s_max`` corresponds to
             # eigenvalue cutoff ``rtol**2 * eig_max``.
             threshold = (1e-6**2) * max(eigvals.max(), 1e-12)
-            inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
+            inv_eigvals = np.zeros_like(eigvals)
+            np.divide(1.0, eigvals, out=inv_eigvals, where=eigvals > threshold)
             M_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
             p_eff = 1.0 + float(np.trace(M_inv @ XtWX))
         else:

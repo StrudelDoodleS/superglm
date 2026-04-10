@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm.multi_penalty import (
+from superglm.reml.multi_penalty import (
     logdet_s_gradient,
     logdet_s_hessian,
     similarity_transform_logdet,
@@ -616,7 +616,7 @@ class TestEndToEndMultiPenaltyDirect:
         from superglm import SuperGLM
         from superglm.features.spline import CubicRegressionSpline
         from superglm.group_matrix import SparseSSPGroupMatrix
-        from superglm.reml_optimizer import optimize_direct_reml
+        from superglm.reml import optimize_direct_reml
         from superglm.solvers.irls_direct import _build_penalty_matrix
         from superglm.types import PenaltyComponent
 

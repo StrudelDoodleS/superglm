@@ -241,7 +241,7 @@ class TestResiduals:
 
     def test_quantile_residuals_tweedie(self):
         """Quantile residuals for Tweedie should be approximately standard normal."""
-        from superglm.tweedie_profile import generate_tweedie_cpg
+        from superglm.profiling.tweedie import generate_tweedie_cpg
 
         rng = np.random.default_rng(42)
         n = 2000
@@ -336,7 +336,7 @@ class TestSummary:
 
     def test_summary_returns_model_summary(self, metrics_obj):
         """summary() returns a ModelSummary object."""
-        from superglm.summary import ModelSummary
+        from superglm.inference.summary import ModelSummary
 
         s = metrics_obj.summary()
         assert isinstance(s, ModelSummary)
@@ -875,7 +875,7 @@ class TestTweedieProfileSummary:
     """Tweedie p profile result appears in ASCII and HTML summary."""
 
     def test_tweedie_profile_summary(self):
-        from superglm.tweedie_profile import generate_tweedie_cpg
+        from superglm.profiling.tweedie import generate_tweedie_cpg
 
         rng = np.random.default_rng(42)
         n = 500
@@ -1031,7 +1031,7 @@ class TestSummaryHelpers:
     """Edge cases in summary helper functions."""
 
     def test_summary_helpers_edge_cases(self):
-        from superglm.summary import _compute_coef_stats, _sig_stars
+        from superglm.inference.summary import _compute_coef_stats, _sig_stars
 
         z, p, lo, hi = _compute_coef_stats(1.0, 0.0)
         assert all(np.isnan(v) for v in (z, p, lo, hi))
@@ -1083,7 +1083,7 @@ class TestModelSummaryAPI:
         return model, X, y
 
     def test_summary_returns_model_summary(self, fitted):
-        from superglm.summary import ModelSummary
+        from superglm.inference.summary import ModelSummary
 
         model, _, _ = fitted
         s = model.summary()
@@ -1171,7 +1171,7 @@ class TestModelSummaryAPI:
 
     def test_summary_after_fit_reml(self):
         """model.summary() works after fit_reml()."""
-        from superglm.summary import ModelSummary
+        from superglm.inference.summary import ModelSummary
 
         rng = np.random.default_rng(42)
         n = 300

@@ -21,7 +21,7 @@ from superglm.group_matrix import (
     _block_xtwx_signed,
 )
 from superglm.links import stabilize_eta
-from superglm.reml.runner import _coerce_reml_penalties
+from superglm.reml.penalty_algebra import coerce_reml_penalties
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -198,7 +198,7 @@ def reml_w_correction(
     dH2_cross is an (m, m) array of second-order Hessian corrections:
     ``dH2_cross[j,k] = 0.5 * tr(H^{-1} X' diag(d2w/(drho_j drho_k)) X)``.
     """
-    penalties = _coerce_reml_penalties(
+    penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
         group_matrices=dm.group_matrices,

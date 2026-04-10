@@ -14,14 +14,19 @@ from superglm.penalties.base import Penalty
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import FeatureSpec
 
-from . import base, explain_ops, fit_ops, monotone_ops, profile_ops, state_ops
+from . import (
+    base,
+    explain_ops,
+    fit_ops,
+    monotone_ops,
+    plot_ops,
+    profile_ops,
+    report_ops,
+    state_ops,
+)
 
 if TYPE_CHECKING:
-    from superglm.diagnostics.discretize import DiscretizationResult
-    from superglm.inference.metrics import ModelMetrics
-    from superglm.inference.term import InteractionInference, TermInference
     from superglm.model.fit_ops import PathResult
-    from superglm.types import GroupSlice
 
 
 class SuperGLM:
@@ -181,7 +186,7 @@ class SuperGLM:
 
     @staticmethod
     def _resolve_ci(ci):
-        return explain_ops.resolve_ci(ci)
+        return plot_ops.resolve_ci(ci)
 
     # ── Core model operations ─────────────────────────────────────
 
@@ -468,192 +473,6 @@ class SuperGLM:
             )
         return pd.DataFrame(rows)
 
-    def diagnostics(self) -> dict[str, Any]:
-        """Per-group diagnostic dict for programmatic / audit access."""
-        return state_ops.diagnostics(self)
-
-    def summary(self, alpha: float = 0.05, detail: str = "compact"):
-        """Rich model summary with coefficient table (statsmodels-style)."""
-        return state_ops.summary(self, alpha, detail=detail)
-
-    def _feature_groups(self, name: str) -> list[GroupSlice]:
-        """Get all groups belonging to a feature."""
-        return state_ops.feature_groups(self, name)
-
-    def reconstruct_feature(self, name: str) -> dict[str, Any]:
-        """Reconstruct a fitted feature's curve or effect on its original scale."""
-        return state_ops.reconstruct_feature(self, name)
-
-    def knot_summary(self) -> dict[str, dict[str, Any]]:
-        """Return fitted knot metadata for all spline features."""
-        return state_ops.knot_summary(self)
-
-    # ── Inference ─────────────────────────────────────────────────
-
-    def metrics(
-        self,
-        X: pd.DataFrame,
-        y: NDArray,
-        sample_weight: NDArray | None = None,
-        offset: NDArray | None = None,
-    ) -> ModelMetrics:
-        """Compute comprehensive diagnostics for the fitted model."""
-        return explain_ops.metrics(self, X, y, sample_weight, offset)
-
-    def drop1(
-        self,
-        X: pd.DataFrame,
-        y: NDArray,
-        sample_weight: NDArray | None = None,
-        offset: NDArray | None = None,
-        *,
-        test: str = "Chisq",
-    ) -> pd.DataFrame:
-        """Drop-one deviance analysis for each feature."""
-        return explain_ops.drop1(self, X, y, sample_weight, offset, test=test)
-
-    def refit_unpenalised(
-        self,
-        X: pd.DataFrame,
-        y: NDArray,
-        sample_weight: NDArray | None = None,
-        offset: NDArray | None = None,
-        *,
-        keep_smoothing: bool = True,
-    ) -> SuperGLM:
-        """Refit with only active features and no selection penalty."""
-        return explain_ops.refit_unpenalised(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset,
-            keep_smoothing=keep_smoothing,
-        )
-
-    def relativities(
-        self, with_se: bool = False, centering: str = "native"
-    ) -> dict[str, pd.DataFrame]:
-        """Extract plot-ready relativity DataFrames for all features.
-
-        Parameters
-        ----------
-        centering : {"native", "mean"}
-            ``"native"`` (default) returns the canonical fitted term
-            contribution under the model's identifiability constraint.
-            ``"mean"`` is a reporting convenience that shifts so the
-            geometric mean of relativities = 1 — useful for cross-feature
-            comparison but not the fitted term decomposition.
-        """
-        return explain_ops.relativities(self, with_se, centering=centering)
-
-    def _feature_se_from_cov(self, name, Cov_active, active_groups, n_points=200):
-        return explain_ops.model_feature_se_from_cov(
-            self, name, Cov_active, active_groups, n_points
-        )
-
-    def simultaneous_bands(
-        self,
-        feature: str,
-        *,
-        alpha: float = 0.05,
-        n_sim: int = 10_000,
-        n_points: int = 200,
-        seed: int = 42,
-    ) -> pd.DataFrame:
-        """Simultaneous confidence bands for a spline feature."""
-        return explain_ops.simultaneous_bands(
-            self, feature, alpha=alpha, n_sim=n_sim, n_points=n_points, seed=seed
-        )
-
-    def term_inference(
-        self,
-        name: str,
-        *,
-        with_se: bool = True,
-        simultaneous: bool = False,
-        n_points: int = 200,
-        alpha: float = 0.05,
-        n_sim: int = 10_000,
-        seed: int = 42,
-        centering: str = "native",
-    ) -> TermInference | InteractionInference:
-        """Per-term inference: curve, uncertainty, and metadata in one object.
-
-        Parameters
-        ----------
-        centering : {"native", "mean"}
-            ``"native"`` (default) returns the canonical fitted term
-            contribution under the model's identifiability constraint.
-            ``"mean"`` is a reporting convenience that shifts so the
-            geometric mean of relativities = 1.
-        """
-        return explain_ops.term_inference(
-            self,
-            name,
-            with_se=with_se,
-            simultaneous=simultaneous,
-            n_points=n_points,
-            alpha=alpha,
-            n_sim=n_sim,
-            seed=seed,
-            centering=centering,
-        )
-
-    # ── Profile estimation ────────────────────────────────────────
-
-    def estimate_p(
-        self,
-        X: pd.DataFrame,
-        y: NDArray,
-        sample_weight: NDArray | None = None,
-        offset: NDArray | None = None,
-        *,
-        fit_mode: str = "fit",
-        phi_method: str = "pearson",
-        method: str = "brent",
-        **kwargs,
-    ):
-        """Estimate Tweedie p via profile likelihood, refit, and return result.
-
-        Parameters
-        ----------
-        fit_mode : {"fit", "reml", "inherit"}
-            Fitting regime for each candidate ``p`` evaluation.
-        phi_method : {"pearson", "mle"}
-            How to profile out Tweedie dispersion ``phi`` at each candidate ``p``.
-            ``"pearson"`` uses the weighted Pearson moment estimate, while
-            ``"mle"`` runs a nested 1D likelihood optimization in ``phi``.
-        method : {"brent", "grid", "grid_refine", "profile_opt"}
-            Search strategy. ``"brent"`` (default) uses bounded scalar
-            optimisation. ``"grid"`` does exhaustive grid search.
-            ``"grid_refine"`` does a coarse grid + local Brent refinement.
-            ``"profile_opt"`` uses a general-purpose optimizer on
-            logit-transformed p.
-        """
-        return profile_ops.estimate_p(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset,
-            fit_mode=fit_mode,
-            phi_method=phi_method,
-            method=method,
-            **kwargs,
-        )
-
-    def estimate_theta(
-        self,
-        X: pd.DataFrame,
-        y: NDArray,
-        sample_weight: NDArray | None = None,
-        offset: NDArray | None = None,
-        **kwargs,
-    ):
-        """Estimate NB theta via profile likelihood, refit, and return result."""
-        return profile_ops.estimate_theta(self, X, y, sample_weight, offset, **kwargs)
-
     # ── Plotting ──────────────────────────────────────────────────
 
     def plot(
@@ -774,7 +593,7 @@ class SuperGLM:
         >>> fig.show()                      # interactive main-effect explorer
         >>> fig.write_html("effects.html") # standalone HTML export
         """
-        return explain_ops.plot(
+        return plot_ops.plot(
             self,
             terms,
             kind=kind,
@@ -907,7 +726,7 @@ class SuperGLM:
         >>> curve_df = payload["terms"][0]["effect"]
         >>> knots_df = payload["terms"][0]["knots"]
         """
-        return explain_ops.plot_data(
+        return plot_ops.plot_data(
             self,
             terms,
             kind=kind,
@@ -946,292 +765,39 @@ class SuperGLM:
 
     # ── Monotone repair ─────────────────────────────────────────
 
-    def apply_monotone_postfit(
-        self,
-        X: pd.DataFrame,
-        sample_weight: NDArray | None = None,
-        offset: NDArray | None = None,
-        *,
-        n_grid: int = 500,
-    ) -> SuperGLM:
-        """Apply post-fit monotone repair to splines with ``monotone`` set.
 
-        Finds all spline features with ``monotone='increasing'`` or
-        ``monotone='decreasing'``, applies weighted isotonic regression
-        to the fitted curve, and projects back to spline coefficients.
+SuperGLM._compute_dW_deta = fit_ops.model_compute_dW_deta
+SuperGLM._reml_w_correction = fit_ops.model_reml_w_correction
+SuperGLM._reml_laml_objective = fit_ops.model_reml_laml_objective
+SuperGLM._reml_direct_gradient = fit_ops.model_reml_direct_gradient
+SuperGLM._reml_direct_hessian = fit_ops.model_reml_direct_hessian
+SuperGLM._optimize_direct_reml = fit_ops.model_optimize_direct_reml
+SuperGLM._optimize_discrete_reml_cached_w = fit_ops.model_optimize_discrete_reml_cached_w
+SuperGLM._optimize_efs_reml = fit_ops.model_optimize_efs_reml
+SuperGLM._run_reml_once = fit_ops.model_run_reml_once
 
-        Idempotent: calling twice does not re-repair already-repaired features.
+SuperGLM.diagnostics = report_ops.diagnostics
+SuperGLM.summary = report_ops.summary
+SuperGLM._feature_groups = report_ops.feature_groups
+SuperGLM.reconstruct_feature = report_ops.reconstruct_feature
+SuperGLM.knot_summary = report_ops.knot_summary
 
-        Parameters
-        ----------
-        X : DataFrame
-            Training data (used to compute density-based grid weights).
-        sample_weight : array-like, optional
-            Frequency weights.
-        offset : array-like, optional
-            Offset term (unused, reserved for deviance computation).
-        n_grid : int
-            Grid resolution for isotonic regression (default 500).
+SuperGLM.metrics = explain_ops.metrics
+SuperGLM.drop1 = explain_ops.drop1
+SuperGLM.refit_unpenalised = explain_ops.refit_unpenalised
+SuperGLM.relativities = explain_ops.relativities
+SuperGLM._feature_se_from_cov = explain_ops.model_feature_se_from_cov
+SuperGLM.simultaneous_bands = explain_ops.simultaneous_bands
+SuperGLM.term_inference = explain_ops.term_inference
+SuperGLM.term_importance = explain_ops.term_importance
+SuperGLM.term_drop_diagnostics = explain_ops.term_drop_diagnostics
+SuperGLM.spline_redundancy = explain_ops.spline_redundancy
+SuperGLM.discretization_impact = explain_ops.discretization_impact
 
-        Returns
-        -------
-        SuperGLM
-            The model (self), with monotone repairs stored.
-        """
-        return monotone_ops.apply_monotone_postfit(self, X, sample_weight, offset, n_grid=n_grid)
+SuperGLM.estimate_p = profile_ops.estimate_p
+SuperGLM.estimate_theta = profile_ops.estimate_theta
 
-    # ── Diagnostics ───────────────────────────────────────────────
+SuperGLM.monotonize = monotone_ops.monotonize
+SuperGLM.apply_monotone_postfit = monotone_ops.apply_monotone_postfit
 
-    def term_importance(
-        self,
-        X: pd.DataFrame,
-        sample_weight: NDArray | None = None,
-    ) -> pd.DataFrame:
-        """Weighted variance of each term's contribution to eta.
-
-        Returns a DataFrame with columns: ``term``, ``feature``,
-        ``subgroup_type``, ``variance_eta``, ``sd_eta``, ``edf``,
-        ``lambda``, ``group_norm``.
-        """
-        return explain_ops.term_importance(self, X, sample_weight)
-
-    def term_drop_diagnostics(
-        self,
-        X: pd.DataFrame,
-        y: NDArray,
-        sample_weight: NDArray | None = None,
-        offset: NDArray | None = None,
-        *,
-        mode: str = "refit",
-        X_val: pd.DataFrame | None = None,
-        y_val: NDArray | None = None,
-    ) -> pd.DataFrame:
-        """Drop-term diagnostics: AIC/BIC deltas or holdout loss deltas.
-
-        Parameters
-        ----------
-        mode : {"refit", "holdout"}
-            ``"refit"`` calls ``drop1()`` and adds delta IC columns.
-            ``"holdout"`` zeros each term on a validation set (no refit).
-        X_val, y_val : optional
-            Validation data for ``mode="holdout"``.
-        """
-        return explain_ops.term_drop_diagnostics(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset,
-            mode=mode,
-            X_val=X_val,
-            y_val=y_val,
-        )
-
-    def spline_redundancy(
-        self,
-        X: pd.DataFrame,
-        sample_weight: NDArray | None = None,
-    ) -> dict:
-        """Spline redundancy diagnostics: knot spacing, basis correlation, effective rank."""
-        return explain_ops.spline_redundancy(self, X, sample_weight)
-
-    # ── Discretization ────────────────────────────────────────────
-
-    def discretization_impact(
-        self,
-        X: pd.DataFrame,
-        y: NDArray,
-        sample_weight: NDArray | None = None,
-        **kwargs,
-    ) -> DiscretizationResult:
-        """Analyse the impact of discretizing spline/polynomial curves."""
-        return explain_ops.discretization_impact(self, X, y, sample_weight, **kwargs)
-
-    # ── REML adapter methods (used by reml_optimizer) ─────────────
-
-    def _compute_dW_deta(self, mu, eta, sample_weight):
-        return fit_ops.model_compute_dW_deta(self, mu, eta, sample_weight)
-
-    def _reml_w_correction(
-        self,
-        pirls_result,
-        XtWX_S_inv,
-        lambdas,
-        reml_groups,
-        penalty_caches,
-        sample_weight,
-        offset_arr,
-        w_correction_order=1,
-    ):
-        return fit_ops.model_reml_w_correction(
-            self,
-            pirls_result,
-            XtWX_S_inv,
-            lambdas,
-            reml_groups,
-            penalty_caches,
-            sample_weight,
-            offset_arr,
-            w_correction_order=w_correction_order,
-        )
-
-    def _reml_laml_objective(
-        self, y, result, lambdas, sample_weight, offset_arr, XtWX=None, penalty_caches=None
-    ):
-        return fit_ops.model_reml_laml_objective(
-            self, y, result, lambdas, sample_weight, offset_arr, XtWX, penalty_caches
-        )
-
-    def _reml_direct_gradient(
-        self, result, XtWX_S_inv, lambdas, reml_groups, penalty_ranks, phi_hat=1.0
-    ):
-        return fit_ops.model_reml_direct_gradient(
-            self, result, XtWX_S_inv, lambdas, reml_groups, penalty_ranks, phi_hat
-        )
-
-    def _reml_direct_hessian(
-        self,
-        XtWX_S_inv,
-        lambdas,
-        reml_groups,
-        gradient,
-        penalty_ranks,
-        penalty_caches=None,
-        pirls_result=None,
-        n_obs=0,
-        phi_hat=1.0,
-        dH_extra=None,
-        dH2_cross=None,
-    ):
-        return fit_ops.model_reml_direct_hessian(
-            self,
-            XtWX_S_inv,
-            lambdas,
-            reml_groups,
-            gradient,
-            penalty_ranks,
-            penalty_caches,
-            pirls_result,
-            n_obs,
-            phi_hat,
-            dH_extra,
-            dH2_cross,
-        )
-
-    def _optimize_direct_reml(
-        self,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        *,
-        max_reml_iter,
-        reml_tol,
-        verbose,
-        penalty_caches=None,
-        profile=None,
-    ):
-        return fit_ops.model_optimize_direct_reml(
-            self,
-            y,
-            sample_weight,
-            offset_arr,
-            reml_groups,
-            penalty_ranks,
-            lambdas,
-            max_reml_iter=max_reml_iter,
-            reml_tol=reml_tol,
-            verbose=verbose,
-            penalty_caches=penalty_caches,
-            profile=profile,
-        )
-
-    def _optimize_discrete_reml_cached_w(
-        self,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        *,
-        max_reml_iter,
-        reml_tol,
-        verbose,
-        penalty_caches=None,
-        profile=None,
-    ):
-        return fit_ops.model_optimize_discrete_reml_cached_w(
-            self,
-            y,
-            sample_weight,
-            offset_arr,
-            reml_groups,
-            penalty_ranks,
-            lambdas,
-            max_reml_iter=max_reml_iter,
-            reml_tol=reml_tol,
-            verbose=verbose,
-            penalty_caches=penalty_caches,
-            profile=profile,
-        )
-
-    def _optimize_efs_reml(
-        self,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        *,
-        max_reml_iter,
-        reml_tol,
-        verbose,
-        penalty_caches=None,
-    ):
-        return fit_ops.model_optimize_efs_reml(
-            self,
-            y,
-            sample_weight,
-            offset_arr,
-            reml_groups,
-            penalty_ranks,
-            lambdas,
-            max_reml_iter=max_reml_iter,
-            reml_tol=reml_tol,
-            verbose=verbose,
-            penalty_caches=penalty_caches,
-        )
-
-    def _run_reml_once(
-        self,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        *,
-        max_reml_iter,
-        reml_tol,
-        verbose,
-        use_direct,
-        penalty_caches=None,
-    ):
-        return fit_ops.model_run_reml_once(
-            self,
-            y,
-            sample_weight,
-            offset_arr,
-            reml_groups,
-            penalty_ranks,
-            lambdas,
-            max_reml_iter=max_reml_iter,
-            reml_tol=reml_tol,
-            verbose=verbose,
-            use_direct=use_direct,
-            penalty_caches=penalty_caches,
-        )
+# ── REML adapter methods (used by reml_optimizer) ─────────────

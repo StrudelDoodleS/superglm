@@ -5,7 +5,6 @@ from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.model import SuperGLM
-from superglm.penalties.group_lasso import GroupLasso
 
 rng = np.random.default_rng(42)
 n = 3000
@@ -21,20 +20,21 @@ X = pd.DataFrame({"driver_age": driver_age, "region": region, "density": density
 
 model = SuperGLM(
     family="poisson",
-    penalty=GroupLasso(lambda1=0.01),
-    lambda2=0.1,
+    penalty="group_lasso",
+    selection_penalty=0.01,
+    spline_penalty=0.1,
     features={
         "driver_age": Spline(n_knots=10, penalty="ssp"),
         "region": Categorical(base="most_exposed"),
         "density": Numeric(),
     },
 )
-model.fit(X, y, exposure=exposure)
+model.fit(X, y, sample_weight=exposure)
 
 print(f"Converged: {model.result.converged} in {model.result.n_iter} iter")
 print(f"Deviance: {model.result.deviance:.1f}  Phi: {model.result.phi:.4f}")
-s = model.summary()
-for name, info in s.items():
+d = model.diagnostics()
+for name, info in d.items():
     if name != "_model":
         print(f"{name}: active={info['active']} norm={info['group_norm']:.4f} p={info['n_params']}")
 
@@ -52,5 +52,6 @@ print(f"Age: young={young:.3f} mid={mid:.3f} old={old:.3f}")
 print(f"U-shape: {'PASS' if young > mid and old > mid else 'CHECK'}")
 
 num_r = model.reconstruct_feature("density")
-print(f"Density coef={num_r['coef_original']:.4f} (true=0.05)")
+coef = num_r.get("coef_original", num_r.get("coef", num_r.get("relativity_per_unit")))
+print(f"Density coef={coef:.4f} (true=0.05)")
 print("END-TO-END COMPLETE")

@@ -62,9 +62,9 @@ def build_coef_rows(
     from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
     from superglm.group_matrix import CategoricalGroupMatrix
-    from superglm.inference.term import (
+    from superglm.inference._term_covariance import feature_se_from_cov
+    from superglm.inference._term_helpers import (
         _resolve_group_lambda,
-        feature_se_from_cov,
         spline_group_enrichment,
     )
 

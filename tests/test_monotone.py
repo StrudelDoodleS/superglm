@@ -119,6 +119,23 @@ class TestMonotoneRepairer:
 
 
 class TestApplyMonotonePostfit:
+    def test_monotonize_alias(self, increasing_poisson_data):
+        X, y, sample_weight = increasing_poisson_data
+        m = SuperGLM(
+            family="poisson",
+            features={"signal": Spline(n_knots=15, monotone="increasing")},
+            selection_penalty=0.0,
+        )
+        m.fit(X, y, sample_weight=sample_weight)
+
+        out = m.monotonize(X, sample_weight=sample_weight)
+
+        assert out is m
+        assert "signal" in m._monotone_repairs
+        repair = m._monotone_repairs["signal"]
+        assert isinstance(repair, MonotoneRepairResult)
+        assert repair.max_violation_after < 0.01
+
     def test_increasing_repair(self, increasing_poisson_data):
         X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
@@ -209,7 +226,7 @@ class TestApplyMonotonePostfit:
             selection_penalty=0.0,
         )
         with pytest.raises(RuntimeError, match="must be fitted"):
-            m.apply_monotone_postfit(X, sample_weight=sample_weight)
+            m.monotonize(X, sample_weight=sample_weight)
 
     def test_reconstruct_after_repair(self, increasing_poisson_data):
         """Reconstruct should use repaired beta."""

@@ -16,8 +16,70 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.group_matrix import (
+    DiscretizedSSPGroupMatrix,
+    GroupMatrix,
+    SparseSSPGroupMatrix,
+)
 from superglm.reml.result import PenaltyCache
-from superglm.types import PenaltyComponent
+from superglm.types import GroupSlice, PenaltyComponent
+
+
+def build_penalty_matrix(
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    lambda2: float | dict[str, float],
+    p: int,
+    reml_penalties: list[PenaltyComponent] | None = None,
+) -> NDArray:
+    """Build the block-diagonal penalty matrix ``S`` in solver coordinates.
+
+    This is the shared penalty-assembly contract used by REML objective and
+    optimizer code.  It was lifted out of ``solvers.irls_direct`` so REML
+    modules no longer need to reach through a solver-private helper.
+    """
+    S = np.zeros((p, p))
+
+    if reml_penalties is not None:
+        for pc in reml_penalties:
+            gm = group_matrices[pc.group_index]
+            lam = lambda2[pc.name] if isinstance(lambda2, dict) else lambda2
+            if lam == 0:
+                continue
+            omega_ssp = (
+                pc.omega_ssp if pc.omega_ssp is not None else (gm.R_inv.T @ pc.omega_raw @ gm.R_inv)
+            )
+            S[pc.group_sl, pc.group_sl] += lam * omega_ssp
+
+        for gm, g in zip(group_matrices, groups):
+            if g.scop_reparameterization is not None and g.penalized:
+                lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                if lam_g > 0:
+                    S[g.sl, g.sl] += lam_g * g.scop_reparameterization.penalty_matrix()
+
+        return S
+
+    for gm, g in zip(group_matrices, groups):
+        if not g.penalized:
+            continue
+
+        if isinstance(lambda2, dict):
+            lam_g = lambda2.get(g.name, 0.0)
+        else:
+            lam_g = lambda2
+
+        if lam_g == 0:
+            continue
+
+        if isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+            omega = gm.omega
+            if omega is None:
+                continue
+            S[g.sl, g.sl] = lam_g * gm.R_inv.T @ omega @ gm.R_inv
+        elif g.scop_reparameterization is not None:
+            S[g.sl, g.sl] = lam_g * g.scop_reparameterization.penalty_matrix()
+
+    return S
 
 
 def build_penalty_components(
@@ -122,6 +184,57 @@ def build_penalty_components(
     return components
 
 
+def coerce_reml_penalties(
+    reml_groups=None,
+    reml_penalties=None,
+    group_matrices=None,
+    penalty_caches=None,
+):
+    """Coerce legacy ``reml_groups`` inputs into ``PenaltyComponent`` objects."""
+    if reml_penalties is not None:
+        return reml_penalties
+    if reml_groups is None:
+        raise ValueError("Either reml_penalties or reml_groups must be provided")
+
+    components = []
+    for idx, g in reml_groups:
+        gm = group_matrices[idx] if group_matrices is not None else None
+        omega_ssp = None
+        rank = 0.0
+        log_det = 0.0
+        eigvals = None
+        omega_raw = None
+        if penalty_caches is not None and g.name in penalty_caches:
+            cache = penalty_caches[g.name]
+            omega_ssp = cache.omega_ssp
+            rank = cache.rank
+            log_det = cache.log_det_omega_plus
+            eigvals = cache.eigvals_omega
+        elif (
+            gm is not None
+            and hasattr(gm, "R_inv")
+            and hasattr(gm, "omega")
+            and gm.omega is not None
+        ):
+            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+        if gm is not None and hasattr(gm, "omega"):
+            omega_raw = gm.omega
+        components.append(
+            PenaltyComponent(
+                name=g.name,
+                group_name=g.name,
+                group_index=idx,
+                group_sl=g.sl,
+                omega_raw=omega_raw,
+                omega_ssp=omega_ssp,
+                rank=rank,
+                log_det_omega_plus=log_det,
+                eigvals_omega=eigvals,
+            )
+        )
+    return components
+
+
 def build_penalty_caches(
     group_matrices: list,
     reml_groups: list[tuple[int, object]],
@@ -141,6 +254,25 @@ def build_penalty_caches(
         )
         for c in components
     }
+
+
+def build_penalty_context(
+    group_matrices: list,
+    reml_groups: list[tuple[int, object]],
+) -> tuple[list[PenaltyComponent], dict[str, PenaltyCache], dict[str, float]]:
+    """Build penalty components, caches, and rank lookup in one pass."""
+    components = build_penalty_components(group_matrices, reml_groups)
+    caches = {
+        c.name: PenaltyCache(
+            omega_ssp=c.omega_ssp,
+            log_det_omega_plus=c.log_det_omega_plus,
+            rank=c.rank,
+            eigvals_omega=c.eigvals_omega,
+        )
+        for c in components
+    }
+    ranks = {c.name: c.rank for c in components}
+    return components, caches, ranks
 
 
 def cached_logdet_s_plus(
