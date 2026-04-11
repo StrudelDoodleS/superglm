@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix_kernels import (
+from ._group_matrix_kernels import (
     _disc_disc_2d_hist,
     _fused_2d_bincount_2,
     _fused_bincount_2,

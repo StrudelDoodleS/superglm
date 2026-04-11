@@ -1,4 +1,4 @@
-"""Tests for superglm.model_tests — model adequacy tests (T13-T26)."""
+"""Tests for superglm.stats.model_tests — model adequacy tests (T13-T26)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pytest
 
 from superglm import Numeric, Spline, SuperGLM
 from superglm.distributions import Gamma, NegativeBinomial
-from superglm.model_tests import (
+from superglm.stats.model_tests import (
     DispersionTestResult,
     ScoreTestZIResult,
     VuongTestResult,
