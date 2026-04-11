@@ -20,14 +20,14 @@ from superglm.group_matrix import DesignMatrix
 from superglm.reml.discrete import optimize_discrete_reml_cached_w
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import reml_laml_objective
-from superglm.reml.penalty_algebra import compute_total_penalty_rank
-from superglm.reml.result import REMLResult
-from superglm.reml.runner import _coerce_reml_penalties
-from superglm.reml.w_derivatives import reml_w_correction
-from superglm.solvers.irls_direct import (
-    _build_penalty_matrix,
-    fit_irls_direct,
+from superglm.reml.penalty_algebra import (
+    build_penalty_matrix,
+    coerce_reml_penalties,
+    compute_total_penalty_rank,
 )
+from superglm.reml.result import REMLResult
+from superglm.reml.w_derivatives import reml_w_correction
+from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -67,7 +67,7 @@ def optimize_direct_reml(
         Cached-W fREML optimizer (fewer data passes), delegated to
         ``optimize_discrete_reml_cached_w``.
     """
-    penalties = _coerce_reml_penalties(
+    penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
         group_matrices=dm.group_matrices,
@@ -132,7 +132,7 @@ def optimize_direct_reml(
 
     # === Bootstrap: one FP step from minimal penalty ===
     boot_lambdas = {name: 1e-4 for name in lambdas}
-    S_boot = _build_penalty_matrix(
+    S_boot = build_penalty_matrix(
         dm.group_matrices, groups, boot_lambdas, dm.p, reml_penalties=penalties
     )
     _t0 = _time.perf_counter()
@@ -214,7 +214,7 @@ def optimize_direct_reml(
         cand_lambdas.update(fixed_lambdas)
 
         # Pre-build penalty matrix S once for this lambda candidate
-        S_cand = _build_penalty_matrix(
+        S_cand = build_penalty_matrix(
             dm.group_matrices,
             groups,
             cand_lambdas,
@@ -431,7 +431,7 @@ def optimize_direct_reml(
             trial_lambdas.update(fixed_lambdas)
 
             _n_linesearch_fits += 1
-            S_trial = _build_penalty_matrix(
+            S_trial = build_penalty_matrix(
                 dm.group_matrices,
                 groups,
                 trial_lambdas,

@@ -1,6 +1,7 @@
 """Tests for the Spline(kind=..., k=...) factory API."""
 
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -21,6 +22,12 @@ from superglm.features.spline import (
 @pytest.mark.filterwarnings("ignore::FutureWarning")
 class TestSplineFactoryDispatch:
     """Spline() should dispatch to the correct concrete class."""
+
+    def test_spline_function_stays_on_public_module(self):
+        assert Spline.__module__ == "superglm.features.spline"
+
+    def test_n_knots_function_stays_on_public_module(self):
+        assert n_knots_from_k.__module__ == "superglm.features.spline"
 
     def test_bs_default(self):
         s = Spline(n_knots=8)
@@ -349,6 +356,13 @@ class TestBsDeprecation:
     def test_bs_warning_message_content(self):
         with pytest.warns(FutureWarning, match="integrated-derivative"):
             Spline(kind="bs", n_knots=8)
+
+    def test_bs_warning_points_at_caller(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            Spline(kind="bs", n_knots=8)
+        assert caught
+        assert Path(caught[0].filename).name == "test_spline_factory.py"
 
     def test_bs_still_creates_pspline(self):
         """Even with the warning, kind='bs' still creates a PSpline."""

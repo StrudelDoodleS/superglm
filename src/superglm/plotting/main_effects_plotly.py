@@ -1473,7 +1473,7 @@ def _add_spline_diagnostic_traces(
     if basis.shape[1] == 0:
         return
 
-    from superglm.model.state_ops import feature_groups
+    from superglm.model.report_ops import feature_groups
 
     groups = feature_groups(model, ti.name)
     beta_combined = np.concatenate([model.result.beta[g.sl] for g in groups])

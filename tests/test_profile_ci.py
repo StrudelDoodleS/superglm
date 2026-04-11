@@ -6,8 +6,8 @@ import pandas as pd
 from superglm import SuperGLM
 from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.features.numeric import Numeric
-from superglm.nb_profile import estimate_nb_theta, profile_ci_theta
-from superglm.tweedie_profile import estimate_tweedie_p
+from superglm.profiling.nb import estimate_nb_theta, profile_ci_theta
+from superglm.profiling.tweedie import estimate_tweedie_p
 
 
 class TestNBThetaProfileCI:
@@ -146,7 +146,7 @@ class TestNBThetaProfileCI:
 class TestTweedieProfileCI:
     def test_ci_works(self):
         """Tweedie profile CI should produce a valid interval."""
-        from superglm.tweedie_profile import generate_tweedie_cpg
+        from superglm.profiling.tweedie import generate_tweedie_cpg
 
         rng = np.random.default_rng(42)
         n = 1000
@@ -179,7 +179,7 @@ class TestTweedieProfileCI:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        from superglm.tweedie_profile import generate_tweedie_cpg
+        from superglm.profiling.tweedie import generate_tweedie_cpg
 
         rng = np.random.default_rng(42)
         n = 500

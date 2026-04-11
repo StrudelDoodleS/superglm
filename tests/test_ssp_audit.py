@@ -26,8 +26,8 @@ from superglm import SuperGLM
 from superglm.dm_builder import compute_projected_R_inv, compute_R_inv
 from superglm.features.spline import CubicRegressionSpline
 from superglm.group_matrix import DesignMatrix, SparseSSPGroupMatrix
-from superglm.reml import build_penalty_caches
-from superglm.reml_optimizer import (
+from superglm.reml import (
+    build_penalty_caches,
     reml_direct_gradient,
     reml_direct_hessian,
     reml_laml_objective,

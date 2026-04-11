@@ -11,10 +11,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.reml.penalty_algebra import (
+    coerce_reml_penalties,
     compute_logdet_s_derivatives,
     compute_total_penalty_rank,
 )
-from superglm.reml.runner import _coerce_reml_penalties
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import PenaltyComponent
 
@@ -32,7 +32,7 @@ def reml_direct_gradient(
     penalty_caches: dict | None = None,
 ) -> NDArray:
     """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W)."""
-    penalties = _coerce_reml_penalties(
+    penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
         group_matrices=group_matrices,
@@ -92,7 +92,7 @@ def reml_direct_hessian(
         0.5 * tr(H^{-1} X'diag(d2w/(drho_j drho_k))X) values,
         added directly to the Hessian.
     """
-    penalties = _coerce_reml_penalties(
+    penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
         group_matrices=group_matrices,

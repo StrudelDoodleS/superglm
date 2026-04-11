@@ -12,8 +12,8 @@ from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
+from superglm.profiling.tweedie import generate_tweedie_cpg
 from superglm.solvers.irls_direct import _robust_solve, _safe_decompose_H
-from superglm.tweedie_profile import generate_tweedie_cpg
 
 
 class TestRobustSolve:

@@ -19,9 +19,9 @@ from numpy.typing import NDArray
 
 from superglm.group_matrix import DesignMatrix
 from superglm.reml.objective import reml_laml_objective
-from superglm.reml.penalty_algebra import compute_total_penalty_rank
+from superglm.reml.penalty_algebra import build_penalty_matrix, compute_total_penalty_rank
 from superglm.reml.result import REMLResult
-from superglm.solvers.irls_direct import _build_penalty_matrix, _safe_decompose_H, fit_irls_direct
+from superglm.solvers.irls_direct import _safe_decompose_H, fit_irls_direct
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -503,7 +503,7 @@ def optimize_scop_efs_reml(
         boot_scop_states = {}
 
     # Build penalty matrix
-    S_boot = _build_penalty_matrix(
+    S_boot = build_penalty_matrix(
         dm.group_matrices, groups, boot_lambdas, dm.p, reml_penalties=reml_penalties
     )
 
@@ -616,7 +616,7 @@ def optimize_scop_efs_reml(
         scop_step_norms_history.append(step_norms_this_iter)
 
         # Step 2: Build penalty matrix
-        S = _build_penalty_matrix(
+        S = build_penalty_matrix(
             dm.group_matrices, groups, lambdas, dm.p, reml_penalties=reml_penalties
         )
 

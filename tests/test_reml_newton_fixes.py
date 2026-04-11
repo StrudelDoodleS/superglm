@@ -512,7 +512,7 @@ class TestQuasiSeparatedCIFinite:
         exposure = rng.uniform(0.3, 1.0, n)
         eta = 5.0 + 0.3 * (cat == "hi").astype(float) - 0.2 * (cat == "mid").astype(float)
         mu = np.exp(eta) * exposure
-        from superglm.tweedie_profile import generate_tweedie_cpg
+        from superglm.profiling.tweedie import generate_tweedie_cpg
 
         y = generate_tweedie_cpg(n, mu=mu, phi=2.0, p=1.5, rng=rng)
         y[cat == "rare"] = 0.0  # force near-separation

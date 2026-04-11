@@ -8,8 +8,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
+
+from superglm.inference._term_helpers import _resolve_group_lambda
 
 if TYPE_CHECKING:
     pass
@@ -55,8 +57,6 @@ def term_importance(
     lambda2 = getattr(model, "lambda2", None)
 
     def _diag_lambda(g_name):
-        from superglm.inference.term import _resolve_group_lambda
-
         return _resolve_group_lambda(g_name, reml_lam, lambda2)
 
     rows = []

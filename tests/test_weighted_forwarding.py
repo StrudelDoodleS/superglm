@@ -91,7 +91,7 @@ class TestWeightedTweedieP:
         n = 1000
         x = rng.uniform(0, 1, n)
         w = rng.uniform(0.5, 2.0, n)
-        from superglm.tweedie_profile import generate_tweedie_cpg
+        from superglm.profiling.tweedie import generate_tweedie_cpg
 
         mu = np.exp(0.5 + 0.3 * x)
         y = generate_tweedie_cpg(n, mu=mu, phi=1.5, p=1.5, rng=rng)
@@ -115,7 +115,7 @@ class TestCICache:
         rng = np.random.default_rng(42)
         n = 500
         x = rng.uniform(0, 1, n)
-        from superglm.tweedie_profile import generate_tweedie_cpg
+        from superglm.profiling.tweedie import generate_tweedie_cpg
 
         y = generate_tweedie_cpg(n, mu=np.exp(0.5 * x), phi=1.5, p=1.5, rng=rng)
         df = pd.DataFrame({"x": x})
@@ -155,7 +155,7 @@ class TestStaleProfileClear:
         """fit() at fixed p should not show profile results in summary."""
         rng = np.random.default_rng(42)
         n = 500
-        from superglm.tweedie_profile import generate_tweedie_cpg
+        from superglm.profiling.tweedie import generate_tweedie_cpg
 
         x = rng.uniform(0, 1, n)
         y = generate_tweedie_cpg(n, mu=np.exp(0.5 * x), phi=1.5, p=1.5, rng=rng)
@@ -200,7 +200,7 @@ class TestStaleProfileClear:
         """fit_reml() should also clear stale profile results."""
         rng = np.random.default_rng(42)
         n = 500
-        from superglm.tweedie_profile import generate_tweedie_cpg
+        from superglm.profiling.tweedie import generate_tweedie_cpg
 
         x = rng.uniform(0, 1, n)
         y = generate_tweedie_cpg(n, mu=np.exp(0.5 * x), phi=1.5, p=1.5, rng=rng)

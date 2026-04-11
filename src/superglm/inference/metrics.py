@@ -74,9 +74,9 @@ class ModelMetrics:
         penalties = getattr(self._model, "_reml_penalties", None)
         if penalties is None:
             return None
-        from superglm.solvers.irls_direct import _build_penalty_matrix
+        from superglm.reml.penalty_algebra import build_penalty_matrix
 
-        return _build_penalty_matrix(
+        return build_penalty_matrix(
             self._dm.group_matrices,
             self._groups,
             lam2,

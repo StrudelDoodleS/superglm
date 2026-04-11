@@ -8,8 +8,8 @@ from scipy.stats import nbinom
 from superglm import NegativeBinomial, SuperGLM, SuperGLMRegressor
 from superglm.distributions import resolve_distribution
 from superglm.features.numeric import Numeric
-from superglm.nb_profile import NBProfileResult, estimate_nb_theta
 from superglm.penalties.group_lasso import GroupLasso
+from superglm.profiling.nb import NBProfileResult, estimate_nb_theta
 
 # =====================================================================
 # Helpers

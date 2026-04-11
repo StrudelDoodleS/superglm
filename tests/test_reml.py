@@ -12,13 +12,13 @@ from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
 from superglm.group_matrix import SparseSSPGroupMatrix
-from superglm.metrics import (
+from superglm.inference.covariance import (
     _penalised_xtwx_inv,
     _penalised_xtwx_inv_gram,
     _second_diff_penalty,
 )
 from superglm.reml import REMLResult, _map_beta_between_bases
-from superglm.wood_pvalue import wood_test_smooth
+from superglm.stats.wood_pvalue import wood_test_smooth
 
 # ── Fixtures ──────────────────────────────────────────────────────
 

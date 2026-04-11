@@ -157,11 +157,17 @@ def test_reml_multi_penalty_canonical():
 
 def test_inference_term_canonical():
     from superglm.inference.term import (  # noqa: F401
+        _VALID_CENTERING,
         InteractionInference,
         SmoothCurve,
         SplineMetadata,
         TermInference,
+        _recenter_term,
+        _resolve_group_lambda,
+        _safe_exp,
         compute_coef_covariance,
+        feature_se_from_cov,
+        spline_group_enrichment,
         term_inference,
     )
 

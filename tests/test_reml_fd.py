@@ -12,8 +12,8 @@ from superglm import SuperGLM
 from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.features.spline import CubicRegressionSpline
 from superglm.group_matrix import SparseSSPGroupMatrix
-from superglm.reml_optimizer import compute_dW_deta
-from superglm.tweedie_profile import generate_tweedie_cpg
+from superglm.profiling.tweedie import generate_tweedie_cpg
+from superglm.reml import compute_dW_deta
 
 
 class TestREMLFiniteDifference:
@@ -444,7 +444,7 @@ class TestREMLFiniteDifference:
         """Analytic compute_d2W_deta2() matches FD of compute_dW_deta()."""
         from superglm.distributions import clip_mu
         from superglm.links import stabilize_eta
-        from superglm.reml_optimizer import compute_d2W_deta2
+        from superglm.reml import compute_d2W_deta2
 
         (
             m,

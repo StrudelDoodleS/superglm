@@ -9,25 +9,54 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributions import Distribution, NegativeBinomial, clip_mu
-from superglm.group_matrix import (
-    DiscretizedSSPGroupMatrix,
-    SparseSSPGroupMatrix,
-)
 from superglm.links import Link, stabilize_eta
-from superglm.reml.direct import optimize_direct_reml
-from superglm.reml.efs import optimize_efs_reml
-from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
-from superglm.reml.objective import reml_laml_objective
-from superglm.reml.runner import run_reml_once
-from superglm.reml.w_derivatives import compute_dW_deta, reml_w_correction
-from superglm.solvers.irls_direct import (
-    _build_penalty_matrix,
-    fit_irls_direct,
+from superglm.model import path_ops
+from superglm.model.reml_execute import (
+    optimize_reml_best,
+    run_fixed_monotone_reml,
+    run_scop_efs_reml,
 )
+from superglm.model.reml_finalize import finalize_reml_fit
+from superglm.model.reml_ops import (
+    model_compute_dW_deta,
+    model_optimize_direct_reml,
+    model_optimize_discrete_reml_cached_w,
+    model_optimize_efs_reml,
+    model_reml_direct_gradient,
+    model_reml_direct_hessian,
+    model_reml_laml_objective,
+    model_reml_w_correction,
+    model_run_reml_once,
+)
+from superglm.model.reml_setup import (
+    collect_reml_groups,
+    initialize_component_lambdas,
+    inject_fixed_scop_lambdas,
+    monotone_flags,
+    restore_qp_constraints,
+    strip_qp_constraints,
+)
+from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult, fit_pirls
-from superglm.types import FitStats, GroupSlice, LambdaPolicy
+from superglm.types import FitStats
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "PathResult",
+    "fit",
+    "fit_path",
+    "fit_reml",
+    "model_compute_dW_deta",
+    "model_optimize_direct_reml",
+    "model_optimize_discrete_reml_cached_w",
+    "model_optimize_efs_reml",
+    "model_reml_direct_gradient",
+    "model_reml_direct_hessian",
+    "model_reml_laml_objective",
+    "model_reml_w_correction",
+    "model_run_reml_once",
+]
 
 
 @dataclass
@@ -77,8 +106,8 @@ def _compute_fit_stats(
             mu_null = clip_mu(link.inverse(eta_null), distribution)
             dmu = link.deriv_inverse(eta_null)
             V = distribution.variance(mu_null)
-            score = np.sum(weights * (y - mu_null) * dmu / V)
-            info = np.sum(weights * dmu**2 / V)
+            score: float = float(np.sum(weights * (y - mu_null) * dmu / V))
+            info: float = float(np.sum(weights * dmu**2 / V))
             step = score / max(info, 1e-10)
             b0 += step
             if abs(step) < 1e-8:
@@ -102,6 +131,54 @@ def _compute_fit_stats(
         pearson_chi2=pearson,
         n_obs=len(y),
     )
+
+
+def _auto_detect_specs_if_needed(model, X, sample_weight) -> None:
+    """Populate feature specs for spline shorthand configs before fitting."""
+    if model._splines is not None and not model._specs:
+        from superglm.model.base import auto_detect
+
+        auto_detect(model, X, sample_weight)
+
+
+def _clear_profile_results(model) -> None:
+    """Clear stale profile-estimation results from previous fits."""
+    model._nb_profile_result = None
+    model._tweedie_profile_result = None
+
+
+def _clear_fit_inference_caches(model) -> None:
+    """Drop cached post-fit inference state invalidated by a new fit."""
+    model.__dict__.pop("_coef_covariance", None)
+    model.__dict__.pop("_fit_active_info", None)
+    model.__dict__.pop("_fit_inference_info", None)
+    model.__dict__.pop("_group_edf", None)
+
+
+def _clear_reml_state(model) -> None:
+    """Clear stale REML state from previous fit_reml calls."""
+    model._reml_lambdas = None
+    model._reml_penalties = None
+    model._reml_result = None
+    model._reml_profile = None
+
+
+def _store_fit_arrays(model, sample_weight, offset):
+    """Persist training weights/offset arrays on the model and return them."""
+    model._fit_weights = np.array(sample_weight)
+    model._fit_offset = np.array(offset) if offset is not None else None
+    return model._fit_weights, model._fit_offset
+
+
+def _maybe_estimate_nb_theta(model, X, y, sample_weight=None, offset=None) -> None:
+    """Resolve auto-theta negative-binomial fits before building the design matrix."""
+    if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
+        from superglm.profiling.nb import estimate_nb_theta
+
+        nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
+        model.family = NegativeBinomial(theta=nb_result.theta_hat)
+        model._nb_profile_result = nb_result
+        logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
 
 
 def fit(
@@ -131,30 +208,12 @@ def fit(
                 f"fit_reml(), not fit(). Use fit_reml() or remove lambda_policy."
             )
 
-    if model._splines is not None and not model._specs:
-        from superglm.model.base import auto_detect
+    _auto_detect_specs_if_needed(model, X, sample_weight)
+    _clear_profile_results(model)
 
-        auto_detect(model, X, sample_weight)
+    _clear_reml_state(model)
 
-    # Clear stale profile results from previous fit
-    model._nb_profile_result = None
-    model._tweedie_profile_result = None
-
-    # Clear stale REML state so post-fit helpers don't use penalties
-    # from a previous fit_reml() call on this model instance.
-    model._reml_lambdas = None
-    model._reml_penalties = None
-    model._reml_result = None
-    model._reml_profile = None
-
-    # Auto-estimate NB theta if requested
-    if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
-        from superglm.profiling.nb import estimate_nb_theta
-
-        nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
-        model.family = NegativeBinomial(theta=nb_result.theta_hat)
-        model._nb_profile_result = nb_result
-        logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
+    _maybe_estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
 
     from superglm.model.base import (
         compute_lambda_max,
@@ -169,10 +228,7 @@ def fit(
 
     validate_response(y, model._distribution)
 
-    model._fit_weights = np.array(sample_weight)
-    model._fit_offset = np.array(offset) if offset is not None else None
-    sample_weight = model._fit_weights
-    offset = model._fit_offset
+    sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
 
     # Auto-calibrate lambda1 if not set
     if model.penalty.lambda1 is None:
@@ -180,10 +236,7 @@ def fit(
     has_lambda1_targets = model_has_lambda1_targets(model)
 
     # Invalidate cached properties from previous fit
-    model.__dict__.pop("_coef_covariance", None)
-    model.__dict__.pop("_fit_active_info", None)
-    model.__dict__.pop("_fit_inference_info", None)
-    model.__dict__.pop("_group_edf", None)
+    _clear_fit_inference_caches(model)
 
     # Monotone fit-time constraints are incompatible with selection_penalty (lambda1).
     # The constrained QP solver path ignores lambda1 — reject explicitly.
@@ -195,7 +248,7 @@ def fit(
     ):
         raise NotImplementedError(
             "Monotone fit-time constraints are not supported with selection_penalty > 0. "
-            "Set selection_penalty=0 or use monotone_mode='postfit'."
+            "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
         )
 
     # Guard: SCOP + QP monotone engines cannot coexist in the same model.
@@ -295,21 +348,9 @@ def fit_path(
     )
 
     y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
-    model._fit_weights = np.array(sample_weight)
-    model._fit_offset = np.array(offset) if offset is not None else None
-    sample_weight = model._fit_weights
-    offset = model._fit_offset
-    model.__dict__.pop("_coef_covariance", None)
-    model.__dict__.pop("_fit_active_info", None)
-    model.__dict__.pop("_fit_inference_info", None)
-    model.__dict__.pop("_group_edf", None)
-
-    # Clear stale REML state so post-fit helpers don't use penalties
-    # from a previous fit_reml() call on this model instance.
-    model._reml_lambdas = None
-    model._reml_penalties = None
-    model._reml_result = None
-    model._reml_profile = None
+    sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
+    _clear_fit_inference_caches(model)
+    _clear_reml_state(model)
 
     if not model_has_lambda1_targets(model):
         raise ValueError(
@@ -318,47 +359,21 @@ def fit_path(
         )
     lambda_max = compute_lambda_max(model, y, sample_weight)
 
-    if lambda_seq is None:
-        lambda_seq = np.geomspace(lambda_max, lambda_max * lambda_ratio, n_lambda)
-    else:
-        lambda_seq = np.asarray(lambda_seq, dtype=np.float64)
-        n_lambda = len(lambda_seq)
-
-    p = model._dm.p
-    coef_path = np.zeros((n_lambda, p))
-    intercept_path = np.zeros(n_lambda)
-    deviance_path = np.zeros(n_lambda)
-    edf_path = np.zeros(n_lambda)
-    n_iter_path = np.zeros(n_lambda, dtype=int)
-    converged_path = np.zeros(n_lambda, dtype=bool)
-
-    beta_warm = None
-    intercept_warm = None
-
-    for i, lam in enumerate(lambda_seq):
-        model.penalty.lambda1 = lam
-        result = fit_pirls(
-            X=model._dm,
-            y=y,
-            weights=sample_weight,
-            family=model._distribution,
-            link=model._link,
-            groups=model._groups,
-            penalty=model.penalty,
-            offset=offset,
-            beta_init=beta_warm,
-            intercept_init=intercept_warm,
-            active_set=model._active_set,
-            lambda2=model.lambda2,
-        )
-        coef_path[i] = result.beta
-        intercept_path[i] = result.intercept
-        deviance_path[i] = result.deviance
-        edf_path[i] = result.effective_df
-        n_iter_path[i] = result.n_iter
-        converged_path[i] = result.converged
-        beta_warm = result.beta
-        intercept_warm = result.intercept
+    lambda_seq = path_ops.resolve_lambda_sequence(
+        lambda_max,
+        n_lambda=n_lambda,
+        lambda_ratio=lambda_ratio,
+        lambda_seq=lambda_seq,
+    )
+    n_lambda = len(lambda_seq)
+    path_data = path_ops.run_lambda_path(
+        model,
+        y=y,
+        sample_weight=sample_weight,
+        offset=offset,
+        lambda_seq=lambda_seq,
+    )
+    result = path_data["result"]
 
     # Set model state to the last (least-regularized) fit
     model._result = result
@@ -375,307 +390,13 @@ def fit_path(
 
     return PathResult(
         lambda_seq=lambda_seq,
-        coef_path=coef_path,
-        intercept_path=intercept_path,
-        deviance_path=deviance_path,
-        n_iter_path=n_iter_path,
-        converged_path=converged_path,
-        edf_path=edf_path,
+        coef_path=path_data["coef_path"],
+        intercept_path=path_data["intercept_path"],
+        deviance_path=path_data["deviance_path"],
+        n_iter_path=path_data["n_iter_path"],
+        converged_path=path_data["converged_path"],
+        edf_path=path_data["edf_path"],
     )
-
-
-# ── REML adapter helpers ─────────────────────────────────────────
-
-
-def model_compute_dW_deta(model, mu, eta, sample_weight):
-    """Derivative of IRLS weights w.r.t. the linear predictor."""
-    return compute_dW_deta(model._link, model._distribution, mu, eta, sample_weight)
-
-
-def model_reml_w_correction(
-    model,
-    pirls_result,
-    XtWX_S_inv,
-    lambdas,
-    reml_groups,
-    penalty_caches,
-    sample_weight,
-    offset_arr,
-    w_correction_order=1,
-):
-    """W(ρ) correction for REML derivatives (first- or second-order)."""
-    return reml_w_correction(
-        model._dm,
-        model._link,
-        model._groups,
-        pirls_result,
-        XtWX_S_inv,
-        lambdas,
-        reml_groups,
-        penalty_caches,
-        sample_weight,
-        offset_arr,
-        model._distribution,
-        w_correction_order=w_correction_order,
-    )
-
-
-def model_reml_laml_objective(
-    model, y, result, lambdas, sample_weight, offset_arr, XtWX=None, penalty_caches=None
-):
-    """Laplace REML/LAML objective up to additive constants."""
-    scop_states = None
-    reml_result = getattr(model, "_reml_result", None)
-    if reml_result is not None:
-        scop_states = getattr(reml_result, "scop_states", None)
-
-    return reml_laml_objective(
-        model._dm,
-        model._distribution,
-        model._link,
-        model._groups,
-        y,
-        result,
-        lambdas,
-        sample_weight,
-        offset_arr,
-        XtWX=XtWX,
-        penalty_caches=penalty_caches,
-        reml_penalties=getattr(model, "_reml_penalties", None),
-        scop_states=scop_states,
-    )
-
-
-def model_reml_direct_gradient(
-    model, result, XtWX_S_inv, lambdas, reml_groups, penalty_ranks, phi_hat=1.0
-):
-    """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W)."""
-    return reml_direct_gradient(
-        model._dm.group_matrices,
-        result,
-        XtWX_S_inv,
-        lambdas,
-        reml_groups,
-        penalty_ranks,
-        phi_hat=phi_hat,
-        reml_penalties=getattr(model, "_reml_penalties", None),
-    )
-
-
-def model_reml_direct_hessian(
-    model,
-    XtWX_S_inv,
-    lambdas,
-    reml_groups,
-    gradient,
-    penalty_ranks,
-    penalty_caches=None,
-    pirls_result=None,
-    n_obs=0,
-    phi_hat=1.0,
-    dH_extra=None,
-    dH2_cross=None,
-):
-    """Outer Hessian of the REML criterion w.r.t. log-lambdas."""
-    return reml_direct_hessian(
-        model._dm.group_matrices,
-        model._distribution,
-        XtWX_S_inv,
-        lambdas,
-        reml_groups,
-        gradient,
-        penalty_ranks,
-        penalty_caches=penalty_caches,
-        pirls_result=pirls_result,
-        n_obs=n_obs,
-        phi_hat=phi_hat,
-        dH_extra=dH_extra,
-        dH2_cross=dH2_cross,
-        reml_penalties=getattr(model, "_reml_penalties", None),
-    )
-
-
-def model_optimize_direct_reml(
-    model,
-    y,
-    sample_weight,
-    offset_arr,
-    reml_groups,
-    penalty_ranks,
-    lambdas,
-    *,
-    max_reml_iter,
-    reml_tol,
-    verbose,
-    penalty_caches=None,
-    profile=None,
-    w_correction_order=1,
-    reml_penalties=None,
-    estimated_names=None,
-):
-    """Optimize the direct REML objective via damped Newton (Wood 2011)."""
-    return optimize_direct_reml(
-        model._dm,
-        model._distribution,
-        model._link,
-        model._groups,
-        model._discrete,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        max_reml_iter=max_reml_iter,
-        reml_tol=reml_tol,
-        verbose=verbose,
-        penalty_caches=penalty_caches,
-        profile=profile,
-        max_analytical_per_w=getattr(model, "_max_analytical_per_w", 30),
-        select_snap=getattr(model, "_select_snap", True),
-        direct_solve=getattr(model, "_direct_solve", "auto"),
-        w_correction_order=w_correction_order,
-        reml_penalties=reml_penalties,
-        estimated_names=estimated_names,
-    )
-
-
-def model_optimize_discrete_reml_cached_w(
-    model,
-    y,
-    sample_weight,
-    offset_arr,
-    reml_groups,
-    penalty_ranks,
-    lambdas,
-    *,
-    max_reml_iter,
-    reml_tol,
-    verbose,
-    penalty_caches=None,
-    profile=None,
-):
-    """Cached-W fREML optimizer for the discrete path."""
-    from superglm.reml.discrete import optimize_discrete_reml_cached_w
-
-    return optimize_discrete_reml_cached_w(
-        model._dm,
-        model._distribution,
-        model._link,
-        model._groups,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        max_reml_iter=max_reml_iter,
-        reml_tol=reml_tol,
-        verbose=verbose,
-        penalty_caches=penalty_caches,
-        profile=profile,
-        max_analytical_per_w=getattr(model, "_max_analytical_per_w", 30),
-    )
-
-
-def model_optimize_efs_reml(
-    model,
-    y,
-    sample_weight,
-    offset_arr,
-    reml_groups,
-    penalty_ranks,
-    lambdas,
-    *,
-    max_reml_iter,
-    reml_tol,
-    verbose,
-    penalty_caches=None,
-    reml_penalties=None,
-    estimated_names=None,
-    pirls_tol=1e-6,
-    max_pirls_iter=100,
-):
-    """EFS REML optimizer for the BCD path (lambda1 > 0)."""
-    from superglm.model.base import rebuild_dm_with_lambdas
-
-    result, dm = optimize_efs_reml(
-        model._dm,
-        model._distribution,
-        model._link,
-        model._groups,
-        model.penalty,
-        model._active_set,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        max_reml_iter=max_reml_iter,
-        reml_tol=reml_tol,
-        verbose=verbose,
-        penalty_caches=penalty_caches,
-        rebuild_dm=lambda lambdas, sample_weight: rebuild_dm_with_lambdas(
-            model, lambdas, sample_weight
-        ),
-        reml_penalties=reml_penalties,
-        estimated_names=estimated_names,
-        pirls_tol=pirls_tol,
-        max_pirls_iter=max_pirls_iter,
-    )
-    model._dm = dm
-    return result
-
-
-def model_run_reml_once(
-    model,
-    y,
-    sample_weight,
-    offset_arr,
-    reml_groups,
-    penalty_ranks,
-    lambdas,
-    *,
-    max_reml_iter,
-    reml_tol,
-    verbose,
-    use_direct,
-    penalty_caches=None,
-    pirls_tol=1e-6,
-    max_pirls_iter=100,
-):
-    """Run a single REML fixed-point outer loop from a chosen initial lambda scale."""
-    from superglm.model.base import rebuild_dm_with_lambdas
-
-    result, dm = run_reml_once(
-        model._dm,
-        model._distribution,
-        model._link,
-        model._groups,
-        model.penalty,
-        model._active_set,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        max_reml_iter=max_reml_iter,
-        reml_tol=reml_tol,
-        verbose=verbose,
-        use_direct=use_direct,
-        penalty_caches=penalty_caches,
-        rebuild_dm=lambda lambdas, sample_weight: rebuild_dm_with_lambdas(
-            model, lambdas, sample_weight
-        ),
-        direct_solve=getattr(model, "_direct_solve", "auto"),
-        reml_penalties=getattr(model, "_reml_penalties", None),
-        pirls_tol=pirls_tol,
-        max_pirls_iter=max_pirls_iter,
-    )
-    model._dm = dm
-    return result
 
 
 def fit_reml(
@@ -695,28 +416,18 @@ def fit_reml(
 ):
     """Fit with REML estimation of per-term smoothing parameters."""
     from superglm.model.base import (
-        auto_detect,
         model_build_design_matrix,
         model_has_lambda1_targets,
     )
 
-    if model._splines is not None and not model._specs:
-        auto_detect(model, X, sample_weight)
+    _auto_detect_specs_if_needed(model, X, sample_weight)
 
     # Clear stale results from previous fit
-    model._nb_profile_result = None
-    model._tweedie_profile_result = None
+    _clear_profile_results(model)
     model._reml_result = None
     model._reml_profile = None
 
-    # Auto-estimate NB theta if requested
-    if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
-        from superglm.profiling.nb import estimate_nb_theta
-
-        nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
-        model.family = NegativeBinomial(theta=nb_result.theta_hat)
-        model._nb_profile_result = nb_result
-        logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
+    _maybe_estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
 
     import time as _time
 
@@ -727,32 +438,16 @@ def fit_reml(
     y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
     _profile["dm_build_s"] = _time.perf_counter() - _t0
 
-    model._fit_weights = np.array(sample_weight)
-    model._fit_offset = np.array(offset) if offset is not None else None
-    sample_weight = model._fit_weights
-    offset = model._fit_offset
-    model.__dict__.pop("_coef_covariance", None)
-    model.__dict__.pop("_fit_active_info", None)
-    model.__dict__.pop("_fit_inference_info", None)
-    model.__dict__.pop("_group_edf", None)
+    sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
+    _clear_fit_inference_caches(model)
 
     # lambda1=None means "no L1 selection" in the REML path — default to 0
     # so the direct IRLS optimizer (Newton REML) is used instead of BCD+EFS.
     if model.penalty.lambda1 is None:
         model.penalty.lambda1 = 0.0
 
-    # Identify REML-eligible groups: penalized SSP groups with stored omega
-    reml_groups: list[tuple[int, GroupSlice]] = []
-    for i, g in enumerate(model._groups):
-        gm = model._dm.group_matrices[i]
-        if (
-            isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix)
-            and g.penalized
-            and gm.omega is not None
-        ):
-            reml_groups.append((i, g))
-
-    _has_monotone = any(g.monotone_engine is not None for g in model._groups)
+    reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)
+    _has_monotone, _has_qp_monotone, _has_scop_monotone = monotone_flags(model._groups)
 
     if not reml_groups and not _has_monotone:
         logger.warning("fit_reml: no REML-eligible groups found, falling back to fit()")
@@ -773,67 +468,18 @@ def fit_reml(
         return model
 
     # Build penalty components and caches (eigenstructure computed once)
-    from superglm.reml.penalty_algebra import build_penalty_caches, build_penalty_components
+    from superglm.reml.penalty_algebra import build_penalty_context
 
-    reml_penalties = build_penalty_components(model._dm.group_matrices, reml_groups)
-    penalty_caches = build_penalty_caches(model._dm.group_matrices, reml_groups)
-    penalty_ranks = {pc.name: pc.rank for pc in reml_penalties}
+    reml_penalties, penalty_caches, penalty_ranks = build_penalty_context(
+        model._dm.group_matrices,
+        reml_groups,
+    )
 
     # Initialize per-component lambdas (penalty-indexed, not term-indexed)
     # Partition into fixed (policy.mode == "fixed") and estimated components.
     lam_init = lambda2_init if lambda2_init is not None else model.lambda2
-    lambdas = {}
-    estimated_names: set[str] = set()
-    for pc in reml_penalties:
-        if pc.lambda_policy is not None and pc.lambda_policy.mode == "fixed":
-            lambdas[pc.name] = float(pc.lambda_policy.value)
-        else:
-            lambdas[pc.name] = lam_init
-            estimated_names.add(pc.name)
-
-    def _scop_fixed_lambda_value(spec) -> float | None:
-        """Return a fixed SCOP lambda value, or None if it should be estimated.
-
-        SCOP is a single-penalty smooth, so dict-style lambda_policy uses the
-        same canonical single-component name as other splines: "wiggle".
-        """
-        lp = getattr(spec, "_lambda_policy", None)
-        if lp is None:
-            return None
-        if isinstance(lp, LambdaPolicy):
-            return float(lp.value) if lp.mode == "fixed" else None
-
-        unknown = set(lp) - {"wiggle"}
-        if unknown:
-            raise ValueError(
-                f"lambda_policy contains unknown component names: {unknown}. "
-                "Valid names: ['wiggle']"
-            )
-
-        wiggle_lp = lp.get("wiggle", LambdaPolicy.estimate())
-        return float(wiggle_lp.value) if wiggle_lp.mode == "fixed" else None
-
-    # Check SCOP terms separately — they bypass SSP and don't enter reml_groups.
-    # Inject fixed SCOP lambdas; flag any unfixed for the EFS optimizer.
-    _scop_groups = [g for g in model._groups if g.monotone_engine == "scop" and g.penalized]
-    _any_unfixed_scop = False
-    for g in _scop_groups:
-        spec = model._specs.get(g.feature_name)
-        if spec is None:
-            _any_unfixed_scop = True
-            continue
-        fixed_scop = _scop_fixed_lambda_value(spec)
-        if fixed_scop is None:
-            _any_unfixed_scop = True
-            continue
-        # Inject fixed lambda for SCOP group into the lambda dict.
-        lambdas[g.name] = fixed_scop
-
-    # Monotone routing — dispatch based on engine type.
-    _has_qp_monotone = any(g.monotone_engine == "qp" for g in model._groups if g.monotone_engine)
-    _has_scop_monotone = any(
-        g.monotone_engine == "scop" for g in model._groups if g.monotone_engine
-    )
+    lambdas, estimated_names = initialize_component_lambdas(reml_penalties, lam_init)
+    _any_unfixed_scop = inject_fixed_scop_lambdas(model._groups, model._specs, lambdas)
 
     # QP monotone with auto lambda → two-stage passthrough heuristic:
     # Stage 1: run unconstrained REML (temporarily strip QP constraints)
@@ -843,18 +489,12 @@ def fit_reml(
 
     # Stage 1 setup: temporarily disable QP constraints so REML runs fully
     # unconstrained. Save the original state to restore for stage 2.
-    _qp_saved_state: list[tuple] = []
+    _qp_saved_state: list[tuple[int, object, object]] = []
     _qp_stripped = False
     if _qp_passthrough:
-        for gi, g in enumerate(model._groups):
-            if g.monotone_engine == "qp":
-                _qp_saved_state.append((gi, g.monotone_engine, g.constraints))
-                g.monotone_engine = None
-                g.constraints = None
+        _qp_saved_state = strip_qp_constraints(model._groups)
         _qp_stripped = True
-        # Re-check monotone flags with QP stripped
-        _has_monotone = any(g.monotone_engine is not None for g in model._groups)
-        _has_qp_monotone = False
+        _has_monotone, _has_qp_monotone, _has_scop_monotone = monotone_flags(model._groups)
 
     try:
         # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
@@ -863,361 +503,90 @@ def fit_reml(
         use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
 
         if _has_monotone and not _any_unfixed_scop and not estimated_names:
-            # All lambdas are fixed (Phase 4 path) — single fit_irls_direct call.
-            # No REML optimizer needed.
-            result, XtWX_S_inv = fit_irls_direct(
-                X=model._dm,
+            run_fixed_monotone_reml(
+                model,
                 y=y,
-                weights=sample_weight,
-                family=model._distribution,
-                link=model._link,
-                groups=model._groups,
-                lambda2=lambdas,
+                sample_weight=sample_weight,
                 offset=offset,
-                max_iter=max_pirls_iter,
-                tol=pirls_tol,
-                convergence="deviance",
-                reml_penalties=reml_penalties if reml_penalties else None,
+                pirls_tol=pirls_tol,
+                max_pirls_iter=max_pirls_iter,
+                lambdas=lambdas,
+                reml_penalties=reml_penalties,
+                compute_fit_stats=_compute_fit_stats,
             )
-
-            model._result = result
-            model._reml_lambdas = lambdas
-            model._reml_penalties = reml_penalties
-
-            # Compute fit stats (mirrors the normal REML post-fit path).
-            eta = model._dm.matvec(result.beta) + result.intercept
-            if offset is not None:
-                eta = eta + offset
-            eta = stabilize_eta(eta, model._link)
-            mu = clip_mu(model._link.inverse(eta), model._distribution)
-
-            model._fit_stats = _compute_fit_stats(
-                y, mu, sample_weight, offset, model._distribution, model._link, result.phi
-            )
-            model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
-            # _reml_result and _reml_profile remain None (set at entry).
-            # The REML outer optimizer was not run — all lambdas were fixed.
-
             logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
             return model
 
         if _any_unfixed_scop or (_has_scop_monotone and estimated_names):
-            # SCOP with auto-lambda → SCOP EFS optimizer.
-            # Add unfixed SCOP group names to estimated_names and set initial lambdas.
-            lam_init = lambda2_init if lambda2_init is not None else model.lambda2
-            for g in model._groups:
-                if g.monotone_engine == "scop" and g.penalized:
-                    spec = model._specs.get(g.feature_name or g.name)
-                    fixed_val = _scop_fixed_lambda_value(spec)
-                    if fixed_val is None:
-                        estimated_names.add(g.name)
-                        lambdas[g.name] = lam_init
-
-            from superglm.reml.scop_efs import optimize_scop_efs_reml
-
-            best = optimize_scop_efs_reml(
-                dm=model._dm,
-                distribution=model._distribution,
-                link=model._link,
-                groups=model._groups,
+            best = run_scop_efs_reml(
+                model,
                 y=y,
                 sample_weight=sample_weight,
+                offset=offset,
                 offset_arr=offset_arr,
                 lambdas=lambdas,
                 estimated_names=estimated_names,
+                lam_init=lam_init,
+                reml_penalties=reml_penalties,
                 max_reml_iter=max_reml_iter,
                 reml_tol=reml_tol,
                 pirls_tol=pirls_tol,
                 max_pirls_iter=max_pirls_iter,
                 verbose=verbose,
-                reml_penalties=reml_penalties,
-                convergence=model._convergence,
+                profile=_profile,
+                total_start=_t_total_start,
+                compute_fit_stats=_compute_fit_stats,
             )
-
-            # Post-fit housekeeping (same structure as other REML paths).
-            model._result = best.pirls_result
-            model._reml_lambdas = best.lambdas
-            model._reml_penalties = best.reml_penalties if best.reml_penalties else reml_penalties
-            model._reml_result = best
-
-            eta = model._dm.matvec(best.pirls_result.beta) + best.pirls_result.intercept
-            if offset is not None:
-                eta = eta + offset
-            eta = stabilize_eta(eta, model._link)
-            mu = clip_mu(model._link.inverse(eta), model._distribution)
-
-            model._fit_stats = _compute_fit_stats(
-                y,
-                mu,
-                sample_weight,
-                offset,
-                model._distribution,
-                model._link,
-                best.pirls_result.phi,
-            )
-            model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
-
-            _profile["total_s"] = _time.perf_counter() - _t_total_start
-            _profile["n_reml_iter"] = best.n_reml_iter
-            _profile["converged"] = best.converged
-            model._reml_profile = _profile
-
             logger.info(
                 f"REML SCOP EFS converged={best.converged} in {best.n_reml_iter} iters, "
                 f"lambdas={best.lambdas}"
             )
             return model
 
-        if not estimated_names:
-            # All lambdas are fixed — skip REML optimizer; one PIRLS solve at fixed lambdas.
-            # Pass estimated_names=set() so the optimizer does a single evaluation pass
-            # and never moves any lambda.
-            if use_direct:
-                best = model_optimize_direct_reml(
-                    model,
-                    y,
-                    sample_weight,
-                    offset_arr,
-                    reml_groups,
-                    penalty_ranks,
-                    lambdas,
-                    max_reml_iter=1,
-                    reml_tol=1.0,  # tol=1.0 ensures convergence after 1 iter
-                    verbose=verbose,
-                    penalty_caches=penalty_caches,
-                    profile=_profile,
-                    w_correction_order=w_correction_order,
-                    reml_penalties=reml_penalties,
-                    estimated_names=estimated_names,
-                )
-            else:
-                best = model_optimize_efs_reml(
-                    model,
-                    y,
-                    sample_weight,
-                    offset_arr,
-                    reml_groups,
-                    penalty_ranks,
-                    lambdas,
-                    max_reml_iter=1,
-                    reml_tol=1.0,
-                    verbose=verbose,
-                    penalty_caches=penalty_caches,
-                    reml_penalties=reml_penalties,
-                    estimated_names=estimated_names,
-                    pirls_tol=pirls_tol,
-                    max_pirls_iter=max_pirls_iter,
-                )
-        elif use_direct:
-            best = model_optimize_direct_reml(
-                model,
-                y,
-                sample_weight,
-                offset_arr,
-                reml_groups,
-                penalty_ranks,
-                lambdas,
-                max_reml_iter=max_reml_iter,
-                reml_tol=reml_tol,
-                verbose=verbose,
-                penalty_caches=penalty_caches,
-                profile=_profile,
-                w_correction_order=w_correction_order,
-                reml_penalties=reml_penalties,
-                estimated_names=estimated_names,
-            )
-        else:
-            best = model_optimize_efs_reml(
-                model,
-                y,
-                sample_weight,
-                offset_arr,
-                reml_groups,
-                penalty_ranks,
-                lambdas,
-                max_reml_iter=max_reml_iter,
-                reml_tol=reml_tol,
-                verbose=verbose,
-                penalty_caches=penalty_caches,
-                reml_penalties=reml_penalties,
-                estimated_names=estimated_names,
-                pirls_tol=pirls_tol,
-                max_pirls_iter=max_pirls_iter,
-            )
-        model._result = best.pirls_result
-        model._reml_lambdas = best.lambdas
-        # Rebuild penalties from the final DM so omega_ssp matches current R_inv.
-        # The EFS path rebuilds the DM (and R_inv) during optimization, so the
-        # pre-optimization reml_penalties have stale omega_ssp.
-        if not use_direct:
-            reml_penalties = build_penalty_components(model._dm.group_matrices, reml_groups)
-        model._reml_penalties = reml_penalties
-        model._reml_result = best
-        lambdas = best.lambdas
-        n_reml_iter = best.n_reml_iter
-        converged = best.converged
-
-        # Fix phi: known-scale families (Poisson) get phi=1.0;
-        # estimated-scale families get REML profiled φ̂ instead of the raw
-        # PIRLS phi = dev/(n-edf) which doesn't include the penalty.
-        scale_known = getattr(model._distribution, "scale_known", True)
-        if scale_known:
-            phi_fixed = 1.0
-        else:
-            p_dim = model._dm.p
-            S_final = _build_penalty_matrix(
-                model._dm.group_matrices,
-                model._groups,
-                lambdas,
-                p_dim,
-                reml_penalties=reml_penalties,
-            )
-            pq_final = float(best.pirls_result.beta @ S_final @ best.pirls_result.beta)
-            from superglm.reml.penalty_algebra import compute_total_penalty_rank
-
-            M_p = compute_total_penalty_rank(reml_penalties)
-            phi_fixed = max((best.pirls_result.deviance + pq_final) / max(len(y) - M_p, 1.0), 1e-10)
-
-        # QP passthrough stage 2: restore constraints and refit at estimated lambdas.
-        # This happens AFTER phi computation (which uses unconstrained REML quantities)
-        # but BEFORE the final corrected PIRLSResult is built.
-        if _qp_passthrough:
-            for gi, engine, constraints in _qp_saved_state:
-                model._groups[gi].monotone_engine = engine
-                model._groups[gi].constraints = constraints
-
-            qp_refit, _ = fit_irls_direct(
-                X=model._dm,
-                y=y,
-                weights=sample_weight,
-                family=model._distribution,
-                link=model._link,
-                groups=model._groups,
-                lambda2=lambdas,
-                offset=offset_arr,
-                beta_init=best.pirls_result.beta,
-                intercept_init=float(best.pirls_result.intercept),
-                max_iter=max_pirls_iter,
-                tol=pirls_tol,
-                convergence="deviance",
-                reml_penalties=reml_penalties,
-            )
-            # Use constrained refit for the final result
-            final_pirls = qp_refit
-        else:
-            final_pirls = best.pirls_result
-
-        corrected = PIRLSResult(
-            beta=final_pirls.beta,
-            intercept=final_pirls.intercept,
-            n_iter=final_pirls.n_iter,
-            deviance=final_pirls.deviance,
-            converged=final_pirls.converged,
-            phi=phi_fixed,
-            effective_df=final_pirls.effective_df,
+        best = optimize_reml_best(
+            model,
+            use_direct=use_direct,
+            y=y,
+            sample_weight=sample_weight,
+            offset_arr=offset_arr,
+            reml_groups=reml_groups,
+            penalty_ranks=penalty_ranks,
+            lambdas=lambdas,
+            max_reml_iter=max_reml_iter,
+            reml_tol=reml_tol,
+            verbose=verbose,
+            penalty_caches=penalty_caches,
+            profile=_profile,
+            w_correction_order=w_correction_order,
+            reml_penalties=reml_penalties,
+            estimated_names=estimated_names,
+            pirls_tol=pirls_tol,
+            max_pirls_iter=max_pirls_iter,
+            model_optimize_direct_reml=model_optimize_direct_reml,
+            model_optimize_efs_reml=model_optimize_efs_reml,
         )
-        model._result = corrected
-        model._reml_result.pirls_result = corrected
-
-        # Update spec R_inv for predict/reconstruct
-        _update_reml_r_inv(model, reml_groups, lambdas)
-
-        _profile["total_s"] = _time.perf_counter() - _t_total_start
-        _profile["n_reml_iter"] = n_reml_iter
-        _profile["converged"] = converged
-        model._reml_profile = _profile
-
-        eta = model._dm.matvec(model._result.beta) + model._result.intercept
-        if offset is not None:
-            eta = eta + offset
-        eta = stabilize_eta(eta, model._link)
-        mu = clip_mu(model._link.inverse(eta), model._distribution)
-
-        model._fit_stats = _compute_fit_stats(
-            y, mu, sample_weight, offset, model._distribution, model._link, model._result.phi
+        lambdas, n_reml_iter, converged = finalize_reml_fit(
+            model,
+            best=best,
+            use_direct=use_direct,
+            reml_groups=reml_groups,
+            reml_penalties=reml_penalties,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset,
+            offset_arr=offset_arr,
+            max_pirls_iter=max_pirls_iter,
+            pirls_tol=pirls_tol,
+            qp_passthrough=_qp_passthrough,
+            qp_saved_state=_qp_saved_state,
+            profile=_profile,
+            total_start=_t_total_start,
+            compute_fit_stats=_compute_fit_stats,
         )
-
-        meta = {"method": "fit_reml", "discrete": model._discrete}
-        if _qp_passthrough:
-            meta["lambda_strategy"] = "qp_passthrough"
-        model._last_fit_meta = meta
-
-        # Safety: ensure QP constraints are always restored (idempotent if already done).
-        for gi, engine, constraints in _qp_saved_state:
-            model._groups[gi].monotone_engine = engine
-            model._groups[gi].constraints = constraints
 
         logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")
         return model
     finally:
         # Always restore QP constraints if stripped
         if _qp_stripped:
-            for gi, engine, constraints in _qp_saved_state:
-                model._groups[gi].monotone_engine = engine
-                model._groups[gi].constraints = constraints
-
-
-def _update_reml_r_inv(model, reml_groups, lambdas):
-    """Update spec R_inv for predict/reconstruct after REML convergence."""
-    from superglm.model.state_ops import feature_groups
-
-    for idx, g in reml_groups:
-        spec = model._specs.get(g.feature_name)
-        if spec is not None and hasattr(spec, "set_reparametrisation"):
-            fgroups = feature_groups(model, g.feature_name)
-            r_inv_parts = []
-            for fg in fgroups:
-                fg_idx = next(i for i, gg in enumerate(model._groups) if gg.name == fg.name)
-                fg_gm = model._dm.group_matrices[fg_idx]
-                if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
-                    r_inv_parts.append(fg_gm.R_inv)
-            if r_inv_parts:
-                spec.set_reparametrisation(
-                    np.hstack(r_inv_parts) if len(r_inv_parts) > 1 else r_inv_parts[0]
-                )
-
-    # Same for interaction specs
-    for iname in model._interaction_order:
-        ispec = model._interaction_specs[iname]
-        if not hasattr(ispec, "set_reparametrisation"):
-            continue
-        fgroups = feature_groups(model, iname)
-
-        # Check if any group was updated by REML (component-aware:
-        # multi-penalty tensor keys are "x1:x2:margin_x1" not "x1:x2")
-        def _has_lambda(fg):
-            if fg.name in lambdas:
-                return True
-            return any(k.startswith(f"{fg.name}:") for k in lambdas)
-
-        updated = any(_has_lambda(fg) for fg in fgroups)
-        if not updated:
-            continue
-        if len(fgroups) > 1:
-            if any(fg.subgroup_type is not None for fg in fgroups):
-                r_inv_parts = []
-                for fg in fgroups:
-                    fg_idx = next(i for i, gg in enumerate(model._groups) if gg.name == fg.name)
-                    fg_gm = model._dm.group_matrices[fg_idx]
-                    if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
-                        r_inv_parts.append(fg_gm.R_inv)
-                if r_inv_parts:
-                    ispec.set_reparametrisation(np.hstack(r_inv_parts))
-            else:
-                # Per-level (SplineCategorical): gather dict
-                r_inv_dict = {}
-                for fg in fgroups:
-                    fg_idx = next(i for i, gg in enumerate(model._groups) if gg.name == fg.name)
-                    fg_gm = model._dm.group_matrices[fg_idx]
-                    if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
-                        level = fg.name.split("[")[1].rstrip("]") if "[" in fg.name else fg.name
-                        r_inv_dict[level] = fg_gm.R_inv
-                if r_inv_dict:
-                    ispec.set_reparametrisation(r_inv_dict)
-        else:
-            # Single group (TensorInteraction)
-            fg = fgroups[0]
-            fg_idx = next(i for i, gg in enumerate(model._groups) if gg.name == fg.name)
-            fg_gm = model._dm.group_matrices[fg_idx]
-            if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
-                ispec.set_reparametrisation(fg_gm.R_inv)
+            restore_qp_constraints(model._groups, _qp_saved_state)

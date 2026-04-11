@@ -18,11 +18,11 @@ from superglm.group_matrix import (
 )
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import (
+    build_penalty_matrix,
     cached_logdet_s_plus,
     compute_logdet_s_plus,
     compute_total_penalty_rank,
 )
-from superglm.solvers.irls_direct import _build_penalty_matrix
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -72,7 +72,7 @@ def reml_laml_objective(
     if S_override is not None:
         S = S_override
     else:
-        S = _build_penalty_matrix(
+        S = build_penalty_matrix(
             dm.group_matrices, groups, lambdas, p, reml_penalties=reml_penalties
         )
     if scop_states:
