@@ -27,74 +27,15 @@ from superglm.distributions import _VARIANCE_FLOOR, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import (
-    build_penalty_caches,
-    build_penalty_components,
+    build_penalty_context,
+    build_penalty_matrix,
+    coerce_reml_penalties,
     compute_total_penalty_rank,
 )
 from superglm.reml.result import REMLResult, _map_beta_between_bases
-from superglm.solvers.irls_direct import (
-    _build_penalty_matrix,
-    _invert_xtwx_plus_penalty,
-    fit_irls_direct,
-)
+from superglm.solvers.irls_direct import _invert_xtwx_plus_penalty, fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 from superglm.types import GroupSlice, PenaltyComponent
-
-
-def _coerce_reml_penalties(
-    reml_groups=None,
-    reml_penalties=None,
-    group_matrices=None,
-    penalty_caches=None,
-):
-    """Coerce legacy reml_groups to reml_penalties list.
-
-    Accepts either reml_penalties (preferred) or reml_groups (legacy).
-    When given reml_groups, builds PenaltyComponent objects from the
-    group matrices and penalty_caches (if available).
-    """
-    if reml_penalties is not None:
-        return reml_penalties
-    if reml_groups is None:
-        raise ValueError("Either reml_penalties or reml_groups must be provided")
-    # Build from legacy reml_groups
-    components = []
-    for idx, g in reml_groups:
-        gm = group_matrices[idx] if group_matrices is not None else None
-        omega_ssp = None
-        rank = 0.0
-        log_det = 0.0
-        eigvals = None
-        omega_raw = None
-        if penalty_caches is not None and g.name in penalty_caches:
-            cache = penalty_caches[g.name]
-            omega_ssp = cache.omega_ssp
-            rank = cache.rank
-            log_det = cache.log_det_omega_plus
-            eigvals = cache.eigvals_omega
-        elif (
-            gm is not None
-            and hasattr(gm, "R_inv")
-            and hasattr(gm, "omega")
-            and gm.omega is not None
-        ):
-            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-        if gm is not None and hasattr(gm, "omega"):
-            omega_raw = gm.omega
-        components.append(
-            PenaltyComponent(
-                name=g.name,
-                group_name=g.name,
-                group_index=idx,
-                group_sl=g.sl,
-                omega_raw=omega_raw,
-                omega_ssp=omega_ssp,
-                rank=rank,
-                log_det_omega_plus=log_det,
-                eigvals_omega=eigvals,
-            )
-        )
-    return components
 
 
 def run_reml_once(
@@ -135,7 +76,7 @@ def run_reml_once(
     if reml_penalties is not None:
         penalties_rro = reml_penalties
     else:
-        penalties_rro = _coerce_reml_penalties(
+        penalties_rro = coerce_reml_penalties(
             reml_groups=reml_groups,
             group_matrices=dm.group_matrices,
             penalty_caches=penalty_caches,
@@ -169,7 +110,7 @@ def run_reml_once(
         n_reml_iter = reml_iter + 1
 
         if use_direct and not cheap_iter:
-            S_iter = _build_penalty_matrix(
+            S_iter = build_penalty_matrix(
                 dm.group_matrices, groups, lambdas, dm.p, reml_penalties=penalties_rro
             )
             pirls_result, XtWX_S_inv_full, XtWX_full = fit_irls_direct(
@@ -239,7 +180,7 @@ def run_reml_once(
             )
             active_groups = list(groups)
         elif not use_direct:
-            S_rro = _build_penalty_matrix(
+            S_rro = build_penalty_matrix(
                 dm.group_matrices,
                 groups,
                 lambdas,
@@ -253,7 +194,7 @@ def run_reml_once(
         inv_phi = 1.0
         if not scale_known and penalty_caches is not None:
             p_dim = dm.p
-            S_fp = _build_penalty_matrix(
+            S_fp = build_penalty_matrix(
                 dm.group_matrices,
                 groups,
                 lambdas,
@@ -358,9 +299,10 @@ def run_reml_once(
             warm_beta = _map_beta_between_bases(beta, old_gms, dm.group_matrices, groups)
             warm_intercept = intercept
             # R_inv changed -> refresh penalties + caches (basis-dependent)
-            penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
-            penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
-            penalties_rro = build_penalty_components(dm.group_matrices, reml_groups)
+            penalties_rro, penalty_caches, penalty_ranks = build_penalty_context(
+                dm.group_matrices,
+                reml_groups,
+            )
             cheap_iter = False
         else:
             cheap_iter = True
@@ -370,9 +312,9 @@ def run_reml_once(
     if cheap_iter and converged and not use_direct:
         dm = rebuild_dm(lambdas, sample_weight)
         # R_inv changed -> refresh penalties so S_final_rro uses current basis
-        penalties_rro = build_penalty_components(dm.group_matrices, reml_groups)
+        penalties_rro, _, _ = build_penalty_context(dm.group_matrices, reml_groups)
 
-    S_final_rro = _build_penalty_matrix(
+    S_final_rro = build_penalty_matrix(
         dm.group_matrices, groups, lambdas, dm.p, reml_penalties=penalties_rro
     )
     if use_direct:

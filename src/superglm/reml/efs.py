@@ -27,16 +27,13 @@ from superglm.group_matrix import (
 from superglm.links import stabilize_eta
 from superglm.reml.objective import reml_laml_objective
 from superglm.reml.penalty_algebra import (
-    build_penalty_caches,
-    build_penalty_components,
+    build_penalty_context,
+    build_penalty_matrix,
+    coerce_reml_penalties,
     compute_total_penalty_rank,
 )
 from superglm.reml.result import REMLResult, _map_beta_between_bases
-from superglm.reml.runner import _coerce_reml_penalties
-from superglm.solvers.irls_direct import (
-    _build_penalty_matrix,
-    _safe_decompose_H,
-)
+from superglm.solvers.irls_direct import _safe_decompose_H
 from superglm.solvers.pirls import fit_pirls
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -82,7 +79,7 @@ def optimize_efs_reml(
     Biometrics 73(4), 1071-1081.
     """
     scale_known = getattr(distribution, "scale_known", True)
-    penalties = _coerce_reml_penalties(
+    penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
         group_matrices=dm.group_matrices,
@@ -125,7 +122,7 @@ def optimize_efs_reml(
 
     # Estimate phi for estimated-scale families
     boot_inv_phi = 1.0
-    S_boot = _build_penalty_matrix(
+    S_boot = build_penalty_matrix(
         dm.group_matrices, groups, boot_lambdas, dm.p, reml_penalties=penalties
     )
     if not scale_known and penalty_caches is not None:
@@ -156,9 +153,10 @@ def optimize_efs_reml(
     # Rebuild DM with bootstrapped lambdas -- refresh penalties + caches
     old_gms = dm.group_matrices
     dm = rebuild_dm(lambdas, sample_weight)
-    penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
-    penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
-    penalties = build_penalty_components(dm.group_matrices, reml_groups)
+    penalties, penalty_caches, penalty_ranks = build_penalty_context(
+        dm.group_matrices,
+        reml_groups,
+    )
     warm_beta = _map_beta_between_bases(boot_result.beta, old_gms, dm.group_matrices, groups)
     warm_intercept = float(boot_result.intercept)
 
@@ -219,7 +217,7 @@ def optimize_efs_reml(
 
         # -- Compute H^{-1} = (X'WX + S)^{-1} --
         p = dm.p
-        S = _build_penalty_matrix(dm.group_matrices, groups, lambdas, p, reml_penalties=penalties)
+        S = build_penalty_matrix(dm.group_matrices, groups, lambdas, p, reml_penalties=penalties)
         H = cached_xtwx + S
         H_inv, _, _ = _safe_decompose_H(H)
 
@@ -366,9 +364,10 @@ def optimize_efs_reml(
             warm_beta = _map_beta_between_bases(beta, old_gms, dm.group_matrices, groups)
             warm_intercept = intercept
             # R_inv changed -> recompute penalties + caches (basis-dependent)
-            penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
-            penalty_ranks = {n_: c.rank for n_, c in penalty_caches.items()}
-            penalties = build_penalty_components(dm.group_matrices, reml_groups)
+            penalties, penalty_caches, penalty_ranks = build_penalty_context(
+                dm.group_matrices,
+                reml_groups,
+            )
             cheap_iter = False
         else:
             # Cheap: re-invert cached X'WX + S only (O(p^3), no data pass)
@@ -380,8 +379,7 @@ def optimize_efs_reml(
     if cheap_iter and converged:
         dm = rebuild_dm(lambdas, sample_weight)
         # R_inv changed -> refresh caches and penalties for the objective computation
-        penalty_caches = build_penalty_caches(dm.group_matrices, reml_groups)
-        penalties = build_penalty_components(dm.group_matrices, reml_groups)
+        penalties, penalty_caches, _ = build_penalty_context(dm.group_matrices, reml_groups)
 
     final_result = fit_pirls(
         X=dm,

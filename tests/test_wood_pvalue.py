@@ -5,8 +5,8 @@ import pandas as pd
 import pytest
 from scipy.stats import chi2 as chi2_dist
 
-from superglm.davies import psum_chisq, satterthwaite
-from superglm.wood_pvalue import _mixture_pvalue, wood_test_smooth
+from superglm.stats.davies import psum_chisq, satterthwaite
+from superglm.stats.wood_pvalue import _mixture_pvalue, wood_test_smooth
 
 # ── Davies algorithm ─────────────────────────────────────────────
 

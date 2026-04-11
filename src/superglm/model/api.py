@@ -14,7 +14,16 @@ from superglm.penalties.base import Penalty
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import FeatureSpec
 
-from . import base, explain_ops, fit_ops, monotone_ops, profile_ops, state_ops
+from . import (
+    base,
+    explain_ops,
+    fit_ops,
+    monotone_ops,
+    plot_ops,
+    profile_ops,
+    report_ops,
+    state_ops,
+)
 
 if TYPE_CHECKING:
     from superglm.diagnostics.discretize import DiscretizationResult
@@ -181,7 +190,7 @@ class SuperGLM:
 
     @staticmethod
     def _resolve_ci(ci):
-        return explain_ops.resolve_ci(ci)
+        return plot_ops.resolve_ci(ci)
 
     # ── Core model operations ─────────────────────────────────────
 
@@ -470,23 +479,23 @@ class SuperGLM:
 
     def diagnostics(self) -> dict[str, Any]:
         """Per-group diagnostic dict for programmatic / audit access."""
-        return state_ops.diagnostics(self)
+        return report_ops.diagnostics(self)
 
     def summary(self, alpha: float = 0.05, detail: str = "compact"):
         """Rich model summary with coefficient table (statsmodels-style)."""
-        return state_ops.summary(self, alpha, detail=detail)
+        return report_ops.summary(self, alpha, detail=detail)
 
     def _feature_groups(self, name: str) -> list[GroupSlice]:
         """Get all groups belonging to a feature."""
-        return state_ops.feature_groups(self, name)
+        return report_ops.feature_groups(self, name)
 
     def reconstruct_feature(self, name: str) -> dict[str, Any]:
         """Reconstruct a fitted feature's curve or effect on its original scale."""
-        return state_ops.reconstruct_feature(self, name)
+        return report_ops.reconstruct_feature(self, name)
 
     def knot_summary(self) -> dict[str, dict[str, Any]]:
         """Return fitted knot metadata for all spline features."""
-        return state_ops.knot_summary(self)
+        return report_ops.knot_summary(self)
 
     # ── Inference ─────────────────────────────────────────────────
 
@@ -774,7 +783,7 @@ class SuperGLM:
         >>> fig.show()                      # interactive main-effect explorer
         >>> fig.write_html("effects.html") # standalone HTML export
         """
-        return explain_ops.plot(
+        return plot_ops.plot(
             self,
             terms,
             kind=kind,
@@ -907,7 +916,7 @@ class SuperGLM:
         >>> curve_df = payload["terms"][0]["effect"]
         >>> knots_df = payload["terms"][0]["knots"]
         """
-        return explain_ops.plot_data(
+        return plot_ops.plot_data(
             self,
             terms,
             kind=kind,
@@ -946,7 +955,7 @@ class SuperGLM:
 
     # ── Monotone repair ─────────────────────────────────────────
 
-    def apply_monotone_postfit(
+    def monotonize(
         self,
         X: pd.DataFrame,
         sample_weight: NDArray | None = None,
@@ -954,11 +963,12 @@ class SuperGLM:
         *,
         n_grid: int = 500,
     ) -> SuperGLM:
-        """Apply post-fit monotone repair to splines with ``monotone`` set.
+        """Repair monotone-annotated spline terms after fitting.
 
-        Finds all spline features with ``monotone='increasing'`` or
-        ``monotone='decreasing'``, applies weighted isotonic regression
-        to the fitted curve, and projects back to spline coefficients.
+        This is a manual, post-fit repair step. It finds all spline features
+        with ``monotone='increasing'`` or ``monotone='decreasing'``, applies
+        weighted isotonic regression to the fitted curve, and projects the
+        repaired curve back to spline coefficients.
 
         Idempotent: calling twice does not re-repair already-repaired features.
 
@@ -978,7 +988,18 @@ class SuperGLM:
         SuperGLM
             The model (self), with monotone repairs stored.
         """
-        return monotone_ops.apply_monotone_postfit(self, X, sample_weight, offset, n_grid=n_grid)
+        return monotone_ops.monotonize(self, X, sample_weight, offset, n_grid=n_grid)
+
+    def apply_monotone_postfit(
+        self,
+        X: pd.DataFrame,
+        sample_weight: NDArray | None = None,
+        offset: NDArray | None = None,
+        *,
+        n_grid: int = 500,
+    ) -> SuperGLM:
+        """Compatibility alias for :meth:`monotonize`."""
+        return self.monotonize(X, sample_weight, offset, n_grid=n_grid)
 
     # ── Diagnostics ───────────────────────────────────────────────
 

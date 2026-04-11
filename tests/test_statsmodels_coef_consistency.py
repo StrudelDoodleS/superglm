@@ -22,7 +22,7 @@ def tweedie_data():
     """Generate Tweedie response data with known DGP."""
     sm = pytest.importorskip("statsmodels")  # noqa: F841
     from superglm.distributions import Tweedie
-    from superglm.tweedie_profile import generate_tweedie_cpg
+    from superglm.profiling.tweedie import generate_tweedie_cpg
 
     P, PHI, N, SEED = 1.5, 2.0, 5_000, 42
     rng = np.random.default_rng(SEED)
@@ -197,7 +197,7 @@ class TestNearSeparatedTweedieConsistency:
         # True DGP
         eta_true = 5.0 + 0.3 * (cat == "hi") - 0.2 * (cat == "lo") + 0.1 * (cat == "mid")
         mu_true = np.exp(eta_true) * exposure
-        from superglm.tweedie_profile import generate_tweedie_cpg
+        from superglm.profiling.tweedie import generate_tweedie_cpg
 
         y = generate_tweedie_cpg(n, mu=mu_true, phi=2.0, p=P, rng=rng)
         # Force near-separation: rare level has y=0

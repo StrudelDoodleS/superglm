@@ -32,7 +32,6 @@ from superglm.group_matrix import (
     DiscretizedSCOPGroupMatrix,
     DiscretizedSSPGroupMatrix,
     GroupMatrix,
-    SparseSSPGroupMatrix,
     _block_xtwx_rhs,
 )
 from superglm.links import Link, stabilize_eta
@@ -134,68 +133,16 @@ def _build_penalty_matrix(
     p: int,
     reml_penalties: list[PenaltyComponent] | None = None,
 ) -> NDArray:
-    """Build block-diagonal penalty matrix S (p×p).
+    """Backward-compatible wrapper for the shared REML penalty builder."""
+    from superglm.reml.penalty_algebra import build_penalty_matrix
 
-    If ``reml_penalties`` is provided, uses the multi-penalty path where
-    multiple PenaltyComponents can accumulate (+=) into the same group
-    block.  Each component carries its own omega and is keyed by a
-    distinct lambda name.
-
-    Otherwise falls back to the legacy single-penalty-per-group path.
-
-    Parameters
-    ----------
-    reml_penalties : list of PenaltyComponent, optional
-        When provided, each component contributes ``lam * omega_ssp``
-        to the block identified by ``pc.group_sl``.  Multiple components
-        sharing the same block are summed (e.g. tensor product marginals).
-    """
-    S = np.zeros((p, p))
-
-    if reml_penalties is not None:
-        for pc in reml_penalties:
-            gm = group_matrices[pc.group_index]
-            lam = lambda2[pc.name] if isinstance(lambda2, dict) else lambda2
-            if lam == 0:
-                continue
-            omega_ssp = (
-                pc.omega_ssp if pc.omega_ssp is not None else (gm.R_inv.T @ pc.omega_raw @ gm.R_inv)
-            )
-            S[pc.group_sl, pc.group_sl] += lam * omega_ssp
-
-        # Also add SCOP penalties (not in reml_penalties).
-        for gm, g in zip(group_matrices, groups):
-            if g.scop_reparameterization is not None and g.penalized:
-                lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
-                if lam_g > 0:
-                    S[g.sl, g.sl] += lam_g * g.scop_reparameterization.penalty_matrix()
-
-        return S
-
-    # Legacy single-penalty path (unchanged)
-    for gm, g in zip(group_matrices, groups):
-        if not g.penalized:
-            continue
-
-        if isinstance(lambda2, dict):
-            lam_g = lambda2.get(g.name, 0.0)
-        else:
-            lam_g = lambda2
-
-        if lam_g == 0:
-            continue
-
-        if isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
-            omega = gm.omega
-            if omega is None:
-                continue
-            S[g.sl, g.sl] = lam_g * gm.R_inv.T @ omega @ gm.R_inv
-        elif g.scop_reparameterization is not None:
-            # SCOP terms bypass SSP — penalty is already in solver coordinates.
-            S_scop = g.scop_reparameterization.penalty_matrix()
-            S[g.sl, g.sl] = lam_g * S_scop
-
-    return S
+    return build_penalty_matrix(
+        group_matrices,
+        groups,
+        lambda2,
+        p,
+        reml_penalties=reml_penalties,
+    )
 
 
 def _sqrt_penalty_augmented(S: NDArray, p: int) -> NDArray:

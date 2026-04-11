@@ -11,7 +11,7 @@ from superglm.distributions import Tweedie as TweedieDistribution
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
-from superglm.tweedie_profile import (
+from superglm.profiling.tweedie import (
     TweedieProfileResult,
     _profile_phi,
     estimate_phi,

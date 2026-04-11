@@ -22,13 +22,13 @@ from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import reml_laml_objective
-from superglm.reml.penalty_algebra import compute_total_penalty_rank
-from superglm.reml.result import REMLResult
-from superglm.reml.runner import _coerce_reml_penalties
-from superglm.solvers.irls_direct import (
-    _build_penalty_matrix,
-    fit_irls_direct,
+from superglm.reml.penalty_algebra import (
+    build_penalty_matrix,
+    coerce_reml_penalties,
+    compute_total_penalty_rank,
 )
+from superglm.reml.result import REMLResult
+from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -113,7 +113,7 @@ def optimize_discrete_reml_cached_w(
     lambdas are large but not maximally penalized.  Deviance drift is
     typically <0.1% relative (guarded by test_wide_poisson_poi_quality).
     """
-    penalties = _coerce_reml_penalties(
+    penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
         group_matrices=dm.group_matrices,
@@ -155,7 +155,7 @@ def optimize_discrete_reml_cached_w(
 
     # === Bootstrap: one FP step from minimal penalty ===
     boot_lambdas = {name: 1e-4 for name in lambdas}
-    S_boot = _build_penalty_matrix(
+    S_boot = build_penalty_matrix(
         dm.group_matrices, groups, boot_lambdas, p, reml_penalties=penalties
     )
     _t0 = _time.perf_counter()
@@ -239,7 +239,7 @@ def optimize_discrete_reml_cached_w(
 
         # --- Step 1: One PIRLS step (W update) ---
         # Pre-build S once for this candidate
-        S_cand = _build_penalty_matrix(
+        S_cand = build_penalty_matrix(
             dm.group_matrices,
             groups,
             cand_lambdas,
@@ -396,7 +396,7 @@ def optimize_discrete_reml_cached_w(
             trial_lambdas.update(fixed_lambdas)
 
             # Solve augmented system analytically (O(p^3), no data pass)
-            S_trial = _build_penalty_matrix(
+            S_trial = build_penalty_matrix(
                 dm.group_matrices,
                 groups,
                 trial_lambdas,
@@ -492,7 +492,7 @@ def optimize_discrete_reml_cached_w(
     for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
         final_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
     final_lambdas.update(fixed_lambdas)
-    S_final = _build_penalty_matrix(
+    S_final = build_penalty_matrix(
         dm.group_matrices, groups, final_lambdas, dm.p, reml_penalties=penalties
     )
     _t0 = _time.perf_counter()
