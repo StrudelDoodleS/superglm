@@ -17,23 +17,23 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
-import superglm._group_matrix_algebra as _group_matrix_algebra
-from superglm._group_matrix_bins import discretize_column
-from superglm._group_matrix_core import (
+from ._group_matrix import _group_matrix_algebra
+from ._group_matrix._group_matrix_bins import discretize_column
+from ._group_matrix._group_matrix_core import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
 )
-from superglm._group_matrix_discretized import (
+from ._group_matrix._group_matrix_discretized import (
     DiscretizedSCOPGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
 )
-from superglm._group_matrix_kernels import (
+from ._group_matrix._group_matrix_kernels import (
     _disc_disc_2d_hist as _kernel_disc_disc_2d_hist,
 )
-from superglm._group_matrix_tabmat import _build_tabmat_split
+from ._group_matrix._group_matrix_tabmat import _build_tabmat_split
 
 DenseGroupMatrix.__module__ = __name__
 SparseGroupMatrix.__module__ = __name__

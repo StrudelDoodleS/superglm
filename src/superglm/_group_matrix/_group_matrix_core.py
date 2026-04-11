@@ -6,7 +6,7 @@ import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
-from superglm._group_matrix_kernels import _csr_weighted_gram
+from ._group_matrix_kernels import _csr_weighted_gram
 
 
 class DenseGroupMatrix:

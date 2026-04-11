@@ -1,9 +1,9 @@
 """Import surface compatibility tests.
 
-Verifies that all documented import paths remain working throughout the
-src/ restructure.  Old paths survive via package __init__.py re-exports
-or thin DeprecationWarning stubs.  New canonical paths are added as each
-phase lands.
+Verifies that the currently supported public import surfaces remain
+importable after the src/ cleanup. These tests cover canonical package
+entry points and submodule import paths that the codebase still treats as
+supported.
 """
 
 
@@ -23,28 +23,6 @@ def test_inference_imports():
     )
 
 
-def test_metrics_imports():
-    from superglm.metrics import ModelMetrics  # noqa: F401
-
-
-def test_summary_imports():
-    from superglm.summary import ModelSummary  # noqa: F401
-
-
-def test_tweedie_profile_imports():
-    from superglm.tweedie_profile import (  # noqa: F401
-        TweedieProfileResult,
-        estimate_phi,
-        estimate_tweedie_p,
-        generate_tweedie_cpg,
-        tweedie_logpdf,
-    )
-
-
-def test_nb_profile_imports():
-    from superglm.nb_profile import NBProfileResult, estimate_nb_theta  # noqa: F401
-
-
 def test_diagnostics_imports():
     from superglm.diagnostics import (  # noqa: F401
         SplineRedundancyReport,
@@ -52,42 +30,6 @@ def test_diagnostics_imports():
         term_drop_diagnostics,
         term_importance,
     )
-
-
-def test_discretize_imports():
-    from superglm.discretize import (  # noqa: F401
-        DiscretizationResult,
-        discretization_impact,
-    )
-
-
-def test_model_tests_imports():
-    from superglm.model_tests import (  # noqa: F401
-        DispersionTestResult,
-        ScoreTestZIResult,
-        VuongTestResult,
-        ZeroInflationResult,
-        dispersion_test,
-        score_test_zi,
-        vuong_test,
-        zero_inflation_index,
-    )
-
-
-def test_davies_imports():
-    from superglm.davies import psum_chisq, satterthwaite  # noqa: F401
-
-
-def test_wood_pvalue_imports():
-    from superglm.wood_pvalue import wood_test_smooth  # noqa: F401
-
-
-def test_multi_penalty_imports():
-    from superglm.multi_penalty import SimilarityTransformResult  # noqa: F401
-
-
-def test_reml_optimizer_imports():
-    from superglm.reml_optimizer import run_reml_once  # noqa: F401
 
 
 def test_validation_imports():
@@ -114,7 +56,7 @@ def test_toplevel_reexports():
         assert hasattr(superglm, name), f"superglm.{name} not accessible"
 
 
-# ── New canonical paths (added as each phase lands) ────────────
+# ── Supported canonical paths ───────────────────────────────────
 
 
 def test_reml_result_canonical():

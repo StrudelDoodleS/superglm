@@ -8,7 +8,7 @@ import tabmat  # type: ignore[import-untyped]
 
 def _build_tabmat_split(gms):
     """Build a tabmat SplitMatrix from non-discrete group matrices."""
-    from superglm.group_matrix import (
+    from ..group_matrix import (
         CategoricalGroupMatrix,
         DenseGroupMatrix,
         DiscretizedSCOPGroupMatrix,

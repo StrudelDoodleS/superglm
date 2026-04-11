@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix_kernels import (
+from ._group_matrix_kernels import (
     _cat_cat_weighted_crosstab,
     _cat_weighted_bincount,
     _csr_weighted_bincount,
@@ -17,7 +17,7 @@ from superglm._group_matrix_kernels import (
 )
 
 if TYPE_CHECKING:
-    from superglm.group_matrix import (
+    from ..group_matrix import (
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
         GroupMatrix,
@@ -31,7 +31,7 @@ _MAX_DISC_DISC_CHANNEL_HIST_CELLS = 5_000_000
 
 def _runtime_group_matrix_types():
     """Import group-matrix runtime classes lazily to avoid circular imports."""
-    from superglm.group_matrix import (
+    from ..group_matrix import (
         CategoricalGroupMatrix,
         DiscretizedSCOPGroupMatrix,
         DiscretizedSSPGroupMatrix,
