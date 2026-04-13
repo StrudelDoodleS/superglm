@@ -172,6 +172,7 @@ def _clear_fit_inference_caches(model) -> None:
     model._fit_sample_weight_ref = None
     model._fit_offset_ref = None
     model._fit_metrics_cache = None
+    model._fit_metrics_cache_signature = None
     model._summary_cache = None
 
 
@@ -219,6 +220,7 @@ def _prime_fit_caches(
     model._fit_sample_weight_ref = sample_weight_ref
     model._fit_offset_ref = offset_ref
     model._fit_metrics_cache = None
+    model._fit_metrics_cache_signature = None
     model._summary_cache = None
 
 
