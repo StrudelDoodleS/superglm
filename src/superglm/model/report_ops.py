@@ -58,6 +58,15 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
     from superglm.inference.coef_tables import build_basis_detail, build_coef_rows
     from superglm.inference.summary import ModelSummary
 
+    cache = model._summary_cache
+    if cache is None:
+        cache = {}
+        model._summary_cache = cache
+    key = (float(alpha), detail)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
     if model._fit_stats is None:
         raise RuntimeError("No fit stats — call fit() or fit_reml() first.")
 
@@ -242,9 +251,11 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         alpha=alpha,
     )
 
-    return ModelSummary(
+    summary_obj = ModelSummary(
         data, model_info, coef_rows, alpha=alpha, detail=detail, basis_detail=basis_detail
     )
+    cache[key] = summary_obj
+    return summary_obj
 
 
 def feature_groups(model, name: str) -> list[GroupSlice]:

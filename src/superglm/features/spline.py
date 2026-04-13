@@ -359,6 +359,10 @@ class _SplineBase:
         """Build design matrix using knots learned during build()."""
         return _spline_runtime.transform(self, x)
 
+    def score(self, x: NDArray, beta: NDArray) -> NDArray:
+        """Score the fitted spline contribution on new data."""
+        return _spline_runtime.score(self, x, beta)
+
     def set_reparametrisation(self, R_inv: NDArray) -> None:
         self._R_inv = R_inv
 

@@ -26,7 +26,33 @@ def metrics(model, X, y, sample_weight=None, offset=None):
     """Compute comprehensive diagnostics for the fitted model."""
     from superglm.inference.metrics import ModelMetrics
 
-    return ModelMetrics(model, X, y, sample_weight, offset)
+    same_fit_refs = (
+        X is getattr(model, "_fit_X_ref", None)
+        and y is getattr(model, "_fit_y_ref", None)
+        and sample_weight is getattr(model, "_fit_sample_weight_ref", None)
+        and offset is getattr(model, "_fit_offset_ref", None)
+    )
+    if same_fit_refs and model._fit_metrics_cache is not None:
+        return model._fit_metrics_cache
+
+    use_fit_mu = X is getattr(model, "_fit_X_ref", None) and (
+        (offset is None and model._fit_offset is None)
+        or offset is getattr(model, "_fit_offset_ref", None)
+    )
+
+    metrics_obj = ModelMetrics(
+        model,
+        X,
+        y,
+        sample_weight,
+        offset,
+        _mu=model._fit_mu if use_fit_mu else None,
+        _null_mu=model._fit_null_mu if same_fit_refs else None,
+        _fit_stats=model._fit_stats if same_fit_refs else None,
+    )
+    if same_fit_refs:
+        model._fit_metrics_cache = metrics_obj
+    return metrics_obj
 
 
 def drop1(model, X, y, sample_weight=None, offset=None, test="Chisq"):
