@@ -26,13 +26,18 @@ def metrics(model, X, y, sample_weight=None, offset=None):
     """Compute comprehensive diagnostics for the fitted model."""
     from superglm.inference.metrics import ModelMetrics
 
+    cache_signature = (id(model.result), id(getattr(model, "_reml_penalties", None)))
     same_fit_refs = (
         X is getattr(model, "_fit_X_ref", None)
         and y is getattr(model, "_fit_y_ref", None)
         and sample_weight is getattr(model, "_fit_sample_weight_ref", None)
         and offset is getattr(model, "_fit_offset_ref", None)
     )
-    if same_fit_refs and model._fit_metrics_cache is not None:
+    if (
+        same_fit_refs
+        and model._fit_metrics_cache is not None
+        and model._fit_metrics_cache_signature == cache_signature
+    ):
         return model._fit_metrics_cache
 
     use_fit_mu = X is getattr(model, "_fit_X_ref", None) and (
@@ -52,6 +57,7 @@ def metrics(model, X, y, sample_weight=None, offset=None):
     )
     if same_fit_refs:
         model._fit_metrics_cache = metrics_obj
+        model._fit_metrics_cache_signature = cache_signature
     return metrics_obj
 
 
