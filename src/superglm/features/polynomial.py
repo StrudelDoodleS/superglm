@@ -71,6 +71,11 @@ class Polynomial:
         x = np.asarray(x, dtype=np.float64).ravel()
         return self._basis(self._scale(x))
 
+    def score(self, x: NDArray, beta: NDArray) -> NDArray:
+        """Score the fitted polynomial contribution directly on new data."""
+        x = np.asarray(x, dtype=np.float64).ravel()
+        return self._basis(self._scale(x)) @ beta
+
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
         """Evaluate the fitted polynomial on a grid and return relativities."""
         x_grid = np.linspace(self._lo, self._hi, n_points)

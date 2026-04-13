@@ -148,6 +148,23 @@ class Categorical:
             _validate_categorical_levels(x, set(self._levels))
         return np.column_stack([(x == lev).astype(np.float64) for lev in self._non_base])
 
+    def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
+        """Score the fitted categorical contribution directly on new data."""
+        import pandas as pd
+
+        x = np.asarray(x).ravel()
+        if self._grouping is not None:
+            _validate_categorical_levels(x, set(self._grouping.all_original_levels))
+            x = pd.Series(x).map(self._grouping.original_to_group).values
+        else:
+            _validate_categorical_levels(x, set(self._levels))
+
+        codes = pd.Categorical(x, categories=self._levels).codes
+        level_effects = np.zeros(len(self._levels), dtype=np.float64)
+        for i, lev in enumerate(self._non_base):
+            level_effects[self._levels.index(lev)] = float(beta[i])
+        return level_effects[codes]
+
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
         """Coefficients -> relativity table."""
         relativities = {self._base_level: 1.0}

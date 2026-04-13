@@ -144,6 +144,22 @@ def transform(spec: Any, x: NDArray) -> NDArray:
     return basis
 
 
+def score(spec: Any, x: NDArray, beta: NDArray) -> NDArray:
+    """Score a spline term directly on new data without materializing transformed columns."""
+    basis = spec._basis_matrix(x)
+    scop_sigma = getattr(spec, "_scop_Sigma", None)
+    if scop_sigma is not None:
+        sigma_no_intercept = scop_sigma[:, 1:]
+        centered_shift = float(np.dot(getattr(spec, "_scop_col_means"), beta))
+        return cast(
+            NDArray,
+            np.asarray(basis @ (sigma_no_intercept @ beta)).ravel() - centered_shift,
+        )
+
+    beta_orig = spec._R_inv @ beta if spec._R_inv is not None else beta
+    return cast(NDArray, np.asarray(basis @ beta_orig).ravel())
+
+
 def reconstruct(spec: Any, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
     """Reconstruct a spline curve on a regular grid."""
     x_grid = np.linspace(spec._lo, spec._hi, n_points)

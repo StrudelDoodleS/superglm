@@ -34,6 +34,11 @@ class Numeric:
         x = np.asarray(x, dtype=np.float64).ravel()
         return x.reshape(-1, 1)
 
+    def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
+        """Score the fitted numeric contribution directly on new data."""
+        x = np.asarray(x, dtype=np.float64).ravel()
+        return x * float(beta[0])
+
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
         """Reconstruct the coefficient on the original scale."""
         b = float(beta[0])

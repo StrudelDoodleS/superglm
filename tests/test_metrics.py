@@ -89,6 +89,23 @@ class TestLogLikelihood:
         assert np.isfinite(metrics_obj.log_likelihood)
 
 
+class TestMetricsCaching:
+    def test_metrics_reuses_fit_mu_on_training_data(self, fitted_poisson):
+        """metrics() on fit data should reuse the cached fitted mean vector."""
+        model, X, y, w = fitted_poisson
+        metrics = model.metrics(X, y, sample_weight=w)
+
+        assert metrics._mu is model._fit_mu
+
+    def test_metrics_returns_cached_object_for_same_fit_refs(self, fitted_poisson):
+        """Repeated metrics() on the exact fit refs should return the cached object."""
+        model, X, y, w = fitted_poisson
+        metrics1 = model.metrics(X, y, sample_weight=w)
+        metrics2 = model.metrics(X, y, sample_weight=w)
+
+        assert metrics1 is metrics2
+
+
 # ── Information criteria ──────────────────────────────────────────
 
 

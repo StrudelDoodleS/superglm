@@ -42,6 +42,54 @@ _PENALTY_SHORTCUTS: dict[str, type[Penalty]] = {
 }
 
 
+def _group_beta_indices(groups: list[GroupSlice], feature_name: str) -> NDArray[np.intp]:
+    """Concatenate coefficient indices for one feature or interaction."""
+    idx = [
+        np.arange(g.start, g.end, dtype=np.intp) for g in groups if g.feature_name == feature_name
+    ]
+    if not idx:
+        raise KeyError(f"No fitted groups found for feature {feature_name!r}")
+    if len(idx) == 1:
+        return idx[0]
+    return np.concatenate(idx)
+
+
+def _build_prediction_plan(model) -> dict[str, list[dict[str, Any]]]:
+    """Compile reusable metadata for prediction scoring."""
+    return {
+        "features": [
+            {
+                "name": name,
+                "spec": model._specs[name],
+                "beta_idx": _group_beta_indices(model._groups, name),
+            }
+            for name in model._feature_order
+        ],
+        "interactions": [
+            {
+                "name": name,
+                "spec": model._interaction_specs[name],
+                "beta_idx": _group_beta_indices(model._groups, name),
+            }
+            for name in model._interaction_order
+        ],
+    }
+
+
+def _score_feature(spec, values: NDArray, beta: NDArray) -> NDArray[np.floating]:
+    """Score a main-effect contribution on new data."""
+    if hasattr(spec, "score"):
+        return np.asarray(spec.score(values, beta), dtype=np.float64).ravel()
+    return np.asarray(spec.transform(values) @ beta, dtype=np.float64).ravel()
+
+
+def _score_interaction(spec, left: NDArray, right: NDArray, beta: NDArray) -> NDArray[np.floating]:
+    """Score an interaction contribution on new data."""
+    if hasattr(spec, "score"):
+        return np.asarray(spec.score(left, right, beta), dtype=np.float64).ravel()
+    return np.asarray(spec.transform(left, right) @ beta, dtype=np.float64).ravel()
+
+
 def resolve_penalty(
     penalty: Penalty | str | None,
     lambda1: float | None,
@@ -157,6 +205,15 @@ def init_model(
     model._tweedie_profile_result = None
     model._last_fit_meta: dict[str, Any] | None = None
     model._monotone_repairs: dict = {}
+    model._prediction_plan = None
+    model._fit_mu: NDArray | None = None
+    model._fit_null_mu: NDArray | None = None
+    model._fit_X_ref = None
+    model._fit_y_ref = None
+    model._fit_sample_weight_ref = None
+    model._fit_offset_ref = None
+    model._fit_metrics_cache = None
+    model._summary_cache = None
 
     # Interaction support
     model._interaction_specs: dict[str, Any] = {}
@@ -341,17 +398,25 @@ def rebuild_dm_with_lambdas(
 
 def predict(model, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
     """Predict the response mean for new data."""
-    blocks = []
-    for name in model._feature_order:
-        spec = model._specs[name]
-        blocks.append(spec.transform(np.asarray(X[name])))
+    plan = model._prediction_plan
+    if plan is None:
+        plan = _build_prediction_plan(model)
+        model._prediction_plan = plan
 
-    for iname in model._interaction_order:
-        ispec = model._interaction_specs[iname]
-        p1, p2 = ispec.parent_names
-        blocks.append(ispec.transform(np.asarray(X[p1]), np.asarray(X[p2])))
+    beta_all = model.result.beta
+    eta = np.full(len(X), model.result.intercept, dtype=np.float64)
 
-    eta = np.hstack(blocks) @ model.result.beta + model.result.intercept
+    for term in plan["features"]:
+        values = np.asarray(X[term["name"]])
+        beta = beta_all[term["beta_idx"]]
+        eta += _score_feature(term["spec"], values, beta)
+
+    for term in plan["interactions"]:
+        spec = term["spec"]
+        p1, p2 = spec.parent_names
+        beta = beta_all[term["beta_idx"]]
+        eta += _score_interaction(spec, np.asarray(X[p1]), np.asarray(X[p2]), beta)
+
     if offset is not None:
         eta = eta + np.asarray(offset, dtype=np.float64)
     eta = stabilize_eta(eta, model._link)
