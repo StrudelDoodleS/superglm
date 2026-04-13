@@ -206,6 +206,14 @@ def init_model(
     model._last_fit_meta: dict[str, Any] | None = None
     model._monotone_repairs: dict = {}
     model._prediction_plan = None
+    model._fit_mu: NDArray | None = None
+    model._fit_null_mu: NDArray | None = None
+    model._fit_X_ref = None
+    model._fit_y_ref = None
+    model._fit_sample_weight_ref = None
+    model._fit_offset_ref = None
+    model._fit_metrics_cache = None
+    model._summary_cache = None
 
     # Interaction support
     model._interaction_specs: dict[str, Any] = {}

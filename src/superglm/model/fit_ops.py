@@ -72,23 +72,16 @@ class PathResult:
     edf_path: NDArray | None = None  # shape (n_lambda,) — effective df
 
 
-def _compute_fit_stats(
+def _compute_null_mu(
     y: NDArray,
-    mu: NDArray,
     weights: NDArray,
     offset: NDArray | None,
     distribution: Distribution,
     link: Link,
-    phi: float,
-) -> FitStats:
-    """Compute scalar fit statistics from training arrays."""
+) -> NDArray:
+    """Null model prediction: intercept-only MLE, offset-aware."""
     from superglm.distributions import Binomial, Gaussian, clip_mu
 
-    ll = distribution.log_likelihood(y, mu, weights, phi)
-
-    # Null model (intercept-only MLE), offset-aware.
-    # For the null model, use the actual weighted mean (the true MLE for
-    # canonical links), clipped into the valid range for the link function.
     y_bar = float(np.average(y, weights=weights))
     if isinstance(distribution, Binomial):
         y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
@@ -98,22 +91,40 @@ def _compute_fit_stats(
         y_bar = max(y_bar, 1e-10)
 
     if offset is None or np.all(offset == 0):
-        null_mu = np.full(len(y), y_bar)
-    else:
-        b0 = float(link.link(np.atleast_1d(y_bar))[0]) - float(np.average(offset, weights=weights))
-        for _ in range(25):
-            eta_null = stabilize_eta(b0 + offset, link)
-            mu_null = clip_mu(link.inverse(eta_null), distribution)
-            dmu = link.deriv_inverse(eta_null)
-            V = distribution.variance(mu_null)
-            score: float = float(np.sum(weights * (y - mu_null) * dmu / V))
-            info: float = float(np.sum(weights * dmu**2 / V))
-            step = score / max(info, 1e-10)
-            b0 += step
-            if abs(step) < 1e-8:
-                break
+        return np.full(len(y), y_bar)
+
+    b0 = float(link.link(np.atleast_1d(y_bar))[0]) - float(np.average(offset, weights=weights))
+    for _ in range(25):
         eta_null = stabilize_eta(b0 + offset, link)
-        null_mu = clip_mu(link.inverse(eta_null), distribution)
+        mu_null = clip_mu(link.inverse(eta_null), distribution)
+        dmu = link.deriv_inverse(eta_null)
+        V = distribution.variance(mu_null)
+        score = float(np.sum(weights * (y - mu_null) * dmu / V))
+        info = float(np.sum(weights * dmu**2 / V))
+        step = score / max(info, 1e-10)
+        b0 += step
+        if abs(step) < 1e-8:
+            break
+
+    eta_null = stabilize_eta(b0 + offset, link)
+    return clip_mu(link.inverse(eta_null), distribution)
+
+
+def _compute_fit_stats(
+    y: NDArray,
+    mu: NDArray,
+    weights: NDArray,
+    offset: NDArray | None,
+    distribution: Distribution,
+    link: Link,
+    phi: float,
+    null_mu: NDArray | None = None,
+) -> FitStats:
+    """Compute scalar fit statistics from training arrays."""
+
+    ll = distribution.log_likelihood(y, mu, weights, phi)
+    if null_mu is None:
+        null_mu = _compute_null_mu(y, weights, offset, distribution, link)
 
     null_ll = distribution.log_likelihood(y, null_mu, weights, phi)
     null_dev = float(np.sum(weights * distribution.deviance_unit(y, null_mu)))
@@ -154,6 +165,14 @@ def _clear_fit_inference_caches(model) -> None:
     model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
     model._prediction_plan = None
+    model._fit_mu = None
+    model._fit_null_mu = None
+    model._fit_X_ref = None
+    model._fit_y_ref = None
+    model._fit_sample_weight_ref = None
+    model._fit_offset_ref = None
+    model._fit_metrics_cache = None
+    model._summary_cache = None
 
 
 def _clear_reml_state(model) -> None:
@@ -169,6 +188,38 @@ def _store_fit_arrays(model, sample_weight, offset):
     model._fit_weights = np.array(sample_weight)
     model._fit_offset = np.array(offset) if offset is not None else None
     return model._fit_weights, model._fit_offset
+
+
+def _prime_fit_caches(
+    model,
+    *,
+    X_ref,
+    y_ref,
+    sample_weight_ref,
+    offset_ref,
+    y_arr: NDArray,
+) -> None:
+    """Store fit-data caches for summary/metrics fast paths."""
+    eta = model._dm.matvec(model.result.beta) + model.result.intercept
+    if model._fit_offset is not None:
+        eta = eta + model._fit_offset
+    eta = stabilize_eta(eta, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    null_mu = _compute_null_mu(
+        y_arr,
+        model._fit_weights,
+        model._fit_offset,
+        model._distribution,
+        model._link,
+    )
+    model._fit_mu = mu
+    model._fit_null_mu = null_mu
+    model._fit_X_ref = X_ref
+    model._fit_y_ref = y_ref
+    model._fit_sample_weight_ref = sample_weight_ref
+    model._fit_offset_ref = offset_ref
+    model._fit_metrics_cache = None
+    model._summary_cache = None
 
 
 def _maybe_estimate_nb_theta(model, X, y, sample_weight=None, offset=None) -> None:
@@ -195,6 +246,10 @@ def fit(
     record_diagnostics=False,
 ):
     """Fit the model to data."""
+    X_ref = X
+    y_ref = y
+    sample_weight_ref = sample_weight
+    offset_ref = offset
     # Resolve fit controls: explicit kwargs > constructor fallback
     tol = tol if tol is not None else model._tol
     max_iter = max_iter if max_iter is not None else model._max_iter
@@ -322,8 +377,24 @@ def fit(
     eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
+    null_mu = _compute_null_mu(y, sample_weight, offset, model._distribution, model._link)
     model._fit_stats = _compute_fit_stats(
-        y, mu, sample_weight, offset, model._distribution, model._link, model._result.phi
+        y,
+        mu,
+        sample_weight,
+        offset,
+        model._distribution,
+        model._link,
+        model._result.phi,
+        null_mu=null_mu,
+    )
+    _prime_fit_caches(
+        model,
+        X_ref=X_ref,
+        y_ref=y_ref,
+        sample_weight_ref=sample_weight_ref,
+        offset_ref=offset_ref,
+        y_arr=y,
     )
 
     model._last_fit_meta = {"method": "fit", "discrete": model._discrete}
@@ -342,6 +413,10 @@ def fit_path(
     lambda_seq=None,
 ):
     """Fit a regularization path from lambda_max down to lambda_min."""
+    X_ref = X
+    y_ref = y
+    sample_weight_ref = sample_weight
+    offset_ref = offset
     from superglm.model.base import (
         compute_lambda_max,
         model_build_design_matrix,
@@ -384,8 +459,24 @@ def fit_path(
         eta = eta + offset
     eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
+    null_mu = _compute_null_mu(y, sample_weight, offset, model._distribution, model._link)
     model._fit_stats = _compute_fit_stats(
-        y, mu, sample_weight, offset, model._distribution, model._link, result.phi
+        y,
+        mu,
+        sample_weight,
+        offset,
+        model._distribution,
+        model._link,
+        result.phi,
+        null_mu=null_mu,
+    )
+    _prime_fit_caches(
+        model,
+        X_ref=X_ref,
+        y_ref=y_ref,
+        sample_weight_ref=sample_weight_ref,
+        offset_ref=offset_ref,
+        y_arr=y,
     )
     model._last_fit_meta = {"method": "fit_path", "discrete": model._discrete}
 
@@ -416,6 +507,10 @@ def fit_reml(
     w_correction_order=1,
 ):
     """Fit with REML estimation of per-term smoothing parameters."""
+    X_ref = X
+    y_ref = y
+    sample_weight_ref = sample_weight
+    offset_ref = offset
     from superglm.model.base import (
         model_build_design_matrix,
         model_has_lambda1_targets,
@@ -466,6 +561,31 @@ def fit_reml(
             tol=pirls_tol,
             max_iter_outer=max_pirls_iter,
         )
+        eta = model._dm.matvec(model._result.beta) + model._result.intercept
+        if offset is not None:
+            eta = eta + offset
+        eta = stabilize_eta(eta, model._link)
+        mu = clip_mu(model._link.inverse(eta), model._distribution)
+        null_mu = _compute_null_mu(y, sample_weight, offset, model._distribution, model._link)
+        model._fit_stats = _compute_fit_stats(
+            y,
+            mu,
+            sample_weight,
+            offset,
+            model._distribution,
+            model._link,
+            model._result.phi,
+            null_mu=null_mu,
+        )
+        _prime_fit_caches(
+            model,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+            y_arr=y,
+        )
+        model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
         return model
 
     # Build penalty components and caches (eigenstructure computed once)
@@ -515,6 +635,14 @@ def fit_reml(
                 reml_penalties=reml_penalties,
                 compute_fit_stats=_compute_fit_stats,
             )
+            _prime_fit_caches(
+                model,
+                X_ref=X_ref,
+                y_ref=y_ref,
+                sample_weight_ref=sample_weight_ref,
+                offset_ref=offset_ref,
+                y_arr=y,
+            )
             logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
             return model
 
@@ -537,6 +665,14 @@ def fit_reml(
                 profile=_profile,
                 total_start=_t_total_start,
                 compute_fit_stats=_compute_fit_stats,
+            )
+            _prime_fit_caches(
+                model,
+                X_ref=X_ref,
+                y_ref=y_ref,
+                sample_weight_ref=sample_weight_ref,
+                offset_ref=offset_ref,
+                y_arr=y,
             )
             logger.info(
                 f"REML SCOP EFS converged={best.converged} in {best.n_reml_iter} iters, "
@@ -583,6 +719,14 @@ def fit_reml(
             profile=_profile,
             total_start=_t_total_start,
             compute_fit_stats=_compute_fit_stats,
+        )
+        _prime_fit_caches(
+            model,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+            y_arr=y,
         )
 
         logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")

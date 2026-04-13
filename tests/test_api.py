@@ -70,6 +70,24 @@ class TestFeaturesDict:
         np.testing.assert_allclose(pred1, pred2, rtol=1e-12, atol=1e-12)
         np.testing.assert_allclose(pred1, pred3, rtol=1e-12, atol=1e-12)
 
+    def test_summary_is_cached_on_repeat_call(self, sample_data):
+        X, y, sample_weight = sample_data
+        model = SuperGLM(
+            penalty="group_lasso",
+            selection_penalty=0.01,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "region": Categorical(base="first"),
+                "density": Numeric(),
+            },
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        summary1 = model.summary()
+        summary2 = model.summary()
+
+        assert summary1 is summary2
+
     def test_features_registered_at_init(self):
         model = SuperGLM(
             features={

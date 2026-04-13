@@ -49,6 +49,8 @@ class ModelMetrics:
         offset=None,
         *,
         _mu: NDArray | None = None,
+        _null_mu: NDArray | None = None,
+        _fit_stats=None,
     ):
         self._model = model
         self._family = model._distribution
@@ -68,6 +70,14 @@ class ModelMetrics:
             self._mu = _mu
         else:
             self._mu = model.predict(X, offset=offset)
+        if _null_mu is not None:
+            self.__dict__["_null_mu"] = _null_mu
+        if _fit_stats is not None:
+            self.__dict__["log_likelihood"] = _fit_stats.log_likelihood
+            self.__dict__["null_log_likelihood"] = _fit_stats.null_log_likelihood
+            self.__dict__["null_deviance"] = _fit_stats.null_deviance
+            self.__dict__["explained_deviance"] = _fit_stats.explained_deviance
+            self.__dict__["pearson_chi2"] = _fit_stats.pearson_chi2
 
     def _build_S_from_penalties(self, lam2) -> NDArray | None:
         """Build full penalty matrix from model._reml_penalties if available."""
