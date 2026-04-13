@@ -153,6 +153,7 @@ def _clear_fit_inference_caches(model) -> None:
     model.__dict__.pop("_fit_active_info", None)
     model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
+    model._prediction_plan = None
 
 
 def _clear_reml_state(model) -> None:

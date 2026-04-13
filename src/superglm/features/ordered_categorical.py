@@ -361,6 +361,24 @@ class OrderedCategorical:
                 return onehot @ self._R_inv
             return onehot
 
+    def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
+        """Score the fitted ordered-categorical contribution directly on new data."""
+        x = np.asarray(x).ravel()
+        _validate_categorical_levels(x, self._known_levels)
+
+        if self._grouping is not None:
+            x = pd.Series(x).map(self._grouping.original_to_group).values
+
+        if self.basis == "spline":
+            x_numeric = self._map_to_numeric(x)
+            return self._spline.score(x_numeric, beta)
+
+        beta_orig = self._R_inv @ beta if self._R_inv is not None else beta
+        level_scores = {self._base_level: 0.0}
+        for i, lev in enumerate(self._non_base):
+            level_scores[lev] = float(beta_orig[i])
+        return np.array([level_scores[lev] for lev in x], dtype=np.float64)
+
     # ── Reconstruct ────────────────────────────────────────────────
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:

@@ -50,6 +50,26 @@ class TestFeaturesDict:
         assert preds.shape == (len(X),)
         assert np.all(preds > 0)
 
+    def test_predict_repeated_calls_match_dataframe_copy(self, sample_data):
+        X, y, sample_weight = sample_data
+        model = SuperGLM(
+            penalty="group_lasso",
+            selection_penalty=0.01,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "region": Categorical(base="first"),
+                "density": Numeric(),
+            },
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        pred1 = model.predict(X)
+        pred2 = model.predict(X)
+        pred3 = model.predict(X.copy())
+
+        np.testing.assert_allclose(pred1, pred2, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(pred1, pred3, rtol=1e-12, atol=1e-12)
+
     def test_features_registered_at_init(self):
         model = SuperGLM(
             features={
