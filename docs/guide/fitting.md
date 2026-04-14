@@ -1,32 +1,39 @@
-# Fitting Modes
+# Choosing A Fitting Path
 
-## 1. Standard penalised fit
+The most important decision is whether you are fitting a REML-selected pricing
+model or a fixed-penalty sparse model.
 
-Use `fit()` when you want a fixed `spline_penalty` and a standard regularised GLM fit.
+| Situation | Recommended path | Why |
+|---|---|---|
+| Standard spline pricing model | `fit_reml()` with `selection_penalty=0` | Automatic smoothness selection and clean GAM-style inference |
+| Large-`n` spline pricing model | `fit_reml(discrete=True)` | Same modeling story, cheaper outer iterations |
+| Smooth shrinkage inside REML | `fit_reml()` with `select=True` on spline terms | mgcv-style double-penalty shrinkage |
+| Sparse screening / compression | `fit()` with `selection_penalty > 0` | Fixed-penalty sparse model rather than REML smoothness selection |
+| Regularisation path analysis | `fit_path()` | Warm-started lambda path for fixed-penalty models |
+
+## Default REML Path
+
+This is the intended path for spline-based GAM-style pricing models.
 
 ```python
 model = SuperGLM(
     family="poisson",
-    penalty="group_elastic_net",
-    selection_penalty=0.01,
-    spline_penalty=0.1,
+    selection_penalty=0.0,
     features=features,
 )
-model.fit(df, y, sample_weight=exposure)
-```
-
-## 2. Exact REML
-
-Use `fit_reml(discrete=False)` for the standard smoothness-selection path (`selection_penalty=0`).
-
-```python
-model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
 model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
 ```
 
-## 3. Discrete / fREML-style REML
+Use this when:
 
-Use `fit_reml(discrete=True)` for large data. This is the fast path for spline-heavy frequency models.
+- you want automatic smoothness selection
+- you care about interpretable smooth terms
+- you want statsmodels-style summaries and smooth-term inference
+
+## Large-`n` REML
+
+Turn on `discrete=True` when the model is still a REML pricing model but the
+data is large enough that exact REML is too expensive.
 
 ```python
 model = SuperGLM(
@@ -39,65 +46,97 @@ model = SuperGLM(
 model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
 ```
 
-## 4. Shrinkage vs selection
+This is the preferred production path for large spline-heavy frequency models.
 
-- `select=True` on a spline adds mgcv-style double-penalty shrinkage.
-- `selection_penalty > 0` activates sparse/group penalties.
+## `select=True` Versus `selection_penalty > 0`
 
-Those are different tools:
+These are different tools and should not be documented as interchangeable.
 
-- `select=True` is the more REML-aligned way to let smooth terms shrink toward zero.
-- `selection_penalty > 0` is the sparse-additive path, best used for screening / compression rather than mgcv-style inference.
+- `select=True` keeps you in the REML story and adds mgcv-style double-penalty
+  shrinkage to the spline term.
+- `selection_penalty > 0` activates sparse/group penalties and moves you toward
+  a sparse additive model workflow.
 
-## 5. Multi-order spline penalties
+If your question is "should this smooth shrink toward linear or zero while I
+stay in REML?", use `select=True`.
 
-Spline specs now support multiple derivative-order penalties on one term:
+If your question is "which groups should survive a fixed-penalty sparse fit?",
+use `selection_penalty > 0`.
+
+## Fixed-Penalty Sparse Models
+
+Use `fit()` when you want a fixed `spline_penalty` and sparse or shrinkage
+regularisation.
+
+```python
+model = SuperGLM(
+    family="poisson",
+    penalty="group_elastic_net",
+    selection_penalty=0.01,
+    spline_penalty=0.1,
+    features=features,
+)
+model.fit(df, y, sample_weight=exposure)
+```
+
+This is a good fit for:
+
+- feature screening
+- model compression
+- fixed-penalty challenger models
+- lambda-path experiments
+
+## Multi-Order Spline Penalties
+
+Spline specs can emit multiple derivative-order penalties on one term, each
+with its own REML smoothing parameter.
 
 ```python
 features = {
     "DrivAge": Spline(kind="cr", k=14, m=(1, 2)),
-    "VehAge": Spline(kind="bs", k=10, m=(2, 3)),
+    "VehAge": Spline(kind="ps", k=10, m=(2, 3)),
 }
-model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+model = SuperGLM(
+    family="poisson",
+    selection_penalty=0.0,
+    features=features,
+)
 model.fit_reml(df, y, sample_weight=exposure)
 ```
 
-This gives each derivative order its own REML smoothing parameter.
-
 Current guard rails:
 
-- `select=True + m=(...)` is not yet supported.
-- tensor interactions with a multi-order spline parent are not yet supported.
-- `kind="cr_cardinal"` currently supports only the default `m=2`.
-- `selection_penalty > 0` with shared-block multi-penalty terms remains guarded.
+- `select=True + m=(...)` is not yet supported
+- tensor interactions with a multi-order spline parent are not yet supported
+- `kind="cr_cardinal"` currently supports only the default `m=2`
+- `selection_penalty > 0` with shared-block multi-penalty terms remains guarded
 
-## Regularisation path
+## Regularisation Path
 
-Fit a sequence of models from high to low regularisation with warm starts:
+`fit_path()` is for fixed-penalty models, not the main REML path.
 
 ```python
-from superglm import PathResult
+from superglm import Categorical, GroupLasso, Poisson, Spline, SuperGLM
 
 model = SuperGLM(
     family=Poisson(),
     penalty=GroupLasso(),
     features={
-        "DrivAge": Spline(k=14),
+        "DrivAge": Spline(kind="ps", k=14),
         "Area": Categorical(base="most_exposed"),
     },
 )
 result = model.fit_path(df, y, sample_weight=exposure, n_lambda=50, lambda_ratio=1e-3)
 
-result.lambda_seq       # (50,) decreasing lambda values
-result.coef_path        # (50, p) coefficients at each lambda
-result.deviance_path    # (50,) deviance at each lambda
-result.n_iter_path      # (50,) PIRLS iterations per lambda
+result.lambda_seq
+result.coef_path
+result.deviance_path
+result.n_iter_path
 ```
 
-Or pass a custom lambda sequence:
+Next:
 
-```python
-result = model.fit_path(df, y, sample_weight=exposure, lambda_seq=[1.0, 0.1, 0.01])
-```
-
-After `fit_path`, `model.predict()` uses the last (least-regularised) fit.
+- [Recommended workflows](workflows.md)
+- [Feature types](features.md)
+- [Monotone splines](monotone.md)
+- [REML and solvers](optimization.md)
