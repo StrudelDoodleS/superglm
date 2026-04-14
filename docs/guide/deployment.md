@@ -1,17 +1,19 @@
-# Deployment and Serialization
+# Deployment
 
-`SuperGLM` deployment is straightforward: fit once, serialize the fitted estimator, load it later, and call `predict()` on new rows.
+The fitted estimator is the deployment artifact.
 
-This is especially important for the native explicit-spec API. A fitted `SuperGLM` is not just a matrix of coefficients. It also carries:
+That matters more here than in a plain linear model because a fitted
+`SuperGLM` contains:
 
-- the registered feature specs (`Spline`, `Categorical`, `Numeric`, ...)
-- learned spline geometry such as knot locations and boundaries
+- registered feature specs
+- learned knot geometry and constraints
 - fitted coefficients and intercept
-- REML smoothing parameters when you used `fit_reml()`
+- REML smoothing parameters
+- enough state for summaries, plots, and term reconstruction
 
-That is model state, not generic preprocessing.
+This is model state, not generic preprocessing.
 
-## Native API round-trip
+## Native API Round-Trip
 
 ```python
 import pickle
@@ -25,7 +27,7 @@ model = SuperGLM(
     selection_penalty=0.0,
     discrete=True,
     features={
-        "age": Spline(kind="bs", k=12, knot_strategy="quantile_tempered", knot_alpha=0.2),
+        "age": Spline(kind="ps", k=12, knot_strategy="quantile_tempered", knot_alpha=0.2),
         "density": Numeric(),
         "region": Categorical(base="most_exposed"),
     },
@@ -48,28 +50,36 @@ print(age_term.spline.interior_knots)
 The loaded model can still:
 
 - score new rows with `predict()`
-- reconstruct spline terms with `term_inference()`
-- produce summaries and relativities
+- rebuild term-level curves with `term_inference()`
+- produce summaries and relativity views
 
 without refitting.
 
-## sklearn Pipeline round-trip
+## Production Framing
 
-If you want explicit preprocessing upstream, keep it in the pipeline and let `SuperGLMRegressor` consume the transformed DataFrame.
+For deployment, the key question is usually not "how do I rebuild the design
+matrix manually?" but "what exactly do I need to persist?" The answer is: the
+fitted estimator.
 
-The key trick is to preserve column names with:
+That keeps:
+
+- knot placement consistent with training
+- monotone and boundary constraints consistent with training
+- scoring behavior aligned with the fitted model
+- inference and diagnostics reproducible after reload
+
+## sklearn Pipeline Round-Trip
+
+If you need upstream preprocessing, keep it explicit in the pipeline and let
+`SuperGLMRegressor` consume the transformed DataFrame.
+
+The main rule is:
 
 ```python
 column_transformer.set_output(transform="pandas")
 ```
 
-That way the final estimator can still refer to transformed columns by name, for example:
-
-- `spline__age` for the spline feature passed through untouched
-- `num__density` for a scaled numeric
-- `cat__region_A`, `cat__region_B`, ... for one-hot columns
-
-Example:
+That preserves column names so the final estimator can refer to them.
 
 ```python
 from sklearn.compose import ColumnTransformer
@@ -106,17 +116,16 @@ pipe.fit(train_df, y)
 pred = pipe.predict(score_df)
 ```
 
-This keeps preprocessing explicit while still letting the final estimator own spline fitting and REML smoothing.
+### Pipeline With Native `features=`
 
-### Pipeline with native `features=`
-
-When you need heterogeneous spline configs or want the full power of the native API inside a pipeline, pass `features=` directly:
+If you want full control over spline kinds and feature specs inside a pipeline,
+pass `features=` directly:
 
 ```python
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from superglm import SuperGLMRegressor, Spline, Numeric
+from superglm import Numeric, Spline, SuperGLMRegressor
 
 pre = ColumnTransformer(
     [
@@ -133,7 +142,7 @@ pipe = Pipeline(
             "model",
             SuperGLMRegressor(
                 features={
-                    "keep_age__age": Spline(kind="bs", k=12, knot_strategy="quantile_tempered"),
+                    "keep_age__age": Spline(kind="ps", k=12, knot_strategy="quantile_tempered"),
                     "scale_density__density": Numeric(),
                 },
                 offset="meta__log_exposure",
@@ -147,36 +156,28 @@ pipe.fit(train_df, y)
 pred = pipe.predict(score_df)
 ```
 
-`features=` is mutually exclusive with the shorthand wrapper arguments (`spline_features`, `categorical_features`, `numeric_features`, non-default `n_knots`/`degree`/`categorical_base`). The wrapper validates this at fit time.
+## Why This Is Not Just A Spline Transformer
 
-## Why this is different from a plain spline transformer
+`SuperGLM` does more than expand columns into basis functions:
 
-A standalone spline basis transformer only expands columns into basis functions.
+- it owns the fitted spline specification
+- it fits the penalized model
+- it estimates smoothness via REML when requested
+- it keeps enough state for post-fit inference and plotting
 
-`SuperGLM` does more than that:
+That is why the fitted estimator, not a detached transformer, is the thing you
+deploy.
 
-- stores the spline spec itself
-- fits the penalized model
-- estimates smoothness via REML when requested
-- keeps enough state for post-fit inference and plotting
-
-So the fitted estimator is the deployment artifact.
-
-## Runnable example
-
-Run:
+## Runnable Examples
 
 ```bash
 uv run python scratch/examples/deployment_roundtrip.py
 uv run python scratch/examples/sklearn_pipeline_roundtrip.py
 ```
 
-Those scripts do complete round-trips for:
+Those scripts:
 
-- native `SuperGLM`
-- sklearn `Pipeline` + `SuperGLMRegressor`
-
-1. fits a spline-based Poisson model
-2. serializes it with `pickle`
-3. reloads it
-4. verifies predictions and spline metadata are unchanged
+1. fit a spline-based Poisson model
+2. serialize it with `pickle`
+3. reload it
+4. verify predictions and spline metadata are unchanged

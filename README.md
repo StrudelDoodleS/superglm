@@ -6,77 +6,97 @@
 [![codecov](https://codecov.io/github/StrudelDoodleS/superglm/graph/badge.svg?token=2HO71TA2ZY)](https://codecov.io/github/StrudelDoodleS/superglm)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/StrudelDoodleS/superglm/actions/workflows/ci.yml)
 
-Penalised GLMs for insurance pricing. SuperGLM supports standard penalised fits, exact REML, large-`n` discrete/fREML-style REML, spline double-penalty shrinkage, group penalties, interactions, and statsmodels-style summaries for Poisson, Gamma, NB2, Tweedie, Binomial, and Gaussian models.
+Penalised GLMs and GAM-style pricing models for insurance. SuperGLM combines
+explicit feature specs, exact REML, large-`n` discrete REML, solver-backed
+monotone splines, actuarial validation tooling, and deployable fitted
+estimators for Poisson, Gamma, NB2, Tweedie, Binomial, and Gaussian models.
 
 ## Installation
+
+Current installation path:
 
 ```bash
 pip install git+https://github.com/StrudelDoodleS/superglm.git
 ```
 
-With all optional dependencies (benchmarks, interactions):
+With optional dependencies:
 
 ```bash
 pip install "superglm[all] @ git+https://github.com/StrudelDoodleS/superglm.git"
 ```
 
-## Quick start
+## Recommended Workflow
 
-**Auto-detect mode** — list which columns should be splines, the rest is auto-detected:
+For spline-based pricing models, the default path is:
+
+1. define explicit feature specs
+2. fit with `fit_reml()` and `selection_penalty=0`
+3. compare candidates with `cross_validate(..., fit_mode="fit_reml")`
+4. refit on all training data
+5. evaluate holdout Lorenz and double-lift charts
+6. serialize the fitted estimator for scoring
 
 ```python
-from superglm import SuperGLM
+from superglm import Categorical, Numeric, Spline, SuperGLM
+
+features = {
+    "DrivAge": Spline(kind="ps", k=14, knot_strategy="quantile_rows"),
+    "VehAge": Spline(kind="cr", k=10, knot_strategy="quantile_rows"),
+    "BonusMalus": Spline(kind="cr", k=12, knot_strategy="quantile_tempered"),
+    "Area": Categorical(base="most_exposed"),
+    "LogDensity": Numeric(),
+}
 
 model = SuperGLM(
     family="poisson",
-    penalty="group_lasso",
-    selection_penalty=0.01,
-    splines=["DrivAge", "VehAge", "BonusMalus"],
-    n_knots=10,
+    selection_penalty=0.0,
+    features=features,
 )
-model.fit(df, y, sample_weight=exposure)
-predictions = model.predict(df)
+model.fit_reml(train_df, y_train, sample_weight=exposure_train, max_reml_iter=30)
+
+mu_holdout = model.predict(holdout_df)
+print(model.summary())
 ```
 
-**Explicit mode** — full control over each feature:
+## Choosing A Fit Path
+
+### `fit_reml()` with `selection_penalty=0`
+
+This is the recommended path for spline-heavy GAM-style pricing models. Use it
+when you want automatic smoothness selection, interpretable smooth terms, and
+mgcv-style modeling rather than sparse screening.
 
 ```python
-from superglm import SuperGLM, Spline, Categorical, Numeric
-
 model = SuperGLM(
     family="poisson",
-    penalty="group_lasso",
-    selection_penalty=0.01,
-    features={
-        "DrivAge": Spline(kind="bs", k=14),
-        "VehAge": Spline(kind="cr", k=10),
-        "BonusMalus": Spline(kind="ns", k=10),
-        "Area": Categorical(base="most_exposed"),
-        "LogDensity": Numeric(),
-    },
+    selection_penalty=0.0,
+    features=features,
 )
-model.fit(df, y, sample_weight=exposure)
+model.fit_reml(df, y, sample_weight=exposure)
 ```
 
-## Weights and offsets
+### `fit_reml(discrete=True)`
 
-Public examples use `sample_weight=`. In insurance settings this is interpreted as **exposure / frequency weight**, not inverse-variance weight. The `exposure=` alias has been removed — use `sample_weight=` only.
-
-Two common patterns for count models:
+Use this when the model is still a REML pricing model, but the data is large
+enough that exact REML becomes expensive. This is the production-scale path for
+large frequency models.
 
 ```python
-# Raw count target: offset absorbs exposure, model estimates a rate
-model.fit(df, claim_counts, offset=np.log(exposure))
-
-# Rate target (count / exposure): weight by exposure for heteroscedasticity
-model.fit(df, claim_rate, sample_weight=exposure)
+model = SuperGLM(
+    family="poisson",
+    selection_penalty=0.0,
+    discrete=True,
+    n_bins=256,
+    features=features,
+)
+model.fit_reml(df, y, sample_weight=exposure)
 ```
 
-## Fitting modes
+### `fit()` with `selection_penalty > 0`
 
-**1. Standard penalised fit**
-
-Use `fit()` when you want a fixed `spline_penalty` and a standard regularised GLM fit.
+Use this when you want sparse screening, compression, or fixed-penalty
+regularisation. This is a different modeling story from REML smoothness
+selection.
 
 ```python
 model = SuperGLM(
@@ -89,493 +109,181 @@ model = SuperGLM(
 model.fit(df, y, sample_weight=exposure)
 ```
 
-**2. Exact REML**
+### `select=True`
 
-Use `fit_reml(discrete=False)` for the standard smoothness-selection path (`selection_penalty=0`).
-
-```python
-model = SuperGLM(family="poisson", selection_penalty=0, features=features)
-model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
-```
-
-**3. Discrete / fREML-style REML**
-
-Use `fit_reml(discrete=True)` for large data. This is the fast path for spline-heavy frequency models.
+`select=True` on spline terms adds mgcv-style double-penalty shrinkage. This is
+the REML-native way to let smooth terms shrink toward linear or zero while
+staying in the `fit_reml()` workflow.
 
 ```python
-model = SuperGLM(
-    family="poisson",
-    selection_penalty=0,
-    discrete=True,
-    n_bins=256,
-    features=features,
-)
-model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
+features = {
+    "DrivAge": Spline(kind="ps", k=14, select=True),
+    "VehAge": Spline(kind="cr", k=10, select=True),
+    "Area": Categorical(base="most_exposed"),
+}
+model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+model.fit_reml(df, y, sample_weight=exposure)
 ```
 
-**4. Shrinkage vs selection**
+## Validation And Model Comparison
 
-- `select=True` on a spline adds mgcv-style double-penalty shrinkage.
-- `selection_penalty > 0` activates sparse/group penalties.
-
-Those are different tools:
-
-- `select=True` is the more REML-aligned way to let smooth terms shrink toward zero.
-- `selection_penalty > 0` is the sparse-additive path, best used for screening / compression rather than mgcv-style inference.
-
-## Feature types
-
-### Splines
-
-`Spline(kind, k)` is the recommended API for creating spline features. `kind` selects the basis type, `k` is the basis dimension matching mgcv's `k`. You can also use `n_knots` (interior knot count) instead of `k`.
-
-```python
-Spline(kind="bs", k=14)                   # 13-column P-spline (k-1 after identifiability)
-Spline(kind="ns", k=10)                   # 9-column natural spline (k-1 after identifiability)
-Spline(kind="cr", k=10)                   # 9-column cubic regression spline (k-1 after identifiability)
-Spline(kind="bs", k=14, select=True)       # mgcv double penalty: spline-vs-linear selection
-Spline(kind="cr", k=12, select=True)       # CR with double penalty selection
-Spline(kind="cr", k=12, m=(1, 2))         # separate first- and second-order penalties
-Spline(kind="bs", k=14, monotone="increasing")  # post-fit isotonic monotone constraint
-```
-
-| Kind | Basis | Penalty | Constraints | Built cols |
-|------|-------|---------|-------------|-----------|
-| `"bs"` | B-spline | Second-difference | Identifiability | `k - 1` |
-| `"ns"` | B-spline | Second-difference | f''=0 at boundaries + identifiability | `k - 1` |
-| `"cr"` | B-spline | Integrated f'' squared | Natural + identifiability | `k - 1` |
-
-`k` matches mgcv's `k` for all kinds. The built column count is always `k - 1` because the identifiability constraint (unweighted sum-to-zero) removes one direction. mgcv absorbs this via a side constraint instead of physically removing the column.
-
-**Knot placement strategies** — controlled by `knot_strategy=`:
-
-| Strategy | Description |
-|----------|-------------|
-| `"uniform"` | Equally-spaced interior knots (default) |
-| `"quantile"` | Quantiles of unique values (mgcv style) |
-| `"quantile_rows"` | Quantiles of all rows (pd.qcut style) |
-| `"quantile_tempered"` | Weighted blend of quantile and uniform (`knot_alpha` controls mixing) |
-
-`select=True` (BS, CR, and CR cardinal) decomposes the penalty eigenspace into a linear subgroup and a wiggly subgroup, both penalised (mgcv-style double penalty). With `fit_reml()`, REML estimates separate lambdas for each subgroup — driving a lambda to infinity effectively zeros that component. Three-way selection: nonlinear, linear, or dropped. Not supported for NS (its constrained penalty has only 1 null eigenvalue).
-
-`m=` can be an integer or a tuple of integers. For example,
-`Spline(kind="cr", m=(1, 2))` emits separate derivative-order penalties on the
-same coefficient block, each with its own REML smoothing parameter.
-
-Current guard rails:
-
-- `select=True + m=(...)` is not yet supported.
-- tensor interactions with a multi-order spline parent are not yet supported.
-- `kind="cr_cardinal"` currently supports only the default `m=2`.
-- `selection_penalty > 0` with shared-block multi-penalty terms remains guarded.
-
-The concrete classes `BasisSpline`, `NaturalSpline`, and `CubicRegressionSpline` are also available for direct use.
-
-**Polynomial** — Orthogonal polynomial (Legendre basis). Very stable across refits — ideal for features with simple monotone or quadratic shapes.
-
-```python
-Polynomial(degree=2)            # quadratic (common insurance choice)
-Polynomial(degree=3)            # cubic (default)
-```
-
-**Categorical** — One-hot encoded with a reference level. The entire factor is selected or removed as a group.
-
-```python
-Categorical(base="most_exposed")  # base = highest-exposure level (default)
-Categorical(base="first")         # base = alphabetically first level
-Categorical(base="B")             # explicit base level
-```
-
-**Numeric** — Single continuous feature passed through as-is. Group size 1, so group lasso reduces to standard L1.
-
-```python
-Numeric()                       # simple passthrough
-```
-
-**OrderedCategorical** — Ordered factor with a spline or step basis. For features with a natural ordering (e.g. policy year, damage severity grade) where you want smooth transitions between levels.
-
-```python
-from superglm import OrderedCategorical
-
-# Spline mode: map categories to numeric values, fit a spline through them
-OrderedCategorical(order=["A", "B", "C", "D", "E", "F"], basis="spline", n_knots=3)
-
-# Explicit numeric values instead of auto-linspace
-OrderedCategorical(values={"A": 0.0, "B": 0.2, "C": 0.4, "D": 0.6, "E": 0.8, "F": 1.0}, basis="spline")
-```
-
-## Interactions
-
-Interactions between features are specified via the `interactions` parameter. The interaction type is auto-detected from the parent feature specs.
-
-```python
-model = SuperGLM(
-    features={"age": Spline(k=14), "region": Categorical()},
-    interactions=[("age", "region")],
-    selection_penalty=0.01,
-)
-model.fit(df, y, sample_weight=exposure)
-```
-
-Auto-detected interaction types:
-
-| Parent types | Interaction class | Groups |
-|---|---|---|
-| Spline + Categorical | `SplineCategorical` | One spline group per non-base level |
-| Polynomial + Categorical | `PolynomialCategorical` | One polynomial group per non-base level |
-| Numeric + Categorical | `NumericCategorical` | Single group with per-level slopes |
-| Categorical + Categorical | `CategoricalInteraction` | Single group with cross-level indicators |
-| Numeric + Numeric | `NumericInteraction` | Single group (product term) |
-| Polynomial + Polynomial | `PolynomialInteraction` | Single group (tensor product) |
-| Spline + Spline | `TensorInteraction` | ti()-style tensor product (interaction surface only) |
-
-## Penalties
-
-```python
-from superglm import GroupLasso, SparseGroupLasso, GroupElasticNet, Ridge, Adaptive
-
-GroupLasso(lambda1=0.01)                          # group L2 — select/remove entire groups
-SparseGroupLasso(lambda1=0.01, alpha=0.5)         # group L2 + elementwise L1
-GroupElasticNet(lambda1=0.01, alpha=0.5)           # group lasso + ridge shrinkage
-Ridge(lambda1=0.01)                               # L2 shrinkage, no selection
-GroupLasso(lambda1=0.01, flavor=Adaptive())        # adaptive group lasso (two-stage)
-```
-
-If `lambda1=None` (default in penalty objects), it is auto-calibrated to 10% of `lambda_max` at fit time.
-
-For spline-heavy models, `GroupElasticNet` is usually the smoother selection path than pure `GroupLasso`. `Ridge` is shrinkage only and does not remove terms.
-
-## Regularisation path
-
-Fit a sequence of models from high to low regularisation with warm starts:
-
-```python
-from superglm import PathResult
-
-model = SuperGLM(
-    family=Poisson(),
-    penalty=GroupLasso(),
-    features={
-        "DrivAge": Spline(k=14),
-        "Area": Categorical(base="most_exposed"),
-    },
-)
-result = model.fit_path(df, y, sample_weight=exposure, n_lambda=50, lambda_ratio=1e-3)
-
-result.lambda_seq       # (50,) decreasing lambda values
-result.coef_path        # (50, p) coefficients at each lambda
-result.deviance_path    # (50,) deviance at each lambda
-result.n_iter_path      # (50,) PIRLS iterations per lambda
-```
-
-Or pass a custom lambda sequence:
-
-```python
-result = model.fit_path(df, y, sample_weight=exposure, lambda_seq=[1.0, 0.1, 0.01])
-```
-
-After `fit_path`, `model.predict()` uses the last (least-regularised) fit.
-
-## Cross-validation
-
-Evaluate model performance with K-fold cross-validation using any sklearn-compatible splitter:
+`cross_validate()` should be part of the standard pricing workflow, not an
+afterthought. It gives fold-level metrics, timing, convergence information, and
+out-of-fold predictions for challenger comparisons.
 
 ```python
 from sklearn.model_selection import KFold
-from superglm import SuperGLM, cross_validate
+from superglm import cross_validate
+from superglm.validation import double_lift_chart, lorenz_curve
 
-model = SuperGLM(
-    family="poisson",
-    selection_penalty=0.0,
-    features=features,
-)
-result = cross_validate(
-    model, df, y,
-    cv=KFold(5, shuffle=True, random_state=42),
-    sample_weight=exposure,
-    scoring=("deviance", "nll"),
+cv = cross_validate(
+    model,
+    train_df,
+    y_train,
+    cv=KFold(n_splits=5, shuffle=True, random_state=42),
+    sample_weight=exposure_train,
+    fit_mode="fit_reml",
+    scoring=("deviance", "nll", "gini"),
     return_oof=True,
 )
 
-result.mean_scores     # {"deviance": ..., "nll": ...}
-result.fold_scores     # DataFrame with per-fold metrics and timing
-result.oof_predictions # out-of-fold predictions (response scale)
+gini = lorenz_curve(y_holdout, mu_holdout, exposure=exposure_holdout)
+lift = double_lift_chart(
+    y_obs=y_holdout,
+    y_pred_model=mu_holdout,
+    y_pred_current=mu_baseline,
+    exposure=exposure_holdout,
+)
 ```
 
-`cross_validate` clones the model per fold (the input model is never mutated), supports `fit_mode="fit_reml"` for REML fits, and accepts custom callable scorers.
+Key outputs:
 
-## Inspecting results
+- `cv.fold_scores`: per-fold metrics, fit time, convergence, and EDF
+- `cv.mean_scores` / `cv.std_scores`: summary comparisons
+- `cv.oof_predictions`: out-of-fold predictions for the training rows
+- `lorenz_curve(...)`: ranking power via Gini
+- `double_lift_chart(...)`: business-facing champion/challenger evidence
 
-### Summary table
+## Monotone Splines
 
-`model.summary()` prints a statsmodels-style table with coefficient estimates, standard errors, p-values, and Wood (2013) smooth term tests. Parametric terms show Wald z-tests; smooth terms show the effective degrees of freedom, penalty strength, and a Bayesian chi-squared test.
+SuperGLM supports solver-backed monotone spline fitting. This is the preferred
+way to enforce business shape constraints inside the model itself.
+
+- `BSplineSmooth(..., monotone="increasing", monotone_mode="fit")`:
+  constrained QP path
+- `CubicRegressionSpline(..., monotone="decreasing", monotone_mode="fit")`:
+  constrained QP path
+- `PSpline(..., monotone="increasing", monotone_mode="fit")`:
+  SCOP path
 
 ```python
-print(model.summary())
-```
+from superglm import BSplineSmooth, PSpline, SuperGLM
 
-```
-╔══════════════════════════ SuperGLM Results ══════════════════════════╗
-║ Family:                   Poisson  No. Observations:            5000 ║
-║ Link:                         Log  Df (effective):             6.745 ║
-║ Method:                      REML  Penalty:              Group Lasso ║
-║ Scale (phi):                1.000  Lambda1:                        0 ║
-║ Log-Likelihood:           -2146.5  AIC:                       4306.5 ║
-╠══════════════════════════════════════════════════════════════════════╣
-║                 coef   std err     z     P>|z|   [0.025   0.975]     ║
-╟──────────────────────────────────────────────────────────────────────╢
-║ Intercept    -2.0693    0.0371 -55.829   0.000   -2.142   -1.997 *** ║
-║                                                                      ║
-╠═════════════════════════════╡ DrivAge ╞══════════════════════════════╣
-║ DrivAge     [spline, 9 params, chi2(1.0)=18.8, p=<0.001]         *** ║
-║               rank=9, edf=1.0, lam=2.1e+04, curve SE: 0.01-0.07      ║
-║                                                                      ║
-╠══════════════════════════════╡ VehAge ╞══════════════════════════════╣
-║ VehAge      [spline, 7 params, chi2(2.1)=6.4, p=0.046]           *   ║
-║               rank=7, edf=1.7, lam=1.3e+02, curve SE: 0.03-0.10      ║
-║                                                                      ║
-╠═══════════════════════════════╡ Area ╞═══════════════════════════════╣
-║ Area[B]       0.2121    0.0718   2.956   0.003    0.071    0.353 **  ║
-║ Area[C]      -0.0793    0.0817  -0.971   0.332   -0.239    0.081     ║
-║ Area[D]       0.3012    0.0673   4.473   0.000    0.169    0.433 *** ║
-╚══════════════════════════════════════════════════════════════════════╝
-Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
-```
-
-The `metrics()` path adds residuals, leverage, Cook's distance, and goodness-of-fit tests:
-
-```python
-m = model.metrics(df, y, sample_weight=exposure)
-print(m.summary())              # same table, richer object
-m.residuals("deviance")         # deviance residuals
-m.residuals("quantile")         # quantile residuals (standard normal under correct model)
-```
-
-### Term-level output
-
-```python
-# Per-term inference (TermInference dataclass)
-ti = model.term_inference("DrivAge")
-
-# Plot a single term for export / deck use
-model.plot("DrivAge", X=df, sample_weight=exposure)
-
-# Plot all terms in a grid
-model.plot(X=df, sample_weight=exposure, ci="both")
-
-# Interactive Plotly explorer for main effects
-model.plot(engine="plotly", X=df, sample_weight=exposure)
-
-# Raw plot data for custom reporting / rebuilds
-payload = model.plot_data("DrivAge", X=df, sample_weight=exposure, show_knots=True)
-curve_df = payload["terms"][0]["effect"]
-
-# Relativity DataFrames — native is the default fitted-term view
-rels_native = model.relativities(with_se=True)
-
-# Optional reporting view — centering="mean" shifts so geometric mean = 1
-rels_mean = model.relativities(with_se=True, centering="mean")
-```
-
-By default, `term_inference()`, `plot()`, `plot_data()`, and `relativities()`
-now return the canonical fitted term contribution under the model's
-identifiability constraint. Use `centering="mean"` only when you explicitly
-want a rebased reporting view for cross-feature comparison.
-
-### Diagnostic plots
-
-`plot_diagnostics()` produces a GLM/GAM-appropriate 4-panel figure using quantile residuals (Dunn & Smyth 1996) with simulation-based Q-Q envelopes:
-
-```python
-model.plot_diagnostics(X, y, sample_weight=exposure)
-```
-
-Panels: Q-Q envelope, calibration, residuals vs linear predictor, residual histogram. Hexbin density rendering activates automatically for large datasets.
-
-### Validation charts
-
-```python
-from superglm.validation import double_lift_chart, lorenz_curve
-
-# CAS-style double lift chart (RPM 2016 methodology)
-double_lift_chart(y_holdout, mu_new, mu_baseline, exposure=exp_holdout, n_bins=20)
-
-# Lorenz curve with Gini coefficient
-lorenz_curve(y, mu, exposure=exposure)
-```
-
-### Other diagnostics
-
-```python
-model.term_importance(df, sample_weight=exposure)     # weighted variance of each term's eta contribution
-model.knot_summary()                                  # knot metadata for all spline features
-model.spline_redundancy(df, sample_weight=exposure)   # knot spacing, basis correlation, rank
-model.diagnostics()                                   # per-group diagnostic dict
-```
-
-### Example: single-term relativity plots
-
-Poisson frequency model on French MTPL2 (678k policies), REML smoothness selection.
-95% pointwise confidence bands with exposure-weighted density strip and interior knot positions.
-Click an image to open it at full size.
-
-| Vehicle Age (`quantile_rows` knots) | Bonus-Malus (`quantile_tempered`, α=0.2) |
-|:---:|:---:|
-| [![VehAge](docs/images/readme_vehage.png)](docs/images/readme_vehage.png) | [![BonusMalus](docs/images/readme_bonusmalus.png)](docs/images/readme_bonusmalus.png) |
-
-## Monotone constraints
-
-Enforce monotonicity on spline terms via post-fit isotonic regression:
-
-```python
-# Declare the constraint at feature level
-features = {
-    "BonusMalus": Spline(kind="bs", k=14, monotone="increasing"),
-}
-
-# After fitting, apply the repair
-model.fit_reml(df, y, sample_weight=exposure)
-model.apply_monotone_postfit(df, sample_weight=exposure)  # modifies model in-place
-```
-
-## Tweedie support
-
-Fit with a fixed Tweedie power:
-
-```python
-from superglm import Tweedie
-
-model = SuperGLM(family=Tweedie(p=1.5), penalty=GroupLasso())
-```
-
-Or estimate the power via profile likelihood:
-
-```python
-model = SuperGLM(family=Tweedie(p=1.5), penalty=GroupLasso(lambda1=0.01))
-result = model.estimate_p(df, y, sample_weight=exposure, p_range=(1.1, 1.9))
-print(result.p_hat)  # estimated Tweedie power
-print(result.ci())   # profile likelihood CI
-result.profile_plot() # profile deviance curve
-```
-
-## Negative binomial (NB2) support
-
-For overdispersed count data where the Poisson variance assumption is too restrictive:
-
-```python
-from superglm import NegativeBinomial
-
-# Fixed theta
-model = SuperGLM(family=NegativeBinomial(theta=1.0), penalty=GroupLasso(lambda1=0.01))
-model.fit(df, y, sample_weight=exposure)
-
-# Profile estimate theta (MASS-style alternating GLM fit + Newton update)
-result = model.estimate_theta(df, y, sample_weight=exposure)
-print(result.theta_hat)  # estimated dispersion
-print(result.ci())       # profile likelihood CI
-result.profile_plot()    # profile deviance curve with CI region
-```
-
-## Binomial (binary classification)
-
-For binary outcomes (0/1):
-
-```python
-from superglm import SuperGLM, Spline, Categorical
-
-model = SuperGLM(
-    family="binomial",
-    selection_penalty=0,
+qp_model = SuperGLM(
+    family="gaussian",
+    selection_penalty=0.0,
     features={
-        "age": Spline(k=10),
-        "region": Categorical(base="first"),
+        "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
     },
 )
-model.fit(df, y)
-probabilities = model.predict(df)  # returns P(Y=1)
-```
 
-The default link is logit. Alternative links (probit, cloglog, cauchit) can be passed via `link=`:
-
-```python
-from superglm import ProbitLink
-
-model = SuperGLM(family="binomial", link=ProbitLink(), selection_penalty=0)
-```
-
-## sklearn interface
-
-**Regressor** — for count/severity models:
-
-```python
-from superglm import SuperGLMRegressor
-
-model = SuperGLMRegressor(
-    family="poisson",
-    penalty="group_lasso",
-    selection_penalty=0.01,
-    spline_features=["DrivAge", "VehAge"],
-    n_knots=10,
+scop_model = SuperGLM(
+    family="gaussian",
+    selection_penalty=0.0,
+    features={
+        "x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit"),
+    },
 )
-model.fit(df, y, sample_weight=exposure)
-model.predict(df)
 ```
 
-**Classifier** — for binary outcomes:
+Post-fit isotonic repair still exists, but it should be treated as a manual
+fallback rather than the main monotone workflow.
+
+## Feature Highlights
+
+- `Spline(kind="ps")`, `Spline(kind="cr")`, and `Spline(kind="ns")` cover the
+  main spline basis choices.
+- `OrderedCategorical(...)` smooths ordered factor levels without forcing a
+  plain one-hot representation.
+- `collapse_levels(...)` lets you merge sparse categorical levels while still
+  expanding back to original levels for inference and plotting.
+- `interactions=[(...)]` supports spline-categorical, numeric-categorical,
+  tensor, and other interaction types.
+- `m=(...)` supports multi-order spline penalties with separate REML lambdas.
 
 ```python
-from superglm import SuperGLMClassifier
+from superglm import Categorical, OrderedCategorical, Spline, collapse_levels
 
-clf = SuperGLMClassifier(selection_penalty=0, spline_features=["age"])
-clf.fit(df, y)
-clf.predict(df)          # hard labels (0/1)
-clf.predict_proba(df)    # (n, 2) class probabilities
-clf.decision_function(df)  # log-odds
+area_grouping = collapse_levels(train_df["Area"], groups={"Rural": ["E", "F"]})
+
+features = {
+    "VehAge": Spline(kind="cr", k=10),
+    "Area": Categorical(base="most_exposed", grouping=area_grouping),
+    "BonusClass": OrderedCategorical(order=["A", "B", "C", "D"], basis="spline"),
+}
 ```
 
-Feature types are auto-detected: object/category columns become `Categorical`, columns in `spline_features` become `Spline`, everything else becomes `Numeric`.
+## Weights And Offsets
 
-## Families
-
-| Family | Variance function | Default link | Use case |
-|--------|------------------|-------------|----------|
-| `Poisson()` | V(mu) = mu | log | Claim frequency |
-| `NegativeBinomial(theta=1.0)` | V(mu) = mu + mu^2/theta | log | Overdispersed frequency |
-| `Gamma()` | V(mu) = mu^2 | log | Claim severity |
-| `Tweedie(p=1.5)` | V(mu) = mu^p | log | Pure premium (frequency x severity) |
-| `Binomial()` | V(mu) = mu(1-mu) | logit | Binary classification |
-| `Gaussian()` | V(mu) = 1 | identity | Continuous response (loss ratios, etc.) |
-
-## Link functions
-
-Every family has a default link, but any link can be overridden:
+Public fitting examples use `sample_weight=`. In insurance settings this means
+exposure / frequency weight, not inverse-variance weight.
 
 ```python
-from superglm import SuperGLM, InverseLink
+import numpy as np
 
-model = SuperGLM(family="gamma", link=InverseLink())
+# Raw count target: offset absorbs exposure, model estimates a rate
+model.fit(df, claim_counts, offset=np.log(exposure))
+
+# Rate target: sample_weight carries exposure
+model.fit(df, claim_rate, sample_weight=exposure)
 ```
 
-| Link | Class | String shortcut |
-|------|-------|----------------|
-| Log | `LogLink` | `"log"` |
-| Logit | `LogitLink` | `"logit"` |
-| Identity | `IdentityLink` | `"identity"` |
-| Probit | `ProbitLink` | `"probit"` |
-| Complementary log-log | `CloglogLink` | `"cloglog"` |
-| Cauchit | `CauchitLink` | `"cauchit"` |
-| Inverse (reciprocal) | `InverseLink` | `"inverse"` |
-| Inverse-squared | `InverseSquaredLink` | `"inverse_squared"` |
-| Square root | `SqrtLink` | `"sqrt"` |
-| Power (parametric) | `PowerLink(power=p)` | -- |
-| NB2 canonical | `NegativeBinomialLink(theta=t)` | -- |
+Validation helpers such as `lorenz_curve(...)` and `double_lift_chart(...)`
+still use `exposure=...`, which is correct for that API.
 
-All links implement `deriv2_inverse` for REML W(rho) correction support.
+## Deployment
 
-## How it works
+A fitted `SuperGLM` is the deployment artifact. It already contains:
 
-SuperGLM fits penalised GLMs via PIRLS (penalised iteratively reweighted least squares) with a proximal Newton block coordinate descent inner solver. Each feature group gets its own block in the BCD cycle, and the group lasso proximal operator either keeps or zeros the entire group.
+- registered feature specs
+- learned knot geometry and constraints
+- fitted coefficients and intercept
+- REML smoothing parameters
 
-SSP (smoothing spline penalty) reparametrisation transforms the B-spline basis so that the group lasso penalty acts on coefficients that are orthogonal with respect to the smoothing penalty. This means group lasso can select smooth functions without distorting their shape.
+```python
+import pickle
 
-For a detailed walkthrough of the solver stack (IRLS, PIRLS, BCD, REML, discretization), see [docs/guide/optimization.md](docs/guide/optimization.md).
+with open("pricing_model.pkl", "wb") as f:
+    pickle.dump(model, f)
+
+with open("pricing_model.pkl", "rb") as f:
+    loaded = pickle.load(f)
+
+mu = loaded.predict(score_df)
+```
+
+The loaded model can still score, print summaries, rebuild curves, and produce
+relativity views without refitting.
+
+## Advanced Penalty Objects
+
+At the top-level model API, prefer `selection_penalty=` and `spline_penalty=`.
+Low-level penalty objects still expose `lambda1`, for example:
+
+```python
+from superglm import GroupElasticNet
+
+penalty = GroupElasticNet(lambda1=0.01, alpha=0.5)
+model = SuperGLM(family="poisson", penalty=penalty, features=features)
+```
+
+That is advanced usage. It should not be your default starting point.
+
+## Learn More
+
+- [Recommended workflows](docs/guide/workflows.md)
+- [Choosing a fitting path](docs/guide/fitting.md)
+- [Monotone splines](docs/guide/monotone.md)
+- [Validation and model comparison](docs/guide/validation.md)
+- [Deployment](docs/guide/deployment.md)
+- [Optimization and solver internals](docs/guide/optimization.md)

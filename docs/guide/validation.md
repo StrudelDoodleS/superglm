@@ -1,40 +1,31 @@
-# Model Validation
+# Validation And Model Comparison
 
-SuperGLM provides a complete validation toolkit for comparing and assessing
-GLM/GAM models in actuarial pricing workflows.
+Validation should be part of the default pricing workflow, not something added
+after the model is already chosen.
 
-## Diagnostic plots
+## Recommended Workflow
 
-Call `model.plot_diagnostics(X, y)` for a 4-panel figure using quantile
-residuals (Dunn & Smyth 1996):
+1. split data into training and holdout
+2. compare candidate models with `cross_validate()` on training data
+3. inspect fold-level deltas, not just one mean metric
+4. refit the chosen candidates on all training data
+5. evaluate holdout Lorenz and double-lift charts
+6. use diagnostics to check residual behavior and calibration
 
-1. **Q-Q with simulation envelope** — simulates response data from the
-   fitted model and builds a 95% pointwise reference band. Points inside
-   the band indicate good fit.
-2. **Calibration** — exposure-weighted observed vs predicted frequency
-   across equal-exposure bins.
-3. **Residuals vs linear predictor** — quantile residuals plotted against
-   eta (the additive scale), with a trend line for pattern detection.
-4. **Residual distribution** — histogram with N(0,1) overlay and
-   dispersion/chi-squared summary.
+## Cross-Validation
 
-```python
-model.plot_diagnostics(X, y, sample_weight=exposure)
-```
-
-For large datasets (>20k rows), hexbin density rendering and quantile-grid
-Q-Q envelopes activate automatically for performance.
-
-## Cross-validation
-
-Use `cross_validate()` for model selection and stability assessment:
+`cross_validate()` is the main comparison tool. For REML pricing models, call
+it with `fit_mode="fit_reml"` so each fold uses the same fitting story as the
+final model.
 
 ```python
 from sklearn.model_selection import KFold
 from superglm.model_selection import cross_validate
 
 result = cross_validate(
-    model, X, y,
+    model,
+    X,
+    y,
     cv=KFold(n_splits=5, shuffle=True, random_state=42),
     sample_weight=exposure,
     fit_mode="fit_reml",
@@ -43,25 +34,46 @@ result = cross_validate(
 )
 ```
 
-**Key outputs:**
+Key outputs:
 
-- `result.fold_scores` — per-fold DataFrame with fit time, convergence,
-  effective df, and all requested metrics
-- `result.mean_scores` / `result.std_scores` — summary statistics
-- `result.oof_predictions` — out-of-fold predictions for every training row
+- `result.fold_scores`: per-fold metrics, fit time, convergence, and EDF
+- `result.mean_scores` / `result.std_scores`: summary comparisons
+- `result.oof_predictions`: out-of-fold predictions for every training row
 
-**Interpreting metrics:**
+Typical metric interpretation:
 
-| Metric | Measures | Lower/higher better |
-|--------|----------|-------------------|
-| deviance | Probabilistic fit | Lower |
-| nll | Negative log-likelihood | Lower |
-| gini | Ranking / segmentation power | Higher |
+| Metric | Measures | Better |
+|--------|----------|--------|
+| `deviance` | probabilistic fit | lower |
+| `nll` | negative log-likelihood | lower |
+| `gini` | ranking / segmentation power | higher |
 
-## Double lift chart
+Out-of-fold predictions are especially useful for challenger analysis because
+they let you compare models on the training portfolio without leaking each row
+into its own fitted mean.
 
-The CAS-style double lift chart ([CAS RPM 2016](https://www.casact.org/sites/default/files/presentation/rpm_2016_presentations_pm-lm-4.pdf))
-compares a new model against a current/baseline model:
+## Holdout Business Evidence
+
+After cross-validation, refit the chosen candidates on all training data and
+evaluate them on holdout.
+
+### Lorenz Curve And Gini
+
+```python
+from superglm.validation import lorenz_curve
+
+result = lorenz_curve(y_obs, y_pred, exposure=exposure)
+print(f"Gini ratio: {result.gini_ratio:.4f}")
+```
+
+The Gini ratio measures ranking power relative to perfect foresight. It is the
+standard quick view of segmentation quality.
+
+### Double Lift Chart
+
+Use the CAS-style double-lift chart when you need business-facing evidence that
+a challenger is improving on the current model rather than just fitting well in
+the abstract.
 
 ```python
 from superglm.validation import double_lift_chart
@@ -75,39 +87,35 @@ result = double_lift_chart(
 )
 ```
 
-The chart sorts observations by the ratio of new-model to current-model
-predictions, bins into equal-exposure quantiles, and plots three indexed
-series (each indexed to its own overall average). Where the new model's
-line tracks Actual more closely than Current, it is adding value.
+The chart sorts by the challenger/current relativity ratio, bins to equal
+exposure, and shows whether the challenger tracks Actual more closely than the
+baseline.
 
-## Lorenz curve and Gini
+## Diagnostic Plots
+
+Use diagnostics after you have a candidate worth defending.
 
 ```python
-from superglm.validation import lorenz_curve
-
-result = lorenz_curve(y_obs, y_pred, exposure=exposure)
-print(f"Gini ratio: {result.gini_ratio:.4f}")
+model.plot_diagnostics(X, y, sample_weight=exposure)
 ```
 
-The Gini ratio (model Gini / perfect-foresight Gini) measures risk
-segmentation power. Values closer to 1.0 indicate better ranking.
+The four-panel diagnostic figure includes:
 
-## Recommended workflow
+1. Q-Q with simulation envelope
+2. exposure-weighted calibration
+3. residuals versus linear predictor
+4. residual histogram with normal overlay
 
-1. **Split** data into training (80%) and holdout (20%)
-2. **Cross-validate** on training with the same folds for all candidate models
-3. **Compare** fold-level deltas (mean, median, std) — models often
-   trade off across metrics (e.g. better deviance, slightly worse Gini),
-   so present the full delta table rather than picking a single winner
-4. **Refit** selected models on all training data
-5. **Evaluate** on holdout with `double_lift_chart()` and `lorenz_curve()`
-   — the holdout double-lift chart is the business-facing evidence
+For large datasets, the plotting code automatically switches to more efficient
+rendering paths such as hexbin density summaries.
+
+## Practical Comparison Advice
+
+- use the same CV folds for all candidate models
+- compare fold-level deltas, not just headline means
+- keep holdout truly untouched until the challenger set is stable
+- use both probabilistic metrics and business ranking metrics
+- treat double-lift as the business communication chart
 
 See the [Plotting & Diagnostics Demo](../notebooks/plotting_diagnostics_demo.ipynb)
-notebook for a complete worked example on the French MTPL2 dataset.
-
-## API reference
-
-- [Validation functions](../api/validation.md) — lift charts, Lorenz curves, loss ratio charts
-- [Diagnostics](../api/diagnostics.md) — plot_diagnostics, term importance, drop-term analysis
-- [Model Selection](../api/model_selection.md) — cross_validate
+for a worked example on French MTPL2.
