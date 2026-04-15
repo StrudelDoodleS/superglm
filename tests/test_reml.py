@@ -45,7 +45,7 @@ def spline_model():
     """Model with two splines and a categorical."""
     return SuperGLM(
         family="poisson",
-        selection_penalty=0.01,
+        selection_penalty=0.0,
         features={
             "x1": Spline(n_knots=8, penalty="ssp"),
             "x2": Spline(n_knots=8, penalty="ssp"),
@@ -515,7 +515,7 @@ class TestREMLConvergence:
 
         model = SuperGLM(
             family="poisson",
-            selection_penalty=0.005,
+            selection_penalty=0.0,
             features={
                 "x1": Spline(n_knots=10, penalty="ssp"),
                 "x2": Spline(n_knots=10, penalty="ssp"),
@@ -531,12 +531,12 @@ class TestREMLConvergence:
         assert ratio > 1.5, f"Expected different lambdas, got ratio {ratio:.2f}"
 
 
-# ── REML + group lasso ───────────────────────────────────────────
+# ── REML selection-penalty rejection ─────────────────────────────
 
 
-class TestREMLGroupLasso:
-    def test_reml_plus_group_lasso(self):
-        """Group lasso coexists with REML — fit_reml produces same structure as fit."""
+class TestREMLSelectionPenaltyRejected:
+    def test_fit_reml_rejects_selection_penalty_poisson(self):
+        """fit_reml() requires selection_penalty=0 on Poisson models."""
         rng = np.random.default_rng(42)
         n = 600
         x1 = rng.uniform(0, 10, n)
@@ -555,24 +555,11 @@ class TestREMLGroupLasso:
                 "x2": Spline(n_knots=6, penalty="ssp"),
             },
         )
-        model.fit_reml(X, y, max_reml_iter=10)
+        with pytest.raises(ValueError, match="selection_penalty=0"):
+            model.fit_reml(X, y, max_reml_iter=10)
 
-        # Both features should be active (non-zero) since lambda1 is moderate
-        beta = model.result.beta
-        for g in model._groups:
-            norm_g = np.linalg.norm(beta[g.sl])
-            # At this lambda1, groups should be non-zero
-            assert norm_g > 0 or not g.penalized
-
-        # Per-group lambdas should exist, be positive, and be finite
-        assert model._reml_lambdas is not None
-        assert len(model._reml_lambdas) >= 1
-        for name, lam in model._reml_lambdas.items():
-            assert np.isfinite(lam), f"Non-finite REML lambda for {name}"
-            assert lam > 0, f"Non-positive REML lambda for {name}"
-
-    def test_reml_plus_group_lasso_gamma_estimated_scale(self, capsys):
-        """Estimated-scale REML should work on the BCD path with lambda1 > 0."""
+    def test_fit_reml_rejects_selection_penalty_gamma(self):
+        """fit_reml() requires selection_penalty=0 on estimated-scale families too."""
         rng = np.random.default_rng(123)
         n = 600
         x1 = rng.uniform(0, 10, n)
@@ -590,20 +577,8 @@ class TestREMLGroupLasso:
                 "x2": Spline(n_knots=6, penalty="ssp"),
             },
         )
-        model.fit_reml(X, y, max_reml_iter=12, verbose=True)
-
-        out = capsys.readouterr().out
-        assert "REML iter=" in out
-        assert "(pirls=" in out
-        assert "(cheap)" in out
-
-        assert model.result.converged
-        assert np.isfinite(model.result.phi)
-        assert model.result.phi > 0
-        assert model._reml_lambdas is not None
-        for name, lam in model._reml_lambdas.items():
-            assert np.isfinite(lam), f"Non-finite REML lambda for {name}"
-            assert lam > 0, f"Non-positive REML lambda for {name}"
+        with pytest.raises(ValueError, match="selection_penalty=0"):
+            model.fit_reml(X, y, max_reml_iter=12, verbose=True)
 
 
 class TestREMLFallbacks:
@@ -1406,44 +1381,6 @@ class TestDiscreteCachedSolve:
         np.testing.assert_allclose(grad_closed, grad_generic, rtol=1e-10, atol=1e-10)
         np.testing.assert_allclose(hess_closed, hess_generic, rtol=1e-10, atol=1e-10)
 
-    @pytest.mark.slow
-    def test_fit_inference_info_uses_multi_penalty_S(self, select_model_fitted):
-        """_fit_inference_info inverse must reflect multi-penalty, not legacy S."""
-        model, X, y, w = select_model_fitted
-
-        info_multi = model._fit_inference_info
-
-        saved = model._reml_penalties
-        model._reml_penalties = None
-        model.__dict__.pop("_fit_inference_info", None)
-        info_legacy = model._fit_inference_info
-        model._reml_penalties = saved
-        model.__dict__.pop("_fit_inference_info", None)
-
-        assert not np.allclose(
-            info_multi["XtWX_inv"],
-            info_legacy["XtWX_inv"],
-            rtol=1e-6,
-        )
-
-    @pytest.mark.slow
-    def test_metrics_active_info_uses_multi_penalty_S(self, select_model_fitted):
-        """ModelMetrics._active_info must use multi-penalty S for leverage/Cook's."""
-        model, X, y, w = select_model_fitted
-
-        # Multi-penalty path
-        met_multi = model.metrics(X, y, sample_weight=w)
-        _, _, inv_multi, _, _ = met_multi._active_info
-
-        # Legacy path
-        saved = model._reml_penalties
-        model._reml_penalties = None
-        met_legacy = model.metrics(X, y, sample_weight=w)
-        _, _, inv_legacy, _, _ = met_legacy._active_info
-        model._reml_penalties = saved
-
-        assert not np.allclose(inv_multi, inv_legacy, rtol=1e-6)
-
 
 class TestStaleREMLClearing:
     """Verify fit() clears REML state from a previous fit_reml()."""
@@ -1488,7 +1425,7 @@ class TestStaleREMLClearing:
 
         model = SuperGLM(
             family="poisson",
-            selection_penalty=0.01,
+            selection_penalty=0.0,
             features={
                 "x1": Spline(n_knots=8, penalty="ssp"),
                 "x2": Spline(n_knots=8, penalty="ssp"),
