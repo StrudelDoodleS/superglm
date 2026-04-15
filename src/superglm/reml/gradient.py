@@ -30,6 +30,7 @@ def reml_direct_gradient(
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
     penalty_caches: dict | None = None,
+    tensor_pair_evaluations: dict | None = None,
 ) -> NDArray:
     """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W)."""
     penalties = coerce_reml_penalties(
@@ -42,7 +43,11 @@ def reml_direct_gradient(
     # Pre-compute log-det derivatives for multi-penalty groups.
     # For single-penalty groups, r_j = rank(Omega_j) (fast shortcut).
     # For multi-penalty groups sharing a block, r_j = lambda_j tr(S^{-1} S_j).
-    r_dict, _ = compute_logdet_s_derivatives(lambdas, penalties)
+    r_dict, _ = compute_logdet_s_derivatives(
+        lambdas,
+        penalties,
+        tensor_pair_evaluations=tensor_pair_evaluations,
+    )
 
     grad = np.zeros(len(penalties), dtype=np.float64)
     inv_phi = 1.0 / max(phi_hat, 1e-10)
@@ -77,6 +82,7 @@ def reml_direct_hessian(
     dH2_cross: NDArray | None = None,
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
+    tensor_pair_evaluations: dict | None = None,
 ) -> NDArray:
     """Outer Hessian of the REML criterion w.r.t. log-lambdas.
 
@@ -108,7 +114,11 @@ def reml_direct_hessian(
     # For single-penalty, r_i = rank and h_ii = rank (they're equal).
     # For shared-block multi-penalty, h_ij is non-trivial and needed
     # to correct the Hessian curvature for the anisotropy directions.
-    r_logdet, h_logdet = compute_logdet_s_derivatives(lambdas, penalties)
+    r_logdet, h_logdet = compute_logdet_s_derivatives(
+        lambdas,
+        penalties,
+        tensor_pair_evaluations=tensor_pair_evaluations,
+    )
 
     full_HdHj: dict[int, NDArray] = {}
     quad_per_group: list[float] = []
@@ -172,7 +182,10 @@ def reml_direct_hessian(
 
     scale_known = getattr(distribution, "scale_known", True)
     if not scale_known and pirls_result is not None and n_obs > 0:
-        M_p = compute_total_penalty_rank(penalties)
+        M_p = compute_total_penalty_rank(
+            penalties,
+            tensor_pair_evaluations=tensor_pair_evaluations,
+        )
         if M_p <= 0 and penalty_ranks is not None:
             M_p = sum(penalty_ranks[pc.name] for pc in penalties)
         pq_total = sum(quad_per_group)

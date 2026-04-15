@@ -874,7 +874,7 @@ class TestTensorPenaltyComponentEmission:
         np.testing.assert_allclose(comp_sum, info.penalty_matrix, atol=1e-12)
 
     def test_decompose_does_not_emit_components(self):
-        """decompose=True still uses eigenspace splitting, not penalty_components."""
+        """decompose=True still splits bilinear/wiggly subgroups, with marginal penalties on wiggly."""
         from superglm.features.interaction import TensorInteraction
         from superglm.features.spline import CubicRegressionSpline
 
@@ -893,9 +893,12 @@ class TestTensorPenaltyComponentEmission:
         # decompose returns a list of GroupInfos (Mechanism A)
         assert isinstance(infos, list)
         assert len(infos) == 2
-        # Neither subgroup should have penalty_components
-        for info in infos:
-            assert info.penalty_components is None
+        bilinear, wiggly = infos
+        assert bilinear.subgroup_name == "bilinear"
+        assert bilinear.penalty_components is None
+        assert wiggly.subgroup_name == "wiggly"
+        assert wiggly.penalty_components is not None
+        assert len(wiggly.penalty_components) == 2
 
     def test_multi_m_parent_raises(self):
         """Tensor interactions reject multi-penalty parent smooths."""
@@ -938,6 +941,8 @@ class TestTensorPenaltyComponentEmission:
         with pytest.raises(NotImplementedError, match="single-penalty parent smooths"):
             model.fit_reml(X, y, max_reml_iter=30)
 
+
+class TestBlockwiseHessianTrace:
     def test_tensor_multi_m_parent_discrete_raises(self):
         """Discrete path also rejects multi-penalty tensor parents."""
         from superglm import Spline, SuperGLM
@@ -1065,6 +1070,77 @@ class TestLogdetSharedBlock:
         result_old = cached_logdet_s_plus(lambdas, {"g": cache})
 
         np.testing.assert_allclose(result_new, result_old, rtol=1e-10)
+
+    def test_tensor_pair_closed_form_matches_generic_shared_block(self):
+        """Discrete tensor pairs use the closed-form logdet summary without changing values."""
+        from superglm.group_matrix import DiscretizedTensorGroupMatrix
+        from superglm.reml import compute_logdet_s_derivatives, compute_logdet_s_plus
+        from superglm.reml.penalty_algebra import (
+            build_tensor_pair_logdet_summaries,
+            evaluate_tensor_pair_logdet_summaries,
+        )
+
+        p1, p2 = 4, 3
+        rng = np.random.default_rng(42)
+        S1 = _make_psd(p1, p1 - 1, rng)
+        S2 = _make_psd(p2, p2 - 1, rng)
+        omega_1 = np.kron(S1, np.eye(p2))
+        omega_2 = np.kron(np.eye(p1), S2)
+        q = p1 * p2
+
+        gm = DiscretizedTensorGroupMatrix(
+            B1_unique=np.eye(p1),
+            B2_unique=np.eye(p2),
+            idx1=np.zeros(q, dtype=np.intp),
+            idx2=np.zeros(q, dtype=np.intp),
+            B_joint=np.eye(q),
+            R_inv=np.eye(q),
+            pair_idx=np.arange(q, dtype=np.intp),
+            tensor_id=7,
+        )
+        penalties = [
+            PenaltyComponent(
+                name="ti:margin_x1",
+                group_name="ti",
+                group_index=0,
+                group_sl=slice(0, q),
+                omega_raw=omega_1,
+                omega_ssp=omega_1,
+                rank=float(np.linalg.matrix_rank(omega_1)),
+            ),
+            PenaltyComponent(
+                name="ti:margin_x2",
+                group_name="ti",
+                group_index=0,
+                group_sl=slice(0, q),
+                omega_raw=omega_2,
+                omega_ssp=omega_2,
+                rank=float(np.linalg.matrix_rank(omega_2)),
+            ),
+        ]
+        lambdas = {"ti:margin_x1": 2.3, "ti:margin_x2": 0.6}
+
+        generic_logdet = compute_logdet_s_plus(lambdas, penalties)
+        generic_grad, generic_hess = compute_logdet_s_derivatives(lambdas, penalties)
+
+        tensor_summaries = build_tensor_pair_logdet_summaries([gm], penalties)
+        tensor_evals = evaluate_tensor_pair_logdet_summaries(tensor_summaries, lambdas)
+        closed_logdet = compute_logdet_s_plus(
+            lambdas, penalties, tensor_pair_evaluations=tensor_evals
+        )
+        closed_grad, closed_hess = compute_logdet_s_derivatives(
+            lambdas,
+            penalties,
+            tensor_pair_evaluations=tensor_evals,
+        )
+
+        assert set(tensor_summaries) == {"ti"}
+        assert set(tensor_evals) == {"ti"}
+        np.testing.assert_allclose(closed_logdet, generic_logdet, rtol=1e-10, atol=1e-10)
+        for name, value in generic_grad.items():
+            np.testing.assert_allclose(closed_grad[name], value, rtol=1e-10, atol=1e-10)
+        for pair, value in generic_hess.items():
+            np.testing.assert_allclose(closed_hess[pair], value, rtol=1e-10, atol=1e-10)
 
 
 # ── Multi-order derivative penalty tests ──────────────────────
@@ -1307,12 +1383,12 @@ class TestMultiOrderSplinePenalty:
         assert len([k for k in lam if k.startswith("x:")]) == 3
 
 
-class TestSelectionPenaltySharedBlock:
-    """selection_penalty > 0 with shared-block multi-penalty terms (PR 1)."""
+class TestSelectionPenaltyRejectedInREML:
+    """fit_reml() rejects sparse selection penalties in favor of direct REML."""
 
     @pytest.mark.slow
-    def test_tensor_selection_penalty_efs_converges(self):
-        """Tensor + selection_penalty > 0 converges on EFS path."""
+    def test_tensor_selection_penalty_rejected(self):
+        """Tensor REML requires selection_penalty=0."""
         from superglm import Spline, SuperGLM
 
         rng = np.random.default_rng(42)
@@ -1332,65 +1408,13 @@ class TestSelectionPenaltySharedBlock:
             },
             interactions=[("x1", "x2")],
         )
-        model.fit_reml(X, y, max_reml_iter=30)
-
-        assert model._reml_result.converged
-        # Tensor term should have per-marginal lambdas
-        lam = model._reml_lambdas
-        tensor_keys = [k for k in lam if "x1:x2" in k]
-        assert len(tensor_keys) >= 2, f"Expected >=2 tensor lambda keys, got {tensor_keys}"
+        with pytest.raises(ValueError, match="selection_penalty=0"):
+            model.fit_reml(X, y, max_reml_iter=30)
 
     @pytest.mark.slow
-    def test_tensor_selection_penalty_parity(self):
-        """EFS and direct paths produce similar deviance for tensor models."""
+    def test_main_effect_selection_penalty_rejected(self):
+        """The REML rejection is generic, not tensor-specific."""
         from superglm import Spline, SuperGLM
-
-        rng = np.random.default_rng(42)
-        n = 800
-        x1 = rng.uniform(0, 1, n)
-        x2 = rng.uniform(0, 1, n)
-        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2
-        y = rng.poisson(np.exp(eta)).astype(float)
-        X = pd.DataFrame({"x1": x1, "x2": x2})
-
-        # Direct path (selection_penalty=0)
-        m_direct = SuperGLM(
-            family="poisson",
-            selection_penalty=0,
-            features={
-                "x1": Spline(kind="cr", n_knots=6),
-                "x2": Spline(kind="cr", n_knots=6),
-            },
-            interactions=[("x1", "x2")],
-        )
-        m_direct.fit_reml(X, y, max_reml_iter=30)
-
-        # EFS path (selection_penalty > 0 but tiny)
-        m_efs = SuperGLM(
-            family="poisson",
-            selection_penalty=1e-10,
-            features={
-                "x1": Spline(kind="cr", n_knots=6),
-                "x2": Spline(kind="cr", n_knots=6),
-            },
-            interactions=[("x1", "x2")],
-        )
-        m_efs.fit_reml(X, y, max_reml_iter=30)
-
-        # Deviance should be similar (tiny selection penalty shouldn't change much)
-        dev_direct = m_direct._result.deviance
-        dev_efs = m_efs._result.deviance
-        rel_diff = abs(dev_direct - dev_efs) / max(dev_direct, 1.0)
-        assert rel_diff < 0.05, (
-            f"Deviance mismatch: direct={dev_direct:.4f}, efs={dev_efs:.4f}, "
-            f"rel_diff={rel_diff:.4f}"
-        )
-
-    @pytest.mark.slow
-    def test_postfit_omega_ssp_consistent_with_dm(self):
-        """model._reml_penalties omega_ssp matches current R_inv after EFS fit."""
-        from superglm import Spline, SuperGLM
-        from superglm.group_matrix import SparseSSPGroupMatrix
 
         rng = np.random.default_rng(42)
         n = 800
@@ -1402,27 +1426,14 @@ class TestSelectionPenaltySharedBlock:
 
         model = SuperGLM(
             family="poisson",
-            selection_penalty=1e-8,
+            selection_penalty=1e-10,
             features={
                 "x1": Spline(kind="cr", n_knots=6),
                 "x2": Spline(kind="cr", n_knots=6),
             },
-            interactions=[("x1", "x2")],
         )
-        model.fit_reml(X, y, max_reml_iter=30)
-
-        # Every PenaltyComponent's omega_ssp must match R_inv.T @ omega_raw @ R_inv
-        for pc in model._reml_penalties:
-            gm = model._dm.group_matrices[pc.group_index]
-            if not isinstance(gm, SparseSSPGroupMatrix):
-                continue
-            expected = gm.R_inv.T @ pc.omega_raw @ gm.R_inv
-            np.testing.assert_allclose(
-                pc.omega_ssp,
-                expected,
-                atol=1e-10,
-                err_msg=f"Stale omega_ssp on {pc.name}",
-            )
+        with pytest.raises(ValueError, match="selection_penalty=0"):
+            model.fit_reml(X, y, max_reml_iter=30)
 
     @pytest.mark.slow
     def test_tensor_summary_reports_fitted_lambda(self):

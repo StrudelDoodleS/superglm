@@ -13,16 +13,177 @@ References
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from numpy.typing import NDArray
 
 from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
+    DiscretizedTensorGroupMatrix,
     GroupMatrix,
     SparseSSPGroupMatrix,
 )
 from superglm.reml.result import PenaltyCache
 from superglm.types import GroupSlice, PenaltyComponent
+
+
+@dataclass(frozen=True)
+class TensorPairLogdetSummary:
+    """Static spectral ingredients for a 2-penalty discrete tensor block."""
+
+    group_name: str
+    tensor_id: int
+    lambda_names: tuple[str, str]
+    eigvals_left: NDArray
+    eigvals_right: NDArray
+
+
+@dataclass(frozen=True)
+class TensorPairLogdetEvaluation:
+    """Closed-form log|S|_+ summary for one tensor lambda pair."""
+
+    group_name: str
+    tensor_id: int
+    lambda_names: tuple[str, str]
+    logdet_s_plus: float
+    rank: float
+    gradient: dict[str, float]
+    hessian: dict[tuple[str, str], float]
+
+
+def _extract_tensor_marginal_eigvals(
+    omega: NDArray,
+    p1: int,
+    p2: int,
+    *,
+    tol: float = 1e-10,
+) -> tuple[str | None, NDArray | None]:
+    """Recover marginal eigenvalues from a tensor penalty component if possible."""
+    q = p1 * p2
+    if omega.shape != (q, q):
+        return None, None
+
+    norm = max(float(np.linalg.norm(omega)), 1e-300)
+    omega4 = omega.reshape(p1, p2, p1, p2)
+
+    left = 0.5 * (omega4[:, 0, :, 0] + omega4[:, 0, :, 0].T)
+    right = 0.5 * (omega4[0, :, 0, :] + omega4[0, :, 0, :].T)
+    left_err = float(np.linalg.norm(np.kron(left, np.eye(p2)) - omega) / norm)
+    right_err = float(np.linalg.norm(np.kron(np.eye(p1), right) - omega) / norm)
+
+    if left_err <= tol and left_err <= right_err:
+        return "left", np.clip(np.linalg.eigvalsh(left), 0.0, None)
+    if right_err <= tol and right_err <= left_err:
+        return "right", np.clip(np.linalg.eigvalsh(right), 0.0, None)
+    return None, None
+
+
+def build_tensor_pair_logdet_summaries(
+    group_matrices: list[GroupMatrix],
+    penalties: list[PenaltyComponent],
+) -> dict[str, TensorPairLogdetSummary]:
+    """Build closed-form tensor summaries for eligible shared tensor penalty pairs."""
+    summaries: dict[str, TensorPairLogdetSummary] = {}
+    for group_name, indices in _group_penalties(penalties).items():
+        if len(indices) != 2:
+            continue
+        pcs = [penalties[i] for i in indices]
+        group_index = pcs[0].group_index
+        if any(pc.group_index != group_index for pc in pcs[1:]):
+            continue
+        if any(pc.group_sl != pcs[0].group_sl for pc in pcs[1:]):
+            continue
+
+        gm = group_matrices[group_index]
+        if not isinstance(gm, DiscretizedTensorGroupMatrix):
+            continue
+        tensor_id = getattr(gm, "tensor_id", None)
+        if tensor_id is None:
+            continue
+
+        p1 = int(gm.B1_unique_t.shape[1])
+        p2 = int(gm.B2_unique_t.shape[1])
+        extracted: dict[str, tuple[str, NDArray]] = {}
+        for pc in pcs:
+            omega = pc.omega_ssp
+            if omega is None:
+                continue
+            side, eigvals = _extract_tensor_marginal_eigvals(omega, p1, p2)
+            if side is None or eigvals is None:
+                extracted.clear()
+                break
+            extracted[side] = (pc.name, eigvals)
+
+        if set(extracted) != {"left", "right"}:
+            continue
+
+        left_name, left_eigvals = extracted["left"]
+        right_name, right_eigvals = extracted["right"]
+        summaries[group_name] = TensorPairLogdetSummary(
+            group_name=group_name,
+            tensor_id=int(tensor_id),
+            lambda_names=(left_name, right_name),
+            eigvals_left=left_eigvals,
+            eigvals_right=right_eigvals,
+        )
+    return summaries
+
+
+def evaluate_tensor_pair_logdet_summaries(
+    summaries: dict[str, TensorPairLogdetSummary],
+    lambdas: dict[str, float],
+) -> dict[str, TensorPairLogdetEvaluation]:
+    """Evaluate cached tensor summaries for one lambda dictionary."""
+    evaluations: dict[str, TensorPairLogdetEvaluation] = {}
+    eps_thresh = np.finfo(float).eps ** (2 / 3)
+    for group_name, summary in summaries.items():
+        left_name, right_name = summary.lambda_names
+        lam_left = float(lambdas.get(left_name, 1.0))
+        lam_right = float(lambdas.get(right_name, 1.0))
+        left_term = lam_left * summary.eigvals_left[:, None]
+        right_term = lam_right * summary.eigvals_right[None, :]
+        x = left_term + right_term
+        thresh = eps_thresh * max(float(np.max(x)), 1e-12)
+        pos = x > thresh
+        if np.any(pos):
+            left_full = np.broadcast_to(left_term, x.shape)[pos]
+            right_full = np.broadcast_to(right_term, x.shape)[pos]
+            x_pos = x[pos]
+            cross = float(np.sum((left_full * right_full) / np.maximum(x_pos**2, 1e-300)))
+            logdet = float(np.sum(np.log(np.maximum(x_pos, 1e-300))))
+            grad = {
+                left_name: float(np.sum(left_full / x_pos)),
+                right_name: float(np.sum(right_full / x_pos)),
+            }
+            hess = {
+                (left_name, left_name): cross,
+                (right_name, right_name): cross,
+                (left_name, right_name): -cross,
+                (right_name, left_name): -cross,
+            }
+            rank = float(np.sum(pos))
+        else:
+            logdet = 0.0
+            grad = {left_name: 0.0, right_name: 0.0}
+            hess = {
+                (left_name, left_name): 0.0,
+                (right_name, right_name): 0.0,
+                (left_name, right_name): 0.0,
+                (right_name, left_name): 0.0,
+            }
+            rank = 0.0
+
+        evaluations[group_name] = TensorPairLogdetEvaluation(
+            group_name=group_name,
+            tensor_id=summary.tensor_id,
+            lambda_names=summary.lambda_names,
+            logdet_s_plus=logdet,
+            rank=rank,
+            gradient=grad,
+            hessian=hess,
+        )
+    return evaluations
 
 
 def build_penalty_matrix(
@@ -297,7 +458,10 @@ def cached_logdet_s_plus(
     return total
 
 
-def compute_total_penalty_rank(penalties: list[PenaltyComponent]) -> float:
+def compute_total_penalty_rank(
+    penalties: list[PenaltyComponent],
+    tensor_pair_evaluations: dict[str, TensorPairLogdetEvaluation] | None = None,
+) -> float:
     """Compute total penalty rank, correctly handling shared-block groups.
 
     For single-component groups, uses the component rank.
@@ -309,6 +473,8 @@ def compute_total_penalty_rank(penalties: list[PenaltyComponent]) -> float:
     for group_name, indices in _group_penalties(penalties).items():
         if len(indices) == 1:
             total += penalties[indices[0]].rank
+        elif tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
+            total += tensor_pair_evaluations[group_name].rank
         else:
             omega_sum = sum(penalties[i].omega_ssp for i in indices)
             eigvals = np.linalg.eigvalsh(omega_sum)
@@ -328,6 +494,7 @@ def _group_penalties(penalties: list[PenaltyComponent]) -> dict[str, list[int]]:
 def compute_logdet_s_plus(
     lambdas: dict[str, float],
     penalties: list[PenaltyComponent],
+    tensor_pair_evaluations: dict[str, TensorPairLogdetEvaluation] | None = None,
 ) -> float:
     """Compute log|S|₊ correctly for both single and multi-penalty groups.
 
@@ -345,6 +512,8 @@ def compute_logdet_s_plus(
             lam = lambdas.get(pc.name, 1.0)
             if lam > 0 and pc.rank > 0:
                 total += pc.rank * np.log(lam) + pc.log_det_omega_plus
+        elif tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
+            total += tensor_pair_evaluations[group_name].logdet_s_plus
         else:
             comp_omegas = [penalties[i].omega_ssp for i in indices]
             comp_lambdas = np.array([lambdas.get(penalties[i].name, 1.0) for i in indices])
@@ -356,6 +525,7 @@ def compute_logdet_s_plus(
 def compute_logdet_s_derivatives(
     lambdas: dict[str, float],
     penalties: list[PenaltyComponent],
+    tensor_pair_evaluations: dict[str, TensorPairLogdetEvaluation] | None = None,
 ) -> tuple[dict[str, float], dict[tuple[str, str], float]]:
     """Compute ∂log|S|₊/∂ρ_j and ∂²log|S|₊/(∂ρ_i ∂ρ_j) for multi-penalty groups.
 
@@ -381,6 +551,10 @@ def compute_logdet_s_derivatives(
             r_dict[pc.name] = pc.rank
             # Second derivative of log|λΩ|₊ = r·log(λ) + const w.r.t. ρ is 0.
             hess_dict[(pc.name, pc.name)] = 0.0
+        elif tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
+            eval_result = tensor_pair_evaluations[group_name]
+            r_dict.update(eval_result.gradient)
+            hess_dict.update(eval_result.hessian)
         else:
             comp_omegas = [penalties[i].omega_ssp for i in indices]
             comp_lambdas = np.array([lambdas.get(penalties[i].name, 1.0) for i in indices])
