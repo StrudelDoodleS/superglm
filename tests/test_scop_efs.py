@@ -1723,7 +1723,7 @@ class TestSCOPEFSRegression:
 
     @pytest.mark.slow
     def test_efs_only_model_unchanged(self):
-        """EFS-only model (selection_penalty > 0, no monotone) unaffected by Phase 5a."""
+        """fit_reml() rejects selection_penalty > 0 even without monotone terms."""
         rng = np.random.default_rng(42)
         n = 500
         x1 = rng.uniform(0, 1, n)
@@ -1736,10 +1736,8 @@ class TestSCOPEFSRegression:
             selection_penalty=0.01,
             features={"x1": PSpline(n_knots=8), "x2": PSpline(n_knots=8)},
         )
-        model.fit_reml(df[["x1", "x2"]], y)
-
-        assert model._result.converged
-        assert model._reml_lambdas is not None
+        with pytest.raises(ValueError, match="selection_penalty=0"):
+            model.fit_reml(df[["x1", "x2"]], y)
 
     @pytest.mark.slow
     def test_discrete_scop_auto_lambda(self):

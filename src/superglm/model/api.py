@@ -346,14 +346,11 @@ class SuperGLM:
     ) -> SuperGLM:
         """Fit with REML estimation of per-term smoothing parameters.
 
-        When ``selection_penalty=0``, the exact/direct path optimizes a Laplace
-        approximate REML objective over log-lambdas. When group selection is
-        also active, REML falls back to the existing Wood (2011) fixed-point
-        outer loop around PIRLS.
-
-        REML coexists with group lasso: REML controls within-group
-        smoothness (per-term lambda_j), group lasso controls between-group
-        selection (lambda1). They are orthogonal.
+        ``fit_reml()`` is the smoothness-selection path and requires
+        ``selection_penalty=0``. It optimizes a Laplace approximate REML
+        objective over per-term smoothing parameters. If you want sparse/group
+        selection, use ``fit()`` / ``fit_path()`` instead. If you want REML to
+        shrink spline null spaces, use ``select=True`` on the spline terms.
 
         Parameters
         ----------

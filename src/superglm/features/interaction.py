@@ -791,6 +791,8 @@ class TensorInteraction:
         self, omega: NDArray, S1: NDArray, S2: NDArray
     ) -> GroupInfo | list[GroupInfo]:
         n_cols = self._p1 * self._p2
+        omega_1 = np.kron(S1, np.eye(self._p2))
+        omega_2 = np.kron(np.eye(self._p1), S2)
         if self._decompose:
             eigvals, eigvecs = np.linalg.eigh(omega)
             tol = 1e-8 * max(float(np.max(eigvals)), 1e-12)
@@ -802,13 +804,18 @@ class TensorInteraction:
                 )
             U_null = eigvecs[:, null_mask]
             U_range = eigvecs[:, ~null_mask]
-            omega_range = np.diag(eigvals[~null_mask])
+            omega_1_range = U_range.T @ omega_1 @ U_range
+            omega_2_range = U_range.T @ omega_2 @ U_range
+            omega_range = 0.5 * (
+                (omega_1_range + omega_2_range) + (omega_1_range + omega_2_range).T
+            )
             return [
                 GroupInfo(
                     columns=None,
                     n_cols=1,
-                    penalty_matrix=np.eye(1),
+                    penalty_matrix=None,
                     reparametrize=False,
+                    penalized=False,
                     subgroup_name="bilinear",
                     projection=U_null,
                 ),
@@ -816,22 +823,23 @@ class TensorInteraction:
                     columns=None,
                     n_cols=n_cols - 1,
                     penalty_matrix=omega_range,
-                    reparametrize=True,
+                    reparametrize=False,
                     subgroup_name="wiggly",
                     projection=U_range,
+                    penalty_components=[
+                        (f"margin_{self.feat1_name}", omega_1_range),
+                        (f"margin_{self.feat2_name}", omega_2_range),
+                    ],
                 ),
             ]
 
         # Non-decompose: emit one penalty component per marginal,
         # matching mgcv te()/ti() single-penalty marginal contract.
-        omega_1 = np.kron(S1, np.eye(self._p2))
-        omega_2 = np.kron(np.eye(self._p1), S2)
-
         return GroupInfo(
             columns=None,
             n_cols=n_cols,
             penalty_matrix=omega,
-            reparametrize=True,
+            reparametrize=False,
             penalty_components=[
                 (f"margin_{self.feat1_name}", omega_1),
                 (f"margin_{self.feat2_name}", omega_2),
