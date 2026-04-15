@@ -544,6 +544,13 @@ def fit_reml(
     if model.penalty.lambda1 is None:
         model.penalty.lambda1 = 0.0
 
+    if model.penalty.lambda1 > 0 and model_has_lambda1_targets(model):
+        raise ValueError(
+            "fit_reml() requires selection_penalty=0. "
+            "Use fit() / fit_path() for sparse selection, or use select=True on spline terms "
+            "when you want REML-managed shrinkage."
+        )
+
     reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)
     _has_monotone, _has_qp_monotone, _has_scop_monotone = monotone_flags(model._groups)
 

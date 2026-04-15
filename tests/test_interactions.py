@@ -980,6 +980,41 @@ class TestTensorInteractionBuild:
         assert infos[0].projection is not None
         assert infos[1].projection is not None
 
+    def test_tensor_interaction_does_not_use_ssp_reparametrization(self):
+        s1 = Spline(n_knots=5)
+        s2 = Spline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b", n_knots=(5, 5))
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+
+        assert info.reparametrize is False
+
+    def test_decomposed_tensor_bilinear_group_is_unpenalized(self):
+        s1 = Spline(n_knots=5)
+        s2 = Spline(n_knots=5)
+        x1 = np.linspace(0, 100, 300)
+        x2 = np.linspace(0, 50, 300)
+        s1.build(x1)
+        s2.build(x2)
+
+        ti = TensorInteraction("a", "b", n_knots=(5, 5), decompose=True)
+        bilinear, wiggly = ti.build(x1, x2, {"a": s1, "b": s2})
+
+        assert bilinear.subgroup_name == "bilinear"
+        assert bilinear.penalized is False
+        assert bilinear.penalty_matrix is None
+        assert wiggly.subgroup_name == "wiggly"
+        assert wiggly.reparametrize is False
+        assert wiggly.penalty_components is not None
+        assert [suffix for suffix, _ in wiggly.penalty_components] == [
+            "margin_a",
+            "margin_b",
+        ]
+
     def test_reconstruct_2d(self):
         s1 = Spline(n_knots=5)
         s2 = Spline(n_knots=5)
@@ -1061,8 +1096,9 @@ class TestTensorInteractionModelSpecifics:
         model.fit_reml(X, y, sample_weight=sample_weight, max_reml_iter=3)
         names = [g.name for g in model._groups if g.feature_name == "age:bm"]
         assert names == ["age:bm:bilinear", "age:bm:wiggly"]
-        assert "age:bm:bilinear" in model._reml_lambdas
-        assert "age:bm:wiggly" in model._reml_lambdas
+        assert "age:bm:bilinear" not in model._reml_lambdas
+        assert "age:bm:wiggly:margin_age" in model._reml_lambdas
+        assert "age:bm:wiggly:margin_bm" in model._reml_lambdas
 
 
 # ── Tensor marginal parent geometry tests ──────────────────────

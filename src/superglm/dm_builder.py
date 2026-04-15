@@ -438,13 +438,30 @@ def _process_info(
                 bin_idx,
                 tensor_id=tensor_id,
             )
+            if info.penalty_matrix is not None:
+                gm.omega = info.penalty_matrix
+            if info.penalty_components is not None:
+                gm.omega_components = info.penalty_components
+                gm.component_types = info.component_types
+                if info.lambda_policies is not None:
+                    gm.lambda_policies = info.lambda_policies
         elif use_discrete and info.scop_reparameterization is not None and bin_idx is not None:
             # SCOP discrete: columns holds the bin-level centered design
             gm = DiscretizedSCOPGroupMatrix(info.columns, bin_idx)
         elif info.cat_codes is not None:
             gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
         elif sp.issparse(info.columns):
-            gm = SparseGroupMatrix(info.columns)
+            if info.penalty_matrix is not None or info.penalty_components is not None:
+                gm = SparseSSPGroupMatrix(info.columns, np.eye(info.n_cols, dtype=np.float64))
+                if info.penalty_matrix is not None:
+                    gm.omega = info.penalty_matrix
+                if info.penalty_components is not None:
+                    gm.omega_components = info.penalty_components
+                    gm.component_types = info.component_types
+                    if info.lambda_policies is not None:
+                        gm.lambda_policies = info.lambda_policies
+            else:
+                gm = SparseGroupMatrix(info.columns)
         else:
             gm = DenseGroupMatrix(info.columns)
 

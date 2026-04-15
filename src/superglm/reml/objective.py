@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+from superglm.distributions import _VARIANCE_FLOOR, Poisson, clip_mu
 from superglm.group_matrix import (
     DesignMatrix,
     _block_xtwx,
@@ -43,6 +43,7 @@ def reml_laml_objective(
     S_override: NDArray | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
     scop_states: dict[int, dict] | None = None,
+    tensor_pair_evaluations: dict | None = None,
 ) -> float:
     """Laplace REML/LAML objective up to additive constants.
 
@@ -60,9 +61,10 @@ def reml_laml_objective(
     Handles both known-scale families (Poisson, NB2 where phi=1) and
     estimated-scale families (Gamma, Tweedie) via phi-profiled REML.
     """
-    eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
-    mu = clip_mu(link.inverse(eta), distribution)
+    mu = None
     if XtWX is None:
+        eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
+        mu = clip_mu(link.inverse(eta), distribution)
         V = distribution.variance(mu)
         dmu_deta = link.deriv_inverse(eta)
         W = sample_weight * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
@@ -84,7 +86,11 @@ def reml_laml_objective(
 
     # log|S|_+ -- use multi-penalty-aware path when reml_penalties available
     if reml_penalties is not None:
-        logdet_s = compute_logdet_s_plus(lambdas, reml_penalties)
+        logdet_s = compute_logdet_s_plus(
+            lambdas,
+            reml_penalties,
+            tensor_pair_evaluations=tensor_pair_evaluations,
+        )
     elif penalty_caches is not None:
         logdet_s = cached_logdet_s_plus(lambdas, penalty_caches)
     else:
@@ -116,7 +122,10 @@ def reml_laml_objective(
     if not scale_known:
         n = len(y)
         if reml_penalties is not None:
-            M_p = compute_total_penalty_rank(reml_penalties)
+            M_p = compute_total_penalty_rank(
+                reml_penalties,
+                tensor_pair_evaluations=tensor_pair_evaluations,
+            )
         elif penalty_caches is not None:
             M_p = sum(c.rank for c in penalty_caches.values())
         else:
@@ -125,5 +134,12 @@ def reml_laml_objective(
         scale_term = 0.5 * max(n - M_p, 1.0) * np.log(d_plus_pq)
         return float(0.5 * (logdet_m - logdet_s) + scale_term)
 
-    nll = -distribution.log_likelihood(y, mu, sample_weight, phi=1.0)
+    if isinstance(distribution, Poisson) and XtWX is not None:
+        # Up to additive constants, Poisson negative log-likelihood is deviance / 2.
+        nll = 0.5 * result.deviance
+    else:
+        if mu is None:
+            eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
+            mu = clip_mu(link.inverse(eta), distribution)
+        nll = -distribution.log_likelihood(y, mu, sample_weight, phi=1.0)
     return float(nll + 0.5 * (penalty_quad + logdet_m - logdet_s))
