@@ -9,7 +9,7 @@ All functions accept raw numpy arrays and are usable with any model framework.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -73,15 +73,16 @@ class LorenzCurveResult:
         Gini coefficient for perfect-foresight ordering.
     gini_ratio : float
         Normalised Gini: ``gini_model / gini_perfect``.
-    figure : matplotlib.figure.Figure or None
-        The generated figure, or ``None`` if an external ``ax`` was provided.
+    figure : object or None
+        The generated matplotlib or Plotly figure, or ``None`` if an external
+        matplotlib ``ax`` was provided.
     """
 
     curve: pd.DataFrame
     gini_model: float
     gini_perfect: float
     gini_ratio: float
-    figure: Figure | None
+    figure: Any | None
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,29 @@ def _gini(cum_x: NDArray, cum_y: NDArray) -> float:
     """
     auc = float(np.trapezoid(cum_y, cum_x))
     return 1.0 - 2.0 * auc
+
+
+def _lorenz_cumulative_by_score(
+    scores: NDArray,
+    exposures: NDArray,
+    losses: NDArray,
+    *,
+    total_exp: float,
+    total_loss: float,
+) -> tuple[NDArray, NDArray]:
+    """Lorenz cumulative shares after collapsing tied scores into one block."""
+    order = np.argsort(scores, kind="stable")
+    scores_sorted = scores[order]
+    exp_sorted = exposures[order]
+    loss_sorted = losses[order]
+
+    _, block_starts = np.unique(scores_sorted, return_index=True)
+    exp_blocks = np.add.reduceat(exp_sorted, block_starts)
+    loss_blocks = np.add.reduceat(loss_sorted, block_starts)
+
+    cum_exp = np.cumsum(exp_blocks) / total_exp
+    cum_loss = np.cumsum(loss_blocks) / total_loss
+    return cum_exp, cum_loss
 
 
 def _make_ax(ax: Axes | None):
@@ -415,6 +439,7 @@ def lorenz_curve(
     sample_weight=None,
     exposure=None,
     *,
+    engine: str = "matplotlib",
     ax: Axes | None = None,
 ) -> LorenzCurveResult:
     """Lorenz curve with Gini coefficient computation.
@@ -430,8 +455,11 @@ def lorenz_curve(
     exposure : array-like or None
         Exposure measure. When provided, the Lorenz curve uses
         cumulative exposure share on the x-axis.
+    engine : {"matplotlib", "plotly"}
+        Plotting backend. ``"plotly"`` requires the optional plotly dependency.
     ax : matplotlib Axes or None
-        If provided, plot onto this axes.
+        If provided, plot onto this axes. Only valid with
+        ``engine="matplotlib"``.
 
     Returns
     -------
@@ -439,6 +467,11 @@ def lorenz_curve(
         Contains ``curve`` DataFrame, ``gini_model``, ``gini_perfect``,
         ``gini_ratio``, and an optional ``figure``.
     """
+    if engine not in {"matplotlib", "plotly"}:
+        raise ValueError(f"engine={engine!r} is not valid, expected 'matplotlib' or 'plotly'.")
+    if engine == "plotly" and ax is not None:
+        raise ValueError("ax= is only supported with engine='matplotlib'.")
+
     y_obs = _ensure_array(y_obs)
     y_pred = _ensure_array(y_pred)
     n = len(y_obs)
@@ -461,25 +494,62 @@ def lorenz_curve(
                 "cum_loss_share_perfect": [0.0, 1.0],
             }
         )
-        ax_plot, fig = _make_ax(ax)
-        ax_plot.plot([0, 1], [0, 1], "k--", linewidth=0.7, label="Random")
-        ax_plot.set_title("Lorenz Curve (degenerate)")
-        ax_plot.legend(fontsize=7)
+        if engine == "plotly":
+            try:
+                import plotly.graph_objects as go
+            except ImportError:
+                raise ImportError(
+                    "plotly is required for engine='plotly'. Install it with: pip install plotly"
+                ) from None
+
+            from superglm.plotting.common import _PLOTLY_TEXT, _apply_plotly_theme
+
+            fig = go.Figure()
+            fig.add_trace(
+                go.Scatter(
+                    x=[0.0, 1.0],
+                    y=[0.0, 1.0],
+                    mode="lines",
+                    name="Random",
+                    line=dict(color=_PLOTLY_TEXT, dash="dash", width=1.2),
+                )
+            )
+            _apply_plotly_theme(
+                fig, hovermode="x unified", height=460, margin=dict(t=72, r=28, b=72, l=72)
+            )
+            fig.update_layout(title="Lorenz Curve (degenerate)")
+            fig.update_xaxes(title_text="Cumulative exposure share", range=[0.0, 1.0])
+            fig.update_yaxes(title_text="Cumulative loss share", range=[0.0, 1.0])
+        else:
+            ax_plot, fig = _make_ax(ax)
+            ax_plot.plot([0, 1], [0, 1], "k--", linewidth=0.7, label="Random")
+            ax_plot.set_title("Lorenz Curve (degenerate)")
+            ax_plot.legend(fontsize=7)
         return LorenzCurveResult(
             curve=curve_df, gini_model=0.0, gini_perfect=0.0, gini_ratio=0.0, figure=fig
         )
 
-    # Order by model predictions (ascending = lowest risk first)
-    order_model = np.argsort(y_pred)
-    cum_exp_model = np.cumsum(exposures[order_model]) / total_exp
-    cum_loss_model = np.cumsum(losses[order_model]) / total_loss
+    # Order by model predictions (ascending = lowest risk first), collapsing
+    # tied predictions into a single block so within-tie row order carries no
+    # fake ranking information.
+    cum_exp_model, cum_loss_model = _lorenz_cumulative_by_score(
+        y_pred,
+        exposures,
+        losses,
+        total_exp=total_exp,
+        total_loss=total_loss,
+    )
 
     # Order by actual loss ratio (ascending = lowest actual risk first)
     # For perfect foresight ordering
     loss_ratio = np.where(exp > 0, y_obs, 0.0)
-    order_perfect = np.argsort(loss_ratio)
-    cum_loss_perfect = np.cumsum(losses[order_perfect]) / total_loss
-    cum_exp_perfect = np.cumsum(exposures[order_perfect]) / total_exp
+    cum_exp_perfect, cum_loss_perfect = _lorenz_cumulative_by_score(
+        loss_ratio,
+        exposures,
+        losses,
+        total_exp=total_exp,
+        total_loss=total_loss,
+    )
 
     # Random ordering = diagonal
     # Prepend (0, 0)
@@ -505,14 +575,70 @@ def lorenz_curve(
     )
 
     # Plot
-    ax_plot, fig = _make_ax(ax)
-    ax_plot.plot([0, 1], [0, 1], "k--", linewidth=0.7, label="Random")
-    ax_plot.plot(cum_exp_m, cum_loss_m, "-", color="C0", linewidth=1.2, label="Model")
-    ax_plot.plot(cum_exp_p, cum_loss_p, "-", color="C2", linewidth=1.0, alpha=0.7, label="Perfect")
-    ax_plot.set_xlabel("Cumulative exposure share")
-    ax_plot.set_ylabel("Cumulative loss share")
-    ax_plot.set_title(f"Lorenz Curve (Gini ratio = {gini_ratio:.3f})")
-    ax_plot.legend(fontsize=8)
+    if engine == "plotly":
+        try:
+            import plotly.graph_objects as go
+        except ImportError:
+            raise ImportError(
+                "plotly is required for engine='plotly'. Install it with: pip install plotly"
+            ) from None
+
+        from superglm.plotting.common import (
+            _PLOTLY_LINE_COLOR,
+            _PLOTLY_SIM_FILL,
+            _PLOTLY_TEXT,
+            _apply_plotly_theme,
+        )
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=[0.0, 1.0],
+                y=[0.0, 1.0],
+                mode="lines",
+                name="Random",
+                line=dict(color=_PLOTLY_TEXT, dash="dash", width=1.2),
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=cum_exp_m,
+                y=cum_loss_m,
+                mode="lines",
+                name="Model",
+                line=dict(color=_PLOTLY_LINE_COLOR, width=2.4),
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=cum_exp_p,
+                y=cum_loss_p,
+                mode="lines",
+                name="Perfect",
+                line=dict(color=_PLOTLY_SIM_FILL, width=2.0),
+                opacity=0.85,
+            )
+        )
+        _apply_plotly_theme(
+            fig,
+            hovermode="x unified",
+            height=460,
+            margin=dict(t=72, r=28, b=72, l=72),
+        )
+        fig.update_layout(title=f"Lorenz Curve (Gini ratio = {gini_ratio:.3f})")
+        fig.update_xaxes(title_text="Cumulative exposure share", range=[0.0, 1.0])
+        fig.update_yaxes(title_text="Cumulative loss share", range=[0.0, 1.0])
+    else:
+        ax_plot, fig = _make_ax(ax)
+        ax_plot.plot([0, 1], [0, 1], "k--", linewidth=0.7, label="Random")
+        ax_plot.plot(cum_exp_m, cum_loss_m, "-", color="C0", linewidth=1.2, label="Model")
+        ax_plot.plot(
+            cum_exp_p, cum_loss_p, "-", color="C2", linewidth=1.0, alpha=0.7, label="Perfect"
+        )
+        ax_plot.set_xlabel("Cumulative exposure share")
+        ax_plot.set_ylabel("Cumulative loss share")
+        ax_plot.set_title(f"Lorenz Curve (Gini ratio = {gini_ratio:.3f})")
+        ax_plot.legend(fontsize=8)
 
     return LorenzCurveResult(
         curve=curve_df,
