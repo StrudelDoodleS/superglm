@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 import matplotlib
 import numpy as np
 import pytest
@@ -19,6 +21,8 @@ from superglm.validation import (
     lorenz_curve,
     loss_ratio_chart,
 )
+
+PLOTLY_AVAILABLE = importlib.util.find_spec("plotly") is not None
 
 
 @pytest.fixture(autouse=True)
@@ -203,6 +207,33 @@ class TestLorenzCurveGini:
         # Gini ratio should be near 0
         assert abs(result.gini_ratio) < 0.1
 
+    def test_constant_predictions_give_exact_zero_gini(self):
+        """Constant predictions should produce no ranking signal."""
+        y = np.array([5.0, 1.0, 3.0, 2.0, 4.0])
+        y_pred = np.ones_like(y)
+        exposure = np.array([1.0, 2.0, 1.5, 0.5, 3.0])
+        result = lorenz_curve(y, y_pred, exposure=exposure)
+        assert result.gini_model == pytest.approx(0.0, abs=1e-12)
+        assert result.gini_ratio == pytest.approx(0.0, abs=1e-12)
+
+    def test_tied_predictions_are_permutation_invariant(self):
+        """Rows with identical scores should not depend on input order."""
+        y = np.array([10.0, 1.0, 8.0, 2.0, 6.0, 3.0])
+        y_pred = np.array([0.2, 0.2, 0.5, 0.5, 0.9, 0.9])
+        exposure = np.array([1.0, 2.0, 1.5, 0.5, 1.0, 3.0])
+
+        result_a = lorenz_curve(y, y_pred, exposure=exposure)
+        perm = np.array([1, 0, 3, 2, 5, 4])
+        result_b = lorenz_curve(y[perm], y_pred[perm], exposure=exposure[perm])
+
+        assert result_a.gini_model == pytest.approx(result_b.gini_model, abs=1e-12)
+        assert result_a.gini_ratio == pytest.approx(result_b.gini_ratio, abs=1e-12)
+        np.testing.assert_allclose(
+            result_a.curve["cum_loss_share_model"].values,
+            result_b.curve["cum_loss_share_model"].values,
+            atol=1e-12,
+        )
+
     def test_gini_bounds(self):
         rng = np.random.default_rng(42)
         n = 500
@@ -250,6 +281,24 @@ class TestLorenzCurveGini:
         assert result.gini_model >= -0.01
         assert result.gini_perfect >= result.gini_model - 0.01
         assert 0.0 <= result.gini_ratio <= 1.01
+
+    @pytest.mark.skipif(not PLOTLY_AVAILABLE, reason="plotly not installed")
+    def test_plotly_engine_returns_plotly_figure(self):
+        import plotly.graph_objects as go
+
+        rng = np.random.default_rng(42)
+        n = 300
+        y = rng.exponential(2.0, n)
+        y_pred = y + rng.normal(0, 0.5, n)
+        result = lorenz_curve(y, y_pred, engine="plotly")
+        assert isinstance(result.figure, go.Figure)
+        assert [trace.name for trace in result.figure.data] == ["Random", "Model", "Perfect"]
+
+    @pytest.mark.skipif(not PLOTLY_AVAILABLE, reason="plotly not installed")
+    def test_plotly_engine_rejects_matplotlib_ax(self):
+        fig, ax = plt.subplots()
+        with pytest.raises(ValueError, match="engine='matplotlib'"):
+            lorenz_curve([1, 2, 3], [1, 2, 3], engine="plotly", ax=ax)
 
     def test_lorenz_endpoints(self):
         rng = np.random.default_rng(42)
