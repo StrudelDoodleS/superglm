@@ -1150,12 +1150,12 @@ class TestMultiOrderSplinePenalty:
     """Verify Spline(m=...) produces correct penalties and REML integration."""
 
     def test_single_m1_difference_penalty(self):
-        """Spline(kind='bs', m=1) produces 1st-difference penalty."""
-        from superglm.features.spline import BasisSpline
+        """PSpline(m=1) produces 1st-difference penalty."""
+        from superglm.features.spline import PSpline
 
         rng = np.random.default_rng(42)
         x = rng.uniform(0, 1, 200)
-        spec = BasisSpline(n_knots=6, m=1)
+        spec = PSpline(n_knots=6, m=1)
         spec._place_knots(x)
         omega = spec._build_penalty()
         D1 = np.diff(np.eye(spec._n_basis), n=1, axis=0)
@@ -1163,12 +1163,12 @@ class TestMultiOrderSplinePenalty:
         np.testing.assert_allclose(omega, expected, atol=1e-12)
 
     def test_single_m3_difference_penalty(self):
-        """Spline(kind='bs', m=3) produces 3rd-difference penalty."""
-        from superglm.features.spline import BasisSpline
+        """PSpline(m=3) produces 3rd-difference penalty."""
+        from superglm.features.spline import PSpline
 
         rng = np.random.default_rng(42)
         x = rng.uniform(0, 1, 200)
-        spec = BasisSpline(n_knots=6, m=3)
+        spec = PSpline(n_knots=6, m=3)
         spec._place_knots(x)
         omega = spec._build_penalty()
         D3 = np.diff(np.eye(spec._n_basis), n=3, axis=0)
@@ -1192,14 +1192,14 @@ class TestMultiOrderSplinePenalty:
         assert n_null == 1  # constant function has zero first derivative
 
     def test_default_m2_unchanged(self):
-        """Default Spline(m=2) produces identical penalty to before."""
+        """Default PSpline(m=2) produces identical penalty to before."""
         from superglm import Spline
 
         rng = np.random.default_rng(42)
         x = rng.uniform(0, 1, 200)
 
-        spec_default = Spline(kind="bs", n_knots=6)
-        spec_explicit = Spline(kind="bs", n_knots=6, m=2)
+        spec_default = Spline(kind="ps", n_knots=6)
+        spec_explicit = Spline(kind="ps", n_knots=6, m=2)
 
         info_d = spec_default.build(x)
         info_e = spec_explicit.build(x)
@@ -1227,7 +1227,7 @@ class TestMultiOrderSplinePenalty:
         np.testing.assert_allclose(comp_sum, info.penalty_matrix, atol=1e-12)
 
     def test_multi_m_bs_emits_components(self):
-        """Spline(kind='bs', m=(2,3)) emits penalty_components."""
+        """Spline(kind='bs', m=(2,3)) emits integrated-derivative penalty components."""
         from superglm import Spline
 
         rng = np.random.default_rng(42)
@@ -1262,11 +1262,11 @@ class TestMultiOrderSplinePenalty:
         np.testing.assert_allclose(comp_sum, result.penalty_matrix, atol=1e-12)
 
     def test_select_plus_multi_m_high_order_raises(self):
-        """select=True + m=(1,2,3) on BS raises (current capability policy)."""
+        """select=True + m=(1,2,3) on PS raises (current capability policy)."""
         from superglm import Spline
 
         with pytest.raises(NotImplementedError, match="not supported for PSpline"):
-            Spline(kind="bs", n_knots=8, m=(1, 2, 3), select=True)
+            Spline(kind="ps", n_knots=8, m=(1, 2, 3), select=True)
 
     @pytest.mark.slow
     def test_select_plus_multi_m_fit_converges(self):

@@ -61,6 +61,7 @@ def Spline(
 ) -> _SplineBase:
     """Create a spline feature spec."""
     from superglm.features.spline import (
+        BSplineSmooth,
         CardinalCRSpline,
         CubicRegressionSpline,
         NaturalSpline,
@@ -68,7 +69,7 @@ def Spline(
     )
 
     kind_map = {
-        "bs": PSpline,
+        "bs": BSplineSmooth,
         "ps": PSpline,
         "ns": NaturalSpline,
         "cr": CubicRegressionSpline,
@@ -89,18 +90,6 @@ def Spline(
         raise NotImplementedError(
             "monotone is not supported for kind='ns'. "
             "Use kind='cr' or kind='ps' with monotone='increasing' or 'decreasing'."
-        )
-
-    if kind == "bs":
-        import warnings
-
-        warnings.warn(
-            "Spline(kind='bs') currently creates a P-spline (discrete-difference "
-            "penalty). Use kind='ps' for this behavior. In a future release, "
-            "kind='bs' will create a proper B-spline smooth with "
-            "integrated-derivative penalty.",
-            FutureWarning,
-            stacklevel=3,
         )
 
     if k is not None:

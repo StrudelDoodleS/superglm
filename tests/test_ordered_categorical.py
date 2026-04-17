@@ -143,14 +143,14 @@ class TestSplineMode:
 
     def test_spline_matches_manual(self, age_band_data):
         """Spline mode should produce the same result as manual Spline on midpoints."""
-        from superglm.features.spline import BasisSpline
+        from superglm.features.spline import PSpline
 
         X, y, sample_weight, midpoints, _ = age_band_data
         x_vals = X["age_band"].values
         x_numeric = np.array([midpoints[v] for v in x_vals])
 
         # Manual spline
-        manual_spline = BasisSpline(n_knots=3, degree=3, penalty="ssp")
+        manual_spline = PSpline(n_knots=3, degree=3, penalty="ssp")
         manual_info = manual_spline.build(x_numeric, sample_weight=sample_weight)
 
         # OrderedCategorical

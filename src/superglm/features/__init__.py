@@ -11,7 +11,6 @@ from superglm.features.interaction import (
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.spline import (
-    BasisSpline,
     BSplineSmooth,
     CubicRegressionSpline,
     NaturalSpline,
@@ -22,7 +21,6 @@ from superglm.features.spline import (
 __all__ = [
     "Spline",
     "PSpline",
-    "BasisSpline",
     "BSplineSmooth",
     "NaturalSpline",
     "CubicRegressionSpline",

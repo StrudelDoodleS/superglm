@@ -6,7 +6,9 @@
 
 ## Spline classes
 
-::: superglm.BasisSpline
+::: superglm.PSpline
+
+::: superglm.BSplineSmooth
 
 ::: superglm.NaturalSpline
 
