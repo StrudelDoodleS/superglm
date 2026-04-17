@@ -1108,7 +1108,7 @@ class TestTensorMarginalParentGeometry:
     """Verify that TensorInteraction consumes parent spline geometry."""
 
     def test_bs_edge_padding_flows_through(self):
-        """BasisSpline parent's open knot vector is used in tensor marginals."""
+        """PSpline parent's open knot vector is used in tensor marginals."""
         s1 = Spline(n_knots=5)
         s2 = Spline(n_knots=5)
         x1 = np.linspace(0, 100, 300)
@@ -1119,7 +1119,7 @@ class TestTensorMarginalParentGeometry:
         ti = TensorInteraction("a", "b", n_knots=(5, 5))
         ti.build(x1, x2, {"a": s1, "b": s2})
 
-        # BasisSpline uses open knot vector with 0.001*range padding
+        # PSpline uses open knot vector with 0.001*range padding
         # The tensor marginal should inherit the same knot vector
         np.testing.assert_array_equal(ti._marginal1.knots, s1._knots)
         np.testing.assert_array_equal(ti._marginal2.knots, s2._knots)
@@ -1179,7 +1179,7 @@ class TestTensorMarginalParentGeometry:
         ti = TensorInteraction("a", "b")
         info = ti.build(x1, x2, {"a": s1, "b": s2})
 
-        # BasisSpline: K_raw=9, centering removes 1 → K_eff=8
+        # PSpline: K_raw=9, centering removes 1 → K_eff=8
         # NaturalSpline: K_raw=9, natural removes 2, centering removes 1 → K_eff=6
         assert ti._marginal1.K_eff == 8
         assert ti._marginal2.K_eff == 6
@@ -1265,8 +1265,8 @@ class TestTensorMarginalParentGeometry:
         ti = TensorInteraction("a", "b")  # n_knots=None
         info = ti.build(x1, x2, {"a": s1, "b": s2})
 
-        # BasisSpline(n_knots=7): K=11, centered=10
-        # BasisSpline(n_knots=4): K=8, centered=7
+        # PSpline(n_knots=7): K=11, centered=10
+        # PSpline(n_knots=4): K=8, centered=7
         assert ti._marginal1.K_eff == 10
         assert ti._marginal2.K_eff == 7
         assert info.n_cols == 10 * 7
@@ -1355,9 +1355,9 @@ class TestTensorMarginalParentGeometry:
         ti.build(x1, x2, {"a": s1, "b": s2})
 
         # Build reference with the correct knot_alpha
-        from superglm.features.spline import BasisSpline
+        from superglm.features.spline import PSpline
 
-        ref = BasisSpline(
+        ref = PSpline(
             n_knots=5,
             knot_strategy="quantile_tempered",
             knot_alpha=0.14,

@@ -12,7 +12,7 @@ import pytest
 
 from superglm import SuperGLM
 from superglm.features.categorical import Categorical
-from superglm.features.spline import BasisSpline, Spline
+from superglm.features.spline import PSpline, Spline
 
 
 def _make_poisson_data(n=2000, seed=42):
@@ -295,7 +295,7 @@ class TestInteractionProjection:
 
     def test_select_stores_interaction_projection(self):
         """select=True stores interaction projection for interaction support."""
-        s = BasisSpline(n_knots=8, select=True)
+        s = PSpline(n_knots=8, select=True)
         x = np.linspace(0, 1, 100)
         s.build(x)
         # BS has no boundary constraints, so _interaction_projection is
