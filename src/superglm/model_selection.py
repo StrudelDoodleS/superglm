@@ -27,9 +27,16 @@ class CrossValidationResult:
         ``fit_time_s``, ``score_time_s``, ``converged``, ``n_iter``,
         ``effective_df``, plus one column per requested metric.
     mean_scores : dict
-        Mean of each metric across folds.
+        Equal-weight mean of each metric across folds.
+    pooled_scores : dict
+        Supported overall pooled metrics, computed as ratio-of-sums rather than
+        mean-of-fold-ratios.
     std_scores : dict
         Standard deviation of each metric across folds.
+    fold_indices : list[tuple[ndarray, ndarray]] or None
+        Per-fold ``(train_idx, test_idx)`` pairs from the CV splitter.
+    curve_similarity : dict or None
+        Fold-by-fold term similarity diagnostics for comparable main effects.
     oof_predictions : ndarray or None
         Out-of-fold predictions (response scale), same length as *y*.
         ``None`` unless ``return_oof=True``.
@@ -39,9 +46,54 @@ class CrossValidationResult:
 
     fold_scores: pd.DataFrame
     mean_scores: dict[str, float]
+    pooled_scores: dict[str, float]
     std_scores: dict[str, float]
+    fold_indices: list[tuple[NDArray, NDArray]] | None = None
+    curve_similarity: dict[str, Any] | None = None
     oof_predictions: NDArray | None = None
     estimators: list | None = None
+
+    def plot_terms_by_fold(
+        self,
+        X: pd.DataFrame,
+        *,
+        sample_weight: NDArray | None = None,
+        terms: str | list[str] | None = None,
+        engine: str = "plotly",
+        **kwargs,
+    ):
+        """Plot fold-specific main effects using the shared comparison engine."""
+        if self.estimators is None:
+            raise RuntimeError("return_estimators=True is required for plot_terms_by_fold().")
+
+        from superglm.plotting.comparison import plot_term_comparison
+
+        models = {
+            f"fold_{fold}": est for fold, est in enumerate(self.estimators) if est is not None
+        }
+        if not models:
+            raise RuntimeError("No fitted fold estimators are available to plot.")
+        support_by_label: dict[str, dict[str, Any]] = {}
+        weight_arr = None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+        for fold, indices in enumerate(self.fold_indices or []):
+            label = f"fold_{fold}"
+            if label not in models:
+                continue
+            train_idx, _test_idx = indices
+            support_by_label[label] = {
+                "X": X.iloc[train_idx],
+                "sample_weight": None if weight_arr is None else weight_arr[train_idx],
+            }
+
+        return plot_term_comparison(
+            models=models,
+            terms=terms,
+            X=X,
+            sample_weight=sample_weight,
+            support_by_label=support_by_label,
+            engine=engine,
+            **kwargs,
+        )
 
 
 # ── Model cloning ────────────────────────────────────────────────
@@ -123,6 +175,24 @@ def _score_gini(model, X_val, y_val, *, sample_weight=None, offset=None):
     return float(gini)
 
 
+def _pooled_deviance_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
+    """Return numerator and denominator for pooled deviance aggregation."""
+    del offset
+    mu = model.predict(X_val)
+    dev = model._distribution.deviance_unit(y_val, mu)
+    w = sample_weight if sample_weight is not None else np.ones(len(y_val))
+    return float(np.sum(w * dev)), float(np.sum(w))
+
+
+def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
+    """Return numerator and denominator for pooled negative log-likelihood."""
+    del offset
+    mu = model.predict(X_val)
+    w = sample_weight if sample_weight is not None else np.ones(len(y_val))
+    ll = model._distribution.log_likelihood(y_val, mu, w, phi=model.result.phi)
+    return float(-ll), float(np.sum(w))
+
+
 _RESERVED_COLUMNS = frozenset(
     {
         "fold",
@@ -140,6 +210,11 @@ _BUILTIN_SCORERS: dict[str, Callable] = {
     "deviance": _score_deviance,
     "nll": _score_nll,
     "gini": _score_gini,
+}
+
+_POOLED_PARTS: dict[str, Callable] = {
+    "deviance": _pooled_deviance_parts,
+    "nll": _pooled_nll_parts,
 }
 
 
@@ -264,12 +339,20 @@ def cross_validate(
 
     # ── Fold loop ─────────────────────────────────────────────────
     fold_records: list[dict[str, Any]] = []
+    fold_indices_list: list[tuple[NDArray, NDArray]] = []
     estimators_list: list | None = [] if return_estimators else None
     oof: NDArray | None = np.full(n, np.nan) if return_oof else None
+    pooled_numerators: dict[str, float] = {
+        name: 0.0 for name in score_names if name in _POOLED_PARTS
+    }
+    pooled_denominators: dict[str, float] = {
+        name: 0.0 for name in score_names if name in _POOLED_PARTS
+    }
 
     for fold_i, (train_idx, test_idx) in enumerate(cv.split(X, y, groups)):
         train_idx = np.asarray(train_idx)
         test_idx = np.asarray(test_idx)
+        fold_indices_list.append((train_idx.copy(), test_idx.copy()))
 
         record: dict[str, Any] = {
             "fold": fold_i,
@@ -318,6 +401,17 @@ def cross_validate(
                         record[k] = v
                 else:
                     record[sname] = float(result)
+                    pooled_fn = _POOLED_PARTS.get(sname)
+                    if pooled_fn is not None:
+                        numerator, denominator = pooled_fn(
+                            est,
+                            X_test,
+                            y_test,
+                            sample_weight=sw_test,
+                            offset=off_test,
+                        )
+                        pooled_numerators[sname] += numerator
+                        pooled_denominators[sname] += denominator
             record["score_time_s"] = time.perf_counter() - t1
 
             # OOF predictions
@@ -355,12 +449,31 @@ def cross_validate(
     all_score_cols = present_score_cols + extra_cols
 
     mean_scores = {c: float(fold_scores[c].mean()) for c in all_score_cols}
+    pooled_scores = {
+        name: pooled_numerators[name] / pooled_denominators[name]
+        for name in pooled_numerators
+        if pooled_denominators[name] > 0.0
+    }
     std_scores = {c: float(fold_scores[c].std(ddof=0)) for c in all_score_cols}
+
+    curve_similarity = None
+    if estimators_list is not None:
+        from superglm.plotting.curve_similarity import build_cv_curve_similarity
+
+        curve_similarity = build_cv_curve_similarity(
+            models=estimators_list,
+            X=X,
+            sample_weight=sample_weight,
+            n_points=200,
+        )
 
     return CrossValidationResult(
         fold_scores=fold_scores,
         mean_scores=mean_scores,
+        pooled_scores=pooled_scores,
         std_scores=std_scores,
+        fold_indices=fold_indices_list,
+        curve_similarity=curve_similarity,
         oof_predictions=oof,
         estimators=estimators_list,
     )

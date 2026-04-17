@@ -4,7 +4,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import CrossValidationResult, GroupLasso, Spline, SuperGLM, cross_validate
+from superglm import (
+    Categorical,
+    CrossValidationResult,
+    GroupLasso,
+    Spline,
+    SuperGLM,
+    cross_validate,
+)
 
 # ── Helpers ───────────────────────────────────────────────────────
 
@@ -76,6 +83,30 @@ def base_model():
         family="poisson",
         penalty=GroupLasso(lambda1=0.0),
         features={"x": Spline(n_knots=5)},
+    )
+
+
+@pytest.fixture
+def categorical_data():
+    """Synthetic Poisson data with one categorical feature."""
+    rng = np.random.default_rng(17)
+    n = 360
+    band = rng.choice(["A", "B", "C"], n, p=[0.4, 0.35, 0.25])
+    effect = {"A": 0.0, "B": 0.25, "C": -0.15}
+    sample_weight = rng.uniform(0.5, 2.0, n)
+    mu = np.exp(0.4 + np.array([effect[b] for b in band]))
+    y = rng.poisson(mu).astype(float)
+    df = pd.DataFrame({"band": band})
+    return df, y, sample_weight
+
+
+@pytest.fixture
+def categorical_model():
+    """Unfitted SuperGLM with one categorical feature."""
+    return SuperGLM(
+        family="poisson",
+        penalty=GroupLasso(lambda1=0.0),
+        features={"band": Categorical(base="first")},
     )
 
 
@@ -376,6 +407,59 @@ class TestScoring:
         )
         assert "deviance" in result.mean_scores
 
+    def test_pooled_scores_match_ratio_of_sums_for_deviance_and_nll(self, poisson_data, base_model):
+        """Pooled ratio metrics aggregate numerator and denominator before dividing."""
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3, shuffle=True, random_state=0),
+            sample_weight=sw,
+            scoring=("deviance", "nll"),
+            return_estimators=True,
+        )
+
+        total_dev = 0.0
+        total_nll = 0.0
+        total_weight = 0.0
+        for est, (_, test_idx) in zip(result.estimators, result.fold_indices, strict=True):
+            X_test = df.iloc[test_idx]
+            y_test = y[test_idx]
+            sw_test = sw[test_idx]
+            mu = est.predict(X_test)
+            total_dev += float(np.sum(sw_test * est._distribution.deviance_unit(y_test, mu)))
+            total_nll += float(
+                -est._distribution.log_likelihood(y_test, mu, sw_test, phi=est.result.phi)
+            )
+            total_weight += float(np.sum(sw_test))
+
+        assert result.pooled_scores["deviance"] == pytest.approx(total_dev / total_weight)
+        assert result.pooled_scores["nll"] == pytest.approx(total_nll / total_weight)
+
+    def test_pooled_scores_can_differ_from_equal_fold_mean(self, poisson_data, base_model):
+        """Mean-of-fold ratios and ratio-of-sums are different quantities."""
+        df, y, _ = poisson_data
+        sw = np.ones_like(y)
+        sw[:50] = 100.0
+
+        class UnevenTwoFold:
+            def split(self, X, y=None, groups=None):
+                yield np.arange(50, len(X)), np.arange(50)
+                yield np.arange(50), np.arange(50, len(X))
+
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=UnevenTwoFold(),
+            sample_weight=sw,
+            scoring=("deviance", "nll"),
+        )
+
+        assert result.mean_scores["deviance"] != pytest.approx(result.pooled_scores["deviance"])
+        assert result.mean_scores["nll"] != pytest.approx(result.pooled_scores["nll"])
+
 
 # ── Return options ────────────────────────────────────────────────
 
@@ -414,6 +498,137 @@ class TestReturnOptions:
             assert isinstance(est, SuperGLM)
             # Each should be fitted
             assert est._result is not None
+
+    def test_return_estimators_stores_fold_indices(self, poisson_data, base_model):
+        """Fold train/test indices are retained for fold-aware tooling."""
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+        assert result.fold_indices is not None
+        assert len(result.fold_indices) == 3
+        train_idx, test_idx = result.fold_indices[0]
+        assert len(train_idx) > 0
+        assert len(test_idx) > 0
+
+    def test_plot_terms_by_fold_uses_labeled_fold_estimators(self, poisson_data, base_model):
+        """The fold wrapper labels traces by fold index."""
+        pytest.importorskip("plotly")
+        import plotly.graph_objects as go
+
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+
+        fig = result.plot_terms_by_fold(
+            df,
+            sample_weight=sw,
+            terms=["x"],
+            engine="plotly",
+            n_points=31,
+        )
+        assert isinstance(fig, go.Figure)
+        names = {t.name for t in fig.data if t.name and t.name.startswith("fold_")}
+        assert names == {"fold_0", "fold_1", "fold_2"}
+
+    def test_plot_terms_by_fold_shows_per_fold_continuous_support(self, poisson_data, base_model):
+        """Continuous fold plots include one support trace per fold in the lower panel."""
+        pytest.importorskip("plotly")
+
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+
+        fig = result.plot_terms_by_fold(
+            df, sample_weight=sw, terms=["x"], engine="plotly", n_points=31
+        )
+        support_traces = [
+            t
+            for t in fig.data
+            if getattr(t, "xaxis", None) == "x2" and t.name == "Exposure density"
+        ]
+        assert len(support_traces) == 3
+
+    def test_plot_terms_by_fold_shows_grouped_fold_exposure_bars(
+        self, categorical_data, categorical_model
+    ):
+        """Categorical fold plots include grouped exposure bars by fold."""
+        pytest.importorskip("plotly")
+
+        df, y, sw = categorical_data
+        result = cross_validate(
+            categorical_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+
+        fig = result.plot_terms_by_fold(
+            df,
+            sample_weight=sw,
+            terms=["band"],
+            engine="plotly",
+            n_points=31,
+        )
+        bar_traces = [
+            t
+            for t in fig.data
+            if getattr(t, "type", None) == "bar" and getattr(t, "xaxis", None) == "x2"
+        ]
+        assert len(bar_traces) == 3
+        assert fig.layout.barmode == "group"
+
+    def test_cross_validate_always_returns_curve_similarity(self, poisson_data, base_model):
+        """Curve similarity is computed automatically when fold estimators exist."""
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+
+        assert result.curve_similarity is not None
+        assert "x" in result.curve_similarity
+        assert set(result.curve_similarity["x"]["pairwise"]) == {"response", "link"}
+
+    def test_curve_similarity_contains_pairwise_metric_frames(self, poisson_data, base_model):
+        """Stored similarity includes pairwise metric matrices on response scale."""
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+
+        response = result.curve_similarity["x"]["pairwise"]["response"]
+        assert set(response) == {"rmse", "max_abs_diff", "correlation"}
+        assert response["rmse"].shape == (3, 3)
+        np.testing.assert_allclose(np.diag(response["rmse"]), 0.0)
 
 
 # ── Error handling ────────────────────────────────────────────────
