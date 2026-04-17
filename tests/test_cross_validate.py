@@ -376,6 +376,59 @@ class TestScoring:
         )
         assert "deviance" in result.mean_scores
 
+    def test_pooled_scores_match_ratio_of_sums_for_deviance_and_nll(self, poisson_data, base_model):
+        """Pooled ratio metrics aggregate numerator and denominator before dividing."""
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3, shuffle=True, random_state=0),
+            sample_weight=sw,
+            scoring=("deviance", "nll"),
+            return_estimators=True,
+        )
+
+        total_dev = 0.0
+        total_nll = 0.0
+        total_weight = 0.0
+        for est, (_, test_idx) in zip(result.estimators, result.fold_indices, strict=True):
+            X_test = df.iloc[test_idx]
+            y_test = y[test_idx]
+            sw_test = sw[test_idx]
+            mu = est.predict(X_test)
+            total_dev += float(np.sum(sw_test * est._distribution.deviance_unit(y_test, mu)))
+            total_nll += float(
+                -est._distribution.log_likelihood(y_test, mu, sw_test, phi=est.result.phi)
+            )
+            total_weight += float(np.sum(sw_test))
+
+        assert result.pooled_scores["deviance"] == pytest.approx(total_dev / total_weight)
+        assert result.pooled_scores["nll"] == pytest.approx(total_nll / total_weight)
+
+    def test_pooled_scores_can_differ_from_equal_fold_mean(self, poisson_data, base_model):
+        """Mean-of-fold ratios and ratio-of-sums are different quantities."""
+        df, y, _ = poisson_data
+        sw = np.ones_like(y)
+        sw[:50] = 100.0
+
+        class UnevenTwoFold:
+            def split(self, X, y=None, groups=None):
+                yield np.arange(50, len(X)), np.arange(50)
+                yield np.arange(50), np.arange(50, len(X))
+
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=UnevenTwoFold(),
+            sample_weight=sw,
+            scoring=("deviance", "nll"),
+        )
+
+        assert result.mean_scores["deviance"] != pytest.approx(result.pooled_scores["deviance"])
+        assert result.mean_scores["nll"] != pytest.approx(result.pooled_scores["nll"])
+
 
 # ── Return options ────────────────────────────────────────────────
 
@@ -414,6 +467,82 @@ class TestReturnOptions:
             assert isinstance(est, SuperGLM)
             # Each should be fitted
             assert est._result is not None
+
+    def test_return_estimators_stores_fold_indices(self, poisson_data, base_model):
+        """Fold train/test indices are retained for fold-aware tooling."""
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+        assert result.fold_indices is not None
+        assert len(result.fold_indices) == 3
+        train_idx, test_idx = result.fold_indices[0]
+        assert len(train_idx) > 0
+        assert len(test_idx) > 0
+
+    def test_plot_terms_by_fold_uses_labeled_fold_estimators(self, poisson_data, base_model):
+        """The fold wrapper labels traces by fold index."""
+        pytest.importorskip("plotly")
+        import plotly.graph_objects as go
+
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+
+        fig = result.plot_terms_by_fold(
+            df,
+            sample_weight=sw,
+            terms=["x"],
+            engine="plotly",
+            n_points=31,
+        )
+        assert isinstance(fig, go.Figure)
+        names = {t.name for t in fig.data if t.name and t.name.startswith("fold_")}
+        assert names == {"fold_0", "fold_1", "fold_2"}
+
+    def test_cross_validate_always_returns_curve_similarity(self, poisson_data, base_model):
+        """Curve similarity is computed automatically when fold estimators exist."""
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+
+        assert result.curve_similarity is not None
+        assert "x" in result.curve_similarity
+        assert set(result.curve_similarity["x"]["pairwise"]) == {"response", "link"}
+
+    def test_curve_similarity_contains_pairwise_metric_frames(self, poisson_data, base_model):
+        """Stored similarity includes pairwise metric matrices on response scale."""
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+
+        response = result.curve_similarity["x"]["pairwise"]["response"]
+        assert set(response) == {"rmse", "max_abs_diff", "correlation"}
+        assert response["rmse"].shape == (3, 3)
+        np.testing.assert_allclose(np.diag(response["rmse"]), 0.0)
 
 
 # ── Error handling ────────────────────────────────────────────────
