@@ -84,6 +84,7 @@ from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
+from superglm.plotting import plot_term_comparison
 from superglm.profiling.nb import NBProfileResult, estimate_nb_theta
 from superglm.profiling.tweedie import (
     TweedieProfileResult,
@@ -192,6 +193,7 @@ __all__ = [
     "SplineRedundancyReport",
     "cross_validate",
     "CrossValidationResult",
+    "plot_term_comparison",
     # Validation toolkit
     "LiftChartResult",
     "DoubleLiftChartResult",
