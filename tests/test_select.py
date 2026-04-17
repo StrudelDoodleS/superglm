@@ -652,12 +652,22 @@ class TestSelectNoiseSuppressionREML:
         )
         assert signal_edf > 3.0, f"Signal total EDF={signal_edf:.2f}, expected > 3.0"
 
-        # Noise lambdas should be large (strongly penalized)
+        # Noise lambdas should dominate the corresponding signal lambdas.
+        # Absolute lambda scales are penalty-dependent, so only the relative
+        # shrinkage is stable across spline kinds.
         noise_lambdas = {
             name: lam for name, lam in model._reml_lambdas.items() if "noise" in name.lower()
         }
+        signal_lambdas = {
+            name: lam for name, lam in model._reml_lambdas.items() if "signal" in name.lower()
+        }
         for name, lam in noise_lambdas.items():
-            assert lam > 1e5, f"{name} lambda={lam:.1f}, expected > 1e5"
+            counterpart = name.replace("noise", "signal")
+            assert counterpart in signal_lambdas
+            sig_lam = signal_lambdas[counterpart]
+            assert lam > sig_lam * 100.0, (
+                f"{name} lambda={lam:.4g}, expected > 100x {counterpart}={sig_lam:.4g}"
+            )
 
 
 class TestSplitLinearSnapWeakSignal:
