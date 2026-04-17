@@ -1,13 +1,12 @@
 """Tests for the Spline(kind=..., k=...) factory API."""
 
 import warnings
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from superglm.features.spline import (
-    BasisSpline,
+    BSplineSmooth,
     CubicRegressionSpline,
     NaturalSpline,
     PSpline,
@@ -19,7 +18,6 @@ from superglm.features.spline import (
 # ── Factory dispatch ─────────────────────────────────────────────
 
 
-@pytest.mark.filterwarnings("ignore::FutureWarning")
 class TestSplineFactoryDispatch:
     """Spline() should dispatch to the correct concrete class."""
 
@@ -31,11 +29,11 @@ class TestSplineFactoryDispatch:
 
     def test_bs_default(self):
         s = Spline(n_knots=8)
-        assert isinstance(s, BasisSpline)
+        assert isinstance(s, PSpline)
 
     def test_bs_explicit(self):
         s = Spline(kind="bs", n_knots=8, penalty="ssp")
-        assert isinstance(s, BasisSpline)
+        assert isinstance(s, BSplineSmooth)
         assert s.n_knots == 8
         assert s.penalty == "ssp"
 
@@ -57,7 +55,7 @@ class TestSplineFactoryDispatch:
 
     def test_bs_select(self):
         s = Spline(kind="bs", n_knots=8, select=True)
-        assert isinstance(s, BasisSpline)
+        assert isinstance(s, BSplineSmooth)
         assert s.select is True
 
     def test_params_forwarded(self):
@@ -93,7 +91,6 @@ class TestSplineFactoryDispatch:
 # ── k mapping ────────────────────────────────────────────────────
 
 
-@pytest.mark.filterwarnings("ignore::FutureWarning")
 class TestKMapping:
     """Test k → n_knots conversion and resulting basis dimensions."""
 
@@ -116,7 +113,7 @@ class TestKMapping:
     def test_factory_with_k_bs(self):
         """Spline(kind='bs', k=14) should produce n_knots=10 for degree=3."""
         s = Spline(kind="bs", k=14)
-        assert isinstance(s, BasisSpline)
+        assert isinstance(s, BSplineSmooth)
         assert s.n_knots == 10
 
     def test_factory_with_k_ns(self):
@@ -157,7 +154,6 @@ class TestKMapping:
 # ── Validation ───────────────────────────────────────────────────
 
 
-@pytest.mark.filterwarnings("ignore::FutureWarning")
 class TestSplineValidation:
     """Test error handling for bad inputs."""
 
@@ -203,15 +199,14 @@ class TestSplineValidation:
             n_knots_from_k("bs", 4, degree=3)  # min is 5
 
 
-# ── Backward compatibility ───────────────────────────────────────
+# ── Direct Class Usage ───────────────────────────────────────────
 
 
-@pytest.mark.filterwarnings("ignore::FutureWarning")
-class TestBackwardCompat:
-    """Existing code using concrete classes or old Spline(...) syntax still works."""
+class TestDirectClasses:
+    """Concrete spline classes still build directly."""
 
-    def test_basis_spline_direct(self):
-        s = BasisSpline(n_knots=8, penalty="ssp")
+    def test_bspline_smooth_direct(self):
+        s = BSplineSmooth(n_knots=8, penalty="ssp")
         assert isinstance(s, _SplineBase)
         x = np.linspace(0, 1, 100)
         info = s.build(x)
@@ -257,11 +252,6 @@ class TestPSplineFactory:
         s = Spline(kind="ps", n_knots=8)
         assert isinstance(s, PSpline)
 
-    def test_ps_isinstance_basisspline(self):
-        """PSpline instances are also BasisSpline (alias)."""
-        s = Spline(kind="ps", n_knots=8)
-        assert isinstance(s, BasisSpline)
-
     def test_ps_isinstance_splinebase(self):
         s = Spline(kind="ps", n_knots=8)
         assert isinstance(s, _SplineBase)
@@ -286,13 +276,12 @@ class TestPSplineFactory:
         assert isinstance(s, PSpline)
         assert s.select is True
 
-    def test_ps_builds_same_as_old_bs(self):
-        """kind='ps' and kind='bs' produce identical spline objects."""
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", FutureWarning)
-            s_bs = Spline(kind="bs", n_knots=8)
+    def test_ps_builds_different_penalty_from_bs(self):
+        """kind='ps' and kind='bs' share basis geometry but not penalty semantics."""
+        s_bs = Spline(kind="bs", n_knots=8)
         s_ps = Spline(kind="ps", n_knots=8)
-        assert type(s_bs) is type(s_ps)
+        assert type(s_bs) is BSplineSmooth
+        assert type(s_ps) is PSpline
         x = np.linspace(0, 1, 100)
         info_bs = s_bs.build(x)
         info_ps = s_ps.build(x)
@@ -305,10 +294,7 @@ class TestPSplineFactory:
         if sp.issparse(cols_ps):
             cols_ps = cols_ps.toarray()
         np.testing.assert_array_equal(cols_bs, cols_ps)
-
-    def test_basisspline_is_pspline_alias(self):
-        """BasisSpline is PSpline (backward-compatible alias)."""
-        assert BasisSpline is PSpline
+        assert not np.allclose(info_bs.penalty_matrix, info_ps.penalty_matrix)
 
     def test_ps_k_mapping(self):
         """k parameter works with kind='ps'."""
@@ -338,14 +324,15 @@ class TestDefaultKindIsPs:
             Spline(n_knots=8)  # should not raise
 
 
-# ── kind="bs" deprecation warning ───────────────────────────────
+# ── kind="bs" is real BSplineSmooth ─────────────────────────────
 
 
-class TestBsDeprecation:
-    """kind='bs' emits a FutureWarning; kind='ps' does not."""
+class TestBsFactory:
+    """kind='bs' dispatches directly to the integrated-derivative B-spline smooth."""
 
-    def test_bs_emits_future_warning(self):
-        with pytest.warns(FutureWarning, match="kind='bs'"):
+    def test_bs_no_warning(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
             Spline(kind="bs", n_knots=8)
 
     def test_ps_no_warning(self):
@@ -353,20 +340,6 @@ class TestBsDeprecation:
             warnings.simplefilter("error", FutureWarning)
             Spline(kind="ps", n_knots=8)  # should not raise
 
-    def test_bs_warning_message_content(self):
-        with pytest.warns(FutureWarning, match="integrated-derivative"):
-            Spline(kind="bs", n_knots=8)
-
-    def test_bs_warning_points_at_caller(self):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            Spline(kind="bs", n_knots=8)
-        assert caught
-        assert Path(caught[0].filename).name == "test_spline_factory.py"
-
-    def test_bs_still_creates_pspline(self):
-        """Even with the warning, kind='bs' still creates a PSpline."""
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", FutureWarning)
-            s = Spline(kind="bs", n_knots=8)
-        assert isinstance(s, PSpline)
+    def test_bs_creates_bspline_smooth(self):
+        s = Spline(kind="bs", n_knots=8)
+        assert isinstance(s, BSplineSmooth)

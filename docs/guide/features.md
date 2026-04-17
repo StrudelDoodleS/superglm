@@ -11,6 +11,7 @@ constraint.
 
 ```python
 Spline(kind="ps", k=14)                   # default P-spline choice
+Spline(kind="bs", k=14)                   # integrated-derivative B-spline smooth
 Spline(kind="cr", k=10)                   # cubic regression spline
 Spline(kind="ns", k=10)                   # natural spline
 Spline(kind="ps", k=14, select=True)      # REML + double-penalty shrinkage
@@ -22,11 +23,9 @@ Spline(kind="cr", k=12, m=(1, 2))         # multi-order penalty
 | Kind | Use when | Notes |
 |------|----------|-------|
 | `"ps"` | default pricing spline | P-spline with difference penalty |
+| `"bs"` | you want a proper B-spline smooth / mgcv-style `bs` basis | integrated-derivative penalty on the same raw B-spline geometry |
 | `"cr"` | you want a cubic regression spline / mgcv-style `cr` basis | natural boundary constraints plus identifiability |
 | `"ns"` | you want a natural spline with fixed natural boundaries | does not support monotone fitting |
-
-`Spline(kind="bs")` currently behaves like a P-spline compatibility alias. For
-new docs and examples, prefer `kind="ps"` or the explicit spline classes.
 
 ### Knot strategies
 

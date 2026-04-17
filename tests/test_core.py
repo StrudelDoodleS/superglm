@@ -1037,14 +1037,14 @@ class TestQuantileTemperedStrategy:
         assert np.all(np.diff(knots) > 0)
 
 
-class TestBasisSplineOpenKnotVector:
-    """Tests for the mgcv-style open knot vector on BasisSpline."""
+class TestPSplineOpenKnotVector:
+    """Tests for the mgcv-style open knot vector on PSpline."""
 
     def test_knot_vector_extends_beyond_boundary(self):
-        """BasisSpline internal knot vector extends beyond the public boundary."""
-        from superglm.features.spline import BasisSpline
+        """PSpline internal knot vector extends beyond the public boundary."""
+        from superglm.features.spline import PSpline
 
-        sp = BasisSpline(n_knots=8)
+        sp = PSpline(n_knots=8)
         x = np.linspace(10.0, 90.0, 500)
         sp.build(x)
         # Outermost knots should be beyond the data range
@@ -1059,9 +1059,9 @@ class TestBasisSplineOpenKnotVector:
 
     def test_public_boundary_unchanged(self):
         """fitted_boundary still reports the data range, not the expanded range."""
-        from superglm.features.spline import BasisSpline
+        from superglm.features.spline import PSpline
 
-        sp = BasisSpline(n_knots=8)
+        sp = PSpline(n_knots=8)
         x = np.linspace(10.0, 90.0, 500)
         sp.build(x)
         assert sp._lo == 10.0
@@ -1070,17 +1070,17 @@ class TestBasisSplineOpenKnotVector:
 
     def test_n_basis_unchanged(self):
         """Same number of basis functions as clamped construction."""
-        from superglm.features.spline import BasisSpline
+        from superglm.features.spline import PSpline
 
-        sp = BasisSpline(n_knots=8, degree=3)
+        sp = PSpline(n_knots=8, degree=3)
         sp.build(np.linspace(0, 1, 200))
         assert sp._n_basis == 8 + 3 + 1  # n_knots + degree + 1
 
     def test_interior_knots_preserved(self):
         """Interior knots extracted via [degree+1:-(degree+1)] match the placed knots."""
-        from superglm.features.spline import BasisSpline
+        from superglm.features.spline import PSpline
 
-        sp = BasisSpline(n_knots=5, degree=3)
+        sp = PSpline(n_knots=5, degree=3)
         sp.build(np.linspace(0, 100, 500))
         interior = sp.fitted_knots
         expected = np.linspace(0, 100, 7)[1:-1]
@@ -1088,9 +1088,9 @@ class TestBasisSplineOpenKnotVector:
 
     def test_partition_of_unity(self):
         """Row sums of the open-knot B-spline basis are 1."""
-        from superglm.features.spline import BasisSpline
+        from superglm.features.spline import PSpline
 
-        sp = BasisSpline(n_knots=10, penalty="none")
+        sp = PSpline(n_knots=10, penalty="none")
         x = np.linspace(5.0, 95.0, 500)
         info = sp.build(x)
         row_sums = np.asarray(info.columns.sum(axis=1)).ravel()

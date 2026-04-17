@@ -10,7 +10,7 @@ Both accept **DataFrame** or **ndarray** input:
 
 - **DataFrame mode** (preferred): feature types are auto-detected from dtype.
   Object/category columns become ``Categorical``, columns in
-  ``spline_features`` become ``BasisSpline``, everything else becomes
+  ``spline_features`` become ``PSpline``, everything else becomes
   ``Numeric``.
 - **ndarray mode**: pass ``feature_names`` for readable column names
   (otherwise synthetic ``x0, x1, …`` names are generated).  Categoricals
@@ -318,7 +318,7 @@ def _build_features_or_splines(
     """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
-    from superglm.features.spline import BasisSpline
+    from superglm.features.spline import PSpline
 
     spline_list = spline_names or []
     cat_list = categorical_names or []
@@ -345,7 +345,7 @@ def _build_features_or_splines(
 
     features: dict = {}
     for i, name in enumerate(spline_list):
-        features[name] = BasisSpline(n_knots=nk_list[i], degree=degree)
+        features[name] = PSpline(n_knots=nk_list[i], degree=degree)
     for name in cat_list:
         features[name] = Categorical(base=cat_base)
     for name in num_list:
