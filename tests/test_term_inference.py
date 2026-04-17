@@ -491,7 +491,7 @@ class TestModelDiagnosticsSplineKeys:
 class TestSplineKinds:
     @pytest.mark.parametrize(
         "kind,expected_class",
-        [("bs", "PSpline"), ("ns", "NaturalSpline"), ("cr", "CubicRegressionSpline")],
+        [("bs", "BSplineSmooth"), ("ns", "NaturalSpline"), ("cr", "CubicRegressionSpline")],
     )
     def test_term_inference_spline_kind(self, sample_data, kind, expected_class):
         X, y, sample_weight = sample_data
