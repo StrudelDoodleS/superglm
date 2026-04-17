@@ -73,12 +73,24 @@ class CrossValidationResult:
         }
         if not models:
             raise RuntimeError("No fitted fold estimators are available to plot.")
+        support_by_label: dict[str, dict[str, Any]] = {}
+        weight_arr = None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+        for fold, indices in enumerate(self.fold_indices or []):
+            label = f"fold_{fold}"
+            if label not in models:
+                continue
+            train_idx, _test_idx = indices
+            support_by_label[label] = {
+                "X": X.iloc[train_idx],
+                "sample_weight": None if weight_arr is None else weight_arr[train_idx],
+            }
 
         return plot_term_comparison(
             models=models,
             terms=terms,
             X=X,
             sample_weight=sample_weight,
+            support_by_label=support_by_label,
             engine=engine,
             **kwargs,
         )

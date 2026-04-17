@@ -4,7 +4,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import CrossValidationResult, GroupLasso, Spline, SuperGLM, cross_validate
+from superglm import (
+    Categorical,
+    CrossValidationResult,
+    GroupLasso,
+    Spline,
+    SuperGLM,
+    cross_validate,
+)
 
 # ── Helpers ───────────────────────────────────────────────────────
 
@@ -76,6 +83,30 @@ def base_model():
         family="poisson",
         penalty=GroupLasso(lambda1=0.0),
         features={"x": Spline(n_knots=5)},
+    )
+
+
+@pytest.fixture
+def categorical_data():
+    """Synthetic Poisson data with one categorical feature."""
+    rng = np.random.default_rng(17)
+    n = 360
+    band = rng.choice(["A", "B", "C"], n, p=[0.4, 0.35, 0.25])
+    effect = {"A": 0.0, "B": 0.25, "C": -0.15}
+    sample_weight = rng.uniform(0.5, 2.0, n)
+    mu = np.exp(0.4 + np.array([effect[b] for b in band]))
+    y = rng.poisson(mu).astype(float)
+    df = pd.DataFrame({"band": band})
+    return df, y, sample_weight
+
+
+@pytest.fixture
+def categorical_model():
+    """Unfitted SuperGLM with one categorical feature."""
+    return SuperGLM(
+        family="poisson",
+        penalty=GroupLasso(lambda1=0.0),
+        features={"band": Categorical(base="first")},
     )
 
 
@@ -510,6 +541,61 @@ class TestReturnOptions:
         assert isinstance(fig, go.Figure)
         names = {t.name for t in fig.data if t.name and t.name.startswith("fold_")}
         assert names == {"fold_0", "fold_1", "fold_2"}
+
+    def test_plot_terms_by_fold_shows_per_fold_continuous_support(self, poisson_data, base_model):
+        """Continuous fold plots include one support trace per fold in the lower panel."""
+        pytest.importorskip("plotly")
+
+        df, y, sw = poisson_data
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+
+        fig = result.plot_terms_by_fold(
+            df, sample_weight=sw, terms=["x"], engine="plotly", n_points=31
+        )
+        support_traces = [
+            t
+            for t in fig.data
+            if getattr(t, "xaxis", None) == "x2" and t.name == "Exposure density"
+        ]
+        assert len(support_traces) == 3
+
+    def test_plot_terms_by_fold_shows_grouped_fold_exposure_bars(
+        self, categorical_data, categorical_model
+    ):
+        """Categorical fold plots include grouped exposure bars by fold."""
+        pytest.importorskip("plotly")
+
+        df, y, sw = categorical_data
+        result = cross_validate(
+            categorical_model,
+            df,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=sw,
+            return_estimators=True,
+        )
+
+        fig = result.plot_terms_by_fold(
+            df,
+            sample_weight=sw,
+            terms=["band"],
+            engine="plotly",
+            n_points=31,
+        )
+        bar_traces = [
+            t
+            for t in fig.data
+            if getattr(t, "type", None) == "bar" and getattr(t, "xaxis", None) == "x2"
+        ]
+        assert len(bar_traces) == 3
+        assert fig.layout.barmode == "group"
 
     def test_cross_validate_always_returns_curve_similarity(self, poisson_data, base_model):
         """Curve similarity is computed automatically when fold estimators exist."""

@@ -79,6 +79,33 @@ def test_build_term_comparison_data_uses_shared_domains(fitted_comparison_models
     assert list(bonus["domain"]["levels"]) == ["50-60", "60-70", "70-80", "80-100", "100+"]
 
 
+def test_build_term_comparison_data_can_store_per_label_support(fitted_comparison_models):
+    from superglm.plotting.comparison import _build_term_comparison_data
+
+    X, sample_weight, models = fitted_comparison_models
+    support_by_label = {
+        "ordered": {"X": X.iloc[:120], "sample_weight": sample_weight[:120]},
+        "categorical": {"X": X.iloc[120:], "sample_weight": sample_weight[120:]},
+    }
+    payload = _build_term_comparison_data(
+        models=models,
+        terms=["VehAge", "BonusBand"],
+        X=X,
+        sample_weight=sample_weight,
+        n_points=41,
+        support_by_label=support_by_label,
+    )
+
+    veh_age_support = payload["terms"][0]["support"]
+    bonus_support = payload["terms"][1]["support"]
+    assert veh_age_support["mode"] == "by_label"
+    assert set(veh_age_support["series"]) == {"ordered", "categorical"}
+    assert len(veh_age_support["series"]["ordered"]["x"]) == 41
+    assert bonus_support["mode"] == "by_label"
+    assert set(bonus_support["series"]) == {"ordered", "categorical"}
+    assert len(bonus_support["series"]["ordered"]["density"]) == 5
+
+
 def test_plot_term_comparison_builds_dropdown_and_scale_toggle(fitted_comparison_models):
     pytest.importorskip("plotly")
     import plotly.graph_objects as go

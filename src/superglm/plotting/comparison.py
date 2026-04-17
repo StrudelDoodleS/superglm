@@ -159,6 +159,7 @@ def _build_term_comparison_data(
     terms: str | list[str] | tuple[str, ...] | None,
     X: pd.DataFrame,
     sample_weight: NDArray | None = None,
+    support_by_label: Mapping[str, dict[str, Any]] | None = None,
     n_points: int = 200,
 ) -> dict[str, Any]:
     """Build normalized per-term comparison data for labeled fitted models."""
@@ -201,13 +202,27 @@ def _build_term_comparison_data(
         for entry in series.values():
             entry["response"] = np.exp(entry["link"])
 
+        if support_by_label is None:
+            support = _support_payload(family, X, term, sample_weight_arr, domain)
+        else:
+            support_series: dict[str, Any] = {}
+            for label, support_data in support_by_label.items():
+                support_series[label] = _support_payload(
+                    family,
+                    support_data["X"],
+                    term,
+                    support_data.get("sample_weight"),
+                    domain,
+                )
+            support = {"mode": "by_label", "series": support_series}
+
         payload_terms.append(
             {
                 "name": term,
                 "family": family,
                 "domain": domain,
                 "series": series,
-                "support": _support_payload(family, X, term, sample_weight_arr, domain),
+                "support": support,
             }
         )
 
@@ -224,6 +239,7 @@ def plot_term_comparison(
     terms: str | list[str] | tuple[str, ...] | None = None,
     X: pd.DataFrame,
     sample_weight: NDArray | None = None,
+    support_by_label: Mapping[str, dict[str, Any]] | None = None,
     engine: str = "plotly",
     n_points: int = 200,
     title: str | None = None,
@@ -236,6 +252,7 @@ def plot_term_comparison(
         terms=terms,
         X=X,
         sample_weight=sample_weight,
+        support_by_label=support_by_label,
         n_points=n_points,
     )
     if engine != "plotly":

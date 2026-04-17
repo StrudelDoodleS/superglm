@@ -73,25 +73,49 @@ def plot_term_comparison_plotly(
                 response_ys.append(series["response"])
                 link_ys.append(series["link"])
 
-            fig.add_trace(
-                go.Scatter(
-                    x=support["x"],
-                    y=support["density"],
-                    mode="lines",
-                    fill="tozeroy",
-                    name="Exposure density",
-                    legendgroup=f"{term['name']}:density",
-                    line=dict(color=style_cfg["density_edge_color"], width=_EXP_EDGE_LW),
-                    fillcolor=_hex_to_rgba(style_cfg["density_fill_color"], 0.72),
-                    hovertemplate=f"{term['name']}: %{{x:.3f}}<br>Density: %{{y:.3f}}<extra></extra>",
-                    visible=(term_idx == 0),
-                ),
-                row=2,
-                col=1,
-            )
-            entries.append({"term_idx": term_idx, "trace_type": "support"})
-            response_ys.append(support["density"])
-            link_ys.append(support["density"])
+            if support.get("mode") == "by_label":
+                for series_idx, (label, support_series) in enumerate(support["series"].items()):
+                    color = colors[series_idx % len(colors)]
+                    fig.add_trace(
+                        go.Scatter(
+                            x=support_series["x"],
+                            y=support_series["density"],
+                            mode="lines",
+                            name="Exposure density",
+                            legendgroup=f"{term['name']}:{label}:density",
+                            showlegend=False,
+                            line=dict(color=color, width=_EXP_EDGE_LW),
+                            hovertemplate=(
+                                f"{label}<br>{term['name']}: %{{x:.3f}}<br>Density: %{{y:.3f}}<extra></extra>"
+                            ),
+                            visible=(term_idx == 0),
+                        ),
+                        row=2,
+                        col=1,
+                    )
+                    entries.append({"term_idx": term_idx, "trace_type": "support"})
+                    response_ys.append(support_series["density"])
+                    link_ys.append(support_series["density"])
+            else:
+                fig.add_trace(
+                    go.Scatter(
+                        x=support["x"],
+                        y=support["density"],
+                        mode="lines",
+                        fill="tozeroy",
+                        name="Exposure density",
+                        legendgroup=f"{term['name']}:density",
+                        line=dict(color=style_cfg["density_edge_color"], width=_EXP_EDGE_LW),
+                        fillcolor=_hex_to_rgba(style_cfg["density_fill_color"], 0.72),
+                        hovertemplate=f"{term['name']}: %{{x:.3f}}<br>Density: %{{y:.3f}}<extra></extra>",
+                        visible=(term_idx == 0),
+                    ),
+                    row=2,
+                    col=1,
+                )
+                entries.append({"term_idx": term_idx, "trace_type": "support"})
+                response_ys.append(support["density"])
+                link_ys.append(support["density"])
         else:
             levels = term["domain"]["levels"]
             for series_idx, (label, series) in enumerate(term["series"].items()):
@@ -113,25 +137,51 @@ def plot_term_comparison_plotly(
                 response_ys.append(series["response"])
                 link_ys.append(series["link"])
 
-            fig.add_trace(
-                go.Bar(
-                    x=support["levels"],
-                    y=support["density"],
-                    name="Exposure",
-                    legendgroup=f"{term['name']}:density",
-                    marker_color=style_cfg["density_fill_color"],
-                    marker_line_color=style_cfg["density_edge_color"],
-                    marker_line_width=_EXP_EDGE_LW,
-                    opacity=0.3,
-                    hovertemplate=f"{term['name']}: %{{x}}<br>Exposure: %{{y:,.0f}}<extra></extra>",
-                    visible=(term_idx == 0),
-                ),
-                row=2,
-                col=1,
-            )
-            entries.append({"term_idx": term_idx, "trace_type": "support"})
-            response_ys.append(support["density"])
-            link_ys.append(support["density"])
+            if support.get("mode") == "by_label":
+                for series_idx, (label, support_series) in enumerate(support["series"].items()):
+                    color = colors[series_idx % len(colors)]
+                    fig.add_trace(
+                        go.Bar(
+                            x=support_series["levels"],
+                            y=support_series["density"],
+                            name=label,
+                            legendgroup=f"{term['name']}:{label}:density",
+                            showlegend=False,
+                            marker_color=color,
+                            marker_line_color=color,
+                            marker_line_width=_EXP_EDGE_LW,
+                            opacity=0.35,
+                            hovertemplate=(
+                                f"{label}<br>{term['name']}: %{{x}}<br>Exposure: %{{y:,.0f}}<extra></extra>"
+                            ),
+                            visible=(term_idx == 0),
+                        ),
+                        row=2,
+                        col=1,
+                    )
+                    entries.append({"term_idx": term_idx, "trace_type": "support"})
+                    response_ys.append(support_series["density"])
+                    link_ys.append(support_series["density"])
+            else:
+                fig.add_trace(
+                    go.Bar(
+                        x=support["levels"],
+                        y=support["density"],
+                        name="Exposure",
+                        legendgroup=f"{term['name']}:density",
+                        marker_color=style_cfg["density_fill_color"],
+                        marker_line_color=style_cfg["density_edge_color"],
+                        marker_line_width=_EXP_EDGE_LW,
+                        opacity=0.3,
+                        hovertemplate=f"{term['name']}: %{{x}}<br>Exposure: %{{y:,.0f}}<extra></extra>",
+                        visible=(term_idx == 0),
+                    ),
+                    row=2,
+                    col=1,
+                )
+                entries.append({"term_idx": term_idx, "trace_type": "support"})
+                response_ys.append(support["density"])
+                link_ys.append(support["density"])
 
     fig.add_hline(
         y=1.0,
@@ -166,6 +216,7 @@ def plot_term_comparison_plotly(
             y=0.98,
         )
     )
+    fig.update_layout(barmode="group")
 
     response_restyle = {"y": response_ys}
     link_restyle = {"y": link_ys}
