@@ -166,13 +166,13 @@ def auto_detect_features(
     """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
-    from superglm.features.spline import BasisSpline
+    from superglm.features.spline import PSpline
 
     lines = ["SuperGLM features:"]
     for col in X.columns:
         if col in spline_cols:
             nk = knots_map[col]
-            spec = BasisSpline(n_knots=nk, degree=degree, penalty="ssp")
+            spec = PSpline(n_knots=nk, degree=degree, penalty="ssp")
             specs[col] = spec
             feature_order.append(col)
             lines.append(f"  {col:<20s} → Spline(n_knots={nk}, degree={degree})")

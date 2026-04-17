@@ -5,11 +5,11 @@ import pandas as pd
 import pytest
 
 from superglm import (
-    BasisSpline,
     Categorical,
     GroupElasticNet,
     GroupLasso,
     Numeric,
+    PSpline,
     Ridge,
     SparseGroupLasso,
     Spline,
@@ -123,7 +123,7 @@ class TestSplinesAutoDetect:
             n_knots=10,
         )
         model.fit(X, y, sample_weight=sample_weight)
-        assert isinstance(model._specs["age"], BasisSpline)
+        assert isinstance(model._specs["age"], PSpline)
         assert isinstance(model._specs["region"], Categorical)
         assert isinstance(model._specs["density"], Numeric)
 

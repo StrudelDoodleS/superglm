@@ -508,10 +508,6 @@ class PSpline(_BSplineBase):
         return self._build_penalty_for_order(self._m_orders[0])
 
 
-# Backward-compatible alias — existing code using BasisSpline still works.
-BasisSpline = PSpline
-
-
 class BSplineSmooth(_BSplineBase):
     """B-spline smooth with integrated-derivative penalty.
 
@@ -989,7 +985,6 @@ def Spline(
 
 
 __all__ = [
-    "BasisSpline",
     "BSplineSmooth",
     "CardinalCRSpline",
     "CubicRegressionSpline",
