@@ -42,12 +42,10 @@ def check_features_structure(text: str) -> None:
     require(text, "Factory", "features/structure")
     require(text, "Spline Classes", "features/structure")
     require(text, "Other Feature Classes", "features/structure")
-    require(
-        text,
-        'Use <code>kind="ps"</code> for a difference-penalized P-spline and '
-        '<code>kind="bs"</code> for an integrated-derivative B-spline smooth.',
-        "features/structure",
-    )
+    require(text, 'Use <code>kind="ps"</code> for a', "features/structure")
+    require(text, "difference-penalized P-spline", "features/structure")
+    require(text, '<code>kind="bs"</code> for an integrated-derivative', "features/structure")
+    require(text, "B-spline smooth.", "features/structure")
     require(text, "PSpline", "features/structure")
     require(text, "BSplineSmooth", "features/structure")
     forbid(text, "BasisSpline", "features/structure")

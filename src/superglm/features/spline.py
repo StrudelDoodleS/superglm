@@ -410,7 +410,7 @@ class _BSplineBase(_SplineBase):
 
 
 class PSpline(_BSplineBase):
-    """P-spline: B-spline basis + discrete-difference penalty.
+    """P-spline: B-spline basis with a discrete-difference penalty.
 
     This is the concrete P-spline implementation. For the recommended
     public API, use :func:`Spline` which dispatches to ``PSpline``,
@@ -509,7 +509,7 @@ class PSpline(_BSplineBase):
 
 
 class BSplineSmooth(_BSplineBase):
-    """B-spline smooth with integrated-derivative penalty.
+    """B-spline smooth: B-spline basis with an integrated-derivative penalty.
 
     Same raw B-spline basis as ``PSpline``, but penalised via the
     *integrated squared m-th derivative* rather than the discrete
