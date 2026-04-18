@@ -162,7 +162,7 @@ class Gamma:
 
 
 class NegativeBinomial:
-    """Negative Binomial (NB2). V(mu) = mu + mu^2/theta.
+    """Negative binomial (NB2) family with overdispersion controlled by ``theta``.
 
     Parameters
     ----------
@@ -180,7 +180,7 @@ class NegativeBinomial:
 
     @property
     def scale_known(self) -> bool:
-        return True  # NB2 variance V(mu) = mu + mu²/θ captures overdispersion; φ=1
+        return True  # NB2 uses theta for overdispersion, so phi stays fixed at 1
 
     @property
     def default_link(self) -> str:

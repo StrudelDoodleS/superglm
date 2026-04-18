@@ -3,13 +3,34 @@
 If monotonicity is part of the model specification, prefer fitting it inside
 the model rather than repairing it afterward.
 
-## Preferred Paths
+## Monotone Settings
+
+These are the accepted monotonicity arguments on the public spline specs:
+
+- `monotone=None`: default, no monotonicity constraint
+- `monotone="increasing"`: enforce a nondecreasing spline
+- `monotone="decreasing"`: enforce a nonincreasing spline
+- `monotone_mode="postfit"`: default, fit the spline first and optionally apply
+  isotonic repair afterward
+- `monotone_mode="fit"`: keep monotonicity inside the solver during `fit()` or
+  `fit_reml()`
+
+## Engine Selection
+
+`monotone_mode="fit"` selects a different constrained engine depending on the
+feature class:
 
 | Feature spec | Engine | Best for |
 |---|---|---|
 | `BSplineSmooth(..., monotone_mode="fit")` | QP | actual B-spline smooth with monotone constraint |
 | `CubicRegressionSpline(..., monotone_mode="fit")` | QP | cubic regression spline with monotone constraint |
 | `PSpline(..., monotone_mode="fit")` | SCOP | monotone P-spline path |
+
+Specifically:
+
+- `PSpline(..., monotone_mode="fit")` uses SCOP
+- `BSplineSmooth(..., monotone_mode="fit")` uses QP
+- `CubicRegressionSpline(..., monotone_mode="fit")` uses QP
 
 ## QP-Backed Monotone Fits
 
@@ -59,16 +80,29 @@ model = SuperGLM(
         ),
     },
 )
-model.fit_reml(df, y, sample_weight=exposure)
+model.fit_reml(df, y)
 ```
 
 This works with both standard and discrete fitting paths and is the preferred
 shape-constrained story for P-splines.
 
-## REML And Discrete REML
+## REML Semantics
 
-Monotone solver-backed splines can be used with `fit_reml()`. For large data,
-you can combine them with `discrete=True`:
+Monotone solver-backed splines can be used with `fit_reml()`, but the REML
+semantics are different for SCOP and QP:
+
+| Path | `fit_reml()` with fixed lambdas | `fit_reml()` with automatic lambda estimation |
+|---|---|---|
+| SCOP (`PSpline(..., monotone_mode="fit")`) | supported | dedicated monotone-aware REML / EFS path |
+| QP (`BSplineSmooth(..., monotone_mode="fit")`, `CubicRegressionSpline(..., monotone_mode="fit")`) | supported | passthrough heuristic: unconstrained REML followed by constrained refit |
+
+The important nuance is that "SCOP works with REML but QP does not" is too
+strong. QP monotone terms do work with `fit_reml()`. The difference is that
+automatic lambda estimation on the QP path is not exact joint constrained REML;
+it estimates lambdas from an unconstrained REML pass and then refits with the
+monotone constraints at those lambdas.
+
+For large data, you can also combine the SCOP path with `discrete=True`:
 
 ```python
 model = SuperGLM(
@@ -85,6 +119,8 @@ model = SuperGLM(
 )
 model.fit_reml(df, y)
 ```
+
+Fixed-lambda monotone REML works for both SCOP and QP paths.
 
 ## Current Guard Rails
 
@@ -103,7 +139,7 @@ assuming it is a valid workflow.
 Post-fit isotonic repair still exists:
 
 ```python
-model.apply_monotone_postfit(df, sample_weight=exposure)
+model.apply_monotone_postfit(df)
 ```
 
 Use it when you already have a fitted model and need a manual monotone repair.
