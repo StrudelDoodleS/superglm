@@ -444,13 +444,16 @@ class PSpline(_BSplineBase):
 
     knots : array-like or None
         Explicit interior knot positions.
-    monotone : str or None
-        Monotonicity constraint direction. ``None`` (default) means no
-        constraint. ``"increasing"`` or ``"decreasing"`` requests
-        monotone repair.
-    monotone_mode : str
-        ``"postfit"`` (default) applies isotonic regression after fitting.
-        ``"fit"`` is reserved for future constrained IRLS (not yet implemented).
+    monotone : {None, "increasing", "decreasing"}
+        ``None`` (default) leaves the spline unconstrained. ``"increasing"``
+        requests a nondecreasing monotone spline and ``"decreasing"``
+        requests a nonincreasing monotone spline.
+    monotone_mode : {"postfit", "fit"}
+        ``"postfit"`` (default) fits first and then allows isotonic repair.
+        ``"fit"`` keeps the monotone constraint in the optimization problem
+        and uses the SCOP monotone engine for ``PSpline``. With
+        ``fit_reml()``, fixed lambdas work directly and automatic lambda
+        estimation uses the dedicated monotone-aware SCOP REML / EFS path.
     """
 
     def __init__(
@@ -540,10 +543,17 @@ class BSplineSmooth(_BSplineBase):
         If True, add double-penalty shrinkage (null + range space).
     knots : array-like or None
         Explicit interior knot positions.
-    monotone : str or None
-        Monotonicity constraint direction.
-    monotone_mode : str
-        ``"postfit"`` (default) applies isotonic regression after fitting.
+    monotone : {None, "increasing", "decreasing"}
+        ``None`` (default) leaves the spline unconstrained. ``"increasing"``
+        requests a nondecreasing monotone spline and ``"decreasing"``
+        requests a nonincreasing monotone spline.
+    monotone_mode : {"postfit", "fit"}
+        ``"postfit"`` (default) fits first and then allows isotonic repair.
+        ``"fit"`` uses the constrained QP monotone solver path for
+        ``BSplineSmooth``. With ``fit_reml()``, fixed lambdas work directly;
+        automatic lambda estimation uses the QP passthrough heuristic
+        (unconstrained REML followed by constrained refit), not exact joint
+        constrained REML.
     m : int or tuple of int
         Integrated derivative order(s) for the penalty.
     lambda_policy : LambdaPolicy or dict or None
@@ -697,6 +707,20 @@ class CubicRegressionSpline(_SplineBase):
 
     Multi-order penalties (m tuple) are a SuperGLM extension, not strict
     mgcv ``bs="cr"`` parity.
+
+    Parameters
+    ----------
+    monotone : {None, "increasing", "decreasing"}
+        ``None`` (default) leaves the spline unconstrained. ``"increasing"``
+        requests a nondecreasing monotone spline and ``"decreasing"``
+        requests a nonincreasing monotone spline.
+    monotone_mode : {"postfit", "fit"}
+        ``"postfit"`` (default) fits first and then allows isotonic repair.
+        ``"fit"`` uses the constrained QP monotone solver path for
+        ``CubicRegressionSpline``. With ``fit_reml()``, fixed lambdas work
+        directly; automatic lambda estimation uses the QP passthrough
+        heuristic (unconstrained REML followed by constrained refit), not
+        exact joint constrained REML.
     """
 
     _penalty_semantics = "integrated_derivative"
