@@ -60,17 +60,19 @@ def check_families_chrome(text: str) -> None:
 def check_families_structure(text: str) -> None:
     require(
         text,
-        "Family objects define the response distribution used during fitting, scoring, and inference.",
+        "Family objects define the response distribution used during fitting, scoring,",
         "families/structure",
     )
+    require(text, "and inference.", "families/structure")
     require(text, "Factories", "families/structure")
     require(text, "Family Classes", "families/structure")
     require(text, "NegativeBinomial", "families/structure")
     require(text, "families.nb2", "families/structure")
+    require(text, "Known-scale families keep <code>phi=1</code>.", "families/structure")
+    require(text, "Negative binomial overdispersion is", "families/structure")
     require(
         text,
-        "Known-scale families keep <code>phi=1</code>. Negative binomial overdispersion is controlled by "
-        "<code>theta</code>, not by a meaningful fitted <code>phi</code>.",
+        "controlled by <code>theta</code>, not by a meaningful fitted <code>phi</code>.",
         "families/structure",
     )
 

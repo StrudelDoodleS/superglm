@@ -24,27 +24,27 @@ from superglm.distributions import (
 
 
 def poisson() -> Poisson:
-    """Poisson distribution (variance = mean)."""
+    """Create a Poisson family object."""
     return Poisson()
 
 
 def gaussian() -> Gaussian:
-    """Gaussian (Normal) distribution."""
+    """Create a Gaussian family object."""
     return Gaussian()
 
 
 def gamma() -> Gamma:
-    """Gamma distribution."""
+    """Create a Gamma family object."""
     return Gamma()
 
 
 def binomial() -> Binomial:
-    """Binomial distribution for binary classification."""
+    """Create a Binomial family object."""
     return Binomial()
 
 
 def nb2(theta: float | str = "auto") -> NegativeBinomial:
-    """Negative Binomial (NB2) distribution.
+    """Create a negative binomial (NB2) family object.
 
     Parameters
     ----------
@@ -56,7 +56,7 @@ def nb2(theta: float | str = "auto") -> NegativeBinomial:
 
 
 def tweedie(p: float) -> Tweedie:
-    """Tweedie distribution.
+    """Create a Tweedie family object.
 
     Parameters
     ----------
