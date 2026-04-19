@@ -39,6 +39,7 @@ from superglm.diagnostics.discretize import DiscretizationResult, discretization
 from superglm.diagnostics.spline_checks import SplineRedundancyReport
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.features.categorical import Categorical
+from superglm.features.constraint import Constraint, ConstraintSpec
 from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.interaction import (
     CategoricalInteraction,
@@ -152,6 +153,8 @@ __all__ = [
     "CubicRegressionSpline",
     "Categorical",
     "OrderedCategorical",
+    "Constraint",
+    "ConstraintSpec",
     "LevelGrouping",
     "collapse_levels",
     "Numeric",

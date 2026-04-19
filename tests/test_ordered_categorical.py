@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, OrderedCategorical, SuperGLM
+from superglm import Categorical, Constraint, OrderedCategorical, PSpline, SuperGLM
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -599,14 +599,14 @@ class TestSplineObjectBasis:
         model.fit(X, y, sample_weight=sample_weight)
         assert model.result.converged
 
-    def test_spline_object_with_monotone(self, age_band_data):
-        from superglm.features.spline import Spline
-
+    def test_spline_object_inherits_constraint(self, age_band_data):
         X, y, sample_weight, _, _ = age_band_data
         spec = OrderedCategorical(
             order=sorted(X["age_band"].unique()),
-            basis=Spline(n_knots=4, monotone="increasing"),
+            basis=PSpline(n_knots=4, constraint=Constraint.fit.increasing),
         )
+        assert spec._spline.monotone == "increasing"
+        assert spec._spline.monotone_mode == "fit"
         model = SuperGLM(
             family="poisson",
             features={"age_band": spec},
@@ -614,8 +614,8 @@ class TestSplineObjectBasis:
         )
         model.fit(X, y, sample_weight=sample_weight)
         assert model.result.converged
-        # Monotone attribute should be visible on the internal spline
         assert spec._spline.monotone == "increasing"
+        assert spec._spline.monotone_mode == "fit"
 
     def test_spline_object_overrides_string_params(self, age_band_data):
         """When Spline object is passed, kind/n_knots/etc are ignored."""

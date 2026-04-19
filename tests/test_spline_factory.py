@@ -5,6 +5,7 @@ import warnings
 import numpy as np
 import pytest
 
+from superglm import Constraint
 from superglm.features.spline import (
     BSplineSmooth,
     CubicRegressionSpline,
@@ -275,6 +276,13 @@ class TestPSplineFactory:
         s = Spline(kind="ps", n_knots=8, select=True)
         assert isinstance(s, PSpline)
         assert s.select is True
+
+    def test_ps_constraint_token_normalizes_to_internal_monotone_fields(self):
+        s = Spline(kind="ps", n_knots=8, constraint=Constraint.fit.increasing)
+
+        assert isinstance(s, PSpline)
+        assert s.monotone == "increasing"
+        assert s.monotone_mode == "fit"
 
     def test_ps_builds_different_penalty_from_bs(self):
         """kind='ps' and kind='bs' share basis geometry but not penalty semantics."""

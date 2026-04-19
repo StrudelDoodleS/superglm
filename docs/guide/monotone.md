@@ -3,34 +3,44 @@
 If monotonicity is part of the model specification, prefer fitting it inside
 the model rather than repairing it afterward.
 
-## Monotone Settings
+## Constraint Settings
 
-These are the accepted monotonicity arguments on the public spline specs:
+The public spline API now uses a single `constraint=` argument:
 
-- `monotone=None`: default, no monotonicity constraint
-- `monotone="increasing"`: enforce a nondecreasing spline
-- `monotone="decreasing"`: enforce a nonincreasing spline
-- `monotone_mode="postfit"`: default, fit the spline first and optionally apply
-  isotonic repair afterward
-- `monotone_mode="fit"`: keep monotonicity inside the solver during `fit()` or
-  `fit_reml()`
+- `constraint=Constraint.fit.increasing`
+- `constraint=Constraint.fit.decreasing`
+- `constraint=Constraint.postfit.increasing`
+- `constraint=Constraint.postfit.decreasing`
+
+Use `Constraint.fit.*` when the shape constraint should live inside the solver.
+Use `Constraint.postfit.*` when you want the fitted spline repaired after
+estimation instead.
+
+Reserved tokens already exist for future work:
+
+- `Constraint.fit.convex`
+- `Constraint.fit.concave`
+- `Constraint.postfit.convex`
+- `Constraint.postfit.concave`
+
+Those names are public, but they currently raise `NotImplementedError`.
 
 ## Engine Selection
 
-`monotone_mode="fit"` selects a different constrained engine depending on the
+`Constraint.fit.*` selects a different constrained engine depending on the
 feature class:
 
 | Feature spec | Engine | Best for |
 |---|---|---|
-| `BSplineSmooth(..., monotone_mode="fit")` | QP | actual B-spline smooth with monotone constraint |
-| `CubicRegressionSpline(..., monotone_mode="fit")` | QP | cubic regression spline with monotone constraint |
-| `PSpline(..., monotone_mode="fit")` | SCOP | monotone P-spline path |
+| `BSplineSmooth(..., constraint=Constraint.fit.increasing)` | QP | actual B-spline smooth with monotone constraint |
+| `CubicRegressionSpline(..., constraint=Constraint.fit.decreasing)` | QP | cubic regression spline with monotone constraint |
+| `PSpline(..., constraint=Constraint.fit.increasing)` | SCOP | monotone P-spline path |
 
 Specifically:
 
-- `PSpline(..., monotone_mode="fit")` uses SCOP
-- `BSplineSmooth(..., monotone_mode="fit")` uses QP
-- `CubicRegressionSpline(..., monotone_mode="fit")` uses QP
+- `PSpline(..., constraint=Constraint.fit.increasing)` uses SCOP
+- `BSplineSmooth(..., constraint=Constraint.fit.increasing)` uses QP
+- `CubicRegressionSpline(..., constraint=Constraint.fit.decreasing)` uses QP
 
 ## QP-Backed Monotone Fits
 
@@ -38,7 +48,7 @@ Use QP-backed monotone fitting when the term is a constrained B-spline smooth
 or cubic regression spline.
 
 ```python
-from superglm import BSplineSmooth, CubicRegressionSpline, SuperGLM
+from superglm import BSplineSmooth, Constraint, CubicRegressionSpline, SuperGLM
 
 model = SuperGLM(
     family="gaussian",
@@ -46,13 +56,11 @@ model = SuperGLM(
     features={
         "x1": BSplineSmooth(
             n_knots=8,
-            monotone="increasing",
-            monotone_mode="fit",
+            constraint=Constraint.fit.increasing,
         ),
         "x2": CubicRegressionSpline(
             n_knots=8,
-            monotone="decreasing",
-            monotone_mode="fit",
+            constraint=Constraint.fit.decreasing,
         ),
     },
 )
@@ -64,10 +72,10 @@ than applying an after-the-fact repair.
 
 ## SCOP-Backed Monotone Fits
 
-Use `PSpline(..., monotone_mode="fit")` when you want the SCOP path.
+Use `PSpline(..., constraint=Constraint.fit.increasing)` when you want the SCOP path.
 
 ```python
-from superglm import PSpline, SuperGLM
+from superglm import Constraint, PSpline, SuperGLM
 
 model = SuperGLM(
     family="gaussian",
@@ -75,8 +83,7 @@ model = SuperGLM(
     features={
         "x": PSpline(
             n_knots=10,
-            monotone="increasing",
-            monotone_mode="fit",
+            constraint=Constraint.fit.increasing,
         ),
     },
 )
@@ -93,8 +100,8 @@ semantics are different for SCOP and QP:
 
 | Path | `fit_reml()` with fixed lambdas | `fit_reml()` with automatic lambda estimation |
 |---|---|---|
-| SCOP (`PSpline(..., monotone_mode="fit")`) | supported | dedicated monotone-aware REML / EFS path |
-| QP (`BSplineSmooth(..., monotone_mode="fit")`, `CubicRegressionSpline(..., monotone_mode="fit")`) | supported | passthrough heuristic: unconstrained REML followed by constrained refit |
+| SCOP (`PSpline(..., constraint=Constraint.fit.increasing)`) | supported | dedicated monotone-aware REML / EFS path |
+| QP (`BSplineSmooth(..., constraint=Constraint.fit.increasing)`, `CubicRegressionSpline(..., constraint=Constraint.fit.decreasing)`) | supported | passthrough heuristic: unconstrained REML followed by constrained refit |
 
 The important nuance is that "SCOP works with REML but QP does not" is too
 strong. QP monotone terms do work with `fit_reml()`. The difference is that
@@ -105,6 +112,8 @@ monotone constraints at those lambdas.
 For large data, you can also combine the SCOP path with `discrete=True`:
 
 ```python
+from superglm import Constraint, PSpline, SuperGLM
+
 model = SuperGLM(
     family="gaussian",
     selection_penalty=0.0,
@@ -112,8 +121,7 @@ model = SuperGLM(
     features={
         "x": PSpline(
             n_knots=10,
-            monotone="increasing",
-            monotone_mode="fit",
+            constraint=Constraint.fit.increasing,
         ),
     },
 )
