@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import Constraint, SuperGLM
 from superglm.families import Gaussian
 from superglm.features.spline import PSpline
 from superglm.model.base import model_build_design_matrix
@@ -35,7 +35,7 @@ def scop_model_inputs():
         family=Gaussian(),
         selection_penalty=0,
         discrete=True,
-        features={"x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")},
+        features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
     )
     # Do NOT call auto_detect — features= dict already populates _specs.
     # auto_detect would overwrite the PSpline spec with Numeric().
@@ -1285,7 +1285,7 @@ class TestSCOPEFSOuterLoop:
             family=Gaussian(),
             selection_penalty=0,
             discrete=True,
-            features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
         )
         y_out, sample_weight, offset = model_build_design_matrix(model, df, y, np.ones(n), None)
         offset_arr = np.zeros(n) if offset is None else np.array(offset)
@@ -1333,7 +1333,7 @@ class TestSCOPEFSOuterLoop:
                 family=Gaussian(),
                 selection_penalty=0,
                 discrete=True,
-                features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+                features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
             )
             y_out, sw, off = model_build_design_matrix(model, df, y, np.ones(n), None)
 
@@ -1454,7 +1454,7 @@ class TestSCOPFitRemlIntegration:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -1487,7 +1487,7 @@ class TestSCOPFitRemlIntegration:
             selection_penalty=0,
             discrete=True,
             features={
-                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
                 "x2": PSpline(n_knots=8),
             },
         )
@@ -1524,8 +1524,7 @@ class TestSCOPFitRemlIntegration:
             features={
                 "x": PSpline(
                     n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
                 ),
             },
@@ -1553,7 +1552,7 @@ class TestSCOPFitRemlIntegration:
             family=Gaussian(),
             discrete=True,
             features={
-                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
                 "x2": PSpline(
                     n_knots=8,
                     lambda_policy=LambdaPolicy(mode="fixed", value=fixed_val),
@@ -1584,8 +1583,7 @@ class TestSCOPFitRemlIntegration:
             features={
                 "x": BSplineSmooth(
                     n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                 ),
             },
         )
@@ -1625,7 +1623,7 @@ class TestSCOPFitRemlIntegration:
         model_qp = SuperGLM(
             family=Gaussian(),
             features={
-                "x1": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x1": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing),
                 "x2": PSpline(n_knots=8),
             },
         )
@@ -1654,8 +1652,7 @@ class TestSCOPFitRemlIntegration:
             features={
                 "x": BSplineSmooth(
                     n_knots=10,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                 ),
             },
         )
@@ -1708,8 +1705,7 @@ class TestSCOPEFSRegression:
             features={
                 "x": PSpline(
                     n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
                 ),
             },
@@ -1753,7 +1749,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -1784,7 +1780,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -1807,7 +1803,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -1831,7 +1827,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -1859,7 +1855,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -1886,7 +1882,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -1957,7 +1953,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -2105,7 +2101,7 @@ class TestSCOPNewtonLineSearchSafety:
             family=Gaussian(),
             discrete=True,
             features={
-                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
                 "x2": PSpline(n_knots=8),
             },
         )
@@ -2147,8 +2143,8 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=200,
             features={
-                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
-                "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
             },
         )
         model.fit_reml(df[["x1", "x2"]], y)
@@ -2193,9 +2189,9 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=500,
             features={
-                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
-                "x2": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
-                "x3": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x3": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x1", "x2", "x3"]], y)
@@ -2227,8 +2223,8 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=500,
             features={
-                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
-                "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
                 "x3": PSpline(n_knots=8),
             },
         )
@@ -2259,11 +2255,10 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=200,
             features={
-                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
                 "x2": PSpline(
                     n_knots=8,
-                    monotone="decreasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.decreasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=fixed_val),
                 ),
             },
@@ -2294,8 +2289,8 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=200,
             features={
-                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
-                "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
             },
         )
         model.fit_reml(df[["x1", "x2"]], y)
@@ -2327,8 +2322,8 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=200,
             features={
-                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
-                "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
             },
         )
         model.fit_reml(df[["x1", "x2"]], y)
@@ -2387,8 +2382,8 @@ class TestMultiSCOPIntegration:
                 discrete=True,
                 max_iter=200,
                 features={
-                    "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
-                    "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+                    "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                    "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
                 },
             )
             model.fit_reml(df[["x1", "x2"]], y)
@@ -2427,8 +2422,8 @@ class TestMultiSCOPIntegration:
             max_iter=200,
             tol=1e-3,
             features={
-                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
-                "x2": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
             },
         )
         model.fit(df[["x1", "x2"]], y)
@@ -2465,7 +2460,7 @@ class TestMultiSCOPIntegration:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -2507,7 +2502,7 @@ class TestMultiSCOPIntegration:
             family=Gaussian(),
             selection_penalty=0,
             features={
-                "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -2531,7 +2526,7 @@ class TestMultiSCOPIntegration:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)

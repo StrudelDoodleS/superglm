@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from superglm.features.constraint import ConstraintSpec
 from superglm.types import LambdaPolicy
 
 
@@ -51,6 +52,22 @@ def validate_select(spec: Any) -> None:
         )
 
 
+def _normalize_constraint(constraint: ConstraintSpec | None) -> tuple[str | None, str]:
+    if constraint is None:
+        return None, "postfit"
+    if not isinstance(constraint, ConstraintSpec):
+        raise TypeError(
+            "constraint must be None or a Constraint token such as Constraint.fit.increasing"
+        )
+    if constraint.kind in {"convex", "concave"}:
+        raise NotImplementedError(f"{constraint.kind} constraints are not implemented yet.")
+    if constraint.kind not in ("increasing", "decreasing"):
+        raise ValueError(f"Unsupported constraint kind: {constraint.kind!r}")
+    if constraint.mode not in ("fit", "postfit"):
+        raise ValueError(f"Unsupported constraint mode: {constraint.mode!r}")
+    return constraint.kind, constraint.mode
+
+
 def initialize_spec(
     spec: Any,
     *,
@@ -65,16 +82,12 @@ def initialize_spec(
     boundary: tuple[float, float] | None,
     knot_alpha: float,
     select: bool,
-    monotone: str | None,
-    monotone_mode: str,
+    constraint: ConstraintSpec | None,
     m: int | tuple[int, ...],
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None,
 ) -> None:
     """Initialize a spline spec's public config and mutable build-time state."""
-    if monotone is not None and monotone not in ("increasing", "decreasing"):
-        raise ValueError(f"monotone must be None, 'increasing', or 'decreasing', got {monotone!r}")
-    if monotone_mode not in ("postfit", "fit"):
-        raise ValueError(f"monotone_mode must be 'postfit' or 'fit', got {monotone_mode!r}")
+    monotone, monotone_mode = _normalize_constraint(constraint)
 
     spec.monotone = monotone
     spec.monotone_mode = monotone_mode

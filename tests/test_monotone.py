@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Spline, SuperGLM
+from superglm import Constraint, Spline, SuperGLM
 from superglm.constraints import MonotoneRepairer, MonotoneRepairResult, monotonicity_violation
 
 # ── Fixtures ─────────────────────────────────────────────────────
@@ -54,41 +54,43 @@ class TestSplineAPIParams:
         assert s.monotone_mode == "postfit"
 
     def test_monotone_increasing(self):
-        s = Spline(monotone="increasing")
+        s = Spline(constraint=Constraint.postfit.increasing)
         assert s.monotone == "increasing"
+        assert s.monotone_mode == "postfit"
 
     def test_monotone_decreasing(self):
-        s = Spline(monotone="decreasing")
+        s = Spline(constraint=Constraint.postfit.decreasing)
         assert s.monotone == "decreasing"
+        assert s.monotone_mode == "postfit"
 
     def test_monotone_invalid(self):
-        with pytest.raises(ValueError, match="monotone must be"):
-            Spline(monotone="flat")
+        with pytest.raises(TypeError, match="constraint must be"):
+            Spline(constraint="flat")
 
     def test_monotone_mode_invalid(self):
-        with pytest.raises(ValueError, match="monotone_mode must be"):
+        with pytest.raises(TypeError):
             Spline(monotone="increasing", monotone_mode="invalid")
 
     def test_monotone_fit_mode_builds_scop(self):
         """PSpline monotone_mode='fit' builds SCOP reparameterization."""
         from superglm.features.spline import PSpline
 
-        s = PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")
+        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing)
         x = np.linspace(0, 1, 200)
         info = s.build(x)
         assert info.scop_reparameterization is not None
         assert info.monotone_engine == "scop"
 
     def test_monotone_ns_rejected(self):
-        with pytest.raises(NotImplementedError, match="monotone is not supported for kind='ns'"):
-            Spline(kind="ns", monotone="increasing")
+        with pytest.raises(NotImplementedError, match="constraint is not supported for kind='ns'"):
+            Spline(kind="ns", constraint=Constraint.fit.increasing)
 
     def test_monotone_bs(self):
-        s = Spline(kind="bs", monotone="increasing")
+        s = Spline(kind="bs", constraint=Constraint.postfit.increasing)
         assert s.monotone == "increasing"
 
     def test_monotone_cr(self):
-        s = Spline(kind="cr", monotone="decreasing")
+        s = Spline(kind="cr", constraint=Constraint.postfit.decreasing)
         assert s.monotone == "decreasing"
 
 
@@ -123,7 +125,7 @@ class TestApplyMonotonePostfit:
         X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=15, monotone="increasing")},
+            features={"signal": Spline(n_knots=15, constraint=Constraint.postfit.increasing)},
             selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=sample_weight)
@@ -140,7 +142,7 @@ class TestApplyMonotonePostfit:
         X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=15, monotone="increasing")},
+            features={"signal": Spline(n_knots=15, constraint=Constraint.postfit.increasing)},
             selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=sample_weight)
@@ -158,7 +160,7 @@ class TestApplyMonotonePostfit:
         X, y, sample_weight = decreasing_poisson_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=15, monotone="decreasing")},
+            features={"signal": Spline(n_knots=15, constraint=Constraint.postfit.decreasing)},
             selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=sample_weight)
@@ -173,7 +175,7 @@ class TestApplyMonotonePostfit:
         X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=15, monotone="increasing")},
+            features={"signal": Spline(n_knots=15, constraint=Constraint.postfit.increasing)},
             selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=sample_weight)
@@ -196,7 +198,7 @@ class TestApplyMonotonePostfit:
         X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=15, monotone="increasing")},
+            features={"signal": Spline(n_knots=15, constraint=Constraint.postfit.increasing)},
             selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=sample_weight)
@@ -222,7 +224,7 @@ class TestApplyMonotonePostfit:
         X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(monotone="increasing")},
+            features={"signal": Spline(constraint=Constraint.postfit.increasing)},
             selection_penalty=0.0,
         )
         with pytest.raises(RuntimeError, match="must be fitted"):
@@ -233,7 +235,7 @@ class TestApplyMonotonePostfit:
         X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=15, monotone="increasing")},
+            features={"signal": Spline(n_knots=15, constraint=Constraint.postfit.increasing)},
             selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=sample_weight)
@@ -254,7 +256,7 @@ class TestSummaryMonotoneIntegration:
         X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, monotone="increasing")},
+            features={"signal": Spline(n_knots=10, constraint=Constraint.postfit.increasing)},
             selection_penalty=0.0,
         )
         m.fit(X, y, sample_weight=sample_weight)

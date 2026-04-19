@@ -137,8 +137,7 @@ class _SplineBase:
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
         select: bool = False,
-        monotone: str | None = None,
-        monotone_mode: str = "postfit",
+        constraint=None,
         m: int | tuple[int, ...] = 2,
         lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     ):
@@ -155,8 +154,7 @@ class _SplineBase:
             boundary=boundary,
             knot_alpha=knot_alpha,
             select=select,
-            monotone=monotone,
-            monotone_mode=monotone_mode,
+            constraint=constraint,
             m=m,
             lambda_policy=lambda_policy,
         )
@@ -444,14 +442,11 @@ class PSpline(_BSplineBase):
 
     knots : array-like or None
         Explicit interior knot positions.
-    monotone : {None, "increasing", "decreasing"}
-        ``None`` (default) leaves the spline unconstrained. ``"increasing"``
-        requests a nondecreasing monotone spline and ``"decreasing"``
-        requests a nonincreasing monotone spline.
-    monotone_mode : {"postfit", "fit"}
-        ``"postfit"`` (default) fits first and then allows isotonic repair.
-        ``"fit"`` keeps the monotone constraint in the optimization problem
-        and uses the SCOP monotone engine for ``PSpline``. With
+    constraint : ConstraintSpec or None
+        Public shape-constraint token. Use ``Constraint.fit.increasing``,
+        ``Constraint.fit.decreasing``, ``Constraint.postfit.increasing``, or
+        ``Constraint.postfit.decreasing``. For ``PSpline``,
+        ``Constraint.fit.*`` uses the SCOP monotone engine. With
         ``fit_reml()``, fixed lambdas work directly and automatic lambda
         estimation uses the dedicated monotone-aware SCOP REML / EFS path.
     """
@@ -469,8 +464,7 @@ class PSpline(_BSplineBase):
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
-        monotone: str | None = None,
-        monotone_mode: str = "postfit",
+        constraint=None,
         m: int | tuple[int, ...] = 2,
         lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     ):
@@ -486,8 +480,7 @@ class PSpline(_BSplineBase):
             boundary,
             knot_alpha,
             select=select,
-            monotone=monotone,
-            monotone_mode=monotone_mode,
+            constraint=constraint,
             m=m,
             lambda_policy=lambda_policy,
         )
@@ -543,17 +536,14 @@ class BSplineSmooth(_BSplineBase):
         If True, add double-penalty shrinkage (null + range space).
     knots : array-like or None
         Explicit interior knot positions.
-    monotone : {None, "increasing", "decreasing"}
-        ``None`` (default) leaves the spline unconstrained. ``"increasing"``
-        requests a nondecreasing monotone spline and ``"decreasing"``
-        requests a nonincreasing monotone spline.
-    monotone_mode : {"postfit", "fit"}
-        ``"postfit"`` (default) fits first and then allows isotonic repair.
-        ``"fit"`` uses the constrained QP monotone solver path for
-        ``BSplineSmooth``. With ``fit_reml()``, fixed lambdas work directly;
-        automatic lambda estimation uses the QP passthrough heuristic
-        (unconstrained REML followed by constrained refit), not exact joint
-        constrained REML.
+    constraint : ConstraintSpec or None
+        Public shape-constraint token. Use ``Constraint.fit.increasing``,
+        ``Constraint.fit.decreasing``, ``Constraint.postfit.increasing``, or
+        ``Constraint.postfit.decreasing``. For ``BSplineSmooth``,
+        ``Constraint.fit.*`` uses the constrained QP monotone solver path.
+        With ``fit_reml()``, fixed lambdas work directly; automatic lambda
+        estimation uses the QP passthrough heuristic (unconstrained REML
+        followed by constrained refit), not exact joint constrained REML.
     m : int or tuple of int
         Integrated derivative order(s) for the penalty.
     lambda_policy : LambdaPolicy or dict or None
@@ -576,8 +566,7 @@ class BSplineSmooth(_BSplineBase):
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
-        monotone: str | None = None,
-        monotone_mode: str = "postfit",
+        constraint=None,
         m: int | tuple[int, ...] = 2,
         lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     ):
@@ -593,8 +582,7 @@ class BSplineSmooth(_BSplineBase):
             boundary,
             knot_alpha,
             select=select,
-            monotone=monotone,
-            monotone_mode=monotone_mode,
+            constraint=constraint,
             m=m,
             lambda_policy=lambda_policy,
         )
@@ -710,17 +698,14 @@ class CubicRegressionSpline(_SplineBase):
 
     Parameters
     ----------
-    monotone : {None, "increasing", "decreasing"}
-        ``None`` (default) leaves the spline unconstrained. ``"increasing"``
-        requests a nondecreasing monotone spline and ``"decreasing"``
-        requests a nonincreasing monotone spline.
-    monotone_mode : {"postfit", "fit"}
-        ``"postfit"`` (default) fits first and then allows isotonic repair.
-        ``"fit"`` uses the constrained QP monotone solver path for
-        ``CubicRegressionSpline``. With ``fit_reml()``, fixed lambdas work
-        directly; automatic lambda estimation uses the QP passthrough
-        heuristic (unconstrained REML followed by constrained refit), not
-        exact joint constrained REML.
+    constraint : ConstraintSpec or None
+        Public shape-constraint token. Use ``Constraint.fit.increasing``,
+        ``Constraint.fit.decreasing``, ``Constraint.postfit.increasing``, or
+        ``Constraint.postfit.decreasing``. For ``CubicRegressionSpline``,
+        ``Constraint.fit.*`` uses the constrained QP monotone solver path.
+        With ``fit_reml()``, fixed lambdas work directly; automatic lambda
+        estimation uses the QP passthrough heuristic (unconstrained REML
+        followed by constrained refit), not exact joint constrained REML.
     """
 
     _penalty_semantics = "integrated_derivative"
@@ -742,8 +727,7 @@ class CubicRegressionSpline(_SplineBase):
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
-        monotone: str | None = None,
-        monotone_mode: str = "postfit",
+        constraint=None,
         m: int | tuple[int, ...] = 2,
         lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     ):
@@ -759,8 +743,7 @@ class CubicRegressionSpline(_SplineBase):
             boundary=boundary,
             knot_alpha=knot_alpha,
             select=select,
-            monotone=monotone,
-            monotone_mode=monotone_mode,
+            constraint=constraint,
             m=m,
             lambda_policy=lambda_policy,
         )
@@ -868,8 +851,7 @@ class CardinalCRSpline(_SplineBase):
         extrapolation: str = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
-        monotone: str | None = None,
-        monotone_mode: str = "postfit",
+        constraint=None,
         m: int | tuple[int, ...] = 2,
         lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     ):
@@ -885,8 +867,7 @@ class CardinalCRSpline(_SplineBase):
             boundary=boundary,
             knot_alpha=knot_alpha,
             select=select,
-            monotone=monotone,
-            monotone_mode=monotone_mode,
+            constraint=constraint,
             m=m,
             lambda_policy=lambda_policy,
         )
@@ -978,8 +959,7 @@ def Spline(
     extrapolation: str = "clip",
     boundary: tuple[float, float] | None = None,
     knot_alpha: float = 0.2,
-    monotone: str | None = None,
-    monotone_mode: str = "postfit",
+    constraint=None,
     m: int | tuple[int, ...] = 2,
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
 ) -> _SplineBase:
@@ -1000,8 +980,7 @@ def Spline(
             extrapolation=extrapolation,
             boundary=boundary,
             knot_alpha=knot_alpha,
-            monotone=monotone,
-            monotone_mode=monotone_mode,
+            constraint=constraint,
             m=m,
             lambda_policy=lambda_policy,
         ),

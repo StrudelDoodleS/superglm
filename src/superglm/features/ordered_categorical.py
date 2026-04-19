@@ -44,8 +44,9 @@ class OrderedCategorical:
       so adjacent categories are soft-fused.  Each level gets its own
       coefficient, penalized toward its neighbours.
 
-    Monotone constraints are not yet supported directly; pass a
-    ``Spline(monotone=...)`` object as ``basis`` in a future release.
+    Monotone spline constraints are supported by passing a configured
+    spline object as ``basis``, for example
+    ``PSpline(constraint=Constraint.fit.increasing)``.
 
     Parameters
     ----------
@@ -58,18 +59,21 @@ class OrderedCategorical:
         ``linspace(0, 1, len(order))``.  Mutually exclusive with ``values``.
     basis : {"spline", "step"} or Spline object
         ``"spline"`` (default) maps categories to numeric values and
-        builds a default B-spline.  ``"step"`` one-hot encodes with a
+        builds a default P-spline.  ``"step"`` one-hot encodes with a
         first-difference penalty.  A ``Spline(...)`` object can be passed
         directly for full control over kind, monotone constraints,
         select, penalty, etc.::
 
-            OrderedCategorical(order=[...], basis=Spline(monotone="increasing"))
+            OrderedCategorical(
+                order=[...],
+                basis=PSpline(constraint=Constraint.fit.increasing),
+            )
 
         When a Spline object is passed, the ``kind``, ``n_knots``,
         ``degree``, ``select``, and ``penalty`` parameters are ignored.
     kind : str
         Spline type (ignored if ``basis`` is a Spline object).
-        ``"bs"`` (default), ``"cr"``, ``"ns"``, etc.
+        ``"ps"`` (default), ``"bs"``, ``"cr"``, ``"ns"``, etc.
     base : str
         Reference level for step mode.  ``"most_exposed"`` (default),
         ``"first"``, or a specific level name.  Ignored in spline mode.
@@ -97,6 +101,13 @@ class OrderedCategorical:
     Step basis (one coefficient per level, soft-fused)::
 
         OrderedCategorical(order=[...], basis="step")
+
+    Monotone spline basis via the public constraint API::
+
+        OrderedCategorical(
+            order=["low", "medium", "high"],
+            basis=PSpline(n_knots=3, constraint=Constraint.fit.increasing),
+        )
     """
 
     def __init__(

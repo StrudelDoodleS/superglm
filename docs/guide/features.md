@@ -68,11 +68,11 @@ If monotonicity is part of the model specification, prefer solver-backed
 monotone fitting rather than post-fit repair.
 
 ```python
-from superglm import BSplineSmooth, CubicRegressionSpline, PSpline
+from superglm import BSplineSmooth, Constraint, CubicRegressionSpline, PSpline
 
-BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit")   # QP
-CubicRegressionSpline(n_knots=8, monotone="decreasing", monotone_mode="fit")  # QP
-PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")        # SCOP
+BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)   # QP
+CubicRegressionSpline(n_knots=8, constraint=Constraint.fit.decreasing)  # QP
+PSpline(n_knots=10, constraint=Constraint.fit.increasing)        # SCOP
 ```
 
 See [Monotone Splines](monotone.md) for the full decision guide.

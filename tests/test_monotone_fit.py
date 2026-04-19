@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import Constraint, SuperGLM
 from superglm.families import Gaussian
 from superglm.features.spline import BSplineSmooth, CubicRegressionSpline, PSpline
 from superglm.types import LambdaPolicy
@@ -39,8 +39,7 @@ class TestMonotoneFitBSplineSmooth:
             features={
                 "x": BSplineSmooth(
                     n_knots=10,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                 ),
             },
         )
@@ -82,8 +81,7 @@ class TestMonotoneFitBSplineSmooth:
             features={
                 "x": BSplineSmooth(
                     n_knots=10,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                 ),
             },
         )
@@ -108,8 +106,7 @@ class TestMonotoneFitBSplineSmooth:
             features={
                 "x": BSplineSmooth(
                     n_knots=8,
-                    monotone="decreasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.decreasing,
                 ),
             },
         )
@@ -138,8 +135,7 @@ class TestMonotoneFitCRS:
             features={
                 "x": CubicRegressionSpline(
                     n_knots=10,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                 ),
             },
         )
@@ -169,8 +165,7 @@ class TestMonotoneMixedModel:
             features={
                 "x1": BSplineSmooth(
                     n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                 ),
                 "x2": BSplineSmooth(n_knots=8),  # unconstrained
             },
@@ -225,7 +220,7 @@ class TestSCOPPenaltyInEDF:
             family=Gaussian(),
             selection_penalty=0,
             spline_penalty=0.01,
-            features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
         )
         model_low.fit(df[["x"]], df["y"])
 
@@ -233,7 +228,7 @@ class TestSCOPPenaltyInEDF:
             family=Gaussian(),
             selection_penalty=0,
             spline_penalty=100.0,
-            features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
         )
         model_high.fit(df[["x"]], df["y"])
 
@@ -257,7 +252,7 @@ class TestSCOPPenaltyInEDF:
             family=Gaussian(),
             selection_penalty=0,
             spline_penalty=0.01,
-            features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
         )
         model_low.fit(df[["x"]], df["y"])
 
@@ -265,7 +260,7 @@ class TestSCOPPenaltyInEDF:
             family=Gaussian(),
             selection_penalty=0,
             spline_penalty=100.0,
-            features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
         )
         model_high.fit(df[["x"]], df["y"])
 
@@ -287,14 +282,14 @@ class TestMonotoneUnsupportedCombinations:
             family=Gaussian(),
             selection_penalty=0.1,
             features={
-                "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         with pytest.raises(NotImplementedError, match="selection_penalty"):
             model.fit(df[["x"]], df["y"])
 
     def test_monotone_with_select_true_raises(self):
-        s = BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit", select=True)
+        s = BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing, select=True)
         x = np.linspace(0, 1, 200)
         with pytest.raises(NotImplementedError, match="select=True"):
             s.build(x)
@@ -311,7 +306,7 @@ class TestMonotoneUnsupportedCombinations:
             family=Gaussian(),
             selection_penalty=0,
             features={
-                "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -330,7 +325,7 @@ class TestMonotoneUnsupportedCombinations:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit(df[["x"]], df["y"])
@@ -355,7 +350,7 @@ class TestMonotoneFitPSpline:
         model = SuperGLM(
             family=Gaussian(),
             selection_penalty=0,
-            features={"x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit")},
+            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
         )
         model.fit(df[["x"]], df["y"])
         x_grid = np.linspace(0, 1, 200)
@@ -372,7 +367,7 @@ class TestMonotoneFitPSpline:
         model = SuperGLM(
             family=Gaussian(),
             selection_penalty=0,
-            features={"x": PSpline(n_knots=8, monotone="decreasing", monotone_mode="fit")},
+            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.decreasing)},
         )
         model.fit(df[["x"]], df["y"])
         x_grid = np.linspace(0, 1, 200)
@@ -391,7 +386,7 @@ class TestMonotoneFitPSpline:
             family=Gaussian(),
             selection_penalty=0,
             features={
-                "x1": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
                 "x2": PSpline(n_knots=8),
             },
         )
@@ -427,8 +422,8 @@ class TestMonotoneFitPSpline:
             family=Gaussian(),
             selection_penalty=0,
             features={
-                "x1": PSpline(n_knots=5, monotone="increasing", monotone_mode="fit"),
-                "x2": BSplineSmooth(n_knots=5, monotone="increasing", monotone_mode="fit"),
+                "x1": PSpline(n_knots=5, constraint=Constraint.fit.increasing),
+                "x2": BSplineSmooth(n_knots=5, constraint=Constraint.fit.increasing),
             },
         )
         with pytest.raises(NotImplementedError, match="SCOP.*QP"):
@@ -456,8 +451,7 @@ class TestMonotoneFixedLambdaREML:
             features={
                 "x": BSplineSmooth(
                     n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
                 ),
             },
@@ -490,8 +484,7 @@ class TestMonotoneFixedLambdaREML:
             features={
                 "x": PSpline(
                     n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
                 ),
             },
@@ -520,8 +513,7 @@ class TestMonotoneFixedLambdaREML:
             features={
                 "x": BSplineSmooth(
                     n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                 ),
             },
         )
@@ -542,7 +534,7 @@ class TestMonotoneFixedLambdaREML:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -592,8 +584,7 @@ class TestDiscreteMonotoneREML:
             features={
                 "x": BSplineSmooth(
                     n_knots=10,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
                 ),
             },
@@ -630,8 +621,7 @@ class TestDiscreteMonotoneREML:
             features={
                 "x": PSpline(
                     n_knots=10,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
                 ),
             },
@@ -674,8 +664,7 @@ class TestSummaryMonotoneEngine:
             features={
                 "x": BSplineSmooth(
                     n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                 ),
             },
         )
@@ -700,8 +689,7 @@ class TestSummaryMonotoneEngine:
             features={
                 "x": PSpline(
                     n_knots=8,
-                    monotone="increasing",
-                    monotone_mode="fit",
+                    constraint=Constraint.fit.increasing,
                 ),
             },
         )
@@ -726,7 +714,7 @@ class TestDiscreteQPMonotone:
             family=Gaussian(),
             selection_penalty=0,
             discrete=True,
-            features={"x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit")},
+            features={"x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)},
         )
         model.fit(df[["x"]], df["y"])
         x_grid = np.linspace(0, 1, 200)
@@ -744,9 +732,7 @@ class TestDiscreteQPMonotone:
             family=Gaussian(),
             selection_penalty=0,
             discrete=True,
-            features={
-                "x": CubicRegressionSpline(n_knots=8, monotone="increasing", monotone_mode="fit")
-            },
+            features={"x": CubicRegressionSpline(n_knots=8, constraint=Constraint.fit.increasing)},
         )
         model.fit(df[["x"]], df["y"])
         x_grid = np.linspace(0, 1, 200)
@@ -767,7 +753,7 @@ class TestDiscreteQPMonotone:
             selection_penalty=0,
             discrete=True,
             features={
-                "x1": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+                "x1": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing),
                 "x2": PSpline(n_knots=8),
             },
         )
@@ -801,7 +787,7 @@ class TestDiscreteQPMonotone:
             family=Gaussian(),
             selection_penalty=0,
             discrete=False,
-            features={"x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit")},
+            features={"x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)},
         )
         model_dense.fit(df[["x"]], df["y"])
         pred_dense = model_dense.predict(df_grid)
@@ -810,7 +796,7 @@ class TestDiscreteQPMonotone:
             family=Gaussian(),
             selection_penalty=0,
             discrete=True,
-            features={"x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit")},
+            features={"x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)},
         )
         model_disc.fit(df[["x"]], df["y"])
         pred_disc = model_disc.predict(df_grid)
@@ -830,7 +816,7 @@ class TestDiscreteSCOPMonotone:
             family=Gaussian(),
             selection_penalty=0,
             discrete=True,
-            features={"x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")},
+            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
         )
         model.fit(df[["x"]], df["y"])
         x_grid = np.linspace(0, 1, 200)
@@ -851,7 +837,7 @@ class TestDiscreteSCOPMonotone:
             family=Gaussian(),
             selection_penalty=0,
             discrete=False,
-            features={"x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")},
+            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
         )
         model_dense.fit(df[["x"]], df["y"])
         pred_dense = model_dense.predict(df_grid)
@@ -860,7 +846,7 @@ class TestDiscreteSCOPMonotone:
             family=Gaussian(),
             selection_penalty=0,
             discrete=True,
-            features={"x": PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")},
+            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
         )
         model_disc.fit(df[["x"]], df["y"])
         pred_disc = model_disc.predict(df_grid)

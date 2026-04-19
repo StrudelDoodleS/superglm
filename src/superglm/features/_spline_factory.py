@@ -54,8 +54,7 @@ def Spline(
     extrapolation: str = "clip",
     boundary: tuple[float, float] | None = None,
     knot_alpha: float = 0.2,
-    monotone: str | None = None,
-    monotone_mode: str = "postfit",
+    constraint=None,
     m: int | tuple[int, ...] = 2,
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
 ) -> _SplineBase:
@@ -86,10 +85,10 @@ def Spline(
             "Cannot specify both k and n_knots. Use k (public basis size) or n_knots (interior knots), not both."
         )
 
-    if monotone is not None and kind == "ns":
+    if constraint is not None and kind == "ns":
         raise NotImplementedError(
-            "monotone is not supported for kind='ns'. "
-            "Use kind='cr' or kind='ps' with monotone='increasing' or 'decreasing'."
+            "constraint is not supported for kind='ns'. "
+            "Use kind='cr', kind='ps', or remove the constraint."
         )
 
     if k is not None:
@@ -119,8 +118,7 @@ def Spline(
                 extrapolation=extrapolation,
                 boundary=boundary,
                 knot_alpha=knot_alpha,
-                monotone=monotone,
-                monotone_mode=monotone_mode,
+                constraint=constraint,
                 m=m,
                 lambda_policy=lambda_policy,
             ),
@@ -139,8 +137,7 @@ def Spline(
                 extrapolation=extrapolation,
                 boundary=boundary,
                 knot_alpha=knot_alpha,
-                monotone=monotone,
-                monotone_mode=monotone_mode,
+                constraint=constraint,
                 m=m,
                 lambda_policy=lambda_policy,
             ),
