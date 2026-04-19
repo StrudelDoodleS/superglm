@@ -963,7 +963,7 @@ class SuperGLM:
         """Repair monotone-annotated spline terms after fitting.
 
         This is a manual, post-fit repair step. It finds all spline features
-        with ``monotone='increasing'`` or ``monotone='decreasing'``, applies
+        using a ``Constraint.postfit.*`` token, applies
         weighted isotonic regression to the fitted curve, and projects the
         repaired curve back to spline coefficients.
 

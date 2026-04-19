@@ -2,7 +2,7 @@
 
 import pytest
 
-from superglm import Constraint, ConstraintSpec, PSpline, features
+from superglm import Constraint, ConstraintSpec, PSpline, Spline, features
 
 
 def test_constraint_fit_increasing_token():
@@ -39,6 +39,11 @@ def test_pspline_constraint_token_normalizes_to_internal_monotone_fields():
 def test_pspline_rejects_old_public_monotone_arguments():
     with pytest.raises(TypeError):
         PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")
+
+
+def test_spline_factory_rejects_old_public_monotone_arguments():
+    with pytest.raises(TypeError):
+        Spline(kind="ps", n_knots=8, monotone="increasing", monotone_mode="fit")
 
 
 @pytest.mark.parametrize(

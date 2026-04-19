@@ -9,6 +9,8 @@ Use this when you want a spline-based GAM-style pricing model with automatic
 smoothness selection and clean post-fit inference.
 
 ```python
+from superglm import Constraint, PSpline, SuperGLM
+
 model = SuperGLM(
     family="poisson",
     selection_penalty=0.0,
@@ -83,20 +85,18 @@ selection.
 If monotonicity is part of the specification, fit it inside the model rather
 than repairing it afterward.
 
-- `BSplineSmooth(..., monotone_mode="fit")`: QP-backed monotone fit
-- `CubicRegressionSpline(..., monotone_mode="fit")`: QP-backed monotone fit
-- `PSpline(..., monotone_mode="fit")`: SCOP-backed monotone fit
+- `BSplineSmooth(..., constraint=Constraint.fit.increasing)`: QP-backed monotone fit
+- `CubicRegressionSpline(..., constraint=Constraint.fit.decreasing)`: QP-backed monotone fit
+- `PSpline(..., constraint=Constraint.fit.increasing)`: SCOP-backed monotone fit
 
 ```python
+from superglm import Constraint, PSpline, SuperGLM
+
 model = SuperGLM(
     family="gaussian",
     selection_penalty=0.0,
     features={
-        "BonusMalus": PSpline(
-            n_knots=10,
-            monotone="increasing",
-            monotone_mode="fit",
-        ),
+        "BonusMalus": PSpline(n_knots=10, constraint=Constraint.fit.increasing),
     },
 )
 model.fit_reml(df, y, sample_weight=exposure)
