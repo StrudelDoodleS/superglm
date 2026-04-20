@@ -13,7 +13,7 @@ from superglm.links import Link, stabilize_eta
 from superglm.model import path_ops
 from superglm.model.reml_execute import (
     optimize_reml_best,
-    run_fixed_monotone_reml,
+    run_fixed_constraint_reml,
     run_scop_efs_reml,
 )
 from superglm.model.reml_finalize import finalize_reml_fit
@@ -30,9 +30,9 @@ from superglm.model.reml_ops import (
 )
 from superglm.model.reml_setup import (
     collect_reml_groups,
+    constraint_engine_flags,
     initialize_component_lambdas,
     inject_fixed_scop_lambdas,
-    monotone_flags,
     restore_qp_constraints,
     strip_qp_constraints,
 )
@@ -296,35 +296,33 @@ def fit(
     # Invalidate cached properties from previous fit
     _clear_fit_inference_caches(model)
 
-    # Monotone fit-time constraints are incompatible with selection_penalty (lambda1).
-    # The constrained QP solver path ignores lambda1 — reject explicitly.
+    _has_constraints, _has_qp_constraints, _has_scop_constraints = constraint_engine_flags(
+        model._groups
+    )
+
+    # Fit-time constraints are incompatible with selection_penalty (lambda1).
+    # The constrained solver paths ignore lambda1 — reject explicitly.
     if (
-        any(g.monotone_engine is not None for g in model._groups)
+        _has_constraints
         and model.penalty.lambda1 is not None
         and model.penalty.lambda1 > 0
         and has_lambda1_targets
     ):
         raise NotImplementedError(
-            "Monotone fit-time constraints are not supported with selection_penalty > 0. "
-            "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
+            "Fit-time constraints are not supported with selection_penalty > 0. "
+            "Set selection_penalty=0 or remove the fit-time constraint."
         )
 
-    # Guard: SCOP + QP monotone engines cannot coexist in the same model.
-    _monotone_engines = {g.monotone_engine for g in model._groups if g.monotone_engine is not None}
-    if len(_monotone_engines) > 1:
-        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
+    if _has_qp_constraints and _has_scop_constraints:
+        raise NotImplementedError(
+            "SCOP + QP fit-time constrained terms in the same model are not supported."
+        )
 
     # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed),
-    # or when any group has monotone constraints (constrained QP / SCOP Newton).
-    _has_constraints = any(g.constraints is not None for g in model._groups)
-    _has_scop = any(g.monotone_engine == "scop" for g in model._groups)
-    if (
-        _has_constraints
-        or _has_scop
-        or (
-            model.penalty.lambda1 is not None
-            and (model.penalty.lambda1 == 0 or not has_lambda1_targets)
-        )
+    # or when any group uses a fit-time constrained engine (QP / SCOP Newton).
+    if _has_constraints or (
+        model.penalty.lambda1 is not None
+        and (model.penalty.lambda1 == 0 or not has_lambda1_targets)
     ):
         model._result, _ = fit_irls_direct(
             X=model._dm,
@@ -552,9 +550,11 @@ def fit_reml(
         )
 
     reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)
-    _has_monotone, _has_qp_monotone, _has_scop_monotone = monotone_flags(model._groups)
+    _has_constraints, _has_qp_constraints, _has_scop_constraints = constraint_engine_flags(
+        model._groups
+    )
 
-    if not reml_groups and not _has_monotone:
+    if not reml_groups and not _has_constraints:
         logger.warning("fit_reml: no REML-eligible groups found, falling back to fit()")
         model._result = fit_pirls(
             X=model._dm,
@@ -611,11 +611,11 @@ def fit_reml(
     lambdas, estimated_names = initialize_component_lambdas(reml_penalties, lam_init)
     _any_unfixed_scop = inject_fixed_scop_lambdas(model._groups, model._specs, lambdas)
 
-    # QP monotone with auto lambda → two-stage passthrough heuristic:
+    # QP-constrained groups with auto lambda use a two-stage passthrough heuristic:
     # Stage 1: run unconstrained REML (temporarily strip QP constraints)
     # Stage 2: constrained refit at estimated lambdas
     # This is a heuristic, not exact joint REML for constrained terms.
-    _qp_passthrough = _has_qp_monotone and bool(estimated_names)
+    _qp_passthrough = _has_qp_constraints and bool(estimated_names)
 
     # Stage 1 setup: temporarily disable QP constraints so REML runs fully
     # unconstrained. Save the original state to restore for stage 2.
@@ -624,7 +624,9 @@ def fit_reml(
     if _qp_passthrough:
         _qp_saved_state = strip_qp_constraints(model._groups)
         _qp_stripped = True
-        _has_monotone, _has_qp_monotone, _has_scop_monotone = monotone_flags(model._groups)
+        _has_constraints, _has_qp_constraints, _has_scop_constraints = constraint_engine_flags(
+            model._groups
+        )
 
     try:
         # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
@@ -632,8 +634,8 @@ def fit_reml(
         lam1 = model.penalty.lambda1
         use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
 
-        if _has_monotone and not _any_unfixed_scop and not estimated_names:
-            run_fixed_monotone_reml(
+        if _has_constraints and not _any_unfixed_scop and not estimated_names:
+            run_fixed_constraint_reml(
                 model,
                 y=y,
                 sample_weight=sample_weight,
@@ -652,10 +654,10 @@ def fit_reml(
                 offset_ref=offset_ref,
                 y_arr=y,
             )
-            logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
+            logger.info(f"fit_reml (constrained, fixed lambdas): lambdas={lambdas}")
             return model
 
-        if _any_unfixed_scop or (_has_scop_monotone and estimated_names):
+        if _any_unfixed_scop or (_has_scop_constraints and estimated_names):
             best = run_scop_efs_reml(
                 model,
                 y=y,

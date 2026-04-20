@@ -11,7 +11,7 @@ from superglm.model.reml_setup import promote_estimated_scop_lambdas
 from superglm.solvers.irls_direct import fit_irls_direct
 
 
-def run_fixed_monotone_reml(
+def run_fixed_constraint_reml(
     model,
     *,
     y,
@@ -23,7 +23,7 @@ def run_fixed_monotone_reml(
     reml_penalties: list[Any],
     compute_fit_stats,
 ) -> None:
-    """Run the fixed-lambda monotone REML path and update the model in place."""
+    """Run the fixed-lambda constrained REML path and update the model in place."""
     result, _ = fit_irls_direct(
         X=model._dm,
         y=y,
@@ -75,7 +75,7 @@ def run_scop_efs_reml(
     total_start: float,
     compute_fit_stats,
 ):
-    """Run the SCOP EFS REML path and update the model in place."""
+    """Run the SCOP-constrained EFS REML path and update the model in place."""
     promote_estimated_scop_lambdas(
         model._groups,
         model._specs,
