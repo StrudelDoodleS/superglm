@@ -13,8 +13,8 @@ The public spline API now uses a single `constraint=` argument:
 - `constraint=Constraint.fit.concave`
 - `constraint=Constraint.postfit.increasing`
 - `constraint=Constraint.postfit.decreasing`
-- `Constraint.postfit.convex`
-- `Constraint.postfit.concave`
+- `constraint=Constraint.postfit.convex`
+- `constraint=Constraint.postfit.concave`
 
 Use `Constraint.fit.*` when the shape constraint should live inside the solver.
 Use `Constraint.postfit.*` when you want the fitted spline repaired after
