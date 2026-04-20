@@ -61,6 +61,32 @@ def test_single_scop_feature_support_compression_matches_fallback(monkeypatch):
     assert_allclose(fast.predict(df), slow.predict(df), atol=1e-8, rtol=1e-8)
 
 
+def test_single_scop_feature_support_compression_preserves_predictions(monkeypatch):
+    x = np.repeat(np.linspace(0.0, 1.0, 50), 8)
+    y = 0.4 + 0.7 * x + 1.2 * x**2
+    df = pd.DataFrame({"x": x})
+
+    fast = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex)},
+    ).fit(df, y)
+
+    monkeypatch.setattr(
+        scop_exact_support,
+        "build_exact_scop_support",
+        lambda B_scop: None,
+    )
+
+    slow = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex)},
+    ).fit(df, y)
+
+    assert_allclose(fast.predict(df), slow.predict(df), atol=1e-8, rtol=1e-8)
+
+
 def test_single_scop_feature_reuses_support_compression_when_available():
     x = np.repeat(np.linspace(0.0, 1.0, 30), 10)
     y = 0.4 + 0.7 * x + 1.2 * x**2
