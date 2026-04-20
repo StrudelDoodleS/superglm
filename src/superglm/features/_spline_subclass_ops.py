@@ -59,6 +59,7 @@ def build_scop_reparameterization(
     x_centered = x_shape - col_means
 
     spec._scop_Sigma = reparam.Sigma
+    spec._scop_null_dim = null_dim
     spec._scop_col_means = col_means
 
     solver_reparam = build_scop_solver_reparam(q, kind=kind)

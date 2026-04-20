@@ -26,11 +26,9 @@ def _uses_fit_time_shape_constraints(spec: Any) -> bool:
 
 
 def _uses_fit_time_scop_constraints(spec: Any) -> bool:
-    """Whether the spec should enter the SCOP fit-time monotone path."""
-    return (
-        _constraint_kind(spec) in {"increasing", "decreasing"}
-        and _constraint_mode(spec) == "fit"
-        and hasattr(spec, "_build_scop_reparameterization")
+    """Whether the spec should enter the SCOP fit-time shape path."""
+    return _uses_fit_time_shape_constraints(spec) and hasattr(
+        spec, "_build_scop_reparameterization"
     )
 
 

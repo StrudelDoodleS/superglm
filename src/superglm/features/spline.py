@@ -447,13 +447,10 @@ class PSpline(_BSplineBase):
         ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
         ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
         ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
-        ``Constraint.postfit.concave``. For ``PSpline``, fit-time monotone
-        constraints are currently limited to increasing/decreasing and use
-        the SCOP engine. Fit-time convex/concave constraints are not
-        implemented yet; use the postfit variants for those shape tokens.
-        With ``fit_reml()``, fixed lambdas work directly and automatic
-        lambda estimation uses the dedicated monotone-aware SCOP REML / EFS
-        path.
+        ``Constraint.postfit.concave``. For ``PSpline``, fit-time shape
+        constraints use the SCOP engine. With ``fit_reml()``, fixed lambdas
+        work directly and automatic lambda estimation uses the dedicated
+        shape-aware SCOP REML / EFS path.
     """
 
     def __init__(
