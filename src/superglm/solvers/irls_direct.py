@@ -26,6 +26,7 @@ import scipy.linalg
 import scipy.linalg.lapack
 from numpy.typing import NDArray
 
+import superglm.solvers.scop_exact_support as scop_exact_support
 from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initial_mean
 from superglm.group_matrix import (
     DesignMatrix,
@@ -402,6 +403,7 @@ def fit_irls_direct(
 
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
+    _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
     _scop_state: dict[int, dict] = {}
     if _has_scop:
@@ -440,14 +442,28 @@ def fit_irls_direct(
                     }
                 else:
                     B_scop = _gm.toarray()
-                    state = {
-                        "reparam": reparam,
-                        "B_scop": B_scop,
-                        "S_scop": S_scop,
-                        "bin_idx": None,
-                        "beta_scop": warm_beta_scop,
-                        "beta_scop_prev": None,
-                    }
+                    support = None
+                    if _n_scop_groups == 1:
+                        support = scop_exact_support.build_exact_scop_support(B_scop)
+
+                    if support is not None:
+                        state = {
+                            "reparam": reparam,
+                            "B_scop": support.B_unique,
+                            "S_scop": S_scop,
+                            "bin_idx": support.row_to_support,
+                            "beta_scop": warm_beta_scop,
+                            "beta_scop_prev": None,
+                        }
+                    else:
+                        state = {
+                            "reparam": reparam,
+                            "B_scop": B_scop,
+                            "S_scop": S_scop,
+                            "bin_idx": None,
+                            "beta_scop": warm_beta_scop,
+                            "beta_scop_prev": None,
+                        }
                 if cached_scop_state is not None:
                     for key in (
                         "penalty_rank",
@@ -949,8 +965,8 @@ def fit_irls_direct(
         log_det_H=log_det_H,
     )
 
-    # Collect converged SCOP state for EFS outer loop
-    if return_scop_state and _has_scop:
+    # Collect converged SCOP state for EFS outer loop and fit results.
+    if _has_scop:
         scop_converged = {}
         for gi, st in _scop_state.items():
             scop_converged[gi] = {
@@ -971,12 +987,13 @@ def fit_irls_direct(
             }
     else:
         scop_converged = None
+    result.scop_states = scop_converged
 
     if return_xtwx:
-        if scop_converged is not None:
+        if return_scop_state and scop_converged is not None:
             return result, XtWX_S_inv_beta, XtWX_beta, scop_converged
         return result, XtWX_S_inv_beta, XtWX_beta
 
-    if scop_converged is not None:
+    if return_scop_state and scop_converged is not None:
         return result, XtWX_S_inv_beta, scop_converged
     return result, XtWX_S_inv_beta

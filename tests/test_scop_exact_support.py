@@ -59,3 +59,21 @@ def test_single_scop_feature_support_compression_matches_fallback(monkeypatch):
 
     assert_allclose(fast.result.beta, slow.result.beta, atol=1e-8, rtol=1e-8)
     assert_allclose(fast.predict(df), slow.predict(df), atol=1e-8, rtol=1e-8)
+
+
+def test_single_scop_feature_reuses_support_compression_when_available():
+    x = np.repeat(np.linspace(0.0, 1.0, 30), 10)
+    y = 0.4 + 0.7 * x + 1.2 * x**2
+    df = pd.DataFrame({"x": x})
+
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex)},
+    ).fit(df, y)
+
+    scop_states = getattr(model._result, "scop_states", None)
+    assert scop_states is not None
+    state = next(iter(scop_states.values()))
+    assert state["bin_idx"] is not None
+    assert state["B_scop"].shape[0] < len(df)
