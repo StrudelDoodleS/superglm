@@ -77,3 +77,21 @@ def test_single_scop_feature_reuses_support_compression_when_available():
     state = next(iter(scop_states.values()))
     assert state["bin_idx"] is not None
     assert state["B_scop"].shape[0] < len(df)
+
+
+def test_multi_scop_feature_fit_does_not_expose_exact_support_state():
+    x1 = np.repeat(np.linspace(0.0, 1.0, 20), 6)
+    x2 = np.repeat(np.linspace(1.0, 2.0, 20), 6)
+    y = 0.3 + 0.4 * x1**2 + 0.2 * x2**2
+    df = pd.DataFrame({"x1": x1, "x2": x2})
+
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "x1": PSpline(n_knots=10, constraint=Constraint.fit.convex),
+            "x2": PSpline(n_knots=10, constraint=Constraint.fit.convex),
+        },
+    ).fit(df, y)
+
+    assert getattr(model._result, "scop_states", None) is None

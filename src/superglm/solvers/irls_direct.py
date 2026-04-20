@@ -404,6 +404,7 @@ def fit_irls_direct(
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
+    _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
     _scop_state: dict[int, dict] = {}
     if _has_scop:
@@ -447,6 +448,7 @@ def fit_irls_direct(
                         support = scop_exact_support.build_exact_scop_support(B_scop)
 
                     if support is not None:
+                        _expose_exact_support_state = True
                         state = {
                             "reparam": reparam,
                             "B_scop": support.B_unique,
@@ -987,7 +989,8 @@ def fit_irls_direct(
             }
     else:
         scop_converged = None
-    result.scop_states = scop_converged
+    if _expose_exact_support_state:
+        result.scop_states = scop_converged
 
     if return_xtwx:
         if return_scop_state and scop_converged is not None:
