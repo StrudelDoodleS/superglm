@@ -444,11 +444,13 @@ class PSpline(_BSplineBase):
         Explicit interior knot positions.
     constraint : ConstraintSpec or None
         Public shape-constraint token. Use ``Constraint.fit.increasing``,
-        ``Constraint.fit.decreasing``, ``Constraint.postfit.increasing``, or
-        ``Constraint.postfit.decreasing``. For ``PSpline``,
-        ``Constraint.fit.*`` uses the SCOP monotone engine. With
-        ``fit_reml()``, fixed lambdas work directly and automatic lambda
-        estimation uses the dedicated monotone-aware SCOP REML / EFS path.
+        ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
+        ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
+        ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
+        ``Constraint.postfit.concave``. For ``PSpline``, fit-time monotone
+        constraints use the SCOP engine. With ``fit_reml()``, fixed lambdas
+        work directly and automatic lambda estimation uses the dedicated
+        monotone-aware SCOP REML / EFS path.
     """
 
     def __init__(
@@ -538,10 +540,12 @@ class BSplineSmooth(_BSplineBase):
         Explicit interior knot positions.
     constraint : ConstraintSpec or None
         Public shape-constraint token. Use ``Constraint.fit.increasing``,
-        ``Constraint.fit.decreasing``, ``Constraint.postfit.increasing``, or
-        ``Constraint.postfit.decreasing``. For ``BSplineSmooth``,
-        ``Constraint.fit.*`` uses the constrained QP monotone solver path.
-        With ``fit_reml()``, fixed lambdas work directly; automatic lambda
+        ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
+        ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
+        ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
+        ``Constraint.postfit.concave``. For ``BSplineSmooth``, fit-time
+        monotone constraints use the constrained QP solver path. With
+        ``fit_reml()``, fixed lambdas work directly; automatic lambda
         estimation uses the QP passthrough heuristic (unconstrained REML
         followed by constrained refit), not exact joint constrained REML.
     m : int or tuple of int
@@ -700,9 +704,11 @@ class CubicRegressionSpline(_SplineBase):
     ----------
     constraint : ConstraintSpec or None
         Public shape-constraint token. Use ``Constraint.fit.increasing``,
-        ``Constraint.fit.decreasing``, ``Constraint.postfit.increasing``, or
-        ``Constraint.postfit.decreasing``. For ``CubicRegressionSpline``,
-        ``Constraint.fit.*`` uses the constrained QP monotone solver path.
+        ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
+        ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
+        ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
+        ``Constraint.postfit.concave``. For ``CubicRegressionSpline``,
+        fit-time monotone constraints use the constrained QP solver path.
         With ``fit_reml()``, fixed lambdas work directly; automatic lambda
         estimation uses the QP passthrough heuristic (unconstrained REML
         followed by constrained refit), not exact joint constrained REML.

@@ -2,7 +2,7 @@
 
 import pytest
 
-from superglm import Constraint, ConstraintSpec, PSpline, Spline, features
+from superglm import BSplineSmooth, Constraint, ConstraintSpec, PSpline, Spline, features
 
 
 def test_constraint_fit_increasing_token():
@@ -36,6 +36,24 @@ def test_pspline_constraint_token_normalizes_to_internal_monotone_fields():
     assert spec.monotone_mode == "fit"
 
 
+def test_constraint_fit_convex_token_normalizes_to_shape_fields():
+    spec = BSplineSmooth(n_knots=8, constraint=Constraint.fit.convex)
+
+    assert spec.constraint_kind == "convex"
+    assert spec.constraint_mode == "fit"
+    assert spec.monotone == "convex"
+    assert spec.monotone_mode == "fit"
+
+
+def test_constraint_postfit_concave_token_normalizes_to_shape_fields():
+    spec = PSpline(n_knots=8, constraint=Constraint.postfit.concave)
+
+    assert spec.constraint_kind == "concave"
+    assert spec.constraint_mode == "postfit"
+    assert spec.monotone == "concave"
+    assert spec.monotone_mode == "postfit"
+
+
 def test_pspline_rejects_old_public_monotone_arguments():
     with pytest.raises(TypeError):
         PSpline(n_knots=8, monotone="increasing", monotone_mode="fit")
@@ -44,12 +62,3 @@ def test_pspline_rejects_old_public_monotone_arguments():
 def test_spline_factory_rejects_old_public_monotone_arguments():
     with pytest.raises(TypeError):
         Spline(kind="ps", n_knots=8, monotone="increasing", monotone_mode="fit")
-
-
-@pytest.mark.parametrize(
-    "constraint",
-    [Constraint.fit.convex, Constraint.postfit.concave],
-)
-def test_pspline_rejects_reserved_constraint_kinds(constraint):
-    with pytest.raises(NotImplementedError):
-        PSpline(n_knots=8, constraint=constraint)
