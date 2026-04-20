@@ -3,6 +3,7 @@ from pathlib import Path
 from benchmarks._constrained_fit_profile import (
     ProfileScenario,
     make_synthetic_dataset,
+    profile_callstack_and_memory,
     summarize_rows,
     write_profile_artifacts,
 )
@@ -57,11 +58,17 @@ def test_summarize_rows_emits_expected_columns():
 
 
 def test_write_profile_artifacts_creates_expected_files(tmp_path: Path):
+    result, stats_text, memory_stats = profile_callstack_and_memory(lambda: sum(range(10)))
+
+    assert result == 45
+    assert "sum" in stats_text
+    assert memory_stats["peak_mb"] >= 0.0
+
     paths = write_profile_artifacts(
         base_dir=tmp_path,
         stem="demo",
-        profile_stats={"cumulative": [("demo", 1.0)]},
-        memory_stats={"peak_mb": 3.5},
+        profile_stats={"stats": stats_text},
+        memory_stats=memory_stats,
     )
     assert paths["cpu_txt"].exists()
     assert paths["memory_json"].exists()
