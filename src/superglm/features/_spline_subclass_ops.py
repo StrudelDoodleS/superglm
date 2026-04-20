@@ -51,10 +51,12 @@ def build_scop_reparameterization(
     q = spec._n_basis
     kind = getattr(spec, "constraint_kind", None) or spec.monotone
     reparam = build_scop_reparam(q, kind=kind)
+    null_dim = reparam.null_dim
 
     x_sigma = basis @ reparam.Sigma
-    col_means = x_sigma[:, 1:].mean(axis=0)
-    x_centered = x_sigma[:, 1:] - col_means
+    x_shape = x_sigma[:, null_dim:]
+    col_means = x_shape.mean(axis=0)
+    x_centered = x_shape - col_means
 
     spec._scop_Sigma = reparam.Sigma
     spec._scop_col_means = col_means
