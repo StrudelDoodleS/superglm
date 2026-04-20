@@ -44,12 +44,13 @@ def build_scop_reparameterization(
     basis: NDArray,
     omega: NDArray,
 ):
-    """Build the SCOP reparameterization for monotone P-splines."""
+    """Build the SCOP reparameterization for shape-constrained P-splines."""
     del omega
     from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
 
     q = spec._n_basis
-    reparam = build_scop_reparam(q, direction=spec.monotone)
+    kind = getattr(spec, "constraint_kind", None) or spec.monotone
+    reparam = build_scop_reparam(q, kind=kind)
 
     x_sigma = basis @ reparam.Sigma
     col_means = x_sigma[:, 1:].mean(axis=0)
@@ -58,7 +59,7 @@ def build_scop_reparameterization(
     spec._scop_Sigma = reparam.Sigma
     spec._scop_col_means = col_means
 
-    solver_reparam = build_scop_solver_reparam(q, direction=spec.monotone)
+    solver_reparam = build_scop_solver_reparam(q, kind=kind)
     scop_penalty = solver_reparam.penalty_matrix()
     return x_centered, scop_penalty, solver_reparam
 

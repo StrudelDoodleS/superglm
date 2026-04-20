@@ -5,6 +5,20 @@ import numpy as np
 from superglm.solvers.scop import build_scop_reparam
 
 
+def test_scop_convex_forward_produces_nonnegative_second_differences():
+    beta = np.array([0.2, -0.1, -1.0, -0.8, -0.6, -0.4])
+    reparam = build_scop_reparam(q=6, kind="convex")
+    gamma = reparam.forward(beta)
+    assert np.all(np.diff(gamma, n=2) >= -1e-10)
+
+
+def test_scop_concave_forward_produces_nonpositive_second_differences():
+    beta = np.array([0.2, -0.1, -1.0, -0.8, -0.6, -0.4])
+    reparam = build_scop_reparam(q=6, kind="concave")
+    gamma = reparam.forward(beta)
+    assert np.all(np.diff(gamma, n=2) <= 1e-10)
+
+
 class TestSCOPForwardMap:
     """Forward map: beta -> gamma via cumulative exp."""
 
