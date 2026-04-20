@@ -13,6 +13,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+ROOT = Path(__file__).resolve().parents[1]
+FREMTPL_FREQ_PATH = ROOT / "data" / "freMTPL2freq.parquet"
+if not FREMTPL_FREQ_PATH.exists() and ROOT.parent.name == ".worktrees":
+    FREMTPL_FREQ_PATH = ROOT.parent.parent / "data" / "freMTPL2freq.parquet"
+
+FREMTPL_SANITY_N = 50_000
+
 
 @dataclass(frozen=True)
 class ProfileScenario:
@@ -24,6 +31,40 @@ class ProfileScenario:
     repeated_support: bool
     discrete: bool
     use_fremtpl: bool
+
+
+def find_fremtpl_freq_path() -> Path | None:
+    return FREMTPL_FREQ_PATH if FREMTPL_FREQ_PATH.exists() else None
+
+
+def load_fremtpl_freq_dataset(n: int | None = None) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    path = find_fremtpl_freq_path()
+    if path is None:
+        raise FileNotFoundError("freMTPL2freq.parquet not found in this checkout or its parents")
+
+    try:
+        df = pd.read_parquet(path)
+    except ImportError as err:
+        raise ImportError(
+            "freMTPL2freq.parquet found but parquet support is unavailable; "
+            "install the bench extra (for example `uv sync --extra bench`)."
+        ) from err
+
+    if n is not None and n < len(df):
+        df = df.head(n).copy()
+    else:
+        df = df.copy()
+
+    df["ClaimNb"] = df["ClaimNb"].clip(upper=4)
+    df["Exposure"] = df["Exposure"].clip(lower=0.01)
+    df["DrivAge"] = df["DrivAge"].clip(18, 90)
+    df["VehAge"] = df["VehAge"].clip(0, 20)
+    df["BonusMalus"] = df["BonusMalus"].clip(50, 150)
+    df["LogDensity"] = np.log1p(df["Density"])
+    y = (df["ClaimNb"] / df["Exposure"]).to_numpy(dtype=np.float64)
+    sample_weight = df["Exposure"].to_numpy(dtype=np.float64)
+    X = df[["BonusMalus", "LogDensity", "DrivAge", "VehAge", "Area"]].copy()
+    return X, y, sample_weight
 
 
 def build_scenarios(max_n: int = 500_000) -> list[ProfileScenario]:
@@ -109,9 +150,59 @@ def build_scenarios(max_n: int = 500_000) -> list[ProfileScenario]:
             use_fremtpl=False,
         ),
         ProfileScenario(
-            name="fremtpl_scop_discrete",
+            name="fremtpl_single_scop_exact",
             engine="scop",
-            n=500_000,
+            n=FREMTPL_SANITY_N,
+            k=12,
+            n_constrained=1,
+            repeated_support=False,
+            discrete=False,
+            use_fremtpl=True,
+        ),
+        ProfileScenario(
+            name="fremtpl_single_scop_discrete",
+            engine="scop",
+            n=FREMTPL_SANITY_N,
+            k=12,
+            n_constrained=1,
+            repeated_support=False,
+            discrete=True,
+            use_fremtpl=True,
+        ),
+        ProfileScenario(
+            name="fremtpl_single_qp_exact",
+            engine="qp",
+            n=FREMTPL_SANITY_N,
+            k=12,
+            n_constrained=1,
+            repeated_support=False,
+            discrete=False,
+            use_fremtpl=True,
+        ),
+        ProfileScenario(
+            name="fremtpl_single_qp_discrete",
+            engine="qp",
+            n=FREMTPL_SANITY_N,
+            k=12,
+            n_constrained=1,
+            repeated_support=False,
+            discrete=True,
+            use_fremtpl=True,
+        ),
+        ProfileScenario(
+            name="fremtpl_multi_scop_exact",
+            engine="scop",
+            n=FREMTPL_SANITY_N,
+            k=12,
+            n_constrained=2,
+            repeated_support=False,
+            discrete=False,
+            use_fremtpl=True,
+        ),
+        ProfileScenario(
+            name="fremtpl_multi_scop_discrete",
+            engine="scop",
+            n=FREMTPL_SANITY_N,
             k=12,
             n_constrained=2,
             repeated_support=False,
@@ -119,9 +210,19 @@ def build_scenarios(max_n: int = 500_000) -> list[ProfileScenario]:
             use_fremtpl=True,
         ),
         ProfileScenario(
-            name="fremtpl_qp_discrete",
+            name="fremtpl_multi_qp_exact",
             engine="qp",
-            n=500_000,
+            n=FREMTPL_SANITY_N,
+            k=12,
+            n_constrained=2,
+            repeated_support=False,
+            discrete=False,
+            use_fremtpl=True,
+        ),
+        ProfileScenario(
+            name="fremtpl_multi_qp_discrete",
+            engine="qp",
+            n=FREMTPL_SANITY_N,
             k=12,
             n_constrained=2,
             repeated_support=False,

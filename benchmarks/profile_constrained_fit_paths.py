@@ -24,6 +24,8 @@ try:
     from benchmarks._constrained_fit_profile import (
         ProfileScenario,
         build_scenarios,
+        find_fremtpl_freq_path,
+        load_fremtpl_freq_dataset,
         make_synthetic_dataset,
         profile_callstack_and_memory,
         summarize_rows,
@@ -33,6 +35,8 @@ except ModuleNotFoundError:
     from _constrained_fit_profile import (
         ProfileScenario,
         build_scenarios,
+        find_fremtpl_freq_path,
+        load_fremtpl_freq_dataset,
         make_synthetic_dataset,
         profile_callstack_and_memory,
         summarize_rows,
@@ -86,39 +90,13 @@ def build_features(scenario: ProfileScenario) -> dict[str, object]:
     }
 
 
-def _find_fremtpl_path() -> Path | None:
-    target = Path("data/freMTPL2freq.parquet")
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / target
-        if candidate.exists():
-            return candidate
-    return None
-
-
 def load_dataset(
     scenario: ProfileScenario,
     seed: int,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     if not scenario.use_fremtpl:
         return make_synthetic_dataset(scenario, seed=seed)
-
-    path = _find_fremtpl_path()
-    if path is None:
-        raise FileNotFoundError("freMTPL2freq.parquet not found in this checkout or its parents")
-
-    df = pd.read_parquet(path)
-    df["ClaimNb"] = df["ClaimNb"].clip(upper=4)
-    df["Exposure"] = df["Exposure"].clip(lower=0.01)
-    df["DrivAge"] = df["DrivAge"].clip(18, 90)
-    df["VehAge"] = df["VehAge"].clip(0, 20)
-    df["BonusMalus"] = df["BonusMalus"].clip(50, 150)
-    df["LogDensity"] = np.log1p(df["Density"])
-    if scenario.n < len(df):
-        df = df.head(scenario.n).copy()
-    y = (df["ClaimNb"] / df["Exposure"]).to_numpy(dtype=np.float64)
-    exposure = df["Exposure"].to_numpy(dtype=np.float64)
-    X = df[["BonusMalus", "LogDensity", "DrivAge", "VehAge", "Area"]].copy()
-    return X, y, exposure
+    return load_fremtpl_freq_dataset(n=scenario.n)
 
 
 def build_model(scenario: ProfileScenario) -> SuperGLM:
@@ -138,8 +116,6 @@ def fit_model(
     max_reml_iter: int,
 ) -> SuperGLM:
     model = build_model(scenario)
-    if scenario.use_fremtpl:
-        return model.fit_reml(X, y, exposure=weight, max_reml_iter=max_reml_iter)
     return model.fit_reml(X, y, sample_weight=weight, max_reml_iter=max_reml_iter)
 
 
@@ -182,13 +158,13 @@ def select_representatives(
     *,
     fremtpl_available: bool,
 ) -> set[str]:
-    chosen: dict[tuple[str, bool, bool], ProfileScenario] = {}
+    chosen: dict[tuple[str, bool, bool, bool], ProfileScenario] = {}
     for scenario in sorted(
         (s for s in scenarios if fremtpl_available or not s.use_fremtpl),
         key=lambda s: (s.n, s.discrete, s.n_constrained),
         reverse=True,
     ):
-        key = (scenario.engine, scenario.discrete, scenario.n_constrained > 1)
+        key = (scenario.engine, scenario.discrete, scenario.n_constrained > 1, scenario.use_fremtpl)
         chosen.setdefault(key, scenario)
     return {scenario.name for scenario in chosen.values()}
 
@@ -240,7 +216,7 @@ def main() -> None:
     args.results_dir.mkdir(parents=True, exist_ok=True)
 
     scenarios = build_scenarios(max_n=args.max_n)
-    fremtpl_available = _find_fremtpl_path() is not None
+    fremtpl_available = find_fremtpl_freq_path() is not None
     representatives = select_representatives(
         scenarios,
         fremtpl_available=fremtpl_available,
@@ -261,7 +237,7 @@ def main() -> None:
         print(f"[{index + 1}/{len(scenarios)}] running {label}")
         try:
             X, y, weight = load_dataset(scenario, seed=args.seed + index)
-        except FileNotFoundError as err:
+        except (FileNotFoundError, ImportError) as err:
             print(f"skipping {scenario.name}: {err}")
             continue
 
