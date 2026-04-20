@@ -1,9 +1,4 @@
-"""Post-fit monotone repair for 1-D spline terms.
-
-Implements pyGAM-style isotonic regression repair: reconstruct the fitted
-curve on a grid, apply weighted isotonic regression, then project back to
-spline coefficients via weighted least squares.
-"""
+"""Post-fit shape repair for 1-D spline terms."""
 
 from __future__ import annotations
 
@@ -20,10 +15,10 @@ if TYPE_CHECKING:
 
 @dataclass
 class MonotoneRepairResult:
-    """Result of a post-fit monotone repair for one spline feature."""
+    """Result of a post-fit shape repair for one spline feature."""
 
     feature_name: str
-    direction: str  # "increasing" | "decreasing"
+    direction: str  # "increasing" | "decreasing" | "convex" | "concave"
     grid: NDArray  # (n_grid,) evaluation points
     original_log_effect: NDArray  # (n_grid,) pre-repair curve
     repaired_log_effect: NDArray  # (n_grid,) post-repair curve
@@ -31,6 +26,11 @@ class MonotoneRepairResult:
     max_violation_before: float
     max_violation_after: float
     projection_residual: float  # ||B @ beta_proj - repaired_curve||
+
+    @property
+    def kind(self) -> str:
+        """Canonical shape token for compatibility with generalized postfit repair."""
+        return self.direction
 
 
 class MonotoneRepairer:
@@ -151,6 +151,17 @@ def monotonicity_violation(values: NDArray, direction: str) -> float:
     return float(np.max(violations)) if len(violations) > 0 else 0.0
 
 
+def curvature_violation(values: NDArray, kind: str) -> float:
+    diffs2 = np.diff(values, n=2)
+    if kind == "convex":
+        bad = np.maximum(0.0, -diffs2)
+    elif kind == "concave":
+        bad = np.maximum(0.0, diffs2)
+    else:
+        raise ValueError(f"Unsupported curvature kind: {kind!r}")
+    return float(np.max(bad)) if len(bad) else 0.0
+
+
 def _weighted_isotonic(y: NDArray, w: NDArray, direction: str) -> NDArray:
     """Apply weighted isotonic regression via sklearn."""
     from sklearn.isotonic import IsotonicRegression
@@ -159,6 +170,18 @@ def _weighted_isotonic(y: NDArray, w: NDArray, direction: str) -> NDArray:
     ir = IsotonicRegression(increasing=increasing, out_of_bounds="clip")
     x_dummy = np.arange(len(y), dtype=np.float64)
     return ir.fit_transform(x_dummy, y, sample_weight=w)
+
+
+def _weighted_curvature_projection(y: NDArray, w: NDArray, kind: str) -> NDArray:
+    from superglm.solvers.constrained_qp import solve_constrained_qp
+
+    n = len(y)
+    A = np.diff(np.eye(n), n=2, axis=0)
+    if kind == "concave":
+        A = -A
+    H = np.diag(w) + 1e-8 * np.eye(n)
+    g = w * y
+    return solve_constrained_qp(H, g, A, np.zeros(A.shape[0])).beta
 
 
 def _project_to_coefficients(
@@ -180,6 +203,25 @@ def _project_to_coefficients(
     BtWB += 1e-10 * np.eye(BtWB.shape[0])
     beta_orig = np.linalg.solve(BtWB, BtWy)
     return beta_orig
+
+
+def _project_to_coefficients_with_curvature(
+    spec: _SplineBase,
+    x_grid: NDArray,
+    repaired_curve: NDArray,
+    weights: NDArray,
+    kind: str,
+) -> NDArray:
+    from superglm.solvers.constrained_qp import solve_constrained_qp
+
+    B_grid = spec._basis_matrix(x_grid).toarray()
+    H = B_grid.T @ (B_grid * weights[:, None])
+    H += 1e-10 * np.eye(H.shape[0])
+    g = B_grid.T @ (repaired_curve * weights)
+    A = np.diff(B_grid, n=2, axis=0)
+    if kind == "concave":
+        A = -A
+    return solve_constrained_qp(H, g, A, np.zeros(A.shape[0])).beta
 
 
 def _recenter(
@@ -243,6 +285,82 @@ def _to_reparam(
         if R_inv is not None:
             return np.linalg.lstsq(R_inv, beta_orig, rcond=None)[0]
         return beta_orig
+
+
+class CurvatureRepairer:
+    """Convex/concave repair for spline curves on the linear predictor scale."""
+
+    def __init__(self, kind: str = "convex"):
+        if kind not in ("convex", "concave"):
+            raise ValueError(f"kind must be 'convex' or 'concave', got {kind!r}")
+        self.kind = kind
+
+    def repair(
+        self,
+        spec: _SplineBase,
+        beta_reparam: NDArray,
+        groups: list[GroupSlice],
+        weights: NDArray | None = None,
+        n_grid: int = 500,
+    ) -> MonotoneRepairResult:
+        beta_combined = np.concatenate([beta_reparam[g.sl] for g in groups])
+
+        recon = spec.reconstruct(beta_combined, n_points=n_grid)
+        x_grid = recon["x"]
+        log_rels = recon["log_relativity"]
+
+        viol_before = curvature_violation(log_rels, self.kind)
+
+        if viol_before < 1e-12:
+            return MonotoneRepairResult(
+                feature_name="",
+                direction=self.kind,
+                grid=x_grid,
+                original_log_effect=log_rels.copy(),
+                repaired_log_effect=log_rels.copy(),
+                repaired_beta_reparam=beta_reparam.copy(),
+                max_violation_before=viol_before,
+                max_violation_after=0.0,
+                projection_residual=0.0,
+            )
+
+        w_grid = np.ones(n_grid) if weights is None else weights
+        repaired = _weighted_curvature_projection(log_rels, w_grid, self.kind)
+        repaired_centered = repaired - np.average(repaired, weights=w_grid)
+
+        beta_orig_new = _project_to_coefficients_with_curvature(
+            spec,
+            x_grid,
+            repaired_centered,
+            w_grid,
+            self.kind,
+        )
+
+        B_grid = spec._basis_matrix(x_grid).toarray()
+        repaired_check = B_grid @ beta_orig_new
+        proj_residual = float(np.max(np.abs(repaired_check - repaired_centered)))
+        viol_after = curvature_violation(repaired_check, self.kind)
+
+        beta_reparam_new = _to_reparam(spec, beta_orig_new, groups)
+
+        beta_out = beta_reparam.copy()
+        offset = 0
+        for g in groups:
+            g_size = g.size
+            beta_out[g.sl] = beta_reparam_new[offset : offset + g_size]
+            offset += g_size
+
+        return MonotoneRepairResult(
+            feature_name="",
+            direction=self.kind,
+            grid=x_grid,
+            original_log_effect=log_rels.copy(),
+            repaired_log_effect=repaired_check.copy(),
+            repaired_beta_reparam=beta_out,
+            max_violation_before=viol_before,
+            max_violation_after=viol_after,
+            projection_residual=proj_residual,
+        )
 
 
 def derivative_grid_matrix(spec: _SplineBase, n_grid: int = 200) -> NDArray:
