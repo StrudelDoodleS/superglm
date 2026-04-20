@@ -2,6 +2,7 @@ from pathlib import Path
 
 from benchmarks._constrained_fit_profile import (
     ProfileScenario,
+    build_scenarios,
     make_synthetic_dataset,
     profile_callstack_and_memory,
     summarize_rows,
@@ -55,6 +56,15 @@ def test_summarize_rows_emits_expected_columns():
         "n_pirls_iter",
         "peak_mem_mb",
     ]
+
+
+def test_build_scenarios_includes_single_and_multi_feature_modes():
+    scenarios = build_scenarios(max_n=100_000)
+
+    assert any(s.engine == "scop" and s.n_constrained == 1 for s in scenarios)
+    assert any(s.engine == "qp" and s.n_constrained == 1 for s in scenarios)
+    assert any(s.n_constrained > 1 for s in scenarios)
+    assert all(s.n <= 100_000 for s in scenarios)
 
 
 def test_write_profile_artifacts_creates_expected_files(tmp_path: Path):

@@ -26,20 +26,136 @@ class ProfileScenario:
     use_fremtpl: bool
 
 
+def build_scenarios(max_n: int = 500_000) -> list[ProfileScenario]:
+    scenarios = [
+        ProfileScenario(
+            name="single_scop_exact_repeated",
+            engine="scop",
+            n=10_000,
+            k=10,
+            n_constrained=1,
+            repeated_support=True,
+            discrete=False,
+            use_fremtpl=False,
+        ),
+        ProfileScenario(
+            name="single_scop_discrete_repeated",
+            engine="scop",
+            n=10_000,
+            k=10,
+            n_constrained=1,
+            repeated_support=True,
+            discrete=True,
+            use_fremtpl=False,
+        ),
+        ProfileScenario(
+            name="single_qp_exact",
+            engine="qp",
+            n=10_000,
+            k=10,
+            n_constrained=1,
+            repeated_support=False,
+            discrete=False,
+            use_fremtpl=False,
+        ),
+        ProfileScenario(
+            name="single_qp_discrete",
+            engine="qp",
+            n=10_000,
+            k=10,
+            n_constrained=1,
+            repeated_support=False,
+            discrete=True,
+            use_fremtpl=False,
+        ),
+        ProfileScenario(
+            name="multi_scop_discrete",
+            engine="scop",
+            n=10_000,
+            k=12,
+            n_constrained=2,
+            repeated_support=False,
+            discrete=True,
+            use_fremtpl=False,
+        ),
+        ProfileScenario(
+            name="multi_qp_discrete",
+            engine="qp",
+            n=10_000,
+            k=12,
+            n_constrained=2,
+            repeated_support=False,
+            discrete=True,
+            use_fremtpl=False,
+        ),
+        ProfileScenario(
+            name="multi_scop_discrete_large",
+            engine="scop",
+            n=100_000,
+            k=12,
+            n_constrained=2,
+            repeated_support=False,
+            discrete=True,
+            use_fremtpl=False,
+        ),
+        ProfileScenario(
+            name="multi_qp_discrete_large",
+            engine="qp",
+            n=100_000,
+            k=12,
+            n_constrained=2,
+            repeated_support=False,
+            discrete=True,
+            use_fremtpl=False,
+        ),
+        ProfileScenario(
+            name="fremtpl_scop_discrete",
+            engine="scop",
+            n=500_000,
+            k=12,
+            n_constrained=2,
+            repeated_support=False,
+            discrete=True,
+            use_fremtpl=True,
+        ),
+        ProfileScenario(
+            name="fremtpl_qp_discrete",
+            engine="qp",
+            n=500_000,
+            k=12,
+            n_constrained=2,
+            repeated_support=False,
+            discrete=True,
+            use_fremtpl=True,
+        ),
+    ]
+    return [scenario for scenario in scenarios if scenario.n <= max_n]
+
+
 def make_synthetic_dataset(
     scenario: ProfileScenario, seed: int
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
-    np.random.default_rng(seed)
+    rng = np.random.default_rng(seed)
     data: dict[str, np.ndarray] = {}
     for j in range(scenario.n_constrained):
+        exponent = 1.0 + 0.25 * j
         if scenario.repeated_support:
             support = max(10, scenario.n // 20)
-            x = np.repeat(np.linspace(0.0, 1.0, support), scenario.n // support + 1)[: scenario.n]
+            base = np.linspace(0.0, 1.0, support)
+            x = np.repeat(np.power(base, exponent), scenario.n // support + 1)[: scenario.n]
         else:
-            x = np.linspace(0.0, 1.0, scenario.n)
+            base = np.sort(rng.uniform(0.0, 1.0, size=scenario.n))
+            x = np.power(base, exponent)
         data[f"x{j + 1}"] = x
     X = pd.DataFrame(data)
-    y = 0.4 + 0.7 * X.iloc[:, 0].to_numpy() + 1.2 * X.iloc[:, 0].to_numpy() ** 2
+    y = np.full(scenario.n, 0.4, dtype=float)
+    for j, name in enumerate(X.columns):
+        xj = X[name].to_numpy(dtype=float)
+        weight = 1.0 / (j + 1)
+        if j % 2 == 0:
+            y += weight * (0.6 * xj + 1.2 * xj**2)
+        else:
+            y += weight * (1.1 - 1.6 * (xj - 0.45) ** 2)
     w = np.ones(len(X), dtype=float)
     return X, y.astype(float), w
 
