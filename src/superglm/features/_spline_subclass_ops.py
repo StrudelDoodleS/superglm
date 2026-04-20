@@ -63,6 +63,11 @@ def build_scop_reparameterization(
     return x_centered, scop_penalty, solver_reparam
 
 
-def build_monotone_constraints_raw(spec: Any):
-    """Build first-difference monotone constraints on raw spline coefficients."""
-    return _spline_constraints.build_monotone_difference_constraints(spec._n_basis, spec.monotone)
+def build_shape_constraints_raw(spec: Any):
+    """Build fit-time shape constraints on raw spline coefficients."""
+    kind = spec.constraint_kind
+    if kind in {"increasing", "decreasing"}:
+        return _spline_constraints.build_monotone_difference_constraints(spec._n_basis, kind)
+    if kind in {"convex", "concave"}:
+        return _spline_constraints.build_curvature_difference_constraints(spec._n_basis, kind)
+    raise ValueError(f"Unsupported fit-time shape kind: {kind!r}")

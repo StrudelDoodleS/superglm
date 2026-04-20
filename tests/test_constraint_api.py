@@ -59,8 +59,6 @@ def test_constraint_postfit_concave_token_normalizes_to_shape_fields():
 @pytest.mark.parametrize(
     ("spec_cls", "constraint", "kind"),
     [
-        (BSplineSmooth, Constraint.fit.convex, "convex"),
-        (BSplineSmooth, Constraint.fit.concave, "concave"),
         (PSpline, Constraint.fit.convex, "convex"),
         (PSpline, Constraint.fit.concave, "concave"),
     ],
@@ -77,8 +75,6 @@ def test_fit_time_shape_constraints_raise_deliberate_not_implemented(spec_cls, c
 @pytest.mark.parametrize(
     ("spec_cls", "constraint", "kind"),
     [
-        (BSplineSmooth, Constraint.fit.convex, "convex"),
-        (BSplineSmooth, Constraint.fit.concave, "concave"),
         (PSpline, Constraint.fit.convex, "convex"),
         (PSpline, Constraint.fit.concave, "concave"),
     ],

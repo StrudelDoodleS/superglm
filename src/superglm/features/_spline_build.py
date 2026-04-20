@@ -20,21 +20,37 @@ def _constraint_mode(spec: Any) -> str:
     return getattr(spec, "constraint_mode", getattr(spec, "monotone_mode", "postfit"))
 
 
+def _uses_fit_time_shape_constraints(spec: Any) -> bool:
+    """Whether the spec requests any fit-time shape-constrained build path."""
+    return _constraint_kind(spec) is not None and _constraint_mode(spec) == "fit"
+
+
+def _uses_fit_time_scop_constraints(spec: Any) -> bool:
+    """Whether the spec should enter the SCOP fit-time monotone path."""
+    return (
+        _constraint_kind(spec) in {"increasing", "decreasing"}
+        and _constraint_mode(spec) == "fit"
+        and hasattr(spec, "_build_scop_reparameterization")
+    )
+
+
+def _uses_fit_time_qp_constraints(spec: Any) -> bool:
+    """Whether the spec should enter the raw-linear-constraint QP path."""
+    return _uses_fit_time_shape_constraints(spec) and hasattr(
+        spec, "_build_monotone_constraints_raw"
+    )
+
+
 def _raise_if_unsupported_fit_shape_constraint(spec: Any) -> None:
-    """Reject fit-time shape constraints that are outside the current monotone engines."""
+    """Reject fit-time shape constraints that no current engine can build."""
     kind = _constraint_kind(spec)
-    if kind in {"convex", "concave"} and _constraint_mode(spec) == "fit":
+    if _uses_fit_time_shape_constraints(spec) and not (
+        _uses_fit_time_qp_constraints(spec) or _uses_fit_time_scop_constraints(spec)
+    ):
         raise NotImplementedError(
             f"Fit-time {kind} constraints are not implemented yet. "
             f"Use Constraint.postfit.{kind} instead."
         )
-
-
-def _uses_fit_time_monotone_constraints(spec: Any) -> bool:
-    """Whether the spec should enter the existing fit-time monotone solver paths."""
-    return (
-        _constraint_kind(spec) in {"increasing", "decreasing"} and _constraint_mode(spec) == "fit"
-    )
 
 
 def build_group_info(
@@ -46,18 +62,11 @@ def build_group_info(
     del sample_weight
     _raise_if_unsupported_fit_shape_constraint(spec)
 
-    if _uses_fit_time_monotone_constraints(spec):
-        if not hasattr(spec, "_build_monotone_constraints_raw") and not hasattr(
-            spec, "_build_scop_reparameterization"
-        ):
-            raise NotImplementedError(
-                f"{type(spec).__name__} does not support "
-                f"monotone_mode='fit'. Use monotone_mode='postfit'."
-            )
+    if _uses_fit_time_shape_constraints(spec):
         if spec.select:
             raise NotImplementedError(
-                "Monotone fit-time constraints are not supported with "
-                "select=True. Use select=False or monotone_mode='postfit'."
+                "Fit-time shape constraints are not supported with "
+                "select=True. Use select=False or Constraint.postfit.*."
             )
 
     x = np.asarray(x, dtype=np.float64).ravel()
@@ -69,9 +78,7 @@ def build_group_info(
         return spec._build_select(x, basis)
 
     omega = spec._build_penalty()
-    if _uses_fit_time_monotone_constraints(spec) and hasattr(
-        spec, "_build_scop_reparameterization"
-    ):
+    if _uses_fit_time_scop_constraints(spec):
         basis_dense = basis.toarray() if hasattr(basis, "toarray") else basis
         centered_basis, scop_penalty, scop_reparam = spec._build_scop_reparameterization(
             basis_dense, omega
@@ -99,7 +106,7 @@ def build_group_info(
     constraints = None
     monotone_engine = None
     raw_to_solver_map = None
-    if _uses_fit_time_monotone_constraints(spec):
+    if _uses_fit_time_qp_constraints(spec):
         constraints = spec._build_monotone_constraints_raw()
         if projection is not None:
             constraints = constraints.compose(projection)
