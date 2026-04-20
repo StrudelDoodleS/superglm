@@ -1,8 +1,10 @@
 """Tests for public constraint tokens."""
 
+import numpy as np
 import pytest
 
 from superglm import BSplineSmooth, Constraint, ConstraintSpec, PSpline, Spline, features
+from superglm.features import _spline_build
 
 
 def test_constraint_fit_increasing_token():
@@ -52,6 +54,42 @@ def test_constraint_postfit_concave_token_normalizes_to_shape_fields():
     assert spec.constraint_mode == "postfit"
     assert spec.monotone == "concave"
     assert spec.monotone_mode == "postfit"
+
+
+@pytest.mark.parametrize(
+    ("spec_cls", "constraint", "kind"),
+    [
+        (BSplineSmooth, Constraint.fit.convex, "convex"),
+        (BSplineSmooth, Constraint.fit.concave, "concave"),
+        (PSpline, Constraint.fit.convex, "convex"),
+        (PSpline, Constraint.fit.concave, "concave"),
+    ],
+)
+def test_fit_time_shape_constraints_raise_deliberate_not_implemented(spec_cls, constraint, kind):
+    spec = spec_cls(n_knots=8, constraint=constraint)
+
+    with pytest.raises(
+        NotImplementedError, match=rf"Fit-time {kind} constraints are not implemented yet"
+    ):
+        _spline_build.build_group_info(spec, np.linspace(0.0, 1.0, 32))
+
+
+@pytest.mark.parametrize(
+    ("spec_cls", "constraint", "kind"),
+    [
+        (BSplineSmooth, Constraint.fit.convex, "convex"),
+        (BSplineSmooth, Constraint.fit.concave, "concave"),
+        (PSpline, Constraint.fit.convex, "convex"),
+        (PSpline, Constraint.fit.concave, "concave"),
+    ],
+)
+def test_fit_time_shape_constraints_raise_before_penalty_only_build(spec_cls, constraint, kind):
+    spec = spec_cls(n_knots=8, constraint=constraint)
+
+    with pytest.raises(
+        NotImplementedError, match=rf"Fit-time {kind} constraints are not implemented yet"
+    ):
+        spec.build_knots_and_penalty(np.linspace(0.0, 1.0, 32))
 
 
 def test_pspline_rejects_old_public_monotone_arguments():

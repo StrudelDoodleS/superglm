@@ -448,9 +448,12 @@ class PSpline(_BSplineBase):
         ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
         ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
         ``Constraint.postfit.concave``. For ``PSpline``, fit-time monotone
-        constraints use the SCOP engine. With ``fit_reml()``, fixed lambdas
-        work directly and automatic lambda estimation uses the dedicated
-        monotone-aware SCOP REML / EFS path.
+        constraints are currently limited to increasing/decreasing and use
+        the SCOP engine. Fit-time convex/concave constraints are not
+        implemented yet; use the postfit variants for those shape tokens.
+        With ``fit_reml()``, fixed lambdas work directly and automatic
+        lambda estimation uses the dedicated monotone-aware SCOP REML / EFS
+        path.
     """
 
     def __init__(
@@ -544,10 +547,13 @@ class BSplineSmooth(_BSplineBase):
         ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
         ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
         ``Constraint.postfit.concave``. For ``BSplineSmooth``, fit-time
-        monotone constraints use the constrained QP solver path. With
-        ``fit_reml()``, fixed lambdas work directly; automatic lambda
-        estimation uses the QP passthrough heuristic (unconstrained REML
-        followed by constrained refit), not exact joint constrained REML.
+        monotone constraints are currently limited to increasing/decreasing
+        and use the constrained QP solver path. Fit-time convex/concave
+        constraints are not implemented yet; use the postfit variants for
+        those shape tokens. With ``fit_reml()``, fixed lambdas work
+        directly; automatic lambda estimation uses the QP passthrough
+        heuristic (unconstrained REML followed by constrained refit), not
+        exact joint constrained REML.
     m : int or tuple of int
         Integrated derivative order(s) for the penalty.
     lambda_policy : LambdaPolicy or dict or None
@@ -708,10 +714,13 @@ class CubicRegressionSpline(_SplineBase):
         ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
         ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
         ``Constraint.postfit.concave``. For ``CubicRegressionSpline``,
-        fit-time monotone constraints use the constrained QP solver path.
-        With ``fit_reml()``, fixed lambdas work directly; automatic lambda
-        estimation uses the QP passthrough heuristic (unconstrained REML
-        followed by constrained refit), not exact joint constrained REML.
+        fit-time monotone constraints are currently limited to
+        increasing/decreasing and use the constrained QP solver path.
+        Fit-time convex/concave constraints are not implemented yet; use
+        the postfit variants for those shape tokens. With ``fit_reml()``,
+        fixed lambdas work directly; automatic lambda estimation uses the
+        QP passthrough heuristic (unconstrained REML followed by
+        constrained refit), not exact joint constrained REML.
     """
 
     _penalty_semantics = "integrated_derivative"
