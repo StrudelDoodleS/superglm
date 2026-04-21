@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -9,6 +10,89 @@ from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.reml_setup import promote_estimated_scop_lambdas
 from superglm.solvers.irls_direct import fit_irls_direct
+
+
+def _trace_rows_enabled(debug_recorder) -> bool:
+    """Return whether detailed JSONL trace rows should be emitted."""
+    return debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2
+
+
+def _lambda_max_delta(lambda_history: list[dict[str, float]] | None) -> float:
+    """Compute the max abs log-lambda delta between the last two snapshots."""
+    if not lambda_history or len(lambda_history) < 2:
+        return 0.0
+
+    previous = lambda_history[-2]
+    current = lambda_history[-1]
+    deltas = [
+        abs(math.log(current[name]) - math.log(previous[name]))
+        for name in current
+        if name in previous and current[name] > 0 and previous[name] > 0
+    ]
+    return max(deltas, default=0.0)
+
+
+def _record_non_scop_reml_trace(best, debug_recorder) -> None:
+    """Emit a compact REML summary row for non-SCOP helper paths."""
+    if not _trace_rows_enabled(debug_recorder):
+        return
+
+    debug_recorder.append_jsonl(
+        "reml",
+        {
+            "iteration": int(getattr(best, "n_reml_iter", 0) or 0),
+            "objective_before": float(getattr(best, "objective", 0.0)),
+            "objective_after": float(getattr(best, "objective", 0.0)),
+            "lambda_max_delta": float(_lambda_max_delta(getattr(best, "lambda_history", None))),
+            "converged": bool(getattr(best, "converged", False)),
+            "path": "non_scop",
+            "lambdas": {name: float(value) for name, value in getattr(best, "lambdas", {}).items()},
+        },
+    )
+
+
+def _record_non_scop_pirls_trace(
+    model,
+    *,
+    best,
+    y,
+    sample_weight,
+    offset_arr,
+    pirls_tol: float,
+    debug_recorder,
+    reml_penalties,
+) -> None:
+    """Replay one final direct IRLS iteration to emit PIRLS trace rows."""
+    if not _trace_rows_enabled(debug_recorder):
+        return
+
+    best_result = getattr(best, "pirls_result", None)
+    if best_result is None:
+        return
+
+    fit_irls_direct(
+        X=model._dm,
+        y=y,
+        weights=sample_weight,
+        family=model._distribution,
+        link=model._link,
+        groups=model._groups,
+        lambda2=best.lambdas,
+        offset=offset_arr,
+        beta_init=best_result.beta,
+        intercept_init=best_result.intercept,
+        max_iter=1,
+        tol=pirls_tol,
+        convergence=model._convergence,
+        reml_penalties=reml_penalties if reml_penalties else None,
+        debug_recorder=debug_recorder,
+        debug_context={
+            "phase": "reml",
+            "path": "non_scop",
+            "reml_iteration": int(getattr(best, "n_reml_iter", 0) or 0),
+            "trace_replay": True,
+        },
+    )
 
 
 def run_fixed_constraint_reml(
@@ -166,7 +250,7 @@ def optimize_reml_best(
     """Run the appropriate REML optimizer and return its best result object."""
     if not estimated_names:
         if use_direct:
-            return model_optimize_direct_reml(
+            best = model_optimize_direct_reml(
                 model,
                 y,
                 sample_weight,
@@ -183,6 +267,18 @@ def optimize_reml_best(
                 reml_penalties=reml_penalties,
                 estimated_names=estimated_names,
             )
+            _record_non_scop_reml_trace(best, debug_recorder)
+            _record_non_scop_pirls_trace(
+                model,
+                best=best,
+                y=y,
+                sample_weight=sample_weight,
+                offset_arr=offset_arr,
+                pirls_tol=pirls_tol,
+                debug_recorder=debug_recorder,
+                reml_penalties=reml_penalties,
+            )
+            return best
         return model_optimize_efs_reml(
             model,
             y,
@@ -202,7 +298,7 @@ def optimize_reml_best(
         )
 
     if use_direct:
-        return model_optimize_direct_reml(
+        best = model_optimize_direct_reml(
             model,
             y,
             sample_weight,
@@ -219,6 +315,18 @@ def optimize_reml_best(
             reml_penalties=reml_penalties,
             estimated_names=estimated_names,
         )
+        _record_non_scop_reml_trace(best, debug_recorder)
+        _record_non_scop_pirls_trace(
+            model,
+            best=best,
+            y=y,
+            sample_weight=sample_weight,
+            offset_arr=offset_arr,
+            pirls_tol=pirls_tol,
+            debug_recorder=debug_recorder,
+            reml_penalties=reml_penalties,
+        )
+        return best
     return model_optimize_efs_reml(
         model,
         y,

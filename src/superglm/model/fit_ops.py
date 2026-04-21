@@ -230,7 +230,7 @@ def _make_reml_debug_recorder(
             "n_obs": int(len(y)),
             "n_columns": int(model._dm.p),
             "n_groups": int(len(model._groups)),
-            "reml_group_names": [group.name for group in reml_groups],
+            "reml_group_names": [group.name for _, group in reml_groups],
             "has_constraints": bool(has_constraints),
             "has_qp_constraints": bool(has_qp_constraints),
             "has_scop_constraints": bool(has_scop_constraints),

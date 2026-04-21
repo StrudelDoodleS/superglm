@@ -763,7 +763,7 @@ def optimize_scop_efs_reml(
                 f"  obj_rel={obj_rel_change:.2e}  lambdas=[{lam_str}]"
             )
 
-        if debug_recorder is not None:
+        if debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2:
             obj_after = reml_laml_objective(
                 dm,
                 distribution,

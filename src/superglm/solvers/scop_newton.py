@@ -98,7 +98,7 @@ def _append_scop_trace(
     group_name: str | None = None,
 ) -> None:
     """Append a private SCOP step summary when debug tracing is enabled."""
-    if debug_recorder is None:
+    if debug_recorder is None or getattr(debug_recorder, "enabled_level", 0) < 2:
         return
 
     payload = dict(debug_context or {})

@@ -912,7 +912,7 @@ def fit_irls_direct(
                 dev_rel_change = abs(dev - dev_prev) / (abs(dev_prev) + 1.0)
             converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
 
-        if debug_recorder is not None:
+        if debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2:
             debug_recorder.append_jsonl(
                 "pirls",
                 {
