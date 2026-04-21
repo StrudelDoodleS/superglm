@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import time
-from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from unittest.mock import patch
@@ -23,13 +22,13 @@ import pandas as pd
 import superglm.reml.scop_efs as scop_efs
 from superglm import Categorical, Constraint, CubicRegressionSpline, PSpline, SuperGLM
 
-RESULTS_DIR = Path("benchmarks/results")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RESULTS_DIR = REPO_ROOT / "benchmarks" / "results"
 CSV_PATH = RESULTS_DIR / "multi_scop_discrete_convergence.csv"
 
-ROOT = Path(__file__).resolve().parents[1]
-DATA_PATH = ROOT / "data" / "freMTPL2freq.parquet"
-if not DATA_PATH.exists() and ROOT.parent.name == ".worktrees":
-    DATA_PATH = ROOT.parent.parent / "data" / "freMTPL2freq.parquet"
+DATA_PATH = REPO_ROOT / "data" / "freMTPL2freq.parquet"
+if not DATA_PATH.exists() and REPO_ROOT.parent.name == ".worktrees":
+    DATA_PATH = REPO_ROOT.parent.parent / "data" / "freMTPL2freq.parquet"
 
 MAX_REML_ITER = 20
 SYNTHETIC_N = 25_000
@@ -39,25 +38,29 @@ SYNTHETIC_N = 25_000
 class VariantResult:
     runtime_s: float
     n_reml_iter: int
-    n_pirls_iter: int
+    total_inner_pirls_iter: int
     predictions: np.ndarray
     lambdas: dict[str, float]
     converged: bool
+    cleanup_gate_calls: int
 
 
 @dataclass(frozen=True)
 class SummaryRow:
     dataset: str
     n_rows: int
+    execution_order: str
     baseline_runtime_s: float
     optimized_runtime_s: float
     speedup_x: float
     baseline_n_reml_iter: int
     optimized_n_reml_iter: int
-    baseline_n_pirls_iter: int
-    optimized_n_pirls_iter: int
+    baseline_total_inner_pirls_iter: int
+    optimized_total_inner_pirls_iter: int
     baseline_converged: bool
     optimized_converged: bool
+    baseline_cleanup_gate_calls: int
+    optimized_cleanup_gate_calls: int
     pred_rmse: float
     pred_max_abs_diff: float
     lambda_max_abs_diff: float
@@ -103,28 +106,41 @@ def _fit_variant(
     max_reml_iter: int = MAX_REML_ITER,
 ) -> VariantResult:
     model = _make_model()
-    gate_patch = (
-        nullcontext()
-        if cleanup_enabled
-        else patch.object(
-            scop_efs,
-            "_multi_scop_discrete_cleanup_enabled",
-            new=_cleanup_disabled,
-        )
-    )
+    gate_calls = 0
+    original_gate = scop_efs._multi_scop_discrete_cleanup_enabled
 
-    with gate_patch:
+    def disabled_gate(*, discrete: bool, scop_term_count: int) -> bool:
+        nonlocal gate_calls
+        gate_calls += 1
+        return _cleanup_disabled(discrete=discrete, scop_term_count=scop_term_count)
+
+    def recorded_gate(*, discrete: bool, scop_term_count: int) -> bool:
+        nonlocal gate_calls
+        gate_calls += 1
+        return original_gate(discrete=discrete, scop_term_count=scop_term_count)
+
+    gate_impl = recorded_gate if cleanup_enabled else disabled_gate
+
+    with patch.object(
+        scop_efs,
+        "_multi_scop_discrete_cleanup_enabled",
+        new=gate_impl,
+    ):
         t0 = time.perf_counter()
         model.fit_reml(X, y, sample_weight=sample_weight, max_reml_iter=max_reml_iter)
         runtime_s = time.perf_counter() - t0
 
+    if cleanup_enabled and gate_calls == 0:
+        raise RuntimeError("optimized variant never consulted the cleanup gate")
+
     return VariantResult(
         runtime_s=float(runtime_s),
         n_reml_iter=int(model._reml_result.n_reml_iter),
-        n_pirls_iter=int(model.result.n_iter),
+        total_inner_pirls_iter=int(sum(model._reml_result.inner_iter_history or [])),
         predictions=np.asarray(model.predict(X), dtype=np.float64),
         lambdas={name: float(value) for name, value in sorted(model._reml_lambdas.items())},
         converged=bool(model._reml_result.converged),
+        cleanup_gate_calls=gate_calls,
     )
 
 
@@ -203,20 +219,21 @@ def _summarize_dataset(
     X: pd.DataFrame,
     y: np.ndarray,
     sample_weight: np.ndarray,
+    execution_order: tuple[str, str],
 ) -> SummaryRow:
     print(f"\nRunning {dataset} ({len(X):,} rows)")
-    baseline = _fit_variant(
-        cleanup_enabled=False,
-        X=X,
-        y=y,
-        sample_weight=sample_weight,
-    )
-    optimized = _fit_variant(
-        cleanup_enabled=True,
-        X=X,
-        y=y,
-        sample_weight=sample_weight,
-    )
+    by_name: dict[str, VariantResult] = {}
+    for variant_name in execution_order:
+        cleanup_enabled = variant_name == "optimized"
+        by_name[variant_name] = _fit_variant(
+            cleanup_enabled=cleanup_enabled,
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+        )
+
+    baseline = by_name["baseline"]
+    optimized = by_name["optimized"]
     pred_metrics = _prediction_metrics(baseline.predictions, optimized.predictions)
     speedup_x = (
         float(baseline.runtime_s / optimized.runtime_s)
@@ -227,7 +244,9 @@ def _summarize_dataset(
         "  "
         f"baseline={baseline.runtime_s:.3f}s "
         f"optimized={optimized.runtime_s:.3f}s "
+        f"order={'->'.join(execution_order)} "
         f"speedup={speedup_x:.3f}x "
+        f"optimized_gate_calls={optimized.cleanup_gate_calls} "
         f"pred_rmse={pred_metrics['rmse']:.3e} "
         f"pred_max_abs={pred_metrics['max_abs_diff']:.3e}"
     )
@@ -235,15 +254,18 @@ def _summarize_dataset(
     return SummaryRow(
         dataset=dataset,
         n_rows=int(len(X)),
+        execution_order="->".join(execution_order),
         baseline_runtime_s=baseline.runtime_s,
         optimized_runtime_s=optimized.runtime_s,
         speedup_x=speedup_x,
         baseline_n_reml_iter=baseline.n_reml_iter,
         optimized_n_reml_iter=optimized.n_reml_iter,
-        baseline_n_pirls_iter=baseline.n_pirls_iter,
-        optimized_n_pirls_iter=optimized.n_pirls_iter,
+        baseline_total_inner_pirls_iter=baseline.total_inner_pirls_iter,
+        optimized_total_inner_pirls_iter=optimized.total_inner_pirls_iter,
         baseline_converged=baseline.converged,
         optimized_converged=optimized.converged,
+        baseline_cleanup_gate_calls=baseline.cleanup_gate_calls,
+        optimized_cleanup_gate_calls=optimized.cleanup_gate_calls,
         pred_rmse=pred_metrics["rmse"],
         pred_max_abs_diff=pred_metrics["max_abs_diff"],
         lambda_max_abs_diff=_lambda_max_abs_diff(baseline.lambdas, optimized.lambdas),
@@ -256,23 +278,33 @@ def _summarize_dataset(
 def main() -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    synthetic_row = _summarize_dataset("synthetic", *_make_synthetic_data())
-    fremtpl_row = _summarize_dataset("freMTPL2", *_load_fremtpl2_freq())
+    synthetic_row = _summarize_dataset(
+        "synthetic",
+        *_make_synthetic_data(),
+        execution_order=("baseline", "optimized"),
+    )
+    fremtpl_row = _summarize_dataset(
+        "freMTPL2",
+        *_load_fremtpl2_freq(),
+        execution_order=("optimized", "baseline"),
+    )
     summary = pd.DataFrame([asdict(synthetic_row), asdict(fremtpl_row)])
     summary.to_csv(CSV_PATH, index=False)
 
     visible_columns = [
         "dataset",
         "n_rows",
+        "execution_order",
         "baseline_runtime_s",
         "optimized_runtime_s",
         "speedup_x",
         "baseline_n_reml_iter",
         "optimized_n_reml_iter",
-        "baseline_n_pirls_iter",
-        "optimized_n_pirls_iter",
+        "baseline_total_inner_pirls_iter",
+        "optimized_total_inner_pirls_iter",
         "baseline_converged",
         "optimized_converged",
+        "optimized_cleanup_gate_calls",
         "pred_rmse",
         "pred_max_abs_diff",
         "lambda_max_abs_diff",
