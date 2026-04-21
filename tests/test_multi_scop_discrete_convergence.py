@@ -1,9 +1,12 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
 
 import superglm.reml.scop_efs as scop_efs
 from superglm import Categorical, Constraint, CubicRegressionSpline, PSpline, SuperGLM
+from superglm.solvers.pirls import PIRLSResult
 
 
 def test_cleanup_enabled_only_for_multi_scop_discrete():
@@ -96,6 +99,86 @@ def test_floor_pinned_lambda_freezes_after_stability_window():
 
     assert active_names == {"DrivAge"}
     assert frozen_names == {"BonusMalus"}
+
+
+def test_empty_cleanup_path_uses_legacy_plateau_convergence(monkeypatch):
+    pirls_result = PIRLSResult(
+        beta=np.array([0.0]),
+        intercept=0.0,
+        n_iter=1,
+        deviance=0.0,
+        converged=True,
+        phi=1.0,
+        effective_df=1.0,
+    )
+    lambda_updates = iter(
+        [
+            {"term": 1.0},
+            {"term": float(np.exp(0.005))},
+            {"term": float(np.exp(0.010))},
+            {"term": float(np.exp(0.015))},
+        ]
+    )
+    objective_values = iter(
+        [
+            1.0,
+            1.0,
+            1.0000005,
+            1.0000005,
+            1.0000009,
+            1.0000009,
+            1.0000009,
+        ]
+    )
+
+    monkeypatch.setattr(
+        scop_efs, "fit_irls_direct", lambda **kwargs: (pirls_result, None, np.eye(1), {})
+    )
+    monkeypatch.setattr(scop_efs, "build_penalty_matrix", lambda *args, **kwargs: np.zeros((1, 1)))
+    monkeypatch.setattr(scop_efs, "build_scop_penalty_components", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        scop_efs, "assemble_joint_hessian", lambda *args, **kwargs: (np.eye(1), None)
+    )
+    monkeypatch.setattr(
+        scop_efs,
+        "_safe_decompose_H",
+        lambda *args, **kwargs: (np.eye(1), 0.0, np.array([1.0])),
+    )
+    monkeypatch.setattr(
+        scop_efs,
+        "_joint_efs_lambda_step",
+        lambda *args, **kwargs: (next(lambda_updates), {}, {}),
+    )
+    monkeypatch.setattr(
+        scop_efs, "reml_laml_objective", lambda *args, **kwargs: next(objective_values)
+    )
+    monkeypatch.setattr(scop_efs, "_multi_scop_discrete_cleanup_names", lambda **kwargs: set())
+
+    def fail_if_helper_used(**kwargs):
+        raise AssertionError("unexpected helper plateau check")
+
+    monkeypatch.setattr(
+        scop_efs,
+        "_multi_scop_discrete_plateau_converged",
+        fail_if_helper_used,
+    )
+
+    result = scop_efs.optimize_scop_efs_reml(
+        dm=SimpleNamespace(group_matrices=[], p=1),
+        distribution=SimpleNamespace(scale_known=True),
+        link=SimpleNamespace(),
+        groups=[SimpleNamespace(monotone_engine="scop")],
+        y=np.array([0.0]),
+        sample_weight=np.ones(1),
+        offset_arr=np.zeros(1),
+        lambdas={"term": 2.0},
+        estimated_names={"term"},
+        max_reml_iter=5,
+        reml_penalties=[SimpleNamespace(name="term")],
+    )
+
+    assert result.converged
+    assert result.n_reml_iter == 3
 
 
 def _make_multi_scop_data(n: int = 1500, seed: int = 42):

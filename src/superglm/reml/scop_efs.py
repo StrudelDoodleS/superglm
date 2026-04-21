@@ -687,6 +687,7 @@ def optimize_scop_efs_reml(
         scop_states=boot_scop_states,
         scop_term_count=scop_term_count,
     )
+    managed_cleanup_active = bool(managed_cleanup_names)
     active_names: set[str] = set(estimated_names)
     frozen_names: set[str] = set()
     stable_counts: dict[str, int] = {name: 0 for name in managed_cleanup_names}
@@ -821,7 +822,7 @@ def optimize_scop_efs_reml(
 
         # Step 7b: Multi-SCOP discrete cleanup — freeze floor-pinned components
         # after they have been stable for several accepted lambda updates.
-        if managed_cleanup_names:
+        if managed_cleanup_active:
             managed_active_names = managed_cleanup_names - frozen_names
             stable_counts = _update_multi_scop_discrete_stability_counts(
                 lambdas_old=lambdas,
@@ -863,12 +864,15 @@ def optimize_scop_efs_reml(
 
         # Converge on strict lambda tolerance
         strict_converged = max_change < reml_tol
-        plateau_converged = n_reml_iter >= 3 and _multi_scop_discrete_plateau_converged(
-            obj_rel_change=obj_rel_change,
-            lambdas_old=lambdas,
-            lambdas_new=lambdas_new,
-            active_names=active_names,
-        )
+        if managed_cleanup_active:
+            plateau_converged = n_reml_iter >= 3 and _multi_scop_discrete_plateau_converged(
+                obj_rel_change=obj_rel_change,
+                lambdas_old=lambdas,
+                lambdas_new=lambdas_new,
+                active_names=active_names,
+            )
+        else:
+            plateau_converged = n_reml_iter >= 3 and obj_rel_change < 1e-6 and max_change < 0.01
 
         if verbose:
             lam_str = ", ".join(f"{pc.name}={lambdas_new[pc.name]:.4g}" for pc in all_pcs)
