@@ -1,8 +1,8 @@
 """Targeted benchmark for the multi-SCOP discrete cleanup toggle.
 
-Runs the discrete REML path twice per dataset:
-- baseline: force-disable the multi-SCOP discrete cleanup
-- optimized: use the branch's current cleanup behavior
+For each dataset repeat, the harness runs both discrete REML execution orders:
+- baseline then optimized
+- optimized then baseline
 
 The harness covers a synthetic multi-SCOP Poisson-rate dataset plus the full
 freMTPL2 frequency dataset and writes a side-by-side summary CSV.
@@ -124,9 +124,31 @@ def _median_int(values: list[int]) -> int:
     return int(median_low(values))
 
 
-def _execution_order_for_run(dataset_index: int, repeat_index: int) -> tuple[str, str]:
-    orders = (("baseline", "optimized"), ("optimized", "baseline"))
-    return orders[(dataset_index + repeat_index) % 2]
+def _execution_orders_for_repeat(
+    repeat_index: int,
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    paired_orders = (("baseline", "optimized"), ("optimized", "baseline"))
+    return paired_orders if repeat_index % 2 == 0 else tuple(reversed(paired_orders))
+
+
+def _format_execution_order_summary(
+    execution_orders_by_repeat: list[tuple[tuple[str, str], tuple[str, str]]],
+) -> str:
+    return "|".join(
+        "&".join("->".join(execution_order) for execution_order in repeat_orders)
+        for repeat_orders in execution_orders_by_repeat
+    )
+
+
+def _aggregate_lambda_metrics(
+    *,
+    lambda_max_abs_diffs: list[float],
+    lambda_keys_matches: list[bool],
+) -> tuple[float, bool]:
+    lambda_keys_match = all(lambda_keys_matches)
+    if not lambda_keys_match:
+        return float("nan"), False
+    return _median_float(lambda_max_abs_diffs), True
 
 
 def _representative_pair_index(
@@ -309,7 +331,6 @@ def _summarize_dataset(
     y: np.ndarray,
     sample_weight: np.ndarray,
     *,
-    dataset_index: int,
     repeats: int,
 ) -> SummaryRow:
     print(f"\nRunning {dataset} ({len(X):,} rows)")
@@ -319,61 +340,67 @@ def _summarize_dataset(
     pred_max_abs_diffs: list[float] = []
     lambda_max_abs_diffs: list[float] = []
     lambda_keys_matches: list[bool] = []
-    execution_orders: list[str] = []
+    execution_orders_by_repeat: list[tuple[tuple[str, str], tuple[str, str]]] = []
 
     for repeat_index in range(repeats):
-        execution_order = _execution_order_for_run(
-            dataset_index=dataset_index,
-            repeat_index=repeat_index,
-        )
-        execution_orders.append("->".join(execution_order))
-        print(f"  repeat {repeat_index + 1}/{repeats} order={'->'.join(execution_order)}")
-
-        by_name: dict[str, VariantResult] = {}
-        for variant_name in execution_order:
-            cleanup_enabled = variant_name == "optimized"
-            by_name[variant_name] = _fit_variant(
-                cleanup_enabled=cleanup_enabled,
-                X=X,
-                y=y,
-                sample_weight=sample_weight,
-            )
-
-        baseline = by_name["baseline"]
-        optimized = by_name["optimized"]
-        baseline_results.append(baseline)
-        optimized_results.append(optimized)
-
-        pred_metrics = _prediction_metrics(baseline.predictions, optimized.predictions)
-        pred_rmses.append(pred_metrics["rmse"])
-        pred_max_abs_diffs.append(pred_metrics["max_abs_diff"])
-        lambda_max_abs_diffs.append(_lambda_max_abs_diff(baseline.lambdas, optimized.lambdas))
-        lambda_keys_matches.append(set(baseline.lambdas) == set(optimized.lambdas))
-
-        speedup_x = (
-            float(baseline.runtime_s / optimized.runtime_s)
-            if optimized.runtime_s > 0.0
-            else float("nan")
-        )
+        repeat_orders = _execution_orders_for_repeat(repeat_index)
+        execution_orders_by_repeat.append(repeat_orders)
         print(
-            "    "
-            f"baseline={baseline.runtime_s:.3f}s "
-            f"optimized={optimized.runtime_s:.3f}s "
-            f"speedup={speedup_x:.3f}x "
-            f"baseline_gate_calls={baseline.cleanup_gate_calls} "
-            f"optimized_gate_calls={optimized.cleanup_gate_calls} "
-            f"optimized_gate_true={optimized.cleanup_gate_true_count} "
-            f"optimized_frozen={optimized.frozen_count} "
-            f"optimized_freeze_iter={optimized.freeze_iter} "
-            f"pred_rmse={pred_metrics['rmse']:.3e} "
-            f"pred_max_abs={pred_metrics['max_abs_diff']:.3e}"
+            f"  repeat {repeat_index + 1}/{repeats} "
+            f"orders={' & '.join('->'.join(order) for order in repeat_orders)}"
         )
+
+        for execution_order in repeat_orders:
+            by_name: dict[str, VariantResult] = {}
+            for variant_name in execution_order:
+                cleanup_enabled = variant_name == "optimized"
+                by_name[variant_name] = _fit_variant(
+                    cleanup_enabled=cleanup_enabled,
+                    X=X,
+                    y=y,
+                    sample_weight=sample_weight,
+                )
+
+            baseline = by_name["baseline"]
+            optimized = by_name["optimized"]
+            baseline_results.append(baseline)
+            optimized_results.append(optimized)
+
+            pred_metrics = _prediction_metrics(baseline.predictions, optimized.predictions)
+            pred_rmses.append(pred_metrics["rmse"])
+            pred_max_abs_diffs.append(pred_metrics["max_abs_diff"])
+            lambda_keys_matches.append(set(baseline.lambdas) == set(optimized.lambdas))
+            lambda_max_abs_diffs.append(_lambda_max_abs_diff(baseline.lambdas, optimized.lambdas))
+
+            speedup_x = (
+                float(baseline.runtime_s / optimized.runtime_s)
+                if optimized.runtime_s > 0.0
+                else float("nan")
+            )
+            print(
+                "    "
+                f"order={'->'.join(execution_order)} "
+                f"baseline={baseline.runtime_s:.3f}s "
+                f"optimized={optimized.runtime_s:.3f}s "
+                f"speedup={speedup_x:.3f}x "
+                f"baseline_gate_calls={baseline.cleanup_gate_calls} "
+                f"optimized_gate_calls={optimized.cleanup_gate_calls} "
+                f"optimized_gate_true={optimized.cleanup_gate_true_count} "
+                f"optimized_frozen={optimized.frozen_count} "
+                f"optimized_freeze_iter={optimized.freeze_iter} "
+                f"pred_rmse={pred_metrics['rmse']:.3e} "
+                f"pred_max_abs={pred_metrics['max_abs_diff']:.3e}"
+            )
 
     representative_idx = _representative_pair_index(baseline_results, optimized_results)
     representative_baseline = baseline_results[representative_idx]
     representative_optimized = optimized_results[representative_idx]
     baseline_runtime_s = _median_float([result.runtime_s for result in baseline_results])
     optimized_runtime_s = _median_float([result.runtime_s for result in optimized_results])
+    lambda_max_abs_diff, lambda_keys_match = _aggregate_lambda_metrics(
+        lambda_max_abs_diffs=lambda_max_abs_diffs,
+        lambda_keys_matches=lambda_keys_matches,
+    )
     speedup_x = (
         float(baseline_runtime_s / optimized_runtime_s)
         if optimized_runtime_s > 0.0
@@ -383,12 +410,13 @@ def _summarize_dataset(
         "  "
         f"median_baseline={baseline_runtime_s:.3f}s "
         f"median_optimized={optimized_runtime_s:.3f}s "
-        f"orders={'|'.join(execution_orders)} "
+        f"orders={_format_execution_order_summary(execution_orders_by_repeat)} "
         f"speedup={speedup_x:.3f}x "
         f"median_optimized_gate_calls={_median_int([r.cleanup_gate_calls for r in optimized_results])} "
         f"median_optimized_gate_true={_median_int([r.cleanup_gate_true_count for r in optimized_results])} "
         f"median_optimized_frozen={_median_int([r.frozen_count for r in optimized_results])} "
         f"median_optimized_freeze_iter={_median_int([r.freeze_iter for r in optimized_results])} "
+        f"lambda_keys_match={lambda_keys_match} "
         f"median_pred_rmse={_median_float(pred_rmses):.3e} "
         f"median_pred_max_abs={_median_float(pred_max_abs_diffs):.3e}"
     )
@@ -397,7 +425,7 @@ def _summarize_dataset(
         dataset=dataset,
         n_rows=int(len(X)),
         repeats=repeats,
-        execution_order="|".join(execution_orders),
+        execution_order=_format_execution_order_summary(execution_orders_by_repeat),
         baseline_runtime_s=baseline_runtime_s,
         optimized_runtime_s=optimized_runtime_s,
         speedup_x=speedup_x,
@@ -425,8 +453,8 @@ def _summarize_dataset(
         optimized_freeze_iter=_median_int([result.freeze_iter for result in optimized_results]),
         pred_rmse=_median_float(pred_rmses),
         pred_max_abs_diff=_median_float(pred_max_abs_diffs),
-        lambda_max_abs_diff=_median_float(lambda_max_abs_diffs),
-        lambda_keys_match=all(lambda_keys_matches),
+        lambda_max_abs_diff=lambda_max_abs_diff,
+        lambda_keys_match=lambda_keys_match,
         baseline_lambdas_json=json.dumps(representative_baseline.lambdas, sort_keys=True),
         optimized_lambdas_json=json.dumps(representative_optimized.lambdas, sort_keys=True),
     )
@@ -438,7 +466,7 @@ def _parse_args() -> argparse.Namespace:
         "--repeats",
         type=int,
         default=3,
-        help="number of alternating-order runs per dataset",
+        help="number of paired repeats per dataset; each repeat runs both orders",
     )
     args = parser.parse_args()
     if args.repeats < 1:
@@ -453,13 +481,11 @@ def main() -> None:
     synthetic_row = _summarize_dataset(
         "synthetic",
         *_make_synthetic_data(),
-        dataset_index=0,
         repeats=args.repeats,
     )
     fremtpl_row = _summarize_dataset(
         "freMTPL2",
         *_load_fremtpl2_freq(),
-        dataset_index=1,
         repeats=args.repeats,
     )
     summary = pd.DataFrame([asdict(synthetic_row), asdict(fremtpl_row)])
