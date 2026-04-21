@@ -3,10 +3,11 @@ from pathlib import Path
 import pandas as pd
 
 from superglm import Constraint, PSpline, SuperGLM
-from superglm._debug import set_debug_level
 
 
 def test_debug_level_zero_emits_no_reml_trace(tmp_path: Path, monkeypatch):
+    from superglm._debug import set_debug_level
+
     monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
     set_debug_level(0)
 
@@ -25,6 +26,8 @@ def test_debug_level_zero_emits_no_reml_trace(tmp_path: Path, monkeypatch):
 
 
 def test_debug_level_two_writes_reml_trace_files(tmp_path: Path, monkeypatch):
+    from superglm._debug import set_debug_level
+
     monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
     set_debug_level(2)
 
