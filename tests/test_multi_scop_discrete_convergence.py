@@ -31,7 +31,6 @@ def test_floor_pinned_lambda_freezes_after_stability_window():
 
     assert active_names == {"DrivAge"}
     assert frozen_names == {"BonusMalus"}
-
 def _make_multi_scop_data(n: int = 1500, seed: int = 42):
     rng = np.random.default_rng(seed)
     driv_age = rng.uniform(18.0, 85.0, size=n)
