@@ -40,6 +40,11 @@ class REMLResult:
     objective_history: list[float] | None = None  # REML objective per outer step
     scop_step_norms: list[dict[str, float]] | None = None  # per-group Newton step_norm per step
     scop_fisher_fallbacks: int = 0  # total Fisher-fallback count
+    managed_cleanup_names: list[str] | None = None  # SCOP names handled by managed cleanup
+    managed_cleanup_frozen_names: list[str] | None = None  # final managed-cleanup frozen names
+    managed_cleanup_freeze_iter: int | None = None  # first outer iteration with new frozen names
+    managed_cleanup_active_history: list[list[str]] | None = None  # active managed names per step
+    managed_cleanup_frozen_history: list[list[str]] | None = None  # frozen managed names per step
 
 
 def _map_beta_between_bases(

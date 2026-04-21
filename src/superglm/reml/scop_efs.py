@@ -676,6 +676,9 @@ def optimize_scop_efs_reml(
     objective_history: list[float] = []
     scop_step_norms_history: list[dict[str, float]] = []
     total_fisher_fallbacks = 0
+    managed_cleanup_active_history: list[list[str]] = []
+    managed_cleanup_frozen_history: list[list[str]] = []
+    managed_cleanup_freeze_iter: int | None = None
 
     # Adaptive EFS step state (per-component)
     efs_alpha: dict[str, float] = {name: 1.0 for name in estimated_names}
@@ -823,6 +826,7 @@ def optimize_scop_efs_reml(
         # Step 7b: Multi-SCOP discrete cleanup — freeze floor-pinned components
         # after they have been stable for several accepted lambda updates.
         if managed_cleanup_active:
+            frozen_names_before = set(frozen_names)
             managed_active_names = managed_cleanup_names - frozen_names
             stable_counts = _update_multi_scop_discrete_stability_counts(
                 lambdas_old=lambdas,
@@ -838,6 +842,10 @@ def optimize_scop_efs_reml(
             )
             frozen_names &= managed_cleanup_names
             active_names = set(estimated_names) - frozen_names
+            if managed_cleanup_freeze_iter is None and frozen_names != frozen_names_before:
+                managed_cleanup_freeze_iter = n_reml_iter
+            managed_cleanup_active_history.append(sorted(managed_cleanup_names - frozen_names))
+            managed_cleanup_frozen_history.append(sorted(frozen_names))
         else:
             active_names = set(estimated_names)
             frozen_names.clear()
@@ -986,4 +994,13 @@ def optimize_scop_efs_reml(
         objective_history=objective_history,
         scop_step_norms=scop_step_norms_history if scop_step_norms_history else None,
         scop_fisher_fallbacks=total_fisher_fallbacks,
+        managed_cleanup_names=sorted(managed_cleanup_names) if managed_cleanup_names else None,
+        managed_cleanup_frozen_names=sorted(frozen_names) if managed_cleanup_active else None,
+        managed_cleanup_freeze_iter=managed_cleanup_freeze_iter,
+        managed_cleanup_active_history=(
+            managed_cleanup_active_history if managed_cleanup_active_history else None
+        ),
+        managed_cleanup_frozen_history=(
+            managed_cleanup_frozen_history if managed_cleanup_frozen_history else None
+        ),
     )

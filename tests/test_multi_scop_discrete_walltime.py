@@ -3,12 +3,15 @@ from dataclasses import asdict
 
 import numpy as np
 import pandas as pd
+import pytest
 from benchmarks.benchmark_multi_scop_discrete_convergence import (
     SummaryRow,
     _aggregate_lambda_metrics,
     _execution_orders_for_repeat,
     _prediction_metrics,
 )
+
+from superglm import Categorical, Constraint, CubicRegressionSpline, PSpline, SuperGLM
 
 
 def test_prediction_metrics_zero_for_identical_inputs():
@@ -101,3 +104,83 @@ def test_summary_csv_columns_include_gate_and_order_fields():
     }
 
     assert expected_columns.issubset(summary.columns)
+
+
+def _make_multi_scop_data(n: int = 1500, seed: int = 42):
+    rng = np.random.default_rng(seed)
+    driv_age = rng.uniform(18.0, 85.0, size=n)
+    veh_age = rng.uniform(0.0, 20.0, size=n)
+    bonus_malus = rng.uniform(50.0, 150.0, size=n)
+    density = rng.uniform(10.0, 5000.0, size=n)
+    area = rng.choice(["A", "B", "C"], size=n, p=[0.5, 0.3, 0.2])
+    eta = (
+        -2.3
+        - 0.018 * (driv_age - 45.0) ** 2 / 25.0
+        - 0.0015 * (bonus_malus - 90.0) ** 2 / 12.0
+        + 0.02 * np.sin(veh_age / 3.0)
+        + 0.08 * np.log(density)
+        + np.where(area == "B", 0.1, 0.0)
+        + np.where(area == "C", -0.08, 0.0)
+    )
+    exposure = rng.uniform(0.2, 1.5, size=n)
+    y = rng.poisson(exposure * np.exp(eta)).astype(float) / exposure
+    X = pd.DataFrame(
+        {
+            "DrivAge": driv_age,
+            "VehAge": veh_age,
+            "BonusMalus": bonus_malus,
+            "LogDensity": np.log(density),
+            "Area": area,
+        }
+    )
+    return X, y, exposure.astype(float)
+
+
+@pytest.mark.slow
+def test_reml_result_exposes_multi_scop_cleanup_metrics():
+    X, y, sample_weight = _make_multi_scop_data()
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "DrivAge": PSpline(n_knots=10, penalty="ssp", constraint=Constraint.fit.concave),
+            "VehAge": CubicRegressionSpline(n_knots=8),
+            "BonusMalus": PSpline(n_knots=10, penalty="ssp", constraint=Constraint.fit.concave),
+            "LogDensity": CubicRegressionSpline(n_knots=8),
+            "Area": Categorical(base="most_exposed"),
+        },
+    )
+
+    model.fit_reml(X, y, sample_weight=sample_weight, max_reml_iter=20)
+    reml_result = model._reml_result
+    managed_cleanup_names = {"BonusMalus", "DrivAge"}
+
+    assert reml_result.converged
+    assert reml_result.managed_cleanup_names == sorted(managed_cleanup_names)
+    assert reml_result.managed_cleanup_active_history is not None
+    assert reml_result.managed_cleanup_frozen_history is not None
+    assert len(reml_result.managed_cleanup_active_history) == reml_result.n_reml_iter
+    assert len(reml_result.managed_cleanup_frozen_history) == reml_result.n_reml_iter
+
+    active_history = [set(names) for names in reml_result.managed_cleanup_active_history]
+    frozen_history = [set(names) for names in reml_result.managed_cleanup_frozen_history]
+    observed_freeze_iter = next(
+        (
+            idx + 1
+            for idx, (prev_names, curr_names) in enumerate(
+                zip([set(), *frozen_history[:-1]], frozen_history, strict=False)
+            )
+            if curr_names != prev_names
+        ),
+        None,
+    )
+
+    for active_names, frozen_names in zip(active_history, frozen_history, strict=False):
+        assert active_names <= managed_cleanup_names
+        assert frozen_names <= managed_cleanup_names
+        assert active_names.isdisjoint(frozen_names)
+        assert active_names | frozen_names == managed_cleanup_names
+
+    assert reml_result.managed_cleanup_frozen_names == sorted(frozen_history[-1])
+    assert reml_result.managed_cleanup_freeze_iter == observed_freeze_iter
