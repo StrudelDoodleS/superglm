@@ -125,6 +125,7 @@ def test_managed_cleanup_can_freeze_floor_pinned_lambda(monkeypatch):
             {"DrivAge": 0.20, "BonusMalus": 1.0e-4},
             {"DrivAge": 0.18, "BonusMalus": 1.0e-4},
             {"DrivAge": 0.16, "BonusMalus": 1.0e-4},
+            {"DrivAge": 0.14, "BonusMalus": 1.0e-4},
         ]
     )
     active_name_calls: list[set[str]] = []
@@ -167,7 +168,7 @@ def test_managed_cleanup_can_freeze_floor_pinned_lambda(monkeypatch):
         offset_arr=np.zeros(1),
         lambdas={"DrivAge": 1.0, "BonusMalus": 1.0},
         estimated_names={"DrivAge", "BonusMalus"},
-        max_reml_iter=3,
+        max_reml_iter=4,
         reml_penalties=[
             SimpleNamespace(name="DrivAge"),
             SimpleNamespace(name="BonusMalus"),
@@ -178,13 +179,14 @@ def test_managed_cleanup_can_freeze_floor_pinned_lambda(monkeypatch):
         {"DrivAge", "BonusMalus"},
         {"DrivAge", "BonusMalus"},
         {"DrivAge", "BonusMalus"},
+        {"DrivAge", "BonusMalus"},
         {"DrivAge"},
     ]
-    assert result.managed_cleanup_freeze_iter == 2
+    assert result.managed_cleanup_freeze_iter == 3
     assert result.managed_cleanup_active_history is not None
     assert result.managed_cleanup_frozen_history is not None
-    assert result.managed_cleanup_active_history[1] == ["DrivAge"]
-    assert result.managed_cleanup_frozen_history[1] == ["BonusMalus"]
+    assert result.managed_cleanup_active_history[2] == ["DrivAge"]
+    assert result.managed_cleanup_frozen_history[2] == ["BonusMalus"]
 
 
 def _make_multi_scop_data(n: int = 1500, seed: int = 42):
@@ -265,9 +267,10 @@ def test_reml_result_exposes_multi_scop_cleanup_metrics():
         assert active_names.isdisjoint(frozen_names)
         assert active_names | frozen_names == managed_cleanup_names
 
-    assert "BonusMalus" in frozen_history[1]
-    assert "BonusMalus" not in active_history[1]
+    assert "BonusMalus" not in frozen_history[1]
+    assert "BonusMalus" in frozen_history[2]
+    assert "BonusMalus" not in active_history[2]
     assert reml_result.managed_cleanup_frozen_names == sorted(frozen_history[-1])
     assert "BonusMalus" in reml_result.managed_cleanup_frozen_names
-    assert observed_freeze_iter == 2
-    assert reml_result.managed_cleanup_freeze_iter == 2
+    assert observed_freeze_iter == 3
+    assert reml_result.managed_cleanup_freeze_iter == 3
