@@ -74,6 +74,7 @@ def _run_scenario(scenario: Scenario, *, n: int, seed: int, max_reml_iter: int) 
         raise RuntimeError(
             f"Expected exactly one new debug run for {scenario.name}, found {new_ids!r}"
         )
+
     run_id = new_ids[0]
     run = load_reml_debug_run(RESULTS_DIR, run_id)
     summary = summarize_reml_debug_run(run)
@@ -88,11 +89,11 @@ def _run_scenario(scenario: Scenario, *, n: int, seed: int, max_reml_iter: int) 
     return summary, run_id
 
 
-def _plot_step_norms(run, output_path: Path) -> Path:
+def _plot_step_norms(run, output_path: Path) -> Path | None:
     if not run.scop_rows:
-        return output_path
+        return None
 
-    xs = [int(row.get("iteration", idx + 1)) for idx, row in enumerate(run.scop_rows)]
+    xs = list(range(1, len(run.scop_rows) + 1))
     ys = [float(row.get("step_norm", 0.0)) for row in run.scop_rows]
 
     fig, ax = plt.subplots(figsize=(8.0, 4.8))
@@ -144,9 +145,9 @@ def main() -> None:
             RESULTS_DIR / f"{scenario.name}_trajectory.png",
             title=f"{scenario.name} trajectory",
         )
-        step_plot = _plot_step_norms(run, RESULTS_DIR / f"{scenario.name}_scop_steps.png")
         print(f"wrote {traj}")
-        if run.scop_rows:
+        step_plot = _plot_step_norms(run, RESULTS_DIR / f"{scenario.name}_scop_steps.png")
+        if step_plot is not None:
             print(f"wrote {step_plot}")
 
     summary_path = write_reml_debug_summary_csv(summary_rows, SUMMARY_CSV)
