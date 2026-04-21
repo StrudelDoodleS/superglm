@@ -24,6 +24,17 @@ from superglm.reml.result import REMLResult
 from superglm.solvers.irls_direct import _safe_decompose_H, fit_irls_direct
 from superglm.types import GroupSlice, PenaltyComponent
 
+_MULTI_SCOP_DISCRETE_LAMBDA_FLOOR = 1.0e-4
+_MULTI_SCOP_DISCRETE_FLOOR_FACTOR = 1.05
+_MULTI_SCOP_DISCRETE_LOG_STEP_TOL = 1.0e-3
+_MULTI_SCOP_DISCRETE_MIN_STABLE_ITERS = 3
+_MULTI_SCOP_DISCRETE_ACTIVE_PLATEAU_TOL = 5.0e-3
+_MULTI_SCOP_DISCRETE_OBJ_REL_TOL = 1.0e-6
+
+
+def _multi_scop_discrete_cleanup_enabled(*, discrete: bool, scop_term_count: int) -> bool:
+    return bool(discrete and scop_term_count > 1)
+
 
 def _get_scop_penalty_metadata(st: dict) -> tuple[float, float, NDArray]:
     """Return cached SCOP penalty metadata, computing it once if needed."""
@@ -71,6 +82,69 @@ def _scop_jacobian_diag(st: dict) -> NDArray:
             return gamma_eff
     beta_eff = np.asarray(st["beta_eff"], dtype=np.float64)
     return np.exp(np.clip(beta_eff, -500, 500))
+
+
+def _update_multi_scop_discrete_stability_counts(
+    *,
+    lambdas_old: dict[str, float],
+    lambdas_new: dict[str, float],
+    active_names: set[str],
+    stable_counts: dict[str, int],
+) -> dict[str, int]:
+    updated = dict(stable_counts)
+    for name in active_names:
+        lam_old = max(lambdas_old[name], 1.0e-10)
+        lam_new = max(lambdas_new[name], 1.0e-10)
+        log_step = abs(np.log(lam_new) - np.log(lam_old))
+        near_floor = lam_new <= (
+            _MULTI_SCOP_DISCRETE_LAMBDA_FLOOR * _MULTI_SCOP_DISCRETE_FLOOR_FACTOR
+        )
+        if near_floor or log_step < _MULTI_SCOP_DISCRETE_LOG_STEP_TOL:
+            updated[name] = updated.get(name, 0) + 1
+        else:
+            updated[name] = 0
+    return updated
+
+
+def _freeze_multi_scop_discrete_lambdas(
+    *,
+    active_names: set[str],
+    frozen_names: set[str],
+    lambdas_new: dict[str, float],
+    stable_counts: dict[str, int],
+) -> tuple[set[str], set[str]]:
+    active_out = set(active_names)
+    frozen_out = set(frozen_names)
+    for name in list(active_names):
+        lam_new = lambdas_new[name]
+        near_floor = lam_new <= (
+            _MULTI_SCOP_DISCRETE_LAMBDA_FLOOR * _MULTI_SCOP_DISCRETE_FLOOR_FACTOR
+        )
+        stable_long_enough = stable_counts.get(name, 0) >= _MULTI_SCOP_DISCRETE_MIN_STABLE_ITERS
+        if near_floor and stable_long_enough:
+            active_out.discard(name)
+            frozen_out.add(name)
+    return active_out, frozen_out
+
+
+def _multi_scop_discrete_plateau_converged(
+    *,
+    obj_rel_change: float,
+    lambdas_old: dict[str, float],
+    lambdas_new: dict[str, float],
+    active_names: set[str],
+) -> bool:
+    if not active_names:
+        return True
+    active_changes = [
+        abs(np.log(max(lambdas_new[name], 1.0e-10)) - np.log(max(lambdas_old[name], 1.0e-10)))
+        for name in active_names
+    ]
+    max_active_change = max(active_changes) if active_changes else 0.0
+    return (
+        obj_rel_change < _MULTI_SCOP_DISCRETE_OBJ_REL_TOL
+        and max_active_change < _MULTI_SCOP_DISCRETE_ACTIVE_PLATEAU_TOL
+    )
 
 
 def build_scop_penalty_components(
