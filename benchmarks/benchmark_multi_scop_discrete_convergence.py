@@ -23,8 +23,10 @@ import superglm.reml.scop_efs as scop_efs
 from superglm import Categorical, Constraint, CubicRegressionSpline, PSpline, SuperGLM
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-RESULTS_DIR = REPO_ROOT / "benchmarks" / "results"
+RESULTS_DIR = Path("benchmarks/results")
 CSV_PATH = RESULTS_DIR / "multi_scop_discrete_convergence.csv"
+ABS_RESULTS_DIR = REPO_ROOT / RESULTS_DIR
+ABS_CSV_PATH = REPO_ROOT / CSV_PATH
 
 DATA_PATH = REPO_ROOT / "data" / "freMTPL2freq.parquet"
 if not DATA_PATH.exists() and REPO_ROOT.parent.name == ".worktrees":
@@ -38,7 +40,7 @@ SYNTHETIC_N = 25_000
 class VariantResult:
     runtime_s: float
     n_reml_iter: int
-    total_inner_pirls_iter: int
+    n_pirls_iter: int
     predictions: np.ndarray
     lambdas: dict[str, float]
     converged: bool
@@ -55,8 +57,8 @@ class SummaryRow:
     speedup_x: float
     baseline_n_reml_iter: int
     optimized_n_reml_iter: int
-    baseline_total_inner_pirls_iter: int
-    optimized_total_inner_pirls_iter: int
+    baseline_n_pirls_iter: int
+    optimized_n_pirls_iter: int
     baseline_converged: bool
     optimized_converged: bool
     baseline_cleanup_gate_calls: int
@@ -95,6 +97,11 @@ def _make_model() -> SuperGLM:
 def _cleanup_disabled(*, discrete: bool, scop_term_count: int) -> bool:
     del discrete, scop_term_count
     return False
+
+
+def _aggregate_inner_pirls_iter(model: SuperGLM) -> int:
+    """Aggregate inner PIRLS work across the REML loop, not just the final refit."""
+    return int(sum(model._reml_result.inner_iter_history or []))
 
 
 def _fit_variant(
@@ -136,7 +143,7 @@ def _fit_variant(
     return VariantResult(
         runtime_s=float(runtime_s),
         n_reml_iter=int(model._reml_result.n_reml_iter),
-        total_inner_pirls_iter=int(sum(model._reml_result.inner_iter_history or [])),
+        n_pirls_iter=_aggregate_inner_pirls_iter(model),
         predictions=np.asarray(model.predict(X), dtype=np.float64),
         lambdas={name: float(value) for name, value in sorted(model._reml_lambdas.items())},
         converged=bool(model._reml_result.converged),
@@ -260,8 +267,8 @@ def _summarize_dataset(
         speedup_x=speedup_x,
         baseline_n_reml_iter=baseline.n_reml_iter,
         optimized_n_reml_iter=optimized.n_reml_iter,
-        baseline_total_inner_pirls_iter=baseline.total_inner_pirls_iter,
-        optimized_total_inner_pirls_iter=optimized.total_inner_pirls_iter,
+        baseline_n_pirls_iter=baseline.n_pirls_iter,
+        optimized_n_pirls_iter=optimized.n_pirls_iter,
         baseline_converged=baseline.converged,
         optimized_converged=optimized.converged,
         baseline_cleanup_gate_calls=baseline.cleanup_gate_calls,
@@ -276,7 +283,7 @@ def _summarize_dataset(
 
 
 def main() -> None:
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    ABS_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     synthetic_row = _summarize_dataset(
         "synthetic",
@@ -289,7 +296,7 @@ def main() -> None:
         execution_order=("optimized", "baseline"),
     )
     summary = pd.DataFrame([asdict(synthetic_row), asdict(fremtpl_row)])
-    summary.to_csv(CSV_PATH, index=False)
+    summary.to_csv(ABS_CSV_PATH, index=False)
 
     visible_columns = [
         "dataset",
@@ -300,8 +307,8 @@ def main() -> None:
         "speedup_x",
         "baseline_n_reml_iter",
         "optimized_n_reml_iter",
-        "baseline_total_inner_pirls_iter",
-        "optimized_total_inner_pirls_iter",
+        "baseline_n_pirls_iter",
+        "optimized_n_pirls_iter",
         "baseline_converged",
         "optimized_converged",
         "optimized_cleanup_gate_calls",
@@ -313,7 +320,7 @@ def main() -> None:
     print(
         summary[visible_columns].to_string(index=False, float_format=lambda value: f"{value:.6g}")
     )
-    print(f"\nWrote {CSV_PATH}")
+    print(f"\nWrote {ABS_CSV_PATH}")
 
 
 if __name__ == "__main__":
