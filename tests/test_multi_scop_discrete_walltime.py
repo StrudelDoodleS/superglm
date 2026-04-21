@@ -138,7 +138,7 @@ def _make_multi_scop_data(n: int = 1500, seed: int = 42):
 
 @pytest.mark.slow
 def test_reml_result_exposes_multi_scop_cleanup_metrics():
-    X, y, sample_weight = _make_multi_scop_data()
+    X, y, sample_weight = _make_multi_scop_data(seed=11)
     model = SuperGLM(
         family="poisson",
         selection_penalty=0.0,
@@ -160,8 +160,10 @@ def test_reml_result_exposes_multi_scop_cleanup_metrics():
     assert reml_result.managed_cleanup_names == sorted(managed_cleanup_names)
     assert reml_result.managed_cleanup_active_history is not None
     assert reml_result.managed_cleanup_frozen_history is not None
+    assert reml_result.managed_cleanup_frozen_names is not None
     assert len(reml_result.managed_cleanup_active_history) == reml_result.n_reml_iter
     assert len(reml_result.managed_cleanup_frozen_history) == reml_result.n_reml_iter
+    assert reml_result.n_reml_iter >= 3
 
     active_history = [set(names) for names in reml_result.managed_cleanup_active_history]
     frozen_history = [set(names) for names in reml_result.managed_cleanup_frozen_history]
@@ -182,5 +184,10 @@ def test_reml_result_exposes_multi_scop_cleanup_metrics():
         assert active_names.isdisjoint(frozen_names)
         assert active_names | frozen_names == managed_cleanup_names
 
+    assert "BonusMalus" not in frozen_history[1]
+    assert "BonusMalus" in frozen_history[2]
+    assert "BonusMalus" not in active_history[2]
     assert reml_result.managed_cleanup_frozen_names == sorted(frozen_history[-1])
-    assert reml_result.managed_cleanup_freeze_iter == observed_freeze_iter
+    assert "BonusMalus" in reml_result.managed_cleanup_frozen_names
+    assert observed_freeze_iter == 3
+    assert reml_result.managed_cleanup_freeze_iter == 3

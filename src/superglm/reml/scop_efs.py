@@ -842,8 +842,11 @@ def optimize_scop_efs_reml(
             )
             frozen_names &= managed_cleanup_names
             active_names = set(estimated_names) - frozen_names
+            # Record the first 1-based outer iteration where the frozen set
+            # changes relative to the previous accepted iteration.
             if managed_cleanup_freeze_iter is None and frozen_names != frozen_names_before:
                 managed_cleanup_freeze_iter = n_reml_iter
+            # Histories store accepted post-update snapshots for this outer step.
             managed_cleanup_active_history.append(sorted(managed_cleanup_names - frozen_names))
             managed_cleanup_frozen_history.append(sorted(frozen_names))
         else:
