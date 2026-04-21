@@ -10,10 +10,12 @@ freMTPL2 frequency dataset and writes a side-by-side summary CSV.
 
 from __future__ import annotations
 
+import argparse
 import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from statistics import median, median_low
 from unittest.mock import patch
 
 import numpy as np
@@ -46,12 +48,15 @@ class VariantResult:
     converged: bool
     cleanup_gate_calls: int
     cleanup_gate_true_count: int
+    frozen_count: int
+    freeze_iter: int
 
 
 @dataclass(frozen=True)
 class SummaryRow:
     dataset: str
     n_rows: int
+    repeats: int
     execution_order: str
     baseline_runtime_s: float
     optimized_runtime_s: float
@@ -66,6 +71,10 @@ class SummaryRow:
     optimized_cleanup_gate_calls: int
     baseline_cleanup_gate_true_count: int
     optimized_cleanup_gate_true_count: int
+    baseline_frozen_count: int
+    optimized_frozen_count: int
+    baseline_freeze_iter: int
+    optimized_freeze_iter: int
     pred_rmse: float
     pred_max_abs_diff: float
     lambda_max_abs_diff: float
@@ -107,6 +116,33 @@ def _aggregate_inner_pirls_iter(model: SuperGLM) -> int:
     return int(sum(model._reml_result.inner_iter_history or []))
 
 
+def _median_float(values: list[float]) -> float:
+    return float(median(values))
+
+
+def _median_int(values: list[int]) -> int:
+    return int(median_low(values))
+
+
+def _execution_order_for_run(dataset_index: int, repeat_index: int) -> tuple[str, str]:
+    orders = (("baseline", "optimized"), ("optimized", "baseline"))
+    return orders[(dataset_index + repeat_index) % 2]
+
+
+def _representative_pair_index(
+    baseline_results: list[VariantResult],
+    optimized_results: list[VariantResult],
+) -> int:
+    baseline_runtime_median = _median_float([result.runtime_s for result in baseline_results])
+    optimized_runtime_median = _median_float([result.runtime_s for result in optimized_results])
+
+    return min(
+        range(len(baseline_results)),
+        key=lambda idx: abs(baseline_results[idx].runtime_s - baseline_runtime_median)
+        + abs(optimized_results[idx].runtime_s - optimized_runtime_median),
+    )
+
+
 def _fit_variant(
     *,
     cleanup_enabled: bool,
@@ -118,7 +154,11 @@ def _fit_variant(
     model = _make_model()
     gate_calls = 0
     gate_true_count = 0
+    freeze_calls = 0
+    frozen_names_seen: set[str] = set()
+    freeze_iter = 0
     original_gate = scop_efs._multi_scop_discrete_cleanup_enabled
+    original_freeze = scop_efs._freeze_multi_scop_discrete_lambdas
 
     def disabled_gate(*, discrete: bool, scop_term_count: int) -> bool:
         nonlocal gate_calls
@@ -132,12 +172,41 @@ def _fit_variant(
         gate_true_count += int(enabled)
         return enabled
 
+    def recorded_freeze(
+        *,
+        active_names: set[str],
+        frozen_names: set[str],
+        lambdas_new: dict[str, float],
+        stable_counts: dict[str, int],
+    ) -> tuple[set[str], set[str]]:
+        nonlocal freeze_calls, freeze_iter
+        freeze_calls += 1
+        active_out, frozen_out = original_freeze(
+            active_names=active_names,
+            frozen_names=frozen_names,
+            lambdas_new=lambdas_new,
+            stable_counts=stable_counts,
+        )
+        newly_frozen = set(frozen_out) - set(frozen_names)
+        if newly_frozen:
+            frozen_names_seen.update(newly_frozen)
+            if freeze_iter == 0:
+                freeze_iter = freeze_calls
+        return active_out, frozen_out
+
     gate_impl = recorded_gate if cleanup_enabled else disabled_gate
 
-    with patch.object(
-        scop_efs,
-        "_multi_scop_discrete_cleanup_enabled",
-        new=gate_impl,
+    with (
+        patch.object(
+            scop_efs,
+            "_multi_scop_discrete_cleanup_enabled",
+            new=gate_impl,
+        ),
+        patch.object(
+            scop_efs,
+            "_freeze_multi_scop_discrete_lambdas",
+            new=recorded_freeze,
+        ),
     ):
         t0 = time.perf_counter()
         model.fit_reml(X, y, sample_weight=sample_weight, max_reml_iter=max_reml_iter)
@@ -159,6 +228,8 @@ def _fit_variant(
         converged=bool(model._reml_result.converged),
         cleanup_gate_calls=gate_calls,
         cleanup_gate_true_count=gate_true_count,
+        frozen_count=len(frozen_names_seen),
+        freeze_iter=freeze_iter,
     )
 
 
@@ -237,77 +308,159 @@ def _summarize_dataset(
     X: pd.DataFrame,
     y: np.ndarray,
     sample_weight: np.ndarray,
-    execution_order: tuple[str, str],
+    *,
+    dataset_index: int,
+    repeats: int,
 ) -> SummaryRow:
     print(f"\nRunning {dataset} ({len(X):,} rows)")
-    by_name: dict[str, VariantResult] = {}
-    for variant_name in execution_order:
-        cleanup_enabled = variant_name == "optimized"
-        by_name[variant_name] = _fit_variant(
-            cleanup_enabled=cleanup_enabled,
-            X=X,
-            y=y,
-            sample_weight=sample_weight,
+    baseline_results: list[VariantResult] = []
+    optimized_results: list[VariantResult] = []
+    pred_rmses: list[float] = []
+    pred_max_abs_diffs: list[float] = []
+    lambda_max_abs_diffs: list[float] = []
+    lambda_keys_matches: list[bool] = []
+    execution_orders: list[str] = []
+
+    for repeat_index in range(repeats):
+        execution_order = _execution_order_for_run(
+            dataset_index=dataset_index,
+            repeat_index=repeat_index,
+        )
+        execution_orders.append("->".join(execution_order))
+        print(f"  repeat {repeat_index + 1}/{repeats} order={'->'.join(execution_order)}")
+
+        by_name: dict[str, VariantResult] = {}
+        for variant_name in execution_order:
+            cleanup_enabled = variant_name == "optimized"
+            by_name[variant_name] = _fit_variant(
+                cleanup_enabled=cleanup_enabled,
+                X=X,
+                y=y,
+                sample_weight=sample_weight,
+            )
+
+        baseline = by_name["baseline"]
+        optimized = by_name["optimized"]
+        baseline_results.append(baseline)
+        optimized_results.append(optimized)
+
+        pred_metrics = _prediction_metrics(baseline.predictions, optimized.predictions)
+        pred_rmses.append(pred_metrics["rmse"])
+        pred_max_abs_diffs.append(pred_metrics["max_abs_diff"])
+        lambda_max_abs_diffs.append(_lambda_max_abs_diff(baseline.lambdas, optimized.lambdas))
+        lambda_keys_matches.append(set(baseline.lambdas) == set(optimized.lambdas))
+
+        speedup_x = (
+            float(baseline.runtime_s / optimized.runtime_s)
+            if optimized.runtime_s > 0.0
+            else float("nan")
+        )
+        print(
+            "    "
+            f"baseline={baseline.runtime_s:.3f}s "
+            f"optimized={optimized.runtime_s:.3f}s "
+            f"speedup={speedup_x:.3f}x "
+            f"baseline_gate_calls={baseline.cleanup_gate_calls} "
+            f"optimized_gate_calls={optimized.cleanup_gate_calls} "
+            f"optimized_gate_true={optimized.cleanup_gate_true_count} "
+            f"optimized_frozen={optimized.frozen_count} "
+            f"optimized_freeze_iter={optimized.freeze_iter} "
+            f"pred_rmse={pred_metrics['rmse']:.3e} "
+            f"pred_max_abs={pred_metrics['max_abs_diff']:.3e}"
         )
 
-    baseline = by_name["baseline"]
-    optimized = by_name["optimized"]
-    pred_metrics = _prediction_metrics(baseline.predictions, optimized.predictions)
+    representative_idx = _representative_pair_index(baseline_results, optimized_results)
+    representative_baseline = baseline_results[representative_idx]
+    representative_optimized = optimized_results[representative_idx]
+    baseline_runtime_s = _median_float([result.runtime_s for result in baseline_results])
+    optimized_runtime_s = _median_float([result.runtime_s for result in optimized_results])
     speedup_x = (
-        float(baseline.runtime_s / optimized.runtime_s)
-        if optimized.runtime_s > 0.0
+        float(baseline_runtime_s / optimized_runtime_s)
+        if optimized_runtime_s > 0.0
         else float("nan")
     )
     print(
         "  "
-        f"baseline={baseline.runtime_s:.3f}s "
-        f"optimized={optimized.runtime_s:.3f}s "
-        f"order={'->'.join(execution_order)} "
+        f"median_baseline={baseline_runtime_s:.3f}s "
+        f"median_optimized={optimized_runtime_s:.3f}s "
+        f"orders={'|'.join(execution_orders)} "
         f"speedup={speedup_x:.3f}x "
-        f"optimized_gate_calls={optimized.cleanup_gate_calls} "
-        f"optimized_gate_true={optimized.cleanup_gate_true_count} "
-        f"pred_rmse={pred_metrics['rmse']:.3e} "
-        f"pred_max_abs={pred_metrics['max_abs_diff']:.3e}"
+        f"median_optimized_gate_calls={_median_int([r.cleanup_gate_calls for r in optimized_results])} "
+        f"median_optimized_gate_true={_median_int([r.cleanup_gate_true_count for r in optimized_results])} "
+        f"median_optimized_frozen={_median_int([r.frozen_count for r in optimized_results])} "
+        f"median_optimized_freeze_iter={_median_int([r.freeze_iter for r in optimized_results])} "
+        f"median_pred_rmse={_median_float(pred_rmses):.3e} "
+        f"median_pred_max_abs={_median_float(pred_max_abs_diffs):.3e}"
     )
 
     return SummaryRow(
         dataset=dataset,
         n_rows=int(len(X)),
-        execution_order="->".join(execution_order),
-        baseline_runtime_s=baseline.runtime_s,
-        optimized_runtime_s=optimized.runtime_s,
+        repeats=repeats,
+        execution_order="|".join(execution_orders),
+        baseline_runtime_s=baseline_runtime_s,
+        optimized_runtime_s=optimized_runtime_s,
         speedup_x=speedup_x,
-        baseline_n_reml_iter=baseline.n_reml_iter,
-        optimized_n_reml_iter=optimized.n_reml_iter,
-        baseline_n_pirls_iter=baseline.n_pirls_iter,
-        optimized_n_pirls_iter=optimized.n_pirls_iter,
-        baseline_converged=baseline.converged,
-        optimized_converged=optimized.converged,
-        baseline_cleanup_gate_calls=baseline.cleanup_gate_calls,
-        optimized_cleanup_gate_calls=optimized.cleanup_gate_calls,
-        baseline_cleanup_gate_true_count=baseline.cleanup_gate_true_count,
-        optimized_cleanup_gate_true_count=optimized.cleanup_gate_true_count,
-        pred_rmse=pred_metrics["rmse"],
-        pred_max_abs_diff=pred_metrics["max_abs_diff"],
-        lambda_max_abs_diff=_lambda_max_abs_diff(baseline.lambdas, optimized.lambdas),
-        lambda_keys_match=set(baseline.lambdas) == set(optimized.lambdas),
-        baseline_lambdas_json=json.dumps(baseline.lambdas, sort_keys=True),
-        optimized_lambdas_json=json.dumps(optimized.lambdas, sort_keys=True),
+        baseline_n_reml_iter=_median_int([result.n_reml_iter for result in baseline_results]),
+        optimized_n_reml_iter=_median_int([result.n_reml_iter for result in optimized_results]),
+        baseline_n_pirls_iter=_median_int([result.n_pirls_iter for result in baseline_results]),
+        optimized_n_pirls_iter=_median_int([result.n_pirls_iter for result in optimized_results]),
+        baseline_converged=all(result.converged for result in baseline_results),
+        optimized_converged=all(result.converged for result in optimized_results),
+        baseline_cleanup_gate_calls=_median_int(
+            [result.cleanup_gate_calls for result in baseline_results]
+        ),
+        optimized_cleanup_gate_calls=_median_int(
+            [result.cleanup_gate_calls for result in optimized_results]
+        ),
+        baseline_cleanup_gate_true_count=_median_int(
+            [result.cleanup_gate_true_count for result in baseline_results]
+        ),
+        optimized_cleanup_gate_true_count=_median_int(
+            [result.cleanup_gate_true_count for result in optimized_results]
+        ),
+        baseline_frozen_count=_median_int([result.frozen_count for result in baseline_results]),
+        optimized_frozen_count=_median_int([result.frozen_count for result in optimized_results]),
+        baseline_freeze_iter=_median_int([result.freeze_iter for result in baseline_results]),
+        optimized_freeze_iter=_median_int([result.freeze_iter for result in optimized_results]),
+        pred_rmse=_median_float(pred_rmses),
+        pred_max_abs_diff=_median_float(pred_max_abs_diffs),
+        lambda_max_abs_diff=_median_float(lambda_max_abs_diffs),
+        lambda_keys_match=all(lambda_keys_matches),
+        baseline_lambdas_json=json.dumps(representative_baseline.lambdas, sort_keys=True),
+        optimized_lambdas_json=json.dumps(representative_optimized.lambdas, sort_keys=True),
     )
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=3,
+        help="number of alternating-order runs per dataset",
+    )
+    args = parser.parse_args()
+    if args.repeats < 1:
+        parser.error("--repeats must be at least 1")
+    return args
+
+
 def main() -> None:
+    args = _parse_args()
     ABS_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     synthetic_row = _summarize_dataset(
         "synthetic",
         *_make_synthetic_data(),
-        execution_order=("baseline", "optimized"),
+        dataset_index=0,
+        repeats=args.repeats,
     )
     fremtpl_row = _summarize_dataset(
         "freMTPL2",
         *_load_fremtpl2_freq(),
-        execution_order=("optimized", "baseline"),
+        dataset_index=1,
+        repeats=args.repeats,
     )
     summary = pd.DataFrame([asdict(synthetic_row), asdict(fremtpl_row)])
     summary.to_csv(ABS_CSV_PATH, index=False)
@@ -315,6 +468,7 @@ def main() -> None:
     visible_columns = [
         "dataset",
         "n_rows",
+        "repeats",
         "execution_order",
         "baseline_runtime_s",
         "optimized_runtime_s",
@@ -325,8 +479,14 @@ def main() -> None:
         "optimized_n_pirls_iter",
         "baseline_converged",
         "optimized_converged",
+        "baseline_cleanup_gate_calls",
         "optimized_cleanup_gate_calls",
+        "baseline_cleanup_gate_true_count",
         "optimized_cleanup_gate_true_count",
+        "baseline_frozen_count",
+        "optimized_frozen_count",
+        "baseline_freeze_iter",
+        "optimized_freeze_iter",
         "pred_rmse",
         "pred_max_abs_diff",
         "lambda_max_abs_diff",
