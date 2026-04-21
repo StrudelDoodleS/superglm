@@ -1,5 +1,6 @@
 import math
 from dataclasses import asdict
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -11,7 +12,9 @@ from benchmarks.benchmark_multi_scop_discrete_convergence import (
     _prediction_metrics,
 )
 
+import superglm.reml.scop_efs as scop_efs
 from superglm import Categorical, Constraint, CubicRegressionSpline, PSpline, SuperGLM
+from superglm.solvers.pirls import PIRLSResult
 
 
 def test_prediction_metrics_zero_for_identical_inputs():
@@ -106,6 +109,84 @@ def test_summary_csv_columns_include_gate_and_order_fields():
     assert expected_columns.issubset(summary.columns)
 
 
+def test_managed_cleanup_can_freeze_floor_pinned_lambda(monkeypatch):
+    pirls_result = PIRLSResult(
+        beta=np.array([0.0]),
+        intercept=0.0,
+        n_iter=1,
+        deviance=0.0,
+        converged=True,
+        phi=1.0,
+        effective_df=1.0,
+    )
+    lambda_updates = iter(
+        [
+            {"DrivAge": 0.25, "BonusMalus": 1.0e-4},
+            {"DrivAge": 0.20, "BonusMalus": 1.0e-4},
+            {"DrivAge": 0.18, "BonusMalus": 1.0e-4},
+            {"DrivAge": 0.16, "BonusMalus": 1.0e-4},
+        ]
+    )
+    active_name_calls: list[set[str]] = []
+
+    monkeypatch.setattr(
+        scop_efs, "fit_irls_direct", lambda **kwargs: (pirls_result, None, np.eye(1), {})
+    )
+    monkeypatch.setattr(scop_efs, "build_penalty_matrix", lambda *args, **kwargs: np.zeros((1, 1)))
+    monkeypatch.setattr(scop_efs, "build_scop_penalty_components", lambda *args, **kwargs: [])
+    monkeypatch.setattr(scop_efs, "assemble_joint_hessian", lambda *args, **kwargs: (np.eye(1), {}))
+    monkeypatch.setattr(
+        scop_efs,
+        "_safe_decompose_H",
+        lambda *args, **kwargs: (np.eye(1), 0.0, np.array([1.0])),
+    )
+
+    def fake_joint_efs_lambda_step(*args, **kwargs):
+        del kwargs
+        active_name_calls.append(set(args[5]))
+        return next(lambda_updates), args[7], {}
+
+    monkeypatch.setattr(scop_efs, "_joint_efs_lambda_step", fake_joint_efs_lambda_step)
+    monkeypatch.setattr(scop_efs, "reml_laml_objective", lambda *args, **kwargs: 1.0)
+    monkeypatch.setattr(
+        scop_efs,
+        "_multi_scop_discrete_cleanup_names",
+        lambda **kwargs: {"DrivAge", "BonusMalus"},
+    )
+
+    result = scop_efs.optimize_scop_efs_reml(
+        dm=SimpleNamespace(group_matrices=[], p=1),
+        distribution=SimpleNamespace(scale_known=True),
+        link=SimpleNamespace(),
+        groups=[
+            SimpleNamespace(monotone_engine="scop"),
+            SimpleNamespace(monotone_engine="scop"),
+        ],
+        y=np.array([0.0]),
+        sample_weight=np.ones(1),
+        offset_arr=np.zeros(1),
+        lambdas={"DrivAge": 1.0, "BonusMalus": 1.0},
+        estimated_names={"DrivAge", "BonusMalus"},
+        max_reml_iter=3,
+        reml_penalties=[
+            SimpleNamespace(name="DrivAge"),
+            SimpleNamespace(name="BonusMalus"),
+        ],
+    )
+
+    assert active_name_calls == [
+        {"DrivAge", "BonusMalus"},
+        {"DrivAge", "BonusMalus"},
+        {"DrivAge", "BonusMalus"},
+        {"DrivAge"},
+    ]
+    assert result.managed_cleanup_freeze_iter == 2
+    assert result.managed_cleanup_active_history is not None
+    assert result.managed_cleanup_frozen_history is not None
+    assert result.managed_cleanup_active_history[1] == ["DrivAge"]
+    assert result.managed_cleanup_frozen_history[1] == ["BonusMalus"]
+
+
 def _make_multi_scop_data(n: int = 1500, seed: int = 42):
     rng = np.random.default_rng(seed)
     driv_age = rng.uniform(18.0, 85.0, size=n)
@@ -184,10 +265,9 @@ def test_reml_result_exposes_multi_scop_cleanup_metrics():
         assert active_names.isdisjoint(frozen_names)
         assert active_names | frozen_names == managed_cleanup_names
 
-    assert "BonusMalus" not in frozen_history[1]
-    assert "BonusMalus" in frozen_history[2]
-    assert "BonusMalus" not in active_history[2]
+    assert "BonusMalus" in frozen_history[1]
+    assert "BonusMalus" not in active_history[1]
     assert reml_result.managed_cleanup_frozen_names == sorted(frozen_history[-1])
     assert "BonusMalus" in reml_result.managed_cleanup_frozen_names
-    assert observed_freeze_iter == 3
-    assert reml_result.managed_cleanup_freeze_iter == 3
+    assert observed_freeze_iter == 2
+    assert reml_result.managed_cleanup_freeze_iter == 2
