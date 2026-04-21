@@ -22,6 +22,7 @@ def run_fixed_constraint_reml(
     lambdas: dict[str, float],
     reml_penalties: list[Any],
     compute_fit_stats,
+    debug_recorder=None,
 ) -> None:
     """Run the fixed-lambda constrained REML path and update the model in place."""
     result, _ = fit_irls_direct(
@@ -37,6 +38,8 @@ def run_fixed_constraint_reml(
         tol=pirls_tol,
         convergence="deviance",
         reml_penalties=reml_penalties if reml_penalties else None,
+        debug_recorder=debug_recorder,
+        debug_context={"phase": "fixed_constraint"},
     )
 
     model._result = result
@@ -74,6 +77,7 @@ def run_scop_efs_reml(
     profile: dict[str, Any],
     total_start: float,
     compute_fit_stats,
+    debug_recorder=None,
 ):
     """Run the SCOP-constrained EFS REML path and update the model in place."""
     promote_estimated_scop_lambdas(
@@ -103,6 +107,7 @@ def run_scop_efs_reml(
         verbose=verbose,
         reml_penalties=reml_penalties,
         convergence=model._convergence,
+        debug_recorder=debug_recorder,
     )
 
     model._result = best.pirls_result
@@ -156,6 +161,7 @@ def optimize_reml_best(
     max_pirls_iter: int,
     model_optimize_direct_reml,
     model_optimize_efs_reml,
+    debug_recorder=None,
 ):
     """Run the appropriate REML optimizer and return its best result object."""
     if not estimated_names:

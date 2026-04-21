@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -42,6 +43,40 @@ def test_debug_level_two_writes_reml_trace_files(tmp_path: Path, monkeypatch):
     )
     model.fit_reml(x, y, max_reml_iter=4)
 
-    assert list(tmp_path.glob("*run.json"))
-    assert list(tmp_path.glob("*reml.jsonl"))
-    assert list(tmp_path.glob("*pirls.jsonl"))
+    run_files = list(tmp_path.glob("*run.json"))
+    reml_files = list(tmp_path.glob("*reml.jsonl"))
+    pirls_files = list(tmp_path.glob("*pirls.jsonl"))
+    scop_files = list(tmp_path.glob("*scop.jsonl"))
+
+    assert run_files
+    assert reml_files
+    assert pirls_files
+    assert scop_files
+
+    run_payload = json.loads(run_files[0].read_text(encoding="utf-8"))
+    assert run_payload["debug_level"] == 2
+    assert run_payload["method"] == "fit_reml"
+
+    reml_rows = [
+        json.loads(line)
+        for line in reml_files[0].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert reml_rows
+    assert reml_rows[0]["iteration"] >= 1
+
+    pirls_rows = [
+        json.loads(line)
+        for line in pirls_files[0].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert pirls_rows
+    assert pirls_rows[0]["iteration"] >= 1
+
+    scop_rows = [
+        json.loads(line)
+        for line in scop_files[0].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert scop_rows
+    assert scop_rows[0]["step_norm"] >= 0.0

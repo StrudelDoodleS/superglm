@@ -89,6 +89,36 @@ class _JointObjectiveCache:
     cross_btwb: dict[tuple[int, int], NDArray] | None = None
 
 
+def _append_scop_trace(
+    debug_recorder,
+    *,
+    mode: str,
+    result: SCOPNewtonResult,
+    debug_context: dict[str, object] | None = None,
+    group_name: str | None = None,
+) -> None:
+    """Append a private SCOP step summary when debug tracing is enabled."""
+    if debug_recorder is None:
+        return
+
+    payload = dict(debug_context or {})
+    if group_name is not None:
+        payload["group_name"] = group_name
+    payload.update(
+        {
+            "mode": mode,
+            "objective_before": float(result.objective_before),
+            "objective_after": float(result.objective_after),
+            "step_norm": float(result.step_norm),
+            "used_fisher_fallback": bool(result.used_fisher_fallback),
+            "linear_solver": result.linear_solver,
+            "linear_iterations": int(result.linear_iterations),
+            "dropped_cross_blocks": int(result.dropped_cross_blocks),
+        }
+    )
+    debug_recorder.append_jsonl("scop", payload)
+
+
 def configure_scop_prototype(
     *,
     solve_mode: Literal["direct", "minres", "minres_inexact"] | None = None,
@@ -205,6 +235,8 @@ def scop_newton_step(
     lambda2: float,
     max_halving: int = 10,
     bin_idx: NDArray | None = None,
+    debug_recorder=None,
+    debug_context: dict[str, object] | None = None,
 ) -> SCOPNewtonResult:
     """One damped full Newton step on the SCOP penalized WLS objective.
 
@@ -258,7 +290,7 @@ def scop_newton_step(
     # If the starting point is already non-finite, we cannot compute a
     # meaningful gradient or Hessian.  Return a no-op.
     if not np.isfinite(obj_before):
-        return SCOPNewtonResult(
+        result = SCOPNewtonResult(
             beta_new=beta,
             objective_before=np.inf,
             objective_after=np.inf,
@@ -266,6 +298,13 @@ def scop_newton_step(
             used_fisher_fallback=False,
             H_penalized=lambda2 * S_scop,
         )
+        _append_scop_trace(
+            debug_recorder,
+            mode="single",
+            result=result,
+            debug_context=debug_context,
+        )
+        return result
 
     # --- Weighted design products (exploit diagonal J) ---
     # J_eff = diag(j_diag), so J^T @ BtWB @ J = diag(j) @ BtWB @ diag(j)
@@ -332,7 +371,7 @@ def scop_newton_step(
         obj_new = obj_before
         step_norm = 0.0
 
-    return SCOPNewtonResult(
+    result = SCOPNewtonResult(
         beta_new=beta_new,
         objective_before=float(obj_before),
         objective_after=float(obj_new),
@@ -340,6 +379,13 @@ def scop_newton_step(
         used_fisher_fallback=used_fisher,
         H_penalized=H_full,
     )
+    _append_scop_trace(
+        debug_recorder,
+        mode="single",
+        result=result,
+        debug_context=debug_context,
+    )
+    return result
 
 
 def _solve_step(H: NDArray, grad: NDArray) -> NDArray | None:
@@ -729,6 +775,8 @@ def scop_joint_newton_step(
     lambdas: dict[str, float] | float,
     groups: list,
     max_halving: int = 10,
+    debug_recorder=None,
+    debug_context: dict[str, object] | None = None,
 ) -> dict[int, SCOPNewtonResult]:
     """Joint Newton step for all SCOP groups simultaneously.
 
@@ -916,6 +964,14 @@ def scop_joint_newton_step(
                 used_fisher_fallback=False,
                 H_penalized=lambdas_list[idx] * st["S_scop"],
             )
+        for gi, result in results.items():
+            _append_scop_trace(
+                debug_recorder,
+                mode="joint",
+                result=result,
+                debug_context=debug_context,
+                group_name=groups[gi].name,
+            )
         return results
 
     # --- Step 4: Solve ---
@@ -1017,6 +1073,15 @@ def scop_joint_newton_step(
             linear_solver=linear_solver,
             linear_iterations=linear_iterations,
             dropped_cross_blocks=dropped_cross_blocks,
+        )
+
+    for gi, result in results.items():
+        _append_scop_trace(
+            debug_recorder,
+            mode="joint",
+            result=result,
+            debug_context=debug_context,
+            group_name=groups[gi].name,
         )
 
     return results

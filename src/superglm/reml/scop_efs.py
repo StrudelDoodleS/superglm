@@ -415,6 +415,7 @@ def optimize_scop_efs_reml(
     reml_penalties: list[PenaltyComponent] | None = None,
     convergence: str = "deviance",
     _scop_joint: bool = True,
+    debug_recorder=None,
 ) -> REMLResult:
     """SCOP-aware EFS REML optimizer for monotone splines.
 
@@ -493,6 +494,8 @@ def optimize_scop_efs_reml(
         reml_penalties=reml_penalties,
         convergence=convergence,
         _scop_joint=_scop_joint,
+        debug_recorder=debug_recorder,
+        debug_context={"phase": "bootstrap", "reml_iteration": 0},
     )
 
     # Unpack: with return_xtwx=True and SCOP -> 4-tuple
@@ -595,6 +598,8 @@ def optimize_scop_efs_reml(
             convergence=convergence,
             _scop_joint=_scop_joint,
             scop_state_init=warm_scop_states,
+            debug_recorder=debug_recorder,
+            debug_context={"phase": "reml", "reml_iteration": n_reml_iter},
         )
 
         if len(irls_out) == 4:
@@ -758,6 +763,36 @@ def optimize_scop_efs_reml(
                 f"  obj_rel={obj_rel_change:.2e}  lambdas=[{lam_str}]"
             )
 
+        if debug_recorder is not None:
+            obj_after = reml_laml_objective(
+                dm,
+                distribution,
+                link,
+                groups,
+                y,
+                result,
+                lambdas_new,
+                sample_weight,
+                offset_arr,
+                XtWX=XtWX,
+                reml_penalties=all_pcs,
+                scop_states=scop_states,
+            )
+            debug_recorder.append_jsonl(
+                "reml",
+                {
+                    "iteration": n_reml_iter,
+                    "objective_before": float(obj_curr),
+                    "objective_after": float(obj_after),
+                    "lambda_max_delta": float(max_change),
+                    "objective_relative_change": float(obj_rel_change),
+                    "strict_converged": bool(strict_converged),
+                    "plateau_converged": bool(plateau_converged),
+                    "estimated_names": sorted(active_names),
+                    "lambdas": {name: float(value) for name, value in lambdas_new.items()},
+                },
+            )
+
         lambda_history.append(lambdas_new.copy())
 
         if strict_converged or plateau_converged:
@@ -791,6 +826,8 @@ def optimize_scop_efs_reml(
         convergence=convergence,
         _scop_joint=_scop_joint,
         scop_state_init=warm_scop_states,
+        debug_recorder=debug_recorder,
+        debug_context={"phase": "final", "reml_iteration": n_reml_iter},
     )
 
     if len(final_out) == 4:
