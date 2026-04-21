@@ -56,11 +56,12 @@ def _multi_scop_discrete_cleanup_names(
     ):
         return set()
 
-    return {
+    eligible_names = {
         st["group_name"]
         for st in scop_states.values()
         if st.get("bin_idx") is not None and st["group_name"] in estimated_names
     }
+    return eligible_names if len(eligible_names) > 1 else set()
 
 
 def _get_scop_penalty_metadata(st: dict) -> tuple[float, float, NDArray]:

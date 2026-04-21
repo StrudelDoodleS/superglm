@@ -38,6 +38,19 @@ def test_cleanup_names_disable_mixed_bootstrap_scop_states():
     assert cleanup_names == set()
 
 
+def test_cleanup_names_require_multiple_eligible_estimated_discrete_scop_terms():
+    cleanup_names = scop_efs._multi_scop_discrete_cleanup_names(
+        estimated_names={"DrivAge", "VehAge"},
+        scop_states={
+            0: {"group_name": "DrivAge", "bin_idx": np.array([0, 1], dtype=np.intp)},
+            1: {"group_name": "BonusMalus", "bin_idx": np.array([1, 0], dtype=np.intp)},
+        },
+        scop_term_count=2,
+    )
+
+    assert cleanup_names == set()
+
+
 def test_first_near_floor_iteration_does_not_immediately_freeze():
     stable_counts = {"BonusMalus": 2}
     active_names = {"BonusMalus"}
