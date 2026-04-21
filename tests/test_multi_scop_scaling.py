@@ -39,6 +39,14 @@ def test_make_dataset_builds_repeated_support_constrained_features():
     assert np.all((X.to_numpy(dtype=np.float64) >= 0.0) & (X.to_numpy(dtype=np.float64) <= 1.0))
 
 
+def test_make_dataset_repeats_support_values_for_small_n():
+    from benchmarks.multi_scop_scaling import make_dataset
+
+    X, _ = make_dataset(n=10, n_constrained=1, seed=7)
+
+    assert X["x1"].nunique() < len(X)
+
+
 def test_summarize_rows_uses_run_row_schema_order():
     from benchmarks.multi_scop_scaling import RunRow, summarize_rows
 

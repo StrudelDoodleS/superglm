@@ -74,6 +74,10 @@ def make_dataset(n: int, n_constrained: int, seed: int) -> tuple[pd.DataFrame, n
 
     for j in range(n_constrained):
         support = max(20, n // 50)
+        if n > 1:
+            support = min(support, n - 1)
+        else:
+            support = 1
         x = np.repeat(np.linspace(0.0, 1.0, support, dtype=np.float64), n // support + 1)[:n]
         rng.shuffle(x)
         data[f"x{j + 1}"] = x
