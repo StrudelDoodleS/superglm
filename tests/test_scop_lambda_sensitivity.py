@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from benchmarks.scop_lambda_sensitivity import (
     build_lambda_grid,
     curve_similarity_metrics,
@@ -13,6 +14,11 @@ def test_build_lambda_grid_is_log_symmetric_around_baseline():
     )
 
 
+def test_build_lambda_grid_rejects_non_positive_baseline():
+    with pytest.raises(ValueError, match="baseline_lambda must be positive"):
+        build_lambda_grid(0.0)
+
+
 def test_curve_similarity_metrics_match_identical_curves():
     x = np.linspace(0.0, 1.0, 50)
     y = x**2
@@ -20,3 +26,22 @@ def test_curve_similarity_metrics_match_identical_curves():
     assert metrics["r2"] == 1.0
     assert metrics["max_abs_diff"] == 0.0
     assert metrics["rmse"] == 0.0
+
+
+def test_curve_similarity_metrics_use_x_spacing_for_rmse_and_r2():
+    x = np.array([0.0, 0.1, 1.0], dtype=np.float64)
+    ref = np.zeros_like(x)
+    other = np.array([0.0, 10.0, 10.0], dtype=np.float64)
+
+    metrics = curve_similarity_metrics(x, ref, other)
+
+    assert metrics["max_abs_diff"] == 10.0
+    assert metrics["rmse"] == pytest.approx(np.sqrt(95.0))
+    assert metrics["r2"] == 0.0
+
+
+def test_curve_similarity_metrics_reject_mismatched_shapes():
+    x = np.linspace(0.0, 1.0, 5)
+
+    with pytest.raises(ValueError, match="same shape"):
+        curve_similarity_metrics(x, np.zeros(5), np.zeros(4))
