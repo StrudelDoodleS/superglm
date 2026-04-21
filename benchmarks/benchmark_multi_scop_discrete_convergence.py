@@ -45,6 +45,7 @@ class VariantResult:
     lambdas: dict[str, float]
     converged: bool
     cleanup_gate_calls: int
+    cleanup_gate_true_count: int
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,8 @@ class SummaryRow:
     optimized_converged: bool
     baseline_cleanup_gate_calls: int
     optimized_cleanup_gate_calls: int
+    baseline_cleanup_gate_true_count: int
+    optimized_cleanup_gate_true_count: int
     pred_rmse: float
     pred_max_abs_diff: float
     lambda_max_abs_diff: float
@@ -114,6 +117,7 @@ def _fit_variant(
 ) -> VariantResult:
     model = _make_model()
     gate_calls = 0
+    gate_true_count = 0
     original_gate = scop_efs._multi_scop_discrete_cleanup_enabled
 
     def disabled_gate(*, discrete: bool, scop_term_count: int) -> bool:
@@ -122,9 +126,11 @@ def _fit_variant(
         return _cleanup_disabled(discrete=discrete, scop_term_count=scop_term_count)
 
     def recorded_gate(*, discrete: bool, scop_term_count: int) -> bool:
-        nonlocal gate_calls
+        nonlocal gate_calls, gate_true_count
         gate_calls += 1
-        return original_gate(discrete=discrete, scop_term_count=scop_term_count)
+        enabled = original_gate(discrete=discrete, scop_term_count=scop_term_count)
+        gate_true_count += int(enabled)
+        return enabled
 
     gate_impl = recorded_gate if cleanup_enabled else disabled_gate
 
@@ -139,6 +145,10 @@ def _fit_variant(
 
     if cleanup_enabled and gate_calls == 0:
         raise RuntimeError("optimized variant never consulted the cleanup gate")
+    if cleanup_enabled and gate_true_count == 0:
+        raise RuntimeError(
+            "optimized variant consulted the cleanup gate but it never returned True"
+        )
 
     return VariantResult(
         runtime_s=float(runtime_s),
@@ -148,6 +158,7 @@ def _fit_variant(
         lambdas={name: float(value) for name, value in sorted(model._reml_lambdas.items())},
         converged=bool(model._reml_result.converged),
         cleanup_gate_calls=gate_calls,
+        cleanup_gate_true_count=gate_true_count,
     )
 
 
@@ -254,6 +265,7 @@ def _summarize_dataset(
         f"order={'->'.join(execution_order)} "
         f"speedup={speedup_x:.3f}x "
         f"optimized_gate_calls={optimized.cleanup_gate_calls} "
+        f"optimized_gate_true={optimized.cleanup_gate_true_count} "
         f"pred_rmse={pred_metrics['rmse']:.3e} "
         f"pred_max_abs={pred_metrics['max_abs_diff']:.3e}"
     )
@@ -273,6 +285,8 @@ def _summarize_dataset(
         optimized_converged=optimized.converged,
         baseline_cleanup_gate_calls=baseline.cleanup_gate_calls,
         optimized_cleanup_gate_calls=optimized.cleanup_gate_calls,
+        baseline_cleanup_gate_true_count=baseline.cleanup_gate_true_count,
+        optimized_cleanup_gate_true_count=optimized.cleanup_gate_true_count,
         pred_rmse=pred_metrics["rmse"],
         pred_max_abs_diff=pred_metrics["max_abs_diff"],
         lambda_max_abs_diff=_lambda_max_abs_diff(baseline.lambdas, optimized.lambdas),
@@ -312,6 +326,7 @@ def main() -> None:
         "baseline_converged",
         "optimized_converged",
         "optimized_cleanup_gate_calls",
+        "optimized_cleanup_gate_true_count",
         "pred_rmse",
         "pred_max_abs_diff",
         "lambda_max_abs_diff",
