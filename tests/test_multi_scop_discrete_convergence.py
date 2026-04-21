@@ -23,6 +23,7 @@ def test_floor_pinned_lambda_freezes_after_stability_window():
         active_names=active_names,
         stable_counts=stable_counts,
     )
+    assert stable_counts["BonusMalus"] == 3
     active_names, frozen_names = scop_efs._freeze_multi_scop_discrete_lambdas(
         active_names=active_names,
         frozen_names=frozen_names,
@@ -93,6 +94,7 @@ def test_multi_scop_discrete_cleanup_preserves_predictions(monkeypatch):
     )
     optimized = _make_model()
     optimized.fit_reml(X, y, sample_weight=w, max_reml_iter=20)
+    assert optimized._reml_result.converged
     assert (True, 2) in consulted_calls
 
     monkeypatch.setattr(
@@ -102,6 +104,7 @@ def test_multi_scop_discrete_cleanup_preserves_predictions(monkeypatch):
     )
     baseline = _make_model()
     baseline.fit_reml(X, y, sample_weight=w, max_reml_iter=20)
+    assert baseline._reml_result.converged
 
     pred_opt = optimized.predict(X)
     pred_base = baseline.predict(X)
