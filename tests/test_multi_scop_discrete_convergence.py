@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 import superglm.reml.scop_efs as scop_efs
 from superglm import Categorical, Constraint, CubicRegressionSpline, PSpline, SuperGLM
@@ -75,12 +76,24 @@ def _make_model() -> SuperGLM:
         },
     )
 
-
+@pytest.mark.slow
 def test_multi_scop_discrete_cleanup_preserves_predictions(monkeypatch):
     X, y, w = _make_multi_scop_data()
+    consulted_calls: list[tuple[bool, int]] = []
+    original = scop_efs._multi_scop_discrete_cleanup_enabled
 
+    def record_cleanup_gate(*, discrete, scop_term_count):
+        consulted_calls.append((discrete, scop_term_count))
+        return original(discrete=discrete, scop_term_count=scop_term_count)
+
+    monkeypatch.setattr(
+        scop_efs,
+        "_multi_scop_discrete_cleanup_enabled",
+        record_cleanup_gate,
+    )
     optimized = _make_model()
     optimized.fit_reml(X, y, sample_weight=w, max_reml_iter=20)
+    assert (True, 2) in consulted_calls
 
     monkeypatch.setattr(
         scop_efs,
