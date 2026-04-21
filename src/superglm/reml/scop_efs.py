@@ -98,8 +98,8 @@ def _update_multi_scop_discrete_stability_counts(
 
     A name is counted as stable when it is either near the absolute lambda floor
     or moving by only a small log-step. The near-floor branch feeds floor-pinned
-    freezing immediately; the small-log-step branch is kept for the later
-    active-set plateau wiring in Task 3.
+    freezing immediately; the small-log-step branch also feeds the active-set
+    plateau check.
     """
     updated = dict(stable_counts)
     for name in active_names:
@@ -654,12 +654,15 @@ def optimize_scop_efs_reml(
     efs_alpha: dict[str, float] = {name: 1.0 for name in estimated_names}
     efs_prev_dlsp: dict[str, float] = {}
 
-    # Staged freeze state: temporarily freeze converged SSP lambdas,
-    # iterate SCOP-only, then unfreeze for final joint cleanup.
+    scop_term_count = sum(1 for group in groups if group.monotone_engine == "scop")
+    has_discrete_scop = any(st.get("bin_idx") is not None for st in boot_scop_states.values())
+    enable_multi_scop_discrete_cleanup = _multi_scop_discrete_cleanup_enabled(
+        discrete=has_discrete_scop,
+        scop_term_count=scop_term_count,
+    )
     active_names: set[str] = set(estimated_names)
     frozen_names: set[str] = set()
-    _unfreeze_pending = False
-    _unfreeze_scheduled = False
+    stable_counts: dict[str, int] = {name: 0 for name in estimated_names}
 
     for reml_iter in range(max_reml_iter):
         n_reml_iter = reml_iter + 1
@@ -789,29 +792,28 @@ def optimize_scop_efs_reml(
                 )
                 efs_prev_dlsp[name] = accepted_step
 
-        # Step 7b: Staged freezing — temporarily freeze converged components
-        # so SCOP-only iterations are cheap, then unfreeze for final cleanup.
-        freeze_threshold = 0.001  # log-scale
-        if n_reml_iter >= 3 and not _unfreeze_scheduled:
-            newly_frozen = []
-            for name in list(active_names):
-                if name in lambdas_new and name in lambdas:
-                    ch = abs(
-                        np.log(max(lambdas_new[name], 1e-10)) - np.log(max(lambdas[name], 1e-10))
-                    )
-                    if ch < freeze_threshold:
-                        newly_frozen.append(name)
-            for name in newly_frozen:
-                active_names.discard(name)
-                frozen_names.add(name)
-
-            # If we have frozen components and only SCOP remains active,
-            # schedule an unfreeze after SCOP stabilizes to re-couple
-            if frozen_names and active_names and len(active_names) < len(estimated_names):
-                _unfreeze_pending = True
+        # Step 7b: Multi-SCOP discrete cleanup — freeze floor-pinned components
+        # after they have been stable for several accepted lambda updates.
+        if enable_multi_scop_discrete_cleanup:
+            stable_counts = _update_multi_scop_discrete_stability_counts(
+                lambdas_old=lambdas,
+                lambdas_new=lambdas_new,
+                active_names=active_names,
+                stable_counts=stable_counts,
+            )
+            active_names, frozen_names = _freeze_multi_scop_discrete_lambdas(
+                active_names=active_names,
+                frozen_names=frozen_names,
+                lambdas_new=lambdas_new,
+                stable_counts=stable_counts,
+            )
+        else:
+            active_names = set(estimated_names)
+            frozen_names.clear()
 
         # Step 8: Convergence check — strict tolerance OR objective plateau
-        # Use all components (not just still-estimated) for convergence decision
+        # Strict convergence still checks the accepted update across all
+        # estimated components, including any names that were frozen earlier.
         changes = [
             abs(np.log(lambdas_new[pc.name]) - np.log(lambdas[pc.name]))
             for pc in all_pcs
@@ -829,18 +831,14 @@ def optimize_scop_efs_reml(
             obj_curr_val = objective_history[-1]
             obj_rel_change = abs(obj_curr_val - obj_prev) / max(abs(obj_curr_val), 1.0)
 
-        # Unfreeze: if SCOP-only iterations have stabilized, re-couple for final joint cleanup
-        if _unfreeze_pending and max_change < 0.01 and n_reml_iter >= 5:
-            active_names = set(estimated_names)
-            frozen_names.clear()
-            _unfreeze_scheduled = True
-            _unfreeze_pending = False
-
         # Converge on strict lambda tolerance
         strict_converged = max_change < reml_tol
-        # OR: objective plateau — relative objective change < 1e-6 AND
-        # lambda changes < 0.01 (1% on log scale) for at least 2 iterations
-        plateau_converged = n_reml_iter >= 3 and obj_rel_change < 1e-6 and max_change < 0.01
+        plateau_converged = n_reml_iter >= 3 and _multi_scop_discrete_plateau_converged(
+            obj_rel_change=obj_rel_change,
+            lambdas_old=lambdas,
+            lambdas_new=lambdas_new,
+            active_names=active_names,
+        )
 
         if verbose:
             lam_str = ", ".join(f"{pc.name}={lambdas_new[pc.name]:.4g}" for pc in all_pcs)
@@ -874,7 +872,9 @@ def optimize_scop_efs_reml(
                     "objective_relative_change": float(obj_rel_change),
                     "strict_converged": bool(strict_converged),
                     "plateau_converged": bool(plateau_converged),
-                    "estimated_names": sorted(active_names),
+                    "estimated_names": sorted(estimated_names),
+                    "active_names": sorted(active_names),
+                    "frozen_names": sorted(frozen_names),
                     "lambdas": {name: float(value) for name, value in lambdas_new.items()},
                 },
             )
