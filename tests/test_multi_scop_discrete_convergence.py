@@ -12,6 +12,56 @@ def test_cleanup_enabled_only_for_multi_scop_discrete():
     assert not scop_efs._multi_scop_discrete_cleanup_enabled(discrete=False, scop_term_count=2)
 
 
+def test_cleanup_names_include_only_discrete_scop_estimated_names():
+    cleanup_names = scop_efs._multi_scop_discrete_cleanup_names(
+        estimated_names={"DrivAge", "BonusMalus", "VehAge"},
+        scop_states={
+            0: {"group_name": "DrivAge", "bin_idx": np.array([0, 1], dtype=np.intp)},
+            1: {"group_name": "BonusMalus", "bin_idx": np.array([1, 0], dtype=np.intp)},
+        },
+        scop_term_count=2,
+    )
+
+    assert cleanup_names == {"DrivAge", "BonusMalus"}
+
+
+def test_cleanup_names_disable_mixed_bootstrap_scop_states():
+    cleanup_names = scop_efs._multi_scop_discrete_cleanup_names(
+        estimated_names={"DrivAge", "BonusMalus", "VehAge"},
+        scop_states={
+            0: {"group_name": "DrivAge", "bin_idx": np.array([0, 1], dtype=np.intp)},
+            1: {"group_name": "BonusMalus", "bin_idx": None},
+        },
+        scop_term_count=2,
+    )
+
+    assert cleanup_names == set()
+
+
+def test_first_near_floor_iteration_does_not_immediately_freeze():
+    stable_counts = {"BonusMalus": 2}
+    active_names = {"BonusMalus"}
+    frozen_names = set()
+
+    stable_counts = scop_efs._update_multi_scop_discrete_stability_counts(
+        lambdas_old={"BonusMalus": 1.2e-4},
+        lambdas_new={"BonusMalus": 1.0e-4},
+        active_names=active_names,
+        stable_counts=stable_counts,
+    )
+    assert stable_counts["BonusMalus"] == 1
+
+    active_names, frozen_names = scop_efs._freeze_multi_scop_discrete_lambdas(
+        active_names=active_names,
+        frozen_names=frozen_names,
+        lambdas_new={"BonusMalus": 1.0e-4},
+        stable_counts=stable_counts,
+    )
+
+    assert active_names == {"BonusMalus"}
+    assert frozen_names == set()
+
+
 def test_floor_pinned_lambda_freezes_after_stability_window():
     stable_counts = {"DrivAge": 0, "BonusMalus": 2}
     active_names = {"DrivAge", "BonusMalus"}
@@ -33,6 +83,8 @@ def test_floor_pinned_lambda_freezes_after_stability_window():
 
     assert active_names == {"DrivAge"}
     assert frozen_names == {"BonusMalus"}
+
+
 def _make_multi_scop_data(n: int = 1500, seed: int = 42):
     rng = np.random.default_rng(seed)
     driv_age = rng.uniform(18.0, 85.0, size=n)
@@ -76,6 +128,7 @@ def _make_model() -> SuperGLM:
             "Area": Categorical(base="most_exposed"),
         },
     )
+
 
 @pytest.mark.slow
 def test_multi_scop_discrete_cleanup_preserves_predictions(monkeypatch):

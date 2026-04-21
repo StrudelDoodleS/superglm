@@ -39,6 +39,30 @@ def _multi_scop_discrete_cleanup_enabled(*, discrete: bool, scop_term_count: int
     return bool(discrete and scop_term_count > 1)
 
 
+def _multi_scop_discrete_cleanup_names(
+    *,
+    estimated_names: set[str],
+    scop_states: dict[int, dict],
+    scop_term_count: int,
+) -> set[str]:
+    """Return the estimated SCOP names eligible for the discrete cleanup path."""
+    if not scop_states:
+        return set()
+
+    all_scop_discrete = all(st.get("bin_idx") is not None for st in scop_states.values())
+    if not _multi_scop_discrete_cleanup_enabled(
+        discrete=all_scop_discrete,
+        scop_term_count=scop_term_count,
+    ):
+        return set()
+
+    return {
+        st["group_name"]
+        for st in scop_states.values()
+        if st.get("bin_idx") is not None and st["group_name"] in estimated_names
+    }
+
+
 def _get_scop_penalty_metadata(st: dict) -> tuple[float, float, NDArray]:
     """Return cached SCOP penalty metadata, computing it once if needed."""
     cached_rank = st.get("penalty_rank")
@@ -97,19 +121,21 @@ def _update_multi_scop_discrete_stability_counts(
     """Track generic per-name lambda stability across freeze and plateau signals.
 
     A name is counted as stable when it is either near the absolute lambda floor
-    or moving by only a small log-step. The near-floor branch feeds floor-pinned
-    freezing immediately; the small-log-step branch also feeds the active-set
-    plateau check.
+    or moving by only a small log-step. The near-floor branch resets when a
+    lambda first enters the floor region so freezing responds only to
+    consecutive near-floor iterations.
     """
     updated = dict(stable_counts)
+    floor_threshold = _MULTI_SCOP_DISCRETE_LAMBDA_FLOOR * _MULTI_SCOP_DISCRETE_FLOOR_FACTOR
     for name in active_names:
         lam_old = max(lambdas_old[name], 1.0e-10)
         lam_new = max(lambdas_new[name], 1.0e-10)
         log_step = abs(np.log(lam_new) - np.log(lam_old))
-        near_floor = lam_new <= (
-            _MULTI_SCOP_DISCRETE_LAMBDA_FLOOR * _MULTI_SCOP_DISCRETE_FLOOR_FACTOR
-        )
-        if near_floor or log_step < _MULTI_SCOP_DISCRETE_LOG_STEP_TOL:
+        near_floor_old = lam_old <= floor_threshold
+        near_floor_new = lam_new <= floor_threshold
+        if near_floor_new:
+            updated[name] = updated.get(name, 0) + 1 if near_floor_old else 1
+        elif log_step < _MULTI_SCOP_DISCRETE_LOG_STEP_TOL:
             updated[name] = updated.get(name, 0) + 1
         else:
             updated[name] = 0
@@ -655,14 +681,14 @@ def optimize_scop_efs_reml(
     efs_prev_dlsp: dict[str, float] = {}
 
     scop_term_count = sum(1 for group in groups if group.monotone_engine == "scop")
-    has_discrete_scop = any(st.get("bin_idx") is not None for st in boot_scop_states.values())
-    enable_multi_scop_discrete_cleanup = _multi_scop_discrete_cleanup_enabled(
-        discrete=has_discrete_scop,
+    managed_cleanup_names = _multi_scop_discrete_cleanup_names(
+        estimated_names=estimated_names,
+        scop_states=boot_scop_states,
         scop_term_count=scop_term_count,
     )
     active_names: set[str] = set(estimated_names)
     frozen_names: set[str] = set()
-    stable_counts: dict[str, int] = {name: 0 for name in estimated_names}
+    stable_counts: dict[str, int] = {name: 0 for name in managed_cleanup_names}
 
     for reml_iter in range(max_reml_iter):
         n_reml_iter = reml_iter + 1
@@ -794,19 +820,22 @@ def optimize_scop_efs_reml(
 
         # Step 7b: Multi-SCOP discrete cleanup — freeze floor-pinned components
         # after they have been stable for several accepted lambda updates.
-        if enable_multi_scop_discrete_cleanup:
+        if managed_cleanup_names:
+            managed_active_names = managed_cleanup_names - frozen_names
             stable_counts = _update_multi_scop_discrete_stability_counts(
                 lambdas_old=lambdas,
                 lambdas_new=lambdas_new,
-                active_names=active_names,
+                active_names=managed_active_names,
                 stable_counts=stable_counts,
             )
-            active_names, frozen_names = _freeze_multi_scop_discrete_lambdas(
-                active_names=active_names,
+            managed_active_names, frozen_names = _freeze_multi_scop_discrete_lambdas(
+                active_names=managed_active_names,
                 frozen_names=frozen_names,
                 lambdas_new=lambdas_new,
                 stable_counts=stable_counts,
             )
+            frozen_names &= managed_cleanup_names
+            active_names = set(estimated_names) - frozen_names
         else:
             active_names = set(estimated_names)
             frozen_names.clear()
