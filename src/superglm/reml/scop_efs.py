@@ -24,6 +24,9 @@ from superglm.reml.result import REMLResult
 from superglm.solvers.irls_direct import _safe_decompose_H, fit_irls_direct
 from superglm.types import GroupSlice, PenaltyComponent
 
+# These private thresholds intentionally mix units: absolute lambda scale for the
+# floor guard, log-lambda-step scale for stability/plateau checks, and relative
+# objective scale for outer-loop flatness checks.
 _MULTI_SCOP_DISCRETE_LAMBDA_FLOOR = 1.0e-4
 _MULTI_SCOP_DISCRETE_FLOOR_FACTOR = 1.05
 _MULTI_SCOP_DISCRETE_LOG_STEP_TOL = 1.0e-3
@@ -91,6 +94,13 @@ def _update_multi_scop_discrete_stability_counts(
     active_names: set[str],
     stable_counts: dict[str, int],
 ) -> dict[str, int]:
+    """Track generic per-name lambda stability across freeze and plateau signals.
+
+    A name is counted as stable when it is either near the absolute lambda floor
+    or moving by only a small log-step. The near-floor branch feeds floor-pinned
+    freezing immediately; the small-log-step branch is kept for the later
+    active-set plateau wiring in Task 3.
+    """
     updated = dict(stable_counts)
     for name in active_names:
         lam_old = max(lambdas_old[name], 1.0e-10)
@@ -113,6 +123,7 @@ def _freeze_multi_scop_discrete_lambdas(
     lambdas_new: dict[str, float],
     stable_counts: dict[str, int],
 ) -> tuple[set[str], set[str]]:
+    """Freeze only floor-pinned names once the generic stability counter matures."""
     active_out = set(active_names)
     frozen_out = set(frozen_names)
     for name in list(active_names):
@@ -134,8 +145,9 @@ def _multi_scop_discrete_plateau_converged(
     lambdas_new: dict[str, float],
     active_names: set[str],
 ) -> bool:
+    """Require objective flatness, then check active-set log-step stability."""
     if not active_names:
-        return True
+        return obj_rel_change < _MULTI_SCOP_DISCRETE_OBJ_REL_TOL
     active_changes = [
         abs(np.log(max(lambdas_new[name], 1.0e-10)) - np.log(max(lambdas_old[name], 1.0e-10)))
         for name in active_names
