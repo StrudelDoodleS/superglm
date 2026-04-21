@@ -308,6 +308,32 @@ def save_curve_plot(
     return output_path
 
 
+def save_curve_difference_plot(
+    scenario: SensitivityScenario,
+    feature_name: str,
+    reference: tuple[np.ndarray, np.ndarray],
+    comparisons: dict[str, tuple[np.ndarray, np.ndarray]],
+    output_path: Path,
+) -> Path:
+    x_ref, y_ref = reference
+    fig, ax = plt.subplots(figsize=(8.5, 5.0))
+    for label, (x_other, y_other) in comparisons.items():
+        if not np.allclose(x_ref, x_other):
+            raise ValueError(f"Curve grids do not match for feature {feature_name}")
+        ax.plot(x_ref, y_other - y_ref, label=label)
+    ax.axhline(0.0, color="black", linewidth=1)
+    ax.set_title(f"{scenario.name}: {feature_name} delta vs integrated")
+    ax.set_xlabel(feature_name)
+    ax.set_ylabel("delta log_relativity")
+    ax.grid(alpha=0.25)
+    ax.legend(frameon=False)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 def save_prediction_scatter(
     scenario: SensitivityScenario,
     label: str,
@@ -354,7 +380,7 @@ def run_scenario(
     grid_limit: int | None,
     sample_n: int,
     seed: int,
-) -> tuple[pd.DataFrame, list[Path]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[Path]]:
     print(
         f"running {scenario.name} "
         f"(mode={'discrete' if scenario.discrete else 'exact'}, n_constrained={scenario.n_constrained})"
@@ -395,30 +421,13 @@ def run_scenario(
         scenario, "passthrough", integrated, constrained_passthrough, X_eval=X_eval
     )
     artifacts: list[Path] = []
+    comparison_models: dict[str, SuperGLM] = {
+        "integrated": integrated,
+        "passthrough": constrained_passthrough,
+    }
 
     for i in range(scenario.n_constrained):
         name = _constrained_feature_name(i)
-        artifacts.append(
-            save_curve_plot(
-                scenario,
-                name,
-                {
-                    "integrated": extract_constrained_curve(integrated, name),
-                    "passthrough": extract_constrained_curve(constrained_passthrough, name),
-                },
-                RESULTS_DIR / f"{scenario.name}_{name}_passthrough_curve.png",
-            )
-        )
-
-    artifacts.append(
-        save_prediction_scatter(
-            scenario,
-            "integrated_vs_passthrough",
-            np.asarray(integrated.predict(X_eval), dtype=float),
-            np.asarray(constrained_passthrough.predict(X_eval), dtype=float),
-            RESULTS_DIR / f"{scenario.name}_passthrough_prediction.png",
-        )
-    )
 
     factors = _LAMBDA_GRID_FACTORS if grid_limit is None else _LAMBDA_GRID_FACTORS[:grid_limit]
     for factor in factors:
@@ -440,13 +449,57 @@ def run_scenario(
                 X_eval=X_eval,
             )
         )
+        comparison_models[f"fixed_x{factor:g}"] = compare
 
-    return summarize_result_rows(rows), artifacts
+    for i in range(scenario.n_constrained):
+        name = _constrained_feature_name(i)
+        curves = {
+            label: extract_constrained_curve(model, name)
+            for label, model in comparison_models.items()
+        }
+        artifacts.append(
+            save_curve_plot(
+                scenario,
+                name,
+                curves,
+                RESULTS_DIR / f"{scenario.name}_{name}_curve_overlay.png",
+            )
+        )
+        reference = curves["integrated"]
+        comparisons = {label: curve for label, curve in curves.items() if label != "integrated"}
+        artifacts.append(
+            save_curve_difference_plot(
+                scenario,
+                name,
+                reference,
+                comparisons,
+                RESULTS_DIR / f"{scenario.name}_{name}_curve_diff.png",
+            )
+        )
+
+    pred_ref = np.asarray(integrated.predict(X_eval), dtype=float)
+    for label, model in comparison_models.items():
+        if label == "integrated":
+            continue
+        artifacts.append(
+            save_prediction_scatter(
+                scenario,
+                f"integrated_vs_{label}",
+                pred_ref,
+                np.asarray(model.predict(X_eval), dtype=float),
+                RESULTS_DIR / f"{scenario.name}_{label}_prediction.png",
+            )
+        )
+
+    summary_rows = summarize_result_rows(rows)
+    curve_rows = summarize_result_rows([row for row in rows if row["target"] == "curve"])
+    prediction_rows = summarize_result_rows([row for row in rows if row["target"] == "prediction"])
+    return summary_rows, curve_rows, prediction_rows, artifacts
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", choices=sorted(SCENARIOS), required=True)
+    parser.add_argument("--scenario", choices=sorted(SCENARIOS), required=False)
     parser.add_argument("--grid-limit", type=int, default=None)
     parser.add_argument("--n", type=int, default=50_000)
     parser.add_argument("--seed", type=int, default=42)
@@ -455,20 +508,55 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    scenario = SCENARIOS[args.scenario]
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    summary, artifacts = run_scenario(
-        scenario,
-        grid_limit=args.grid_limit,
-        sample_n=args.n,
-        seed=args.seed,
+    scenarios = [SCENARIOS[args.scenario]] if args.scenario else list(SCENARIOS.values())
+
+    summary_frames = []
+    curve_frames = []
+    prediction_frames = []
+
+    for idx, scenario in enumerate(scenarios, start=1):
+        print(f"[{idx}/{len(scenarios)}] running {scenario.name}")
+        summary, curve_rows, prediction_rows, artifacts = run_scenario(
+            scenario,
+            grid_limit=args.grid_limit,
+            sample_n=args.n,
+            seed=args.seed + idx,
+        )
+        summary_path = RESULTS_DIR / f"{scenario.name}_summary.csv"
+        curve_path = RESULTS_DIR / f"{scenario.name}_curve_metrics.csv"
+        prediction_path = RESULTS_DIR / f"{scenario.name}_prediction_metrics.csv"
+        summary.to_csv(summary_path, index=False)
+        curve_rows.to_csv(curve_path, index=False)
+        prediction_rows.to_csv(prediction_path, index=False)
+        print(f"wrote {summary_path}")
+        print(f"wrote {curve_path}")
+        print(f"wrote {prediction_path}")
+        for path in artifacts:
+            print(f"wrote {path}")
+        summary_frames.append(summary)
+        curve_frames.append(curve_rows)
+        prediction_frames.append(prediction_rows)
+
+    combined_summary = (
+        pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
     )
-    output_csv = RESULTS_DIR / f"{scenario.name}_summary.csv"
-    summary.to_csv(output_csv, index=False)
-    print(f"wrote {output_csv}")
-    for path in artifacts:
-        print(f"wrote {path}")
-    print(summary.to_string(index=False))
+    combined_curve = pd.concat(curve_frames, ignore_index=True) if curve_frames else pd.DataFrame()
+    combined_prediction = (
+        pd.concat(prediction_frames, ignore_index=True) if prediction_frames else pd.DataFrame()
+    )
+
+    combined_summary_path = RESULTS_DIR / "all_scenarios_summary.csv"
+    combined_curve_path = RESULTS_DIR / "all_curve_metrics.csv"
+    combined_prediction_path = RESULTS_DIR / "all_prediction_metrics.csv"
+    combined_summary.to_csv(combined_summary_path, index=False)
+    combined_curve.to_csv(combined_curve_path, index=False)
+    combined_prediction.to_csv(combined_prediction_path, index=False)
+    print(f"wrote {combined_summary_path}")
+    print(f"wrote {combined_curve_path}")
+    print(f"wrote {combined_prediction_path}")
+    if not combined_summary.empty:
+        print(combined_summary.to_string(index=False))
 
 
 if __name__ == "__main__":
