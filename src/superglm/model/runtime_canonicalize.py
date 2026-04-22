@@ -24,13 +24,40 @@ class CanonicalizationDiagnostics:
     term_means_after: dict[str, float]
 
 
-def _is_spline_backed_spec(spec: Any) -> bool:
-    """Whether this feature exposes spline-style runtime evaluation hooks."""
+def _is_spline_backed_feature_spec(spec: Any) -> bool:
+    """Whether this main-effect spec exposes spline-style runtime hooks."""
     return hasattr(spec, "_basis_matrix")
 
 
+def _is_spline_backed_interaction(model, spec: Any) -> bool:
+    """Whether this interaction is backed by spline parent terms."""
+    parent_names = getattr(spec, "parent_names", None)
+    if parent_names is None:
+        return False
+    left, right = parent_names
+    return (
+        left in model._specs
+        and right in model._specs
+        and _is_spline_backed_feature_spec(model._specs[left])
+        and _is_spline_backed_feature_spec(model._specs[right])
+    )
+
+
+def _iter_spline_backed_terms(model):
+    """Yield spline-backed main effects and interactions."""
+    for feature_name in model._feature_order:
+        spec = model._specs[feature_name]
+        if _is_spline_backed_feature_spec(spec):
+            yield feature_name, spec, "feature"
+
+    for interaction_name in model._interaction_order:
+        spec = model._interaction_specs[interaction_name]
+        if _is_spline_backed_interaction(model, spec):
+            yield interaction_name, spec, "interaction"
+
+
 def _feature_group_indices(model, feature_name: str) -> tuple[int, ...]:
-    """Return all fitted group indices belonging to one feature."""
+    """Return all fitted group indices belonging to one term."""
     return tuple(i for i, group in enumerate(model._groups) if group.feature_name == feature_name)
 
 
@@ -41,7 +68,9 @@ def _group_column_means(group_matrix, n_rows: int) -> NDArray[np.float64]:
 
 
 def _term_contribution(
-    model, solver: PIRLSResult, group_indices: tuple[int, ...]
+    model,
+    solver: PIRLSResult,
+    group_indices: tuple[int, ...],
 ) -> NDArray[np.float64]:
     """Evaluate one fitted term on the training rows in solver space."""
     contribution = np.zeros(model._dm.n, dtype=np.float64)
@@ -54,99 +83,161 @@ def _term_contribution(
     return contribution
 
 
-def _regular_spline_transform(model, spec: Any, group_idx: int) -> dict[str, Any]:
-    """Center an SSP-style runtime block by rewriting its public transform."""
-    group = model._groups[group_idx]
-    group_matrix = model._dm.group_matrices[group_idx]
-    column_means = _group_column_means(group_matrix, model._dm.n)
+def _term_group_metadata(model, group_indices: tuple[int, ...]) -> list[dict[str, Any]]:
+    """Collect blockwise group metadata for one term."""
+    groups: list[dict[str, Any]] = []
+    for idx in group_indices:
+        group = model._groups[idx]
+        groups.append(
+            {
+                "group_index": idx,
+                "group_name": group.name,
+                "solver_slice": (group.start, group.end),
+                "column_means": _group_column_means(model._dm.group_matrices[idx], model._dm.n),
+            }
+        )
+    return groups
+
+
+def _term_shift_from_groups(
+    solver: PIRLSResult,
+    groups: list[dict[str, Any]],
+) -> float:
+    """Compute the scalar intercept shift implied by the blockwise means."""
+    shift = 0.0
+    for group_state in groups:
+        start, end = group_state["solver_slice"]
+        shift += float(np.dot(group_state["column_means"], solver.beta[start:end]))
+    return shift
+
+
+def _group_mode(model, group_indices: tuple[int, ...], spec: Any) -> str:
+    """Return the canonicalization mode for this term."""
+    groups = [model._groups[idx] for idx in group_indices]
+    if getattr(spec, "_scop_Sigma", None) is not None:
+        return "affine"
+    if any(group.monotone_engine == "qp" or group.constraints is not None for group in groups):
+        return "affine"
+    return "blockwise"
+
+
+def _apply_r_inv_centering(spec: Any, column_means: NDArray[np.float64]) -> None:
+    """Apply centering to an SSP-style runtime transform."""
     r_inv = np.asarray(spec._R_inv, dtype=np.float64)
-    centered = r_inv - np.ones((r_inv.shape[0], 1), dtype=np.float64) @ column_means[None, :]
-    spec._R_inv = centered
-    return {
-        "mode": "blockwise",
-        "group_indices": (group_idx,),
-        "solver_slice": (group.start, group.end),
-        "column_means": column_means,
-    }
+    spec._R_inv = r_inv - np.ones((r_inv.shape[0], 1), dtype=np.float64) @ column_means[None, :]
 
 
-def _constrained_spline_transform(model, spec: Any, group_idx: int) -> dict[str, Any]:
-    """Center a constrained runtime block by updating its affine offset."""
-    group = model._groups[group_idx]
-    group_matrix = model._dm.group_matrices[group_idx]
-    column_means = _group_column_means(group_matrix, model._dm.n)
+def _apply_scop_centering(spec: Any, column_means: NDArray[np.float64]) -> None:
+    """Apply centering to a SCOP runtime transform."""
     spec._scop_col_means = np.asarray(spec._scop_col_means, dtype=np.float64) + column_means
-    return {
-        "mode": "affine",
-        "group_indices": (group_idx,),
-        "solver_slice": (group.start, group.end),
-        "column_means": column_means,
-    }
+
+
+def _materialize_public_term(
+    term_kind: str,
+    spec: Any,
+    mode: str,
+    groups: list[dict[str, Any]],
+) -> bool:
+    """Apply canonicalization directly to the current public term when possible."""
+    if term_kind != "feature" or len(groups) != 1:
+        return False
+
+    column_means = groups[0]["column_means"]
+    if getattr(spec, "_scop_Sigma", None) is not None:
+        _apply_scop_centering(spec, column_means)
+        return True
+
+    if getattr(spec, "_R_inv", None) is not None and mode in {"blockwise", "affine"}:
+        _apply_r_inv_centering(spec, column_means)
+        return True
+
+    return False
+
+
+def _compute_public_parity_diagnostics(
+    model,
+    solver: PIRLSResult,
+    term_states: dict[str, dict[str, Any]],
+    intercept_shift: float,
+) -> CanonicalizationDiagnostics:
+    """Compute real before/after diagnostics from the applied public state."""
+    eta_before = model._dm.matvec(solver.beta) + float(solver.intercept)
+
+    applied_shift = float(
+        sum(
+            term_state["intercept_shift"]
+            for term_state in term_states.values()
+            if term_state["applied_to_public_model"]
+        )
+    )
+    eta_after = eta_before + intercept_shift - applied_shift
+
+    if model._fit_offset is not None:
+        eta_before = eta_before + model._fit_offset
+        eta_after = eta_after + model._fit_offset
+
+    eta_before = stabilize_eta(eta_before, model._link)
+    eta_after = stabilize_eta(eta_after, model._link)
+    mu_before = clip_mu(model._link.inverse(eta_before), model._distribution)
+    mu_after = clip_mu(model._link.inverse(eta_after), model._distribution)
+
+    return CanonicalizationDiagnostics(
+        max_abs_eta_delta=float(np.max(np.abs(eta_after - eta_before))) if eta_before.size else 0.0,
+        max_abs_mu_delta=float(np.max(np.abs(mu_after - mu_before))) if mu_before.size else 0.0,
+        intercept_shift=float(intercept_shift),
+        term_means_before={
+            term_name: float(term_state["term_mean_before"])
+            for term_name, term_state in term_states.items()
+        },
+        term_means_after={
+            term_name: float(term_state["term_mean_after"])
+            for term_name, term_state in term_states.items()
+        },
+    )
 
 
 def _compile_runtime_state(model, solver: PIRLSResult) -> dict[str, Any]:
     """Compile term-level canonicalization state and diagnostics."""
     term_states: dict[str, dict[str, Any]] = {}
-    term_means_before: dict[str, float] = {}
-    term_means_after: dict[str, float] = {}
-    total_shift = 0.0
+    public_intercept_shift = 0.0
 
-    for feature_name in model._feature_order:
-        spec = model._specs[feature_name]
-        if not _is_spline_backed_spec(spec):
-            continue
-
-        group_indices = _feature_group_indices(model, feature_name)
+    for term_name, spec, term_kind in _iter_spline_backed_terms(model):
+        group_indices = _feature_group_indices(model, term_name)
         if not group_indices:
             continue
 
+        groups = _term_group_metadata(model, group_indices)
         contribution_before = _term_contribution(model, solver, group_indices)
         mean_before = float(np.mean(contribution_before))
-        state: dict[str, Any] = {
-            "mode": "skipped",
+        shift = _term_shift_from_groups(solver, groups)
+        mode = _group_mode(model, group_indices, spec)
+        applied_to_public_model = _materialize_public_term(term_kind, spec, mode, groups)
+
+        if applied_to_public_model:
+            public_intercept_shift += shift
+
+        term_states[term_name] = {
+            "term_kind": term_kind,
+            "mode": mode,
+            "applied_to_public_model": applied_to_public_model,
             "group_indices": group_indices,
-            "solver_slice": None,
+            "groups": groups,
             "term_mean_before": mean_before,
-            "term_mean_after": mean_before,
-            "intercept_shift": 0.0,
+            "term_mean_after": 0.0,
+            "intercept_shift": float(shift),
         }
 
-        if len(group_indices) == 1 and getattr(spec, "_scop_Sigma", None) is not None:
-            state |= _constrained_spline_transform(model, spec, group_indices[0])
-            state["term_mean_after"] = 0.0
-            state["intercept_shift"] = mean_before
-            total_shift += mean_before
-        elif len(group_indices) == 1 and getattr(spec, "_R_inv", None) is not None:
-            state |= _regular_spline_transform(model, spec, group_indices[0])
-            state["term_mean_after"] = 0.0
-            state["intercept_shift"] = mean_before
-            total_shift += mean_before
-
-        term_states[feature_name] = state
-        term_means_before[feature_name] = mean_before
-        term_means_after[feature_name] = float(state["term_mean_after"])
-
-    eta_before = model._dm.matvec(solver.beta) + float(solver.intercept)
-    if model._fit_offset is not None:
-        eta_before = eta_before + model._fit_offset
-    eta_before = stabilize_eta(eta_before, model._link)
-    mu_before = clip_mu(model._link.inverse(eta_before), model._distribution)
-
-    eta_after = eta_before.copy()
-    mu_after = clip_mu(model._link.inverse(eta_after), model._distribution)
-
-    diagnostics = CanonicalizationDiagnostics(
-        max_abs_eta_delta=float(np.max(np.abs(eta_after - eta_before))) if eta_before.size else 0.0,
-        max_abs_mu_delta=float(np.max(np.abs(mu_after - mu_before))) if mu_before.size else 0.0,
-        intercept_shift=float(total_shift),
-        term_means_before=term_means_before,
-        term_means_after=term_means_after,
+    diagnostics = _compute_public_parity_diagnostics(
+        model,
+        solver,
+        term_states,
+        public_intercept_shift,
     )
 
     return {
         "terms": term_states,
         "diagnostics": asdict(diagnostics),
-        "intercept_shift": float(total_shift),
+        "intercept_shift": float(public_intercept_shift),
         "solver_to_public": np.eye(model._dm.p, dtype=np.float64),
     }
 
