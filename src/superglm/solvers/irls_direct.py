@@ -26,6 +26,7 @@ import scipy.linalg
 import scipy.linalg.lapack
 from numpy.typing import NDArray
 
+import superglm.solvers.scop_exact_support as scop_exact_support
 from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initial_mean
 from superglm.group_matrix import (
     DesignMatrix,
@@ -313,6 +314,8 @@ def fit_irls_direct(
     return_scop_state: bool = False,
     _scop_joint: bool = True,
     scop_state_init: dict[int, dict] | None = None,
+    debug_recorder=None,
+    debug_context: dict[str, object] | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -402,6 +405,8 @@ def fit_irls_direct(
 
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
+    _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
+    _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
     _scop_state: dict[int, dict] = {}
     if _has_scop:
@@ -440,14 +445,29 @@ def fit_irls_direct(
                     }
                 else:
                     B_scop = _gm.toarray()
-                    state = {
-                        "reparam": reparam,
-                        "B_scop": B_scop,
-                        "S_scop": S_scop,
-                        "bin_idx": None,
-                        "beta_scop": warm_beta_scop,
-                        "beta_scop_prev": None,
-                    }
+                    support = None
+                    if _n_scop_groups == 1:
+                        support = scop_exact_support.build_exact_scop_support(B_scop)
+
+                    if support is not None:
+                        _expose_exact_support_state = True
+                        state = {
+                            "reparam": reparam,
+                            "B_scop": support.B_unique,
+                            "S_scop": S_scop,
+                            "bin_idx": support.row_to_support,
+                            "beta_scop": warm_beta_scop,
+                            "beta_scop_prev": None,
+                        }
+                    else:
+                        state = {
+                            "reparam": reparam,
+                            "B_scop": B_scop,
+                            "S_scop": S_scop,
+                            "bin_idx": None,
+                            "beta_scop": warm_beta_scop,
+                            "beta_scop_prev": None,
+                        }
                 if cached_scop_state is not None:
                     for key in (
                         "penalty_rank",
@@ -530,6 +550,7 @@ def fit_irls_direct(
     eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
     mu = clip_mu(link.inverse(eta), family)
     iteration_log: list[IterationDiagnostics] = [] if record_diagnostics else []
+    base_debug_context = dict(debug_context or {})
 
     max_halving = 5  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
@@ -674,6 +695,11 @@ def fit_irls_direct(
                         lambda2,
                         groups,
                         max_halving=10,
+                        debug_recorder=debug_recorder,
+                        debug_context={
+                            **base_debug_context,
+                            "pirls_iteration": it + 1,
+                        },
                     )
                     for gi, jresult in joint_results.items():
                         _scop_state[gi]["beta_scop"] = jresult.beta_new
@@ -707,6 +733,12 @@ def fit_irls_direct(
                             S_scop=st["S_scop"],
                             lambda2=_lam_scop,
                             bin_idx=st["bin_idx"],
+                            debug_recorder=debug_recorder,
+                            debug_context={
+                                **base_debug_context,
+                                "pirls_iteration": it + 1,
+                                "group_name": g_i.name,
+                            },
                         )
                         st["beta_scop"] = result.beta_new
                         st["H_scop_penalized"] = result.H_penalized
@@ -866,19 +898,49 @@ def fit_irls_direct(
             logger.warning(f"IRLS direct non-finite deviance at iter={it + 1}: dev={dev:.2e}")
             break
 
+        dev_rel_change = None
+        coef_change = None
         if convergence == "coefficients":
             coef_change = float(np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta))))
             coef_change = max(
                 coef_change,
                 abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
             )
-            if coef_change < tol:
-                converged = True
-                break
+            converged_this_iter = coef_change < tol
         else:
-            if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
-                converged = True
-                break
+            if np.isfinite(dev_prev):
+                dev_rel_change = abs(dev - dev_prev) / (abs(dev_prev) + 1.0)
+            converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
+
+        if debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2:
+            debug_recorder.append_jsonl(
+                "pirls",
+                {
+                    **base_debug_context,
+                    "iteration": it + 1,
+                    "deviance": float(dev),
+                    "deviance_relative_change": (
+                        float(dev_rel_change) if dev_rel_change is not None else None
+                    ),
+                    "coefficient_change": float(coef_change) if coef_change is not None else None,
+                    "convergence": convergence,
+                    "converged": bool(converged_this_iter),
+                    "w_min": float(W.min()),
+                    "w_max": float(W.max()),
+                    "mu_min": float(mu.min()),
+                    "mu_max": float(mu.max()),
+                    "eta_min": float(eta.min()),
+                    "eta_max": float(eta.max()),
+                    "step_halvings": int(n_halvings),
+                    "cond_estimate": float(_cond_est),
+                    "used_svd_fallback": bool(_used_svd),
+                    "has_scop": bool(_has_scop),
+                },
+            )
+
+        if converged_this_iter:
+            converged = True
+            break
         dev_prev = dev
 
     t_elapsed = time.perf_counter() - t_start
@@ -949,8 +1011,8 @@ def fit_irls_direct(
         log_det_H=log_det_H,
     )
 
-    # Collect converged SCOP state for EFS outer loop
-    if return_scop_state and _has_scop:
+    # Collect converged SCOP state for EFS outer loop and fit results.
+    if _has_scop:
         scop_converged = {}
         for gi, st in _scop_state.items():
             scop_converged[gi] = {
@@ -971,12 +1033,14 @@ def fit_irls_direct(
             }
     else:
         scop_converged = None
+    if _expose_exact_support_state:
+        result.scop_states = scop_converged
 
     if return_xtwx:
-        if scop_converged is not None:
+        if return_scop_state and scop_converged is not None:
             return result, XtWX_S_inv_beta, XtWX_beta, scop_converged
         return result, XtWX_S_inv_beta, XtWX_beta
 
-    if scop_converged is not None:
+    if return_scop_state and scop_converged is not None:
         return result, XtWX_S_inv_beta, scop_converged
     return result, XtWX_S_inv_beta

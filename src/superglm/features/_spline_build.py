@@ -10,6 +10,47 @@ from numpy.typing import NDArray
 from superglm.types import GroupInfo, TensorMarginalInfo
 
 
+def _constraint_kind(spec: Any) -> str | None:
+    """Return the canonical shape token, falling back to legacy fields if needed."""
+    return getattr(spec, "constraint_kind", getattr(spec, "monotone", None))
+
+
+def _constraint_mode(spec: Any) -> str:
+    """Return the canonical shape mode, falling back to legacy fields if needed."""
+    return getattr(spec, "constraint_mode", getattr(spec, "monotone_mode", "postfit"))
+
+
+def _uses_fit_time_shape_constraints(spec: Any) -> bool:
+    """Whether the spec requests any fit-time shape-constrained build path."""
+    return _constraint_kind(spec) is not None and _constraint_mode(spec) == "fit"
+
+
+def _uses_fit_time_scop_constraints(spec: Any) -> bool:
+    """Whether the spec should enter the SCOP fit-time shape path."""
+    return _uses_fit_time_shape_constraints(spec) and hasattr(
+        spec, "_build_scop_reparameterization"
+    )
+
+
+def _uses_fit_time_qp_constraints(spec: Any) -> bool:
+    """Whether the spec should enter the raw-linear-constraint QP path."""
+    return _uses_fit_time_shape_constraints(spec) and hasattr(
+        spec, "_build_monotone_constraints_raw"
+    )
+
+
+def _raise_if_unsupported_fit_shape_constraint(spec: Any) -> None:
+    """Reject fit-time shape constraints that no current engine can build."""
+    kind = _constraint_kind(spec)
+    if _uses_fit_time_shape_constraints(spec) and not (
+        _uses_fit_time_qp_constraints(spec) or _uses_fit_time_scop_constraints(spec)
+    ):
+        raise NotImplementedError(
+            f"Fit-time {kind} constraints are not implemented yet. "
+            f"Use Constraint.postfit.{kind} instead."
+        )
+
+
 def build_group_info(
     spec: Any,
     x: NDArray,
@@ -17,18 +58,13 @@ def build_group_info(
 ) -> GroupInfo | list[GroupInfo]:
     """Build the main GroupInfo payload for a spline spec."""
     del sample_weight
-    if spec.monotone is not None and spec.monotone_mode == "fit":
-        if not hasattr(spec, "_build_monotone_constraints_raw") and not hasattr(
-            spec, "_build_scop_reparameterization"
-        ):
-            raise NotImplementedError(
-                f"{type(spec).__name__} does not support "
-                f"monotone_mode='fit'. Use monotone_mode='postfit'."
-            )
+    _raise_if_unsupported_fit_shape_constraint(spec)
+
+    if _uses_fit_time_shape_constraints(spec):
         if spec.select:
             raise NotImplementedError(
-                "Monotone fit-time constraints are not supported with "
-                "select=True. Use select=False or monotone_mode='postfit'."
+                "Fit-time shape constraints are not supported with "
+                "select=True. Use select=False or Constraint.postfit.*."
             )
 
     x = np.asarray(x, dtype=np.float64).ravel()
@@ -40,11 +76,7 @@ def build_group_info(
         return spec._build_select(x, basis)
 
     omega = spec._build_penalty()
-    if (
-        spec.monotone is not None
-        and spec.monotone_mode == "fit"
-        and hasattr(spec, "_build_scop_reparameterization")
-    ):
+    if _uses_fit_time_scop_constraints(spec):
         basis_dense = basis.toarray() if hasattr(basis, "toarray") else basis
         centered_basis, scop_penalty, scop_reparam = spec._build_scop_reparameterization(
             basis_dense, omega
@@ -72,7 +104,7 @@ def build_group_info(
     constraints = None
     monotone_engine = None
     raw_to_solver_map = None
-    if spec.monotone is not None and spec.monotone_mode == "fit":
+    if _uses_fit_time_qp_constraints(spec):
         constraints = spec._build_monotone_constraints_raw()
         if projection is not None:
             constraints = constraints.compose(projection)
@@ -104,6 +136,8 @@ def build_knots_and_penalty(
 ) -> tuple[NDArray, int, NDArray | None]:
     """Place knots and return projected penalty info without building the full basis."""
     del sample_weight
+    _raise_if_unsupported_fit_shape_constraint(spec)
+
     x = np.asarray(x, dtype=np.float64).ravel()
     spec._place_knots(x)
     spec._validate_m_orders_build()

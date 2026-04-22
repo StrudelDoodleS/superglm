@@ -137,8 +137,9 @@ def transform(spec: Any, x: NDArray) -> NDArray:
     basis = spec._basis_matrix(x).toarray()
     scop_sigma = getattr(spec, "_scop_Sigma", None)
     if scop_sigma is not None:
+        null_dim = getattr(spec, "_scop_null_dim", 1)
         x_sigma = basis @ scop_sigma
-        return x_sigma[:, 1:] - getattr(spec, "_scop_col_means")
+        return x_sigma[:, null_dim:] - getattr(spec, "_scop_col_means")
     if spec._R_inv is not None:
         basis = basis @ spec._R_inv
     return basis
@@ -149,7 +150,8 @@ def score(spec: Any, x: NDArray, beta: NDArray) -> NDArray:
     basis = spec._basis_matrix(x)
     scop_sigma = getattr(spec, "_scop_Sigma", None)
     if scop_sigma is not None:
-        sigma_no_intercept = scop_sigma[:, 1:]
+        null_dim = getattr(spec, "_scop_null_dim", 1)
+        sigma_no_intercept = scop_sigma[:, null_dim:]
         centered_shift = float(np.dot(getattr(spec, "_scop_col_means"), beta))
         return cast(
             NDArray,

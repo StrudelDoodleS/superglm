@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
@@ -13,7 +17,7 @@ from superglm.links import Link, stabilize_eta
 from superglm.model import path_ops
 from superglm.model.reml_execute import (
     optimize_reml_best,
-    run_fixed_monotone_reml,
+    run_fixed_constraint_reml,
     run_scop_efs_reml,
 )
 from superglm.model.reml_finalize import finalize_reml_fit
@@ -30,9 +34,9 @@ from superglm.model.reml_ops import (
 )
 from superglm.model.reml_setup import (
     collect_reml_groups,
+    constraint_engine_flags,
     initialize_component_lambdas,
     inject_fixed_scop_lambdas,
-    monotone_flags,
     restore_qp_constraints,
     strip_qp_constraints,
 )
@@ -191,6 +195,54 @@ def _store_fit_arrays(model, sample_weight, offset):
     return model._fit_weights, model._fit_offset
 
 
+def _make_reml_debug_recorder(
+    model,
+    *,
+    y: NDArray,
+    reml_groups,
+    has_constraints: bool,
+    has_qp_constraints: bool,
+    has_scop_constraints: bool,
+    max_reml_iter: int,
+    reml_tol: float,
+    pirls_tol: float,
+    max_pirls_iter: int,
+):
+    """Create the private REML debug recorder when tracing is enabled."""
+    from superglm._debug import get_debug_level
+    from superglm.model.reml_debug import REMLDebugRecorder
+
+    debug_level = get_debug_level()
+    if debug_level <= 0:
+        return None
+
+    base_dir = Path(os.environ.get("SUPERGLM_DEBUG_DIR", ".superglm-debug"))
+    run_id = f"fit_reml_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    recorder = REMLDebugRecorder(debug_level, base_dir, run_id)
+    recorder.write_run_metadata(
+        {
+            "run_id": run_id,
+            "debug_level": debug_level,
+            "method": "fit_reml",
+            "family": type(model._distribution).__name__,
+            "link": type(model._link).__name__,
+            "discrete": bool(model._discrete),
+            "n_obs": int(len(y)),
+            "n_columns": int(model._dm.p),
+            "n_groups": int(len(model._groups)),
+            "reml_group_names": [group.name for _, group in reml_groups],
+            "has_constraints": bool(has_constraints),
+            "has_qp_constraints": bool(has_qp_constraints),
+            "has_scop_constraints": bool(has_scop_constraints),
+            "max_reml_iter": int(max_reml_iter),
+            "reml_tol": float(reml_tol),
+            "pirls_tol": float(pirls_tol),
+            "max_pirls_iter": int(max_pirls_iter),
+        }
+    )
+    return recorder
+
+
 def _prime_fit_caches(
     model,
     *,
@@ -296,35 +348,33 @@ def fit(
     # Invalidate cached properties from previous fit
     _clear_fit_inference_caches(model)
 
-    # Monotone fit-time constraints are incompatible with selection_penalty (lambda1).
-    # The constrained QP solver path ignores lambda1 — reject explicitly.
+    _has_constraints, _has_qp_constraints, _has_scop_constraints = constraint_engine_flags(
+        model._groups
+    )
+
+    # Fit-time constraints are incompatible with selection_penalty (lambda1).
+    # The constrained solver paths ignore lambda1 — reject explicitly.
     if (
-        any(g.monotone_engine is not None for g in model._groups)
+        _has_constraints
         and model.penalty.lambda1 is not None
         and model.penalty.lambda1 > 0
         and has_lambda1_targets
     ):
         raise NotImplementedError(
-            "Monotone fit-time constraints are not supported with selection_penalty > 0. "
-            "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
+            "Fit-time constraints are not supported with selection_penalty > 0. "
+            "Set selection_penalty=0 or remove the fit-time constraint."
         )
 
-    # Guard: SCOP + QP monotone engines cannot coexist in the same model.
-    _monotone_engines = {g.monotone_engine for g in model._groups if g.monotone_engine is not None}
-    if len(_monotone_engines) > 1:
-        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
+    if _has_qp_constraints and _has_scop_constraints:
+        raise NotImplementedError(
+            "SCOP + QP fit-time constrained terms in the same model are not supported."
+        )
 
     # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed),
-    # or when any group has monotone constraints (constrained QP / SCOP Newton).
-    _has_constraints = any(g.constraints is not None for g in model._groups)
-    _has_scop = any(g.monotone_engine == "scop" for g in model._groups)
-    if (
-        _has_constraints
-        or _has_scop
-        or (
-            model.penalty.lambda1 is not None
-            and (model.penalty.lambda1 == 0 or not has_lambda1_targets)
-        )
+    # or when any group uses a fit-time constrained engine (QP / SCOP Newton).
+    if _has_constraints or (
+        model.penalty.lambda1 is not None
+        and (model.penalty.lambda1 == 0 or not has_lambda1_targets)
     ):
         model._result, _ = fit_irls_direct(
             X=model._dm,
@@ -552,9 +602,23 @@ def fit_reml(
         )
 
     reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)
-    _has_monotone, _has_qp_monotone, _has_scop_monotone = monotone_flags(model._groups)
+    _has_constraints, _has_qp_constraints, _has_scop_constraints = constraint_engine_flags(
+        model._groups
+    )
+    debug_recorder = _make_reml_debug_recorder(
+        model,
+        y=y,
+        reml_groups=reml_groups,
+        has_constraints=_has_constraints,
+        has_qp_constraints=_has_qp_constraints,
+        has_scop_constraints=_has_scop_constraints,
+        max_reml_iter=max_reml_iter,
+        reml_tol=reml_tol,
+        pirls_tol=pirls_tol,
+        max_pirls_iter=max_pirls_iter,
+    )
 
-    if not reml_groups and not _has_monotone:
+    if not reml_groups and not _has_constraints:
         logger.warning("fit_reml: no REML-eligible groups found, falling back to fit()")
         model._result = fit_pirls(
             X=model._dm,
@@ -611,11 +675,11 @@ def fit_reml(
     lambdas, estimated_names = initialize_component_lambdas(reml_penalties, lam_init)
     _any_unfixed_scop = inject_fixed_scop_lambdas(model._groups, model._specs, lambdas)
 
-    # QP monotone with auto lambda → two-stage passthrough heuristic:
+    # QP-constrained groups with auto lambda use a two-stage passthrough heuristic:
     # Stage 1: run unconstrained REML (temporarily strip QP constraints)
     # Stage 2: constrained refit at estimated lambdas
     # This is a heuristic, not exact joint REML for constrained terms.
-    _qp_passthrough = _has_qp_monotone and bool(estimated_names)
+    _qp_passthrough = _has_qp_constraints and bool(estimated_names)
 
     # Stage 1 setup: temporarily disable QP constraints so REML runs fully
     # unconstrained. Save the original state to restore for stage 2.
@@ -624,7 +688,9 @@ def fit_reml(
     if _qp_passthrough:
         _qp_saved_state = strip_qp_constraints(model._groups)
         _qp_stripped = True
-        _has_monotone, _has_qp_monotone, _has_scop_monotone = monotone_flags(model._groups)
+        _has_constraints, _has_qp_constraints, _has_scop_constraints = constraint_engine_flags(
+            model._groups
+        )
 
     try:
         # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
@@ -632,8 +698,8 @@ def fit_reml(
         lam1 = model.penalty.lambda1
         use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
 
-        if _has_monotone and not _any_unfixed_scop and not estimated_names:
-            run_fixed_monotone_reml(
+        if _has_constraints and not _any_unfixed_scop and not estimated_names:
+            run_fixed_constraint_reml(
                 model,
                 y=y,
                 sample_weight=sample_weight,
@@ -643,6 +709,7 @@ def fit_reml(
                 lambdas=lambdas,
                 reml_penalties=reml_penalties,
                 compute_fit_stats=_compute_fit_stats,
+                debug_recorder=debug_recorder,
             )
             _prime_fit_caches(
                 model,
@@ -652,10 +719,10 @@ def fit_reml(
                 offset_ref=offset_ref,
                 y_arr=y,
             )
-            logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
+            logger.info(f"fit_reml (constrained, fixed lambdas): lambdas={lambdas}")
             return model
 
-        if _any_unfixed_scop or (_has_scop_monotone and estimated_names):
+        if _any_unfixed_scop or (_has_scop_constraints and estimated_names):
             best = run_scop_efs_reml(
                 model,
                 y=y,
@@ -674,6 +741,7 @@ def fit_reml(
                 profile=_profile,
                 total_start=_t_total_start,
                 compute_fit_stats=_compute_fit_stats,
+                debug_recorder=debug_recorder,
             )
             _prime_fit_caches(
                 model,
@@ -710,6 +778,7 @@ def fit_reml(
             max_pirls_iter=max_pirls_iter,
             model_optimize_direct_reml=model_optimize_direct_reml,
             model_optimize_efs_reml=model_optimize_efs_reml,
+            debug_recorder=debug_recorder,
         )
         lambdas, n_reml_iter, converged = finalize_reml_fit(
             model,

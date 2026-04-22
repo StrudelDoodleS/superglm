@@ -1,8 +1,38 @@
 """Tests for SCOP reparameterization: beta -> beta_tilde -> gamma chain."""
 
+from types import SimpleNamespace
+
 import numpy as np
 
+from superglm.features._spline_subclass_ops import build_scop_reparameterization
 from superglm.solvers.scop import build_scop_reparam
+
+
+def test_scop_convex_forward_produces_nonnegative_second_differences():
+    beta = np.array([0.2, -0.1, -1.0, -0.8, -0.6, -0.4])
+    reparam = build_scop_reparam(q=6, kind="convex")
+    gamma = reparam.forward(beta)
+    assert np.all(np.diff(gamma, n=2) >= -1e-10)
+
+
+def test_scop_concave_forward_produces_nonpositive_second_differences():
+    beta = np.array([0.2, -0.1, -1.0, -0.8, -0.6, -0.4])
+    reparam = build_scop_reparam(q=6, kind="concave")
+    gamma = reparam.forward(beta)
+    assert np.all(np.diff(gamma, n=2) <= 1e-10)
+
+
+def test_scop_helper_drops_full_curvature_null_space():
+    spec = SimpleNamespace(_n_basis=6, constraint_kind="convex", monotone=None)
+    basis = np.eye(6)
+    omega = np.eye(6)
+
+    x_centered, scop_penalty, solver_reparam = build_scop_reparameterization(spec, basis, omega)
+
+    assert x_centered.shape == (6, 4)
+    assert spec._scop_col_means.shape == (4,)
+    assert scop_penalty.shape == (4, 4)
+    assert solver_reparam.q == 4
 
 
 class TestSCOPForwardMap:

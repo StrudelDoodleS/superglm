@@ -59,9 +59,7 @@ def _normalize_constraint(constraint: ConstraintSpec | None) -> tuple[str | None
         raise TypeError(
             "constraint must be None or a Constraint token such as Constraint.fit.increasing"
         )
-    if constraint.kind in {"convex", "concave"}:
-        raise NotImplementedError(f"{constraint.kind} constraints are not implemented yet.")
-    if constraint.kind not in ("increasing", "decreasing"):
+    if constraint.kind not in ("increasing", "decreasing", "convex", "concave"):
         raise ValueError(f"Unsupported constraint kind: {constraint.kind!r}")
     if constraint.mode not in ("fit", "postfit"):
         raise ValueError(f"Unsupported constraint mode: {constraint.mode!r}")
@@ -87,10 +85,14 @@ def initialize_spec(
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None,
 ) -> None:
     """Initialize a spline spec's public config and mutable build-time state."""
-    monotone, monotone_mode = _normalize_constraint(constraint)
+    constraint_kind, constraint_mode = _normalize_constraint(constraint)
 
-    spec.monotone = monotone
-    spec.monotone_mode = monotone_mode
+    spec.constraint_kind = constraint_kind
+    spec.constraint_mode = constraint_mode
+
+    # Keep existing internals working while the build path is generalized.
+    spec.monotone = constraint_kind
+    spec.monotone_mode = constraint_mode
     spec.select = select
 
     spec._m_orders = (m,) if isinstance(m, int) else tuple(m)
