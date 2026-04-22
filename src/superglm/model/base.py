@@ -197,10 +197,12 @@ def init_model(
     model._distribution: Distribution | None = None
     model._link: Link | None = None
     model._result: PIRLSResult | None = None
+    model._solver_result: PIRLSResult | None = None
     model._dm: DesignMatrix | None = None
     model._fit_weights: NDArray | None = None
     model._fit_offset: NDArray | None = None
     model._fit_stats: FitStats | None = None
+    model._runtime_canonical_state: dict[str, Any] | None = None
     model._nb_profile_result = None
     model._tweedie_profile_result = None
     model._last_fit_meta: dict[str, Any] | None = None

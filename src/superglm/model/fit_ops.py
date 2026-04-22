@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 
 from superglm.distributions import Distribution, NegativeBinomial, clip_mu
 from superglm.links import Link, stabilize_eta
-from superglm.model import path_ops
+from superglm.model import path_ops, runtime_canonicalize
 from superglm.model.reml_execute import (
     optimize_reml_best,
     run_fixed_monotone_reml,
@@ -164,6 +164,8 @@ def _clear_fit_inference_caches(model) -> None:
     model.__dict__.pop("_fit_active_info", None)
     model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
+    model._solver_result = None
+    model._runtime_canonical_state = None
     model._prediction_plan = None
     model._fit_mu = None
     model._fit_null_mu = None
@@ -201,7 +203,10 @@ def _prime_fit_caches(
     y_arr: NDArray,
 ) -> None:
     """Store fit-data caches for summary/metrics fast paths."""
-    eta = model._dm.matvec(model.result.beta) + model.result.intercept
+    fit_space_result = (
+        model._solver_pirls_result() if model._solver_result is not None else model.result
+    )
+    eta = model._dm.matvec(fit_space_result.beta) + fit_space_result.intercept
     if model._fit_offset is not None:
         eta = eta + model._fit_offset
     eta = stabilize_eta(eta, model._link)
@@ -371,6 +376,7 @@ def fit(
             phi=1.0,
             effective_df=model._result.effective_df,
             iteration_log=model._result.iteration_log,
+            log_det_H=model._result.log_det_H,
         )
 
     eta = model._dm.matvec(model._result.beta) + model._result.intercept
@@ -390,6 +396,8 @@ def fit(
         model._result.phi,
         null_mu=null_mu,
     )
+    model._solver_result = model._result
+    runtime_canonicalize.canonicalize_fitted_model(model)
     _prime_fit_caches(
         model,
         X_ref=X_ref,
@@ -472,6 +480,8 @@ def fit_path(
         result.phi,
         null_mu=null_mu,
     )
+    model._solver_result = result
+    runtime_canonicalize.canonicalize_fitted_model(model)
     _prime_fit_caches(
         model,
         X_ref=X_ref,
@@ -586,6 +596,8 @@ def fit_reml(
             model._result.phi,
             null_mu=null_mu,
         )
+        model._solver_result = model._result
+        runtime_canonicalize.canonicalize_fitted_model(model)
         _prime_fit_caches(
             model,
             X_ref=X_ref,
