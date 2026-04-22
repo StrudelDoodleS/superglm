@@ -7,6 +7,7 @@ from typing import Any
 
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
+from superglm.model import runtime_canonicalize
 from superglm.model.reml_setup import promote_estimated_scop_lambdas
 from superglm.solvers.irls_direct import fit_irls_direct
 
@@ -52,6 +53,8 @@ def run_fixed_monotone_reml(
     model._fit_stats = compute_fit_stats(
         y, mu, sample_weight, offset, model._distribution, model._link, result.phi
     )
+    model._solver_result = result
+    runtime_canonicalize.canonicalize_fitted_model(model)
     model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
 
 
@@ -125,6 +128,8 @@ def run_scop_efs_reml(
         model._link,
         best.pirls_result.phi,
     )
+    model._solver_result = best.pirls_result
+    runtime_canonicalize.canonicalize_fitted_model(model)
     model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
 
     profile["total_s"] = time.perf_counter() - total_start

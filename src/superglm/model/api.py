@@ -410,13 +410,19 @@ class SuperGLM:
 
     @property
     def result(self) -> PIRLSResult:
-        """The fitted PIRLS result (coefficients, deviance, convergence info).
+        """The fitted public PIRLS result (canonical coefficients and fit stats).
 
         Raises ``RuntimeError`` if the model has not been fitted.
         """
         if self._result is None:
             raise RuntimeError("Not fitted")
         return self._result
+
+    def _solver_pirls_result(self) -> PIRLSResult:
+        """Return the private solver-space PIRLS result for internal helpers."""
+        if self._solver_result is None:
+            raise RuntimeError("Not fitted")
+        return self._solver_result
 
     @cached_property
     def _coef_covariance(self):
