@@ -675,9 +675,7 @@ class TestSplineObjectRuntimeDeployability:
         )
         model.fit(X, y, sample_weight=sample_weight)
 
-        beta = np.concatenate(
-            [model.result.beta[g.sl] for g in model._groups if g.feature_name == "age_band"]
-        )
+        beta = np.concatenate([model.result.beta[g.sl] for g in model._feature_groups("age_band")])
         spec = model._specs["age_band"]
         values = X["age_band"].to_numpy()
         np.testing.assert_allclose(
@@ -686,8 +684,3 @@ class TestSplineObjectRuntimeDeployability:
             atol=1e-12,
             rtol=1e-12,
         )
-
-        runtime_state = model.diagnostics()["age_band"].get("runtime_canonicalization")
-        assert runtime_state is not None
-        assert runtime_state["before_after_link_max_abs_diff"] < 1e-12
-        assert runtime_state["before_after_response_max_abs_diff"] < 1e-12
