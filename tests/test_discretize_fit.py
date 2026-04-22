@@ -620,6 +620,38 @@ class TestDiscretePredictParity:
         assert np.max(np.abs(eta_exact - eta_fast)) < 3e-2
         assert np.max(np.abs(mu_exact - mu_fast)) < 3e-2
 
+    def test_fast_discrete_tensor_predict_matches_exact_on_shifted_holdout(
+        self, tensor_interaction_data
+    ):
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins={"age": 64, "bm": 48},
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit_reml(X, y, max_reml_iter=6)
+
+        holdout = pd.DataFrame(
+            {
+                "age": np.linspace(20.0, 78.0, 1200),
+                "bm": np.linspace(17.0, 43.0, 1200)[::-1],
+            }
+        )
+
+        eta_exact = model._predict_eta_exact(holdout)
+        eta_fast = model._predict_eta_fast_discrete(holdout)
+        mu_exact = model._predict_exact(holdout)
+        mu_fast = model._predict_fast_discrete(holdout)
+
+        assert np.max(np.abs(eta_exact - eta_fast)) < 3e-2
+        assert np.max(np.abs(mu_exact - mu_fast)) < 2e-2
+
 
 class TestDiscretizedTensorInteraction:
     def test_tensor_interaction_predictions_close_to_exact(self, tensor_interaction_data):
