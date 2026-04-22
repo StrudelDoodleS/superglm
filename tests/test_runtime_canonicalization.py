@@ -181,6 +181,24 @@ class TestRuntimeCanonicalization:
             X["x"].to_numpy(dtype=np.float64),
         )
 
+    def test_discrete_standalone_spline_fast_predict_respects_public_runtime_state(self):
+        X, y, sample_weight = _make_monotone_poisson_data(seed=0)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x": Spline(n_knots=10, penalty="ssp")},
+        )
+        model.fit_reml(X, y, sample_weight=sample_weight, max_reml_iter=6)
+
+        eta_exact = model._predict_eta_exact(X)
+        eta_fast = model._predict_eta_fast_discrete(X)
+        mu_exact = model.predict(X)
+        mu_fast = model._predict_fast_discrete(X)
+
+        assert np.max(np.abs(eta_exact - eta_fast)) < 3e-3
+        assert np.max(np.abs(mu_exact - mu_fast)) < 3e-3
+
     def test_qp_monotone_fit_spline_uses_affine_runtime_state(self):
         X, y, sample_weight = _make_monotone_poisson_data(seed=2)
         model = SuperGLM(

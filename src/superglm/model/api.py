@@ -938,6 +938,22 @@ class SuperGLM:
 
     # ── Prediction ────────────────────────────────────────────────
 
+    def _predict_eta_exact(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+        """Private exact canonical predictor on the link scale."""
+        return base.predict_eta_exact(self, X, offset)
+
+    def _predict_eta_fast_discrete(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+        """Private fast discrete predictor on the link scale."""
+        return base.predict_eta_fast_discrete(self, X, offset)
+
+    def _predict_exact(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+        """Private exact canonical predictor on the response scale."""
+        return base.predict_exact(self, X, offset)
+
+    def _predict_fast_discrete(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+        """Private fast discrete predictor on the response scale."""
+        return base.predict_fast_discrete(self, X, offset)
+
     def predict(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
         """Predict the response mean for new data.
 
@@ -954,7 +970,7 @@ class SuperGLM:
         NDArray
             Predicted mean on the response scale (inverse-link of eta).
         """
-        return base.predict(self, X, offset)
+        return self._predict_exact(X, offset)
 
     # ── Monotone repair ─────────────────────────────────────────
 
