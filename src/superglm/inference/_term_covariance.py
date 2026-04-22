@@ -54,6 +54,23 @@ def compute_coef_covariance(
     return cov_features, active_groups
 
 
+def _active_subgroup_columns(
+    feature_name: str,
+    feature_groups: list[GroupSlice],
+    active_subs: list[GroupSlice],
+) -> NDArray:
+    return np.concatenate(
+        [
+            np.arange(group.start, group.end) - feature_groups[0].start
+            for group in feature_groups
+            if any(
+                active_group.feature_name == feature_name and active_group.name == group.name
+                for active_group in active_subs
+            )
+        ]
+    )
+
+
 def feature_se_from_cov(
     name: str,
     Cov_active: NDArray,
@@ -77,15 +94,15 @@ def feature_se_from_cov(
 
     if isinstance(spec, OrderedCategorical):
         if spec.basis == "spline":
-            level_values = np.array([spec._level_to_value[lev] for lev in spec._ordered_levels])
             return _spline_se(
-                spec._spline,
+                spec,
                 name,
                 beta,
                 feature_groups,
                 active_groups,
                 Cov_active,
-                x_eval=level_values,
+                x_eval=np.array(spec._ordered_levels, dtype=object),
+                reference_x=np.array([spec._base_level], dtype=object),
             )
         beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
         if np.linalg.norm(beta_combined) < 1e-12:
@@ -134,7 +151,7 @@ def feature_se_from_cov(
             feature_groups,
             active_groups,
             Cov_active,
-            n_points,
+            n_points=n_points,
         )
 
     if isinstance(spec, Polynomial):
@@ -194,16 +211,8 @@ def simultaneous_bands(
     Cov_g = Cov_active[np.ix_(indices, indices)]
 
     x_grid = np.linspace(spec._lo, spec._hi, n_points)
-    B_grid = spec._raw_basis_matrix(x_grid)
-    M = B_grid @ spec._R_inv if spec._R_inv is not None else B_grid
-
-    active_cols = np.concatenate(
-        [
-            np.arange(g.start, g.end) - feature_groups[0].start
-            for g in feature_groups
-            if any(ag.feature_name == feature and ag.name == g.name for ag in active_subs)
-        ]
-    )
+    M = np.asarray(spec.transform(x_grid), dtype=np.float64)
+    active_cols = _active_subgroup_columns(feature, feature_groups, active_subs)
     M = M[:, active_cols]
 
     Q = M @ Cov_g

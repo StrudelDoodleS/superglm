@@ -410,13 +410,19 @@ class SuperGLM:
 
     @property
     def result(self) -> PIRLSResult:
-        """The fitted PIRLS result (coefficients, deviance, convergence info).
+        """The fitted public PIRLS result (canonical coefficients and fit stats).
 
         Raises ``RuntimeError`` if the model has not been fitted.
         """
         if self._result is None:
             raise RuntimeError("Not fitted")
         return self._result
+
+    def _solver_pirls_result(self) -> PIRLSResult:
+        """Return the private solver-space PIRLS result for internal helpers."""
+        if self._solver_result is None:
+            raise RuntimeError("Not fitted")
+        return self._solver_result
 
     @cached_property
     def _coef_covariance(self):
@@ -932,6 +938,22 @@ class SuperGLM:
 
     # ── Prediction ────────────────────────────────────────────────
 
+    def _predict_eta_exact(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+        """Private exact canonical predictor on the link scale."""
+        return base.predict_eta_exact(self, X, offset)
+
+    def _predict_eta_fast_discrete(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+        """Private fast discrete predictor on the link scale."""
+        return base.predict_eta_fast_discrete(self, X, offset)
+
+    def _predict_exact(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+        """Private exact canonical predictor on the response scale."""
+        return base.predict_exact(self, X, offset)
+
+    def _predict_fast_discrete(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+        """Private fast discrete predictor on the response scale."""
+        return base.predict_fast_discrete(self, X, offset)
+
     def predict(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
         """Predict the response mean for new data.
 
@@ -948,7 +970,7 @@ class SuperGLM:
         NDArray
             Predicted mean on the response scale (inverse-link of eta).
         """
-        return base.predict(self, X, offset)
+        return self._predict_exact(X, offset)
 
     # ── Monotone repair ─────────────────────────────────────────
 
@@ -963,7 +985,7 @@ class SuperGLM:
         """Repair monotone-annotated spline terms after fitting.
 
         This is a manual, post-fit repair step. It finds all spline features
-        using a ``Constraint.postfit.*`` token, applies
+        with ``monotone='increasing'`` or ``monotone='decreasing'``, applies
         weighted isotonic regression to the fitted curve, and projects the
         repaired curve back to spline coefficients.
 

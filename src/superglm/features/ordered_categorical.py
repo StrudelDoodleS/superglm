@@ -44,9 +44,8 @@ class OrderedCategorical:
       so adjacent categories are soft-fused.  Each level gets its own
       coefficient, penalized toward its neighbours.
 
-    Monotone spline constraints are supported by passing a configured
-    spline object as ``basis``, for example
-    ``PSpline(constraint=Constraint.fit.increasing)``.
+    Monotone constraints are not yet supported directly; pass a
+    ``Spline(monotone=...)`` object as ``basis`` in a future release.
 
     Parameters
     ----------
@@ -59,21 +58,18 @@ class OrderedCategorical:
         ``linspace(0, 1, len(order))``.  Mutually exclusive with ``values``.
     basis : {"spline", "step"} or Spline object
         ``"spline"`` (default) maps categories to numeric values and
-        builds a default P-spline.  ``"step"`` one-hot encodes with a
+        builds a default B-spline.  ``"step"`` one-hot encodes with a
         first-difference penalty.  A ``Spline(...)`` object can be passed
         directly for full control over kind, monotone constraints,
         select, penalty, etc.::
 
-            OrderedCategorical(
-                order=[...],
-                basis=PSpline(constraint=Constraint.fit.increasing),
-            )
+            OrderedCategorical(order=[...], basis=Spline(monotone="increasing"))
 
         When a Spline object is passed, the ``kind``, ``n_knots``,
         ``degree``, ``select``, and ``penalty`` parameters are ignored.
     kind : str
         Spline type (ignored if ``basis`` is a Spline object).
-        ``"ps"`` (default), ``"bs"``, ``"cr"``, ``"ns"``, etc.
+        ``"bs"`` (default), ``"cr"``, ``"ns"``, etc.
     base : str
         Reference level for step mode.  ``"most_exposed"`` (default),
         ``"first"``, or a specific level name.  Ignored in spline mode.
@@ -101,13 +97,6 @@ class OrderedCategorical:
     Step basis (one coefficient per level, soft-fused)::
 
         OrderedCategorical(order=[...], basis="step")
-
-    Monotone spline basis via the public constraint API::
-
-        OrderedCategorical(
-            order=["low", "medium", "high"],
-            basis=PSpline(n_knots=3, constraint=Constraint.fit.increasing),
-        )
     """
 
     def __init__(
@@ -357,10 +346,15 @@ class OrderedCategorical:
     def transform(self, x: NDArray) -> NDArray:
         """Build design matrix for new data using learned parameters."""
         x = np.asarray(x).ravel()
-        _validate_categorical_levels(x, self._known_levels)
-
         if self._grouping is not None:
-            x = pd.Series(x).map(self._grouping.original_to_group).values
+            valid_levels = self._known_levels | set(self._grouping.grouped_levels)
+            _validate_categorical_levels(x, valid_levels)
+            x = np.array(
+                [self._grouping.original_to_group.get(str(v), str(v)) for v in x],
+                dtype=object,
+            )
+        else:
+            _validate_categorical_levels(x, self._known_levels)
 
         if self.basis == "spline":
             x_numeric = self._map_to_numeric(x)
@@ -375,10 +369,15 @@ class OrderedCategorical:
     def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
         """Score the fitted ordered-categorical contribution directly on new data."""
         x = np.asarray(x).ravel()
-        _validate_categorical_levels(x, self._known_levels)
-
         if self._grouping is not None:
-            x = pd.Series(x).map(self._grouping.original_to_group).values
+            valid_levels = self._known_levels | set(self._grouping.grouped_levels)
+            _validate_categorical_levels(x, valid_levels)
+            x = np.array(
+                [self._grouping.original_to_group.get(str(v), str(v)) for v in x],
+                dtype=object,
+            )
+        else:
+            _validate_categorical_levels(x, self._known_levels)
 
         if self.basis == "spline":
             x_numeric = self._map_to_numeric(x)
@@ -409,9 +408,7 @@ class OrderedCategorical:
 
         # Per-level values on the fitted curve
         level_values = np.array([self._level_to_value[lev] for lev in self._ordered_levels])
-        B_levels = self._spline._raw_basis_matrix(level_values)
-        beta_orig = self._spline._R_inv @ beta if self._spline._R_inv is not None else beta
-        level_log_rels = B_levels @ beta_orig
+        level_log_rels = np.asarray(self._spline.score(level_values, beta), dtype=np.float64)
 
         # Shift so base level = 0 (relativity = 1)
         base_shift = float(level_log_rels[self._ordered_levels.index(self._base_level)])

@@ -189,7 +189,11 @@ def term_inference(
                     feature_groups,
                     active_groups_cov,
                     Cov_active,
-                    n_points=n_points,
+                    x_eval=raw["x"],
+                    reference_x=np.array(
+                        [raw["level_values"][spec._base_level]],
+                        dtype=np.float64,
+                    ),
                 )
                 curve = SmoothCurve(
                     x=raw["x"],

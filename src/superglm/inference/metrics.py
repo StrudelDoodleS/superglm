@@ -17,10 +17,28 @@ from superglm.inference.covariance import (  # noqa: F401
     _second_diff_penalty,
 )
 from superglm.inference.summary import ModelSummary, _CoefRow
+from superglm.model.state_ops import _public_augmented_covariance
 from superglm.types import GroupSlice
 
 if TYPE_CHECKING:
     from superglm.model import SuperGLM
+
+
+def _active_feature_columns(
+    feature_name: str,
+    groups: list[GroupSlice],
+    active_subs: list[GroupSlice],
+) -> NDArray:
+    return np.concatenate(
+        [
+            np.arange(group.start, group.end) - groups[0].start
+            for group in groups
+            if any(
+                active_group.feature_name == feature_name and active_group.name == group.name
+                for active_group in active_subs
+            )
+        ]
+    )
 
 
 class ModelMetrics:
@@ -391,6 +409,7 @@ class ModelMetrics:
         X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
             beta, W, self._dm.group_matrices, self._groups, lam2, S_override=S_full
         )
+        XtWX_inv_aug = _public_augmented_covariance(self._model, XtWX_inv_aug, active_groups)
         return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
 
     @cached_property
@@ -631,21 +650,8 @@ class ModelMetrics:
 
         if isinstance(spec, _SplineBase):
             x_grid = np.linspace(spec._lo, spec._hi, n_points)
-            B_grid = spec._raw_basis_matrix(x_grid)
-
-            if spec._R_inv is not None:
-                M = B_grid @ spec._R_inv
-            else:
-                M = B_grid
-
-            # Only use columns for active subgroups
-            active_cols = np.concatenate(
-                [
-                    np.arange(g.start, g.end) - groups[0].start
-                    for g in groups
-                    if any(ag.feature_name == name and ag.name == g.name for ag in active_subs)
-                ]
-            )
+            M = np.asarray(spec.transform(x_grid), dtype=np.float64)
+            active_cols = _active_feature_columns(name, groups, active_subs)
             M = M[:, active_cols]
 
             Q = M @ Cov_g
