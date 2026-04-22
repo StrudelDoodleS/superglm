@@ -397,7 +397,6 @@ def fit(
         null_mu=null_mu,
     )
     model._solver_result = model._result
-    runtime_canonicalize.canonicalize_fitted_model(model)
     _prime_fit_caches(
         model,
         X_ref=X_ref,
@@ -406,6 +405,7 @@ def fit(
         offset_ref=offset_ref,
         y_arr=y,
     )
+    runtime_canonicalize.canonicalize_fitted_model(model)
 
     model._last_fit_meta = {"method": "fit", "discrete": model._discrete}
     return model
@@ -481,7 +481,6 @@ def fit_path(
         null_mu=null_mu,
     )
     model._solver_result = result
-    runtime_canonicalize.canonicalize_fitted_model(model)
     _prime_fit_caches(
         model,
         X_ref=X_ref,
@@ -490,6 +489,7 @@ def fit_path(
         offset_ref=offset_ref,
         y_arr=y,
     )
+    runtime_canonicalize.canonicalize_fitted_model(model)
     model._last_fit_meta = {"method": "fit_path", "discrete": model._discrete}
 
     return PathResult(
@@ -597,7 +597,6 @@ def fit_reml(
             null_mu=null_mu,
         )
         model._solver_result = model._result
-        runtime_canonicalize.canonicalize_fitted_model(model)
         _prime_fit_caches(
             model,
             X_ref=X_ref,
@@ -606,6 +605,7 @@ def fit_reml(
             offset_ref=offset_ref,
             y_arr=y,
         )
+        runtime_canonicalize.canonicalize_fitted_model(model)
         model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
         return model
 
@@ -664,6 +664,7 @@ def fit_reml(
                 offset_ref=offset_ref,
                 y_arr=y,
             )
+            runtime_canonicalize.canonicalize_fitted_model(model)
             logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
             return model
 
@@ -695,6 +696,7 @@ def fit_reml(
                 offset_ref=offset_ref,
                 y_arr=y,
             )
+            runtime_canonicalize.canonicalize_fitted_model(model)
             logger.info(
                 f"REML SCOP EFS converged={best.converged} in {best.n_reml_iter} iters, "
                 f"lambdas={best.lambdas}"
@@ -749,6 +751,7 @@ def fit_reml(
             offset_ref=offset_ref,
             y_arr=y,
         )
+        runtime_canonicalize.canonicalize_fitted_model(model)
 
         logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")
         return model

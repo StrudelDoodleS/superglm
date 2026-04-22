@@ -6,7 +6,6 @@ import time as _time
 
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
-from superglm.model import runtime_canonicalize
 from superglm.model.reml_state import update_reml_r_inv
 from superglm.reml.penalty_algebra import build_penalty_context, build_penalty_matrix
 from superglm.solvers.irls_direct import fit_irls_direct
@@ -161,7 +160,6 @@ def finalize_reml_fit(
         y, mu, sample_weight, offset, model._distribution, model._link, model._result.phi
     )
     model._solver_result = corrected
-    runtime_canonicalize.canonicalize_fitted_model(model)
 
     meta = {"method": "fit_reml", "discrete": model._discrete}
     if qp_passthrough:

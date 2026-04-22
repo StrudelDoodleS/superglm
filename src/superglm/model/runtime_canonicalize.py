@@ -154,50 +154,11 @@ def _materialize_public_term(
     return False
 
 
-def _compute_public_parity_diagnostics(
+def _compile_runtime_terms(
     model,
     solver: PIRLSResult,
-    term_states: dict[str, dict[str, Any]],
-    intercept_shift: float,
-) -> CanonicalizationDiagnostics:
-    """Compute real before/after diagnostics from the applied public state."""
-    eta_before = model._dm.matvec(solver.beta) + float(solver.intercept)
-
-    applied_shift = float(
-        sum(
-            term_state["intercept_shift"]
-            for term_state in term_states.values()
-            if term_state["applied_to_public_model"]
-        )
-    )
-    eta_after = eta_before + intercept_shift - applied_shift
-
-    if model._fit_offset is not None:
-        eta_before = eta_before + model._fit_offset
-        eta_after = eta_after + model._fit_offset
-
-    eta_before = stabilize_eta(eta_before, model._link)
-    eta_after = stabilize_eta(eta_after, model._link)
-    mu_before = clip_mu(model._link.inverse(eta_before), model._distribution)
-    mu_after = clip_mu(model._link.inverse(eta_after), model._distribution)
-
-    return CanonicalizationDiagnostics(
-        max_abs_eta_delta=float(np.max(np.abs(eta_after - eta_before))) if eta_before.size else 0.0,
-        max_abs_mu_delta=float(np.max(np.abs(mu_after - mu_before))) if mu_before.size else 0.0,
-        intercept_shift=float(intercept_shift),
-        term_means_before={
-            term_name: float(term_state["term_mean_before"])
-            for term_name, term_state in term_states.items()
-        },
-        term_means_after={
-            term_name: float(term_state["term_mean_after"])
-            for term_name, term_state in term_states.items()
-        },
-    )
-
-
-def _compile_runtime_state(model, solver: PIRLSResult) -> dict[str, Any]:
-    """Compile term-level canonicalization state and diagnostics."""
+) -> tuple[dict[str, dict[str, Any]], float]:
+    """Compile spline-backed term state and apply the Task 2 public mutations."""
     term_states: dict[str, dict[str, Any]] = {}
     public_intercept_shift = 0.0
 
@@ -223,23 +184,106 @@ def _compile_runtime_state(model, solver: PIRLSResult) -> dict[str, Any]:
             "group_indices": group_indices,
             "groups": groups,
             "term_mean_before": mean_before,
-            "term_mean_after": 0.0,
+            "term_mean_after": None,
             "intercept_shift": float(shift),
         }
 
-    diagnostics = _compute_public_parity_diagnostics(
-        model,
-        solver,
-        term_states,
-        public_intercept_shift,
-    )
+    return term_states, public_intercept_shift
 
-    return {
-        "terms": term_states,
-        "diagnostics": asdict(diagnostics),
-        "intercept_shift": float(public_intercept_shift),
-        "solver_to_public": np.eye(model._dm.p, dtype=np.float64),
+
+def _live_public_runtime_state(
+    model,
+    public_result: PIRLSResult,
+) -> tuple[dict[str, NDArray[np.float64]], NDArray[np.float64], NDArray[np.float64]]:
+    """Evaluate the training rows through the live public scoring contract."""
+    from superglm.model import base
+
+    X_ref = model._fit_X_ref
+    if X_ref is None:
+        raise RuntimeError("Training feature reference is required for runtime diagnostics")
+
+    plan = base._build_prediction_plan(model)
+    beta_all = public_result.beta
+    eta = np.full(len(X_ref), public_result.intercept, dtype=np.float64)
+    contributions: dict[str, NDArray[np.float64]] = {}
+
+    for term in plan["features"]:
+        values = np.asarray(X_ref[term["name"]])
+        beta = beta_all[term["beta_idx"]]
+        contribution = np.asarray(
+            base._score_feature(term["spec"], values, beta),
+            dtype=np.float64,
+        ).ravel()
+        contributions[term["name"]] = contribution
+        eta += contribution
+
+    for term in plan["interactions"]:
+        spec = term["spec"]
+        left_name, right_name = spec.parent_names
+        beta = beta_all[term["beta_idx"]]
+        contribution = np.asarray(
+            base._score_interaction(
+                spec,
+                np.asarray(X_ref[left_name]),
+                np.asarray(X_ref[right_name]),
+                beta,
+            ),
+            dtype=np.float64,
+        ).ravel()
+        contributions[term["name"]] = contribution
+        eta += contribution
+
+    if model._fit_offset is not None:
+        eta = eta + model._fit_offset
+
+    eta = stabilize_eta(eta, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    return contributions, eta, mu
+
+
+def _compute_public_parity_diagnostics(
+    model,
+    solver: PIRLSResult,
+    public_result: PIRLSResult,
+    term_states: dict[str, dict[str, Any]],
+    intercept_shift: float,
+) -> tuple[CanonicalizationDiagnostics, dict[str, float]]:
+    """Compute diagnostics from the live public runtime state."""
+    eta_before = model._dm.matvec(solver.beta) + float(solver.intercept)
+    if model._fit_offset is not None:
+        eta_before = eta_before + model._fit_offset
+    eta_before = stabilize_eta(eta_before, model._link)
+    mu_before = clip_mu(model._link.inverse(eta_before), model._distribution)
+
+    contributions_after, eta_after, mu_after = _live_public_runtime_state(model, public_result)
+    live_term_means_after = {
+        term_name: float(np.mean(contributions_after[term_name]))
+        for term_name in term_states
+        if term_name in contributions_after
     }
+
+    diagnostics = CanonicalizationDiagnostics(
+        max_abs_eta_delta=float(np.max(np.abs(eta_after - eta_before))) if eta_before.size else 0.0,
+        max_abs_mu_delta=float(np.max(np.abs(mu_after - mu_before))) if mu_before.size else 0.0,
+        intercept_shift=float(intercept_shift),
+        term_means_before={
+            term_name: float(term_state["term_mean_before"])
+            for term_name, term_state in term_states.items()
+        },
+        term_means_after=live_term_means_after,
+    )
+    return diagnostics, live_term_means_after
+
+
+def _solver_to_public_state(
+    model,
+    term_states: dict[str, dict[str, Any]],
+) -> tuple[NDArray[np.float64] | None, bool]:
+    """Return the honest solver-to-public mapping state for Task 2."""
+    complete = all(term_state["applied_to_public_model"] for term_state in term_states.values())
+    if complete:
+        return np.eye(model._dm.p, dtype=np.float64), True
+    return None, False
 
 
 def _build_public_result(solver: PIRLSResult, state: dict[str, Any]) -> PIRLSResult:
@@ -260,7 +304,30 @@ def _build_public_result(solver: PIRLSResult, state: dict[str, Any]) -> PIRLSRes
 def canonicalize_fitted_model(model) -> None:
     """Finalize the public runtime result after solver-space fitting completes."""
     solver = model._solver_pirls_result()
-    state = _compile_runtime_state(model, solver)
-    model._result = _build_public_result(solver, state)
-    model._runtime_canonical_state = state
+    term_states, public_intercept_shift = _compile_runtime_terms(model, solver)
+
+    state = {"intercept_shift": float(public_intercept_shift)}
+    public_result = _build_public_result(solver, state)
+    diagnostics, live_term_means_after = _compute_public_parity_diagnostics(
+        model,
+        solver,
+        public_result,
+        term_states,
+        public_intercept_shift,
+    )
+
+    for term_name, term_state in term_states.items():
+        if term_state["applied_to_public_model"]:
+            term_state["term_mean_after"] = live_term_means_after.get(term_name)
+
+    solver_to_public, solver_to_public_complete = _solver_to_public_state(model, term_states)
+
+    model._result = public_result
+    model._runtime_canonical_state = {
+        "terms": term_states,
+        "diagnostics": asdict(diagnostics),
+        "intercept_shift": float(public_intercept_shift),
+        "solver_to_public": solver_to_public,
+        "solver_to_public_complete": solver_to_public_complete,
+    }
     model._prediction_plan = None
