@@ -444,11 +444,15 @@ class PSpline(_BSplineBase):
         Explicit interior knot positions.
     constraint : ConstraintSpec or None
         Public shape-constraint token. Use ``Constraint.fit.increasing``,
-        ``Constraint.fit.decreasing``, ``Constraint.postfit.increasing``, or
-        ``Constraint.postfit.decreasing``. For ``PSpline``,
-        ``Constraint.fit.*`` uses the SCOP monotone engine. With
-        ``fit_reml()``, fixed lambdas work directly and automatic lambda
-        estimation uses the dedicated monotone-aware SCOP REML / EFS path.
+        ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
+        ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
+        ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
+        ``Constraint.postfit.concave``. For ``PSpline``, fit-time shape
+        constraints apply on the spline term's linear-predictor contribution
+        and use the SCOP engine. This works in both exact and
+        ``discrete=True`` fitting paths. With ``fit_reml()``, fixed lambdas
+        work directly and automatic lambda estimation uses the dedicated
+        shape-aware SCOP REML / EFS path.
     """
 
     def __init__(
@@ -538,12 +542,16 @@ class BSplineSmooth(_BSplineBase):
         Explicit interior knot positions.
     constraint : ConstraintSpec or None
         Public shape-constraint token. Use ``Constraint.fit.increasing``,
-        ``Constraint.fit.decreasing``, ``Constraint.postfit.increasing``, or
-        ``Constraint.postfit.decreasing``. For ``BSplineSmooth``,
-        ``Constraint.fit.*`` uses the constrained QP monotone solver path.
-        With ``fit_reml()``, fixed lambdas work directly; automatic lambda
-        estimation uses the QP passthrough heuristic (unconstrained REML
-        followed by constrained refit), not exact joint constrained REML.
+        ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
+        ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
+        ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
+        ``Constraint.postfit.concave``. For ``BSplineSmooth``, fit-time
+        monotone and curvature constraints apply on the spline term's
+        linear-predictor contribution and use the constrained QP solver
+        path. With ``fit_reml()``, fixed lambdas work directly; automatic
+        lambda estimation uses the QP passthrough heuristic
+        (unconstrained REML followed by constrained refit), not exact
+        joint constrained REML.
     m : int or tuple of int
         Integrated derivative order(s) for the penalty.
     lambda_policy : LambdaPolicy or dict or None
@@ -594,15 +602,11 @@ class BSplineSmooth(_BSplineBase):
         )
 
     def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
-        """Build monotone constraints on raw B-spline coefficients.
-
-        For monotone increasing: D @ beta_raw >= 0 where D is the
-        first-difference matrix (beta_{i+1} - beta_i >= 0).
-        For monotone decreasing: -D @ beta_raw >= 0.
+        """Build fit-time shape constraints on raw B-spline coefficients.
 
         Returns constraints on K raw (pre-projection) coefficients.
         """
-        return _spline_subclass_ops.build_monotone_constraints_raw(self)
+        return _spline_subclass_ops.build_shape_constraints_raw(self)
 
     def _build_penalty(self) -> NDArray:
         return self._build_penalty_for_order(self._m_orders[0])
@@ -700,12 +704,16 @@ class CubicRegressionSpline(_SplineBase):
     ----------
     constraint : ConstraintSpec or None
         Public shape-constraint token. Use ``Constraint.fit.increasing``,
-        ``Constraint.fit.decreasing``, ``Constraint.postfit.increasing``, or
-        ``Constraint.postfit.decreasing``. For ``CubicRegressionSpline``,
-        ``Constraint.fit.*`` uses the constrained QP monotone solver path.
-        With ``fit_reml()``, fixed lambdas work directly; automatic lambda
-        estimation uses the QP passthrough heuristic (unconstrained REML
-        followed by constrained refit), not exact joint constrained REML.
+        ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
+        ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
+        ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
+        ``Constraint.postfit.concave``. For ``CubicRegressionSpline``,
+        fit-time monotone and curvature constraints apply on the spline
+        term's linear-predictor contribution and use the constrained QP
+        solver path. With ``fit_reml()``, fixed lambdas work directly;
+        automatic lambda estimation uses the QP passthrough heuristic
+        (unconstrained REML followed by constrained refit), not exact
+        joint constrained REML.
     """
 
     _penalty_semantics = "integrated_derivative"
@@ -773,18 +781,16 @@ class CubicRegressionSpline(_SplineBase):
         return self._linear_tail_basis_matrix(x)
 
     def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
-        """Build monotone constraints on raw B-spline coefficients.
+        """Build fit-time shape constraints on raw B-spline coefficients.
 
         CRS is built on a raw B-spline basis projected through a
-        natural-boundary Z matrix. Adjacent-coefficient-difference
-        constraints on the raw B-spline coefficients (D @ beta_raw >= 0)
-        guarantee monotonicity because B-spline functions with monotone
-        coefficients are monotone.
+        natural-boundary Z matrix. Raw coefficient constraints are
+        composed through Z and the identifiability projection by
+        _SplineBase.build().
 
-        The composition through Z and identifiability is handled by
-        _SplineBase.build() via cs_raw.compose(projection).
+        Returns constraints on K raw (pre-projection) coefficients.
         """
-        return _spline_subclass_ops.build_monotone_constraints_raw(self)
+        return _spline_subclass_ops.build_shape_constraints_raw(self)
 
     def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
         """Natural boundary constraints: f''(lo) = f''(hi) = 0."""

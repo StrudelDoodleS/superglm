@@ -26,7 +26,11 @@ class PenaltyCache:
 
 @dataclass
 class REMLResult:
-    """Result of REML smoothing parameter estimation."""
+    """Result of REML smoothing parameter estimation.
+
+    Cleanup histories, when present, are accepted post-update snapshots from
+    each outer REML iteration.
+    """
 
     lambdas: dict[str, float]  # group_name -> estimated lambda_j
     pirls_result: object  # PIRLSResult from final iteration
@@ -40,6 +44,15 @@ class REMLResult:
     objective_history: list[float] | None = None  # REML objective per outer step
     scop_step_norms: list[dict[str, float]] | None = None  # per-group Newton step_norm per step
     scop_fisher_fallbacks: int = 0  # total Fisher-fallback count
+    managed_cleanup_names: list[str] | None = None  # SCOP names handled by managed cleanup
+    managed_cleanup_frozen_names: list[str] | None = None  # final managed frozen set
+    # First 1-based outer iteration where the managed frozen set changed
+    # from the previous accepted iteration.
+    managed_cleanup_freeze_iter: int | None = None
+    # Accepted post-update active managed names per outer step.
+    managed_cleanup_active_history: list[list[str]] | None = None
+    # Accepted post-update frozen managed names per outer step.
+    managed_cleanup_frozen_history: list[list[str]] | None = None
 
 
 def _map_beta_between_bases(

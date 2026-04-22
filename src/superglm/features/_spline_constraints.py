@@ -19,6 +19,14 @@ def build_monotone_difference_constraints(
     return LinearConstraintSet(A=D, b=np.zeros(n_basis - 1))
 
 
+def build_curvature_difference_constraints(n_basis: int, kind: str) -> LinearConstraintSet:
+    """Build second-difference curvature constraints on raw spline coefficients."""
+    D2 = np.diff(np.eye(n_basis), n=2, axis=0)
+    if kind == "concave":
+        D2 = -D2
+    return LinearConstraintSet(A=D2, b=np.zeros(D2.shape[0]))
+
+
 def build_natural_constraint_null_space(
     knots: NDArray,
     degree: int,
@@ -39,4 +47,8 @@ def build_natural_constraint_null_space(
     return Q[:, 2:]
 
 
-__all__ = ["build_monotone_difference_constraints", "build_natural_constraint_null_space"]
+__all__ = [
+    "build_curvature_difference_constraints",
+    "build_monotone_difference_constraints",
+    "build_natural_constraint_null_space",
+]

@@ -44,25 +44,34 @@ def build_scop_reparameterization(
     basis: NDArray,
     omega: NDArray,
 ):
-    """Build the SCOP reparameterization for monotone P-splines."""
+    """Build the SCOP reparameterization for shape-constrained P-splines."""
     del omega
     from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
 
     q = spec._n_basis
-    reparam = build_scop_reparam(q, direction=spec.monotone)
+    kind = getattr(spec, "constraint_kind", None) or spec.monotone
+    reparam = build_scop_reparam(q, kind=kind)
+    null_dim = reparam.null_dim
 
     x_sigma = basis @ reparam.Sigma
-    col_means = x_sigma[:, 1:].mean(axis=0)
-    x_centered = x_sigma[:, 1:] - col_means
+    x_shape = x_sigma[:, null_dim:]
+    col_means = x_shape.mean(axis=0)
+    x_centered = x_shape - col_means
 
     spec._scop_Sigma = reparam.Sigma
+    spec._scop_null_dim = null_dim
     spec._scop_col_means = col_means
 
-    solver_reparam = build_scop_solver_reparam(q, direction=spec.monotone)
+    solver_reparam = build_scop_solver_reparam(q, kind=kind)
     scop_penalty = solver_reparam.penalty_matrix()
     return x_centered, scop_penalty, solver_reparam
 
 
-def build_monotone_constraints_raw(spec: Any):
-    """Build first-difference monotone constraints on raw spline coefficients."""
-    return _spline_constraints.build_monotone_difference_constraints(spec._n_basis, spec.monotone)
+def build_shape_constraints_raw(spec: Any):
+    """Build fit-time shape constraints on raw spline coefficients."""
+    kind = spec.constraint_kind
+    if kind in {"increasing", "decreasing"}:
+        return _spline_constraints.build_monotone_difference_constraints(spec._n_basis, kind)
+    if kind in {"convex", "concave"}:
+        return _spline_constraints.build_curvature_difference_constraints(spec._n_basis, kind)
+    raise ValueError(f"Unsupported fit-time shape kind: {kind!r}")

@@ -1538,6 +1538,34 @@ class TestSCOPFitRemlIntegration:
             assert v == 1.0
 
     @pytest.mark.slow
+    def test_fit_reml_scop_concave_fixed_lambda_policy(self):
+        """Curvature-constrained SCOP terms should honor fixed lambda_policy values."""
+        rng = np.random.default_rng(7)
+        n = 300
+        x = np.sort(rng.uniform(0, 1, n))
+        y = 1.0 - (x - 0.4) ** 2 + rng.normal(0, 0.05, n)
+        df = pd.DataFrame({"x": x})
+
+        fixed_val = 2.5
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    constraint=Constraint.fit.concave,
+                    lambda_policy=LambdaPolicy(mode="fixed", value=fixed_val),
+                ),
+            },
+        )
+        model.fit_reml(df[["x"]], y)
+
+        assert model._result.converged
+        assert model._reml_lambdas is not None
+        assert model._reml_lambdas["x"] == pytest.approx(fixed_val)
+
+    @pytest.mark.slow
     def test_mixed_fixed_and_estimated_lambda(self):
         """Mixed model: fixed-lambda SSP + auto-lambda SCOP through EFS path."""
         rng = np.random.default_rng(42)

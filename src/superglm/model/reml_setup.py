@@ -60,17 +60,22 @@ def scop_fixed_lambda_value(spec: Any) -> float | None:
     return float(wiggle_policy.value) if wiggle_policy.mode == "fixed" else None
 
 
+def scop_group_spec(groupspecs: dict[str, Any], group: GroupSlice) -> Any | None:
+    """Return the feature spec backing a SCOP-constrained group."""
+    return groupspecs.get(group.feature_name or group.name)
+
+
 def inject_fixed_scop_lambdas(
     groups: list[GroupSlice],
     specs: dict[str, Any],
     lambdas: dict[str, float],
 ) -> bool:
-    """Inject fixed SCOP lambdas and report whether any remain unfixed."""
+    """Inject fixed lambdas for SCOP-constrained groups and report whether any remain unfixed."""
     any_unfixed_scop = False
     for group in groups:
         if group.monotone_engine != "scop" or not group.penalized:
             continue
-        spec = specs.get(group.feature_name)
+        spec = scop_group_spec(specs, group)
         if spec is None:
             any_unfixed_scop = True
             continue
@@ -89,11 +94,11 @@ def promote_estimated_scop_lambdas(
     estimated_names: set[str],
     default_lambda: float,
 ) -> None:
-    """Add unfixed SCOP groups to the estimated-lambda set."""
+    """Add unfixed SCOP-constrained groups to the estimated-lambda set."""
     for group in groups:
         if group.monotone_engine != "scop" or not group.penalized:
             continue
-        spec = specs.get(group.feature_name or group.name)
+        spec = scop_group_spec(specs, group)
         fixed_value = scop_fixed_lambda_value(spec)
         if fixed_value is not None:
             continue
@@ -101,8 +106,8 @@ def promote_estimated_scop_lambdas(
         lambdas[group.name] = default_lambda
 
 
-def monotone_flags(groups: list[GroupSlice]) -> tuple[bool, bool, bool]:
-    """Return whether any, QP, or SCOP monotone groups are present."""
+def constraint_engine_flags(groups: list[GroupSlice]) -> tuple[bool, bool, bool]:
+    """Return whether any, QP, or SCOP fit-time constrained groups are present."""
     has_any = False
     has_qp = False
     has_scop = False
@@ -117,7 +122,7 @@ def monotone_flags(groups: list[GroupSlice]) -> tuple[bool, bool, bool]:
 
 
 def strip_qp_constraints(groups: list[GroupSlice]) -> list[tuple[int, Any, Any]]:
-    """Temporarily disable QP monotone constraints for passthrough REML."""
+    """Temporarily disable QP fit-time constraints for passthrough REML."""
     saved_state: list[tuple[int, Any, Any]] = []
     for group_index, group in enumerate(groups):
         if group.monotone_engine != "qp":
@@ -132,7 +137,7 @@ def restore_qp_constraints(
     groups: list[GroupSlice],
     saved_state: list[tuple[int, Any, Any]],
 ) -> None:
-    """Restore QP monotone constraints after passthrough REML."""
+    """Restore QP fit-time constraints after passthrough REML."""
     for group_index, monotone_engine, constraints in saved_state:
         groups[group_index].monotone_engine = monotone_engine
         groups[group_index].constraints = constraints

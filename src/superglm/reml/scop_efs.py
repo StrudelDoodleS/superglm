@@ -24,6 +24,45 @@ from superglm.reml.result import REMLResult
 from superglm.solvers.irls_direct import _safe_decompose_H, fit_irls_direct
 from superglm.types import GroupSlice, PenaltyComponent
 
+# These private thresholds intentionally mix units: absolute lambda scale for the
+# floor guard, log-lambda-step scale for stability/plateau checks, and relative
+# objective scale for outer-loop flatness checks.
+_MULTI_SCOP_DISCRETE_LAMBDA_FLOOR = 1.0e-4
+_MULTI_SCOP_DISCRETE_FLOOR_FACTOR = 1.05
+_MULTI_SCOP_DISCRETE_LOG_STEP_TOL = 1.0e-3
+_MULTI_SCOP_DISCRETE_MIN_STABLE_ITERS = 3
+_MULTI_SCOP_DISCRETE_ACTIVE_PLATEAU_TOL = 5.0e-3
+_MULTI_SCOP_DISCRETE_OBJ_REL_TOL = 1.0e-6
+
+
+def _multi_scop_discrete_cleanup_enabled(*, discrete: bool, scop_term_count: int) -> bool:
+    return bool(discrete and scop_term_count > 1)
+
+
+def _multi_scop_discrete_cleanup_names(
+    *,
+    estimated_names: set[str],
+    scop_states: dict[int, dict],
+    scop_term_count: int,
+) -> set[str]:
+    """Return the estimated SCOP names eligible for the discrete cleanup path."""
+    if not scop_states:
+        return set()
+
+    all_scop_discrete = all(st.get("bin_idx") is not None for st in scop_states.values())
+    if not _multi_scop_discrete_cleanup_enabled(
+        discrete=all_scop_discrete,
+        scop_term_count=scop_term_count,
+    ):
+        return set()
+
+    eligible_names = {
+        st["group_name"]
+        for st in scop_states.values()
+        if st.get("bin_idx") is not None and st["group_name"] in estimated_names
+    }
+    return eligible_names if len(eligible_names) > 1 else set()
+
 
 def _get_scop_penalty_metadata(st: dict) -> tuple[float, float, NDArray]:
     """Return cached SCOP penalty metadata, computing it once if needed."""
@@ -71,6 +110,80 @@ def _scop_jacobian_diag(st: dict) -> NDArray:
             return gamma_eff
     beta_eff = np.asarray(st["beta_eff"], dtype=np.float64)
     return np.exp(np.clip(beta_eff, -500, 500))
+
+
+def _update_multi_scop_discrete_stability_counts(
+    *,
+    lambdas_old: dict[str, float],
+    lambdas_new: dict[str, float],
+    active_names: set[str],
+    stable_counts: dict[str, int],
+) -> dict[str, int]:
+    """Track generic per-name lambda stability across freeze and plateau signals.
+
+    A name is counted as stable when it is either near the absolute lambda floor
+    or moving by only a small log-step. The near-floor branch resets when a
+    lambda first enters the floor region so freezing responds only to
+    consecutive near-floor iterations.
+    """
+    updated = dict(stable_counts)
+    floor_threshold = _MULTI_SCOP_DISCRETE_LAMBDA_FLOOR * _MULTI_SCOP_DISCRETE_FLOOR_FACTOR
+    for name in active_names:
+        lam_old = max(lambdas_old[name], 1.0e-10)
+        lam_new = max(lambdas_new[name], 1.0e-10)
+        log_step = abs(np.log(lam_new) - np.log(lam_old))
+        near_floor_old = lam_old <= floor_threshold
+        near_floor_new = lam_new <= floor_threshold
+        if near_floor_new:
+            updated[name] = updated.get(name, 0) + 1 if near_floor_old else 1
+        elif log_step < _MULTI_SCOP_DISCRETE_LOG_STEP_TOL:
+            updated[name] = updated.get(name, 0) + 1
+        else:
+            updated[name] = 0
+    return updated
+
+
+def _freeze_multi_scop_discrete_lambdas(
+    *,
+    active_names: set[str],
+    frozen_names: set[str],
+    lambdas_new: dict[str, float],
+    stable_counts: dict[str, int],
+) -> tuple[set[str], set[str]]:
+    """Freeze only floor-pinned names once the generic stability counter matures."""
+    active_out = set(active_names)
+    frozen_out = set(frozen_names)
+    for name in list(active_names):
+        lam_new = lambdas_new[name]
+        near_floor = lam_new <= (
+            _MULTI_SCOP_DISCRETE_LAMBDA_FLOOR * _MULTI_SCOP_DISCRETE_FLOOR_FACTOR
+        )
+        stable_long_enough = stable_counts.get(name, 0) >= _MULTI_SCOP_DISCRETE_MIN_STABLE_ITERS
+        if near_floor and stable_long_enough:
+            active_out.discard(name)
+            frozen_out.add(name)
+    return active_out, frozen_out
+
+
+def _multi_scop_discrete_plateau_converged(
+    *,
+    obj_rel_change: float,
+    lambdas_old: dict[str, float],
+    lambdas_new: dict[str, float],
+    active_names: set[str],
+) -> bool:
+    """Require objective flatness, then check active-set log-step stability."""
+    if not active_names:
+        return obj_rel_change < _MULTI_SCOP_DISCRETE_OBJ_REL_TOL
+    active_changes = [
+        abs(np.log(max(lambdas_new[name], 1.0e-10)) - np.log(max(lambdas_old[name], 1.0e-10)))
+        for name in active_names
+    ]
+    max_active_change = max(active_changes) if active_changes else 0.0
+    return (
+        obj_rel_change < _MULTI_SCOP_DISCRETE_OBJ_REL_TOL
+        and max_active_change < _MULTI_SCOP_DISCRETE_ACTIVE_PLATEAU_TOL
+    )
 
 
 def build_scop_penalty_components(
@@ -415,6 +528,7 @@ def optimize_scop_efs_reml(
     reml_penalties: list[PenaltyComponent] | None = None,
     convergence: str = "deviance",
     _scop_joint: bool = True,
+    debug_recorder=None,
 ) -> REMLResult:
     """SCOP-aware EFS REML optimizer for monotone splines.
 
@@ -493,6 +607,8 @@ def optimize_scop_efs_reml(
         reml_penalties=reml_penalties,
         convergence=convergence,
         _scop_joint=_scop_joint,
+        debug_recorder=debug_recorder,
+        debug_context={"phase": "bootstrap", "reml_iteration": 0},
     )
 
     # Unpack: with return_xtwx=True and SCOP -> 4-tuple
@@ -560,17 +676,24 @@ def optimize_scop_efs_reml(
     objective_history: list[float] = []
     scop_step_norms_history: list[dict[str, float]] = []
     total_fisher_fallbacks = 0
+    managed_cleanup_active_history: list[list[str]] = []
+    managed_cleanup_frozen_history: list[list[str]] = []
+    managed_cleanup_freeze_iter: int | None = None
 
     # Adaptive EFS step state (per-component)
     efs_alpha: dict[str, float] = {name: 1.0 for name in estimated_names}
     efs_prev_dlsp: dict[str, float] = {}
 
-    # Staged freeze state: temporarily freeze converged SSP lambdas,
-    # iterate SCOP-only, then unfreeze for final joint cleanup.
+    scop_term_count = sum(1 for group in groups if group.monotone_engine == "scop")
+    managed_cleanup_names = _multi_scop_discrete_cleanup_names(
+        estimated_names=estimated_names,
+        scop_states=boot_scop_states,
+        scop_term_count=scop_term_count,
+    )
+    managed_cleanup_active = bool(managed_cleanup_names)
     active_names: set[str] = set(estimated_names)
     frozen_names: set[str] = set()
-    _unfreeze_pending = False
-    _unfreeze_scheduled = False
+    stable_counts: dict[str, int] = {name: 0 for name in managed_cleanup_names}
 
     for reml_iter in range(max_reml_iter):
         n_reml_iter = reml_iter + 1
@@ -595,6 +718,8 @@ def optimize_scop_efs_reml(
             convergence=convergence,
             _scop_joint=_scop_joint,
             scop_state_init=warm_scop_states,
+            debug_recorder=debug_recorder,
+            debug_context={"phase": "reml", "reml_iteration": n_reml_iter},
         )
 
         if len(irls_out) == 4:
@@ -698,29 +823,39 @@ def optimize_scop_efs_reml(
                 )
                 efs_prev_dlsp[name] = accepted_step
 
-        # Step 7b: Staged freezing — temporarily freeze converged components
-        # so SCOP-only iterations are cheap, then unfreeze for final cleanup.
-        freeze_threshold = 0.001  # log-scale
-        if n_reml_iter >= 3 and not _unfreeze_scheduled:
-            newly_frozen = []
-            for name in list(active_names):
-                if name in lambdas_new and name in lambdas:
-                    ch = abs(
-                        np.log(max(lambdas_new[name], 1e-10)) - np.log(max(lambdas[name], 1e-10))
-                    )
-                    if ch < freeze_threshold:
-                        newly_frozen.append(name)
-            for name in newly_frozen:
-                active_names.discard(name)
-                frozen_names.add(name)
-
-            # If we have frozen components and only SCOP remains active,
-            # schedule an unfreeze after SCOP stabilizes to re-couple
-            if frozen_names and active_names and len(active_names) < len(estimated_names):
-                _unfreeze_pending = True
+        # Step 7b: Multi-SCOP discrete cleanup — freeze floor-pinned components
+        # after they have been stable for several accepted lambda updates.
+        if managed_cleanup_active:
+            frozen_names_before = set(frozen_names)
+            managed_active_names = managed_cleanup_names - frozen_names
+            stable_counts = _update_multi_scop_discrete_stability_counts(
+                lambdas_old=lambdas,
+                lambdas_new=lambdas_new,
+                active_names=managed_active_names,
+                stable_counts=stable_counts,
+            )
+            managed_active_names, frozen_names = _freeze_multi_scop_discrete_lambdas(
+                active_names=managed_active_names,
+                frozen_names=frozen_names,
+                lambdas_new=lambdas_new,
+                stable_counts=stable_counts,
+            )
+            frozen_names &= managed_cleanup_names
+            active_names = set(estimated_names) - frozen_names
+            # Record the first 1-based outer iteration where the frozen set
+            # changes relative to the previous accepted iteration.
+            if managed_cleanup_freeze_iter is None and frozen_names != frozen_names_before:
+                managed_cleanup_freeze_iter = n_reml_iter
+            # Histories store accepted post-update snapshots for this outer step.
+            managed_cleanup_active_history.append(sorted(managed_cleanup_names - frozen_names))
+            managed_cleanup_frozen_history.append(sorted(frozen_names))
+        else:
+            active_names = set(estimated_names)
+            frozen_names.clear()
 
         # Step 8: Convergence check — strict tolerance OR objective plateau
-        # Use all components (not just still-estimated) for convergence decision
+        # Strict convergence still checks the accepted update across all
+        # estimated components, including any names that were frozen earlier.
         changes = [
             abs(np.log(lambdas_new[pc.name]) - np.log(lambdas[pc.name]))
             for pc in all_pcs
@@ -738,24 +873,55 @@ def optimize_scop_efs_reml(
             obj_curr_val = objective_history[-1]
             obj_rel_change = abs(obj_curr_val - obj_prev) / max(abs(obj_curr_val), 1.0)
 
-        # Unfreeze: if SCOP-only iterations have stabilized, re-couple for final joint cleanup
-        if _unfreeze_pending and max_change < 0.01 and n_reml_iter >= 5:
-            active_names = set(estimated_names)
-            frozen_names.clear()
-            _unfreeze_scheduled = True
-            _unfreeze_pending = False
-
         # Converge on strict lambda tolerance
         strict_converged = max_change < reml_tol
-        # OR: objective plateau — relative objective change < 1e-6 AND
-        # lambda changes < 0.01 (1% on log scale) for at least 2 iterations
-        plateau_converged = n_reml_iter >= 3 and obj_rel_change < 1e-6 and max_change < 0.01
+        if managed_cleanup_active:
+            plateau_converged = n_reml_iter >= 3 and _multi_scop_discrete_plateau_converged(
+                obj_rel_change=obj_rel_change,
+                lambdas_old=lambdas,
+                lambdas_new=lambdas_new,
+                active_names=active_names,
+            )
+        else:
+            plateau_converged = n_reml_iter >= 3 and obj_rel_change < 1e-6 and max_change < 0.01
 
         if verbose:
             lam_str = ", ".join(f"{pc.name}={lambdas_new[pc.name]:.4g}" for pc in all_pcs)
             print(
                 f"  SCOP REML iter={n_reml_iter}  max_change={max_change:.6f}"
                 f"  obj_rel={obj_rel_change:.2e}  lambdas=[{lam_str}]"
+            )
+
+        if debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2:
+            obj_after = reml_laml_objective(
+                dm,
+                distribution,
+                link,
+                groups,
+                y,
+                result,
+                lambdas_new,
+                sample_weight,
+                offset_arr,
+                XtWX=XtWX,
+                reml_penalties=all_pcs,
+                scop_states=scop_states,
+            )
+            debug_recorder.append_jsonl(
+                "reml",
+                {
+                    "iteration": n_reml_iter,
+                    "objective_before": float(obj_curr),
+                    "objective_after": float(obj_after),
+                    "lambda_max_delta": float(max_change),
+                    "objective_relative_change": float(obj_rel_change),
+                    "strict_converged": bool(strict_converged),
+                    "plateau_converged": bool(plateau_converged),
+                    "estimated_names": sorted(estimated_names),
+                    "active_names": sorted(active_names),
+                    "frozen_names": sorted(frozen_names),
+                    "lambdas": {name: float(value) for name, value in lambdas_new.items()},
+                },
             )
 
         lambda_history.append(lambdas_new.copy())
@@ -791,6 +957,8 @@ def optimize_scop_efs_reml(
         convergence=convergence,
         _scop_joint=_scop_joint,
         scop_state_init=warm_scop_states,
+        debug_recorder=debug_recorder,
+        debug_context={"phase": "final", "reml_iteration": n_reml_iter},
     )
 
     if len(final_out) == 4:
@@ -829,4 +997,13 @@ def optimize_scop_efs_reml(
         objective_history=objective_history,
         scop_step_norms=scop_step_norms_history if scop_step_norms_history else None,
         scop_fisher_fallbacks=total_fisher_fallbacks,
+        managed_cleanup_names=sorted(managed_cleanup_names) if managed_cleanup_names else None,
+        managed_cleanup_frozen_names=sorted(frozen_names) if managed_cleanup_active else None,
+        managed_cleanup_freeze_iter=managed_cleanup_freeze_iter,
+        managed_cleanup_active_history=(
+            managed_cleanup_active_history if managed_cleanup_active_history else None
+        ),
+        managed_cleanup_frozen_history=(
+            managed_cleanup_frozen_history if managed_cleanup_frozen_history else None
+        ),
     )

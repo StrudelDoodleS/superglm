@@ -538,10 +538,15 @@ def build_design_matrix(
         bin_idx = None
         exposure_agg = None
 
+        constraint_kind = getattr(spec, "constraint_kind", getattr(spec, "monotone", None))
+        constraint_mode = getattr(
+            spec, "constraint_mode", getattr(spec, "monotone_mode", "postfit")
+        )
+
         _scop_discrete = (
             use_discrete
-            and getattr(spec, "monotone", None) is not None
-            and getattr(spec, "monotone_mode", "postfit") == "fit"
+            and constraint_kind is not None
+            and constraint_mode == "fit"
             and hasattr(spec, "_build_scop_reparameterization")
         )
 
@@ -559,8 +564,8 @@ def build_design_matrix(
             monotone_engine = None
             raw_to_solver_map = None
             if (
-                getattr(spec, "monotone", None) is not None
-                and getattr(spec, "monotone_mode", "postfit") == "fit"
+                constraint_kind is not None
+                and constraint_mode == "fit"
                 and hasattr(spec, "_build_monotone_constraints_raw")
             ):
                 cs_raw = spec._build_monotone_constraints_raw()
@@ -575,20 +580,23 @@ def build_design_matrix(
                 from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
 
                 q_raw = spec._n_basis
-                raw_reparam = build_scop_reparam(q_raw, direction=spec.monotone)
+                raw_reparam = build_scop_reparam(q_raw, kind=constraint_kind)
                 X_sigma_unique = B_unique @ raw_reparam.Sigma  # (n_bins, K)
 
                 # Centering weighted by bin counts (equivalent to full-data mean)
                 n_obs = len(bin_idx)
                 bin_counts = np.bincount(bin_idx, minlength=len(bin_centers))
-                col_means = (X_sigma_unique[:, 1:].T @ bin_counts) / n_obs
-                X_centered_unique = X_sigma_unique[:, 1:] - col_means  # (n_bins, q_eff)
+                null_dim = raw_reparam.null_dim
+                X_shape_unique = X_sigma_unique[:, null_dim:]
+                col_means = (X_shape_unique.T @ bin_counts) / n_obs
+                X_centered_unique = X_shape_unique - col_means  # (n_bins, q_eff)
 
                 # Store on spec for predict-time transform
                 spec._scop_Sigma = raw_reparam.Sigma
+                spec._scop_null_dim = null_dim
                 spec._scop_col_means = col_means
 
-                solver_reparam = build_scop_solver_reparam(q_raw, direction=spec.monotone)
+                solver_reparam = build_scop_solver_reparam(q_raw, kind=constraint_kind)
                 S_scop = solver_reparam.penalty_matrix()
                 q_eff = X_centered_unique.shape[1]
 

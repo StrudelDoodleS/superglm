@@ -987,6 +987,19 @@ class SuperGLM:
         """
         return monotone_ops.monotonize(self, X, sample_weight, offset, n_grid=n_grid)
 
+    def apply_shape_postfit(
+        self,
+        X: pd.DataFrame,
+        sample_weight: NDArray | None = None,
+        offset: NDArray | None = None,
+        *,
+        n_grid: int = 500,
+    ) -> SuperGLM:
+        """Repair postfit monotone and curvature-constrained spline terms."""
+        from superglm.model import shape_ops
+
+        return shape_ops.apply_shape_postfit(self, X, sample_weight, offset, n_grid=n_grid)
+
     def apply_monotone_postfit(
         self,
         X: pd.DataFrame,
