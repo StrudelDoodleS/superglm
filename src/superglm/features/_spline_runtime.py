@@ -146,34 +146,19 @@ def transform(spec: Any, x: NDArray) -> NDArray:
 
 
 def score(spec: Any, x: NDArray, beta: NDArray) -> NDArray:
-    """Score a spline term directly on new data without materializing transformed columns."""
-    basis = spec._basis_matrix(x)
-    scop_sigma = getattr(spec, "_scop_Sigma", None)
-    if scop_sigma is not None:
-        null_dim = getattr(spec, "_scop_null_dim", 1)
-        sigma_no_intercept = scop_sigma[:, null_dim:]
-        centered_shift = float(np.dot(getattr(spec, "_scop_col_means"), beta))
-        return cast(
-            NDArray,
-            np.asarray(basis @ (sigma_no_intercept @ beta)).ravel() - centered_shift,
-        )
-
-    beta_orig = spec._R_inv @ beta if spec._R_inv is not None else beta
-    return cast(NDArray, np.asarray(basis @ beta_orig).ravel())
+    """Score a spline term directly from the public runtime basis."""
+    return cast(NDArray, np.asarray(transform(spec, x) @ beta, dtype=np.float64).ravel())
 
 
 def reconstruct(spec: Any, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
     """Reconstruct a spline curve on a regular grid."""
     x_grid = np.linspace(spec._lo, spec._hi, n_points)
+    log_rels = transform(spec, x_grid) @ beta
     scop_sigma = getattr(spec, "_scop_Sigma", None)
     if scop_sigma is not None:
-        basis_grid = transform(spec, x_grid)
-        log_rels = basis_grid @ beta
         beta_orig = beta
     else:
         beta_orig = spec._R_inv @ beta if spec._R_inv is not None else beta
-        basis_grid = spec._basis_matrix(x_grid).toarray()
-        log_rels = basis_grid @ beta_orig
     return {
         "x": x_grid,
         "log_relativity": log_rels,
