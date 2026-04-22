@@ -57,13 +57,61 @@ def _group_beta_indices(groups: list[GroupSlice], feature_name: str) -> NDArray[
     return np.concatenate(idx)
 
 
+def _fit_discretizer_metadata(values: NDArray, n_bins: int) -> dict[str, Any]:
+    """Compile fit-time support metadata for a fast discrete predictor."""
+    support, _ = _discretize_column(values, n_bins)
+    unique_vals = np.unique(values)
+    if len(unique_vals) <= n_bins:
+        return {
+            "mode": "exact_support",
+            "support": support,
+        }
+    return {
+        "mode": "uniform_bins",
+        "support": support,
+        "lo": float(np.min(values)),
+        "hi": float(np.max(values)),
+        "n_bins": len(support),
+    }
+
+
+def _discretize_against_fit_metadata(
+    values: NDArray,
+    metadata: dict[str, Any],
+) -> tuple[NDArray[np.float64], NDArray[np.intp]]:
+    """Discretize prediction data against fit-time support metadata."""
+    values = np.asarray(values, dtype=np.float64).ravel()
+    support = np.asarray(metadata["support"], dtype=np.float64)
+    if metadata["mode"] == "exact_support":
+        if len(support) <= 1:
+            return support, np.zeros(len(values), dtype=np.intp)
+        boundaries = 0.5 * (support[:-1] + support[1:])
+        bin_idx = np.searchsorted(boundaries, values, side="right").astype(np.intp)
+        return support, bin_idx
+
+    lo = float(metadata["lo"])
+    hi = float(metadata["hi"])
+    n_bins = int(metadata["n_bins"])
+    if lo == hi:
+        return np.array([lo], dtype=np.float64), np.zeros(len(values), dtype=np.intp)
+    edges = np.linspace(lo, hi, n_bins + 1)
+    bin_idx = np.clip(np.searchsorted(edges, values, side="right") - 1, 0, n_bins - 1)
+    return support, np.asarray(bin_idx, dtype=np.intp)
+
+
 def _feature_fast_discrete_metadata(model, name: str, spec: FeatureSpec) -> dict[str, Any] | None:
     """Compile fit-time metadata for a discretized main-effect fast predictor."""
     if not should_discretize(spec, model._discrete):
         return None
+    if model._fit_X_ref is None:
+        return None
+    n_bins = resolve_discrete_n_bins(name, spec, model._n_bins)
     return {
         "kind": "feature",
-        "n_bins": resolve_discrete_n_bins(name, spec, model._n_bins),
+        "discretizer": _fit_discretizer_metadata(
+            np.asarray(model._fit_X_ref[name], dtype=np.float64),
+            n_bins,
+        ),
     }
 
 
@@ -71,13 +119,24 @@ def _interaction_fast_discrete_metadata(model, spec: Any) -> dict[str, Any] | No
     """Compile fit-time metadata for a discretized tensor fast predictor."""
     if not should_discretize_tensor_interaction(spec, model._specs, model._discrete):
         return None
+    if model._fit_X_ref is None:
+        return None
     left_name, right_name = spec.parent_names
+    left_bins = resolve_discrete_n_bins(left_name, model._specs[left_name], model._n_bins)
+    right_bins = resolve_discrete_n_bins(right_name, model._specs[right_name], model._n_bins)
     return {
         "kind": "interaction",
-        "n_bins": (
-            resolve_discrete_n_bins(left_name, model._specs[left_name], model._n_bins),
-            resolve_discrete_n_bins(right_name, model._specs[right_name], model._n_bins),
+        "left_discretizer": _fit_discretizer_metadata(
+            np.asarray(model._fit_X_ref[left_name], dtype=np.float64),
+            left_bins,
         ),
+        "right_discretizer": _fit_discretizer_metadata(
+            np.asarray(model._fit_X_ref[right_name], dtype=np.float64),
+            right_bins,
+        ),
+        "left_marginal": copy.deepcopy(spec._marginal1),
+        "right_marginal": copy.deepcopy(spec._marginal2),
+        "r_inv": None if getattr(spec, "_R_inv", None) is None else np.asarray(spec._R_inv).copy(),
     }
 
 
@@ -140,9 +199,9 @@ def _score_feature_fast_discrete(
     beta: NDArray,
 ) -> NDArray[np.floating]:
     """Approximate one canonical main-effect term via discretized support points."""
-    support, bin_idx = _discretize_column(
+    support, bin_idx = _discretize_against_fit_metadata(
         np.asarray(X[term["name"]], dtype=np.float64),
-        term["fast_discrete"]["n_bins"],
+        term["fast_discrete"]["discretizer"],
     )
     values = _score_feature(term["spec"], support, beta)
     return np.asarray(values, dtype=np.float64).ravel()[bin_idx]
@@ -156,29 +215,43 @@ def _score_interaction_fast_discrete(
 ) -> NDArray[np.floating]:
     """Approximate one canonical tensor term via discretized support pairs."""
     spec = term["spec"]
+    metadata = term["fast_discrete"]
     left_name, right_name = term["parent_names"]
-    old_marginal1 = getattr(spec, "_marginal1", None)
-    old_marginal2 = getattr(spec, "_marginal2", None)
-    old_p1 = getattr(spec, "_p1", None)
-    old_p2 = getattr(spec, "_p2", None)
-    try:
-        tensor_build = spec.build_discrete(
-            np.asarray(X[left_name], dtype=np.float64),
-            np.asarray(X[right_name], dtype=np.float64),
-            model._specs,
-            term["fast_discrete"]["n_bins"],
-        )
-    finally:
-        spec._marginal1 = old_marginal1
-        spec._marginal2 = old_marginal2
-        spec._p1 = old_p1
-        spec._p2 = old_p2
+    left_support, idx1 = _discretize_against_fit_metadata(
+        np.asarray(X[left_name], dtype=np.float64),
+        metadata["left_discretizer"],
+    )
+    right_support, idx2 = _discretize_against_fit_metadata(
+        np.asarray(X[right_name], dtype=np.float64),
+        metadata["right_discretizer"],
+    )
+    B1_unique = np.asarray(
+        spec._centered_marginal_basis(left_support, metadata["left_marginal"]).toarray(),
+        dtype=np.float64,
+    )
+    B2_unique = np.asarray(
+        spec._centered_marginal_basis(right_support, metadata["right_marginal"]).toarray(),
+        dtype=np.float64,
+    )
+
+    n_support2 = len(right_support)
+    pair_codes = idx1.astype(np.int64) * n_support2 + idx2.astype(np.int64)
+    observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+    observed_i1 = (observed_codes // n_support2).astype(np.intp)
+    observed_i2 = (observed_codes % n_support2).astype(np.intp)
+    B_joint = np.einsum(
+        "ij,ik->ijk",
+        B1_unique[observed_i1],
+        B2_unique[observed_i2],
+        optimize=True,
+    ).reshape(len(observed_codes), -1)
+
     beta_block = beta
-    r_inv = getattr(spec, "_R_inv", None)
+    r_inv = metadata["r_inv"]
     if r_inv is not None:
         beta_block = np.asarray(r_inv, dtype=np.float64) @ beta
-    support_values = np.asarray(tensor_build.B_joint @ beta_block, dtype=np.float64).ravel()
-    return support_values[tensor_build.pair_idx]
+    support_values = np.asarray(B_joint @ beta_block, dtype=np.float64).ravel()
+    return support_values[np.asarray(pair_idx, dtype=np.intp)]
 
 
 def _score_prediction_term_exact(
