@@ -22,15 +22,38 @@ def _runtime_canonicalization_diagnostics(model: SuperGLM) -> dict:
     return diagnostics
 
 
-def _recompute_runtime_parity_diagnostics(model: SuperGLM) -> dict[str, float]:
+def _recompute_live_public_runtime_state(model: SuperGLM) -> dict[str, object]:
+    X = model._fit_X_ref
+    assert X is not None
+
+    eta_after = np.full(len(X), model.result.intercept, dtype=np.float64)
+    term_means_after: dict[str, float] = {}
+
+    for feature_name in model._feature_order:
+        spec = model._specs[feature_name]
+        groups = model._feature_groups(feature_name)
+        beta = np.concatenate([model.result.beta[g.sl] for g in groups])
+        values = X[feature_name].to_numpy(dtype=np.float64)
+        contribution = np.asarray(spec.score(values, beta), dtype=np.float64).ravel()
+        eta_after += contribution
+        term_means_after[feature_name] = float(np.mean(contribution))
+
+    for interaction_name in model._interaction_order:
+        spec = model._interaction_specs[interaction_name]
+        groups = model._feature_groups(interaction_name)
+        beta = np.concatenate([model.result.beta[g.sl] for g in groups])
+        left_name, right_name = spec.parent_names
+        left = X[left_name].to_numpy(dtype=np.float64)
+        right = X[right_name].to_numpy(dtype=np.float64)
+        if hasattr(spec, "score"):
+            contribution = np.asarray(spec.score(left, right, beta), dtype=np.float64).ravel()
+        else:
+            contribution = np.asarray(spec.transform(left, right) @ beta, dtype=np.float64).ravel()
+        eta_after += contribution
+        term_means_after[interaction_name] = float(np.mean(contribution))
+
     solver = model._solver_pirls_result()
     eta_before = model._dm.matvec(solver.beta) + solver.intercept
-    applied_shift = 0.0
-    for term_state in model._runtime_canonical_state["terms"].values():
-        assert "applied_to_public_model" in term_state
-        if term_state["applied_to_public_model"]:
-            applied_shift += term_state["intercept_shift"]
-    eta_after = eta_before + applied_shift
     if model._fit_offset is not None:
         eta_before = eta_before + model._fit_offset
         eta_after = eta_after + model._fit_offset
@@ -39,6 +62,7 @@ def _recompute_runtime_parity_diagnostics(model: SuperGLM) -> dict[str, float]:
     mu_before = clip_mu(model._link.inverse(eta_before), model._distribution)
     mu_after = clip_mu(model._link.inverse(eta_after), model._distribution)
     return {
+        "term_means_after": term_means_after,
         "max_abs_eta_delta": float(np.max(np.abs(eta_after - eta_before))),
         "max_abs_mu_delta": float(np.max(np.abs(mu_after - mu_before))),
     }
@@ -55,7 +79,7 @@ def _assert_zero_mean_and_before_after_parity(
     assert abs(np.mean(contribution)) < 1e-10
 
     diagnostics = _runtime_canonicalization_diagnostics(model)
-    recomputed = _recompute_runtime_parity_diagnostics(model)
+    recomputed = _recompute_live_public_runtime_state(model)
     assert diagnostics["max_abs_eta_delta"] < 1e-10
     assert diagnostics["max_abs_mu_delta"] < 1e-10
     assert abs(diagnostics["max_abs_eta_delta"] - recomputed["max_abs_eta_delta"]) < 1e-12
@@ -99,6 +123,8 @@ class TestRuntimeCanonicalization:
         )
         model.fit_reml(X, y, sample_weight=sample_weight, max_reml_iter=10)
 
+        assert model._runtime_canonical_state["solver_to_public"] is not None
+        assert model._runtime_canonical_state["solver_to_public_complete"] is True
         _assert_zero_mean_and_before_after_parity(
             model,
             "x",
@@ -172,10 +198,16 @@ class TestRuntimeCanonicalization:
         assert state["applied_to_public_model"] is False
         assert len(state["group_indices"]) == 2
         assert abs(state["term_mean_before"]) > 1e-6
-        assert abs(state["term_mean_after"]) < 1e-10
+        assert state["term_mean_after"] is None
+        assert model._runtime_canonical_state["solver_to_public"] is None
+        assert model._runtime_canonical_state["solver_to_public_complete"] is False
 
         diagnostics = _runtime_canonicalization_diagnostics(model)
-        recomputed = _recompute_runtime_parity_diagnostics(model)
-        assert abs(diagnostics["term_means_after"][interaction_name]) < 1e-10
+        recomputed = _recompute_live_public_runtime_state(model)
+        assert (
+            diagnostics["term_means_after"][interaction_name]
+            == recomputed["term_means_after"][interaction_name]
+        )
+        assert abs(diagnostics["term_means_after"][interaction_name]) > 1e-6
         assert abs(diagnostics["max_abs_eta_delta"] - recomputed["max_abs_eta_delta"]) < 1e-12
         assert abs(diagnostics["max_abs_mu_delta"] - recomputed["max_abs_mu_delta"]) < 1e-12
