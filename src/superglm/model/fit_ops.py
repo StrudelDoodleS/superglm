@@ -492,11 +492,17 @@ def fit_path(
     )
     runtime_canonicalize.canonicalize_fitted_model(model)
     model._last_fit_meta = {"method": "fit_path", "discrete": model._discrete}
+    intercept_path = runtime_canonicalize.canonicalize_intercept_path(
+        model,
+        path_data["coef_path"],
+        path_data["intercept_path"],
+    )
+    intercept_path[-1] = model.result.intercept
 
     return PathResult(
         lambda_seq=lambda_seq,
         coef_path=path_data["coef_path"],
-        intercept_path=path_data["intercept_path"],
+        intercept_path=intercept_path,
         deviance_path=path_data["deviance_path"],
         n_iter_path=path_data["n_iter_path"],
         converged_path=path_data["converged_path"],

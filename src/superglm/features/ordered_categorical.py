@@ -346,10 +346,15 @@ class OrderedCategorical:
     def transform(self, x: NDArray) -> NDArray:
         """Build design matrix for new data using learned parameters."""
         x = np.asarray(x).ravel()
-        _validate_categorical_levels(x, self._known_levels)
-
         if self._grouping is not None:
-            x = pd.Series(x).map(self._grouping.original_to_group).values
+            valid_levels = self._known_levels | set(self._grouping.grouped_levels)
+            _validate_categorical_levels(x, valid_levels)
+            x = np.array(
+                [self._grouping.original_to_group.get(str(v), str(v)) for v in x],
+                dtype=object,
+            )
+        else:
+            _validate_categorical_levels(x, self._known_levels)
 
         if self.basis == "spline":
             x_numeric = self._map_to_numeric(x)
@@ -364,10 +369,15 @@ class OrderedCategorical:
     def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
         """Score the fitted ordered-categorical contribution directly on new data."""
         x = np.asarray(x).ravel()
-        _validate_categorical_levels(x, self._known_levels)
-
         if self._grouping is not None:
-            x = pd.Series(x).map(self._grouping.original_to_group).values
+            valid_levels = self._known_levels | set(self._grouping.grouped_levels)
+            _validate_categorical_levels(x, valid_levels)
+            x = np.array(
+                [self._grouping.original_to_group.get(str(v), str(v)) for v in x],
+                dtype=object,
+            )
+        else:
+            _validate_categorical_levels(x, self._known_levels)
 
         if self.basis == "spline":
             x_numeric = self._map_to_numeric(x)

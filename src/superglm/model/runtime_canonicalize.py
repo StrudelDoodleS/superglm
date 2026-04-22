@@ -46,11 +46,15 @@ def _is_spline_backed_interaction(model, spec: Any) -> bool:
 def _iter_spline_backed_terms(model):
     """Yield spline-backed main effects and interactions."""
     for feature_name in model._feature_order:
+        if feature_name in model._interaction_specs:
+            continue
         spec = model._specs[feature_name]
         if _is_spline_backed_feature_spec(spec):
             yield feature_name, spec, "feature"
 
     for interaction_name in model._interaction_order:
+        if interaction_name in model._specs:
+            continue
         spec = model._interaction_specs[interaction_name]
         if _is_spline_backed_interaction(model, spec):
             yield interaction_name, spec, "interaction"
@@ -261,6 +265,8 @@ def _live_public_runtime_state(
     contributions: dict[str, NDArray[np.float64]] = {}
 
     for term in plan["features"]:
+        if term["name"] in model._interaction_specs:
+            continue
         values = np.asarray(X_ref[term["name"]])
         beta = beta_all[term["beta_idx"]]
         contribution = np.asarray(
@@ -271,6 +277,8 @@ def _live_public_runtime_state(
         eta += contribution
 
     for term in plan["interactions"]:
+        if term["name"] in model._specs:
+            continue
         spec = term["spec"]
         left_name, right_name = spec.parent_names
         beta = beta_all[term["beta_idx"]]
@@ -386,3 +394,29 @@ def canonicalize_fitted_model(model) -> None:
         "solver_to_public_complete": solver_to_public_complete,
     }
     base.freeze_prediction_plan(model)
+
+
+def canonicalize_intercept_path(
+    model,
+    coef_path: NDArray[np.float64],
+    intercept_path: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Map a solver-space intercept path into the public canonical intercept path."""
+    state = getattr(model, "_runtime_canonical_state", None)
+    if not isinstance(state, dict):
+        return np.asarray(intercept_path, dtype=np.float64)
+
+    terms = state.get("terms", {})
+    intercept_public = np.asarray(intercept_path, dtype=np.float64).copy()
+    if coef_path.size == 0 or not terms:
+        return intercept_public
+
+    for term_state in terms.values():
+        if not term_state.get("applied_to_public_model"):
+            continue
+        for group_state in term_state["groups"]:
+            start, end = group_state["solver_slice"]
+            means = np.asarray(group_state["column_means"], dtype=np.float64)
+            intercept_public += coef_path[:, start:end] @ means
+
+    return intercept_public
