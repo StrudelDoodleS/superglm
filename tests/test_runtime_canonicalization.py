@@ -199,6 +199,35 @@ class TestRuntimeCanonicalization:
         assert np.max(np.abs(eta_exact - eta_fast)) < 3e-3
         assert np.max(np.abs(mu_exact - mu_fast)) < 3e-3
 
+    @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
+    def test_discrete_standalone_spline_public_term_is_zero_mean_in_live_runtime_space(
+        self,
+        kind: str,
+    ):
+        X, y, sample_weight = _make_monotone_poisson_data(seed=0)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x": Spline(kind=kind, n_knots=10, penalty="ssp")},
+        )
+        model.fit_reml(X, y, sample_weight=sample_weight, max_reml_iter=10)
+
+        beta = _feature_beta(model, "x")
+        contribution = np.asarray(
+            model._specs["x"].score(X["x"].to_numpy(dtype=np.float64), beta),
+            dtype=np.float64,
+        )
+        recomputed = _recompute_live_public_runtime_state(model)
+        diagnostics = _runtime_canonicalization_diagnostics(model)
+
+        assert abs(np.mean(contribution)) < 1e-10
+        assert abs(recomputed["term_means_after"]["x"]) < 1e-10
+        assert diagnostics["term_means_after"]["x"] == pytest.approx(
+            recomputed["term_means_after"]["x"],
+            abs=1e-12,
+        )
+
     def test_qp_monotone_fit_spline_uses_affine_runtime_state(self):
         X, y, sample_weight = _make_monotone_poisson_data(seed=2)
         model = SuperGLM(
