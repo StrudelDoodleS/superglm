@@ -93,14 +93,17 @@ def _spline_se(
     Cov_active: NDArray,
     n_points: int = 200,
     x_eval: NDArray | None = None,
+    reference_x: NDArray | None = None,
 ) -> NDArray:
-    """Shared spline SE computation for _SplineBase and OrderedCategorical(spline).
+    """Shared public-runtime SE computation for spline-style terms.
 
     Parameters
     ----------
     x_eval : array, optional
         Evaluate SEs at these specific x positions instead of a linspace grid.
         When provided, ``n_points`` is ignored.
+    reference_x : array, optional
+        When provided, propagate uncertainty for ``f(x_eval) - f(reference_x)``.
     """
     n_out = len(x_eval) if x_eval is not None else n_points
     beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
@@ -114,8 +117,7 @@ def _spline_se(
     x_grid = (
         x_eval if x_eval is not None else np.linspace(spline_spec._lo, spline_spec._hi, n_points)
     )
-    B_grid = spline_spec._raw_basis_matrix(x_grid)
-    M = B_grid @ spline_spec._R_inv if spline_spec._R_inv is not None else B_grid
+    M = np.asarray(spline_spec.transform(x_grid), dtype=np.float64)
     # For select=True: only use columns for active subgroups
     active_cols = np.concatenate(
         [
@@ -125,6 +127,14 @@ def _spline_se(
         ]
     )
     M = M[:, active_cols]
+    if reference_x is not None:
+        M_ref = np.asarray(spline_spec.transform(reference_x), dtype=np.float64)[:, active_cols]
+        if M_ref.shape[0] == 1:
+            M = M - M_ref
+        elif M_ref.shape[0] == M.shape[0]:
+            M = M - M_ref
+        else:
+            raise ValueError("reference_x must produce one row or match x_eval row count.")
     Q = M @ Cov_g
     return cast(NDArray, np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0)))
 

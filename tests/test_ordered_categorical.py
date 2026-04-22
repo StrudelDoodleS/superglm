@@ -6,6 +6,25 @@ import pytest
 
 from superglm import Categorical, OrderedCategorical, SuperGLM
 
+
+def _active_feature_columns(model: SuperGLM, feature_name: str) -> np.ndarray:
+    groups = model._feature_groups(feature_name)
+    _, active_groups = model._coef_covariance
+    active_subs = [ag for ag in active_groups if ag.feature_name == feature_name]
+    return np.concatenate(
+        [
+            np.arange(g.start, g.end) - groups[0].start
+            for g in groups
+            if any(ag.feature_name == feature_name and ag.name == g.name for ag in active_subs)
+        ]
+    )
+
+
+def _manual_runtime_se(M: np.ndarray, Cov_g: np.ndarray) -> np.ndarray:
+    Q = M @ Cov_g
+    return np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
+
+
 # ── Fixtures ──────────────────────────────────────────────────────
 
 
@@ -731,6 +750,100 @@ class TestSplineObjectRuntimeDeployability:
         }
         np.testing.assert_allclose(
             [level_rows[level] for level in raw["levels"]],
+            expected,
+            atol=1e-12,
+            rtol=1e-12,
+        )
+
+    def test_monotone_fit_spline_object_level_ses_are_base_relative(self, age_band_data):
+        from superglm.features.spline import PSpline
+
+        X, y, sample_weight, midpoints, _ = age_band_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "age_band": OrderedCategorical(
+                    values=midpoints,
+                    basis=PSpline(
+                        n_knots=4,
+                        penalty="ssp",
+                        monotone="increasing",
+                        monotone_mode="fit",
+                    ),
+                )
+            },
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        spec = model._specs["age_band"]
+        Cov_active, active_groups = model._coef_covariance
+        active_subs = [ag for ag in active_groups if ag.feature_name == "age_band"]
+        indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
+        Cov_g = Cov_active[np.ix_(indices, indices)]
+        levels = np.array(spec._ordered_levels, dtype=object)
+        active_cols = _active_feature_columns(model, "age_band")
+        M_levels = spec.transform(levels)[:, active_cols]
+        base_idx = spec._ordered_levels.index(spec._base_level)
+        expected = _manual_runtime_se(M_levels - M_levels[[base_idx]], Cov_g)
+
+        ti = model.term_inference("age_band")
+        assert ti.se_log_relativity is not None
+        np.testing.assert_allclose(ti.se_log_relativity, expected, atol=1e-12, rtol=1e-12)
+        assert ti.se_log_relativity[base_idx] == pytest.approx(0.0, abs=1e-12)
+
+        summary = model.summary()
+        level_rows = {
+            row.name[len("age_band[") : -1]: row
+            for row in summary._coef_rows
+            if row.name.startswith("age_band[")
+        }
+        got_summary = np.array(
+            [level_rows[level].se for level in spec._ordered_levels], dtype=float
+        )
+        np.testing.assert_allclose(got_summary, expected, atol=1e-12, rtol=1e-12)
+        assert level_rows[spec._base_level].se == pytest.approx(0.0, abs=1e-12)
+
+    def test_monotone_fit_spline_object_curve_se_uses_public_runtime_basis(self, age_band_data):
+        from superglm.features.spline import PSpline
+
+        X, y, sample_weight, midpoints, _ = age_band_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "age_band": OrderedCategorical(
+                    values=midpoints,
+                    basis=PSpline(
+                        n_knots=4,
+                        penalty="ssp",
+                        monotone="increasing",
+                        monotone_mode="fit",
+                    ),
+                )
+            },
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        spec = model._specs["age_band"]
+        ti = model.term_inference("age_band")
+        assert ti.smooth_curve is not None
+        assert ti.smooth_curve.se_log_relativity is not None
+
+        Cov_active, active_groups = model._coef_covariance
+        active_subs = [ag for ag in active_groups if ag.feature_name == "age_band"]
+        indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
+        Cov_g = Cov_active[np.ix_(indices, indices)]
+        active_cols = _active_feature_columns(model, "age_band")
+
+        x_grid = np.asarray(ti.smooth_curve.x, dtype=np.float64)
+        M_curve = spec._spline.transform(x_grid)[:, active_cols]
+        base_value = np.array([spec._level_to_value[spec._base_level]], dtype=np.float64)
+        M_base = spec._spline.transform(base_value)[:, active_cols]
+        expected = _manual_runtime_se(M_curve - M_base, Cov_g)
+
+        np.testing.assert_allclose(
+            ti.smooth_curve.se_log_relativity,
             expected,
             atol=1e-12,
             rtol=1e-12,
