@@ -303,6 +303,8 @@ def _build_public_result(solver: PIRLSResult, state: dict[str, Any]) -> PIRLSRes
 
 def canonicalize_fitted_model(model) -> None:
     """Finalize the public runtime result after solver-space fitting completes."""
+    from superglm.model import base
+
     solver = model._solver_pirls_result()
     term_states, public_intercept_shift = _compile_runtime_terms(model, solver)
 
@@ -330,4 +332,4 @@ def canonicalize_fitted_model(model) -> None:
         "solver_to_public": solver_to_public,
         "solver_to_public_complete": solver_to_public_complete,
     }
-    model._prediction_plan = None
+    base.freeze_prediction_plan(model)

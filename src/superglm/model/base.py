@@ -99,7 +99,11 @@ def _discretize_against_fit_metadata(
     return support, np.asarray(bin_idx, dtype=np.intp)
 
 
-def _feature_fast_discrete_metadata(model, name: str, spec: FeatureSpec) -> dict[str, Any] | None:
+def _compile_feature_fast_discrete_metadata(
+    model,
+    name: str,
+    spec: FeatureSpec,
+) -> dict[str, Any] | None:
     """Compile fit-time metadata for a discretized main-effect fast predictor."""
     if not should_discretize(spec, model._discrete):
         return None
@@ -115,7 +119,7 @@ def _feature_fast_discrete_metadata(model, name: str, spec: FeatureSpec) -> dict
     }
 
 
-def _interaction_fast_discrete_metadata(model, spec: Any) -> dict[str, Any] | None:
+def _compile_interaction_fast_discrete_metadata(model, spec: Any) -> dict[str, Any] | None:
     """Compile fit-time metadata for a discretized tensor fast predictor."""
     if not should_discretize_tensor_interaction(spec, model._specs, model._discrete):
         return None
@@ -140,8 +144,30 @@ def _interaction_fast_discrete_metadata(model, spec: Any) -> dict[str, Any] | No
     }
 
 
-def _build_prediction_plan(model) -> dict[str, list[dict[str, Any]]]:
+def _compile_fast_prediction_state(model) -> dict[str, dict[str, dict[str, Any] | None]]:
+    """Freeze fit-time fast prediction metadata on the model."""
+    return {
+        "features": {
+            name: _compile_feature_fast_discrete_metadata(model, name, model._specs[name])
+            for name in model._feature_order
+        },
+        "interactions": {
+            name: _compile_interaction_fast_discrete_metadata(model, model._interaction_specs[name])
+            for name in model._interaction_order
+        },
+    }
+
+
+def _build_prediction_plan(
+    model,
+    *,
+    fast_prediction_state: dict[str, dict[str, dict[str, Any] | None]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     """Compile reusable metadata for prediction scoring."""
+    if fast_prediction_state is None:
+        fast_prediction_state = getattr(model, "_fast_prediction_state", None)
+    if fast_prediction_state is None:
+        fast_prediction_state = _compile_fast_prediction_state(model)
     return {
         "features": [
             {
@@ -149,7 +175,7 @@ def _build_prediction_plan(model) -> dict[str, list[dict[str, Any]]]:
                 "name": name,
                 "spec": model._specs[name],
                 "beta_idx": _group_beta_indices(model._groups, name),
-                "fast_discrete": _feature_fast_discrete_metadata(model, name, model._specs[name]),
+                "fast_discrete": copy.deepcopy(fast_prediction_state["features"].get(name)),
             }
             for name in model._feature_order
         ],
@@ -160,10 +186,7 @@ def _build_prediction_plan(model) -> dict[str, list[dict[str, Any]]]:
                 "spec": model._interaction_specs[name],
                 "parent_names": tuple(model._interaction_specs[name].parent_names),
                 "beta_idx": _group_beta_indices(model._groups, name),
-                "fast_discrete": _interaction_fast_discrete_metadata(
-                    model,
-                    model._interaction_specs[name],
-                ),
+                "fast_discrete": copy.deepcopy(fast_prediction_state["interactions"].get(name)),
             }
             for name in model._interaction_order
         ],
@@ -188,9 +211,23 @@ def _prediction_plan(model) -> dict[str, list[dict[str, Any]]]:
     """Return the cached prediction metadata, building it lazily."""
     plan = model._prediction_plan
     if plan is None:
-        plan = _build_prediction_plan(model)
+        fast_prediction_state = getattr(model, "_fast_prediction_state", None)
+        if fast_prediction_state is None:
+            fast_prediction_state = _compile_fast_prediction_state(model)
+            model._fast_prediction_state = fast_prediction_state
+        plan = _build_prediction_plan(model, fast_prediction_state=fast_prediction_state)
         model._prediction_plan = plan
     return plan
+
+
+def freeze_prediction_plan(model) -> None:
+    """Freeze the fast discrete prediction metadata after fitting."""
+    fast_prediction_state = _compile_fast_prediction_state(model)
+    model._fast_prediction_state = fast_prediction_state
+    model._prediction_plan = _build_prediction_plan(
+        model,
+        fast_prediction_state=fast_prediction_state,
+    )
 
 
 def _score_feature_fast_discrete(
@@ -469,6 +506,7 @@ def init_model(
     model._last_fit_meta: dict[str, Any] | None = None
     model._monotone_repairs: dict = {}
     model._prediction_plan = None
+    model._fast_prediction_state = None
     model._fit_mu: NDArray | None = None
     model._fit_null_mu: NDArray | None = None
     model._fit_X_ref = None
