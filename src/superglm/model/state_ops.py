@@ -31,6 +31,54 @@ def _build_S_from_penalties(model, lam2) -> NDArray | None:
     )
 
 
+def _solver_space_working_weights(model) -> NDArray:
+    """Working weights computed against the solver-space fit state."""
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+
+    solver = model._solver_pirls_result()
+    eta = model._dm.matvec(solver.beta) + solver.intercept
+    if model._fit_offset is not None:
+        eta = eta + model._fit_offset
+    eta = stabilize_eta(eta, model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    V = model._distribution.variance(mu)
+    dmu_deta = model._link.deriv_inverse(eta)
+    return model._fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
+
+
+def _public_augmented_covariance(model, XtWX_inv_aug: NDArray, active_groups) -> NDArray:
+    """Map solver-space augmented covariance into the public runtime state."""
+    runtime_state = getattr(model, "_runtime_canonical_state", None)
+    if runtime_state is None:
+        return XtWX_inv_aug
+
+    p_active = XtWX_inv_aug.shape[0] - 1
+    if p_active <= 0:
+        return XtWX_inv_aug
+
+    intercept_shift = np.zeros(p_active, dtype=np.float64)
+    for term_state in runtime_state.get("terms", {}).values():
+        if not term_state.get("applied_to_public_model", False):
+            continue
+        for group_state in term_state.get("groups", []):
+            active_group = next(
+                (group for group in active_groups if group.name == group_state["group_name"]),
+                None,
+            )
+            if active_group is None:
+                continue
+            column_means = np.asarray(group_state["column_means"], dtype=np.float64).ravel()
+            intercept_shift[active_group.sl] = column_means
+
+    if not np.any(intercept_shift):
+        return XtWX_inv_aug
+
+    transform = np.eye(XtWX_inv_aug.shape[0], dtype=np.float64)
+    transform[0, 1:] = intercept_shift
+    return transform @ XtWX_inv_aug @ transform.T
+
+
 def coef_covariance(model):
     """Phi-scaled Bayesian covariance for active coefficients."""
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
@@ -40,7 +88,7 @@ def coef_covariance(model):
         model._distribution,
         model._link,
         model._groups,
-        model.result,
+        model._solver_pirls_result(),
         model._fit_weights,
         model._fit_offset,
         lam2,
@@ -50,29 +98,22 @@ def coef_covariance(model):
 
 def fit_active_info(model):
     """Active design columns, weights, and (X'WX+S)^{-1} from fit state."""
-    from superglm.distributions import clip_mu
     from superglm.inference.covariance import _penalised_xtwx_inv
-    from superglm.links import stabilize_eta
 
-    eta = model._dm.matvec(model.result.beta) + model.result.intercept
-    if model._fit_offset is not None:
-        eta = eta + model._fit_offset
-    eta = stabilize_eta(eta, model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution)
-    V = model._distribution.variance(mu)
-    dmu_deta = model._link.deriv_inverse(eta)
-    W = model._fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
+    solver = model._solver_pirls_result()
+    W = _solver_space_working_weights(model)
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
     S_full = _build_S_from_penalties(model, lam2)
     X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
-        model.result.beta,
+        solver.beta,
         W,
         model._dm.group_matrices,
         model._groups,
         lam2,
         S_override=S_full,
     )
+    XtWX_inv_aug = _public_augmented_covariance(model, XtWX_inv_aug, active_groups)
     return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
 
 
@@ -96,19 +137,10 @@ def fit_inference_info(model):
     """
     import scipy.linalg
 
-    from superglm.distributions import clip_mu
     from superglm.inference.covariance import _penalised_xtwx_inv_gram
-    from superglm.links import stabilize_eta
 
-    # Compute working weights — one O(n) pass
-    eta = model._dm.matvec(model.result.beta) + model.result.intercept
-    if model._fit_offset is not None:
-        eta = eta + model._fit_offset
-    eta = stabilize_eta(eta, model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution)
-    V = model._distribution.variance(mu)
-    dmu_deta = model._link.deriv_inverse(eta)
-    W = model._fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
+    solver = model._solver_pirls_result()
+    W = _solver_space_working_weights(model)
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
     S_full = _build_S_from_penalties(model, lam2)
@@ -118,13 +150,14 @@ def fit_inference_info(model):
     # Returns XtWX and S directly so we don't need to recover them
     # from the (possibly truncated) pseudo-inverse.
     XtWX_inv, XtWX_inv_aug, active_groups, XtWX, S = _penalised_xtwx_inv_gram(
-        model.result.beta,
+        solver.beta,
         W,
         model._dm.group_matrices,
         model._groups,
         lam2,
         S_override=S_full,
     )
+    XtWX_inv_aug = _public_augmented_covariance(model, XtWX_inv_aug, active_groups)
 
     p_a = XtWX_inv.shape[0]
     if p_a == 0:

@@ -573,6 +573,131 @@ class TestLowUniqueCompression:
         )
 
 
+class TestDiscretePredictParity:
+    def test_fast_discrete_predict_matches_exact_canonical_predict_for_main_effects(
+        self, poisson_data
+    ):
+        X, y = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.01,
+            discrete=True,
+            n_bins=256,
+            features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
+        )
+        model.fit(X, y)
+
+        eta_exact = model._predict_eta_exact(X)
+        eta_fast = model._predict_eta_fast_discrete(X)
+        mu_exact = model.predict(X)
+        mu_fast = model._predict_fast_discrete(X)
+
+        assert np.max(np.abs(eta_exact - eta_fast)) < 3e-2
+        assert np.max(np.abs(mu_exact - mu_fast)) < 7e-2
+
+    def test_fast_discrete_predict_matches_exact_canonical_predict_for_tensor_terms(
+        self, tensor_interaction_data
+    ):
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins={"age": 64, "bm": 48},
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit_reml(X, y, max_reml_iter=6)
+
+        eta_exact = model._predict_eta_exact(X)
+        eta_fast = model._predict_eta_fast_discrete(X)
+        mu_exact = model.predict(X)
+        mu_fast = model._predict_fast_discrete(X)
+
+        assert np.max(np.abs(eta_exact - eta_fast)) < 3e-2
+        assert np.max(np.abs(mu_exact - mu_fast)) < 3e-2
+
+    def test_fast_discrete_tensor_predict_matches_exact_on_shifted_holdout(
+        self, tensor_interaction_data
+    ):
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins={"age": 64, "bm": 48},
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit_reml(X, y, max_reml_iter=6)
+
+        holdout = pd.DataFrame(
+            {
+                "age": np.linspace(20.0, 78.0, 1200),
+                "bm": np.linspace(17.0, 43.0, 1200)[::-1],
+            }
+        )
+
+        eta_exact = model._predict_eta_exact(holdout)
+        eta_fast = model._predict_eta_fast_discrete(holdout)
+        mu_exact = model._predict_exact(holdout)
+        mu_fast = model._predict_fast_discrete(holdout)
+
+        assert np.max(np.abs(eta_exact - eta_fast)) < 3e-2
+        assert np.max(np.abs(mu_exact - mu_fast)) < 2e-2
+
+    def test_fast_discrete_tensor_metadata_is_frozen_at_fit_time(self, tensor_interaction_data):
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins={"age": 64, "bm": 48},
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit_reml(X, y, max_reml_iter=6)
+
+        assert model._prediction_plan is not None
+        interaction_plan = next(
+            term for term in model._prediction_plan["interactions"] if term["name"] == "age:bm"
+        )
+        assert interaction_plan["fast_discrete"] is not None
+
+        holdout = pd.DataFrame(
+            {
+                "age": np.linspace(20.0, 78.0, 1200),
+                "bm": np.linspace(17.0, 43.0, 1200)[::-1],
+            }
+        )
+
+        model._fit_X_ref = pd.DataFrame(
+            {
+                "age": np.linspace(30.0, 35.0, len(X)),
+                "bm": np.linspace(22.0, 24.0, len(X)),
+            }
+        )
+        model._n_bins = {"age": 5, "bm": 4}
+        model._discrete = False
+
+        eta_exact = model._predict_eta_exact(holdout)
+        eta_fast = model._predict_eta_fast_discrete(holdout)
+        mu_exact = model._predict_exact(holdout)
+        mu_fast = model._predict_fast_discrete(holdout)
+
+        assert np.max(np.abs(eta_exact - eta_fast)) < 3e-2
+        assert np.max(np.abs(mu_exact - mu_fast)) < 2e-2
+
+
 class TestDiscretizedTensorInteraction:
     def test_tensor_interaction_predictions_close_to_exact(self, tensor_interaction_data):
         """Discrete tensor interaction should stay close to the exact fit."""
