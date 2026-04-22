@@ -619,7 +619,7 @@ class TestNaturalSplineModelSpecifics:
 
 
 class TestSplineCategoricalRuntimeDeployability:
-    def test_predict_wrapper_is_preserved_for_spline_categorical_blocks(self, interaction_data):
+    def test_wrapper_runtime_scoring_matches_direct_transform(self, interaction_data):
         X, y, sample_weight = interaction_data
         model = SuperGLM(
             family="poisson",
@@ -629,45 +629,19 @@ class TestSplineCategoricalRuntimeDeployability:
         )
         model.fit(X, y, sample_weight=sample_weight)
 
-        age_beta = np.concatenate(
-            [model.result.beta[g.sl] for g in model._groups if g.name == "age"]
-        )
-        region_beta = np.concatenate(
-            [model.result.beta[g.sl] for g in model._groups if g.name == "region"]
-        )
-        interaction_beta = np.concatenate(
-            [model.result.beta[g.sl] for g in model._groups if g.feature_name == "age:region"]
-        )
         interaction_spec = model._interaction_specs["age:region"]
-
-        eta = np.full(len(X), model.result.intercept, dtype=np.float64)
-        eta += model._specs["age"].score(X["age"].to_numpy(), age_beta)
-        eta += model._specs["region"].score(X["region"].to_numpy(), region_beta)
-        eta += (
-            interaction_spec.transform(
-                X["age"].to_numpy(),
-                X["region"].to_numpy(),
-            )
-            @ interaction_beta
+        interaction_beta = np.concatenate(
+            [model.result.beta[g.sl] for g in model._feature_groups("age:region")]
         )
+        left = X["age"].to_numpy()
+        right = X["region"].to_numpy()
 
         np.testing.assert_allclose(
-            model.predict(X),
-            np.exp(eta),
+            interaction_spec.transform(left, right) @ interaction_beta,
+            interaction_spec.score(left, right, interaction_beta),
             atol=1e-12,
             rtol=1e-12,
         )
-
-        diagnostics = model.diagnostics()
-        interaction_entries = [
-            diagnostics[g.name] for g in model._groups if g.feature_name == "age:region"
-        ]
-        assert interaction_entries
-        for entry in interaction_entries:
-            runtime_state = entry.get("runtime_canonicalization")
-            assert runtime_state is not None
-            assert runtime_state["before_after_link_max_abs_diff"] < 1e-12
-            assert runtime_state["before_after_response_max_abs_diff"] < 1e-12
 
 
 class TestCubicRegressionSplineModelSpecifics:

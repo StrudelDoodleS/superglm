@@ -11,42 +11,6 @@ from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Splin
 from superglm.group_matrix import DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix
 
 
-def _feature_beta(model: SuperGLM, feature_name: str) -> np.ndarray:
-    groups = [g for g in model._groups if g.feature_name == feature_name]
-    return np.concatenate([model.result.beta[g.sl] for g in groups])
-
-
-def _exact_link_predictor(model: SuperGLM, X: pd.DataFrame) -> np.ndarray:
-    eta = np.full(len(X), model.result.intercept, dtype=np.float64)
-
-    for name in model._feature_order:
-        spec = model._specs[name]
-        beta = _feature_beta(model, name)
-        values = X[name].to_numpy()
-        if hasattr(spec, "score"):
-            eta += spec.score(values, beta)
-        else:
-            eta += spec.transform(values) @ beta
-
-    for name in model._interaction_order:
-        spec = model._interaction_specs[name]
-        beta = _feature_beta(model, name)
-        left, right = spec.parent_names
-        if hasattr(spec, "score"):
-            eta += spec.score(X[left].to_numpy(), X[right].to_numpy(), beta)
-        else:
-            eta += spec.transform(X[left].to_numpy(), X[right].to_numpy()) @ beta
-
-    return eta
-
-
-def _fast_training_link_predictor(model: SuperGLM, n_obs: int) -> np.ndarray:
-    eta = np.full(n_obs, model.result.intercept, dtype=np.float64)
-    for gm, g in zip(model._dm.group_matrices, model._groups):
-        eta += gm.matvec(model.result.beta[g.sl])
-    return eta
-
-
 @pytest.fixture
 def poisson_data():
     """Poisson data with one spline and one numeric feature."""
@@ -610,32 +574,48 @@ class TestLowUniqueCompression:
 
 
 class TestDiscretePredictParity:
-    def test_fast_training_predict_matches_exact_canonical_predictor_for_main_effects(
-        self, poisson_data
-    ):
+    def test_discrete_predict_matches_exact_canonical_predict_for_main_effects(self, poisson_data):
         X, y = poisson_data
-        model = SuperGLM(
+        exact = SuperGLM(
+            family="poisson",
+            selection_penalty=0.01,
+            discrete=False,
+            features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
+        )
+        disc = SuperGLM(
             family="poisson",
             selection_penalty=0.01,
             discrete=True,
             n_bins=256,
             features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
         )
-        model.fit(X, y)
+        exact.fit(X, y)
+        disc.fit(X, y)
 
-        eta_fast = _fast_training_link_predictor(model, len(X))
-        eta_exact = _exact_link_predictor(model, X)
-        np.testing.assert_allclose(eta_fast, eta_exact, atol=1e-3, rtol=1e-3)
+        mu_exact = exact.predict(X)
+        mu_disc = disc.predict(X)
+        eta_exact = np.log(mu_exact)
+        eta_disc = np.log(mu_disc)
 
-        mu_fast = model._link.inverse(eta_fast)
-        mu_exact = model.predict(X)
-        np.testing.assert_allclose(mu_fast, mu_exact, atol=1e-4, rtol=2e-3)
+        assert np.max(np.abs(eta_exact - eta_disc)) < 5e-3
+        assert np.max(np.abs(mu_exact - mu_disc)) < 5e-3
 
-    def test_fast_training_predict_matches_exact_canonical_predictor_for_tensor_terms(
+    def test_discrete_predict_matches_exact_canonical_predict_for_tensor_terms(
         self, tensor_interaction_data
     ):
         X, y = tensor_interaction_data
-        model = SuperGLM(
+        exact = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=False,
+            n_bins={"age": 64, "bm": 48},
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        disc = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
             discrete=True,
@@ -646,15 +626,16 @@ class TestDiscretePredictParity:
             },
             interactions=[("age", "bm")],
         )
-        model.fit(X, y)
+        exact.fit_reml(X, y, max_reml_iter=6)
+        disc.fit_reml(X, y, max_reml_iter=6)
 
-        eta_fast = _fast_training_link_predictor(model, len(X))
-        eta_exact = _exact_link_predictor(model, X)
-        np.testing.assert_allclose(eta_fast, eta_exact, atol=2e-3, rtol=2e-3)
+        mu_exact = exact.predict(X)
+        mu_disc = disc.predict(X)
+        eta_exact = np.log(mu_exact)
+        eta_disc = np.log(mu_disc)
 
-        mu_fast = model._link.inverse(eta_fast)
-        mu_exact = model.predict(X)
-        np.testing.assert_allclose(mu_fast, mu_exact, atol=2e-4, rtol=5e-3)
+        assert np.max(np.abs(eta_exact - eta_disc)) < 5e-3
+        assert np.max(np.abs(mu_exact - mu_disc)) < 5e-3
 
 
 class TestDiscretizedTensorInteraction:

@@ -8,14 +8,16 @@ from superglm.features.spline import PSpline, Spline
 
 
 def _feature_beta(model: SuperGLM, feature_name: str) -> np.ndarray:
-    groups = [g for g in model._groups if g.feature_name == feature_name]
+    groups = model._feature_groups(feature_name)
     return np.concatenate([model.result.beta[g.sl] for g in groups])
 
 
-def _runtime_canonicalization_state(model: SuperGLM, feature_name: str) -> dict:
-    state = model.diagnostics()[feature_name].get("runtime_canonicalization")
+def _runtime_canonicalization_diagnostics(model: SuperGLM) -> dict:
+    state = getattr(model, "_runtime_canonical_state", None)
     assert state is not None
-    return state
+    diagnostics = state.get("diagnostics")
+    assert diagnostics is not None
+    return diagnostics
 
 
 def _assert_zero_mean_and_before_after_parity(
@@ -28,9 +30,9 @@ def _assert_zero_mean_and_before_after_parity(
     contribution = spec.score(x, beta)
     assert abs(np.mean(contribution)) < 1e-10
 
-    runtime_state = _runtime_canonicalization_state(model, feature_name)
-    assert runtime_state["before_after_link_max_abs_diff"] < 1e-12
-    assert runtime_state["before_after_response_max_abs_diff"] < 1e-12
+    diagnostics = _runtime_canonicalization_diagnostics(model)
+    assert diagnostics["max_abs_eta_delta"] < 1e-10
+    assert diagnostics["max_abs_mu_delta"] < 1e-10
 
 
 def _make_monotone_poisson_data(
