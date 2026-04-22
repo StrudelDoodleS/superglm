@@ -684,3 +684,54 @@ class TestSplineObjectRuntimeDeployability:
             atol=1e-12,
             rtol=1e-12,
         )
+
+    def test_monotone_fit_spline_object_summary_and_reconstruct_use_public_levels(
+        self,
+        age_band_data,
+    ):
+        from superglm.features.spline import PSpline
+
+        X, y, sample_weight, midpoints, _ = age_band_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "age_band": OrderedCategorical(
+                    values=midpoints,
+                    basis=PSpline(
+                        n_knots=4,
+                        penalty="ssp",
+                        monotone="increasing",
+                        monotone_mode="fit",
+                    ),
+                )
+            },
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        spec = model._specs["age_band"]
+        beta = np.concatenate([model.result.beta[g.sl] for g in model._feature_groups("age_band")])
+        levels = np.array(spec._ordered_levels, dtype=object)
+        score_levels = spec.score(levels, beta)
+        base_idx = spec._ordered_levels.index(spec._base_level)
+        expected = score_levels - score_levels[base_idx]
+
+        raw = model.reconstruct_feature("age_band")
+        got = np.array([raw["level_log_relativities"][level] for level in raw["levels"]])
+        np.testing.assert_allclose(got, expected, atol=1e-12, rtol=1e-12)
+
+        summary = model.summary()
+        intercept_row = next(row for row in summary._coef_rows if row.name == "Intercept")
+        assert intercept_row.coef == pytest.approx(model.result.intercept)
+
+        level_rows = {
+            row.name[len("age_band[") : -1]: row.coef
+            for row in summary._coef_rows
+            if row.name.startswith("age_band[")
+        }
+        np.testing.assert_allclose(
+            [level_rows[level] for level in raw["levels"]],
+            expected,
+            atol=1e-12,
+            rtol=1e-12,
+        )

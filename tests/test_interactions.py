@@ -16,7 +16,7 @@ from superglm.features.interaction import (
 )
 from superglm.features.numeric import Numeric
 from superglm.features.polynomial import Polynomial
-from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
+from superglm.features.spline import CubicRegressionSpline, NaturalSpline, PSpline, Spline
 from superglm.model import SuperGLM
 from superglm.types import GroupInfo
 
@@ -625,6 +625,41 @@ class TestSplineCategoricalRuntimeDeployability:
             family="poisson",
             selection_penalty=0.0,
             features={"age": Spline(n_knots=10), "region": Categorical(base="first")},
+            interactions=[("age", "region")],
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        interaction_spec = model._interaction_specs["age:region"]
+        interaction_beta = np.concatenate(
+            [model.result.beta[g.sl] for g in model._feature_groups("age:region")]
+        )
+        left = X["age"].to_numpy()
+        right = X["region"].to_numpy()
+
+        np.testing.assert_allclose(
+            interaction_spec.transform(left, right) @ interaction_beta,
+            interaction_spec.score(left, right, interaction_beta),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+
+    def test_monotone_parent_wrapper_runtime_scoring_matches_direct_transform(
+        self,
+        interaction_data,
+    ):
+        X, y, sample_weight = interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "age": PSpline(
+                    n_knots=8,
+                    penalty="ssp",
+                    monotone="increasing",
+                    monotone_mode="fit",
+                ),
+                "region": Categorical(base="first"),
+            },
             interactions=[("age", "region")],
         )
         model.fit(X, y, sample_weight=sample_weight)
