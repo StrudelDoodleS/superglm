@@ -651,3 +651,43 @@ class TestSplineObjectBasis:
                 basis=Spline(n_knots=10),
             )
         assert spec._spline.n_knots == 2
+
+
+class TestSplineObjectRuntimeDeployability:
+    def test_monotone_fit_spline_object_block_is_runtime_deployable(self, age_band_data):
+        from superglm.features.spline import PSpline
+
+        X, y, sample_weight, midpoints, _ = age_band_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "age_band": OrderedCategorical(
+                    values=midpoints,
+                    basis=PSpline(
+                        n_knots=4,
+                        penalty="ssp",
+                        monotone="increasing",
+                        monotone_mode="fit",
+                    ),
+                )
+            },
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        beta = np.concatenate(
+            [model.result.beta[g.sl] for g in model._groups if g.feature_name == "age_band"]
+        )
+        spec = model._specs["age_band"]
+        values = X["age_band"].to_numpy()
+        np.testing.assert_allclose(
+            spec.transform(values) @ beta,
+            spec.score(values, beta),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+
+        runtime_state = model.diagnostics()["age_band"].get("runtime_canonicalization")
+        assert runtime_state is not None
+        assert runtime_state["before_after_link_max_abs_diff"] < 1e-12
+        assert runtime_state["before_after_response_max_abs_diff"] < 1e-12
