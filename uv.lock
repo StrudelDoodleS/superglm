@@ -3853,7 +3853,7 @@ wheels = [
 
 [[package]]
 name = "superglm"
-version = "0.8.2"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "matplotlib" },
