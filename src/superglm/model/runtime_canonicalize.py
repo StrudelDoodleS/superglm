@@ -99,6 +99,33 @@ def _term_group_metadata(model, group_indices: tuple[int, ...]) -> list[dict[str
     return groups
 
 
+def _runtime_training_feature_column_means(
+    model,
+    feature_name: str,
+    spec: Any,
+) -> NDArray[np.float64]:
+    """Compute exact public runtime column means on the stored training rows."""
+    X_ref = model._fit_X_ref
+    if X_ref is None:
+        raise RuntimeError("Training feature reference is required for runtime canonicalization")
+
+    values = np.asarray(X_ref[feature_name], dtype=np.float64)
+    return np.asarray(np.mean(spec.transform(values), axis=0), dtype=np.float64)
+
+
+def _replace_group_column_means(
+    groups: list[dict[str, Any]],
+    column_means: NDArray[np.float64],
+) -> list[dict[str, Any]]:
+    """Return group metadata with the exact runtime column means substituted in."""
+    if len(groups) != 1:
+        raise ValueError("Public runtime mean substitution currently requires a single group")
+
+    group_state = dict(groups[0])
+    group_state["column_means"] = np.asarray(column_means, dtype=np.float64)
+    return [group_state]
+
+
 def _term_shift_from_groups(
     solver: PIRLSResult,
     groups: list[dict[str, Any]],
@@ -139,7 +166,7 @@ def _materialize_public_term(
     groups: list[dict[str, Any]],
 ) -> bool:
     """Apply canonicalization directly to the current public term when possible."""
-    if term_kind != "feature" or len(groups) != 1:
+    if not _can_materialize_public_term(term_kind, spec, mode, groups):
         return False
 
     column_means = groups[0]["column_means"]
@@ -147,8 +174,24 @@ def _materialize_public_term(
         _apply_scop_centering(spec, column_means)
         return True
 
+    _apply_r_inv_centering(spec, column_means)
+    return True
+
+
+def _can_materialize_public_term(
+    term_kind: str,
+    spec: Any,
+    mode: str,
+    groups: list[dict[str, Any]],
+) -> bool:
+    """Whether this term can be canonicalized directly in the public model."""
+    if term_kind != "feature" or len(groups) != 1:
+        return False
+
+    if getattr(spec, "_scop_Sigma", None) is not None:
+        return True
+
     if getattr(spec, "_R_inv", None) is not None and mode in {"blockwise", "affine"}:
-        _apply_r_inv_centering(spec, column_means)
         return True
 
     return False
@@ -168,10 +211,20 @@ def _compile_runtime_terms(
             continue
 
         groups = _term_group_metadata(model, group_indices)
-        contribution_before = _term_contribution(model, solver, group_indices)
-        mean_before = float(np.mean(contribution_before))
-        shift = _term_shift_from_groups(solver, groups)
         mode = _group_mode(model, group_indices, spec)
+        can_materialize = _can_materialize_public_term(term_kind, spec, mode, groups)
+        if can_materialize:
+            groups = _replace_group_column_means(
+                groups,
+                _runtime_training_feature_column_means(model, term_name, spec),
+            )
+
+        shift = _term_shift_from_groups(solver, groups)
+        mean_before = (
+            float(shift)
+            if can_materialize
+            else float(np.mean(_term_contribution(model, solver, group_indices)))
+        )
         applied_to_public_model = _materialize_public_term(term_kind, spec, mode, groups)
 
         if applied_to_public_model:
