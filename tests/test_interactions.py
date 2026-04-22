@@ -618,6 +618,58 @@ class TestNaturalSplineModelSpecifics:
         assert isinstance(model._specs["age"], NaturalSpline)
 
 
+class TestSplineCategoricalRuntimeDeployability:
+    def test_predict_wrapper_is_preserved_for_spline_categorical_blocks(self, interaction_data):
+        X, y, sample_weight = interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"age": Spline(n_knots=10), "region": Categorical(base="first")},
+            interactions=[("age", "region")],
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        age_beta = np.concatenate(
+            [model.result.beta[g.sl] for g in model._groups if g.name == "age"]
+        )
+        region_beta = np.concatenate(
+            [model.result.beta[g.sl] for g in model._groups if g.name == "region"]
+        )
+        interaction_beta = np.concatenate(
+            [model.result.beta[g.sl] for g in model._groups if g.feature_name == "age:region"]
+        )
+        interaction_spec = model._interaction_specs["age:region"]
+
+        eta = np.full(len(X), model.result.intercept, dtype=np.float64)
+        eta += model._specs["age"].score(X["age"].to_numpy(), age_beta)
+        eta += model._specs["region"].score(X["region"].to_numpy(), region_beta)
+        eta += (
+            interaction_spec.transform(
+                X["age"].to_numpy(),
+                X["region"].to_numpy(),
+            )
+            @ interaction_beta
+        )
+
+        np.testing.assert_allclose(
+            model.predict(X),
+            np.exp(eta),
+            atol=1e-12,
+            rtol=1e-12,
+        )
+
+        diagnostics = model.diagnostics()
+        interaction_entries = [
+            diagnostics[g.name] for g in model._groups if g.feature_name == "age:region"
+        ]
+        assert interaction_entries
+        for entry in interaction_entries:
+            runtime_state = entry.get("runtime_canonicalization")
+            assert runtime_state is not None
+            assert runtime_state["before_after_link_max_abs_diff"] < 1e-12
+            assert runtime_state["before_after_response_max_abs_diff"] < 1e-12
+
+
 class TestCubicRegressionSplineModelSpecifics:
     def test_cr_spline_reconstruct(self, interaction_data):
         X, y, sample_weight = interaction_data
