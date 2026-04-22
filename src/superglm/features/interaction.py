@@ -47,7 +47,7 @@ class SplineCategorical:
         self._hi: float = 1.0
         self._non_base: list[str] = []
         self._base_level: str = ""
-        self._R_inv_dict: dict[str, NDArray] = {}
+        self._R_inv_dict: dict[str, NDArray] | NDArray = {}
         self._projection: NDArray | None = None
 
     @property
@@ -112,8 +112,23 @@ class SplineCategorical:
             )
         return groups
 
-    def set_reparametrisation(self, R_inv_dict: dict[str, NDArray]) -> None:
-        self._R_inv_dict = R_inv_dict
+    def set_reparametrisation(self, R_inv_dict: dict[str, NDArray] | NDArray) -> None:
+        if isinstance(R_inv_dict, dict):
+            self._R_inv_dict = R_inv_dict
+            return
+
+        arr = np.asarray(R_inv_dict, dtype=np.float64)
+        if len(self._non_base) == 0:
+            self._R_inv_dict = {}
+            return
+
+        n_cols = arr.shape[1] // len(self._non_base)
+        if n_cols * len(self._non_base) != arr.shape[1]:
+            raise ValueError("SplineCategorical R_inv array width is not divisible by level count.")
+
+        self._R_inv_dict = {
+            level: arr[:, i * n_cols : (i + 1) * n_cols] for i, level in enumerate(self._non_base)
+        }
 
     def transform(self, x_spline: NDArray, x_cat: NDArray) -> NDArray:
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
