@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from superglm import SuperGLM
 from superglm.distributions import clip_mu
@@ -84,6 +85,33 @@ def _assert_zero_mean_and_before_after_parity(
     assert diagnostics["max_abs_mu_delta"] < 1e-10
     assert abs(diagnostics["max_abs_eta_delta"] - recomputed["max_abs_eta_delta"]) < 1e-12
     assert abs(diagnostics["max_abs_mu_delta"] - recomputed["max_abs_mu_delta"]) < 1e-12
+
+
+def _manual_public_curve_se(
+    model: SuperGLM,
+    feature_name: str,
+    x_eval: np.ndarray,
+) -> np.ndarray:
+    spec = model._specs[feature_name]
+    groups = model._feature_groups(feature_name)
+    Cov_active, active_groups = model._coef_covariance
+
+    active_subs = [ag for ag in active_groups if ag.feature_name == feature_name]
+    assert active_subs
+
+    indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
+    Cov_g = Cov_active[np.ix_(indices, indices)]
+    M = spec.transform(x_eval)
+    active_cols = np.concatenate(
+        [
+            np.arange(g.start, g.end) - groups[0].start
+            for g in groups
+            if any(ag.feature_name == feature_name and ag.name == g.name for ag in active_subs)
+        ]
+    )
+    M = M[:, active_cols]
+    Q = M @ Cov_g
+    return np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
 
 
 def _make_monotone_poisson_data(
@@ -178,6 +206,30 @@ class TestRuntimeCanonicalization:
             "x",
             X["x"].to_numpy(dtype=np.float64),
         )
+
+    def test_monotone_fit_summary_curve_se_uses_public_runtime_basis(self):
+        X, y, sample_weight = _make_monotone_poisson_data(seed=3)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "x": PSpline(
+                    n_knots=10,
+                    penalty="ssp",
+                    monotone="increasing",
+                    monotone_mode="fit",
+                )
+            },
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        summary = model.summary()
+        spline_row = next(row for row in summary._coef_rows if row.name == "x")
+        x_grid = np.linspace(model._specs["x"]._lo, model._specs["x"]._hi, 200)
+        expected = _manual_public_curve_se(model, "x", x_grid)
+
+        assert spline_row.curve_se_min == pytest.approx(float(np.min(expected)), abs=1e-12)
+        assert spline_row.curve_se_max == pytest.approx(float(np.max(expected)), abs=1e-12)
 
     def test_decomposed_tensor_interaction_term_is_compiled_blockwise_and_deferred(self):
         X, y, sample_weight = _make_tensor_poisson_data()

@@ -398,9 +398,7 @@ class OrderedCategorical:
 
         # Per-level values on the fitted curve
         level_values = np.array([self._level_to_value[lev] for lev in self._ordered_levels])
-        B_levels = self._spline._raw_basis_matrix(level_values)
-        beta_orig = self._spline._R_inv @ beta if self._spline._R_inv is not None else beta
-        level_log_rels = B_levels @ beta_orig
+        level_log_rels = np.asarray(self._spline.score(level_values, beta), dtype=np.float64)
 
         # Shift so base level = 0 (relativity = 1)
         base_shift = float(level_log_rels[self._ordered_levels.index(self._base_level)])

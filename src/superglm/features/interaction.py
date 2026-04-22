@@ -136,31 +136,17 @@ class SplineCategorical:
             blocks.append(B_level)
         return np.hstack(blocks)
 
+    def score(self, x_spline: NDArray, x_cat: NDArray, beta: NDArray) -> NDArray:
+        """Score the interaction directly from its public runtime blocks."""
+        return np.asarray(self.transform(x_spline, x_cat) @ beta, dtype=np.float64).ravel()
+
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
         x_grid = np.linspace(self._lo, self._hi, n_points)
-        B_grid = self._spline_spec._raw_basis_matrix(x_grid)
 
         per_level: dict[str, dict[str, Any]] = {}
-        offset = 0
         for level in self._non_base:
-            R_inv = self._R_inv_dict.get(level)
-            if R_inv is not None:
-                n_cols = R_inv.shape[1]
-            elif self._projection is not None:
-                n_cols = self._projection.shape[1]
-            else:
-                n_cols = self._n_basis
-            b_level = beta[offset : offset + n_cols]
-            offset += n_cols
-
-            # R_inv already includes projection (P @ R_inv_local)
-            if R_inv is not None:
-                beta_orig = R_inv @ b_level
-            elif self._projection is not None:
-                beta_orig = self._projection @ b_level
-            else:
-                beta_orig = b_level
-            log_rels = B_grid @ beta_orig
+            level_codes = np.full(n_points, level, dtype=object)
+            log_rels = self.score(x_grid, level_codes, beta)
             per_level[level] = {
                 "log_relativity": log_rels,
                 "relativity": np.exp(log_rels),
