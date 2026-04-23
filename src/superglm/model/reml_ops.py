@@ -136,7 +136,7 @@ def model_optimize_direct_reml(
     estimated_names=None,
 ):
     """Optimize the direct REML objective via damped Newton (Wood 2011)."""
-    return optimize_direct_reml(
+    result = optimize_direct_reml(
         model._dm,
         model._distribution,
         model._link,
@@ -160,6 +160,11 @@ def model_optimize_direct_reml(
         reml_penalties=reml_penalties,
         estimated_names=estimated_names,
     )
+    if model._discrete:
+        from superglm.model.base import rebuild_dm_with_lambdas
+
+        model._dm = rebuild_dm_with_lambdas(model, result.lambdas, sample_weight)
+    return result
 
 
 def model_optimize_discrete_reml_cached_w(

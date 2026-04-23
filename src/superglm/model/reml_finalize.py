@@ -6,8 +6,10 @@ import time as _time
 
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
+from superglm.model.base import rebuild_dm_with_lambdas
 from superglm.model.reml_state import update_reml_r_inv
 from superglm.reml.penalty_algebra import build_penalty_context, build_penalty_matrix
+from superglm.reml.result import _map_beta_between_bases
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
 
@@ -109,12 +111,42 @@ def finalize_reml_fit(
     n_reml_iter = best.n_reml_iter
     converged = best.converged
 
+    solver_result = best.pirls_result
+    if use_direct:
+        old_gms = model._dm.group_matrices
+        model._dm = rebuild_dm_with_lambdas(model, lambdas, sample_weight)
+        reml_penalties, _, _ = build_penalty_context(model._dm.group_matrices, reml_groups)
+        model._reml_penalties = reml_penalties
+
+        beta_init = _map_beta_between_bases(
+            solver_result.beta,
+            old_gms,
+            model._dm.group_matrices,
+            model._groups,
+        )
+        solver_result, _ = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=lambdas,
+            offset=offset_arr,
+            beta_init=beta_init,
+            intercept_init=float(best.pirls_result.intercept),
+            max_iter=max_pirls_iter,
+            tol=pirls_tol,
+            convergence="deviance",
+            reml_penalties=reml_penalties,
+        )
+
     phi_fixed = compute_profiled_phi(
         model,
         y=y,
         lambdas=lambdas,
         reml_penalties=reml_penalties,
-        pirls_result=best.pirls_result,
+        pirls_result=solver_result,
     )
 
     final_pirls = maybe_qp_passthrough_refit(
@@ -125,7 +157,7 @@ def finalize_reml_fit(
         sample_weight=sample_weight,
         offset_arr=offset_arr,
         lambdas=lambdas,
-        pirls_result=best.pirls_result,
+        pirls_result=solver_result,
         max_pirls_iter=max_pirls_iter,
         pirls_tol=pirls_tol,
         reml_penalties=reml_penalties,

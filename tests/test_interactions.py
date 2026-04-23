@@ -1271,8 +1271,8 @@ class TestTensorMarginalParentGeometry:
         assert ti._marginal2.K_eff == 7
         assert info.n_cols == 10 * 7
 
-    def test_cardinal_cr_raises(self):
-        """CardinalCRSpline rejected via tensor_marginal_ingredients."""
+    def test_cardinal_cr_builds(self):
+        """CardinalCRSpline is supported for tensor marginals."""
         from superglm.features.spline import CardinalCRSpline
 
         s1 = CardinalCRSpline(n_knots=5)
@@ -1283,8 +1283,8 @@ class TestTensorMarginalParentGeometry:
         s2.build(x2)
 
         ti = TensorInteraction("a", "b")
-        with pytest.raises(NotImplementedError, match="CardinalCRSpline"):
-            ti.build(x1, x2, {"a": s1, "b": s2})
+        info = ti.build(x1, x2, {"a": s1, "b": s2})
+        assert info.n_cols > 0
 
     def test_select_parent_raises(self):
         """Tensor interactions reject select=True parent smooths."""
