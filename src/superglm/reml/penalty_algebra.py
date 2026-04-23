@@ -275,25 +275,41 @@ def build_penalty_components(
     components: list[PenaltyComponent] = []
     eps_thresh = np.finfo(float).eps ** (2 / 3)
 
-    def _rank_and_logdet(omega_raw: NDArray, omega_ssp: NDArray) -> tuple[float, float, NDArray]:
+    def _rank_and_logdet(
+        omega_raw: NDArray,
+        omega_ssp: NDArray,
+        *,
+        force_solver_rank: bool = False,
+    ) -> tuple[float, float, NDArray]:
         """Compute basis-invariant rank from raw penalty, log|Ω|₊ from SSP.
 
-        Rank is computed from the raw (basis-invariant) penalty to avoid
-        SSP-congruence sensitivity: R_inv.T @ Ω @ R_inv can shift near-null
-        eigenvalues above/below the threshold depending on which valid R_inv
-        was used. But log|Ω|₊ must stay in SSP coordinates because it enters
-        the REML objective as log|S|₊ - log|H|, where log|H| is also in SSP
-        coordinates. The 2*log|R_inv| factors cancel only when both terms
+        For square SSP congruences, rank is computed from the raw
+        (basis-invariant) penalty to avoid threshold sensitivity:
+        ``R_inv.T @ Ω @ R_inv`` can shift near-null eigenvalues above/below
+        the threshold depending on which valid ``R_inv`` was used.
+
+        When extra side constraints have removed coefficient directions, the
+        REML rank must instead be the rank of the projected solver-space
+        penalty, because the removed raw directions no longer contribute
+        coefficients or degrees of freedom.
+
+        ``log|Ω|₊`` must stay in SSP coordinates because it enters the REML
+        objective as ``log|S|₊ - log|H|``, where ``log|H|`` is also in SSP
+        coordinates. The ``2*log|R_inv|`` factors cancel only when both terms
         use the same basis.
         """
         # Rank from raw penalty (basis-invariant)
         raw_eigvals = np.linalg.eigvalsh(omega_raw)
         raw_thresh = eps_thresh * max(raw_eigvals.max(), 1e-12)
-        rank = float(np.sum(raw_eigvals > raw_thresh))
+        raw_rank = float(np.sum(raw_eigvals > raw_thresh))
 
         # log|Ω|₊ and eigvals from SSP penalty (same basis as log|H|)
         ssp_eigvals = np.linalg.eigvalsh(omega_ssp)
-        # Use the raw-basis rank to select the top eigenvalues from SSP
+        ssp_thresh = eps_thresh * max(ssp_eigvals.max(), 1e-12)
+        ssp_rank = float(np.sum(ssp_eigvals > ssp_thresh))
+        rank = ssp_rank if force_solver_rank or raw_rank > omega_ssp.shape[0] else raw_rank
+
+        # Use the effective rank to select the top eigenvalues from SSP.
         n_pos = int(rank)
         if n_pos > 0:
             sorted_ssp = np.sort(ssp_eigvals)[::-1]
@@ -314,7 +330,15 @@ def build_penalty_components(
             lp_map = getattr(gm, "lambda_policies", None) or {}
             for suffix, omega_j in gm.omega_components:
                 omega_ssp_j = gm.R_inv.T @ omega_j @ gm.R_inv
-                rank, log_det, pos_eigvals = _rank_and_logdet(omega_j, omega_ssp_j)
+                force_solver_rank = (
+                    isinstance(gm, DiscretizedTensorGroupMatrix)
+                    and getattr(gm, "projection", None) is not None
+                )
+                rank, log_det, pos_eigvals = _rank_and_logdet(
+                    omega_j,
+                    omega_ssp_j,
+                    force_solver_rank=force_solver_rank,
+                )
                 components.append(
                     PenaltyComponent(
                         name=f"{g.name}:{suffix}",
@@ -334,7 +358,15 @@ def build_penalty_components(
             # Single-penalty path.
             lp_map = getattr(gm, "lambda_policies", None) or {}
             omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
-            rank, log_det, pos_eigvals = _rank_and_logdet(gm.omega, omega_ssp)
+            force_solver_rank = (
+                isinstance(gm, DiscretizedTensorGroupMatrix)
+                and getattr(gm, "projection", None) is not None
+            )
+            rank, log_det, pos_eigvals = _rank_and_logdet(
+                gm.omega,
+                omega_ssp,
+                force_solver_rank=force_solver_rank,
+            )
             components.append(
                 PenaltyComponent(
                     name=g.name,
