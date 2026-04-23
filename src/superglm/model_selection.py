@@ -177,8 +177,7 @@ def _score_gini(model, X_val, y_val, *, sample_weight=None, offset=None):
 
 def _pooled_deviance_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Return numerator and denominator for pooled deviance aggregation."""
-    del offset
-    mu = model.predict(X_val)
+    mu = model.predict(X_val, offset=offset)
     dev = model._distribution.deviance_unit(y_val, mu)
     w = sample_weight if sample_weight is not None else np.ones(len(y_val))
     return float(np.sum(w * dev)), float(np.sum(w))
@@ -186,8 +185,7 @@ def _pooled_deviance_parts(model, X_val, y_val, *, sample_weight=None, offset=No
 
 def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Return numerator and denominator for pooled negative log-likelihood."""
-    del offset
-    mu = model.predict(X_val)
+    mu = model.predict(X_val, offset=offset)
     w = sample_weight if sample_weight is not None else np.ones(len(y_val))
     ll = model._distribution.log_likelihood(y_val, mu, w, phi=model.result.phi)
     return float(-ll), float(np.sum(w))

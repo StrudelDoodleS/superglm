@@ -19,7 +19,6 @@ import numpy as np
 import scipy.sparse as sp
 from numpy.polynomial.legendre import legvander
 from numpy.typing import NDArray
-from scipy.interpolate import BSpline as BSpl
 
 from superglm.features.categorical import _validate_categorical_levels
 from superglm.group_matrix import _discretize_column
@@ -644,6 +643,20 @@ def _row_kron_dense(B1: NDArray, B2: NDArray) -> NDArray:
     return np.einsum("ij,ik->ijk", B1, B2).reshape(B1.shape[0], B1.shape[1] * B2.shape[1])
 
 
+def _normalize_tensor_penalty(S: NDArray) -> NDArray:
+    """Scale a marginal tensor penalty to unit leading eigenvalue.
+
+    mgcv rescales marginal penalties before constructing tensor penalties in
+    ``smooth.construct.tensor.smooth.spec()``. Matching that keeps different
+    margins on comparable penalty scales.
+    """
+    eigvals = np.linalg.eigvalsh(S)
+    max_eig = float(np.max(eigvals)) if eigvals.size else 0.0
+    if max_eig <= 1e-12:
+        return S
+    return S / max_eig
+
+
 # ── TensorInteraction ─────────────────────────────────────────
 
 
@@ -721,6 +734,35 @@ class TensorInteraction:
                 "This matches the mgcv te()/ti() marginal-smooth contract."
             )
 
+        # For tensor marginals, route cubic regression splines through the
+        # cardinal CR implementation, which is much closer to mgcv's bs="cr"
+        # geometry than the older projected-B-spline CR path.
+        from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
+
+        if isinstance(spec, CubicRegressionSpline):
+            knot_strategy = spec.knot_strategy
+            if knot_strategy == "uniform" and spec._explicit_knots is None:
+                knot_strategy = "quantile"
+            cardinal = CardinalCRSpline(
+                n_knots=n_knots_override if n_knots_override is not None else spec.n_knots,
+                knot_strategy=knot_strategy,
+                penalty=spec.penalty,
+                knots=spec._explicit_knots,
+                discrete=spec.discrete,
+                n_bins=spec.n_bins,
+                extrapolation=spec.extrapolation,
+                boundary=spec._explicit_boundary,
+                knot_alpha=spec.knot_alpha,
+                select=False,
+                constraint=None,
+                m=spec._m_orders[0],
+                lambda_policy=None,
+            )
+            cardinal._place_knots(x)
+            info = cardinal.tensor_marginal_ingredients(x)
+            info.normalize_penalty = True
+            return info
+
         if n_knots_override is not None and n_knots_override != spec.n_knots:
             kwargs: dict = dict(
                 n_knots=n_knots_override,
@@ -742,7 +784,7 @@ class TensorInteraction:
     def _centered_marginal_basis(self, x: NDArray, info: TensorMarginalInfo) -> sp.csr_matrix:
         x = np.asarray(x, dtype=np.float64).ravel()
         x_clip = np.clip(x, info.lo, info.hi)
-        B = BSpl.design_matrix(x_clip, info.knots, info.degree).tocsr()
+        B = np.asarray(info.raw_basis_eval(x_clip), dtype=np.float64)
         return sp.csr_matrix(B @ info.projection)
 
     def _prepare_marginal_infos(
@@ -784,16 +826,18 @@ class TensorInteraction:
 
         B1 = sp.csr_matrix(m1.basis)
         B2 = sp.csr_matrix(m2.basis)
-        S1 = m1.penalty
-        S2 = m2.penalty
+        S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty
+        S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
         return B1, B2, S1, S2
 
     def _build_group_infos(
-        self, omega: NDArray, S1: NDArray, S2: NDArray
+        self,
+        omega_1: NDArray,
+        omega_2: NDArray,
+        projection: NDArray | None = None,
     ) -> GroupInfo | list[GroupInfo]:
-        n_cols = self._p1 * self._p2
-        omega_1 = np.kron(S1, np.eye(self._p2))
-        omega_2 = np.kron(np.eye(self._p1), S2)
+        omega = omega_1 + omega_2
+        n_cols = omega.shape[0]
         if self._decompose:
             eigvals, eigvecs = np.linalg.eigh(omega)
             tol = 1e-8 * max(float(np.max(eigvals)), 1e-12)
@@ -826,7 +870,7 @@ class TensorInteraction:
                     penalty_matrix=omega_range,
                     reparametrize=False,
                     subgroup_name="wiggly",
-                    projection=U_range,
+                    projection=U_range if projection is None else projection @ U_range,
                     penalty_components=[
                         (f"margin_{self.feat1_name}", omega_1_range),
                         (f"margin_{self.feat2_name}", omega_2_range),
@@ -841,6 +885,7 @@ class TensorInteraction:
             n_cols=n_cols,
             penalty_matrix=omega,
             reparametrize=False,
+            projection=projection,
             penalty_components=[
                 (f"margin_{self.feat1_name}", omega_1),
                 (f"margin_{self.feat2_name}", omega_2),
@@ -860,8 +905,9 @@ class TensorInteraction:
         T = _row_kron(B1, B2)
 
         # Tensor product penalty on the centered marginal spaces.
-        omega = np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
-        infos = self._build_group_infos(omega, S1, S2)
+        omega_1 = np.kron(S1, np.eye(self._p2))
+        omega_2 = np.kron(np.eye(self._p1), S2)
+        infos = self._build_group_infos(omega_1, omega_2)
         if isinstance(infos, list):
             for info in infos:
                 info.columns = T
@@ -879,9 +925,8 @@ class TensorInteraction:
     ) -> DiscreteTensorBuildResult:
         """Build a discretized tensor basis on observed joint support pairs."""
         m1, m2 = self._prepare_marginal_infos(x1, x2, parent_specs)
-        S1, S2 = m1.penalty, m2.penalty
-        omega = np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
-        infos = self._build_group_infos(omega, S1, S2)
+        S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty
+        S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
 
         support1, idx1 = _discretize_column(x1, int(n_bins[0]))
         support2, idx2 = _discretize_column(x2, int(n_bins[1]))
@@ -899,6 +944,9 @@ class TensorInteraction:
             B1_unique[observed_i1],
             B2_unique[observed_i2],
         )
+        omega_1 = np.kron(S1, np.eye(self._p2))
+        omega_2 = np.kron(np.eye(self._p1), S2)
+        infos = self._build_group_infos(omega_1, omega_2)
         return DiscreteTensorBuildResult(
             infos=infos,
             B_joint=B_joint,

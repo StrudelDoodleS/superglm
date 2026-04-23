@@ -17,7 +17,7 @@ import pytest
 from superglm import SuperGLM
 from superglm.distributions import clip_mu
 from superglm.features.categorical import Categorical
-from superglm.features.spline import CubicRegressionSpline
+from superglm.features.spline import CubicRegressionSpline, Spline
 from superglm.links import stabilize_eta
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -66,6 +66,34 @@ def _make_mtpl2_style_data(n, seed=42):
     return df, y_freq, sample_weight
 
 
+def _make_mtpl2_interaction_count_data(n, seed=42):
+    """MTPL-style count data with overlapping pairwise interaction signal."""
+    rng = np.random.default_rng(seed)
+    driv_age = rng.uniform(18, 90, n)
+    veh_age = rng.uniform(0, 20, n)
+    bonus = np.clip(50 + 100 * rng.beta(2.0, 4.0, n), 50, 150)
+    area = rng.choice(["A", "B", "C", "D", "E", "F"], n)
+    exposure = rng.uniform(0.05, 1.5, n)
+    area_effect = {"A": 0.0, "B": -0.08, "C": 0.04, "D": -0.15, "E": 0.09, "F": -0.03}
+
+    age_s = 2.0 * np.pi * (driv_age - 18.0) / 72.0
+    veh_s = np.pi * veh_age / 20.0
+    bm_s = (bonus - 100.0) / 50.0
+    eta = (
+        -2.8
+        + 0.30 * np.sin(age_s)
+        - 0.12 * np.cos(veh_s)
+        + 0.08 * bm_s
+        + np.array([area_effect[a] for a in area])
+        + 0.08 * np.sin(age_s) * bm_s
+        + 0.06 * np.cos(veh_s) * bm_s
+        + 0.05 * np.sin(age_s) * np.cos(veh_s)
+    )
+    y = rng.poisson(np.exp(eta + np.log(exposure))).astype(float)
+    df = pd.DataFrame({"DrivAge": driv_age, "VehAge": veh_age, "BonusMalus": bonus, "Area": area})
+    return df, y, np.log(exposure)
+
+
 _SPLINE_FEATURES = {
     "x1": CubicRegressionSpline(n_knots=8),
     "x2": CubicRegressionSpline(n_knots=8),
@@ -75,6 +103,13 @@ _MTPL2_FEATURES = {
     "DrivAge": CubicRegressionSpline(n_knots=10),
     "VehAge": CubicRegressionSpline(n_knots=8),
     "BonusMalus": CubicRegressionSpline(n_knots=8),
+    "Area": Categorical(base="most_exposed"),
+}
+
+_MTPL2_CR_FEATURES = {
+    "DrivAge": Spline(kind="cr", n_knots=10, penalty="ssp", discrete=True),
+    "VehAge": Spline(kind="cr", n_knots=8, penalty="ssp", discrete=True),
+    "BonusMalus": Spline(kind="cr", n_knots=8, penalty="ssp", discrete=True),
     "Area": Categorical(base="most_exposed"),
 }
 
@@ -89,6 +124,12 @@ def _predict_mu(model, df):
     """Get fitted mu values."""
     eta = stabilize_eta(model._dm.matvec(model.result.beta) + model.result.intercept, model._link)
     return clip_mu(model._link.inverse(eta), model._distribution)
+
+
+def _poisson_mean_deviance(y_true, y_pred, correction=1e-10):
+    yt = y_true.astype(float) + correction
+    yp = y_pred.astype(float) + correction
+    return float(2.0 * np.mean(yp - yt - yt * np.log(yp / yt)))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -407,3 +448,53 @@ class TestLargeNStability:
         # EDF spread < 5
         edf_spread = float(np.max(edf_arr) - np.min(edf_arr))
         assert edf_spread < 5.0, f"EDF spread across seeds: {edf_spread:.2f}"
+
+    @pytest.mark.slow
+    def test_multi_tensor_interactions_do_not_blow_up(self):
+        """Overlapping tensor interactions remain numerically stable."""
+        df, y, offset = _make_mtpl2_interaction_count_data(2000, seed=7)
+        rng = np.random.default_rng(11)
+        idx = rng.permutation(len(df))
+        tr_end = int(0.8 * len(df))
+        tr, te = idx[:tr_end], idx[tr_end:]
+        X_train = df.iloc[tr].reset_index(drop=True)
+        X_test = df.iloc[te].reset_index(drop=True)
+        y_train = y[tr]
+        y_test = y[te]
+        off_train = offset[tr]
+        off_test = offset[te]
+
+        main = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features=_MTPL2_CR_FEATURES,
+            discrete=True,
+            n_bins=128,
+        )
+        main.fit_reml(X_train, y_train, offset=off_train, max_reml_iter=10)
+        assert main.result.converged
+
+        top3 = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features=_MTPL2_CR_FEATURES,
+            interactions=[
+                ("VehAge", "BonusMalus"),
+                ("DrivAge", "BonusMalus"),
+                ("DrivAge", "VehAge"),
+            ],
+            discrete=True,
+            n_bins=128,
+        )
+        top3.fit_reml(X_train, y_train, offset=off_train, max_reml_iter=10)
+        assert top3.result.converged
+
+        bootstrap = top3._reml_profile["reml_bootstrap_summary"]
+        assert bootstrap["n_components_at_lower_bound"] < bootstrap["n_components"]
+
+        main_pred = main.predict(X_test, offset=off_test)
+        top3_pred = top3.predict(X_test, offset=off_test)
+        dev_main = _poisson_mean_deviance(y_test, main_pred)
+        dev_top3 = _poisson_mean_deviance(y_test, top3_pred)
+        assert np.isfinite(dev_top3)
+        assert dev_top3 < dev_main * 2.0

@@ -7,6 +7,7 @@ The solver never sees feature types — only GroupInfo objects.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
@@ -265,6 +266,8 @@ class TensorMarginalInfo:
     projection: NDArray  # (K_raw, K_eff) raw→centered+constrained projection
     K_eff: int  # effective column count
     degree: int  # B-spline degree (for basis eval at new points)
+    raw_basis_eval: Callable[[NDArray], NDArray]  # parent-spec raw basis evaluator
+    normalize_penalty: bool = False  # rescale before tensor kron assembly
 
 
 # ── Discretized tensor build result ─────────────────────────────

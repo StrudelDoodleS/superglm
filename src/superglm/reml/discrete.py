@@ -18,18 +18,20 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributions import clip_mu
+from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import reml_laml_objective
 from superglm.reml.penalty_algebra import (
+    build_penalty_context,
     build_penalty_matrix,
     build_tensor_pair_logdet_summaries,
     coerce_reml_penalties,
     compute_total_penalty_rank,
     evaluate_tensor_pair_logdet_summaries,
 )
-from superglm.reml.result import REMLResult
+from superglm.reml.result import REMLResult, _map_beta_between_bases
 from superglm.solvers.irls_direct import _safe_decompose_H, fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import GroupSlice, PenaltyComponent
@@ -235,15 +237,33 @@ def optimize_discrete_reml_cached_w(
     _tensor_post_stall_unlocked = False
     _prev_tensor_v: float | None = None
 
-    # === Bootstrap: one FP step from minimal penalty ===
-    boot_lambdas = {name: 1e-4 for name in lambdas}
+    # === Bootstrap: one FP step from conservative interaction penalties ===
+    # Rich tensor interactions can explode under an almost-unpenalized
+    # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
+    # interaction penalty components from a materially stronger seed.
+    boot_lambdas = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
+    dm_boot = rebuild_design_matrix_with_lambdas(
+        dm,
+        groups,
+        boot_lambdas,
+        sample_weight,
+        boot_lambdas,
+    )
+    penalties_boot, penalty_caches_boot, penalty_ranks_boot = build_penalty_context(
+        dm_boot.group_matrices,
+        reml_groups,
+    )
     S_boot = build_penalty_matrix(
-        dm.group_matrices, groups, boot_lambdas, p, reml_penalties=penalties
+        dm_boot.group_matrices,
+        groups,
+        boot_lambdas,
+        p,
+        reml_penalties=penalties_boot,
     )
     _t0 = _time.perf_counter()
     cache: dict = {}
     boot_result, boot_inv, boot_xtwx = fit_irls_direct(
-        X=dm,
+        X=dm_boot,
         y=y,
         weights=sample_weight,
         family=distribution,
@@ -257,6 +277,13 @@ def optimize_discrete_reml_cached_w(
         direct_solve=direct_solve,
         S_override=S_boot,
     )
+    dm = dm_boot
+    penalties = penalties_boot
+    penalty_caches = penalty_caches_boot
+    penalty_ranks = penalty_ranks_boot
+    shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
+    shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
+    tensor_pair_summaries = build_tensor_pair_logdet_summaries(dm.group_matrices, penalties)
     _t_pirls += _time.perf_counter() - _t0
     _n_pirls_steps += boot_result.n_iter
     warm_beta = boot_result.beta.copy()
@@ -268,7 +295,11 @@ def optimize_discrete_reml_cached_w(
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
         M_p = compute_total_penalty_rank(penalties)
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
+    else:
+        pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
+        M_p = compute_total_penalty_rank(penalties)
     boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
+    bootstrap_log_step_cap = 4.0
 
     # Store original fixed lambda values for exact restoration after exp->clip
     fixed_lambdas: dict[str, float] = {}
@@ -277,6 +308,7 @@ def optimize_discrete_reml_cached_w(
             fixed_lambdas[pc.name] = float(lambdas[pc.name])
 
     rho = np.zeros(m, dtype=np.float64)
+    _bootstrap_component_stats: list[dict[str, float | int | str]] = []
     for i, pc in enumerate(penalties):
         if not estimated_mask[i]:
             fixed_val = fixed_lambdas[pc.name]
@@ -293,6 +325,22 @@ def optimize_discrete_reml_cached_w(
         r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
+        lam_fp_clipped = float(np.clip(lam_fp, 1e-6, 1e10))
+        _bootstrap_component_stats.append(
+            {
+                "name": pc.name,
+                "group_name": pc.group_name,
+                "rank": float(r_j),
+                "quad": quad,
+                "trace_term": trace_term,
+                "denom": denom,
+                "lam_fp_raw": float(lam_fp),
+                "lam_fp_clipped": lam_fp_clipped,
+                "beta_norm": float(np.linalg.norm(beta_g)),
+                "omega_frob": float(np.linalg.norm(omega_ssp)),
+                "block_dim": int(beta_g.shape[0]),
+            }
+        )
         # Snap degenerate select=True null-space penalties to upper bound.
         pc_i = penalties[i]
         if (
@@ -302,7 +350,16 @@ def optimize_discrete_reml_cached_w(
             and boot_inv_phi * quad < 0.1 * trace_term
         ):
             lam_fp = np.exp(log_hi)
-        rho[i] = np.clip(np.log(max(lam_fp, 1e-6)), log_lo, log_hi)
+        lam_prev = max(float(lambdas.get(pc.name, 1e-4)), 1e-6)
+        log_prev = np.log(lam_prev)
+        log_target = np.log(max(lam_fp, 1e-6))
+        if ":" in pc.group_name:
+            log_target = np.clip(
+                log_target,
+                log_prev - bootstrap_log_step_cap,
+                log_prev + bootstrap_log_step_cap,
+            )
+        rho[i] = np.clip(log_target, log_lo, log_hi)
 
     if verbose:
         boot_lam_str = ", ".join(
@@ -744,12 +801,61 @@ def optimize_discrete_reml_cached_w(
                 converged = True
                 break
 
+        current_lambdas = lambdas.copy()
+        for name, val in zip(group_names, np.exp(np.clip(rho, log_lo, log_hi)), strict=False):
+            current_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+        current_lambdas.update(fixed_lambdas)
+
+        old_gms = dm.group_matrices
+        dm = rebuild_design_matrix_with_lambdas(
+            dm,
+            groups,
+            current_lambdas,
+            sample_weight,
+            current_lambdas,
+        )
+        warm_beta = _map_beta_between_bases(
+            pirls_result.beta,
+            old_gms,
+            dm.group_matrices,
+            groups,
+        )
+        warm_intercept = float(pirls_result.intercept)
+        penalties, penalty_caches, penalty_ranks = build_penalty_context(
+            dm.group_matrices,
+            reml_groups,
+        )
+        shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
+        shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
+        tensor_pair_summaries = build_tensor_pair_logdet_summaries(dm.group_matrices, penalties)
+
     # === Final full IRLS refit at converged lambdas ===
     rho_clipped = np.clip(rho, log_lo, log_hi)
     final_lambdas = lambdas.copy()
     for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
         final_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
     final_lambdas.update(fixed_lambdas)
+    old_gms_final = dm.group_matrices
+    dm = rebuild_design_matrix_with_lambdas(
+        dm,
+        groups,
+        final_lambdas,
+        sample_weight,
+        final_lambdas,
+    )
+    warm_beta = _map_beta_between_bases(
+        warm_beta if warm_beta is not None else pirls_result.beta,
+        old_gms_final,
+        dm.group_matrices,
+        groups,
+    )
+    penalties, penalty_caches, penalty_ranks = build_penalty_context(
+        dm.group_matrices,
+        reml_groups,
+    )
+    shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
+    shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
+    tensor_pair_summaries = build_tensor_pair_logdet_summaries(dm.group_matrices, penalties)
     S_final = build_penalty_matrix(
         dm.group_matrices, groups, final_lambdas, dm.p, reml_penalties=penalties
     )
@@ -801,6 +907,25 @@ def optimize_discrete_reml_cached_w(
     lambda_history.append(final_lambdas.copy())
 
     if profile is not None:
+        if _bootstrap_component_stats:
+            profile["reml_bootstrap_summary"] = {
+                "boot_phi": float(boot_phi),
+                "boot_inv_phi": float(boot_inv_phi),
+                "boot_deviance": float(boot_result.deviance),
+                "boot_penalty_quad": float(pq_boot),
+                "boot_penalty_rank_total": float(M_p),
+                "n_components": len(_bootstrap_component_stats),
+                "lam_fp_min": float(
+                    min(row["lam_fp_clipped"] for row in _bootstrap_component_stats)
+                ),
+                "lam_fp_max": float(
+                    max(row["lam_fp_clipped"] for row in _bootstrap_component_stats)
+                ),
+                "n_components_at_lower_bound": int(
+                    sum(row["lam_fp_clipped"] <= 1.0000001e-6 for row in _bootstrap_component_stats)
+                ),
+            }
+            profile["reml_bootstrap_components"] = _bootstrap_component_stats
         profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
         profile["reml_pirls_s"] = _t_pirls
         profile["reml_objective_s"] = _t_objective

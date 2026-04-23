@@ -839,7 +839,7 @@ class CardinalCRSpline(_SplineBase):
     _penalty_semantics = "fixed"
     _max_penalty_order = 2
     _multi_m_supported = False
-    _tensor_supported = False
+    _tensor_supported = True
 
     def _select_compatible(self, m_orders: tuple[int, ...]) -> bool:
         """CardinalCR: only m=(2,) supports select."""
@@ -937,7 +937,7 @@ class CardinalCRSpline(_SplineBase):
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
         return _spline_cardinal_spec.reconstruct(self, beta, n_points=n_points)
 
-    # tensor_marginal_ingredients: rejected by base class via _tensor_supported = False
+    # tensor_marginal_ingredients: inherited from _SplineBase
 
 
 # ═══════════════════════════════════════════════════════════════════
