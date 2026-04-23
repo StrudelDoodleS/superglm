@@ -98,6 +98,13 @@ def build_tensor_pair_logdet_summaries(
         gm = group_matrices[group_index]
         if not isinstance(gm, DiscretizedTensorGroupMatrix):
             continue
+        if getattr(gm, "projection", None) is not None:
+            # Once a tensor block has been projected (e.g. parent-side or
+            # global side constraints), the penalty pair is no longer a simple
+            # separable Kronecker pair in solver space. Fall back to the
+            # generic multi-penalty algebra rather than using the closed-form
+            # tensor shortcut.
+            continue
         tensor_id = getattr(gm, "tensor_id", None)
         if tensor_id is None:
             continue

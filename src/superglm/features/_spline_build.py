@@ -223,4 +223,6 @@ def tensor_marginal_info(spec: Any, x: NDArray) -> TensorMarginalInfo:
         projection=projection,
         K_eff=projection.shape[1],
         degree=spec.degree,
+        raw_basis_eval=spec._raw_basis_matrix,
+        normalize_penalty=False,
     )

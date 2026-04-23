@@ -130,8 +130,11 @@ def optimize_direct_reml(
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
 
-    # === Bootstrap: one FP step from minimal penalty ===
-    boot_lambdas = {name: 1e-4 for name in lambdas}
+    # === Bootstrap: one FP step from conservative interaction penalties ===
+    # Rich tensor interactions can explode under an almost-unpenalized
+    # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
+    # interaction penalty components from a materially stronger seed.
+    boot_lambdas = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
     S_boot = build_penalty_matrix(
         dm.group_matrices, groups, boot_lambdas, dm.p, reml_penalties=penalties
     )
@@ -160,6 +163,7 @@ def optimize_direct_reml(
         M_p = compute_total_penalty_rank(penalties)
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
     boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
+    bootstrap_log_step_cap = 4.0
 
     # Store original fixed lambda values so they can be restored exactly
     # after the exp(rho)->clip round-trip (which would clamp 0.0 to 1e-6).
@@ -193,7 +197,16 @@ def optimize_direct_reml(
             and boot_inv_phi * quad < 0.1 * trace_term
         ):
             lam_fp = np.exp(log_hi)
-        rho[i] = np.clip(np.log(max(lam_fp, 1e-6)), log_lo, log_hi)
+        lam_prev = max(float(lambdas.get(pc.name, 1e-4)), 1e-6)
+        log_prev = np.log(lam_prev)
+        log_target = np.log(max(lam_fp, 1e-6))
+        if ":" in pc.group_name:
+            log_target = np.clip(
+                log_target,
+                log_prev - bootstrap_log_step_cap,
+                log_prev + bootstrap_log_step_cap,
+            )
+        rho[i] = np.clip(log_target, log_lo, log_hi)
 
     prev_obj = np.inf
 
