@@ -270,6 +270,43 @@ class TestDataForwarding:
         )
         assert r_with.mean_scores["deviance"] != r_without.mean_scores["deviance"]
 
+    def test_pooled_scores_forward_offset(self, poisson_data, base_model):
+        """Pooled deviance/NLL use the validation offset just like fold scoring."""
+        df, y, sw = poisson_data
+        offset = np.log(sw)
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(3, shuffle=True, random_state=0),
+            sample_weight=sw,
+            offset=offset,
+            scoring=("deviance", "nll"),
+            return_estimators=True,
+        )
+
+        dev_num = 0.0
+        dev_den = 0.0
+        nll_num = 0.0
+        nll_den = 0.0
+        assert result.estimators is not None
+        assert result.fold_indices is not None
+        for est, (_train_idx, test_idx) in zip(result.estimators, result.fold_indices, strict=True):
+            X_test = df.iloc[test_idx]
+            y_test = y[test_idx]
+            sw_test = sw[test_idx]
+            off_test = offset[test_idx]
+            mu = est.predict(X_test, offset=off_test)
+            dev = est._distribution.deviance_unit(y_test, mu)
+            ll = est._distribution.log_likelihood(y_test, mu, sw_test, phi=est.result.phi)
+            dev_num += float(np.sum(sw_test * dev))
+            dev_den += float(np.sum(sw_test))
+            nll_num += float(-ll)
+            nll_den += float(np.sum(sw_test))
+
+        assert result.pooled_scores["deviance"] == pytest.approx(dev_num / dev_den)
+        assert result.pooled_scores["nll"] == pytest.approx(nll_num / nll_den)
+
 
 # ── Fit modes ─────────────────────────────────────────────────────
 
