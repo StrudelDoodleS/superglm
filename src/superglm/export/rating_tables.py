@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from inspect import signature
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -72,6 +73,10 @@ def _continuous_features(model: SuperGLM) -> list[str]:
 
 def _format_interval(left: float, right: float) -> str:
     return f"[{left:.10g}, {right:.10g})"
+
+
+def _format_axis_value(value: float) -> str:
+    return f"{value:.10g}"
 
 
 def _continuous_block(name: str, table: pd.DataFrame) -> RatingTableBlock:
@@ -144,17 +149,55 @@ def _numeric_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlo
     )
 
 
-def _interaction_blocks(model: SuperGLM) -> list[InteractionTableBlock]:
+def _interaction_beta(model: SuperGLM, name: str) -> np.ndarray:
+    groups = [g for g in model._groups if g.feature_name == name]
+    return np.concatenate([model.result.beta[g.sl] for g in groups])
+
+
+def _reconstruct_interaction(ispec, beta: NDArray, n_bins: int) -> dict:
+    if "n_points" in signature(ispec.reconstruct).parameters:
+        return ispec.reconstruct(beta, n_points=n_bins)
+    return ispec.reconstruct(beta)
+
+
+def _continuous_interaction_block(
+    name: str,
+    raw: dict,
+    parent1: str,
+    parent2: str,
+) -> InteractionTableBlock:
+    x1 = np.asarray(raw["x1"], dtype=np.float64)
+    x2 = np.asarray(raw["x2"], dtype=np.float64)
+    relativity = np.asarray(raw["relativity"], dtype=np.float64)
+    if relativity.shape == (len(x2), len(x1)):
+        relativity = relativity.T
+    elif relativity.shape != (len(x1), len(x2)):
+        raise ValueError(
+            f"Interaction {name!r} returned a {relativity.shape} relativity grid, "
+            f"expected {(len(x1), len(x2))} or {(len(x2), len(x1))}."
+        )
+
+    table = pd.DataFrame(relativity, columns=[_format_axis_value(v) for v in x2])
+    table.insert(0, parent1, [_format_axis_value(v) for v in x1])
+    return InteractionTableBlock(name=name, table=table)
+
+
+def _interaction_blocks(model: SuperGLM, n_bins: int) -> list[InteractionTableBlock]:
     blocks: list[InteractionTableBlock] = []
     for name in model._interaction_order:
-        raw = model.reconstruct_feature(name)
+        ispec = model._interaction_specs[name]
+        parent1, _ = ispec.parent_names
+        raw = _reconstruct_interaction(ispec, _interaction_beta(model, name), n_bins)
+        if {"x1", "x2", "relativity"} <= set(raw):
+            parent2 = ispec.parent_names[1]
+            blocks.append(_continuous_interaction_block(name, raw, parent1, parent2))
+            continue
+
         if "pairs" not in raw:
             raise NotImplementedError(
                 f"Interaction {name!r} is not yet exportable as a rating table."
             )
 
-        ispec = model._interaction_specs[name]
-        parent1, _ = ispec.parent_names
         levels1 = raw["levels1"]
         levels2 = raw["levels2"]
         rows = []
@@ -278,7 +321,7 @@ def build_rating_table_payload(
         base_relativity=float(np.exp(model.result.intercept)),
         selected_n_bins=int(n_bins),
         main_effects=main_effects,
-        interactions=_interaction_blocks(model),
+        interactions=_interaction_blocks(model, n_bins),
         discretization_impact=impact,
         summary_lines=str(model.summary(detail="compact")).splitlines(),
     )

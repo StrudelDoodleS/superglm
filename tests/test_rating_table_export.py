@@ -143,6 +143,41 @@ def test_interactions_start_two_blank_rows_below_main_effects(tmp_path):
     assert ws.cell(row=interaction_title_row, column=1).value == "region:type"
 
 
+def test_continuous_interaction_export_uses_selected_bins():
+    rng = np.random.default_rng(456)
+    n = 500
+    X = pd.DataFrame(
+        {
+            "age": rng.uniform(18, 80, n),
+            "vehicle_age": rng.uniform(0, 20, n),
+        }
+    )
+    eta = (
+        -1.0
+        + 0.08 * np.sin(X["age"].to_numpy() / 9.0)
+        + 0.05 * np.cos(X["vehicle_age"].to_numpy() / 4.0)
+        + 0.03 * (X["age"].to_numpy() - 45.0) * (X["vehicle_age"].to_numpy() - 8.0) / 100.0
+    )
+    y = rng.poisson(np.exp(eta)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={
+            "age": Spline(n_knots=7),
+            "vehicle_age": Spline(n_knots=6),
+        },
+        interactions=[("age", "vehicle_age")],
+    )
+    model.fit(X, y)
+
+    payload = build_rating_table_payload(model, X, y, n_bins=12)
+
+    interaction = next(block for block in payload.interactions if block.name == "age:vehicle_age")
+    assert interaction.table.shape == (12, 13)
+    assert interaction.table.columns[0] == "age"
+    assert np.isfinite(interaction.table.iloc[:, 1:].to_numpy(dtype=float)).all()
+
+
 def test_export_rejects_unsupported_format(tmp_path):
     model, X, y, w = _fit_export_model()
     with pytest.raises(ValueError, match="Unsupported rating table export format"):
