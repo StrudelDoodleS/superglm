@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from openpyxl import load_workbook
 
 from superglm import Categorical, Numeric, Spline, SuperGLM, export_rating_tables
 from superglm.export.rating_tables import build_rating_table_payload
@@ -84,3 +85,26 @@ def test_categorical_and_numeric_blocks_are_exported():
     assert set(region.table["Level"]) == {"A", "B", "C"}
     assert np.isclose(region.table["Weight"].sum(), w.sum())
     assert score.table["Level"].tolist() == ["per_unit"]
+
+
+def test_excel_workbook_layout(tmp_path):
+    model, X, y, w = _fit_export_model()
+    output = tmp_path / "tables.xlsx"
+
+    model.export_rating_tables(output, X, y, sample_weight=w, n_bins=20)
+
+    wb = load_workbook(output, data_only=True)
+    assert wb.sheetnames == ["Rating Tables", "Discretization Impact", "Model Summary"]
+    ws = wb["Rating Tables"]
+    assert ws["A2"].value == "Base"
+    assert isinstance(ws["C2"].value, float)
+    assert ws["A5"].value == "age"
+    assert ws["A7"].value == "Level"
+    assert ws["B7"].value == "Relativity"
+    assert ws["C7"].value == "Weight"
+    assert ws["D5"].value == "region"
+    assert ws["G5"].value == "score"
+
+    impact_ws = wb["Discretization Impact"]
+    headers = [impact_ws.cell(row=1, column=i).value for i in range(1, 11)]
+    assert headers[:3] == ["n_bins", "feature", "actual_bins"]
