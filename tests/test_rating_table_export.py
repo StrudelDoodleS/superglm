@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 from openpyxl import load_workbook
 
 from superglm import Categorical, Numeric, Spline, SuperGLM, export_rating_tables
@@ -140,3 +141,15 @@ def test_interactions_start_two_blank_rows_below_main_effects(tmp_path):
     interaction_title_row = main_last_row + 3
     assert ws.cell(row=interaction_title_row - 1, column=1).value is None
     assert ws.cell(row=interaction_title_row, column=1).value == "region:type"
+
+
+def test_export_rejects_unsupported_format(tmp_path):
+    model, X, y, w = _fit_export_model()
+    with pytest.raises(ValueError, match="Unsupported rating table export format"):
+        model.export_rating_tables(tmp_path / "tables.csv", X, y, sample_weight=w)
+
+
+def test_export_validates_lengths(tmp_path):
+    model, X, y, w = _fit_export_model()
+    with pytest.raises(ValueError, match="same length"):
+        model.export_rating_tables(tmp_path / "tables.xlsx", X.iloc[:-1], y, sample_weight=w)
