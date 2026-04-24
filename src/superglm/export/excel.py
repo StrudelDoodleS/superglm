@@ -70,6 +70,21 @@ def write_rating_table_workbook(
             if cell.column % 3 == 0:
                 cell.number_format = "#,##0.00"
 
+    interaction_row = max_main_row + 3
+    for block in payload.interactions:
+        title_cell = ws.cell(row=interaction_row, column=1, value=block.name)
+        title_cell.font = Font(bold=True)
+        end_row, _ = _write_dataframe(ws, block.table, interaction_row + 2, 1)
+        for row in ws.iter_rows(
+            min_row=interaction_row + 3,
+            max_row=end_row,
+            min_col=2,
+            max_col=block.table.shape[1],
+        ):
+            for cell in row:
+                cell.number_format = "0.000000"
+        interaction_row = end_row + 3
+
     impact_ws = wb.create_sheet(impact_sheet_name)
     _write_dataframe(impact_ws, payload.discretization_impact, 1, 1)
 

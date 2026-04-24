@@ -108,3 +108,35 @@ def test_excel_workbook_layout(tmp_path):
     impact_ws = wb["Discretization Impact"]
     headers = [impact_ws.cell(row=1, column=i).value for i in range(1, 11)]
     assert headers[:3] == ["n_bins", "feature", "actual_bins"]
+
+
+def test_interactions_start_two_blank_rows_below_main_effects(tmp_path):
+    rng = np.random.default_rng(321)
+    n = 400
+    X = pd.DataFrame(
+        {
+            "region": rng.choice(["A", "B", "C"], n),
+            "type": rng.choice(["X", "Y"], n),
+        }
+    )
+    y = rng.poisson(1.0 + 0.2 * (X["region"] == "B")).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"region": Categorical(base="first"), "type": Categorical(base="first")},
+        interactions=[("region", "type")],
+    )
+    model.fit(X, y)
+    output = tmp_path / "interaction.xlsx"
+
+    model.export_rating_tables(output, X, y)
+
+    ws = load_workbook(output, data_only=True)["Rating Tables"]
+    main_last_row = (
+        8
+        + max(len(block.table) for block in build_rating_table_payload(model, X, y).main_effects)
+        - 1
+    )
+    interaction_title_row = main_last_row + 3
+    assert ws.cell(row=interaction_title_row - 1, column=1).value is None
+    assert ws.cell(row=interaction_title_row, column=1).value == "region:type"

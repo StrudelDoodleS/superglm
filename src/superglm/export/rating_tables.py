@@ -144,6 +144,30 @@ def _numeric_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlo
     )
 
 
+def _interaction_blocks(model: SuperGLM) -> list[InteractionTableBlock]:
+    blocks: list[InteractionTableBlock] = []
+    for name in model._interaction_order:
+        raw = model.reconstruct_feature(name)
+        if "pairs" not in raw:
+            raise NotImplementedError(
+                f"Interaction {name!r} is not yet exportable as a rating table."
+            )
+
+        ispec = model._interaction_specs[name]
+        parent1, _ = ispec.parent_names
+        levels1 = raw["levels1"]
+        levels2 = raw["levels2"]
+        rows = []
+        for level1 in levels1:
+            row: dict[str, str | float] = {parent1: level1}
+            for level2 in levels2:
+                key = f"{level1}:{level2}"
+                row[level2] = float(raw["relativities"].get(key, 1.0))
+            rows.append(row)
+        blocks.append(InteractionTableBlock(name=name, table=pd.DataFrame(rows)))
+    return blocks
+
+
 def _empty_impact_frame() -> pd.DataFrame:
     return pd.DataFrame(
         columns=[
@@ -254,7 +278,7 @@ def build_rating_table_payload(
         base_relativity=float(np.exp(model.result.intercept)),
         selected_n_bins=int(n_bins),
         main_effects=main_effects,
-        interactions=[],
+        interactions=_interaction_blocks(model),
         discretization_impact=impact,
         summary_lines=str(model.summary(detail="compact")).splitlines(),
     )
