@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from superglm import Categorical, Spline, SuperGLM, export_rating_tables
+from superglm.export.rating_tables import build_rating_table_payload
 
 
 def _fit_export_model():
@@ -37,3 +38,28 @@ def test_public_export_api_exists(tmp_path):
     assert result_path == output
     assert output.exists()
     assert method_path.exists()
+
+
+def test_default_selected_bins_are_150():
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w)
+
+    age_block = next(block for block in payload.main_effects if block.name == "age")
+
+    assert payload.selected_n_bins == 150
+    assert len(age_block.table) <= 150
+    assert {"Level", "Relativity", "Weight"} <= set(age_block.table.columns)
+
+
+def test_default_impact_sweep_bins():
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w)
+
+    assert sorted(payload.discretization_impact["n_bins"].unique().tolist()) == [
+        20,
+        50,
+        100,
+        200,
+        250,
+    ]
+    assert set(payload.discretization_impact["feature"]) == {"age"}
