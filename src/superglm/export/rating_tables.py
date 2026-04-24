@@ -10,6 +10,9 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm.features.categorical import Categorical
+from superglm.features.numeric import Numeric
+from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 
@@ -85,6 +88,62 @@ def _continuous_block(name: str, table: pd.DataFrame) -> RatingTableBlock:
     return RatingTableBlock(name=name, kind="continuous", table=out)
 
 
+def _weights_by_level(
+    X: pd.DataFrame,
+    name: str,
+    levels: list[str],
+    sample_weight: NDArray | None,
+) -> np.ndarray:
+    weights = (
+        np.ones(len(X), dtype=np.float64)
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=np.float64)
+    )
+    grouped = (
+        pd.DataFrame({"level": X[name].astype(str), "weight": weights})
+        .groupby("level", sort=False)["weight"]
+        .sum()
+    )
+    return np.array([float(grouped.get(level, 0.0)) for level in levels], dtype=np.float64)
+
+
+def _categorical_block(
+    model: SuperGLM,
+    X: pd.DataFrame,
+    name: str,
+    sample_weight: NDArray | None,
+    centering: str,
+) -> RatingTableBlock:
+    ti = model.term_inference(name, with_se=False, centering=centering)
+    levels = list(ti.levels or [])
+    return RatingTableBlock(
+        name=name,
+        kind="categorical",
+        table=pd.DataFrame(
+            {
+                "Level": levels,
+                "Relativity": np.asarray(ti.relativity, dtype=np.float64),
+                "Weight": _weights_by_level(X, name, levels, sample_weight),
+            }
+        ),
+    )
+
+
+def _numeric_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlock:
+    ti = model.term_inference(name, with_se=False, centering=centering)
+    return RatingTableBlock(
+        name=name,
+        kind="numeric",
+        table=pd.DataFrame(
+            {
+                "Level": ["per_unit"],
+                "Relativity": np.asarray(ti.relativity, dtype=np.float64),
+                "Weight": [0.0],
+            }
+        ),
+    )
+
+
 def _empty_impact_frame() -> pd.DataFrame:
     return pd.DataFrame(
         columns=[
@@ -149,7 +208,6 @@ def build_rating_table_payload(
     bin_strategy: str = "exposure_quantile",
     centering: str = "native",
 ) -> RatingTablePayload:
-    del centering
     if model._result is None:
         raise RuntimeError("Model must be fitted before exporting rating tables.")
 
@@ -174,10 +232,14 @@ def build_rating_table_payload(
     )
 
     main_effects: list[RatingTableBlock] = []
-    if selected is not None:
-        for name in model._feature_order:
-            if name in selected.tables:
-                main_effects.append(_continuous_block(name, selected.tables[name]))
+    for name in model._feature_order:
+        spec = model._specs[name]
+        if selected is not None and name in selected.tables:
+            main_effects.append(_continuous_block(name, selected.tables[name]))
+        elif isinstance(spec, Categorical | OrderedCategorical):
+            main_effects.append(_categorical_block(model, X, name, sample_weight, centering))
+        elif isinstance(spec, Numeric):
+            main_effects.append(_numeric_block(model, name, centering))
 
     impact = _impact_sweep(
         model,
