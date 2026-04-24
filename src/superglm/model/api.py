@@ -1100,6 +1100,19 @@ class SuperGLM:
         """Analyse the impact of discretizing spline/polynomial curves."""
         return explain_ops.discretization_impact(self, X, y, sample_weight, **kwargs)
 
+    def export_rating_tables(
+        self,
+        file_path,
+        X: pd.DataFrame,
+        y: NDArray,
+        sample_weight: NDArray | None = None,
+        **kwargs,
+    ):
+        """Export deployment rating tables for the fitted model."""
+        from superglm.export import export_rating_tables
+
+        return export_rating_tables(self, file_path, X, y, sample_weight=sample_weight, **kwargs)
+
     # ── REML adapter methods (used by reml_optimizer) ─────────────
 
     def _compute_dW_deta(self, mu, eta, sample_weight):
