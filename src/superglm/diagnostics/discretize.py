@@ -167,7 +167,9 @@ def discretization_impact(
 
     result = model.result  # raises if not fitted
     beta = result.beta
-    intercept = result.intercept
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+    from superglm.model.base import predict_eta_exact
 
     # Determine which features to discretize
     if features is not None:
@@ -185,18 +187,7 @@ def discretization_impact(
             name for name in model._feature_order if _is_continuous_feature(model, name)
         ]
 
-    # Build per-feature design matrices and log-relativities
-    # Also reconstruct the full eta for the original predictions
-    blocks = []
-    for name in model._feature_order:
-        spec = model._specs[name]
-        x_col = np.asarray(X[name])
-        blocks.append(spec.transform(x_col))
-
-    from superglm.distributions import clip_mu
-    from superglm.links import stabilize_eta
-
-    eta_orig = stabilize_eta(np.hstack(blocks) @ beta + intercept, model._link)
+    eta_orig = predict_eta_exact(model, X)
     original_predictions = clip_mu(model._link.inverse(eta_orig), model._distribution)
 
     # For each target feature, compute the delta (binned - smooth)
@@ -205,12 +196,15 @@ def discretization_impact(
 
     for name in target_features:
         spec = model._specs[name]
-        g = next(g for g in model._groups if g.name == name)
+        groups = [g for g in model._groups if g.feature_name == name]
         x_raw = np.asarray(X[name], dtype=np.float64)
 
         # Per-observation smooth log-relativity for this feature
-        design_block = spec.transform(x_raw)
-        log_rel_smooth = design_block @ beta[g.sl]
+        beta_feature = np.concatenate([beta[g.sl] for g in groups])
+        if hasattr(spec, "score"):
+            log_rel_smooth = np.asarray(spec.score(x_raw, beta_feature), dtype=np.float64).ravel()
+        else:
+            log_rel_smooth = np.asarray(spec.transform(x_raw) @ beta_feature, dtype=np.float64)
 
         # Compute bin edges using the selected strategy
         edges = _compute_edges(x_raw, sample_weight, n_bins, bin_strategy)
