@@ -102,6 +102,24 @@ reporting or cross-feature comparison:
 rels = model.relativities(with_se=True, centering="mean")
 ```
 
+## Rating table export
+
+Use `export_rating_tables()` to create deployment-oriented Excel tables with
+binned spline effects:
+
+```python
+model.export_rating_tables(
+    "rating_tables.xlsx",
+    X_train,
+    y_train,
+    sample_weight=exposure_train,
+    n_bins=150,
+)
+```
+
+The workbook includes selected-bin rating tables, a discretization impact sweep
+for `20, 50, 100, 200, 250` bins, and the model summary.
+
 ## Families
 
 | Family | Variance function | Use case |

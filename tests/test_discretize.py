@@ -154,6 +154,41 @@ class TestPredictions:
         expected = m.predict(df)
         np.testing.assert_allclose(result.original_predictions, expected, rtol=1e-10)
 
+    def test_works_when_interactions_are_present(self):
+        rng = np.random.default_rng(1234)
+        n = 400
+        df = pd.DataFrame(
+            {
+                "age": rng.uniform(18, 80, n),
+                "region": rng.choice(["A", "B", "C"], n),
+                "segment": rng.choice(["X", "Y"], n),
+            }
+        )
+        eta = (
+            -1.0
+            + 0.15 * np.sin(df["age"].to_numpy() / 8.0)
+            + 0.2 * (df["region"].to_numpy() == "B")
+            + 0.1 * ((df["region"].to_numpy() == "C") & (df["segment"].to_numpy() == "Y"))
+        )
+        y = rng.poisson(np.exp(eta)).astype(float)
+        w = rng.uniform(0.5, 2.0, n)
+        model = SuperGLM(
+            family=Poisson(),
+            penalty=GroupLasso(lambda1=0.0),
+            features={
+                "age": Spline(n_knots=8),
+                "region": Categorical(base="first"),
+                "segment": Categorical(base="first"),
+            },
+            interactions=[("region", "segment")],
+        )
+        model.fit(df, y, sample_weight=w)
+
+        result = model.discretization_impact(df, y, sample_weight=w, n_bins=20)
+
+        assert list(result.tables) == ["age"]
+        np.testing.assert_allclose(result.original_predictions, model.predict(df), rtol=1e-10)
+
 
 class TestMetrics:
     def test_all_metric_keys_present(self, fitted_model):
