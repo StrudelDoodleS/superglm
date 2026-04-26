@@ -82,7 +82,7 @@ def _format_axis_value(value: float) -> str:
 def _continuous_block(name: str, table: pd.DataFrame) -> RatingTableBlock:
     out = pd.DataFrame(
         {
-            "Level": [
+            name: [
                 _format_interval(float(row.bin_from), float(row.bin_to))
                 for row in table.itertuples(index=False)
             ],
@@ -126,7 +126,7 @@ def _categorical_block(
         kind="categorical",
         table=pd.DataFrame(
             {
-                "Level": levels,
+                name: levels,
                 "Relativity": np.asarray(ti.relativity, dtype=np.float64),
                 "Weight": _weights_by_level(X, name, levels, sample_weight),
             }
@@ -141,7 +141,7 @@ def _numeric_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlo
         kind="numeric",
         table=pd.DataFrame(
             {
-                "Level": ["per_unit"],
+                name: ["per_unit"],
                 "Relativity": np.asarray(ti.relativity, dtype=np.float64),
                 "Weight": [0.0],
             }

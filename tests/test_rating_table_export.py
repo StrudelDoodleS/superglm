@@ -56,7 +56,7 @@ def test_default_selected_bins_are_150():
 
     assert payload.selected_n_bins == 150
     assert len(age_block.table) <= 150
-    assert {"Level", "Relativity", "Weight"} <= set(age_block.table.columns)
+    assert {"age", "Relativity", "Weight"} <= set(age_block.table.columns)
 
 
 def test_default_impact_sweep_bins():
@@ -83,9 +83,9 @@ def test_categorical_and_numeric_blocks_are_exported():
     region = next(block for block in payload.main_effects if block.name == "region")
     score = next(block for block in payload.main_effects if block.name == "score")
 
-    assert set(region.table["Level"]) == {"A", "B", "C"}
+    assert set(region.table["region"]) == {"A", "B", "C"}
     assert np.isclose(region.table["Weight"].sum(), w.sum())
-    assert score.table["Level"].tolist() == ["per_unit"]
+    assert score.table["score"].tolist() == ["per_unit"]
 
 
 def test_excel_workbook_layout(tmp_path):
@@ -100,11 +100,13 @@ def test_excel_workbook_layout(tmp_path):
     assert ws["A2"].value == "Base"
     assert isinstance(ws["C2"].value, float)
     assert ws["A5"].value == "age"
-    assert ws["A7"].value == "Level"
+    assert ws["A7"].value == "age"
     assert ws["B7"].value == "Relativity"
     assert ws["C7"].value == "Weight"
     assert ws["D5"].value == "region"
+    assert ws["D7"].value == "region"
     assert ws["G5"].value == "score"
+    assert ws["G7"].value == "score"
 
     impact_ws = wb["Discretization Impact"]
     headers = [impact_ws.cell(row=1, column=i).value for i in range(1, 11)]
