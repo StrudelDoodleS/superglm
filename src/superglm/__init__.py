@@ -38,6 +38,7 @@ from superglm.constraints import MonotoneRepairer, MonotoneRepairResult
 from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
 from superglm.diagnostics.spline_checks import SplineRedundancyReport
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
+from superglm.export import export_rating_tables
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint, ConstraintSpec
 from superglm.features.grouping import LevelGrouping, collapse_levels
@@ -125,6 +126,7 @@ __all__ = [
     "PathResult",
     "DiscretizationResult",
     "discretization_impact",
+    "export_rating_tables",
     "ModelMetrics",
     "ModelSummary",
     "SuperGLMRegressor",
