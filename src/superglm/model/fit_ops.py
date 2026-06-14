@@ -282,6 +282,37 @@ def _prime_fit_caches(
     model._summary_cache = None
 
 
+def _maybe_release_fit_state(model) -> None:
+    """Optionally retain only compact post-fit inference state."""
+    if getattr(model, "_retain_fit_state", True):
+        return
+
+    # Distill the fit-time design into coefficient-space inference caches before
+    # releasing row-scale state. These cached_property values are then returned
+    # directly without needing model._dm.
+    inf = model._fit_inference_info
+    model.__dict__["_group_edf"] = dict(inf["group_edf_map"])
+    model.__dict__["_coef_covariance"] = (
+        model.result.phi * inf["XtWX_inv_aug"][1:, 1:],
+        inf["active_groups"],
+    )
+    inf["W"] = np.empty(0, dtype=np.float64)
+
+    model.__dict__.pop("_fit_active_info", None)
+    model._dm = None
+    model._fit_weights = None
+    model._fit_offset = None
+    model._fit_mu = None
+    model._fit_null_mu = None
+    model._fit_X_ref = None
+    model._fit_y_ref = None
+    model._fit_sample_weight_ref = None
+    model._fit_offset_ref = None
+    model._fit_metrics_cache = None
+    model._fit_metrics_cache_signature = None
+    model._summary_cache = None
+
+
 def _maybe_estimate_nb_theta(model, X, y, sample_weight=None, offset=None) -> None:
     """Resolve auto-theta negative-binomial fits before building the design matrix."""
     if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
@@ -461,6 +492,7 @@ def fit(
     runtime_canonicalize.canonicalize_fitted_model(model)
 
     model._last_fit_meta = {"method": "fit", "discrete": model._discrete}
+    _maybe_release_fit_state(model)
     return model
 
 
@@ -550,6 +582,7 @@ def fit_path(
         path_data["intercept_path"],
     )
     intercept_path[-1] = model.result.intercept
+    _maybe_release_fit_state(model)
 
     return PathResult(
         lambda_seq=lambda_seq,
@@ -678,6 +711,7 @@ def fit_reml(
         )
         runtime_canonicalize.canonicalize_fitted_model(model)
         model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
+        _maybe_release_fit_state(model)
         return model
 
     # Build penalty components and caches (eigenstructure computed once)
@@ -738,6 +772,7 @@ def fit_reml(
             )
             runtime_canonicalize.canonicalize_fitted_model(model)
             logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
+            _maybe_release_fit_state(model)
             return model
 
         if _any_unfixed_scop or (_has_scop_monotone and estimated_names):
@@ -774,6 +809,7 @@ def fit_reml(
                 f"REML SCOP EFS converged={best.converged} in {best.n_reml_iter} iters, "
                 f"lambdas={best.lambdas}"
             )
+            _maybe_release_fit_state(model)
             return model
 
         best = optimize_reml_best(
@@ -828,6 +864,7 @@ def fit_reml(
         runtime_canonicalize.canonicalize_fitted_model(model)
 
         logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")
+        _maybe_release_fit_state(model)
         return model
     finally:
         # Always restore QP constraints if stripped

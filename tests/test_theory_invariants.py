@@ -297,6 +297,364 @@ class TestBackendLinearAlgebraInvariants:
         xtwx_block = _block_xtwx([sub], groups, W)
         np.testing.assert_allclose(xtwx_tabmat, xtwx_block, atol=1e-12)
 
+    def test_tabmat_split_skips_sparse_ssp_groups(self):
+        """SSP spline groups must stay on sparse/factored algebra."""
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import SparseSSPGroupMatrix, _build_tabmat_split
+
+        B = sp.csr_matrix(
+            np.array(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.5, 0.5, 0.0],
+                    [0.0, 0.5, 0.5],
+                    [0.0, 0.0, 1.0],
+                ]
+            )
+        )
+        gm = SparseSSPGroupMatrix(B, np.eye(3))
+
+        assert _build_tabmat_split([gm]) is None
+
+    def test_spline_categorical_level_group_matches_masked_ssp(self):
+        """Compact spline-by-category level algebra must match masked sparse SSP."""
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import SparseSSPGroupMatrix, SplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(113)
+        n = 60
+        B = sp.random(n, 7, density=0.35, format="csr", random_state=113)
+        R_inv = rng.normal(size=(7, 5))
+        mask = rng.random(n) < 0.3
+        W = rng.uniform(0.2, 2.0, size=n)
+        w = rng.normal(size=n)
+        beta = rng.normal(size=5)
+
+        compact = SplineCategoricalGroupMatrix(B, R_inv, mask)
+        masked = SparseSSPGroupMatrix(B.multiply(mask.astype(float)[:, None]), R_inv)
+
+        np.testing.assert_allclose(compact.matvec(beta), masked.matvec(beta), atol=1e-12)
+        np.testing.assert_allclose(compact.rmatvec(w), masked.rmatvec(w), atol=1e-12)
+        np.testing.assert_allclose(compact.gram(W), masked.gram(W), atol=1e-12)
+        np.testing.assert_allclose(compact.toarray(), masked.toarray(), atol=1e-12)
+
+    def test_spline_categorical_level_group_stores_row_indices_not_full_mask(self):
+        """Spline-by-category levels should store selected rows, not a full n-row mask."""
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import SplineCategoricalGroupMatrix
+
+        n = 80
+        B = sp.random(n, 6, density=0.25, format="csr", random_state=119)
+        R_inv = np.eye(6)
+        mask = np.zeros(n, dtype=bool)
+        mask[[2, 7, 19, 43, 71]] = True
+
+        compact = SplineCategoricalGroupMatrix(B, R_inv, mask)
+
+        assert not hasattr(compact, "mask")
+        np.testing.assert_array_equal(compact.row_idx, np.flatnonzero(mask))
+        assert compact.B_level.shape == (int(mask.sum()), B.shape[1])
+
+    def test_spline_categorical_cross_level_gram_is_zero(self):
+        """Disjoint spline-by-category level groups have an exact zero cross-block."""
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import SplineCategoricalGroupMatrix, _cross_gram
+
+        rng = np.random.default_rng(114)
+        n = 50
+        B = sp.random(n, 6, density=0.3, format="csr", random_state=114)
+        codes = rng.integers(0, 3, size=n)
+        gm_a = SplineCategoricalGroupMatrix(B, np.eye(6), codes == 0)
+        gm_b = SplineCategoricalGroupMatrix(B, np.eye(6), codes == 1)
+
+        cross = _cross_gram(gm_a, gm_b, rng.uniform(0.5, 1.5, size=n))
+
+        np.testing.assert_allclose(cross, np.zeros((6, 6)), atol=0.0)
+
+    def test_tensor_spline_categorical_cross_gram_matches_dense_oracle(self):
+        """Tensor × compact spline-category cross-Gram should avoid dense fallback math."""
+        import scipy.sparse as sp
+
+        from superglm._group_matrix._group_matrix_algebra import (
+            _cross_gram_tensor_spline_categorical,
+        )
+        from superglm.group_matrix import SplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(115)
+        n = 80
+        n1, n2 = 5, 4
+        k1, k2, k_cat = 3, 2, 4
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        B1 = rng.normal(size=(n1, k1))
+        B2 = rng.normal(size=(n2, k2))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        observed_i1 = observed_codes // n2
+        observed_i2 = observed_codes % n2
+        B_joint = (B1[observed_i1, :, None] * B2[observed_i2, None, :]).reshape(
+            len(observed_codes), k1 * k2
+        )
+        R_tensor = rng.normal(size=(k1 * k2, 5))
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            R_tensor,
+            pair_idx.astype(np.intp),
+            tensor_id=4,
+        )
+        B_cat = sp.random(n, k_cat, density=0.5, format="csr", random_state=115)
+        R_cat = rng.normal(size=(k_cat, 3))
+        mask = rng.random(n) < 0.4
+        spline_cat = SplineCategoricalGroupMatrix(B_cat, R_cat, mask)
+        W = rng.normal(size=n)
+
+        compact = _cross_gram_tensor_spline_categorical(tensor, spline_cat, W)
+        dense = tensor.toarray().T @ (spline_cat.toarray() * W[:, None])
+
+        np.testing.assert_allclose(compact, dense, rtol=1e-10, atol=1e-10)
+
+    def test_tensor_spline_categorical_cross_gram_does_not_call_tensor_rmatvec(self, monkeypatch):
+        """The block assembler should use the compact tensor × spline-category kernel."""
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import SplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(116)
+        n = 40
+        idx1 = rng.integers(0, 3, size=n)
+        idx2 = rng.integers(0, 2, size=n)
+        B1 = rng.normal(size=(3, 2))
+        B2 = rng.normal(size=(2, 2))
+        pair_codes = idx1 * 2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // 2, :, None] * B2[observed_codes % 2, None, :]).reshape(
+            len(observed_codes), 4
+        )
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            np.eye(4),
+            pair_idx.astype(np.intp),
+            tensor_id=5,
+        )
+        spline_cat = SplineCategoricalGroupMatrix(
+            sp.random(n, 3, density=0.5, format="csr", random_state=116),
+            np.eye(3),
+            rng.random(n) < 0.5,
+        )
+
+        def fail_rmatvec(*args, **kwargs):
+            raise AssertionError("tensor rmatvec fallback should not be used")
+
+        monkeypatch.setattr(DiscretizedTensorGroupMatrix, "rmatvec", fail_rmatvec)
+
+        cross = _cross_gram(tensor, spline_cat, rng.uniform(0.5, 1.5, size=n))
+
+        assert cross.shape == (4, 3)
+
+    def test_tensor_own_margin_cross_gram_uses_packed_weight_grid(self, monkeypatch):
+        """Tensor × parent smooth cross-blocks should not use the generic row scan path."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+
+        rng = np.random.default_rng(121)
+        n = 90
+        n1, n2 = 6, 5
+        k1, k2, k_main = 3, 4, 5
+        p_tensor, p_main = 7, 4
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        B1 = rng.normal(size=(n1, k1))
+        B2 = rng.normal(size=(n2, k2))
+        B_main = rng.normal(size=(n1, k_main))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), k1 * k2
+        )
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            rng.normal(size=(k1 * k2, p_tensor)),
+            pair_idx.astype(np.intp),
+            tensor_id=6,
+        )
+        main = DiscretizedSSPGroupMatrix(
+            B_main,
+            rng.normal(size=(k_main, p_main)),
+            idx1,
+        )
+        W = rng.uniform(0.2, 1.8, size=n)
+
+        def fail_generic(*args, **kwargs):
+            raise AssertionError("generic tensor-main cross-Gram should not be used")
+
+        monkeypatch.setattr(algebra, "_cross_gram_tensor_main", fail_generic)
+
+        cross = algebra._cross_gram(tensor, main, W)
+        dense = tensor.toarray().T @ (main.toarray() * W[:, None])
+
+        np.testing.assert_allclose(cross, dense, rtol=1e-10, atol=1e-10)
+
+    def test_tensor_own_margin_detection_is_cached(self, monkeypatch):
+        """Repeated tensor × main cross-blocks should not rescan full index arrays."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+
+        rng = np.random.default_rng(122)
+        n = 80
+        n1, n2 = 5, 4
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        B1 = rng.normal(size=(n1, 3))
+        B2 = rng.normal(size=(n2, 2))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), 6
+        )
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            np.eye(6),
+            pair_idx.astype(np.intp),
+            tensor_id=7,
+        )
+        main = DiscretizedSSPGroupMatrix(rng.normal(size=(n1, 4)), np.eye(4), idx1)
+        W = rng.uniform(0.2, 1.8, size=n)
+        calls = 0
+        real_array_equal = algebra.np.array_equal
+
+        def counting_array_equal(a, b):
+            nonlocal calls
+            calls += 1
+            return real_array_equal(a, b)
+
+        monkeypatch.setattr(algebra.np, "array_equal", counting_array_equal)
+
+        algebra._cross_gram(tensor, main, W)
+        first_call_count = calls
+        algebra._cross_gram(tensor, main, W)
+
+        assert first_call_count > 0
+        assert calls == first_call_count
+
+    def test_block_xtwx_rhs_reuses_tensor_w_grid_for_own_margins(self, monkeypatch):
+        """One block assembly should share a tensor W-grid across both parent crosses."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+        from superglm.types import GroupSlice
+
+        rng = np.random.default_rng(123)
+        n = 120
+        n1, n2 = 7, 6
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        B1 = rng.normal(size=(n1, 3))
+        B2 = rng.normal(size=(n2, 2))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), 6
+        )
+        main1 = DiscretizedSSPGroupMatrix(rng.normal(size=(n1, 4)), np.eye(4), idx1)
+        main2 = DiscretizedSSPGroupMatrix(rng.normal(size=(n2, 5)), np.eye(5), idx2)
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            np.eye(6),
+            pair_idx.astype(np.intp),
+            tensor_id=8,
+        )
+        groups = [
+            GroupSlice(name="x1", start=0, end=4, weight=2.0),
+            GroupSlice(name="x2", start=4, end=9, weight=np.sqrt(5.0)),
+            GroupSlice(name="x1:x2", start=9, end=15, weight=np.sqrt(6.0)),
+        ]
+        W = rng.uniform(0.2, 1.8, size=n)
+        Wz = rng.normal(size=n)
+        calls = 0
+        real_hist = algebra._disc_disc_2d_hist
+
+        def counting_hist(a, b, weights, n_a, n_b):
+            nonlocal calls
+            if a is tensor.idx1 and b is tensor.idx2 and weights is W:
+                calls += 1
+            return real_hist(a, b, weights, n_a, n_b)
+
+        monkeypatch.setattr(algebra, "_disc_disc_2d_hist", counting_hist)
+
+        algebra._block_xtwx_rhs([main1, main2, tensor], groups, W, Wz)
+
+        assert calls == 1
+
+    def test_categorical_spline_categorical_cross_gram_matches_dense_oracle(self):
+        """Categorical × compact spline-category cross-Gram should use one aggregation."""
+        import scipy.sparse as sp
+
+        from superglm._group_matrix._group_matrix_algebra import (
+            _cross_gram_categorical_spline_categorical,
+        )
+        from superglm.group_matrix import CategoricalGroupMatrix, SplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(117)
+        n = 70
+        n_levels = 5
+        codes = rng.integers(-1, n_levels, size=n)
+        cat = CategoricalGroupMatrix(codes, n_levels)
+        B = sp.random(n, 4, density=0.45, format="csr", random_state=117)
+        R_inv = rng.normal(size=(4, 3))
+        spline_cat = SplineCategoricalGroupMatrix(B, R_inv, codes == 2)
+        W = rng.normal(size=n)
+
+        compact = _cross_gram_categorical_spline_categorical(cat, spline_cat, W)
+        dense = cat.toarray().T @ (spline_cat.toarray() * W[:, None])
+
+        np.testing.assert_allclose(compact, dense, rtol=1e-12, atol=1e-12)
+
+    def test_categorical_spline_categorical_cross_gram_does_not_call_cat_rmatvec(self, monkeypatch):
+        """The block assembler should avoid per-column categorical rmatvec fallback."""
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import CategoricalGroupMatrix, SplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(118)
+        n = 60
+        n_levels = 8
+        codes = rng.integers(-1, n_levels, size=n)
+        cat = CategoricalGroupMatrix(codes, n_levels)
+        spline_cat = SplineCategoricalGroupMatrix(
+            sp.random(n, 5, density=0.4, format="csr", random_state=118),
+            rng.normal(size=(5, 3)),
+            codes == 3,
+        )
+
+        def fail_rmatvec(*args, **kwargs):
+            raise AssertionError("categorical rmatvec fallback should not be used")
+
+        monkeypatch.setattr(CategoricalGroupMatrix, "rmatvec", fail_rmatvec)
+
+        cross = _cross_gram(cat, spline_cat, rng.uniform(0.5, 1.5, size=n))
+
+        assert cross.shape == (n_levels, 3)
+
     def test_categorical_cross_gram_matches_dense_oracle(self):
         """Categorical × categorical cross-gram must match dense weighted one-hot."""
         from superglm.group_matrix import CategoricalGroupMatrix

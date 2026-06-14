@@ -44,6 +44,21 @@ from superglm.types import GroupSlice, PenaltyComponent
 logger = logging.getLogger(__name__)
 
 
+def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
+    """Return True when PIRLS weights are independent of ``mu``.
+
+    The direct solver can reuse X'WX only when
+    ``(dmu/deta)^2 / V(mu)`` is exactly constant.  Keep this deliberately
+    conservative so performance never changes the fitted problem.
+    """
+    from superglm.distributions import Gamma, Gaussian
+    from superglm.links import IdentityLink, LogLink
+
+    return (isinstance(family, Gaussian) and isinstance(link, IdentityLink)) or (
+        isinstance(family, Gamma) and isinstance(link, LogLink)
+    )
+
+
 def _robust_solve(
     M: NDArray, rhs: NDArray, residual_tol: float = 1e-6
 ) -> tuple[NDArray, float, bool]:
@@ -75,6 +90,21 @@ def _robust_solve(
         True if the SVD path was taken.
     """
     k = M.shape[0]
+
+    # Fast path: ordinary SPD systems are the common case in REML/IRLS.
+    # Keep the rank-revealing path below as the safety net for semidefinite
+    # or numerically awkward systems.
+    try:
+        L = scipy.linalg.cholesky(M, lower=True, check_finite=False)
+        x = scipy.linalg.cho_solve((L, True), rhs, check_finite=False)
+        rhs_norm = np.linalg.norm(rhs)
+        rel_residual = np.linalg.norm(M @ x - rhs) / max(rhs_norm, 1e-300)
+        if rel_residual < residual_tol:
+            diag_L = np.abs(np.diag(L))
+            cond_est = float((diag_L.max() / max(diag_L.min(), 1e-300)) ** 2)
+            return x, cond_est, False
+    except (np.linalg.LinAlgError, ValueError):
+        pass
 
     # === Primary path: Pivoted Cholesky (Higham Ch. 10.3) ===
     try:
@@ -125,6 +155,22 @@ def _robust_solve(
     x = (Vh.T * inv_s) @ (U_svd.T @ rhs)
     cond_est = float(s[0] / max(s[-1], 1e-300))
     return x, cond_est, True
+
+
+def _solve_profiled_intercept_from_h_inv(
+    H_inv: NDArray,
+    XtWz: NDArray,
+    XtW1: NDArray,
+    sum_W: float,
+    sum_Wz: float,
+) -> tuple[NDArray, float]:
+    """Solve beta/intercept from H^{-1} with the intercept profiled out."""
+    h_z = H_inv @ XtWz
+    h_1 = H_inv @ XtW1
+    denom = sum_W - float(XtW1 @ h_1)
+    intercept = float((sum_Wz - XtW1 @ h_z) / denom)
+    beta = h_z - h_1 * intercept
+    return beta, intercept
 
 
 def _build_penalty_matrix(
@@ -221,6 +267,21 @@ def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, 
         True if the pivoted-Cholesky path succeeded with acceptable quality.
     """
     p = H.shape[0]
+
+    # Fast path for the usual full-rank SPD case.  If this fails or the
+    # spot-check is poor, fall through to the rank-revealing decomposition.
+    try:
+        L = scipy.linalg.cholesky(H, lower=True, check_finite=False)
+        H_inv = scipy.linalg.cho_solve((L, True), np.eye(p), check_finite=False)
+        e0 = np.zeros(p)
+        e0[0] = 1.0
+        residual = np.linalg.norm(H @ H_inv[:, 0] - e0)
+        if residual < residual_tol:
+            diag_L = np.abs(np.diag(L))
+            log_det_H = 2.0 * float(np.sum(np.log(diag_L)))
+            return H_inv, log_det_H, True
+    except (np.linalg.LinAlgError, ValueError):
+        pass
 
     # === Primary path: Pivoted Cholesky (Higham Ch. 10.3) ===
     # dpstrf computes P' U' U P = H (upper) with column pivoting,
@@ -402,6 +463,19 @@ def fit_irls_direct(
     # ── Constrained QP support (monotone splines) ──
     has_constraints = any(g.constraints is not None for g in groups)
     prev_active_set: list[int] | None = None
+    A_all: NDArray | None = None
+    b_all: NDArray | None = None
+    if has_constraints:
+        A_blocks: list[np.ndarray] = []
+        b_blocks: list[np.ndarray] = []
+        for g in groups:
+            if g.constraints is not None:
+                A_model = np.zeros((g.constraints.n_constraints, p))
+                A_model[:, g.sl] = g.constraints.A
+                A_blocks.append(A_model)
+                b_blocks.append(g.constraints.b)
+        A_all = np.vstack(A_blocks)
+        b_all = np.concatenate(b_blocks)
 
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
@@ -532,11 +606,16 @@ def fit_irls_direct(
     # R_inv is constant within a single fit_irls_direct call, so the
     # materialized X is valid for all IRLS iterations.
     _tabmat_split = dm.tabmat_split if not _use_qr else None
+    _can_reuse_weighted_gram = _has_constant_irls_weights(family, link) and not _has_scop
+    _constant_w_gram_cache: tuple[NDArray, NDArray, float] | None = None
 
     t_start = time.perf_counter()
     dev_prev = np.inf
     converged = False
     XtWX_beta = np.eye(p)  # will be overwritten
+    _precomputed_final_inverse: NDArray | None = None
+    _precomputed_log_det_H: float | None = None
+    _use_h_inverse_solve = max_iter == 1 and return_xtwx and not has_constraints and not _has_scop
 
     # Phase timing accumulators
     _t_working = 0.0
@@ -754,8 +833,16 @@ def fit_irls_direct(
                 Wz = W * z_off
                 sum_W = float(np.sum(W))
 
-                # Combined gram + rmatvec: shares O(n) bincount for discretized groups
-                XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz, tabmat_split=_tabmat_split)
+                if _can_reuse_weighted_gram and _constant_w_gram_cache is not None:
+                    XtWX, XtW1, sum_W = _constant_w_gram_cache
+                    XtWz = dm.rmatvec(Wz)
+                else:
+                    # Combined gram + rmatvec: shares O(n) bincount for discretized groups
+                    XtWX, XtW1, XtWz = _block_xtwx_rhs(
+                        gms, groups, W, Wz, tabmat_split=_tabmat_split
+                    )
+                    if _can_reuse_weighted_gram:
+                        _constant_w_gram_cache = (XtWX, XtW1, sum_W)
 
                 # Build augmented system (p+1, p+1)
                 M_aug = np.empty((p + 1, p + 1))
@@ -773,19 +860,6 @@ def fit_irls_direct(
                 # Solve — constrained QP or Cholesky with SVD fallback
                 _t0 = time.perf_counter()
                 if has_constraints:
-                    # Assemble model-level constraint matrix from per-group constraints
-                    A_blocks: list[np.ndarray] = []
-                    b_blocks: list[np.ndarray] = []
-                    for g in groups:
-                        if g.constraints is not None:
-                            A_model = np.zeros((g.constraints.n_constraints, p))
-                            A_model[:, g.sl] = g.constraints.A
-                            A_blocks.append(A_model)
-                            b_blocks.append(g.constraints.b)
-
-                    A_all = np.vstack(A_blocks)
-                    b_all = np.concatenate(b_blocks)
-
                     # Profile out intercept (unconstrained):
                     # intercept = (rhs[0] - XtW1 @ beta) / sum_W
                     # Reduced system: H = XtWX + S, g_vec = XtWz - XtW1*(sum_Wz/sum_W)
@@ -803,6 +877,20 @@ def fit_irls_direct(
                     intercept = float((rhs[0] - XtW1 @ beta) / sum_W)
                     prev_active_set = qp_result.active_set
                     _used_svd = False
+                    _cond_est = 0.0
+                elif _use_h_inverse_solve:
+                    H = M_aug[1:, 1:]
+                    H_inv, log_det_H, cholesky_ok = _safe_decompose_H(H)
+                    beta, intercept = _solve_profiled_intercept_from_h_inv(
+                        H_inv,
+                        XtWz,
+                        XtW1,
+                        sum_W,
+                        float(np.sum(Wz)),
+                    )
+                    _precomputed_final_inverse = H_inv
+                    _precomputed_log_det_H = log_det_H
+                    _used_svd = not cholesky_ok
                     _cond_est = 0.0
                 else:
                     beta_aug, _cond_est, _used_svd = _robust_solve(M_aug, rhs)
@@ -979,8 +1067,12 @@ def fit_irls_direct(
     # XtWX is already computed from the last iteration. Reuse S from above.
     _t0 = time.perf_counter()
     XtWX_beta = XtWX
-    M_beta = XtWX_beta + S
-    H_inv, log_det_H, _ = _safe_decompose_H(M_beta)
+    if _precomputed_final_inverse is not None:
+        H_inv = _precomputed_final_inverse
+        log_det_H = float(_precomputed_log_det_H)
+    else:
+        M_beta = XtWX_beta + S
+        H_inv, log_det_H, _ = _safe_decompose_H(M_beta)
     XtWX_S_inv_beta = H_inv
 
     # Exact effective df: 1 (intercept) + trace((X'WX + S)^{-1} X'WX)

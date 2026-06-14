@@ -172,3 +172,111 @@ class SparseSSPGroupMatrix:
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         return sub
+
+
+class SplineCategoricalGroupMatrix:
+    """One spline-by-category level without materialising a masked spline block."""
+
+    __slots__ = (
+        "B",
+        "B_level",
+        "_data",
+        "_indices",
+        "_indptr",
+        "_p_b",
+        "R_inv",
+        "row_idx",
+        "n_rows",
+        "shape",
+        "omega",
+        "projection",
+        "omega_components",
+        "component_types",
+        "lambda_policies",
+    )
+
+    def __init__(self, B_csr: sp.spmatrix, R_inv: NDArray, mask_or_idx: NDArray):
+        self.B = sp.csr_matrix(B_csr)
+        self.n_rows = self.B.shape[0]
+        arr = np.asarray(mask_or_idx)
+        if arr.dtype == bool:
+            if arr.shape != (self.n_rows,):
+                raise ValueError("mask length must match spline basis row count")
+            row_idx = np.flatnonzero(arr)
+        else:
+            row_idx = arr.astype(np.intp, copy=False)
+            if row_idx.ndim != 1:
+                raise ValueError("row index array must be one-dimensional")
+            if row_idx.size and (int(row_idx.min()) < 0 or int(row_idx.max()) >= self.n_rows):
+                raise ValueError("row index array contains rows outside the spline basis")
+
+        self.row_idx = np.asarray(row_idx, dtype=np.intp)
+        self.B_level = self.B[self.row_idx].tocsr()
+        self._data = self.B_level.data.astype(np.float64)
+        self._indices = self.B_level.indices
+        self._indptr = self.B_level.indptr
+        self._p_b = self.B_level.shape[1]
+        self.R_inv = np.asarray(R_inv)
+        self.shape = (self.n_rows, self.R_inv.shape[1])
+        self.omega = None
+        self.projection = None
+        self.omega_components = None
+        self.component_types = None
+        self.lambda_policies = None
+
+    def matvec(self, v: NDArray) -> NDArray:
+        out = np.zeros(self.shape[0], dtype=np.float64)
+        if self.row_idx.size == 0:
+            return out
+        raw_beta = self.R_inv @ v
+        out[self.row_idx] = np.asarray(self.B_level @ raw_beta).ravel()
+        return out
+
+    def rmatvec(self, w: NDArray) -> NDArray:
+        return self.R_inv.T @ np.asarray(self.B_level.T @ w[self.row_idx]).ravel()
+
+    def gram(self, W: NDArray) -> NDArray:
+        raw_gram = _csr_weighted_gram(
+            self._data,
+            self._indices,
+            self._indptr,
+            W[self.row_idx],
+            self._p_b,
+        )
+        return self.R_inv.T @ raw_gram @ self.R_inv
+
+    def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+        W_sub = W[self.row_idx]
+        Wz_sub = Wz[self.row_idx]
+        raw_gram = _csr_weighted_gram(
+            self._data,
+            self._indices,
+            self._indptr,
+            W_sub,
+            self._p_b,
+        )
+        gram = self.R_inv.T @ raw_gram @ self.R_inv
+        xtw = self.R_inv.T @ np.asarray(self.B_level.T @ W_sub).ravel()
+        xtwz = self.R_inv.T @ np.asarray(self.B_level.T @ Wz_sub).ravel()
+        return gram, xtw, xtwz
+
+    def toarray(self) -> NDArray:
+        out = np.zeros(self.shape, dtype=np.float64)
+        if self.row_idx.size:
+            out[self.row_idx] = np.asarray(self.B_level @ self.R_inv)
+        return out
+
+    def row_subset(self, idx: NDArray) -> SplineCategoricalGroupMatrix:
+        idx_arr = np.asarray(idx)
+        if idx_arr.dtype == bool:
+            idx_arr = np.flatnonzero(idx_arr)
+        else:
+            idx_arr = idx_arr.astype(np.intp, copy=False)
+        sub_row_idx = np.flatnonzero(np.isin(idx_arr, self.row_idx))
+        sub = SplineCategoricalGroupMatrix(self.B[idx_arr], self.R_inv, sub_row_idx)
+        sub.omega = self.omega
+        sub.projection = self.projection
+        sub.omega_components = self.omega_components
+        sub.component_types = self.component_types
+        sub.lambda_policies = self.lambda_policies
+        return sub

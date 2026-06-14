@@ -196,7 +196,21 @@ def optimize_discrete_reml_cached_w(
     m = len(group_names)
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
     shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
+    _t_reml_start = _time.perf_counter()
+    _t_pirls = 0.0
+    _t_objective = 0.0
+    _t_newton = 0.0
+    _t_linesearch = 0.0
+    _t_linesearch_solve = 0.0
+    _t_linesearch_surrogate = 0.0
+    _t_linesearch_full_obj = 0.0
+    _t_rebuild_dm = 0.0
+    _t_map_beta = 0.0
+    _t_penalty_context = 0.0
+    _t_tensor_summary = 0.0
+    _t0 = _time.perf_counter()
     tensor_pair_summaries = build_tensor_pair_logdet_summaries(dm.group_matrices, penalties)
+    _t_tensor_summary += _time.perf_counter() - _t0
     use_tensor_surrogate_linesearch = scale_known and bool(shared_tensor_groups)
     # estimated_mask[i] = True  => component i is free to be optimized
     #                     False => component i has a fixed lambda (policy)
@@ -220,14 +234,6 @@ def optimize_discrete_reml_cached_w(
     best_pirls = None
     converged = False
 
-    _t_reml_start = _time.perf_counter()
-    _t_pirls = 0.0
-    _t_objective = 0.0
-    _t_newton = 0.0
-    _t_linesearch = 0.0
-    _t_linesearch_solve = 0.0
-    _t_linesearch_surrogate = 0.0
-    _t_linesearch_full_obj = 0.0
     _n_pirls_steps = 0
     _n_newton_steps = 0
     _n_linesearch_evals = 0
@@ -242,6 +248,7 @@ def optimize_discrete_reml_cached_w(
     # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
     # interaction penalty components from a materially stronger seed.
     boot_lambdas = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
+    _t0 = _time.perf_counter()
     dm_boot = rebuild_design_matrix_with_lambdas(
         dm,
         groups,
@@ -249,10 +256,13 @@ def optimize_discrete_reml_cached_w(
         sample_weight,
         boot_lambdas,
     )
+    _t_rebuild_dm += _time.perf_counter() - _t0
+    _t0 = _time.perf_counter()
     penalties_boot, penalty_caches_boot, penalty_ranks_boot = build_penalty_context(
         dm_boot.group_matrices,
         reml_groups,
     )
+    _t_penalty_context += _time.perf_counter() - _t0
     S_boot = build_penalty_matrix(
         dm_boot.group_matrices,
         groups,
@@ -260,7 +270,7 @@ def optimize_discrete_reml_cached_w(
         p,
         reml_penalties=penalties_boot,
     )
-    _t0 = _time.perf_counter()
+    _pirls_start = _time.perf_counter()
     cache: dict = {}
     boot_result, boot_inv, boot_xtwx = fit_irls_direct(
         X=dm_boot,
@@ -277,14 +287,16 @@ def optimize_discrete_reml_cached_w(
         direct_solve=direct_solve,
         S_override=S_boot,
     )
+    _t_pirls += _time.perf_counter() - _pirls_start
     dm = dm_boot
     penalties = penalties_boot
     penalty_caches = penalty_caches_boot
     penalty_ranks = penalty_ranks_boot
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
     shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
+    _t0 = _time.perf_counter()
     tensor_pair_summaries = build_tensor_pair_logdet_summaries(dm.group_matrices, penalties)
-    _t_pirls += _time.perf_counter() - _t0
+    _t_tensor_summary += _time.perf_counter() - _t0
     _n_pirls_steps += boot_result.n_iter
     warm_beta = boot_result.beta.copy()
     warm_intercept = float(boot_result.intercept)
@@ -604,16 +616,6 @@ def optimize_discrete_reml_cached_w(
                 p,
                 reml_penalties=penalties,
             )
-            _tls0 = _time.perf_counter()
-            beta_trial, intercept_trial = _solve_cached_augmented(
-                XtWX,
-                S_trial,
-                c_XtWz,
-                c_XtW1,
-                c_sum_W,
-                c_sum_Wz,
-            )
-            _t_linesearch_solve += _time.perf_counter() - _tls0
 
             _n_linesearch_evals += 1
             if use_tensor_surrogate_linesearch:
@@ -629,10 +631,20 @@ def optimize_discrete_reml_cached_w(
                     rho_trial,
                     trial_lambdas,
                     S_trial,
-                    beta_trial,
-                    intercept_trial,
                 )
                 break
+
+            # Solve augmented system analytically (O(p^3), no data pass).
+            _tls0 = _time.perf_counter()
+            beta_trial, intercept_trial = _solve_cached_augmented(
+                XtWX,
+                S_trial,
+                c_XtWz,
+                c_XtW1,
+                c_sum_W,
+                c_sum_Wz,
+            )
+            _t_linesearch_solve += _time.perf_counter() - _tls0
 
             # Evaluate full REML at trial point once the cached surrogate
             # suggests an improving direction (or for all trials on the
@@ -681,7 +693,7 @@ def optimize_discrete_reml_cached_w(
             halving_count += 1
 
         if use_tensor_surrogate_linesearch and candidate is not None and not accepted:
-            rho_trial, trial_lambdas, S_trial, beta_trial, intercept_trial = candidate
+            rho_trial, trial_lambdas, S_trial = candidate
             _tls0 = _time.perf_counter()
             beta_trial, intercept_trial, log_det_H_trial = _solve_cached_h_system(
                 XtWX,
@@ -807,6 +819,7 @@ def optimize_discrete_reml_cached_w(
         current_lambdas.update(fixed_lambdas)
 
         old_gms = dm.group_matrices
+        _t0 = _time.perf_counter()
         dm = rebuild_design_matrix_with_lambdas(
             dm,
             groups,
@@ -814,20 +827,27 @@ def optimize_discrete_reml_cached_w(
             sample_weight,
             current_lambdas,
         )
+        _t_rebuild_dm += _time.perf_counter() - _t0
+        _t0 = _time.perf_counter()
         warm_beta = _map_beta_between_bases(
             pirls_result.beta,
             old_gms,
             dm.group_matrices,
             groups,
         )
+        _t_map_beta += _time.perf_counter() - _t0
         warm_intercept = float(pirls_result.intercept)
+        _t0 = _time.perf_counter()
         penalties, penalty_caches, penalty_ranks = build_penalty_context(
             dm.group_matrices,
             reml_groups,
         )
+        _t_penalty_context += _time.perf_counter() - _t0
         shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
         shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
+        _t0 = _time.perf_counter()
         tensor_pair_summaries = build_tensor_pair_logdet_summaries(dm.group_matrices, penalties)
+        _t_tensor_summary += _time.perf_counter() - _t0
 
     # === Final full IRLS refit at converged lambdas ===
     rho_clipped = np.clip(rho, log_lo, log_hi)
@@ -836,6 +856,7 @@ def optimize_discrete_reml_cached_w(
         final_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
     final_lambdas.update(fixed_lambdas)
     old_gms_final = dm.group_matrices
+    _t0 = _time.perf_counter()
     dm = rebuild_design_matrix_with_lambdas(
         dm,
         groups,
@@ -843,19 +864,26 @@ def optimize_discrete_reml_cached_w(
         sample_weight,
         final_lambdas,
     )
+    _t_rebuild_dm += _time.perf_counter() - _t0
+    _t0 = _time.perf_counter()
     warm_beta = _map_beta_between_bases(
         warm_beta if warm_beta is not None else pirls_result.beta,
         old_gms_final,
         dm.group_matrices,
         groups,
     )
+    _t_map_beta += _time.perf_counter() - _t0
+    _t0 = _time.perf_counter()
     penalties, penalty_caches, penalty_ranks = build_penalty_context(
         dm.group_matrices,
         reml_groups,
     )
+    _t_penalty_context += _time.perf_counter() - _t0
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
     shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
+    _t0 = _time.perf_counter()
     tensor_pair_summaries = build_tensor_pair_logdet_summaries(dm.group_matrices, penalties)
+    _t_tensor_summary += _time.perf_counter() - _t0
     S_final = build_penalty_matrix(
         dm.group_matrices, groups, final_lambdas, dm.p, reml_penalties=penalties
     )
@@ -936,6 +964,10 @@ def optimize_discrete_reml_cached_w(
         profile["reml_linesearch_solve_s"] = _t_linesearch_solve
         profile["reml_linesearch_surrogate_s"] = _t_linesearch_surrogate
         profile["reml_linesearch_full_obj_s"] = _t_linesearch_full_obj
+        profile["reml_rebuild_dm_s"] = _t_rebuild_dm
+        profile["reml_map_beta_s"] = _t_map_beta
+        profile["reml_penalty_context_s"] = _t_penalty_context
+        profile["reml_tensor_summary_s"] = _t_tensor_summary
         profile["reml_fp_update_s"] = 0.0
         profile["reml_n_linesearch_fits"] = _n_linesearch_evals
         profile["reml_n_linesearch_surrogate_evals"] = _n_linesearch_surrogate_evals

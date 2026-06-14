@@ -19,6 +19,19 @@ from superglm.solvers.pirls import PIRLSResult
 from superglm.types import PenaltyComponent
 
 
+def _penalty_block_trace(
+    XtWX_S_inv: NDArray,
+    sl_i: slice,
+    weighted_omega_i: NDArray,
+    sl_j: slice,
+    weighted_omega_j: NDArray,
+) -> float:
+    """Return tr(H^-1 dS_i H^-1 dS_j) without materialising p x p blocks."""
+    H_ji = XtWX_S_inv[sl_j, :][:, sl_i]
+    H_ij = XtWX_S_inv[sl_i, :][:, sl_j]
+    return float(np.trace(H_ji @ weighted_omega_i @ H_ij @ weighted_omega_j))
+
+
 def reml_direct_gradient(
     group_matrices: list,
     result: PIRLSResult,
@@ -107,6 +120,7 @@ def reml_direct_hessian(
     m = len(penalties)
     p = XtWX_S_inv.shape[0]
     hess = np.zeros((m, m))
+    use_compact_trace = dH_extra is None
 
     # Pre-compute log-det derivatives for multi-penalty groups.
     # r_logdet: first derivative d(log|S|_+)/drho_i
@@ -121,6 +135,7 @@ def reml_direct_hessian(
     )
 
     full_HdHj: dict[int, NDArray] = {}
+    compact_dS: list[tuple[slice, NDArray]] = []
     quad_per_group: list[float] = []
     s_beta_list: list[NDArray] = []
     for i, pc in enumerate(penalties):
@@ -132,13 +147,15 @@ def reml_direct_hessian(
                 gm = group_matrices[pc.group_index]
                 omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
         lam = lambdas[pc.name]
-        F = np.zeros((p, p))
-        F[:, pc.group_sl] = XtWX_S_inv[:, pc.group_sl] @ (lam * omega_ssp)
-
-        if dH_extra is not None and i in dH_extra:
-            F = F + XtWX_S_inv @ dH_extra[i]
-
-        full_HdHj[i] = F
+        weighted_omega = lam * omega_ssp
+        if use_compact_trace:
+            compact_dS.append((pc.group_sl, weighted_omega))
+        else:
+            F = np.zeros((p, p))
+            F[:, pc.group_sl] = XtWX_S_inv[:, pc.group_sl] @ weighted_omega
+            if dH_extra is not None and i in dH_extra:
+                F = F + XtWX_S_inv @ dH_extra[i]
+            full_HdHj[i] = F
 
         if pirls_result is not None:
             beta_g = pirls_result.beta[pc.group_sl]
@@ -152,7 +169,18 @@ def reml_direct_hessian(
 
     for i in range(m):
         for j in range(i, m):
-            h = -0.5 * float(np.sum(full_HdHj[i] * full_HdHj[j].T))
+            if use_compact_trace:
+                sl_i, weighted_omega_i = compact_dS[i]
+                sl_j, weighted_omega_j = compact_dS[j]
+                h = -0.5 * _penalty_block_trace(
+                    XtWX_S_inv,
+                    sl_i,
+                    weighted_omega_i,
+                    sl_j,
+                    weighted_omega_j,
+                )
+            else:
+                h = -0.5 * float(np.sum(full_HdHj[i] * full_HdHj[j].T))
             hess[i, j] = h
             hess[j, i] = h
 
