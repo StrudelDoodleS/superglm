@@ -349,6 +349,7 @@ class SuperGLM:
         pirls_tol: float | None = None,
         max_pirls_iter: int | None = None,
         lambda2_init: float | None = None,
+        interaction_mode: str = "full",
         verbose: bool = False,
         w_correction_order: int = 1,
     ) -> SuperGLM:
@@ -382,6 +383,11 @@ class SuperGLM:
             constructor ``max_iter`` (100).
         lambda2_init : float, optional
             Initial per-group lambda. Defaults to ``self.lambda2``.
+        interaction_mode : {"full", "fast_candidate"}
+            ``"full"`` runs ordinary REML. ``"fast_candidate"`` caps REML
+            outer updates for interaction models and then runs the normal final
+            refit, intended for screening candidate interactions before a full
+            final model fit.
         verbose : bool
             Print progress.
         w_correction_order : int
@@ -410,6 +416,7 @@ class SuperGLM:
             pirls_tol=resolved_pirls_tol,
             max_pirls_iter=resolved_max_pirls_iter,
             lambda2_init=lambda2_init,
+            interaction_mode=interaction_mode,
             verbose=verbose,
             w_correction_order=w_correction_order,
         )

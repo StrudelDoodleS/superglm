@@ -161,6 +161,8 @@ def optimize_discrete_reml_cached_w(
     penalty_caches: dict | None = None,
     profile: dict | None = None,
     direct_solve: str = "auto",
+    pirls_tol: float = 1e-6,
+    max_pirls_iter: int = 100,
     # Legacy kwargs accepted but ignored (removed in POI rewrite)
     max_analytical_per_w: int = 30,
     select_snap: bool = True,
@@ -232,7 +234,7 @@ def optimize_discrete_reml_cached_w(
     max_newton_step = 5.0
     max_halving = 25
     _eps = np.finfo(float).eps
-    _tol = min(reml_tol, 1e-6)
+    _tol = max(float(reml_tol), 1e-12)
 
     best_obj = np.inf
     best_lambdas = lambdas.copy()
@@ -287,6 +289,8 @@ def optimize_discrete_reml_cached_w(
         groups=groups,
         lambda2=boot_lambdas,
         offset=offset_arr,
+        max_iter=max_pirls_iter,
+        tol=pirls_tol,
         return_xtwx=True,
         profile=profile,
         cache_out=cache,
@@ -422,6 +426,7 @@ def optimize_discrete_reml_cached_w(
             beta_init=warm_beta,
             intercept_init=warm_intercept,
             max_iter=1,
+            tol=pirls_tol,
             return_xtwx=True,
             profile=profile,
             cache_out=cache,
@@ -919,6 +924,8 @@ def optimize_discrete_reml_cached_w(
         offset=offset_arr,
         beta_init=warm_beta,
         intercept_init=warm_intercept,
+        max_iter=max_pirls_iter,
+        tol=pirls_tol,
         return_xtwx=True,
         profile=profile,
         direct_solve=direct_solve,

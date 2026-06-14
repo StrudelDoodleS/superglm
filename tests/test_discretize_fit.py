@@ -974,6 +974,127 @@ class TestDiscretizedTensorInteraction:
             assert key in profile
             assert profile[key] >= 0.0
 
+    def test_fast_candidate_interaction_mode_caps_reml_outer_iterations(
+        self, tensor_interaction_data
+    ):
+        """Candidate interaction fits should cap REML updates but still finalize the fit."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit_reml(X, y, max_reml_iter=12, interaction_mode="fast_candidate")
+
+        profile = model._reml_profile
+        assert profile["interaction_mode"] == "fast_candidate"
+        assert profile["interaction_candidate_active"] is True
+        assert profile["requested_max_reml_iter"] == 12
+        assert profile["effective_max_reml_iter"] == 5
+        assert profile["fit_runtime_canonicalize_validate"] is False
+        assert profile["n_reml_iter"] <= 5
+        assert model.result.converged
+        assert np.all(np.isfinite(model.predict(X.iloc[:25])))
+        assert model._runtime_canonical_state["diagnostics"]["skipped"] is True
+
+    def test_fast_candidate_interaction_mode_does_not_cap_main_effect_models(
+        self, tensor_interaction_data
+    ):
+        """The candidate cap is interaction-specific and leaves main-only REML untouched."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+        )
+        model.fit_reml(X, y, max_reml_iter=7, interaction_mode="fast_candidate")
+
+        profile = model._reml_profile
+        assert profile["interaction_mode"] == "fast_candidate"
+        assert profile["interaction_candidate_active"] is False
+        assert profile["requested_max_reml_iter"] == 7
+        assert profile["effective_max_reml_iter"] == 7
+        assert profile["fit_runtime_canonicalize_validate"] is True
+
+    def test_fit_reml_rejects_unknown_interaction_mode(self, tensor_interaction_data):
+        """Unknown interaction candidate modes should fail before fitting."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+
+        with pytest.raises(ValueError, match="interaction_mode"):
+            model.fit_reml(X, y, max_reml_iter=5, interaction_mode="fast")
+
+    def test_discrete_reml_forwards_public_pirls_controls(
+        self, tensor_interaction_data, monkeypatch
+    ):
+        """Discrete REML should honor public PIRLS tolerance and iteration controls."""
+        from superglm.reml import discrete as discrete_reml
+
+        X, y = tensor_interaction_data
+        calls = []
+        original = discrete_reml.fit_irls_direct
+
+        def spy_fit_irls_direct(*args, **kwargs):
+            calls.append({"tol": kwargs.get("tol"), "max_iter": kwargs.get("max_iter")})
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(discrete_reml, "fit_irls_direct", spy_fit_irls_direct)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit_reml(X, y, max_reml_iter=2, pirls_tol=1e-5, max_pirls_iter=7)
+
+        assert calls
+        assert all(call["tol"] == 1e-5 for call in calls)
+        assert calls[0]["max_iter"] == 7
+        assert calls[-1]["max_iter"] == 7
+        assert {call["max_iter"] for call in calls[1:-1]} <= {1}
+
+    def test_discrete_reml_tol_can_be_relaxed(self, tensor_interaction_data):
+        """A loose REML tolerance should actually loosen discrete REML convergence."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+
+        model.fit_reml(X, y, max_reml_iter=8, reml_tol=1e9)
+
+        assert model._reml_result.converged
+        assert model._reml_result.n_reml_iter == 2
+
     def test_penalty_context_cache_reuses_frozen_tensor_components(
         self, tensor_interaction_data, monkeypatch
     ):

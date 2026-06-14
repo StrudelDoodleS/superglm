@@ -46,6 +46,9 @@ from superglm.types import FitStats
 
 logger = logging.getLogger(__name__)
 
+_VALID_REML_INTERACTION_MODES = {"full", "fast_candidate"}
+_FAST_CANDIDATE_REML_ITER_CAP = 5
+
 __all__ = [
     "PathResult",
     "fit",
@@ -244,6 +247,27 @@ def _make_reml_debug_recorder(
         }
     )
     return recorder
+
+
+def _resolve_interaction_reml_mode(model, interaction_mode: str, max_reml_iter: int) -> dict:
+    """Return profile metadata and the effective REML iteration limit."""
+    if interaction_mode not in _VALID_REML_INTERACTION_MODES:
+        valid = ", ".join(sorted(_VALID_REML_INTERACTION_MODES))
+        raise ValueError(f"interaction_mode must be one of {{{valid}}}, got {interaction_mode!r}")
+
+    requested = int(max_reml_iter)
+    interaction_order = getattr(model, "_interaction_order", ()) or ()
+    pending_interactions = getattr(model, "_pending_interactions", ()) or ()
+    n_interactions = len(interaction_order) if interaction_order else len(pending_interactions)
+    active = interaction_mode == "fast_candidate" and n_interactions > 0
+    effective = min(requested, _FAST_CANDIDATE_REML_ITER_CAP) if active else requested
+    return {
+        "interaction_mode": interaction_mode,
+        "interaction_candidate_active": bool(active),
+        "n_interactions": int(n_interactions),
+        "requested_max_reml_iter": requested,
+        "effective_max_reml_iter": int(effective),
+    }
 
 
 def _prime_fit_caches(
@@ -607,6 +631,7 @@ def fit_reml(
     pirls_tol=1e-6,
     max_pirls_iter=100,
     lambda2_init=None,
+    interaction_mode="full",
     verbose=False,
     w_correction_order=1,
 ):
@@ -633,6 +658,8 @@ def fit_reml(
 
     _t_total_start = _time.perf_counter()
     _profile: dict = {}
+    _profile.update(_resolve_interaction_reml_mode(model, interaction_mode, max_reml_iter))
+    effective_max_reml_iter = _profile["effective_max_reml_iter"]
 
     _t0 = _time.perf_counter()
     y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
@@ -662,7 +689,7 @@ def fit_reml(
         has_constraints=_has_monotone,
         has_qp_constraints=_has_qp_monotone,
         has_scop_constraints=_has_scop_monotone,
-        max_reml_iter=max_reml_iter,
+        max_reml_iter=effective_max_reml_iter,
         reml_tol=reml_tol,
         pirls_tol=pirls_tol,
         max_pirls_iter=max_pirls_iter,
@@ -786,7 +813,7 @@ def fit_reml(
                 estimated_names=estimated_names,
                 lam_init=lam_init,
                 reml_penalties=reml_penalties,
-                max_reml_iter=max_reml_iter,
+                max_reml_iter=effective_max_reml_iter,
                 reml_tol=reml_tol,
                 pirls_tol=pirls_tol,
                 max_pirls_iter=max_pirls_iter,
@@ -821,7 +848,7 @@ def fit_reml(
             reml_groups=reml_groups,
             penalty_ranks=penalty_ranks,
             lambdas=lambdas,
-            max_reml_iter=max_reml_iter,
+            max_reml_iter=effective_max_reml_iter,
             reml_tol=reml_tol,
             verbose=verbose,
             penalty_caches=penalty_caches,
@@ -853,6 +880,7 @@ def fit_reml(
             total_start=_t_total_start,
             compute_fit_stats=_compute_fit_stats,
         )
+        _t0 = _time.perf_counter()
         _prime_fit_caches(
             model,
             X_ref=X_ref,
@@ -861,10 +889,19 @@ def fit_reml(
             offset_ref=offset_ref,
             y_arr=y,
         )
-        runtime_canonicalize.canonicalize_fitted_model(model)
+        _profile["fit_prime_caches_s"] = _time.perf_counter() - _t0
+
+        validate_runtime = not bool(_profile.get("interaction_candidate_active", False))
+        _profile["fit_runtime_canonicalize_validate"] = bool(validate_runtime)
+        _t0 = _time.perf_counter()
+        runtime_canonicalize.canonicalize_fitted_model(model, validate=validate_runtime)
+        _profile["fit_runtime_canonicalize_s"] = _time.perf_counter() - _t0
 
         logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")
+        _t0 = _time.perf_counter()
         _maybe_release_fit_state(model)
+        _profile["fit_release_state_s"] = _time.perf_counter() - _t0
+        _profile["total_s"] = _time.perf_counter() - _t_total_start
         return model
     finally:
         # Always restore QP constraints if stripped
