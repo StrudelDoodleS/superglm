@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,8 +39,17 @@ OUT_DIR = ROOT / "benchmarks" / "results"
 OUT_JSON = OUT_DIR / "tensor_ti_freq.json"
 OUT_TRAIN_CSV = OUT_DIR / "tensor_ti_freq_train.csv"
 OUT_TEST_CSV = OUT_DIR / "tensor_ti_freq_test.csv"
+OUT_FAIRNESS_JSON = OUT_DIR / "tensor_ti_freq_fairness.json"
+OUT_VALIDATION_JSON = OUT_DIR / "tensor_ti_freq_runtime_validation.json"
 TIMEOUT_S = 120.0
 CASE_TIMEOUT_S = 180.0
+THREAD_ENV_KEYS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
 PROFILE_TIMING_KEYS = (
     "reml_rebuild_dm_s",
     "reml_map_beta_s",
@@ -84,6 +94,55 @@ class BenchmarkCase:
         return ("DrivAge", "BonusMalus") in self.interactions
 
 
+@dataclass(frozen=True)
+class FitControls:
+    name: str
+    pirls_tol: float | None = None
+    reml_tol: float = 1e-6
+    max_reml_iter: int = 30
+    max_pirls_iter: int | None = None
+    interaction_mode: str = "full"
+    runtime_validation: str = "auto"
+    direct_solve: str = "auto"
+    discrete: bool = True
+    n_bins: int = 256
+    discrete_strategy: str = "fixed_bins"
+
+    def fit_kwargs(self) -> dict:
+        kwargs = {
+            "max_reml_iter": self.max_reml_iter,
+            "reml_tol": self.reml_tol,
+            "interaction_mode": self.interaction_mode,
+            "runtime_validation": self.runtime_validation,
+        }
+        if self.pirls_tol is not None:
+            kwargs["pirls_tol"] = self.pirls_tol
+        if self.max_pirls_iter is not None:
+            kwargs["max_pirls_iter"] = self.max_pirls_iter
+        return kwargs
+
+    def metadata(self) -> dict:
+        return {
+            "name": self.name,
+            "tol": 1e-6,
+            "pirls_tol": 1e-6 if self.pirls_tol is None else self.pirls_tol,
+            "pirls_tol_source": "model_default" if self.pirls_tol is None else "fit_reml_kwarg",
+            "reml_tol": self.reml_tol,
+            "max_iter": 100,
+            "max_pirls_iter": 100 if self.max_pirls_iter is None else self.max_pirls_iter,
+            "max_pirls_iter_source": "model_default"
+            if self.max_pirls_iter is None
+            else "fit_reml_kwarg",
+            "max_reml_iter": self.max_reml_iter,
+            "interaction_mode": self.interaction_mode,
+            "runtime_validation": self.runtime_validation,
+            "direct_solve": self.direct_solve,
+            "discrete": self.discrete,
+            "n_bins": self.n_bins,
+            "discrete_strategy": self.discrete_strategy,
+        }
+
+
 def build_superglm_cases() -> tuple[BenchmarkCase, ...]:
     """Cases used to track one- and multi-interaction scaling.
 
@@ -114,6 +173,63 @@ def build_superglm_cases() -> tuple[BenchmarkCase, ...]:
     )
 
 
+def build_fairness_cases() -> tuple[BenchmarkCase, ...]:
+    return build_superglm_cases()[:2]
+
+
+def build_superglm_control_profiles() -> tuple[FitControls, ...]:
+    return (
+        FitControls("S0_current_default"),
+        FitControls(
+            "S1_strict",
+            pirls_tol=1e-7,
+            reml_tol=1e-7,
+            max_reml_iter=20,
+            runtime_validation="full",
+        ),
+        FitControls("S2_mgcv_ish", pirls_tol=1e-7, reml_tol=1e-6, max_reml_iter=20),
+        FitControls("S3_practical", pirls_tol=1e-6, reml_tol=1e-6, max_reml_iter=20),
+        FitControls(
+            "S4_relaxed_candidate",
+            pirls_tol=1e-5,
+            reml_tol=1e-5,
+            max_reml_iter=5,
+            interaction_mode="fast_candidate",
+        ),
+        FitControls(
+            "S5_very_relaxed_candidate",
+            pirls_tol=1e-4,
+            reml_tol=1e-4,
+            max_reml_iter=3,
+            interaction_mode="fast_candidate",
+        ),
+    )
+
+
+def build_runtime_validation_profiles() -> tuple[FitControls, ...]:
+    return (
+        FitControls("runtime_auto", runtime_validation="auto"),
+        FitControls("runtime_full", runtime_validation="full"),
+        FitControls("runtime_skip", runtime_validation="skip"),
+    )
+
+
+def thread_control_metadata() -> dict[str, str | None]:
+    return {key: os.environ.get(key) for key in THREAD_ENV_KEYS}
+
+
+def select_named_items(items: tuple, names: str | None) -> tuple:
+    if names is None or not names.strip():
+        return items
+    wanted = [name.strip() for name in names.split(",") if name.strip()]
+    by_name = {item.name: item for item in items}
+    missing = [name for name in wanted if name not in by_name]
+    if missing:
+        available = ", ".join(by_name)
+        raise ValueError(f"Unknown names {missing}; available: {available}")
+    return tuple(by_name[name] for name in wanted)
+
+
 def _safe_delta(case: dict, baseline: dict, key: str) -> float | int | None:
     if case.get(key) is None or baseline.get(key) is None:
         return None
@@ -135,6 +251,7 @@ def build_case_deltas(rows: list[dict]) -> dict:
         "gini_model",
         "gini_ratio",
         "effective_df",
+        "deviance",
         "reml_n_linesearch_fits",
         "reml_linesearch_s",
     )
@@ -149,6 +266,7 @@ def build_case_deltas(rows: list[dict]) -> dict:
                 "gini_model",
                 "gini_ratio",
                 "effective_df",
+                "deviance",
                 "coef_count",
                 "n_groups",
                 "n_smoothing_params",
@@ -216,18 +334,22 @@ def _fit_case_result(
     w_test: np.ndarray,
     *,
     interactions: tuple[tuple[str, str], ...],
+    controls: FitControls | None = None,
+    return_eta: bool = False,
 ) -> dict:
+    controls = controls or FitControls("S0_current_default")
     model = SuperGLM(
         family="poisson",
         selection_penalty=0.0,
         spline_penalty=0.0,
-        discrete=True,
-        n_bins=256,
-        features=build_features(discrete=True),
+        direct_solve=controls.direct_solve,
+        discrete=controls.discrete,
+        n_bins=controls.n_bins,
+        features=build_features(discrete=controls.discrete),
         interactions=list(interactions) if interactions else None,
     )
     t0 = time.perf_counter()
-    model.fit_reml(X_train, y_train, sample_weight=w_train, max_reml_iter=30)
+    model.fit_reml(X_train, y_train, sample_weight=w_train, **controls.fit_kwargs())
     fit_s = time.perf_counter() - t0
     profile_timings = {key: float(model._reml_profile.get(key, 0.0)) for key in PROFILE_TIMING_KEYS}
     runtime_validate = bool(model._reml_profile.get("fit_runtime_canonicalize_validate", False))
@@ -241,6 +363,7 @@ def _fit_case_result(
             "with_ti": ("DrivAge", "BonusMalus") in interactions,
             "interactions": [f"{a}:{b}" for a, b in interactions],
             "n_interactions": len(interactions),
+            "control": controls.metadata(),
             "timed_out": True,
             "timeout_s": TIMEOUT_S,
             "fit_s": fit_s,
@@ -248,6 +371,8 @@ def _fit_case_result(
             "gini_model": None,
             "gini_ratio": None,
             "effective_df": None,
+            "deviance": None,
+            "lambdas": {},
             "n_reml_iter": int(model._reml_result.n_reml_iter),
             "converged": False,
             "reml_n_linesearch_fits": int(model._reml_profile.get("reml_n_linesearch_fits", 0)),
@@ -265,6 +390,7 @@ def _fit_case_result(
         }
 
     mu = model.predict(X_test)
+    eta = model._predict_eta_exact(X_test) if return_eta else None
     lorenz = lorenz_curve(y_test, mu, exposure=w_test)
 
     _ = model.predict(X_test)
@@ -274,16 +400,19 @@ def _fit_case_result(
         _ = model.predict(X_test)
         predict_times.append(time.perf_counter() - t0)
 
-    return {
+    row = {
         "model": name,
         "with_ti": ("DrivAge", "BonusMalus") in interactions,
         "interactions": [f"{a}:{b}" for a, b in interactions],
         "n_interactions": len(interactions),
+        "control": controls.metadata(),
         "fit_s": fit_s,
         "predict_test_median_s": float(np.median(predict_times)),
         "gini_model": float(lorenz.gini_model),
         "gini_ratio": float(lorenz.gini_ratio),
         "effective_df": float(model.result.effective_df),
+        "deviance": float(model.result.deviance),
+        "lambdas": {str(k): float(v) for k, v in model._reml_result.lambdas.items()},
         "coef_count": int(model._result.beta.size),
         "n_groups": len(model._groups),
         "n_smoothing_params": len(model._reml_result.lambdas),
@@ -300,6 +429,9 @@ def _fit_case_result(
         "fit_runtime_canonicalize_validate_reason": runtime_validate_reason,
         **profile_timings,
     }
+    if return_eta:
+        row["_eta_test"] = eta
+    return row
 
 
 def _fit_case_worker(
@@ -312,6 +444,8 @@ def _fit_case_worker(
     w_train: np.ndarray,
     w_test: np.ndarray,
     interactions: tuple[tuple[str, str], ...],
+    controls: FitControls,
+    return_eta: bool,
 ) -> None:
     try:
         queue.put(
@@ -324,6 +458,8 @@ def _fit_case_worker(
                 w_train,
                 w_test,
                 interactions=interactions,
+                controls=controls,
+                return_eta=return_eta,
             )
         )
     except BaseException as exc:  # pragma: no cover - benchmark failure path
@@ -333,6 +469,7 @@ def _fit_case_worker(
                 "with_ti": ("DrivAge", "BonusMalus") in interactions,
                 "interactions": [f"{a}:{b}" for a, b in interactions],
                 "n_interactions": len(interactions),
+                "control": controls.metadata(),
                 "error": repr(exc),
             }
         )
@@ -348,13 +485,44 @@ def fit_case(
     w_test: np.ndarray,
     *,
     interactions: tuple[tuple[str, str], ...],
+    controls: FitControls | None = None,
+    return_eta: bool = False,
     timeout_s: float = TIMEOUT_S,
 ) -> dict:
+    controls = controls or FitControls("S0_current_default")
+    if return_eta:
+        result = _fit_case_result(
+            name,
+            X_train,
+            X_test,
+            y_train,
+            y_test,
+            w_train,
+            w_test,
+            interactions=interactions,
+            controls=controls,
+            return_eta=True,
+        )
+        result.setdefault("timed_out", False)
+        return result
+
     ctx = mp.get_context("fork")
     queue: mp.Queue = ctx.Queue()
     proc = ctx.Process(
         target=_fit_case_worker,
-        args=(queue, name, X_train, X_test, y_train, y_test, w_train, w_test, interactions),
+        args=(
+            queue,
+            name,
+            X_train,
+            X_test,
+            y_train,
+            y_test,
+            w_train,
+            w_test,
+            interactions,
+            controls,
+            return_eta,
+        ),
     )
     proc.start()
     proc.join(CASE_TIMEOUT_S)
@@ -367,6 +535,7 @@ def fit_case(
             "with_ti": ("DrivAge", "BonusMalus") in interactions,
             "interactions": [f"{a}:{b}" for a, b in interactions],
             "n_interactions": len(interactions),
+            "control": controls.metadata(),
             "timed_out": True,
             "timeout_s": timeout_s,
             "fit_s": timeout_s,
@@ -374,6 +543,8 @@ def fit_case(
             "gini_model": None,
             "gini_ratio": None,
             "effective_df": None,
+            "deviance": None,
+            "lambdas": {},
             "n_reml_iter": None,
             "converged": False,
             "reml_n_linesearch_fits": None,
@@ -393,8 +564,9 @@ def fit_case(
     return result
 
 
-def main() -> None:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+def _prepare_split() -> tuple[
+    pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
     X, y, w = load_freq()
     X_train, X_test, y_train, y_test, w_train, w_test = split_data(X, y, w)
 
@@ -407,9 +579,64 @@ def main() -> None:
     export_test["y_freq"] = y_test
     export_test["Exposure"] = w_test
     export_test.to_csv(OUT_TEST_CSV, index=False)
+    return X_train, X_test, y_train, y_test, w_train, w_test
 
-    rows = [
-        fit_case(
+
+def _base_output(
+    *,
+    n_total: int,
+    n_train: int,
+    n_test: int,
+    case_matrix: tuple[BenchmarkCase, ...],
+) -> dict:
+    return {
+        "dataset": "freMTPL2freq",
+        "n_total": int(n_total),
+        "n_train": int(n_train),
+        "n_test": int(n_test),
+        "target": "claim_rate",
+        "weight": "exposure",
+        "feature_set": ["DrivAge", "VehAge", "BonusMalus", "Area"],
+        "interaction": "DrivAge:BonusMalus",
+        "case_matrix": [
+            {"name": case.name, "interactions": [f"{a}:{b}" for a, b in case.interactions]}
+            for case in case_matrix
+        ],
+        "split_seed": 42,
+        "timeout_s": TIMEOUT_S,
+        "thread_controls": thread_control_metadata(),
+    }
+
+
+def _print_rows(rows: list[dict]) -> None:
+    for row in rows:
+        print(
+            f"{row['model']:<48s} "
+            f"fit={row['fit_s']:>7.2f}s  "
+            f"predict={row['predict_test_median_s'] if row['predict_test_median_s'] is None else format(row['predict_test_median_s'], '.4f')}s  "
+            f"gini={row['gini_model'] if row['gini_model'] is None else format(row['gini_model'], '.6f')}  "
+            f"edf={row['effective_df'] if row['effective_df'] is None else format(row['effective_df'], '8.2f')}  "
+            f"dev={row['deviance'] if row['deviance'] is None else format(row['deviance'], '.3f')}  "
+            f"p={row['coef_count']}  "
+            f"groups={row['n_groups']}  "
+            f"sp={row['n_smoothing_params']}  "
+            f"reml={row['n_reml_iter']}  "
+            f"irls={row.get('irls_iters')}  "
+            f"converged={row['converged']}  "
+            f"timed_out={row['timed_out']}"
+        )
+
+
+def run_case_matrix() -> dict:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    X_train, X_test, y_train, y_test, w_train, w_test = _prepare_split()
+    controls = FitControls("S0_current_default")
+    cases = build_superglm_cases()
+
+    rows = []
+    for case in cases:
+        print(f"[SuperGLM matrix] fitting {case.name}", flush=True)
+        row = fit_case(
             case.name,
             X_train,
             X_test,
@@ -418,62 +645,198 @@ def main() -> None:
             w_train,
             w_test,
             interactions=case.interactions,
+            controls=controls,
         )
-        for case in build_superglm_cases()
-    ]
+        print(f"[SuperGLM matrix] finished {case.name}: fit={row.get('fit_s')}s", flush=True)
+        rows.append(row)
 
-    out = {
-        "dataset": "freMTPL2freq",
-        "n_total": int(len(X)),
-        "n_train": int(len(X_train)),
-        "n_test": int(len(X_test)),
-        "target": "claim_rate",
-        "weight": "exposure",
-        "feature_set": ["DrivAge", "VehAge", "BonusMalus", "Area"],
-        "interaction": "DrivAge:BonusMalus",
-        "case_matrix": [
-            {"name": case.name, "interactions": [f"{a}:{b}" for a, b in case.interactions]}
-            for case in build_superglm_cases()
-        ],
-        "split_seed": 42,
-        "timeout_s": TIMEOUT_S,
-        "results": rows,
-        "deltas": build_case_deltas(rows),
-    }
+    out = _base_output(
+        n_total=len(X_train) + len(X_test),
+        n_train=len(X_train),
+        n_test=len(X_test),
+        case_matrix=cases,
+    )
+    out.update(
+        {
+            "suite": "case_matrix",
+            "control": controls.metadata(),
+            "results": rows,
+            "deltas": build_case_deltas(rows),
+        }
+    )
     OUT_JSON.write_text(json.dumps(out, indent=2))
+    return out
+
+
+def run_fairness_ladder(profile_names: str | None = None) -> dict:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    X_train, X_test, y_train, y_test, w_train, w_test = _prepare_split()
+    cases = build_fairness_cases()
+    controls = select_named_items(build_superglm_control_profiles(), profile_names)
+    rows: list[dict] = []
+    eta_by_key: dict[tuple[str, str], np.ndarray] = {}
+
+    for control in controls:
+        for case in cases:
+            print(f"[SuperGLM fairness] fitting {control.name}/{case.name}", flush=True)
+            row = fit_case(
+                case.name,
+                X_train,
+                X_test,
+                y_train,
+                y_test,
+                w_train,
+                w_test,
+                interactions=case.interactions,
+                controls=control,
+                return_eta=True,
+            )
+            eta = row.pop("_eta_test", None)
+            if eta is not None:
+                eta_by_key[(control.name, case.name)] = np.asarray(eta, dtype=np.float64)
+            row["setting"] = control.name
+            print(
+                f"[SuperGLM fairness] finished {control.name}/{case.name}: fit={row.get('fit_s')}s",
+                flush=True,
+            )
+            rows.append(row)
+
+    for row in rows:
+        strict_eta = eta_by_key.get(("S1_strict", row["model"]))
+        eta = eta_by_key.get((row["setting"], row["model"]))
+        if strict_eta is None or eta is None:
+            row["max_abs_eta_delta_vs_strict"] = None
+            row["mean_abs_eta_delta_vs_strict"] = None
+            continue
+        delta = np.abs(eta - strict_eta)
+        row["max_abs_eta_delta_vs_strict"] = float(np.max(delta))
+        row["mean_abs_eta_delta_vs_strict"] = float(np.mean(delta))
+
+    out = _base_output(
+        n_total=len(X_train) + len(X_test),
+        n_train=len(X_train),
+        n_test=len(X_test),
+        case_matrix=cases,
+    )
+    out.update(
+        {
+            "suite": "fairness_ladder",
+            "controls": [control.metadata() for control in controls],
+            "results": rows,
+            "deltas_by_setting": {
+                control.name: build_case_deltas(
+                    [row for row in rows if row.get("setting") == control.name]
+                )
+                for control in controls
+            },
+        }
+    )
+    OUT_FAIRNESS_JSON.write_text(json.dumps(out, indent=2))
+    return out
+
+
+def run_runtime_validation_ladder(profile_names: str | None = None) -> dict:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    X_train, X_test, y_train, y_test, w_train, w_test = _prepare_split()
+    cases = build_fairness_cases()
+    controls = select_named_items(build_runtime_validation_profiles(), profile_names)
+    rows: list[dict] = []
+
+    for control in controls:
+        for case in cases:
+            print(f"[SuperGLM runtime] fitting {control.name}/{case.name}", flush=True)
+            row = fit_case(
+                case.name,
+                X_train,
+                X_test,
+                y_train,
+                y_test,
+                w_train,
+                w_test,
+                interactions=case.interactions,
+                controls=control,
+            )
+            row["setting"] = control.name
+            print(
+                f"[SuperGLM runtime] finished {control.name}/{case.name}: fit={row.get('fit_s')}s",
+                flush=True,
+            )
+            rows.append(row)
+
+    out = _base_output(
+        n_total=len(X_train) + len(X_test),
+        n_train=len(X_train),
+        n_test=len(X_test),
+        case_matrix=cases,
+    )
+    out.update(
+        {
+            "suite": "runtime_validation_ladder",
+            "controls": [control.metadata() for control in controls],
+            "results": rows,
+            "deltas_by_setting": {
+                control.name: build_case_deltas(
+                    [row for row in rows if row.get("setting") == control.name]
+                )
+                for control in controls
+            },
+        }
+    )
+    OUT_VALIDATION_JSON.write_text(json.dumps(out, indent=2))
+    return out
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--suite",
+        choices=("matrix", "fairness", "runtime-validation"),
+        default="matrix",
+        help="Benchmark suite to run.",
+    )
+    parser.add_argument(
+        "--profiles",
+        default=None,
+        help="Comma-separated control/profile names for fairness or runtime-validation suites.",
+    )
+    args = parser.parse_args()
+
+    if args.suite == "fairness":
+        out = run_fairness_ladder(profile_names=args.profiles)
+        out_path = OUT_FAIRNESS_JSON
+    elif args.suite == "runtime-validation":
+        out = run_runtime_validation_ladder(profile_names=args.profiles)
+        out_path = OUT_VALIDATION_JSON
+    else:
+        out = run_case_matrix()
+        out_path = OUT_JSON
+
+    rows = out["results"]
 
     print("Discrete MTPL tensor benchmark")
     print("=" * 88)
-    print(f"Train rows: {len(X_train):,}  Test rows: {len(X_test):,}")
+    print(f"Suite: {out['suite']}")
+    print(f"Train rows: {out['n_train']:,}  Test rows: {out['n_test']:,}")
+    print(f"Thread controls: {out['thread_controls']}")
     print()
-    for row in rows:
+    _print_rows(rows)
+    print()
+    if "deltas" in out:
         print(
-            f"{row['model']:<28s} "
-            f"fit={row['fit_s']:>7.2f}s  "
-            f"predict={row['predict_test_median_s'] if row['predict_test_median_s'] is None else format(row['predict_test_median_s'], '.4f')}s  "
-            f"gini={row['gini_model'] if row['gini_model'] is None else format(row['gini_model'], '.6f')}  "
-            f"gini_ratio={row['gini_ratio'] if row['gini_ratio'] is None else format(row['gini_ratio'], '.6f')}  "
-            f"edf={row['effective_df'] if row['effective_df'] is None else format(row['effective_df'], '8.2f')}  "
-            f"p={row['coef_count']}  "
-            f"groups={row['n_groups']}  "
-            f"sp={row['n_smoothing_params']}  "
-            f"ls_fits={row['reml_n_linesearch_fits']}  "
-            f"converged={row['converged']}  "
-            f"timed_out={row['timed_out']}"
+            "Delta vs baseline: "
+            f"fit={out['deltas']['fit_s']:+.2f}s  "
+            f"predict={out['deltas']['predict_test_median_s']}s  "
+            f"gini={out['deltas']['gini_model']}  "
+            f"gini_ratio={out['deltas']['gini_ratio']}  "
+            f"edf={out['deltas']['effective_df']}  "
+            f"dev={out['deltas']['deviance']}  "
+            f"ls_fits={out['deltas']['reml_n_linesearch_fits']}  "
+            f"ls_time={out['deltas']['reml_linesearch_s']}"
         )
     print()
-    print(
-        "Delta vs baseline: "
-        f"fit={out['deltas']['fit_s']:+.2f}s  "
-        f"predict={out['deltas']['predict_test_median_s']}s  "
-        f"gini={out['deltas']['gini_model']}  "
-        f"gini_ratio={out['deltas']['gini_ratio']}  "
-        f"edf={out['deltas']['effective_df']}  "
-        f"ls_fits={out['deltas']['reml_n_linesearch_fits']}  "
-        f"ls_time={out['deltas']['reml_linesearch_s']}"
-    )
-    print()
-    print(f"Saved JSON: {OUT_JSON}")
+    print(f"Saved JSON: {out_path}")
     print(f"Saved train CSV: {OUT_TRAIN_CSV}")
     print(f"Saved test CSV:  {OUT_TEST_CSV}")
 
