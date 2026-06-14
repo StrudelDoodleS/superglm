@@ -268,6 +268,9 @@ def optimize_discrete_reml_cached_w(
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
         M_p = compute_total_penalty_rank(penalties)
         boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
+    else:
+        pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
+        M_p = compute_total_penalty_rank(penalties)
     boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
 
     # Store original fixed lambda values for exact restoration after exp->clip
@@ -277,6 +280,7 @@ def optimize_discrete_reml_cached_w(
             fixed_lambdas[pc.name] = float(lambdas[pc.name])
 
     rho = np.zeros(m, dtype=np.float64)
+    _bootstrap_component_stats: list[dict[str, float | int | str]] = []
     for i, pc in enumerate(penalties):
         if not estimated_mask[i]:
             fixed_val = fixed_lambdas[pc.name]
@@ -293,6 +297,22 @@ def optimize_discrete_reml_cached_w(
         r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
+        lam_fp_clipped = float(np.clip(lam_fp, 1e-6, 1e10))
+        _bootstrap_component_stats.append(
+            {
+                "name": pc.name,
+                "group_name": pc.group_name,
+                "rank": float(r_j),
+                "quad": quad,
+                "trace_term": trace_term,
+                "denom": denom,
+                "lam_fp_raw": float(lam_fp),
+                "lam_fp_clipped": lam_fp_clipped,
+                "beta_norm": float(np.linalg.norm(beta_g)),
+                "omega_frob": float(np.linalg.norm(omega_ssp)),
+                "block_dim": int(beta_g.shape[0]),
+            }
+        )
         # Snap degenerate select=True null-space penalties to upper bound.
         pc_i = penalties[i]
         if (
@@ -547,16 +567,6 @@ def optimize_discrete_reml_cached_w(
                 p,
                 reml_penalties=penalties,
             )
-            _tls0 = _time.perf_counter()
-            beta_trial, intercept_trial = _solve_cached_augmented(
-                XtWX,
-                S_trial,
-                c_XtWz,
-                c_XtW1,
-                c_sum_W,
-                c_sum_Wz,
-            )
-            _t_linesearch_solve += _time.perf_counter() - _tls0
 
             _n_linesearch_evals += 1
             if use_tensor_surrogate_linesearch:
@@ -572,10 +582,20 @@ def optimize_discrete_reml_cached_w(
                     rho_trial,
                     trial_lambdas,
                     S_trial,
-                    beta_trial,
-                    intercept_trial,
                 )
                 break
+
+            # Solve augmented system analytically (O(p^3), no data pass).
+            _tls0 = _time.perf_counter()
+            beta_trial, intercept_trial = _solve_cached_augmented(
+                XtWX,
+                S_trial,
+                c_XtWz,
+                c_XtW1,
+                c_sum_W,
+                c_sum_Wz,
+            )
+            _t_linesearch_solve += _time.perf_counter() - _tls0
 
             # Evaluate full REML at trial point once the cached surrogate
             # suggests an improving direction (or for all trials on the
@@ -624,7 +644,7 @@ def optimize_discrete_reml_cached_w(
             halving_count += 1
 
         if use_tensor_surrogate_linesearch and candidate is not None and not accepted:
-            rho_trial, trial_lambdas, S_trial, beta_trial, intercept_trial = candidate
+            rho_trial, trial_lambdas, S_trial = candidate
             _tls0 = _time.perf_counter()
             beta_trial, intercept_trial, log_det_H_trial = _solve_cached_h_system(
                 XtWX,
@@ -801,6 +821,25 @@ def optimize_discrete_reml_cached_w(
     lambda_history.append(final_lambdas.copy())
 
     if profile is not None:
+        if _bootstrap_component_stats:
+            profile["reml_bootstrap_summary"] = {
+                "boot_phi": float(boot_phi),
+                "boot_inv_phi": float(boot_inv_phi),
+                "boot_deviance": float(boot_result.deviance),
+                "boot_penalty_quad": float(pq_boot),
+                "boot_penalty_rank_total": float(M_p),
+                "n_components": len(_bootstrap_component_stats),
+                "lam_fp_min": float(
+                    min(row["lam_fp_clipped"] for row in _bootstrap_component_stats)
+                ),
+                "lam_fp_max": float(
+                    max(row["lam_fp_clipped"] for row in _bootstrap_component_stats)
+                ),
+                "n_components_at_lower_bound": int(
+                    sum(row["lam_fp_clipped"] <= 1.0000001e-6 for row in _bootstrap_component_stats)
+                ),
+            }
+            profile["reml_bootstrap_components"] = _bootstrap_component_stats
         profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
         profile["reml_pirls_s"] = _t_pirls
         profile["reml_objective_s"] = _t_objective

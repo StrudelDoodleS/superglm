@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+from superglm.group_matrix import (
+    DiscretizedSSPGroupMatrix,
+    SparseSSPGroupMatrix,
+    SplineCategoricalGroupMatrix,
+)
 from superglm.types import GroupSlice, LambdaPolicy
 
 
@@ -17,7 +21,10 @@ def collect_reml_groups(
     for i, group in enumerate(groups):
         group_matrix = group_matrices[i]
         if (
-            isinstance(group_matrix, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix)
+            isinstance(
+                group_matrix,
+                SparseSSPGroupMatrix | SplineCategoricalGroupMatrix | DiscretizedSSPGroupMatrix,
+            )
             and group.penalized
             and group_matrix.omega is not None
         ):

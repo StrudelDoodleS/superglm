@@ -67,6 +67,7 @@ class SuperGLM:
         tol: float = 1e-6,
         max_iter: int = 100,
         convergence: str = "deviance",
+        retain_fit_state: bool = True,
     ):
         """
         Parameters
@@ -140,6 +141,12 @@ class SuperGLM:
             ``"coefficients"`` (**experimental**) stops when the maximum
             relative coefficient change drops below *tol*.  May not
             converge for near-separated levels where the MLE is at −∞.
+        retain_fit_state : bool
+            If True (default), keep training-scale fit state such as the fitted
+            design matrix for later diagnostics. If False, eagerly computes
+            compact inference state after fitting, then releases row-scale
+            training caches while preserving prediction, summaries, and term
+            confidence intervals.
         """
         base.init_model(
             self,
@@ -162,6 +169,7 @@ class SuperGLM:
             tol=tol,
             max_iter=max_iter,
             convergence=convergence,
+            retain_fit_state=retain_fit_state,
         )
 
     def __repr__(self) -> str:

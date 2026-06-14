@@ -38,6 +38,7 @@ def _runtime_group_matrix_types():
         DiscretizedTensorGroupMatrix,
         SparseGroupMatrix,
         SparseSSPGroupMatrix,
+        SplineCategoricalGroupMatrix,
     )
 
     return (
@@ -47,6 +48,7 @@ def _runtime_group_matrix_types():
         DiscretizedTensorGroupMatrix,
         SparseGroupMatrix,
         SparseSSPGroupMatrix,
+        SplineCategoricalGroupMatrix,
     )
 
 
@@ -65,6 +67,7 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
         _DiscretizedTensorGroupMatrix,
         SparseGroupMatrix,
         SparseSSPGroupMatrix,
+        SplineCategoricalGroupMatrix,
     ) = _runtime_group_matrix_types()
     if isinstance(gm, CategoricalGroupMatrix):
         return _cat_weighted_bincount(gm.codes, bin_idx, W, n_bins, gm.n_levels)
@@ -81,6 +84,17 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
     if isinstance(gm, SparseSSPGroupMatrix):
         B_agg = _csr_weighted_bincount(
             gm._data, gm._indices, gm._indptr, gm._p_b, bin_idx, W, n_bins
+        )
+        return B_agg @ gm.R_inv
+    if isinstance(gm, SplineCategoricalGroupMatrix):
+        B_agg = _csr_weighted_bincount(
+            gm._data,
+            gm._indices,
+            gm._indptr,
+            gm._p_b,
+            bin_idx,
+            W * gm.mask,
+            n_bins,
         )
         return B_agg @ gm.R_inv
     X = gm.toarray()
@@ -159,6 +173,53 @@ def _cross_gram_tensor_main(
     return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
 
 
+def _cross_gram_tensor_spline_categorical(
+    gm_tensor: DiscretizedTensorGroupMatrix,
+    gm_spline_cat: GroupMatrix,
+    W: NDArray,
+) -> NDArray:
+    """Cross-gram X_tensor.T W X_spline_cat without materialising joint support."""
+    B1 = gm_tensor.B1_unique_t
+    B2 = gm_tensor.B2_unique_t
+    K1, K2 = B1.shape[1], B2.shape[1]
+    K_cat = gm_spline_cat._p_b
+    result_raw = np.empty((K1 * K2, K_cat), dtype=np.float64)
+    masked_W = W * gm_spline_cat.mask
+
+    for j2 in range(K2):
+        w_col = masked_W * B2[gm_tensor.idx2, j2]
+        B_cat_agg = _csr_weighted_bincount(
+            gm_spline_cat._data,
+            gm_spline_cat._indices,
+            gm_spline_cat._indptr,
+            K_cat,
+            gm_tensor.idx1,
+            w_col,
+            gm_tensor.n_bins1,
+        )
+        result_raw[j2::K2, :] = B1.T @ B_cat_agg
+
+    return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
+
+
+def _cross_gram_categorical_spline_categorical(
+    gm_cat: GroupMatrix,
+    gm_spline_cat: GroupMatrix,
+    W: NDArray,
+) -> NDArray:
+    """Cross-gram X_cat.T W X_spline_cat via one categorical aggregation."""
+    B_agg = _csr_weighted_bincount(
+        gm_spline_cat._data,
+        gm_spline_cat._indices,
+        gm_spline_cat._indptr,
+        gm_spline_cat._p_b,
+        gm_cat.codes,
+        W * gm_spline_cat.mask,
+        gm_cat.n_levels + 1,
+    )
+    return B_agg[: gm_cat.n_levels] @ gm_spline_cat.R_inv
+
+
 def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     """Compute X_i.T @ diag(W) @ X_j efficiently.
 
@@ -175,7 +236,14 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
         DiscretizedTensorGroupMatrix,
         _SparseGroupMatrix,
         _SparseSSPGroupMatrix,
+        SplineCategoricalGroupMatrix,
     ) = _runtime_group_matrix_types()
+
+    if isinstance(gm_i, SplineCategoricalGroupMatrix) and isinstance(
+        gm_j, SplineCategoricalGroupMatrix
+    ):
+        if not np.any(gm_i.mask & gm_j.mask):
+            return np.zeros((gm_i.shape[1], gm_j.shape[1]))
     # Tensor × tensor (same marginals, e.g. decomposed bilinear/wiggly)
     if (
         isinstance(gm_i, DiscretizedTensorGroupMatrix)
@@ -183,6 +251,20 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
         and gm_i.tensor_id == gm_j.tensor_id
     ):
         return _cross_gram_tensor_tensor(gm_i, gm_j, W)
+
+    if isinstance(gm_i, DiscretizedTensorGroupMatrix) and isinstance(
+        gm_j, SplineCategoricalGroupMatrix
+    ):
+        return _cross_gram_tensor_spline_categorical(gm_i, gm_j, W)
+    if isinstance(gm_j, DiscretizedTensorGroupMatrix) and isinstance(
+        gm_i, SplineCategoricalGroupMatrix
+    ):
+        return _cross_gram_tensor_spline_categorical(gm_j, gm_i, W).T
+
+    if isinstance(gm_i, CategoricalGroupMatrix) and isinstance(gm_j, SplineCategoricalGroupMatrix):
+        return _cross_gram_categorical_spline_categorical(gm_i, gm_j, W)
+    if isinstance(gm_j, CategoricalGroupMatrix) and isinstance(gm_i, SplineCategoricalGroupMatrix):
+        return _cross_gram_categorical_spline_categorical(gm_j, gm_i, W).T
 
     # Tensor × discretized main-effect (not tensor × tensor with different ids)
     if (
@@ -280,9 +362,14 @@ def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
         _DiscretizedTensorGroupMatrix,
         _SparseGroupMatrix,
         SparseSSPGroupMatrix,
+        SplineCategoricalGroupMatrix,
     ) = _runtime_group_matrix_types()
     if isinstance(
-        gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix | DiscretizedSCOPGroupMatrix
+        gm,
+        SparseSSPGroupMatrix
+        | SplineCategoricalGroupMatrix
+        | DiscretizedSSPGroupMatrix
+        | DiscretizedSCOPGroupMatrix,
     ):
         return gm.gram(W)
     if isinstance(gm, CategoricalGroupMatrix):
@@ -338,6 +425,7 @@ def _block_xtwx_rhs(
         _DiscretizedTensorGroupMatrix,
         _SparseGroupMatrix,
         _SparseSSPGroupMatrix,
+        SplineCategoricalGroupMatrix,
     ) = _runtime_group_matrix_types()
     if tabmat_split is not None:
         XtWX = np.asarray(tabmat_split.sandwich(W))
@@ -352,7 +440,10 @@ def _block_xtwx_rhs(
     for i, (gm_i, g_i) in enumerate(zip(gms, groups)):
         sl_i = slice(g_i.start, g_i.end)
         # Diagonal block + rmatvecs via shared bincount
-        if isinstance(gm_i, DiscretizedSSPGroupMatrix | DiscretizedSCOPGroupMatrix):
+        if isinstance(
+            gm_i,
+            DiscretizedSSPGroupMatrix | DiscretizedSCOPGroupMatrix | SplineCategoricalGroupMatrix,
+        ):
             gram_i, xtw_i, xtwz_i = gm_i.gram_rmatvec(W, Wz)
             XtWX[sl_i, sl_i] = gram_i
             XtW1[sl_i] = xtw_i

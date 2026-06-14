@@ -148,6 +148,10 @@ class GroupInfo:
     # Solver-space (q_eff = q_raw - 1 dimensional) — the solver calls
     # forward(), jacobian(), penalty_matrix() directly without dimension translation.
     scop_reparameterization: SCOPSolverReparam | None = None
+    # Compact spline-by-categorical level representation.  ``columns`` stays
+    # None so the builder can avoid materialising B * level_indicator.
+    spline_cat_basis: sp.spmatrix | None = None
+    spline_cat_mask: NDArray | None = None
 
     def __post_init__(self):
         if self.columns is None:

@@ -99,15 +99,16 @@ class SplineCategorical:
 
         groups: list[GroupInfo] = []
         for level in self._non_base:
-            indicator = (x_cat == level).astype(np.float64)
-            B_level = B.multiply(indicator[:, None]).tocsr()
+            mask = x_cat == level
             groups.append(
                 GroupInfo(
-                    columns=B_level,
+                    columns=None,
                     n_cols=n_cols,
                     penalty_matrix=omega,
                     reparametrize=True,
                     projection=self._projection,
+                    spline_cat_basis=B,
+                    spline_cat_mask=mask,
                 )
             )
         return groups
@@ -153,7 +154,34 @@ class SplineCategorical:
 
     def score(self, x_spline: NDArray, x_cat: NDArray, beta: NDArray) -> NDArray:
         """Score the interaction directly from its public runtime blocks."""
-        return np.asarray(self.transform(x_spline, x_cat) @ beta, dtype=np.float64).ravel()
+        x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
+        x_cat = np.asarray(x_cat).ravel()
+        _validate_categorical_levels(
+            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        )
+
+        B = sp.csr_matrix(self._spline_spec._raw_basis_matrix(x_spline))
+        beta = np.asarray(beta, dtype=np.float64).ravel()
+        out = np.zeros(len(x_spline), dtype=np.float64)
+
+        offset = 0
+        for level in self._non_base:
+            R_inv = self._R_inv_dict.get(level)
+            if R_inv is not None:
+                n_cols = R_inv.shape[1]
+                beta_raw = R_inv @ beta[offset : offset + n_cols]
+            elif self._projection is not None:
+                n_cols = self._projection.shape[1]
+                beta_raw = self._projection @ beta[offset : offset + n_cols]
+            else:
+                n_cols = self._n_basis
+                beta_raw = beta[offset : offset + n_cols]
+            offset += n_cols
+
+            mask = x_cat == level
+            if np.any(mask):
+                out[mask] = np.asarray(B[mask] @ beta_raw, dtype=np.float64).ravel()
+        return out
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
         x_grid = np.linspace(self._lo, self._hi, n_points)
@@ -257,6 +285,24 @@ class PolynomialCategorical:
             blocks.append(P * indicator[:, None])
         return np.hstack(blocks)
 
+    def score(self, x_poly: NDArray, x_cat: NDArray, beta: NDArray) -> NDArray:
+        x_poly = np.asarray(x_poly, dtype=np.float64).ravel()
+        x_cat = np.asarray(x_cat).ravel()
+        _validate_categorical_levels(
+            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        )
+        P = self._basis(self._scale(x_poly))
+        beta = np.asarray(beta, dtype=np.float64).ravel()
+        out = np.zeros(len(x_poly), dtype=np.float64)
+        offset = 0
+        for level in self._non_base:
+            b_level = beta[offset : offset + self._degree]
+            offset += self._degree
+            mask = x_cat == level
+            if np.any(mask):
+                out[mask] = P[mask] @ b_level
+        return out
+
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
         x_grid = np.linspace(self._lo, self._hi, n_points)
         P_grid = self._basis(self._scale(x_grid))
@@ -345,6 +391,20 @@ class NumericCategorical:
             indicator = (x_cat == level).astype(np.float64)
             cols.append(x_num * indicator)
         return np.column_stack(cols)
+
+    def score(self, x_num: NDArray, x_cat: NDArray, beta: NDArray) -> NDArray:
+        x_num = np.asarray(x_num, dtype=np.float64).ravel()
+        x_cat = np.asarray(x_cat).ravel()
+        _validate_categorical_levels(
+            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        )
+        beta = np.asarray(beta, dtype=np.float64).ravel()
+        out = np.zeros(len(x_num), dtype=np.float64)
+        for i, level in enumerate(self._non_base):
+            mask = x_cat == level
+            if np.any(mask):
+                out[mask] = x_num[mask] * beta[i]
+        return out
 
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
         log_rels_per_unit: dict[str, float] = {}
@@ -452,6 +512,23 @@ class CategoricalInteraction:
             cols.append(((x_cat1 == lev1) & (x_cat2 == lev2)).astype(np.float64))
         return np.column_stack(cols) if cols else np.empty((n, 0))
 
+    def score(self, x_cat1: NDArray, x_cat2: NDArray, beta: NDArray) -> NDArray:
+        x_cat1 = np.asarray(x_cat1).ravel()
+        x_cat2 = np.asarray(x_cat2).ravel()
+        _validate_categorical_levels(
+            x_cat1, set(self._non_base1) | {self._base1}, context=self.cat1_name
+        )
+        _validate_categorical_levels(
+            x_cat2, set(self._non_base2) | {self._base2}, context=self.cat2_name
+        )
+        beta = np.asarray(beta, dtype=np.float64).ravel()
+        out = np.zeros(len(x_cat1), dtype=np.float64)
+        for i, (lev1, lev2) in enumerate(self._pairs):
+            mask = (x_cat1 == lev1) & (x_cat2 == lev2)
+            if np.any(mask):
+                out[mask] = beta[i]
+        return out
+
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
         log_rels = {}
         rels = {}
@@ -515,6 +592,10 @@ class NumericInteraction:
     def transform(self, x1: NDArray, x2: NDArray) -> NDArray:
         x1s, x2s = self._prep(x1, x2)
         return (x1s * x2s).reshape(-1, 1)
+
+    def score(self, x1: NDArray, x2: NDArray, beta: NDArray) -> NDArray:
+        x1s, x2s = self._prep(x1, x2)
+        return x1s * x2s * float(np.asarray(beta, dtype=np.float64).ravel()[0])
 
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
         b = float(beta[0])
@@ -600,6 +681,14 @@ class PolynomialInteraction:
 
     def transform(self, x1: NDArray, x2: NDArray) -> NDArray:
         return self._cross_design(x1, x2)
+
+    def score(self, x1: NDArray, x2: NDArray, beta: NDArray) -> NDArray:
+        x1 = np.asarray(x1, dtype=np.float64).ravel()
+        x2 = np.asarray(x2, dtype=np.float64).ravel()
+        P1 = self._basis(self._scale(x1, self._lo1, self._hi1), self._degree1)
+        P2 = self._basis(self._scale(x2, self._lo2, self._hi2), self._degree2)
+        C = np.asarray(beta, dtype=np.float64).reshape(self._degree1, self._degree2)
+        return np.einsum("ij,jk,ik->i", P1, C, P2, optimize=True)
 
     def reconstruct(self, beta: NDArray, n_points: int = 50) -> dict[str, Any]:
         x1_grid = np.linspace(self._lo1, self._hi1, n_points)
@@ -922,6 +1011,25 @@ class TensorInteraction:
         if self._R_inv is not None:
             return T @ self._R_inv
         return T.toarray()
+
+    def score(self, x1: NDArray, x2: NDArray, beta: NDArray) -> NDArray:
+        """Score the tensor interaction without materialising the row-Kronecker block."""
+        x1 = np.asarray(x1, dtype=np.float64).ravel()
+        x2 = np.asarray(x2, dtype=np.float64).ravel()
+        B1 = self._centered_marginal_basis(x1, self._marginal1)
+        B2 = self._centered_marginal_basis(x2, self._marginal2)
+
+        beta_eff = np.asarray(beta, dtype=np.float64).ravel()
+        if self._R_inv is not None:
+            beta_eff = self._R_inv @ beta_eff
+        C = beta_eff.reshape(self._p1, self._p2)
+
+        if self._p1 <= self._p2:
+            tmp = np.asarray(B1 @ C, dtype=np.float64)
+            return np.asarray(B2.multiply(tmp).sum(axis=1), dtype=np.float64).ravel()
+
+        tmp = np.asarray(B2 @ C.T, dtype=np.float64)
+        return np.asarray(B1.multiply(tmp).sum(axis=1), dtype=np.float64).ravel()
 
     def reconstruct(self, beta: NDArray, n_points: int = 50) -> dict[str, Any]:
         # Map from SSP space to original space
