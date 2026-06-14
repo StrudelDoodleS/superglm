@@ -463,6 +463,97 @@ class TestBackendLinearAlgebraInvariants:
 
         assert cross.shape == (4, 3)
 
+    def test_tensor_own_margin_cross_gram_uses_packed_weight_grid(self, monkeypatch):
+        """Tensor × parent smooth cross-blocks should not use the generic row scan path."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+
+        rng = np.random.default_rng(121)
+        n = 90
+        n1, n2 = 6, 5
+        k1, k2, k_main = 3, 4, 5
+        p_tensor, p_main = 7, 4
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        B1 = rng.normal(size=(n1, k1))
+        B2 = rng.normal(size=(n2, k2))
+        B_main = rng.normal(size=(n1, k_main))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), k1 * k2
+        )
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            rng.normal(size=(k1 * k2, p_tensor)),
+            pair_idx.astype(np.intp),
+            tensor_id=6,
+        )
+        main = DiscretizedSSPGroupMatrix(
+            B_main,
+            rng.normal(size=(k_main, p_main)),
+            idx1,
+        )
+        W = rng.uniform(0.2, 1.8, size=n)
+
+        def fail_generic(*args, **kwargs):
+            raise AssertionError("generic tensor-main cross-Gram should not be used")
+
+        monkeypatch.setattr(algebra, "_cross_gram_tensor_main", fail_generic)
+
+        cross = algebra._cross_gram(tensor, main, W)
+        dense = tensor.toarray().T @ (main.toarray() * W[:, None])
+
+        np.testing.assert_allclose(cross, dense, rtol=1e-10, atol=1e-10)
+
+    def test_tensor_own_margin_detection_is_cached(self, monkeypatch):
+        """Repeated tensor × main cross-blocks should not rescan full index arrays."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+
+        rng = np.random.default_rng(122)
+        n = 80
+        n1, n2 = 5, 4
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        B1 = rng.normal(size=(n1, 3))
+        B2 = rng.normal(size=(n2, 2))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), 6
+        )
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            np.eye(6),
+            pair_idx.astype(np.intp),
+            tensor_id=7,
+        )
+        main = DiscretizedSSPGroupMatrix(rng.normal(size=(n1, 4)), np.eye(4), idx1)
+        W = rng.uniform(0.2, 1.8, size=n)
+        calls = 0
+        real_array_equal = algebra.np.array_equal
+
+        def counting_array_equal(a, b):
+            nonlocal calls
+            calls += 1
+            return real_array_equal(a, b)
+
+        monkeypatch.setattr(algebra.np, "array_equal", counting_array_equal)
+
+        algebra._cross_gram(tensor, main, W)
+        first_call_count = calls
+        algebra._cross_gram(tensor, main, W)
+
+        assert first_call_count > 0
+        assert calls == first_call_count
+
     def test_categorical_spline_categorical_cross_gram_matches_dense_oracle(self):
         """Categorical × compact spline-category cross-Gram should use one aggregation."""
         import scipy.sparse as sp

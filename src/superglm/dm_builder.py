@@ -359,17 +359,19 @@ def _process_info(
     is_spline_cat = info.spline_cat_basis is not None and info.spline_cat_mask is not None
 
     if is_spline_cat:
-        B_for = info.spline_cat_basis
+        B_for = sp.csr_matrix(info.spline_cat_basis)
         mask = np.asarray(info.spline_cat_mask, dtype=bool)
-        masked_weight = sample_weight * mask
+        row_idx = np.flatnonzero(mask)
+        B_level = B_for[row_idx]
+        level_weight = sample_weight[row_idx]
         if info.projection is not None:
             P = info.projection
             if info.reparametrize and info.penalty_matrix is not None:
                 R_inv_local = compute_projected_R_inv(
-                    B_for,
+                    B_level,
                     P,
                     info.penalty_matrix,
-                    masked_weight,
+                    level_weight,
                     lambda2,
                 )
                 R_inv = P @ R_inv_local
@@ -378,7 +380,7 @@ def _process_info(
                 R_inv_local = None
             omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
         elif info.reparametrize and info.penalty_matrix is not None:
-            R_inv = compute_R_inv(B_for, info.penalty_matrix, masked_weight, lambda2)
+            R_inv = compute_R_inv(B_level, info.penalty_matrix, level_weight, lambda2)
             R_inv_local = R_inv
             omega_full = info.penalty_matrix
         else:
@@ -387,7 +389,7 @@ def _process_info(
             omega_full = info.penalty_matrix
 
         n_cols = R_inv.shape[1]
-        gm = SplineCategoricalGroupMatrix(B_for, R_inv, mask)
+        gm = SplineCategoricalGroupMatrix(B_for, R_inv, row_idx)
         if omega_full is not None:
             gm.omega = omega_full
         if info.projection is not None:

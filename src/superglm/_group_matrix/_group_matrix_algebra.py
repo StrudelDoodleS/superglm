@@ -174,6 +174,64 @@ def _cross_gram_tensor_main(
     return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
 
 
+def _cross_gram_tensor_own_margin(
+    gm_tensor: DiscretizedTensorGroupMatrix,
+    gm_main: DiscretizedSSPGroupMatrix,
+    W: NDArray,
+) -> NDArray | None:
+    """Cross-Gram for tensor × one of its own discretized marginal smooths.
+
+    mgcv bam(discrete=TRUE) stores tensor marginals as compact matrices plus
+    row index arrays and forms X'WX from that packed representation via XWXd.
+    For tensor × own-margin main-effect cross-blocks, reuse the tensor 2D
+    W-grid instead of rescanning observations through the generic tensor-main
+    channel histogram.
+
+    Returns X_main.T @ diag(W) @ X_tensor in SSP space, or None if the main
+    group is not exactly one unambiguous tensor margin.
+    """
+    cache_key = (id(gm_main), id(gm_main.bin_idx), gm_main.n_bins)
+    margin = gm_tensor._own_margin_cache.get(cache_key, -1)
+    if margin == -1:
+        same_margin1 = gm_main.n_bins == gm_tensor.n_bins1 and np.array_equal(
+            gm_main.bin_idx, gm_tensor.idx1
+        )
+        same_margin2 = gm_main.n_bins == gm_tensor.n_bins2 and np.array_equal(
+            gm_main.bin_idx, gm_tensor.idx2
+        )
+        margin = None if same_margin1 == same_margin2 else (1 if same_margin1 else 2)
+        gm_tensor._own_margin_cache[cache_key] = margin
+    if margin is None:
+        return None
+
+    B1 = gm_tensor.B1_unique_t
+    B2 = gm_tensor.B2_unique_t
+    B_main = gm_main.B_unique
+    K1, K2 = B1.shape[1], B2.shape[1]
+    K_main_raw = B_main.shape[1]
+    result_raw = np.empty((K_main_raw, K1 * K2), dtype=np.float64)
+    w_grid = _disc_disc_2d_hist(
+        gm_tensor.idx1,
+        gm_tensor.idx2,
+        W,
+        gm_tensor.n_bins1,
+        gm_tensor.n_bins2,
+    )
+
+    if margin == 1:
+        weighted_margin2 = w_grid @ B2  # (n_bins1, K2)
+        for j2 in range(K2):
+            result_raw[:, j2::K2] = B_main.T @ (B1 * weighted_margin2[:, j2][:, None])
+    else:
+        weighted_margin1 = w_grid.T @ B1  # (n_bins2, K1)
+        for j1 in range(K1):
+            result_raw[:, j1 * K2 : (j1 + 1) * K2] = B_main.T @ (
+                B2 * weighted_margin1[:, j1][:, None]
+            )
+
+    return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
+
+
 def _cross_gram_tensor_spline_categorical(
     gm_tensor: DiscretizedTensorGroupMatrix,
     gm_spline_cat: GroupMatrix,
@@ -276,12 +334,18 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
         and isinstance(gm_j, DiscretizedSSPGroupMatrix)
         and not isinstance(gm_j, DiscretizedTensorGroupMatrix)
     ):
+        own_margin = _cross_gram_tensor_own_margin(gm_i, gm_j, W)
+        if own_margin is not None:
+            return own_margin.T
         return _cross_gram_tensor_main(gm_i, gm_j, W).T
     if (
         isinstance(gm_j, DiscretizedTensorGroupMatrix)
         and isinstance(gm_i, DiscretizedSSPGroupMatrix)
         and not isinstance(gm_i, DiscretizedTensorGroupMatrix)
     ):
+        own_margin = _cross_gram_tensor_own_margin(gm_j, gm_i, W)
+        if own_margin is not None:
+            return own_margin
         return _cross_gram_tensor_main(gm_j, gm_i, W)
 
     if isinstance(gm_i, DiscretizedSCOPGroupMatrix) and isinstance(

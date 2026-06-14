@@ -161,6 +161,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         "n_bins1",
         "n_bins2",
         "tensor_id",
+        "_own_margin_cache",
     )
 
     def __init__(
@@ -182,6 +183,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         self.n_bins1 = self.B1_unique_t.shape[0]
         self.n_bins2 = self.B2_unique_t.shape[0]
         self.tensor_id = tensor_id
+        self._own_margin_cache: dict[tuple[int, int, int], int | None] = {}
 
     def _factored_gram_raw(self, w_grid: NDArray) -> NDArray:
         """Compute B_joint.T @ diag(w) @ B_joint via Kronecker factorization.

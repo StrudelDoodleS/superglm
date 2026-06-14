@@ -659,6 +659,57 @@ class TestSplineCategoricalPerLevel:
         assert stored_rows < n * len(non_base_levels)
         assert all(not hasattr(gm, "mask") for gm in interaction_gms)
 
+    def test_initial_reparam_uses_level_rows(self, monkeypatch):
+        """Initial spline-categorical R_inv setup should use B_level, not zeroed full rows."""
+        import superglm.dm_builder as dm_builder
+
+        rng = np.random.default_rng(233)
+        n = 90
+        region = np.array(["A"] * 45 + ["B"] * 12 + ["C"] * 33, dtype=object)
+        rng.shuffle(region)
+        X = pd.DataFrame(
+            {
+                "age": rng.uniform(18.0, 80.0, n),
+                "region": region,
+            }
+        )
+        y = rng.poisson(1.1, size=n).astype(float)
+        sample_weight = rng.uniform(0.5, 2.0, size=n)
+        expected_level_rows = sorted(int(np.sum(region == level)) for level in ("B", "C"))
+        seen_rows: list[int] = []
+        real_compute_R_inv = dm_builder.compute_R_inv
+        real_compute_projected_R_inv = dm_builder.compute_projected_R_inv
+
+        def record_compute_R_inv(B, omega, weights, lambda2):
+            if B.shape[0] in expected_level_rows:
+                seen_rows.append(B.shape[0])
+            return real_compute_R_inv(B, omega, weights, lambda2)
+
+        def record_compute_projected_R_inv(B, projection, penalty_sub, weights, lambda2):
+            if B.shape[0] in expected_level_rows:
+                seen_rows.append(B.shape[0])
+            return real_compute_projected_R_inv(B, projection, penalty_sub, weights, lambda2)
+
+        monkeypatch.setattr(dm_builder, "compute_R_inv", record_compute_R_inv)
+        monkeypatch.setattr(
+            dm_builder,
+            "compute_projected_R_inv",
+            record_compute_projected_R_inv,
+        )
+
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "age": Spline(n_knots=6),
+                "region": Categorical(base="first"),
+            },
+            interactions=[("age", "region")],
+            selection_penalty=0.0,
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        assert sorted(seen_rows) == expected_level_rows
+
     def test_fit_reml_estimates_compact_group_penalties(self, interaction_data):
         """Compact spline-categorical levels remain REML-eligible SSP groups."""
         from superglm.group_matrix import SplineCategoricalGroupMatrix
