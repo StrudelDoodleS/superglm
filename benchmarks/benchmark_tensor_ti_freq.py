@@ -44,6 +44,31 @@ PROFILE_TIMING_KEYS = (
     "reml_map_beta_s",
     "reml_penalty_context_s",
     "reml_tensor_summary_s",
+    "fit_prime_caches_s",
+    "fit_runtime_canonicalize_s",
+    "fit_release_state_s",
+    "irls_working_s",
+    "irls_gram_s",
+    "irls_solve_s",
+    "irls_eta_s",
+    "irls_deviance_s",
+    "irls_deviance_eval_s",
+    "irls_total_s",
+    "irls_calls",
+    "irls_iters",
+    "block_diag_tensor_s",
+    "block_diag_discrete_ssp_s",
+    "block_diag_other_s",
+    "block_cross_tensor_own_margin_s",
+    "block_cross_tensor_main_s",
+    "block_cross_tensor_tensor_s",
+    "block_cross_tensor_spline_cat_s",
+    "block_cross_disc_disc_s",
+    "block_cross_disc_other_s",
+    "block_cross_cat_cat_s",
+    "block_cross_fallback_s",
+    "block_hist2d_s",
+    "block_tabmat_s",
 )
 
 
@@ -110,6 +135,10 @@ def _fit_case_result(
     model.fit_reml(X_train, y_train, sample_weight=w_train, max_reml_iter=30)
     fit_s = time.perf_counter() - t0
     profile_timings = {key: float(model._reml_profile.get(key, 0.0)) for key in PROFILE_TIMING_KEYS}
+    runtime_validate = bool(model._reml_profile.get("fit_runtime_canonicalize_validate", False))
+    runtime_validate_reason = str(
+        model._reml_profile.get("fit_runtime_canonicalize_validate_reason", "")
+    )
 
     if fit_s > TIMEOUT_S:
         return {
@@ -128,6 +157,8 @@ def _fit_case_result(
             "reml_linesearch_s": float(model._reml_profile.get("reml_linesearch_s", 0.0)),
             "reml_n_outer_iter": int(model._reml_profile.get("reml_n_outer_iter", 0)),
             "reml_pirls_s": float(model._reml_profile.get("reml_pirls_s", 0.0)),
+            "fit_runtime_canonicalize_validate": runtime_validate,
+            "fit_runtime_canonicalize_validate_reason": runtime_validate_reason,
             **profile_timings,
         }
 
@@ -158,6 +189,8 @@ def _fit_case_result(
         "reml_objective_s": float(model._reml_profile.get("reml_objective_s", 0.0)),
         "reml_hessian_newton_s": float(model._reml_profile.get("reml_hessian_newton_s", 0.0)),
         "reml_n_analytical_iters": int(model._reml_profile.get("reml_n_analytical_iters", 0)),
+        "fit_runtime_canonicalize_validate": runtime_validate,
+        "fit_runtime_canonicalize_validate_reason": runtime_validate_reason,
         **profile_timings,
     }
 

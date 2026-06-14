@@ -47,7 +47,9 @@ from superglm.types import FitStats
 logger = logging.getLogger(__name__)
 
 _VALID_REML_INTERACTION_MODES = {"full", "fast_candidate"}
+_VALID_RUNTIME_VALIDATION_MODES = {"auto", "full", "skip"}
 _FAST_CANDIDATE_REML_ITER_CAP = 5
+_AUTO_RUNTIME_VALIDATION_MAX_ROWS = 100_000
 
 __all__ = [
     "PathResult",
@@ -268,6 +270,60 @@ def _resolve_interaction_reml_mode(model, interaction_mode: str, max_reml_iter: 
         "requested_max_reml_iter": requested,
         "effective_max_reml_iter": int(effective),
     }
+
+
+def _validate_runtime_validation_mode(runtime_validation: str | bool) -> None:
+    """Validate the runtime-validation mode before expensive fit work starts."""
+    if isinstance(runtime_validation, bool):
+        return
+    if runtime_validation not in _VALID_RUNTIME_VALIDATION_MODES:
+        valid = ", ".join(sorted(_VALID_RUNTIME_VALIDATION_MODES))
+        raise ValueError(
+            f"runtime_validation must be one of {{{valid}}} or a bool, got {runtime_validation!r}"
+        )
+
+
+def _resolve_runtime_validation(
+    runtime_validation: str | bool,
+    *,
+    n_rows: int,
+    interaction_candidate_active: bool,
+) -> tuple[bool, str]:
+    """Resolve runtime parity validation for post-fit canonicalization."""
+    _validate_runtime_validation_mode(runtime_validation)
+    if isinstance(runtime_validation, bool):
+        return bool(runtime_validation), "explicit_full" if runtime_validation else "explicit_skip"
+
+    if runtime_validation == "full":
+        return True, "explicit_full"
+    if runtime_validation == "skip":
+        return False, "explicit_skip"
+
+    if interaction_candidate_active:
+        return False, "fast_candidate"
+    if n_rows > _AUTO_RUNTIME_VALIDATION_MAX_ROWS:
+        return False, "large_fit"
+    return True, "auto_full"
+
+
+def _canonicalize_fitted_model(
+    model,
+    profile: dict,
+    *,
+    runtime_validation: str | bool,
+    n_rows: int,
+) -> None:
+    """Canonicalize the public runtime state and profile validation cost."""
+    validate_runtime, reason = _resolve_runtime_validation(
+        runtime_validation,
+        n_rows=n_rows,
+        interaction_candidate_active=bool(profile.get("interaction_candidate_active", False)),
+    )
+    profile["fit_runtime_canonicalize_validate"] = bool(validate_runtime)
+    profile["fit_runtime_canonicalize_validate_reason"] = reason
+    t0 = time.perf_counter()
+    runtime_canonicalize.canonicalize_fitted_model(model, validate=validate_runtime)
+    profile["fit_runtime_canonicalize_s"] = time.perf_counter() - t0
 
 
 def _prime_fit_caches(
@@ -632,6 +688,7 @@ def fit_reml(
     max_pirls_iter=100,
     lambda2_init=None,
     interaction_mode="full",
+    runtime_validation="auto",
     verbose=False,
     w_correction_order=1,
 ):
@@ -659,6 +716,7 @@ def fit_reml(
     _t_total_start = _time.perf_counter()
     _profile: dict = {}
     _profile.update(_resolve_interaction_reml_mode(model, interaction_mode, max_reml_iter))
+    _validate_runtime_validation_mode(runtime_validation)
     effective_max_reml_iter = _profile["effective_max_reml_iter"]
 
     _t0 = _time.perf_counter()
@@ -736,7 +794,12 @@ def fit_reml(
             offset_ref=offset_ref,
             y_arr=y,
         )
-        runtime_canonicalize.canonicalize_fitted_model(model)
+        _canonicalize_fitted_model(
+            model,
+            _profile,
+            runtime_validation=runtime_validation,
+            n_rows=len(y),
+        )
         model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
         _maybe_release_fit_state(model)
         return model
@@ -797,7 +860,12 @@ def fit_reml(
                 offset_ref=offset_ref,
                 y_arr=y,
             )
-            runtime_canonicalize.canonicalize_fitted_model(model)
+            _canonicalize_fitted_model(
+                model,
+                _profile,
+                runtime_validation=runtime_validation,
+                n_rows=len(y),
+            )
             logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
             _maybe_release_fit_state(model)
             return model
@@ -831,7 +899,12 @@ def fit_reml(
                 offset_ref=offset_ref,
                 y_arr=y,
             )
-            runtime_canonicalize.canonicalize_fitted_model(model)
+            _canonicalize_fitted_model(
+                model,
+                _profile,
+                runtime_validation=runtime_validation,
+                n_rows=len(y),
+            )
             logger.info(
                 f"REML SCOP EFS converged={best.converged} in {best.n_reml_iter} iters, "
                 f"lambdas={best.lambdas}"
@@ -891,11 +964,12 @@ def fit_reml(
         )
         _profile["fit_prime_caches_s"] = _time.perf_counter() - _t0
 
-        validate_runtime = not bool(_profile.get("interaction_candidate_active", False))
-        _profile["fit_runtime_canonicalize_validate"] = bool(validate_runtime)
-        _t0 = _time.perf_counter()
-        runtime_canonicalize.canonicalize_fitted_model(model, validate=validate_runtime)
-        _profile["fit_runtime_canonicalize_s"] = _time.perf_counter() - _t0
+        _canonicalize_fitted_model(
+            model,
+            _profile,
+            runtime_validation=runtime_validation,
+            n_rows=len(y),
+        )
 
         logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")
         _t0 = _time.perf_counter()

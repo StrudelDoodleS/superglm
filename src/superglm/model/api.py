@@ -350,6 +350,7 @@ class SuperGLM:
         max_pirls_iter: int | None = None,
         lambda2_init: float | None = None,
         interaction_mode: str = "full",
+        runtime_validation: str | bool = "auto",
         verbose: bool = False,
         w_correction_order: int = 1,
     ) -> SuperGLM:
@@ -388,6 +389,12 @@ class SuperGLM:
             outer updates for interaction models and then runs the normal final
             refit, intended for screening candidate interactions before a full
             final model fit.
+        runtime_validation : {"auto", "full", "skip"} or bool
+            Controls the post-fit public-runtime parity diagnostic.
+            ``"auto"`` validates small fits and skips the full training-row
+            diagnostic for large fits or fast candidate interaction fits.
+            ``"full"`` always validates; ``"skip"`` skips validation while
+            still canonicalizing the public prediction state.
         verbose : bool
             Print progress.
         w_correction_order : int
@@ -417,6 +424,7 @@ class SuperGLM:
             max_pirls_iter=resolved_max_pirls_iter,
             lambda2_init=lambda2_init,
             interaction_mode=interaction_mode,
+            runtime_validation=runtime_validation,
             verbose=verbose,
             w_correction_order=w_correction_order,
         )

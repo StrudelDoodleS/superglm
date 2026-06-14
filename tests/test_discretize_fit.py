@@ -970,6 +970,8 @@ class TestDiscretizedTensorInteraction:
             "reml_map_beta_s",
             "reml_penalty_context_s",
             "reml_tensor_summary_s",
+            "irls_eta_s",
+            "irls_deviance_eval_s",
         ):
             assert key in profile
             assert profile[key] >= 0.0
@@ -1041,6 +1043,72 @@ class TestDiscretizedTensorInteraction:
 
         with pytest.raises(ValueError, match="interaction_mode"):
             model.fit_reml(X, y, max_reml_iter=5, interaction_mode="fast")
+
+    def test_runtime_validation_auto_skips_large_fit(self, tensor_interaction_data, monkeypatch):
+        """Auto runtime validation should skip the full training-row diagnostic on large fits."""
+        from superglm.model import fit_ops
+
+        X, y = tensor_interaction_data
+        monkeypatch.setattr(fit_ops, "_AUTO_RUNTIME_VALIDATION_MAX_ROWS", 10)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+
+        model.fit_reml(X, y, max_reml_iter=2, runtime_validation="auto")
+
+        assert model._reml_profile["fit_runtime_canonicalize_validate"] is False
+        assert model._reml_profile["fit_runtime_canonicalize_validate_reason"] == "large_fit"
+        assert model._runtime_canonical_state["diagnostics"]["skipped"] is True
+        assert np.all(np.isfinite(model.predict(X.iloc[:25])))
+
+    def test_runtime_validation_full_overrides_large_fit_auto_skip(
+        self, tensor_interaction_data, monkeypatch
+    ):
+        """Explicit full runtime validation should remain available for large fits."""
+        from superglm.model import fit_ops
+
+        X, y = tensor_interaction_data
+        monkeypatch.setattr(fit_ops, "_AUTO_RUNTIME_VALIDATION_MAX_ROWS", 10)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+
+        model.fit_reml(X, y, max_reml_iter=2, runtime_validation="full")
+
+        assert model._reml_profile["fit_runtime_canonicalize_validate"] is True
+        assert model._reml_profile["fit_runtime_canonicalize_validate_reason"] == "explicit_full"
+        assert "skipped" not in model._runtime_canonical_state["diagnostics"]
+
+    def test_fit_reml_rejects_unknown_runtime_validation(self, tensor_interaction_data):
+        """Unknown runtime validation modes should fail before fitting."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+
+        with pytest.raises(ValueError, match="runtime_validation"):
+            model.fit_reml(X, y, max_reml_iter=2, runtime_validation="sometimes")
 
     def test_discrete_reml_forwards_public_pirls_controls(
         self, tensor_interaction_data, monkeypatch

@@ -80,6 +80,40 @@ def _extract_tensor_marginal_eigvals(
     return None, None
 
 
+def _tensor_marginal_rank_logdet(
+    gm: GroupMatrix,
+    omega_raw: NDArray,
+    *,
+    eps_thresh: float,
+) -> tuple[float, float, NDArray] | None:
+    """Fast spectral summary for unprojected tensor marginal penalties."""
+    if not isinstance(gm, DiscretizedTensorGroupMatrix):
+        return None
+    if getattr(gm, "projection", None) is not None:
+        return None
+
+    r_inv = getattr(gm, "R_inv", None)
+    if r_inv is None or r_inv.ndim != 2 or r_inv.shape[0] != r_inv.shape[1]:
+        return None
+    if not np.array_equal(r_inv, np.eye(r_inv.shape[0], dtype=r_inv.dtype)):
+        return None
+
+    p1 = int(gm.B1_unique_t.shape[1])
+    p2 = int(gm.B2_unique_t.shape[1])
+    side, eigvals = _extract_tensor_marginal_eigvals(omega_raw, p1, p2)
+    if side is None or eigvals is None:
+        return None
+
+    eigvals = np.asarray(eigvals, dtype=np.float64)
+    thresh = eps_thresh * max(float(eigvals.max()), 1e-12) if eigvals.size else 0.0
+    pos = eigvals[eigvals > thresh]
+    repeat = p2 if side == "left" else p1
+    rank = float(pos.size * repeat)
+    log_det = float(repeat * np.sum(np.log(np.maximum(pos, 1e-300)))) if pos.size else 0.0
+    pos_eigvals = np.sort(np.repeat(pos, repeat))[::-1] if pos.size else np.array([])
+    return rank, log_det, pos_eigvals
+
+
 def _penalty_group_cache_key(index: int, group: GroupSlice, gm: GroupMatrix) -> tuple:
     """Return a cache key for penalty components tied to one fixed solver basis."""
     omega_components = tuple(
@@ -405,16 +439,25 @@ def build_penalty_components(
             ct_map = getattr(gm, "component_types", None) or {}
             lp_map = getattr(gm, "lambda_policies", None) or {}
             for suffix, omega_j in gm.omega_components:
-                omega_ssp_j = gm.R_inv.T @ omega_j @ gm.R_inv
-                force_solver_rank = (
-                    isinstance(gm, DiscretizedTensorGroupMatrix)
-                    and getattr(gm, "projection", None) is not None
-                )
-                rank, log_det, pos_eigvals = _rank_and_logdet(
+                tensor_summary = _tensor_marginal_rank_logdet(
+                    gm,
                     omega_j,
-                    omega_ssp_j,
-                    force_solver_rank=force_solver_rank,
+                    eps_thresh=eps_thresh,
                 )
+                if tensor_summary is not None:
+                    omega_ssp_j = omega_j
+                    rank, log_det, pos_eigvals = tensor_summary
+                else:
+                    omega_ssp_j = gm.R_inv.T @ omega_j @ gm.R_inv
+                    force_solver_rank = (
+                        isinstance(gm, DiscretizedTensorGroupMatrix)
+                        and getattr(gm, "projection", None) is not None
+                    )
+                    rank, log_det, pos_eigvals = _rank_and_logdet(
+                        omega_j,
+                        omega_ssp_j,
+                        force_solver_rank=force_solver_rank,
+                    )
                 group_components.append(
                     PenaltyComponent(
                         name=f"{g.name}:{suffix}",

@@ -78,6 +78,8 @@ def _map_beta_between_bases(
     beta_new = beta.copy()
     for gm_old, gm_new, g in zip(old_gms, new_gms, groups):
         if isinstance(gm_old, _SSP_LIKE) and isinstance(gm_new, _SSP_LIKE):
+            if gm_old is gm_new or gm_old.R_inv is gm_new.R_inv:
+                continue
             # Map through B-spline space: old_R_inv @ beta_old = new_R_inv @ beta_new
             beta_bspline = gm_old.R_inv @ beta_new[g.sl]
             beta_new[g.sl] = np.linalg.lstsq(gm_new.R_inv, beta_bspline, rcond=None)[0]
