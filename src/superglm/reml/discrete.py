@@ -604,16 +604,6 @@ def optimize_discrete_reml_cached_w(
                 p,
                 reml_penalties=penalties,
             )
-            _tls0 = _time.perf_counter()
-            beta_trial, intercept_trial = _solve_cached_augmented(
-                XtWX,
-                S_trial,
-                c_XtWz,
-                c_XtW1,
-                c_sum_W,
-                c_sum_Wz,
-            )
-            _t_linesearch_solve += _time.perf_counter() - _tls0
 
             _n_linesearch_evals += 1
             if use_tensor_surrogate_linesearch:
@@ -629,10 +619,20 @@ def optimize_discrete_reml_cached_w(
                     rho_trial,
                     trial_lambdas,
                     S_trial,
-                    beta_trial,
-                    intercept_trial,
                 )
                 break
+
+            # Solve augmented system analytically (O(p^3), no data pass).
+            _tls0 = _time.perf_counter()
+            beta_trial, intercept_trial = _solve_cached_augmented(
+                XtWX,
+                S_trial,
+                c_XtWz,
+                c_XtW1,
+                c_sum_W,
+                c_sum_Wz,
+            )
+            _t_linesearch_solve += _time.perf_counter() - _tls0
 
             # Evaluate full REML at trial point once the cached surrogate
             # suggests an improving direction (or for all trials on the
@@ -681,7 +681,7 @@ def optimize_discrete_reml_cached_w(
             halving_count += 1
 
         if use_tensor_surrogate_linesearch and candidate is not None and not accepted:
-            rho_trial, trial_lambdas, S_trial, beta_trial, intercept_trial = candidate
+            rho_trial, trial_lambdas, S_trial = candidate
             _tls0 = _time.perf_counter()
             beta_trial, intercept_trial, log_det_H_trial = _solve_cached_h_system(
                 XtWX,

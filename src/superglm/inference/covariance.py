@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
+    SplineCategoricalGroupMatrix,
     _block_xtwx,
 )
 from superglm.types import GroupSlice
@@ -121,7 +122,10 @@ def _penalised_xtwx_inv(
             if lam_g == 0:
                 continue
 
-            if isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+            if isinstance(
+                gm_orig,
+                SparseSSPGroupMatrix | SplineCategoricalGroupMatrix | DiscretizedSSPGroupMatrix,
+            ):
                 R_inv = gm_orig.R_inv
                 omega = gm_orig.omega
                 if omega is None:
@@ -255,7 +259,10 @@ def _penalised_xtwx_inv_gram(
             if lam_g == 0:
                 continue
 
-            if isinstance(gm_orig, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+            if isinstance(
+                gm_orig,
+                SparseSSPGroupMatrix | SplineCategoricalGroupMatrix | DiscretizedSSPGroupMatrix,
+            ):
                 R_inv = gm_orig.R_inv
                 omega = gm_orig.omega
                 if omega is None:

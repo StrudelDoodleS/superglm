@@ -31,6 +31,7 @@ from superglm.group_matrix import (
     GroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
+    SplineCategoricalGroupMatrix,
     _cross_gram,
     _discretize_column,
 )
@@ -349,8 +350,55 @@ def _process_info(
     # R_inv_local: SSP transform in post-identifiability space (projected -> solver).
     # Used to compose constraints that are already in post-identifiability space.
     R_inv_local: NDArray | None = None
+    is_spline_cat = info.spline_cat_basis is not None and info.spline_cat_mask is not None
 
-    if info.projection is not None:
+    if is_spline_cat:
+        B_for = info.spline_cat_basis
+        mask = np.asarray(info.spline_cat_mask, dtype=bool)
+        masked_weight = sample_weight * mask
+        if info.projection is not None:
+            P = info.projection
+            if info.reparametrize and info.penalty_matrix is not None:
+                R_inv_local = compute_projected_R_inv(
+                    B_for,
+                    P,
+                    info.penalty_matrix,
+                    masked_weight,
+                    lambda2,
+                )
+                R_inv = P @ R_inv_local
+            else:
+                R_inv = P
+                R_inv_local = None
+            omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
+        elif info.reparametrize and info.penalty_matrix is not None:
+            R_inv = compute_R_inv(B_for, info.penalty_matrix, masked_weight, lambda2)
+            R_inv_local = R_inv
+            omega_full = info.penalty_matrix
+        else:
+            R_inv = np.eye(info.n_cols, dtype=np.float64)
+            R_inv_local = None
+            omega_full = info.penalty_matrix
+
+        n_cols = R_inv.shape[1]
+        gm = SplineCategoricalGroupMatrix(B_for, R_inv, mask)
+        if omega_full is not None:
+            gm.omega = omega_full
+        if info.projection is not None:
+            gm.projection = info.projection
+        if info.penalty_components is not None:
+            if info.projection is not None:
+                P = info.projection
+                gm.omega_components = [
+                    (suffix, P @ omega_j @ P.T) for suffix, omega_j in info.penalty_components
+                ]
+            else:
+                gm.omega_components = info.penalty_components
+            gm.component_types = info.component_types
+            if info.lambda_policies is not None:
+                gm.lambda_policies = info.lambda_policies
+
+    elif info.projection is not None:
         P = info.projection
         if info.reparametrize and info.penalty_matrix is not None:
             B_for = B_unique if use_discrete else info.columns
@@ -1022,6 +1070,26 @@ def rebuild_design_matrix_with_lambdas(
             else:
                 R_inv_new = compute_R_inv(gm.B, omega_eff, sample_weight, lam)
             new_gm = SparseSSPGroupMatrix(gm.B, R_inv_new)
+            new_gm.omega = gm.omega
+            new_gm.projection = gm.projection
+            new_gm.omega_components = gm.omega_components
+            new_gm.component_types = gm.component_types
+            new_gm.lambda_policies = gm.lambda_policies
+            new_gms.append(new_gm)
+        elif isinstance(gm, SplineCategoricalGroupMatrix) and _group_has_lambda(gm, g, lambdas):
+            if gm.omega is None:
+                new_gms.append(gm)
+                continue
+            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            masked_weight = sample_weight * gm.mask
+            if gm.projection is not None:
+                P = gm.projection
+                omega_proj = P.T @ omega_eff @ P
+                R_inv_local = compute_projected_R_inv(gm.B, P, omega_proj, masked_weight, lam)
+                R_inv_new = P @ R_inv_local
+            else:
+                R_inv_new = compute_R_inv(gm.B, omega_eff, masked_weight, lam)
+            new_gm = SplineCategoricalGroupMatrix(gm.B, R_inv_new, gm.mask)
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components

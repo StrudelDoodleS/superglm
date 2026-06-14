@@ -105,7 +105,7 @@ class TestSplineCategoricalBuild:
             assert g.reparametrize is True
             assert g.penalty_matrix is not None
 
-    def test_sparse_columns(self):
+    def test_compact_sparse_basis_and_mask(self):
         import scipy.sparse as sp
 
         spline_spec = Spline(n_knots=5)
@@ -119,14 +119,13 @@ class TestSplineCategoricalBuild:
         sc = SplineCategorical("spline", "cat")
         groups = sc.build(x_spline, x_cat, {"spline": spline_spec, "cat": cat_spec})
 
-        B_level = groups[0].columns
-        # B_level stays sparse (projection is on GroupInfo, not applied to columns)
-        assert sp.issparse(B_level)
+        assert groups[0].columns is None
+        # The shared spline basis stays sparse and the level mask carries sparsity.
+        assert sp.issparse(groups[0].spline_cat_basis)
+        assert groups[0].spline_cat_mask is not None
         # Projection is set for dm_builder to fold into R_inv
         assert groups[0].projection is not None
-        mask_not_b = x_cat != "B"
-        arr = B_level.toarray()
-        np.testing.assert_array_equal(arr[mask_not_b], 0.0)
+        np.testing.assert_array_equal(groups[0].spline_cat_mask, x_cat == "B")
 
     def test_penalty_matches_parent(self):
         spline_spec = Spline(n_knots=8)
@@ -144,6 +143,34 @@ class TestSplineCategoricalBuild:
     def test_parent_names(self):
         sc = SplineCategorical("age", "region")
         assert sc.parent_names == ("age", "region")
+
+    def test_prediction_uses_direct_score_without_transform(self, interaction_data, monkeypatch):
+        X, y, sample_weight = interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "age": Spline(n_knots=6, penalty="ssp"),
+                "region": Categorical(base="first"),
+            },
+            interactions=[("age", "region")],
+        )
+        model.fit(X[["age", "region"]], y, sample_weight=sample_weight)
+        baseline = model.predict(X[["age", "region"]])
+
+        spec = model._interaction_specs["age:region"]
+
+        def _raise_transform(*args, **kwargs):
+            raise AssertionError("SplineCategorical.transform should not be used for prediction")
+
+        monkeypatch.setattr(spec, "transform", _raise_transform)
+
+        np.testing.assert_allclose(
+            model.predict(X[["age", "region"]]),
+            baseline,
+            rtol=1e-12,
+            atol=1e-12,
+        )
 
 
 class TestSplineCategoricalNaturalBuild:
@@ -568,6 +595,54 @@ class TestSplineCategoricalPerLevel:
         raw = model.reconstruct_feature("age:region")
         assert "per_level" in raw
         assert "x" in raw
+
+    def test_fit_uses_compact_group_matrices(self, interaction_data):
+        """Spline-categorical fit algebra should not store masked spline blocks."""
+        from superglm.group_matrix import SplineCategoricalGroupMatrix
+
+        X, y, sample_weight = interaction_data
+        model = SuperGLM(
+            features={"age": Spline(n_knots=6), "region": Categorical(base="first")},
+            interactions=[("age", "region")],
+            selection_penalty=0.0,
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        interaction_gms = [
+            gm
+            for gm, group in zip(model._dm.group_matrices, model._groups)
+            if group.feature_name == "age:region"
+        ]
+
+        assert interaction_gms
+        assert all(isinstance(gm, SplineCategoricalGroupMatrix) for gm in interaction_gms)
+
+    def test_fit_reml_estimates_compact_group_penalties(self, interaction_data):
+        """Compact spline-categorical levels remain REML-eligible SSP groups."""
+        from superglm.group_matrix import SplineCategoricalGroupMatrix
+
+        X, y, sample_weight = interaction_data
+        model = SuperGLM(
+            features={"age": Spline(n_knots=6), "region": Categorical(base="first")},
+            interactions=[("age", "region")],
+            selection_penalty=0.0,
+        )
+        model.fit_reml(X, y, sample_weight=sample_weight, max_reml_iter=3)
+
+        interaction_groups = [
+            (gm, group)
+            for gm, group in zip(model._dm.group_matrices, model._groups)
+            if group.feature_name == "age:region"
+        ]
+        interaction_penalties = [
+            penalty
+            for penalty in model._reml_penalties
+            if penalty.group_name.startswith("age:region[")
+        ]
+
+        assert interaction_groups
+        assert all(isinstance(gm, SplineCategoricalGroupMatrix) for gm, _ in interaction_groups)
+        assert len(interaction_penalties) == len(interaction_groups)
 
 
 class TestNaturalSplineModelSpecifics:
@@ -1099,6 +1174,90 @@ class TestTensorInteractionModelSpecifics:
         assert "age:bm:bilinear" not in model._reml_lambdas
         assert "age:bm:wiggly:margin_age" in model._reml_lambdas
         assert "age:bm:wiggly:margin_bm" in model._reml_lambdas
+
+    def test_prediction_uses_direct_score_without_transform(self, interaction_data, monkeypatch):
+        X, y, sample_weight = interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"age": Spline(n_knots=6), "bm": Spline(n_knots=5)},
+            interactions=[("age", "bm")],
+        )
+        model.fit(X[["age", "bm"]], y, sample_weight=sample_weight)
+        baseline = model.predict(X[["age", "bm"]])
+
+        spec = model._interaction_specs["age:bm"]
+
+        def _raise_transform(*args, **kwargs):
+            raise AssertionError("TensorInteraction.transform should not be used for prediction")
+
+        monkeypatch.setattr(spec, "transform", _raise_transform)
+
+        np.testing.assert_allclose(
+            model.predict(X[["age", "bm"]]),
+            baseline,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+
+class TestDirectInteractionPrediction:
+    @pytest.mark.parametrize(
+        ("features", "interaction", "columns"),
+        [
+            (
+                {"bm": Numeric(), "density": Numeric()},
+                ("bm", "density"),
+                ["bm", "density"],
+            ),
+            (
+                {"bm": Numeric(), "region": Categorical(base="first")},
+                ("bm", "region"),
+                ["bm", "region"],
+            ),
+            (
+                {"region": Categorical(base="first"), "type": Categorical(base="first")},
+                ("region", "type"),
+                ["region", "type"],
+            ),
+            (
+                {"bm": Polynomial(degree=3), "density": Polynomial(degree=2)},
+                ("bm", "density"),
+                ["bm", "density"],
+            ),
+            (
+                {"bm": Polynomial(degree=3), "region": Categorical(base="first")},
+                ("bm", "region"),
+                ["bm", "region"],
+            ),
+        ],
+    )
+    def test_prediction_uses_direct_score_without_transform(
+        self,
+        interaction_data,
+        monkeypatch,
+        features,
+        interaction,
+        columns,
+    ):
+        X, y, sample_weight = interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features=features,
+            interactions=[interaction],
+        )
+        model.fit(X[columns], y, sample_weight=sample_weight)
+        baseline = model.predict(X[columns])
+        name = f"{interaction[0]}:{interaction[1]}"
+        spec = model._interaction_specs[name]
+
+        def _raise_transform(*args, **kwargs):
+            raise AssertionError(f"{type(spec).__name__}.transform should not be used")
+
+        monkeypatch.setattr(spec, "transform", _raise_transform)
+
+        np.testing.assert_allclose(model.predict(X[columns]), baseline, rtol=1e-12, atol=1e-12)
 
 
 # ── Tensor marginal parent geometry tests ──────────────────────

@@ -172,3 +172,91 @@ class SparseSSPGroupMatrix:
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         return sub
+
+
+class SplineCategoricalGroupMatrix:
+    """One spline-by-category level without materialising a masked spline block."""
+
+    __slots__ = (
+        "B",
+        "_data",
+        "_indices",
+        "_indptr",
+        "_p_b",
+        "R_inv",
+        "mask",
+        "shape",
+        "omega",
+        "projection",
+        "omega_components",
+        "component_types",
+        "lambda_policies",
+    )
+
+    def __init__(self, B_csr: sp.spmatrix, R_inv: NDArray, mask: NDArray):
+        self.B = sp.csr_matrix(B_csr)
+        self._data = self.B.data.astype(np.float64)
+        self._indices = self.B.indices
+        self._indptr = self.B.indptr
+        self._p_b = self.B.shape[1]
+        self.R_inv = np.asarray(R_inv)
+        self.mask = np.asarray(mask, dtype=bool)
+        if self.mask.shape != (self.B.shape[0],):
+            raise ValueError("mask length must match spline basis row count")
+        self.shape = (self.B.shape[0], self.R_inv.shape[1])
+        self.omega = None
+        self.projection = None
+        self.omega_components = None
+        self.component_types = None
+        self.lambda_policies = None
+
+    def matvec(self, v: NDArray) -> NDArray:
+        out = np.zeros(self.shape[0], dtype=np.float64)
+        if not np.any(self.mask):
+            return out
+        raw_beta = self.R_inv @ v
+        out[self.mask] = np.asarray(self.B[self.mask] @ raw_beta).ravel()
+        return out
+
+    def rmatvec(self, w: NDArray) -> NDArray:
+        return self.R_inv.T @ np.asarray(self.B.T @ (w * self.mask)).ravel()
+
+    def gram(self, W: NDArray) -> NDArray:
+        raw_gram = _csr_weighted_gram(
+            self._data,
+            self._indices,
+            self._indptr,
+            W * self.mask,
+            self._p_b,
+        )
+        return self.R_inv.T @ raw_gram @ self.R_inv
+
+    def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+        masked_W = W * self.mask
+        masked_Wz = Wz * self.mask
+        raw_gram = _csr_weighted_gram(
+            self._data,
+            self._indices,
+            self._indptr,
+            masked_W,
+            self._p_b,
+        )
+        gram = self.R_inv.T @ raw_gram @ self.R_inv
+        xtw = self.R_inv.T @ np.asarray(self.B.T @ masked_W).ravel()
+        xtwz = self.R_inv.T @ np.asarray(self.B.T @ masked_Wz).ravel()
+        return gram, xtw, xtwz
+
+    def toarray(self) -> NDArray:
+        out = np.zeros(self.shape, dtype=np.float64)
+        if np.any(self.mask):
+            out[self.mask] = np.asarray(self.B[self.mask] @ self.R_inv)
+        return out
+
+    def row_subset(self, idx: NDArray) -> SplineCategoricalGroupMatrix:
+        sub = SplineCategoricalGroupMatrix(self.B[idx], self.R_inv, self.mask[idx])
+        sub.omega = self.omega
+        sub.projection = self.projection
+        sub.omega_components = self.omega_components
+        sub.component_types = self.component_types
+        sub.lambda_policies = self.lambda_policies
+        return sub

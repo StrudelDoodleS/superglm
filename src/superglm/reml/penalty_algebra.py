@@ -23,6 +23,7 @@ from superglm.group_matrix import (
     DiscretizedTensorGroupMatrix,
     GroupMatrix,
     SparseSSPGroupMatrix,
+    SplineCategoricalGroupMatrix,
 )
 from superglm.reml.result import PenaltyCache
 from superglm.types import GroupSlice, PenaltyComponent
@@ -239,7 +240,10 @@ def build_penalty_matrix(
         if lam_g == 0:
             continue
 
-        if isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+        if isinstance(
+            gm,
+            SparseSSPGroupMatrix | SplineCategoricalGroupMatrix | DiscretizedSSPGroupMatrix,
+        ):
             omega = gm.omega
             if omega is None:
                 continue

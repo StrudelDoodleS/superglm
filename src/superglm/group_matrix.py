@@ -24,6 +24,7 @@ from ._group_matrix._group_matrix_core import (
     DenseGroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
+    SplineCategoricalGroupMatrix,
 )
 from ._group_matrix._group_matrix_discretized import (
     DiscretizedSCOPGroupMatrix,
@@ -39,6 +40,7 @@ DenseGroupMatrix.__module__ = __name__
 SparseGroupMatrix.__module__ = __name__
 CategoricalGroupMatrix.__module__ = __name__
 SparseSSPGroupMatrix.__module__ = __name__
+SplineCategoricalGroupMatrix.__module__ = __name__
 DiscretizedSSPGroupMatrix.__module__ = __name__
 DiscretizedSCOPGroupMatrix.__module__ = __name__
 DiscretizedTensorGroupMatrix.__module__ = __name__
@@ -54,6 +56,7 @@ GroupMatrix = (
     | SparseGroupMatrix
     | CategoricalGroupMatrix
     | SparseSSPGroupMatrix
+    | SplineCategoricalGroupMatrix
     | DiscretizedSSPGroupMatrix
     | DiscretizedSCOPGroupMatrix
     | DiscretizedTensorGroupMatrix
