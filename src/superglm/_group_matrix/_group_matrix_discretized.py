@@ -215,20 +215,23 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         G_raw = self._factored_gram_raw(w_grid)
         return self.R_inv.T @ G_raw @ self.R_inv
 
+    def gram_rmatvec_from_grids(
+        self, w_grid: NDArray, wz_grid: NDArray
+    ) -> tuple[NDArray, NDArray, NDArray]:
+        """Factored gram + rmatvec from precomputed tensor weight grids."""
+        B1, B2 = self.B1_unique_t, self.B2_unique_t
+        G_raw = self._factored_gram_raw(w_grid)
+        gram = self.R_inv.T @ G_raw @ self.R_inv
+        xtw = self.R_inv.T @ (B1.T @ w_grid @ B2).ravel()
+        xtwz = self.R_inv.T @ (B1.T @ wz_grid @ B2).ravel()
+        return gram, xtw, xtwz
+
     def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
         """Factored gram + rmatvec with shared 2D bincount."""
-        B1, B2 = self.B1_unique_t, self.B2_unique_t
         w_grid, wz_grid = _fused_2d_bincount_2(
             self.idx1, self.idx2, W, Wz, self.n_bins1, self.n_bins2
         )
-        # Factored gram
-        G_raw = self._factored_gram_raw(w_grid)
-        gram = self.R_inv.T @ G_raw @ self.R_inv
-        # Factored rmatvec(W)
-        xtw = self.R_inv.T @ (B1.T @ w_grid @ B2).ravel()
-        # Factored rmatvec(Wz)
-        xtwz = self.R_inv.T @ (B1.T @ wz_grid @ B2).ravel()
-        return gram, xtw, xtwz
+        return self.gram_rmatvec_from_grids(w_grid, wz_grid)
 
     def matvec(self, v: NDArray) -> NDArray:
         B1, B2 = self.B1_unique_t, self.B2_unique_t

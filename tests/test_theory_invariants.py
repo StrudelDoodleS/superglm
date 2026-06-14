@@ -554,6 +554,57 @@ class TestBackendLinearAlgebraInvariants:
         assert first_call_count > 0
         assert calls == first_call_count
 
+    def test_block_xtwx_rhs_reuses_tensor_w_grid_for_own_margins(self, monkeypatch):
+        """One block assembly should share a tensor W-grid across both parent crosses."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+        from superglm.types import GroupSlice
+
+        rng = np.random.default_rng(123)
+        n = 120
+        n1, n2 = 7, 6
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        B1 = rng.normal(size=(n1, 3))
+        B2 = rng.normal(size=(n2, 2))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), 6
+        )
+        main1 = DiscretizedSSPGroupMatrix(rng.normal(size=(n1, 4)), np.eye(4), idx1)
+        main2 = DiscretizedSSPGroupMatrix(rng.normal(size=(n2, 5)), np.eye(5), idx2)
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            np.eye(6),
+            pair_idx.astype(np.intp),
+            tensor_id=8,
+        )
+        groups = [
+            GroupSlice(name="x1", start=0, end=4, weight=2.0),
+            GroupSlice(name="x2", start=4, end=9, weight=np.sqrt(5.0)),
+            GroupSlice(name="x1:x2", start=9, end=15, weight=np.sqrt(6.0)),
+        ]
+        W = rng.uniform(0.2, 1.8, size=n)
+        Wz = rng.normal(size=n)
+        calls = 0
+        real_hist = algebra._disc_disc_2d_hist
+
+        def counting_hist(a, b, weights, n_a, n_b):
+            nonlocal calls
+            if a is tensor.idx1 and b is tensor.idx2 and weights is W:
+                calls += 1
+            return real_hist(a, b, weights, n_a, n_b)
+
+        monkeypatch.setattr(algebra, "_disc_disc_2d_hist", counting_hist)
+
+        algebra._block_xtwx_rhs([main1, main2, tensor], groups, W, Wz)
+
+        assert calls == 1
+
     def test_categorical_spline_categorical_cross_gram_matches_dense_oracle(self):
         """Categorical × compact spline-category cross-Gram should use one aggregation."""
         import scipy.sparse as sp

@@ -1108,6 +1108,15 @@ def rebuild_design_matrix_with_lambdas(
             if gm.omega is None:
                 new_gms.append(gm)
                 continue
+            if gm.omega_components is not None and gm.projection is None:
+                # Discrete tensor interactions are emitted in fixed centered
+                # tensor coordinates with explicit marginal penalty components.
+                # Lambda updates should change S(lambda), not rebuild the
+                # packed design/R_inv. This mirrors mgcv bam(discrete=TRUE),
+                # where the packed marginal/index representation is fixed
+                # while smoothing parameters move.
+                new_gms.append(gm)
+                continue
             lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
             exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
             if gm.projection is not None:

@@ -39,6 +39,12 @@ OUT_TRAIN_CSV = OUT_DIR / "tensor_ti_freq_train.csv"
 OUT_TEST_CSV = OUT_DIR / "tensor_ti_freq_test.csv"
 TIMEOUT_S = 30.0
 CASE_TIMEOUT_S = 60.0
+PROFILE_TIMING_KEYS = (
+    "reml_rebuild_dm_s",
+    "reml_map_beta_s",
+    "reml_penalty_context_s",
+    "reml_tensor_summary_s",
+)
 
 
 def load_freq() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
@@ -103,6 +109,7 @@ def _fit_case_result(
     t0 = time.perf_counter()
     model.fit_reml(X_train, y_train, sample_weight=w_train, max_reml_iter=30)
     fit_s = time.perf_counter() - t0
+    profile_timings = {key: float(model._reml_profile.get(key, 0.0)) for key in PROFILE_TIMING_KEYS}
 
     if fit_s > TIMEOUT_S:
         return {
@@ -121,6 +128,7 @@ def _fit_case_result(
             "reml_linesearch_s": float(model._reml_profile.get("reml_linesearch_s", 0.0)),
             "reml_n_outer_iter": int(model._reml_profile.get("reml_n_outer_iter", 0)),
             "reml_pirls_s": float(model._reml_profile.get("reml_pirls_s", 0.0)),
+            **profile_timings,
         }
 
     mu = model.predict(X_test)
@@ -150,6 +158,7 @@ def _fit_case_result(
         "reml_objective_s": float(model._reml_profile.get("reml_objective_s", 0.0)),
         "reml_hessian_newton_s": float(model._reml_profile.get("reml_hessian_newton_s", 0.0)),
         "reml_n_analytical_iters": int(model._reml_profile.get("reml_n_analytical_iters", 0)),
+        **profile_timings,
     }
 
 
@@ -312,6 +321,14 @@ def main() -> None:
                 if with_ti["reml_linesearch_s"] is None
                 else float(with_ti["reml_linesearch_s"] - baseline["reml_linesearch_s"])
             ),
+            **{
+                key: (
+                    None
+                    if with_ti.get(key) is None
+                    else float(with_ti.get(key, 0.0) - baseline.get(key, 0.0))
+                )
+                for key in PROFILE_TIMING_KEYS
+            },
         },
     }
     OUT_JSON.write_text(json.dumps(out, indent=2))

@@ -13,6 +13,7 @@ from ._group_matrix_kernels import (
     _csr_weighted_bincount,
     _disc_disc_2d_hist,
     _disc_disc_2d_hist_channels,
+    _fused_2d_bincount_2,
     _weighted_bincount_2d,
 )
 
@@ -27,6 +28,65 @@ else:
 
 _MAX_DISC_DISC_HIST_CELLS = 5_000_000
 _MAX_DISC_DISC_CHANNEL_HIST_CELLS = 5_000_000
+
+
+class _BlockWeightCache:
+    """Per-block-assembly cache for weighted discrete summaries."""
+
+    __slots__ = ("_hist2d",)
+
+    def __init__(self) -> None:
+        self._hist2d: dict[tuple[int, int, int, int, int], NDArray] = {}
+
+    @staticmethod
+    def _key(idx_a: NDArray, idx_b: NDArray, W: NDArray, n_a: int, n_b: int):
+        return (id(idx_a), id(idx_b), id(W), int(n_a), int(n_b))
+
+    def disc_disc_hist(
+        self,
+        idx_a: NDArray,
+        idx_b: NDArray,
+        W: NDArray,
+        n_a: int,
+        n_b: int,
+    ) -> NDArray:
+        key = self._key(idx_a, idx_b, W, n_a, n_b)
+        cached = self._hist2d.get(key)
+        if cached is not None:
+            return cached
+
+        rev_key = self._key(idx_b, idx_a, W, n_b, n_a)
+        rev_cached = self._hist2d.get(rev_key)
+        if rev_cached is not None:
+            hist = rev_cached.T
+            self._hist2d[key] = hist
+            return hist
+
+        hist = _disc_disc_2d_hist(idx_a, idx_b, W, n_a, n_b)
+        self._hist2d[key] = hist
+        return hist
+
+    def tensor_w_grid(self, gm: DiscretizedTensorGroupMatrix, W: NDArray) -> NDArray:
+        return self.disc_disc_hist(gm.idx1, gm.idx2, W, gm.n_bins1, gm.n_bins2)
+
+    def tensor_w_wz_grid(
+        self, gm: DiscretizedTensorGroupMatrix, W: NDArray, Wz: NDArray
+    ) -> tuple[NDArray, NDArray]:
+        w_key = self._key(gm.idx1, gm.idx2, W, gm.n_bins1, gm.n_bins2)
+        wz_key = self._key(gm.idx1, gm.idx2, Wz, gm.n_bins1, gm.n_bins2)
+        w_grid = self._hist2d.get(w_key)
+        wz_grid = self._hist2d.get(wz_key)
+        if w_grid is None and wz_grid is None:
+            w_grid, wz_grid = _fused_2d_bincount_2(gm.idx1, gm.idx2, W, Wz, gm.n_bins1, gm.n_bins2)
+            self._hist2d[w_key] = w_grid
+            self._hist2d[wz_key] = wz_grid
+            return w_grid, wz_grid
+
+        if w_grid is None:
+            w_grid = self.tensor_w_grid(gm, W)
+        if wz_grid is None:
+            wz_grid = self.disc_disc_hist(gm.idx1, gm.idx2, Wz, gm.n_bins1, gm.n_bins2)
+        return w_grid, wz_grid
 
 
 def _runtime_group_matrix_types():
@@ -106,13 +166,17 @@ def _cross_gram_tensor_tensor(
     gm_i: DiscretizedTensorGroupMatrix,
     gm_j: DiscretizedTensorGroupMatrix,
     W: NDArray,
+    cache: _BlockWeightCache | None = None,
 ) -> NDArray:
     """Cross-gram between two tensor groups sharing the same marginals.
 
     Used for decomposed tensor subgroups (bilinear × wiggly) that share
     the same B1_unique, B2_unique, idx1, idx2 but have different R_inv.
     """
-    w_grid = _disc_disc_2d_hist(gm_i.idx1, gm_i.idx2, W, gm_i.n_bins1, gm_i.n_bins2)
+    if cache is None:
+        w_grid = _disc_disc_2d_hist(gm_i.idx1, gm_i.idx2, W, gm_i.n_bins1, gm_i.n_bins2)
+    else:
+        w_grid = cache.tensor_w_grid(gm_i, W)
     G_raw = gm_i._factored_gram_raw(w_grid)
     return gm_i.R_inv.T @ G_raw @ gm_j.R_inv
 
@@ -178,6 +242,7 @@ def _cross_gram_tensor_own_margin(
     gm_tensor: DiscretizedTensorGroupMatrix,
     gm_main: DiscretizedSSPGroupMatrix,
     W: NDArray,
+    cache: _BlockWeightCache | None = None,
 ) -> NDArray | None:
     """Cross-Gram for tensor × one of its own discretized marginal smooths.
 
@@ -210,13 +275,16 @@ def _cross_gram_tensor_own_margin(
     K1, K2 = B1.shape[1], B2.shape[1]
     K_main_raw = B_main.shape[1]
     result_raw = np.empty((K_main_raw, K1 * K2), dtype=np.float64)
-    w_grid = _disc_disc_2d_hist(
-        gm_tensor.idx1,
-        gm_tensor.idx2,
-        W,
-        gm_tensor.n_bins1,
-        gm_tensor.n_bins2,
-    )
+    if cache is None:
+        w_grid = _disc_disc_2d_hist(
+            gm_tensor.idx1,
+            gm_tensor.idx2,
+            W,
+            gm_tensor.n_bins1,
+            gm_tensor.n_bins2,
+        )
+    else:
+        w_grid = cache.tensor_w_grid(gm_tensor, W)
 
     if margin == 1:
         weighted_margin2 = w_grid @ B2  # (n_bins1, K2)
@@ -282,7 +350,12 @@ def _cross_gram_categorical_spline_categorical(
     return B_agg[: gm_cat.n_levels] @ gm_spline_cat.R_inv
 
 
-def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
+def _cross_gram(
+    gm_i: GroupMatrix,
+    gm_j: GroupMatrix,
+    W: NDArray,
+    cache: _BlockWeightCache | None = None,
+) -> NDArray:
     """Compute X_i.T @ diag(W) @ X_j efficiently.
 
     For two DiscretizedSSPGroupMatrix, uses a 2D weight histogram to avoid
@@ -312,7 +385,7 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
         and isinstance(gm_j, DiscretizedTensorGroupMatrix)
         and gm_i.tensor_id == gm_j.tensor_id
     ):
-        return _cross_gram_tensor_tensor(gm_i, gm_j, W)
+        return _cross_gram_tensor_tensor(gm_i, gm_j, W, cache)
 
     if isinstance(gm_i, DiscretizedTensorGroupMatrix) and isinstance(
         gm_j, SplineCategoricalGroupMatrix
@@ -334,7 +407,7 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
         and isinstance(gm_j, DiscretizedSSPGroupMatrix)
         and not isinstance(gm_j, DiscretizedTensorGroupMatrix)
     ):
-        own_margin = _cross_gram_tensor_own_margin(gm_i, gm_j, W)
+        own_margin = _cross_gram_tensor_own_margin(gm_i, gm_j, W, cache)
         if own_margin is not None:
             return own_margin.T
         return _cross_gram_tensor_main(gm_i, gm_j, W).T
@@ -343,7 +416,7 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
         and isinstance(gm_i, DiscretizedSSPGroupMatrix)
         and not isinstance(gm_i, DiscretizedTensorGroupMatrix)
     ):
-        own_margin = _cross_gram_tensor_own_margin(gm_j, gm_i, W)
+        own_margin = _cross_gram_tensor_own_margin(gm_j, gm_i, W, cache)
         if own_margin is not None:
             return own_margin
         return _cross_gram_tensor_main(gm_j, gm_i, W)
@@ -353,20 +426,32 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     ):
         n_joint = gm_i.n_bins * gm_j.n_bins
         if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
-            W_2d = _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+            W_2d = (
+                _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+                if cache is None
+                else cache.disc_disc_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+            )
             return gm_i.B_scop_unique.T @ W_2d @ gm_j.B_scop_unique
 
     if isinstance(gm_i, DiscretizedSSPGroupMatrix) and isinstance(gm_j, DiscretizedSCOPGroupMatrix):
         n_joint = gm_i.n_bins * gm_j.n_bins
         if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
-            W_2d = _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+            W_2d = (
+                _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+                if cache is None
+                else cache.disc_disc_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+            )
             BtWB = gm_i.B_unique.T @ W_2d @ gm_j.B_scop_unique
             return gm_i.R_inv.T @ BtWB
 
     if isinstance(gm_i, DiscretizedSCOPGroupMatrix) and isinstance(gm_j, DiscretizedSSPGroupMatrix):
         n_joint = gm_i.n_bins * gm_j.n_bins
         if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
-            W_2d = _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+            W_2d = (
+                _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+                if cache is None
+                else cache.disc_disc_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+            )
             BtWB = gm_i.B_scop_unique.T @ W_2d @ gm_j.B_unique
             return BtWB @ gm_j.R_inv
 
@@ -374,7 +459,11 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
         n_joint = gm_i.n_bins * gm_j.n_bins
         if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
             # Fused 2D histogram: single O(n) pass, no (n,) temp allocations.
-            W_2d = _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+            W_2d = (
+                _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+                if cache is None
+                else cache.disc_disc_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
+            )
             BtWB = gm_i.B_unique.T @ W_2d @ gm_j.B_unique
             return gm_i.R_inv.T @ BtWB @ gm_j.R_inv
 
@@ -458,6 +547,7 @@ def _block_xtwx(gms: list[GroupMatrix], groups: list, W: NDArray, *, tabmat_spli
         return np.asarray(tabmat_split.sandwich(W))
     p_total = sum(g.end - g.start for g in groups)
     XtWX = np.zeros((p_total, p_total))
+    cache = _BlockWeightCache()
 
     for i, (gm_i, g_i) in enumerate(zip(gms, groups)):
         sl_i = slice(g_i.start, g_i.end)
@@ -469,7 +559,7 @@ def _block_xtwx(gms: list[GroupMatrix], groups: list, W: NDArray, *, tabmat_spli
             gm_j = gms[j]
             g_j = groups[j]
             sl_j = slice(g_j.start, g_j.end)
-            cross = _cross_gram(gm_i, gm_j, W)
+            cross = _cross_gram(gm_i, gm_j, W, cache)
             XtWX[sl_i, sl_j] = cross
             XtWX[sl_j, sl_i] = cross.T
 
@@ -490,7 +580,7 @@ def _block_xtwx_rhs(
         _CategoricalGroupMatrix,
         DiscretizedSCOPGroupMatrix,
         DiscretizedSSPGroupMatrix,
-        _DiscretizedTensorGroupMatrix,
+        DiscretizedTensorGroupMatrix,
         _SparseGroupMatrix,
         _SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
@@ -504,11 +594,18 @@ def _block_xtwx_rhs(
     XtWX = np.zeros((p_total, p_total))
     XtW1 = np.zeros(p_total)
     XtWz_out = np.zeros(p_total)
+    cache = _BlockWeightCache()
 
     for i, (gm_i, g_i) in enumerate(zip(gms, groups)):
         sl_i = slice(g_i.start, g_i.end)
         # Diagonal block + rmatvecs via shared bincount
-        if isinstance(
+        if isinstance(gm_i, DiscretizedTensorGroupMatrix):
+            w_grid, wz_grid = cache.tensor_w_wz_grid(gm_i, W, Wz)
+            gram_i, xtw_i, xtwz_i = gm_i.gram_rmatvec_from_grids(w_grid, wz_grid)
+            XtWX[sl_i, sl_i] = gram_i
+            XtW1[sl_i] = xtw_i
+            XtWz_out[sl_i] = xtwz_i
+        elif isinstance(
             gm_i,
             DiscretizedSSPGroupMatrix | DiscretizedSCOPGroupMatrix | SplineCategoricalGroupMatrix,
         ):
@@ -526,7 +623,7 @@ def _block_xtwx_rhs(
             gm_j = gms[j]
             g_j = groups[j]
             sl_j = slice(g_j.start, g_j.end)
-            cross = _cross_gram(gm_i, gm_j, W)
+            cross = _cross_gram(gm_i, gm_j, W, cache)
             XtWX[sl_i, sl_j] = cross
             XtWX[sl_j, sl_i] = cross.T
 
@@ -547,6 +644,7 @@ def _block_xtwx_signed(
         return np.asarray(tabmat_split.sandwich(W))
     p_total = sum(g.end - g.start for g in groups)
     XtWX = np.zeros((p_total, p_total))
+    cache = _BlockWeightCache()
 
     for i, (gm_i, g_i) in enumerate(zip(gms, groups)):
         sl_i = slice(g_i.start, g_i.end)
@@ -556,7 +654,7 @@ def _block_xtwx_signed(
             gm_j = gms[j]
             g_j = groups[j]
             sl_j = slice(g_j.start, g_j.end)
-            cross = _cross_gram(gm_i, gm_j, W)
+            cross = _cross_gram(gm_i, gm_j, W, cache)
             XtWX[sl_i, sl_j] = cross
             XtWX[sl_j, sl_i] = cross.T
 
