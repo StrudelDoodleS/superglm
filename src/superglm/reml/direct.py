@@ -55,6 +55,8 @@ def optimize_direct_reml(
     w_correction_order: int = 1,
     reml_penalties: list[PenaltyComponent] | None = None,
     estimated_names: set[str] | None = None,
+    pirls_tol: float = 1e-6,
+    max_pirls_iter: int = 100,
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
 
@@ -95,6 +97,8 @@ def optimize_direct_reml(
             direct_solve=direct_solve,
             reml_penalties=penalties,
             estimated_names=estimated_names,
+            pirls_tol=pirls_tol,
+            max_pirls_iter=max_pirls_iter,
         )
 
     scale_known = getattr(distribution, "scale_known", True)
@@ -148,6 +152,8 @@ def optimize_direct_reml(
         groups=groups,
         lambda2=boot_lambdas,
         offset=offset_arr,
+        max_iter=max_pirls_iter,
+        tol=pirls_tol,
         return_xtwx=True,
         profile=profile,
         direct_solve=direct_solve,
@@ -247,6 +253,8 @@ def optimize_direct_reml(
             offset=offset_arr,
             beta_init=warm_beta,
             intercept_init=warm_intercept,
+            max_iter=max_pirls_iter,
+            tol=pirls_tol,
             return_xtwx=True,
             profile=profile,
             direct_solve=direct_solve,
@@ -462,6 +470,8 @@ def optimize_direct_reml(
                 offset=offset_arr,
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
+                max_iter=max_pirls_iter,
+                tol=pirls_tol,
                 return_xtwx=True,
                 profile=profile,
                 direct_solve=direct_solve,

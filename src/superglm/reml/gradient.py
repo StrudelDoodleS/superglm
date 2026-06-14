@@ -32,6 +32,10 @@ def _penalty_block_trace(
     return float(np.trace(H_ji @ weighted_omega_i @ H_ij @ weighted_omega_j))
 
 
+def _same_slice(sl_i: slice, sl_j: slice) -> bool:
+    return sl_i.start == sl_j.start and sl_i.stop == sl_j.stop and sl_i.step == sl_j.step
+
+
 def reml_direct_gradient(
     group_matrices: list,
     result: PIRLSResult,
@@ -136,6 +140,8 @@ def reml_direct_hessian(
 
     full_HdHj: dict[int, NDArray] = {}
     compact_dS: list[tuple[slice, NDArray]] = []
+    same_slice_H_blocks: dict[tuple[int | None, int | None, int | None], NDArray] = {}
+    same_slice_products: dict[int, NDArray] = {}
     quad_per_group: list[float] = []
     s_beta_list: list[NDArray] = []
     for i, pc in enumerate(penalties):
@@ -172,13 +178,29 @@ def reml_direct_hessian(
             if use_compact_trace:
                 sl_i, weighted_omega_i = compact_dS[i]
                 sl_j, weighted_omega_j = compact_dS[j]
-                h = -0.5 * _penalty_block_trace(
-                    XtWX_S_inv,
-                    sl_i,
-                    weighted_omega_i,
-                    sl_j,
-                    weighted_omega_j,
-                )
+                if _same_slice(sl_i, sl_j):
+                    key_i = (sl_i.start, sl_i.stop, sl_i.step)
+                    H_block = same_slice_H_blocks.get(key_i)
+                    if H_block is None:
+                        H_block = XtWX_S_inv[sl_i, sl_i]
+                        same_slice_H_blocks[key_i] = H_block
+                    A_i = same_slice_products.get(i)
+                    if A_i is None:
+                        A_i = H_block @ weighted_omega_i
+                        same_slice_products[i] = A_i
+                    A_j = same_slice_products.get(j)
+                    if A_j is None:
+                        A_j = H_block @ weighted_omega_j
+                        same_slice_products[j] = A_j
+                    h = -0.5 * float(np.sum(A_i * A_j.T))
+                else:
+                    h = -0.5 * _penalty_block_trace(
+                        XtWX_S_inv,
+                        sl_i,
+                        weighted_omega_i,
+                        sl_j,
+                        weighted_omega_j,
+                    )
             else:
                 h = -0.5 * float(np.sum(full_HdHj[i] * full_HdHj[j].T))
             hess[i, j] = h

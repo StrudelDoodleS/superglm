@@ -134,6 +134,8 @@ def model_optimize_direct_reml(
     w_correction_order=1,
     reml_penalties=None,
     estimated_names=None,
+    pirls_tol=1e-6,
+    max_pirls_iter=100,
 ):
     """Optimize the direct REML objective via damped Newton (Wood 2011)."""
     result = optimize_direct_reml(
@@ -159,6 +161,8 @@ def model_optimize_direct_reml(
         w_correction_order=w_correction_order,
         reml_penalties=reml_penalties,
         estimated_names=estimated_names,
+        pirls_tol=pirls_tol,
+        max_pirls_iter=max_pirls_iter,
     )
     if model._discrete:
         from superglm.model.base import rebuild_dm_with_lambdas
@@ -181,6 +185,8 @@ def model_optimize_discrete_reml_cached_w(
     verbose,
     penalty_caches=None,
     profile=None,
+    pirls_tol=1e-6,
+    max_pirls_iter=100,
 ):
     """Cached-W fREML optimizer for the discrete path."""
     from superglm.reml.discrete import optimize_discrete_reml_cached_w
@@ -202,6 +208,8 @@ def model_optimize_discrete_reml_cached_w(
         penalty_caches=penalty_caches,
         profile=profile,
         max_analytical_per_w=getattr(model, "_max_analytical_per_w", 30),
+        pirls_tol=pirls_tol,
+        max_pirls_iter=max_pirls_iter,
     )
 
 

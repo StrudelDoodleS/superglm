@@ -970,9 +970,286 @@ class TestDiscretizedTensorInteraction:
             "reml_map_beta_s",
             "reml_penalty_context_s",
             "reml_tensor_summary_s",
+            "irls_eta_s",
+            "irls_deviance_eval_s",
         ):
             assert key in profile
             assert profile[key] >= 0.0
+
+    def test_fast_candidate_interaction_mode_caps_reml_outer_iterations(
+        self, tensor_interaction_data
+    ):
+        """Candidate interaction fits should cap REML updates but still finalize the fit."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit_reml(X, y, max_reml_iter=12, interaction_mode="fast_candidate")
+
+        profile = model._reml_profile
+        assert profile["interaction_mode"] == "fast_candidate"
+        assert profile["interaction_candidate_active"] is True
+        assert profile["requested_max_reml_iter"] == 12
+        assert profile["effective_max_reml_iter"] == 5
+        assert profile["fit_runtime_canonicalize_validate"] is False
+        assert profile["n_reml_iter"] <= 5
+        assert model.result.converged
+        assert np.all(np.isfinite(model.predict(X.iloc[:25])))
+        assert model._runtime_canonical_state["diagnostics"]["skipped"] is True
+
+    def test_fast_candidate_interaction_mode_does_not_cap_main_effect_models(
+        self, tensor_interaction_data
+    ):
+        """The candidate cap is interaction-specific and leaves main-only REML untouched."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+        )
+        model.fit_reml(X, y, max_reml_iter=7, interaction_mode="fast_candidate")
+
+        profile = model._reml_profile
+        assert profile["interaction_mode"] == "fast_candidate"
+        assert profile["interaction_candidate_active"] is False
+        assert profile["requested_max_reml_iter"] == 7
+        assert profile["effective_max_reml_iter"] == 7
+        assert profile["fit_runtime_canonicalize_validate"] is True
+
+    def test_fit_reml_rejects_unknown_interaction_mode(self, tensor_interaction_data):
+        """Unknown interaction candidate modes should fail before fitting."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+
+        with pytest.raises(ValueError, match="interaction_mode"):
+            model.fit_reml(X, y, max_reml_iter=5, interaction_mode="fast")
+
+    def test_runtime_validation_auto_skips_large_fit(self, tensor_interaction_data, monkeypatch):
+        """Auto runtime validation should skip the full training-row diagnostic on large fits."""
+        from superglm.model import fit_ops
+
+        X, y = tensor_interaction_data
+        monkeypatch.setattr(fit_ops, "_AUTO_RUNTIME_VALIDATION_MAX_ROWS", 10)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+
+        model.fit_reml(X, y, max_reml_iter=2, runtime_validation="auto")
+
+        assert model._reml_profile["fit_runtime_canonicalize_validate"] is False
+        assert model._reml_profile["fit_runtime_canonicalize_validate_reason"] == "large_fit"
+        assert model._runtime_canonical_state["diagnostics"]["skipped"] is True
+        assert np.all(np.isfinite(model.predict(X.iloc[:25])))
+
+    def test_runtime_validation_full_overrides_large_fit_auto_skip(
+        self, tensor_interaction_data, monkeypatch
+    ):
+        """Explicit full runtime validation should remain available for large fits."""
+        from superglm.model import fit_ops
+
+        X, y = tensor_interaction_data
+        monkeypatch.setattr(fit_ops, "_AUTO_RUNTIME_VALIDATION_MAX_ROWS", 10)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+
+        model.fit_reml(X, y, max_reml_iter=2, runtime_validation="full")
+
+        assert model._reml_profile["fit_runtime_canonicalize_validate"] is True
+        assert model._reml_profile["fit_runtime_canonicalize_validate_reason"] == "explicit_full"
+        assert "skipped" not in model._runtime_canonical_state["diagnostics"]
+
+    def test_fit_reml_rejects_unknown_runtime_validation(self, tensor_interaction_data):
+        """Unknown runtime validation modes should fail before fitting."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+
+        with pytest.raises(ValueError, match="runtime_validation"):
+            model.fit_reml(X, y, max_reml_iter=2, runtime_validation="sometimes")
+
+    def test_discrete_reml_forwards_public_pirls_controls(
+        self, tensor_interaction_data, monkeypatch
+    ):
+        """Discrete REML should honor public PIRLS tolerance and iteration controls."""
+        from superglm.reml import discrete as discrete_reml
+
+        X, y = tensor_interaction_data
+        calls = []
+        original = discrete_reml.fit_irls_direct
+
+        def spy_fit_irls_direct(*args, **kwargs):
+            calls.append({"tol": kwargs.get("tol"), "max_iter": kwargs.get("max_iter")})
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(discrete_reml, "fit_irls_direct", spy_fit_irls_direct)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit_reml(X, y, max_reml_iter=2, pirls_tol=1e-5, max_pirls_iter=7)
+
+        assert calls
+        assert all(call["tol"] == 1e-5 for call in calls)
+        assert calls[0]["max_iter"] == 7
+        assert calls[-1]["max_iter"] == 7
+        assert {call["max_iter"] for call in calls[1:-1]} <= {1}
+
+    def test_discrete_reml_tol_can_be_relaxed(self, tensor_interaction_data):
+        """A loose REML tolerance should actually loosen discrete REML convergence."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+
+        model.fit_reml(X, y, max_reml_iter=8, reml_tol=1e9)
+
+        assert model._reml_result.converged
+        assert model._reml_result.n_reml_iter == 2
+
+    def test_penalty_context_cache_reuses_frozen_tensor_components(
+        self, tensor_interaction_data, monkeypatch
+    ):
+        """Penalty context rebuilds should reuse static tensor eigensystems."""
+        from superglm.reml import penalty_algebra
+
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit(X, y)
+        tensor_idx = next(i for i, g in enumerate(model._groups) if g.feature_name == "age:bm")
+        reml_groups = [(tensor_idx, model._groups[tensor_idx])]
+        cache = {}
+
+        penalties_first, _, _ = penalty_algebra.build_penalty_context(
+            model._dm.group_matrices,
+            reml_groups,
+            cache=cache,
+        )
+        assert any("age:bm" in pc.group_name for pc in penalties_first)
+
+        def fail_eigvalsh(*args, **kwargs):
+            raise AssertionError("cached penalty context should not recompute eigensystems")
+
+        monkeypatch.setattr(penalty_algebra.np.linalg, "eigvalsh", fail_eigvalsh)
+
+        penalties_second, _, _ = penalty_algebra.build_penalty_context(
+            model._dm.group_matrices,
+            reml_groups,
+            cache=cache,
+        )
+
+        assert [pc.name for pc in penalties_second] == [pc.name for pc in penalties_first]
+
+    def test_tensor_pair_summary_cache_reuses_static_marginal_eigenvalues(
+        self, tensor_interaction_data, monkeypatch
+    ):
+        """Tensor logdet summary rebuilds should reuse static marginal eigensystems."""
+        from superglm.model.reml_setup import collect_reml_groups
+        from superglm.reml import penalty_algebra
+
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit(X, y)
+        reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)
+        cache = {}
+        penalties, _, _ = penalty_algebra.build_penalty_context(
+            model._dm.group_matrices,
+            reml_groups,
+            cache=cache,
+        )
+        summaries_first = penalty_algebra.build_tensor_pair_logdet_summaries(
+            model._dm.group_matrices,
+            penalties,
+            cache=cache,
+        )
+        assert summaries_first
+
+        def fail_eigvalsh(*args, **kwargs):
+            raise AssertionError("cached tensor summaries should not recompute eigensystems")
+
+        monkeypatch.setattr(penalty_algebra.np.linalg, "eigvalsh", fail_eigvalsh)
+
+        summaries_second = penalty_algebra.build_tensor_pair_logdet_summaries(
+            model._dm.group_matrices,
+            penalties,
+            cache=cache,
+        )
+
+        assert summaries_second.keys() == summaries_first.keys()
 
     def test_build_discrete_returns_dataclass(self):
         """TensorInteraction.build_discrete() must return DiscreteTensorBuildResult."""

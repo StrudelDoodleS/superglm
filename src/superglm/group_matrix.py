@@ -88,9 +88,14 @@ def _cross_gram_tensor_main(gm_tensor, gm_main, W: NDArray) -> NDArray:
     return _group_matrix_algebra._cross_gram_tensor_main(gm_tensor, gm_main, W)
 
 
-def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
+def _cross_gram(
+    gm_i: GroupMatrix,
+    gm_j: GroupMatrix,
+    W: NDArray,
+    profile: dict | None = None,
+) -> NDArray:
     """Compatibility wrapper for the private cross-gram helper."""
-    return _group_matrix_algebra._cross_gram(gm_i, gm_j, W)
+    return _group_matrix_algebra._cross_gram(gm_i, gm_j, W, profile=profile)
 
 
 def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
@@ -98,13 +103,28 @@ def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
     return _group_matrix_algebra._gram_any_sign(gm, W)
 
 
-def _block_xtwx(gms: list[GroupMatrix], groups: list, W: NDArray, *, tabmat_split=None) -> NDArray:
+def _block_xtwx(
+    gms: list[GroupMatrix],
+    groups: list,
+    W: NDArray,
+    *,
+    tabmat_split=None,
+    profile: dict | None = None,
+) -> NDArray:
     """Compatibility wrapper for block XtWX assembly."""
-    return _group_matrix_algebra._block_xtwx(gms, groups, W, tabmat_split=tabmat_split)
+    return _group_matrix_algebra._block_xtwx(
+        gms, groups, W, tabmat_split=tabmat_split, profile=profile
+    )
 
 
 def _block_xtwx_rhs(
-    gms: list[GroupMatrix], groups: list, W: NDArray, Wz: NDArray, *, tabmat_split=None
+    gms: list[GroupMatrix],
+    groups: list,
+    W: NDArray,
+    Wz: NDArray,
+    *,
+    tabmat_split=None,
+    profile: dict | None = None,
 ) -> tuple[NDArray, NDArray, NDArray]:
     """Compatibility wrapper for block XtWX/XtW/XtWz assembly."""
     return cast(
@@ -115,12 +135,18 @@ def _block_xtwx_rhs(
             W,
             Wz,
             tabmat_split=tabmat_split,
+            profile=profile,
         ),
     )
 
 
 def _block_xtwx_signed(
-    gms: list[GroupMatrix], groups: list, W: NDArray, *, tabmat_split=None
+    gms: list[GroupMatrix],
+    groups: list,
+    W: NDArray,
+    *,
+    tabmat_split=None,
+    profile: dict | None = None,
 ) -> NDArray:
     """Compatibility wrapper for arbitrary-sign block XtWX assembly."""
     return _group_matrix_algebra._block_xtwx_signed(
@@ -128,6 +154,7 @@ def _block_xtwx_signed(
         groups,
         W,
         tabmat_split=tabmat_split,
+        profile=profile,
     )
 
 

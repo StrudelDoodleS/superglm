@@ -80,12 +80,97 @@ def _extract_tensor_marginal_eigvals(
     return None, None
 
 
+def _tensor_marginal_rank_logdet(
+    gm: GroupMatrix,
+    omega_raw: NDArray,
+    *,
+    eps_thresh: float,
+) -> tuple[float, float, NDArray] | None:
+    """Fast spectral summary for unprojected tensor marginal penalties."""
+    if not isinstance(gm, DiscretizedTensorGroupMatrix):
+        return None
+    if getattr(gm, "projection", None) is not None:
+        return None
+
+    r_inv = getattr(gm, "R_inv", None)
+    if r_inv is None or r_inv.ndim != 2 or r_inv.shape[0] != r_inv.shape[1]:
+        return None
+    if not np.array_equal(r_inv, np.eye(r_inv.shape[0], dtype=r_inv.dtype)):
+        return None
+
+    p1 = int(gm.B1_unique_t.shape[1])
+    p2 = int(gm.B2_unique_t.shape[1])
+    side, eigvals = _extract_tensor_marginal_eigvals(omega_raw, p1, p2)
+    if side is None or eigvals is None:
+        return None
+
+    eigvals = np.asarray(eigvals, dtype=np.float64)
+    thresh = eps_thresh * max(float(eigvals.max()), 1e-12) if eigvals.size else 0.0
+    pos = eigvals[eigvals > thresh]
+    repeat = p2 if side == "left" else p1
+    rank = float(pos.size * repeat)
+    log_det = float(repeat * np.sum(np.log(np.maximum(pos, 1e-300)))) if pos.size else 0.0
+    pos_eigvals = np.sort(np.repeat(pos, repeat))[::-1] if pos.size else np.array([])
+    return rank, log_det, pos_eigvals
+
+
+def _penalty_group_cache_key(index: int, group: GroupSlice, gm: GroupMatrix) -> tuple:
+    """Return a cache key for penalty components tied to one fixed solver basis."""
+    omega_components = tuple(
+        (suffix, id(omega_j)) for suffix, omega_j in (getattr(gm, "omega_components", None) or ())
+    )
+    return (
+        "penalty_components",
+        int(index),
+        group.name,
+        group.start,
+        group.end,
+        gm,
+        id(getattr(gm, "R_inv", None)),
+        id(getattr(gm, "omega", None)),
+        id(getattr(gm, "projection", None)),
+        id(getattr(gm, "component_types", None)),
+        id(getattr(gm, "lambda_policies", None)),
+        omega_components,
+    )
+
+
+def _can_cache_penalty_group(gm: GroupMatrix) -> bool:
+    """Return whether a group has a lambda-invariant solver penalty basis."""
+    return (
+        isinstance(gm, DiscretizedTensorGroupMatrix)
+        and getattr(gm, "omega_components", None) is not None
+        and getattr(gm, "projection", None) is None
+    )
+
+
+def _tensor_pair_summary_cache_key(
+    group_name: str,
+    gm: DiscretizedTensorGroupMatrix,
+    penalties: list[PenaltyComponent],
+    p1: int,
+    p2: int,
+) -> tuple:
+    """Return a cache key for one tensor pair logdet summary."""
+    return (
+        "tensor_pair_logdet_summary",
+        group_name,
+        gm,
+        int(gm.tensor_id),
+        p1,
+        p2,
+        tuple((pc.name, id(pc.omega_ssp), id(pc.omega_raw)) for pc in penalties),
+    )
+
+
 def build_tensor_pair_logdet_summaries(
     group_matrices: list[GroupMatrix],
     penalties: list[PenaltyComponent],
+    cache: dict | None = None,
 ) -> dict[str, TensorPairLogdetSummary]:
     """Build closed-form tensor summaries for eligible shared tensor penalty pairs."""
     summaries: dict[str, TensorPairLogdetSummary] = {}
+    summary_cache = None if cache is None else cache.setdefault("tensor_pair_logdet_summaries", {})
     for group_name, indices in _group_penalties(penalties).items():
         if len(indices) != 2:
             continue
@@ -112,6 +197,13 @@ def build_tensor_pair_logdet_summaries(
 
         p1 = int(gm.B1_unique_t.shape[1])
         p2 = int(gm.B2_unique_t.shape[1])
+        cache_key = _tensor_pair_summary_cache_key(group_name, gm, pcs, p1, p2)
+        if summary_cache is not None and cache_key in summary_cache:
+            cached = summary_cache[cache_key]
+            if cached is not None:
+                summaries[group_name] = cached
+            continue
+
         extracted: dict[str, tuple[str, NDArray]] = {}
         for pc in pcs:
             omega = pc.omega_ssp
@@ -124,17 +216,22 @@ def build_tensor_pair_logdet_summaries(
             extracted[side] = (pc.name, eigvals)
 
         if set(extracted) != {"left", "right"}:
+            if summary_cache is not None:
+                summary_cache[cache_key] = None
             continue
 
         left_name, left_eigvals = extracted["left"]
         right_name, right_eigvals = extracted["right"]
-        summaries[group_name] = TensorPairLogdetSummary(
+        summary = TensorPairLogdetSummary(
             group_name=group_name,
             tensor_id=int(tensor_id),
             lambda_names=(left_name, right_name),
             eigvals_left=left_eigvals,
             eigvals_right=right_eigvals,
         )
+        summaries[group_name] = summary
+        if summary_cache is not None:
+            summary_cache[cache_key] = summary
     return summaries
 
 
@@ -257,6 +354,7 @@ def build_penalty_matrix(
 def build_penalty_components(
     group_matrices: list,
     reml_groups: list[tuple[int, object]],
+    cache: dict | None = None,
 ) -> list[PenaltyComponent]:
     """Build PenaltyComponent list — the single source of penalty eigenstructure.
 
@@ -277,6 +375,7 @@ def build_penalty_components(
     list of PenaltyComponent, one per smoothing parameter.
     """
     components: list[PenaltyComponent] = []
+    component_cache = None if cache is None else cache.setdefault("penalty_components", {})
     eps_thresh = np.finfo(float).eps ** (2 / 3)
 
     def _rank_and_logdet(
@@ -327,23 +426,39 @@ def build_penalty_components(
 
     for idx, g in reml_groups:
         gm = group_matrices[idx]
+        can_cache_group = component_cache is not None and _can_cache_penalty_group(gm)
+        cache_key = _penalty_group_cache_key(idx, g, gm) if can_cache_group else None
+        if cache_key is not None and cache_key in component_cache:
+            components.extend(component_cache[cache_key])
+            continue
+
+        group_components: list[PenaltyComponent] = []
 
         if getattr(gm, "omega_components", None) is not None:
             # Multi-penalty path: N components share this coefficient block.
             ct_map = getattr(gm, "component_types", None) or {}
             lp_map = getattr(gm, "lambda_policies", None) or {}
             for suffix, omega_j in gm.omega_components:
-                omega_ssp_j = gm.R_inv.T @ omega_j @ gm.R_inv
-                force_solver_rank = (
-                    isinstance(gm, DiscretizedTensorGroupMatrix)
-                    and getattr(gm, "projection", None) is not None
-                )
-                rank, log_det, pos_eigvals = _rank_and_logdet(
+                tensor_summary = _tensor_marginal_rank_logdet(
+                    gm,
                     omega_j,
-                    omega_ssp_j,
-                    force_solver_rank=force_solver_rank,
+                    eps_thresh=eps_thresh,
                 )
-                components.append(
+                if tensor_summary is not None:
+                    omega_ssp_j = omega_j
+                    rank, log_det, pos_eigvals = tensor_summary
+                else:
+                    omega_ssp_j = gm.R_inv.T @ omega_j @ gm.R_inv
+                    force_solver_rank = (
+                        isinstance(gm, DiscretizedTensorGroupMatrix)
+                        and getattr(gm, "projection", None) is not None
+                    )
+                    rank, log_det, pos_eigvals = _rank_and_logdet(
+                        omega_j,
+                        omega_ssp_j,
+                        force_solver_rank=force_solver_rank,
+                    )
+                group_components.append(
                     PenaltyComponent(
                         name=f"{g.name}:{suffix}",
                         group_name=g.name,
@@ -371,7 +486,7 @@ def build_penalty_components(
                 omega_ssp,
                 force_solver_rank=force_solver_rank,
             )
-            components.append(
+            group_components.append(
                 PenaltyComponent(
                     name=g.name,
                     group_name=g.name,
@@ -385,6 +500,9 @@ def build_penalty_components(
                     lambda_policy=lp_map.get(g.name) or lp_map.get("_default"),
                 )
             )
+        if cache_key is not None:
+            component_cache[cache_key] = tuple(group_components)
+        components.extend(group_components)
     return components
 
 
@@ -442,13 +560,14 @@ def coerce_reml_penalties(
 def build_penalty_caches(
     group_matrices: list,
     reml_groups: list[tuple[int, object]],
+    cache: dict | None = None,
 ) -> dict[str, PenaltyCache]:
     """Build PenaltyCache dict — thin wrapper over build_penalty_components.
 
     Retained for backward compatibility. New code should prefer
     build_penalty_components directly.
     """
-    components = build_penalty_components(group_matrices, reml_groups)
+    components = build_penalty_components(group_matrices, reml_groups, cache=cache)
     return {
         c.name: PenaltyCache(
             omega_ssp=c.omega_ssp,
@@ -463,9 +582,10 @@ def build_penalty_caches(
 def build_penalty_context(
     group_matrices: list,
     reml_groups: list[tuple[int, object]],
+    cache: dict | None = None,
 ) -> tuple[list[PenaltyComponent], dict[str, PenaltyCache], dict[str, float]]:
     """Build penalty components, caches, and rank lookup in one pass."""
-    components = build_penalty_components(group_matrices, reml_groups)
+    components = build_penalty_components(group_matrices, reml_groups, cache=cache)
     caches = {
         c.name: PenaltyCache(
             omega_ssp=c.omega_ssp,

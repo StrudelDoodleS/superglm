@@ -375,6 +375,32 @@ class TestBackendLinearAlgebraInvariants:
 
         np.testing.assert_allclose(cross, np.zeros((6, 6)), atol=0.0)
 
+    def test_overlapping_spline_categorical_cross_gram_avoids_dense_fallback(self, monkeypatch):
+        """Spline-category groups on the same rows should multiply row subsets directly."""
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import SplineCategoricalGroupMatrix, _cross_gram
+
+        rng = np.random.default_rng(124)
+        n = 80
+        B_left = sp.random(n, 5, density=0.4, format="csr", random_state=124)
+        B_right = sp.random(n, 4, density=0.5, format="csr", random_state=125)
+        rows = np.sort(rng.choice(n, size=35, replace=False))
+        left = SplineCategoricalGroupMatrix(B_left, rng.normal(size=(5, 3)), rows)
+        right = SplineCategoricalGroupMatrix(B_right, rng.normal(size=(4, 2)), rows)
+        W = rng.normal(size=n)
+
+        dense = left.toarray().T @ (right.toarray() * W[:, None])
+
+        def fail_toarray(*args, **kwargs):
+            raise AssertionError("spline-category cross-Gram should not materialize")
+
+        monkeypatch.setattr(SplineCategoricalGroupMatrix, "toarray", fail_toarray)
+
+        compact = _cross_gram(left, right, W)
+
+        np.testing.assert_allclose(compact, dense, rtol=1e-10, atol=1e-10)
+
     def test_tensor_spline_categorical_cross_gram_matches_dense_oracle(self):
         """Tensor × compact spline-category cross-Gram should avoid dense fallback math."""
         import scipy.sparse as sp
@@ -462,6 +488,85 @@ class TestBackendLinearAlgebraInvariants:
         cross = _cross_gram(tensor, spline_cat, rng.uniform(0.5, 1.5, size=n))
 
         assert cross.shape == (4, 3)
+
+    def test_shared_margin_tensor_tensor_cross_gram_matches_dense_oracle(self):
+        """Tensor × tensor terms sharing one marginal should use exact compact algebra."""
+        rng = np.random.default_rng(122)
+        n = 90
+        n_shared, n_left, n_right = 5, 4, 3
+        k_shared, k_left, k_right = 3, 2, 4
+        idx_shared = rng.integers(0, n_shared, size=n)
+        idx_left = rng.integers(0, n_left, size=n)
+        idx_right = rng.integers(0, n_right, size=n)
+        B_shared = rng.normal(size=(n_shared, k_shared))
+        B_left = rng.normal(size=(n_left, k_left))
+        B_right = rng.normal(size=(n_right, k_right))
+
+        def make_tensor(B1, B2, idx1, idx2, n2, tensor_id, out_cols):
+            pair_codes = idx1 * n2 + idx2
+            observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+            B_joint = (
+                B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]
+            ).reshape(len(observed_codes), B1.shape[1] * B2.shape[1])
+            return DiscretizedTensorGroupMatrix(
+                B1,
+                B2,
+                idx1,
+                idx2,
+                B_joint,
+                rng.normal(size=(B1.shape[1] * B2.shape[1], out_cols)),
+                pair_idx.astype(np.intp),
+                tensor_id=tensor_id,
+            )
+
+        left = make_tensor(B_shared, B_left, idx_shared, idx_left, n_left, 1, 5)
+        right = make_tensor(B_shared, B_right, idx_shared, idx_right, n_right, 2, 6)
+        W = rng.normal(size=n)
+
+        compact = _cross_gram(left, right, W)
+        dense = left.toarray().T @ (right.toarray() * W[:, None])
+
+        np.testing.assert_allclose(compact, dense, rtol=1e-10, atol=1e-10)
+
+    def test_shared_margin_tensor_tensor_cross_gram_does_not_materialize_tensor(self, monkeypatch):
+        """The block assembler should avoid tensor toarray fallback for shared margins."""
+        rng = np.random.default_rng(123)
+        n = 80
+        n_shared, n_left, n_right = 50, 46, 46
+        idx_shared = rng.integers(0, n_shared, size=n)
+        idx_left = rng.integers(0, n_left, size=n)
+        idx_right = rng.integers(0, n_right, size=n)
+        B_shared = rng.normal(size=(n_shared, 2))
+        B_left = rng.normal(size=(n_left, 2))
+        B_right = rng.normal(size=(n_right, 3))
+
+        def make_tensor(B1, B2, idx1, idx2, n2, tensor_id):
+            B_joint = (
+                B1[np.repeat(np.arange(B1.shape[0]), n2), :, None]
+                * B2[np.tile(np.arange(n2), B1.shape[0]), None, :]
+            ).reshape(B1.shape[0] * n2, B1.shape[1] * B2.shape[1])
+            return DiscretizedTensorGroupMatrix(
+                B1,
+                B2,
+                idx1,
+                idx2,
+                B_joint,
+                np.eye(B1.shape[1] * B2.shape[1]),
+                (idx1 * n2 + idx2).astype(np.intp),
+                tensor_id=tensor_id,
+            )
+
+        left = make_tensor(B_shared, B_left, idx_shared, idx_left, n_left, 1)
+        right = make_tensor(B_shared, B_right, idx_shared, idx_right, n_right, 2)
+
+        def fail_toarray(*args, **kwargs):
+            raise AssertionError("shared-margin tensor cross-Gram should not materialize")
+
+        monkeypatch.setattr(DiscretizedTensorGroupMatrix, "toarray", fail_toarray)
+
+        cross = _cross_gram(left, right, rng.uniform(0.5, 1.5, size=n))
+
+        assert cross.shape == (4, 6)
 
     def test_tensor_own_margin_cross_gram_uses_packed_weight_grid(self, monkeypatch):
         """Tensor × parent smooth cross-blocks should not use the generic row scan path."""
@@ -604,6 +709,229 @@ class TestBackendLinearAlgebraInvariants:
         algebra._block_xtwx_rhs([main1, main2, tensor], groups, W, Wz)
 
         assert calls == 1
+
+    def test_block_xtwx_rhs_profiles_tensor_block_work(self):
+        """Optional block profiling should attribute tensor diagonal and cross work."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+        from superglm.types import GroupSlice
+
+        rng = np.random.default_rng(126)
+        n = 100
+        n1, n2, n3 = 7, 5, 4
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        idx3 = rng.integers(0, n3, size=n)
+        B1 = rng.normal(size=(n1, 3))
+        B2 = rng.normal(size=(n2, 2))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), 6
+        )
+        main_own = DiscretizedSSPGroupMatrix(rng.normal(size=(n1, 4)), np.eye(4), idx1)
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            np.eye(6),
+            pair_idx.astype(np.intp),
+            tensor_id=12,
+        )
+        main_other = DiscretizedSSPGroupMatrix(rng.normal(size=(n3, 3)), np.eye(3), idx3)
+        groups = [
+            GroupSlice(name="x1", start=0, end=4, weight=2.0),
+            GroupSlice(name="x1:x2", start=4, end=10, weight=np.sqrt(6.0)),
+            GroupSlice(name="x3", start=10, end=13, weight=np.sqrt(3.0)),
+        ]
+        W = rng.uniform(0.2, 1.8, size=n)
+        Wz = rng.normal(size=n)
+        profile: dict[str, float] = {}
+
+        profiled = algebra._block_xtwx_rhs(
+            [main_own, tensor, main_other], groups, W, Wz, profile=profile
+        )
+        plain = algebra._block_xtwx_rhs([main_own, tensor, main_other], groups, W, Wz)
+
+        for got, expected in zip(profiled, plain, strict=True):
+            np.testing.assert_allclose(got, expected, rtol=1e-12, atol=1e-12)
+
+        assert profile["block_diag_tensor_s"] > 0.0
+        assert profile["block_diag_discrete_ssp_s"] > 0.0
+        assert profile["block_cross_tensor_own_margin_s"] > 0.0
+        assert profile["block_cross_tensor_main_s"] > 0.0
+        assert profile["block_cross_disc_disc_s"] > 0.0
+        assert profile["block_hist2d_s"] > 0.0
+        assert profile["block_calls"] == 1
+
+    def test_unprojected_tensor_penalty_context_uses_marginal_eigenspectra(self, monkeypatch):
+        """Unprojected tensor penalties should not eigendecompose full tensor blocks."""
+        import superglm.reml.penalty_algebra as penalty_algebra
+        from superglm.types import GroupSlice
+
+        rng = np.random.default_rng(127)
+        n = 40
+        n1, n2 = 6, 5
+        k1, k2 = 4, 3
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        B1 = rng.normal(size=(n1, k1))
+        B2 = rng.normal(size=(n2, k2))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), k1 * k2
+        )
+        D1 = np.diff(np.eye(k1), n=2, axis=0)
+        D2 = np.diff(np.eye(k2), n=2, axis=0)
+        S1 = D1.T @ D1
+        S2 = D2.T @ D2
+        omega_left = np.kron(S1, np.eye(k2))
+        omega_right = np.kron(np.eye(k1), S2)
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            np.eye(k1 * k2),
+            pair_idx.astype(np.intp),
+            tensor_id=13,
+        )
+        tensor.omega_components = [
+            ("margin_x1", omega_left),
+            ("margin_x2", omega_right),
+        ]
+        tensor.component_types = {}
+        tensor.lambda_policies = {}
+        group = GroupSlice(name="x1:x2", start=0, end=k1 * k2, weight=np.sqrt(k1 * k2))
+        real_eigvalsh = penalty_algebra.np.linalg.eigvalsh
+        full_tensor_eigs = 0
+
+        def counting_eigvalsh(a):
+            nonlocal full_tensor_eigs
+            if np.asarray(a).shape == (k1 * k2, k1 * k2):
+                full_tensor_eigs += 1
+            return real_eigvalsh(a)
+
+        monkeypatch.setattr(penalty_algebra.np.linalg, "eigvalsh", counting_eigvalsh)
+
+        penalties, caches, ranks = penalty_algebra.build_penalty_context(
+            [tensor],
+            [(0, group)],
+        )
+
+        assert full_tensor_eigs == 0
+        assert [pc.name for pc in penalties] == ["x1:x2:margin_x1", "x1:x2:margin_x2"]
+        eig1 = np.linalg.eigvalsh(S1)
+        eig2 = np.linalg.eigvalsh(S2)
+        eps_thresh = np.finfo(float).eps ** (2 / 3)
+        pos1 = eig1[eig1 > eps_thresh * max(float(eig1.max()), 1e-12)]
+        pos2 = eig2[eig2 > eps_thresh * max(float(eig2.max()), 1e-12)]
+        assert ranks["x1:x2:margin_x1"] == float(pos1.size * k2)
+        assert ranks["x1:x2:margin_x2"] == float(pos2.size * k1)
+        assert caches["x1:x2:margin_x1"].log_det_omega_plus == pytest.approx(
+            float(k2 * np.sum(np.log(pos1)))
+        )
+        assert caches["x1:x2:margin_x2"].log_det_omega_plus == pytest.approx(
+            float(k1 * np.sum(np.log(pos2)))
+        )
+
+    def test_map_beta_between_bases_skips_unchanged_group_matrix(self, monkeypatch):
+        """Frozen group matrices should not pay an identity least-squares remap."""
+        from superglm.reml.result import _map_beta_between_bases
+        from superglm.types import GroupSlice
+
+        rng = np.random.default_rng(128)
+        n = 30
+        n1, n2 = 5, 4
+        k1, k2 = 3, 2
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        B1 = rng.normal(size=(n1, k1))
+        B2 = rng.normal(size=(n2, k2))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), k1 * k2
+        )
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            np.eye(k1 * k2),
+            pair_idx.astype(np.intp),
+            tensor_id=14,
+        )
+        groups = [GroupSlice(name="x1:x2", start=0, end=k1 * k2, weight=np.sqrt(k1 * k2))]
+        beta = rng.normal(size=k1 * k2)
+
+        def fail_lstsq(*args, **kwargs):
+            raise AssertionError("unchanged group matrix should not be remapped")
+
+        monkeypatch.setattr(np.linalg, "lstsq", fail_lstsq)
+
+        mapped = _map_beta_between_bases(beta, [tensor], [tensor], groups)
+
+        np.testing.assert_allclose(mapped, beta, rtol=0.0, atol=0.0)
+
+    def test_reml_hessian_uses_same_slice_penalty_trace_fast_path(self, monkeypatch):
+        """Same-slice multi-penalty Hessian traces should avoid generic block tracing."""
+        import superglm.reml.gradient as gradient
+        from superglm.types import PenaltyComponent
+
+        rng = np.random.default_rng(129)
+        q = 8
+        H_inv = rng.normal(size=(q, q))
+        H_inv = H_inv.T @ H_inv + np.eye(q)
+        D1 = np.diff(np.eye(q), n=1, axis=0)
+        D2 = np.diff(np.eye(q), n=2, axis=0)
+        S1 = D1.T @ D1
+        S2 = D2.T @ D2
+        penalties = [
+            PenaltyComponent(
+                name="g:a",
+                group_name="g",
+                group_index=0,
+                group_sl=slice(0, q),
+                omega_raw=S1,
+                omega_ssp=S1,
+                rank=float(np.linalg.matrix_rank(S1)),
+                log_det_omega_plus=0.0,
+                eigvals_omega=np.array([]),
+            ),
+            PenaltyComponent(
+                name="g:b",
+                group_name="g",
+                group_index=0,
+                group_sl=slice(0, q),
+                omega_raw=S2,
+                omega_ssp=S2,
+                rank=float(np.linalg.matrix_rank(S2)),
+                log_det_omega_plus=0.0,
+                eigvals_omega=np.array([]),
+            ),
+        ]
+
+        def fail_block_trace(*args, **kwargs):
+            raise AssertionError("same-slice penalties should use the cached fast path")
+
+        monkeypatch.setattr(gradient, "_penalty_block_trace", fail_block_trace)
+
+        hess = gradient.reml_direct_hessian(
+            [],
+            distribution=type("KnownScale", (), {"scale_known": True})(),
+            XtWX_S_inv=H_inv,
+            lambdas={"g:a": 2.0, "g:b": 3.0},
+            gradient=np.zeros(2),
+            reml_penalties=penalties,
+        )
+
+        assert hess.shape == (2, 2)
+        np.testing.assert_allclose(hess, hess.T, rtol=1e-12, atol=1e-12)
 
     def test_categorical_spline_categorical_cross_gram_matches_dense_oracle(self):
         """Categorical × compact spline-category cross-Gram should use one aggregation."""
@@ -845,6 +1173,58 @@ class TestBackendLinearAlgebraInvariants:
         X_other = gm_other.toarray()
         cross2_dense = X_other.T @ (X_tensor * W[:, None])
         np.testing.assert_allclose(cross2, cross2_dense, atol=1e-9)
+
+    def test_tensor_main_cross_gram_channels_over_smaller_margin(self, monkeypatch):
+        """Unrelated tensor-main blocks should channel over the cheaper tensor margin."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+
+        rng = np.random.default_rng(125)
+        n = 120
+        n1, n2, n_main = 7, 6, 5
+        k1, k2, k_main = 2, 5, 4
+        p_tensor, p_main = 8, 3
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        main_idx = rng.integers(0, n_main, size=n)
+        B1 = rng.normal(size=(n1, k1))
+        B2 = rng.normal(size=(n2, k2))
+        B_main = rng.normal(size=(n_main, k_main))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), k1 * k2
+        )
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            rng.normal(size=(k1 * k2, p_tensor)),
+            pair_idx.astype(np.intp),
+            tensor_id=8,
+        )
+        main = DiscretizedSSPGroupMatrix(
+            B_main,
+            rng.normal(size=(k_main, p_main)),
+            main_idx,
+        )
+        W = rng.uniform(0.2, 1.8, size=n)
+
+        original = algebra._disc_disc_2d_hist_channels
+        channel_shapes = []
+
+        def spy_channels(idx_a, idx_b, channel_idx, weights, channel_basis, n_a, n_b):
+            channel_shapes.append(channel_basis.shape)
+            return original(idx_a, idx_b, channel_idx, weights, channel_basis, n_a, n_b)
+
+        monkeypatch.setattr(algebra, "_disc_disc_2d_hist_channels", spy_channels)
+
+        cross = algebra._cross_gram_tensor_main(tensor, main, W)
+        dense = main.toarray().T @ (tensor.toarray() * W[:, None])
+
+        np.testing.assert_allclose(cross, dense, rtol=1e-10, atol=1e-10)
+        assert channel_shapes == [B1.shape]
 
     def test_tensor_full_xtwx_matches_dense(self):
         """Full _block_xtwx with tensor interaction must match dense oracle."""

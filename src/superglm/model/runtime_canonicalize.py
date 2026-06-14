@@ -365,7 +365,7 @@ def _build_public_result(solver: PIRLSResult, state: dict[str, Any]) -> PIRLSRes
     return public_result
 
 
-def canonicalize_fitted_model(model) -> None:
+def canonicalize_fitted_model(model, *, validate: bool = True) -> None:
     """Finalize the public runtime result after solver-space fitting completes."""
     from superglm.model import base
 
@@ -374,13 +374,28 @@ def canonicalize_fitted_model(model) -> None:
 
     state = {"intercept_shift": float(public_intercept_shift)}
     public_result = _build_public_result(solver, state)
-    diagnostics, live_term_means_after = _compute_public_parity_diagnostics(
-        model,
-        solver,
-        public_result,
-        term_states,
-        public_intercept_shift,
-    )
+    if validate:
+        diagnostics, live_term_means_after = _compute_public_parity_diagnostics(
+            model,
+            solver,
+            public_result,
+            term_states,
+            public_intercept_shift,
+        )
+        diagnostics_state = asdict(diagnostics)
+    else:
+        live_term_means_after = {}
+        diagnostics_state = {
+            "max_abs_eta_delta": float("nan"),
+            "max_abs_mu_delta": float("nan"),
+            "intercept_shift": float(public_intercept_shift),
+            "term_means_before": {
+                term_name: float(term_state["term_mean_before"])
+                for term_name, term_state in term_states.items()
+            },
+            "term_means_after": {},
+            "skipped": True,
+        }
 
     for term_name, term_state in term_states.items():
         if term_state["applied_to_public_model"]:
@@ -391,7 +406,7 @@ def canonicalize_fitted_model(model) -> None:
     model._result = public_result
     model._runtime_canonical_state = {
         "terms": term_states,
-        "diagnostics": asdict(diagnostics),
+        "diagnostics": diagnostics_state,
         "intercept_shift": float(public_intercept_shift),
         "solver_to_public": solver_to_public,
         "solver_to_public_complete": solver_to_public_complete,
