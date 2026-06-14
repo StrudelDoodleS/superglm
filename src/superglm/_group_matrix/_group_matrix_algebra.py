@@ -190,8 +190,9 @@ def _cross_gram_tensor_main(
 
     Returns X_main.T @ diag(W) @ X_tensor in SSP space, shape (p_main, p_tensor).
 
-    Uses K2 passes through 2D histograms — O(n*K2) total observation passes
-    with O(n_bins_main * n_bins1) memory per pass.  No 3D histogram.
+    Chooses the cheaper channel orientation. If the second tensor margin is
+    narrower, aggregate channels over B2 and contract with B1. If the first
+    margin is narrower, aggregate channels over B1 and contract with B2.
 
     Column ordering: j1 * K2 + j2, matching _row_kron_dense().
     """
@@ -201,8 +202,29 @@ def _cross_gram_tensor_main(
     K1, K2 = B1.shape[1], B2.shape[1]
     K_main_raw = B_main.shape[1]
 
-    n_cells = gm_main.n_bins * gm_tensor.n_bins1 * K2
+    n_cells_b2 = gm_main.n_bins * gm_tensor.n_bins1 * K2
+    n_cells_b1 = gm_main.n_bins * gm_tensor.n_bins2 * K1
+    channel_over_b2 = n_cells_b2 <= n_cells_b1
+    n_cells = n_cells_b2 if channel_over_b2 else n_cells_b1
     if n_cells <= _MAX_DISC_DISC_CHANNEL_HIST_CELLS:
+        if not channel_over_b2:
+            H_flat = _disc_disc_2d_hist_channels(
+                gm_main.bin_idx,
+                gm_tensor.idx2,
+                gm_tensor.idx1,
+                W,
+                B1,
+                gm_main.n_bins,
+                gm_tensor.n_bins2,
+            )
+            tmp = B_main.T @ H_flat.reshape(gm_main.n_bins, gm_tensor.n_bins2 * K1)
+            tmp_3d = tmp.reshape(K_main_raw, gm_tensor.n_bins2, K1)
+
+            result_raw = np.empty((K_main_raw, K1 * K2))
+            for j1 in range(K1):
+                result_raw[:, j1 * K2 : (j1 + 1) * K2] = tmp_3d[:, :, j1] @ B2
+            return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
+
         H_flat = _disc_disc_2d_hist_channels(
             gm_main.bin_idx,
             gm_tensor.idx1,
@@ -221,6 +243,19 @@ def _cross_gram_tensor_main(
         return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
 
     result_raw = np.zeros((K_main_raw, K1 * K2))
+    if not channel_over_b2:
+        for j1 in range(K1):
+            w_col = W * B1[gm_tensor.idx1, j1]
+            H = _disc_disc_2d_hist(
+                gm_main.bin_idx,
+                gm_tensor.idx2,
+                w_col,
+                gm_main.n_bins,
+                gm_tensor.n_bins2,
+            )
+            result_raw[:, j1 * K2 : (j1 + 1) * K2] = B_main.T @ H @ B2
+        return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
+
     for j2 in range(K2):
         # Weight observations by B2[idx2[obs], j2]
         w_col = W * B2[gm_tensor.idx2, j2]
