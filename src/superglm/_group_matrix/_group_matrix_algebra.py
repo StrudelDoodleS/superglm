@@ -201,6 +201,117 @@ def _cross_gram_tensor_tensor(
     return gm_i.R_inv.T @ G_raw @ gm_j.R_inv
 
 
+def _tensor_margin_parts(
+    gm: DiscretizedTensorGroupMatrix,
+    margin: int,
+) -> tuple[NDArray, NDArray, int, NDArray, NDArray, int, bool]:
+    if margin == 1:
+        return (
+            gm.B1_unique_t,
+            gm.idx1,
+            gm.n_bins1,
+            gm.B2_unique_t,
+            gm.idx2,
+            gm.n_bins2,
+            True,
+        )
+    return (
+        gm.B2_unique_t,
+        gm.idx2,
+        gm.n_bins2,
+        gm.B1_unique_t,
+        gm.idx1,
+        gm.n_bins1,
+        False,
+    )
+
+
+def _same_discrete_margin(
+    gm_i: DiscretizedTensorGroupMatrix,
+    margin_i: int,
+    gm_j: DiscretizedTensorGroupMatrix,
+    margin_j: int,
+) -> bool:
+    _B_i, idx_i, n_i, *_ = _tensor_margin_parts(gm_i, margin_i)
+    _B_j, idx_j, n_j, *_ = _tensor_margin_parts(gm_j, margin_j)
+    return n_i == n_j and np.array_equal(idx_i, idx_j)
+
+
+def _cross_gram_tensor_tensor_shared_margin(
+    gm_i: DiscretizedTensorGroupMatrix,
+    gm_j: DiscretizedTensorGroupMatrix,
+    W: NDArray,
+) -> NDArray | None:
+    """Cross-Gram for two tensor terms that share exactly one marginal index."""
+    matches = [
+        (margin_i, margin_j)
+        for margin_i in (1, 2)
+        for margin_j in (1, 2)
+        if _same_discrete_margin(gm_i, margin_i, gm_j, margin_j)
+    ]
+    if len(matches) != 1:
+        return None
+
+    margin_i, margin_j = matches[0]
+    (
+        B_shared_i,
+        idx_shared,
+        n_shared,
+        B_other_i,
+        idx_other_i,
+        n_other_i,
+        i_shared_first,
+    ) = _tensor_margin_parts(gm_i, margin_i)
+    (
+        B_shared_j,
+        _idx_shared_j,
+        _n_shared_j,
+        B_other_j,
+        idx_other_j,
+        n_other_j,
+        j_shared_first,
+    ) = _tensor_margin_parts(gm_j, margin_j)
+
+    n_cells = n_shared * n_other_i * n_other_j
+    if n_cells > _MAX_DISC_DISC_HIST_CELLS:
+        return None
+
+    flat = (idx_shared * n_other_i + idx_other_i) * n_other_j + idx_other_j
+    joint = np.bincount(flat, weights=W, minlength=n_cells).reshape(
+        n_shared,
+        n_other_i,
+        n_other_j,
+    )
+
+    K_shared_i = B_shared_i.shape[1]
+    K_other_i = B_other_i.shape[1]
+    K_shared_j = B_shared_j.shape[1]
+    K_other_j = B_other_j.shape[1]
+    raw4 = np.zeros(
+        (K_shared_i, K_other_i, K_shared_j, K_other_j),
+        dtype=np.float64,
+    )
+    for idx in range(n_shared):
+        other_cross = B_other_i.T @ joint[idx] @ B_other_j
+        raw4 += np.einsum(
+            "p,q,rs->prqs",
+            B_shared_i[idx],
+            B_shared_j[idx],
+            other_cross,
+            optimize=True,
+        )
+
+    axes = (
+        (0, 1) if i_shared_first else (1, 0),
+        (2, 3) if j_shared_first else (3, 2),
+    )
+    raw = raw4.transpose(*axes[0], *axes[1]).reshape(
+        gm_i.R_inv.shape[0],
+        gm_j.R_inv.shape[0],
+    )
+    return gm_i.R_inv.T @ raw @ gm_j.R_inv
+
+
 def _cross_gram_tensor_main(
     gm_tensor: DiscretizedTensorGroupMatrix,
     gm_main: DiscretizedSSPGroupMatrix,
@@ -405,6 +516,29 @@ def _cross_gram_categorical_spline_categorical(
     return B_agg[: gm_cat.n_levels] @ gm_spline_cat.R_inv
 
 
+def _cross_gram_spline_categorical_spline_categorical(
+    gm_i: GroupMatrix,
+    gm_j: GroupMatrix,
+    W: NDArray,
+) -> NDArray:
+    """Cross-gram between compact spline-category level groups."""
+    common_rows, pos_i, pos_j = np.intersect1d(
+        gm_i.row_idx,
+        gm_j.row_idx,
+        assume_unique=True,
+        return_indices=True,
+    )
+    if common_rows.size == 0:
+        return np.zeros((gm_i.shape[1], gm_j.shape[1]))
+
+    B_i = gm_i.B_level[pos_i]
+    B_j = gm_j.B_level[pos_j]
+    raw = B_i.T @ B_j.multiply(W[common_rows][:, None])
+    if hasattr(raw, "toarray"):
+        raw = raw.toarray()
+    return gm_i.R_inv.T @ np.asarray(raw, dtype=np.float64) @ gm_j.R_inv
+
+
 def _cross_gram(
     gm_i: GroupMatrix,
     gm_j: GroupMatrix,
@@ -433,8 +567,10 @@ def _cross_gram(
     if isinstance(gm_i, SplineCategoricalGroupMatrix) and isinstance(
         gm_j, SplineCategoricalGroupMatrix
     ):
-        if np.intersect1d(gm_i.row_idx, gm_j.row_idx, assume_unique=False).size == 0:
-            return np.zeros((gm_i.shape[1], gm_j.shape[1]))
+        t0 = perf_counter() if profile is not None else 0.0
+        result = _cross_gram_spline_categorical_spline_categorical(gm_i, gm_j, W)
+        _profile_elapsed(profile, "block_cross_spline_cat_spline_cat_s", t0)
+        return result
     # Tensor × tensor (same marginals, e.g. decomposed bilinear/wiggly)
     if (
         isinstance(gm_i, DiscretizedTensorGroupMatrix)
@@ -445,6 +581,14 @@ def _cross_gram(
         result = _cross_gram_tensor_tensor(gm_i, gm_j, W, cache)
         _profile_elapsed(profile, "block_cross_tensor_tensor_s", t0)
         return result
+    if isinstance(gm_i, DiscretizedTensorGroupMatrix) and isinstance(
+        gm_j, DiscretizedTensorGroupMatrix
+    ):
+        t0 = perf_counter() if profile is not None else 0.0
+        result = _cross_gram_tensor_tensor_shared_margin(gm_i, gm_j, W)
+        if result is not None:
+            _profile_elapsed(profile, "block_cross_tensor_tensor_s", t0)
+            return result
 
     if isinstance(gm_i, DiscretizedTensorGroupMatrix) and isinstance(
         gm_j, SplineCategoricalGroupMatrix

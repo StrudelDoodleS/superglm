@@ -375,6 +375,32 @@ class TestBackendLinearAlgebraInvariants:
 
         np.testing.assert_allclose(cross, np.zeros((6, 6)), atol=0.0)
 
+    def test_overlapping_spline_categorical_cross_gram_avoids_dense_fallback(self, monkeypatch):
+        """Spline-category groups on the same rows should multiply row subsets directly."""
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import SplineCategoricalGroupMatrix, _cross_gram
+
+        rng = np.random.default_rng(124)
+        n = 80
+        B_left = sp.random(n, 5, density=0.4, format="csr", random_state=124)
+        B_right = sp.random(n, 4, density=0.5, format="csr", random_state=125)
+        rows = np.sort(rng.choice(n, size=35, replace=False))
+        left = SplineCategoricalGroupMatrix(B_left, rng.normal(size=(5, 3)), rows)
+        right = SplineCategoricalGroupMatrix(B_right, rng.normal(size=(4, 2)), rows)
+        W = rng.normal(size=n)
+
+        dense = left.toarray().T @ (right.toarray() * W[:, None])
+
+        def fail_toarray(*args, **kwargs):
+            raise AssertionError("spline-category cross-Gram should not materialize")
+
+        monkeypatch.setattr(SplineCategoricalGroupMatrix, "toarray", fail_toarray)
+
+        compact = _cross_gram(left, right, W)
+
+        np.testing.assert_allclose(compact, dense, rtol=1e-10, atol=1e-10)
+
     def test_tensor_spline_categorical_cross_gram_matches_dense_oracle(self):
         """Tensor × compact spline-category cross-Gram should avoid dense fallback math."""
         import scipy.sparse as sp
@@ -462,6 +488,85 @@ class TestBackendLinearAlgebraInvariants:
         cross = _cross_gram(tensor, spline_cat, rng.uniform(0.5, 1.5, size=n))
 
         assert cross.shape == (4, 3)
+
+    def test_shared_margin_tensor_tensor_cross_gram_matches_dense_oracle(self):
+        """Tensor × tensor terms sharing one marginal should use exact compact algebra."""
+        rng = np.random.default_rng(122)
+        n = 90
+        n_shared, n_left, n_right = 5, 4, 3
+        k_shared, k_left, k_right = 3, 2, 4
+        idx_shared = rng.integers(0, n_shared, size=n)
+        idx_left = rng.integers(0, n_left, size=n)
+        idx_right = rng.integers(0, n_right, size=n)
+        B_shared = rng.normal(size=(n_shared, k_shared))
+        B_left = rng.normal(size=(n_left, k_left))
+        B_right = rng.normal(size=(n_right, k_right))
+
+        def make_tensor(B1, B2, idx1, idx2, n2, tensor_id, out_cols):
+            pair_codes = idx1 * n2 + idx2
+            observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+            B_joint = (
+                B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]
+            ).reshape(len(observed_codes), B1.shape[1] * B2.shape[1])
+            return DiscretizedTensorGroupMatrix(
+                B1,
+                B2,
+                idx1,
+                idx2,
+                B_joint,
+                rng.normal(size=(B1.shape[1] * B2.shape[1], out_cols)),
+                pair_idx.astype(np.intp),
+                tensor_id=tensor_id,
+            )
+
+        left = make_tensor(B_shared, B_left, idx_shared, idx_left, n_left, 1, 5)
+        right = make_tensor(B_shared, B_right, idx_shared, idx_right, n_right, 2, 6)
+        W = rng.normal(size=n)
+
+        compact = _cross_gram(left, right, W)
+        dense = left.toarray().T @ (right.toarray() * W[:, None])
+
+        np.testing.assert_allclose(compact, dense, rtol=1e-10, atol=1e-10)
+
+    def test_shared_margin_tensor_tensor_cross_gram_does_not_materialize_tensor(self, monkeypatch):
+        """The block assembler should avoid tensor toarray fallback for shared margins."""
+        rng = np.random.default_rng(123)
+        n = 80
+        n_shared, n_left, n_right = 50, 46, 46
+        idx_shared = rng.integers(0, n_shared, size=n)
+        idx_left = rng.integers(0, n_left, size=n)
+        idx_right = rng.integers(0, n_right, size=n)
+        B_shared = rng.normal(size=(n_shared, 2))
+        B_left = rng.normal(size=(n_left, 2))
+        B_right = rng.normal(size=(n_right, 3))
+
+        def make_tensor(B1, B2, idx1, idx2, n2, tensor_id):
+            B_joint = (
+                B1[np.repeat(np.arange(B1.shape[0]), n2), :, None]
+                * B2[np.tile(np.arange(n2), B1.shape[0]), None, :]
+            ).reshape(B1.shape[0] * n2, B1.shape[1] * B2.shape[1])
+            return DiscretizedTensorGroupMatrix(
+                B1,
+                B2,
+                idx1,
+                idx2,
+                B_joint,
+                np.eye(B1.shape[1] * B2.shape[1]),
+                (idx1 * n2 + idx2).astype(np.intp),
+                tensor_id=tensor_id,
+            )
+
+        left = make_tensor(B_shared, B_left, idx_shared, idx_left, n_left, 1)
+        right = make_tensor(B_shared, B_right, idx_shared, idx_right, n_right, 2)
+
+        def fail_toarray(*args, **kwargs):
+            raise AssertionError("shared-margin tensor cross-Gram should not materialize")
+
+        monkeypatch.setattr(DiscretizedTensorGroupMatrix, "toarray", fail_toarray)
+
+        cross = _cross_gram(left, right, rng.uniform(0.5, 1.5, size=n))
+
+        assert cross.shape == (4, 6)
 
     def test_tensor_own_margin_cross_gram_uses_packed_weight_grid(self, monkeypatch):
         """Tensor × parent smooth cross-blocks should not use the generic row scan path."""

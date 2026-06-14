@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -37,8 +38,8 @@ OUT_DIR = ROOT / "benchmarks" / "results"
 OUT_JSON = OUT_DIR / "tensor_ti_freq.json"
 OUT_TRAIN_CSV = OUT_DIR / "tensor_ti_freq_train.csv"
 OUT_TEST_CSV = OUT_DIR / "tensor_ti_freq_test.csv"
-TIMEOUT_S = 30.0
-CASE_TIMEOUT_S = 60.0
+TIMEOUT_S = 120.0
+CASE_TIMEOUT_S = 180.0
 PROFILE_TIMING_KEYS = (
     "reml_rebuild_dm_s",
     "reml_map_beta_s",
@@ -63,6 +64,7 @@ PROFILE_TIMING_KEYS = (
     "block_cross_tensor_main_s",
     "block_cross_tensor_tensor_s",
     "block_cross_tensor_spline_cat_s",
+    "block_cross_spline_cat_spline_cat_s",
     "block_cross_disc_disc_s",
     "block_cross_disc_other_s",
     "block_cross_cat_cat_s",
@@ -70,6 +72,99 @@ PROFILE_TIMING_KEYS = (
     "block_hist2d_s",
     "block_tabmat_s",
 )
+
+
+@dataclass(frozen=True)
+class BenchmarkCase:
+    name: str
+    interactions: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def with_ti(self) -> bool:
+        return ("DrivAge", "BonusMalus") in self.interactions
+
+
+def build_superglm_cases() -> tuple[BenchmarkCase, ...]:
+    """Cases used to track one- and multi-interaction scaling.
+
+    The first two cases intentionally preserve the original benchmark ordering:
+    downstream PR summaries compare ``baseline_discrete`` against
+    ``baseline_plus_ti_discrete``.
+    """
+    return (
+        BenchmarkCase("baseline_discrete"),
+        BenchmarkCase("baseline_plus_ti_discrete", (("DrivAge", "BonusMalus"),)),
+        BenchmarkCase(
+            "baseline_plus_2_tensors_discrete",
+            (("DrivAge", "BonusMalus"), ("DrivAge", "VehAge")),
+        ),
+        BenchmarkCase(
+            "baseline_plus_3_tensors_discrete",
+            (("DrivAge", "BonusMalus"), ("DrivAge", "VehAge"), ("VehAge", "BonusMalus")),
+        ),
+        BenchmarkCase("baseline_plus_spline_cat_discrete", (("DrivAge", "Area"),)),
+        BenchmarkCase(
+            "baseline_plus_2_spline_cat_discrete",
+            (("DrivAge", "Area"), ("BonusMalus", "Area")),
+        ),
+        BenchmarkCase(
+            "baseline_plus_mixed_tensor_spline_cat_discrete",
+            (("DrivAge", "BonusMalus"), ("VehAge", "Area")),
+        ),
+    )
+
+
+def _safe_delta(case: dict, baseline: dict, key: str) -> float | int | None:
+    if case.get(key) is None or baseline.get(key) is None:
+        return None
+    value = case.get(key, 0.0) - baseline.get(key, 0.0)
+    if isinstance(case.get(key), int) and isinstance(baseline.get(key), int):
+        return int(value)
+    return float(value)
+
+
+def build_case_deltas(rows: list[dict]) -> dict:
+    baseline = rows[0]
+    one_tensor = next(
+        (row for row in rows if row.get("model") == "baseline_plus_ti_discrete"),
+        rows[1] if len(rows) > 1 else baseline,
+    )
+    legacy_keys = (
+        "fit_s",
+        "predict_test_median_s",
+        "gini_model",
+        "gini_ratio",
+        "effective_df",
+        "reml_n_linesearch_fits",
+        "reml_linesearch_s",
+    )
+    deltas = {key: _safe_delta(one_tensor, baseline, key) for key in legacy_keys}
+    deltas.update({key: _safe_delta(one_tensor, baseline, key) for key in PROFILE_TIMING_KEYS})
+    deltas["by_case"] = {
+        str(row["model"]): {
+            key: _safe_delta(row, baseline, key)
+            for key in (
+                "fit_s",
+                "predict_test_median_s",
+                "gini_model",
+                "gini_ratio",
+                "effective_df",
+                "coef_count",
+                "n_groups",
+                "n_smoothing_params",
+                "n_reml_iter",
+                "irls_calls",
+                "irls_iters",
+                "irls_gram_s",
+                "irls_solve_s",
+                "irls_eta_s",
+                "reml_pirls_s",
+                "reml_hessian_newton_s",
+            )
+        }
+        for row in rows[1:]
+    }
+    return deltas
 
 
 def load_freq() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
@@ -120,7 +215,7 @@ def _fit_case_result(
     w_train: np.ndarray,
     w_test: np.ndarray,
     *,
-    with_ti: bool,
+    interactions: tuple[tuple[str, str], ...],
 ) -> dict:
     model = SuperGLM(
         family="poisson",
@@ -129,7 +224,7 @@ def _fit_case_result(
         discrete=True,
         n_bins=256,
         features=build_features(discrete=True),
-        interactions=[("DrivAge", "BonusMalus")] if with_ti else None,
+        interactions=list(interactions) if interactions else None,
     )
     t0 = time.perf_counter()
     model.fit_reml(X_train, y_train, sample_weight=w_train, max_reml_iter=30)
@@ -143,7 +238,9 @@ def _fit_case_result(
     if fit_s > TIMEOUT_S:
         return {
             "model": name,
-            "with_ti": with_ti,
+            "with_ti": ("DrivAge", "BonusMalus") in interactions,
+            "interactions": [f"{a}:{b}" for a, b in interactions],
+            "n_interactions": len(interactions),
             "timed_out": True,
             "timeout_s": TIMEOUT_S,
             "fit_s": fit_s,
@@ -159,6 +256,11 @@ def _fit_case_result(
             "reml_pirls_s": float(model._reml_profile.get("reml_pirls_s", 0.0)),
             "fit_runtime_canonicalize_validate": runtime_validate,
             "fit_runtime_canonicalize_validate_reason": runtime_validate_reason,
+            "coef_count": int(model._result.beta.size),
+            "n_groups": len(model._groups),
+            "n_smoothing_params": 0
+            if model._reml_result is None
+            else len(model._reml_result.lambdas),
             **profile_timings,
         }
 
@@ -174,12 +276,17 @@ def _fit_case_result(
 
     return {
         "model": name,
-        "with_ti": with_ti,
+        "with_ti": ("DrivAge", "BonusMalus") in interactions,
+        "interactions": [f"{a}:{b}" for a, b in interactions],
+        "n_interactions": len(interactions),
         "fit_s": fit_s,
         "predict_test_median_s": float(np.median(predict_times)),
         "gini_model": float(lorenz.gini_model),
         "gini_ratio": float(lorenz.gini_ratio),
         "effective_df": float(model.result.effective_df),
+        "coef_count": int(model._result.beta.size),
+        "n_groups": len(model._groups),
+        "n_smoothing_params": len(model._reml_result.lambdas),
         "n_reml_iter": int(model._reml_result.n_reml_iter),
         "converged": bool(model._reml_result.converged),
         "reml_n_linesearch_fits": int(model._reml_profile.get("reml_n_linesearch_fits", 0)),
@@ -204,7 +311,7 @@ def _fit_case_worker(
     y_test: np.ndarray,
     w_train: np.ndarray,
     w_test: np.ndarray,
-    with_ti: bool,
+    interactions: tuple[tuple[str, str], ...],
 ) -> None:
     try:
         queue.put(
@@ -216,11 +323,19 @@ def _fit_case_worker(
                 y_test,
                 w_train,
                 w_test,
-                with_ti=with_ti,
+                interactions=interactions,
             )
         )
     except BaseException as exc:  # pragma: no cover - benchmark failure path
-        queue.put({"model": name, "with_ti": with_ti, "error": repr(exc)})
+        queue.put(
+            {
+                "model": name,
+                "with_ti": ("DrivAge", "BonusMalus") in interactions,
+                "interactions": [f"{a}:{b}" for a, b in interactions],
+                "n_interactions": len(interactions),
+                "error": repr(exc),
+            }
+        )
 
 
 def fit_case(
@@ -232,14 +347,14 @@ def fit_case(
     w_train: np.ndarray,
     w_test: np.ndarray,
     *,
-    with_ti: bool,
+    interactions: tuple[tuple[str, str], ...],
     timeout_s: float = TIMEOUT_S,
 ) -> dict:
     ctx = mp.get_context("fork")
     queue: mp.Queue = ctx.Queue()
     proc = ctx.Process(
         target=_fit_case_worker,
-        args=(queue, name, X_train, X_test, y_train, y_test, w_train, w_test, with_ti),
+        args=(queue, name, X_train, X_test, y_train, y_test, w_train, w_test, interactions),
     )
     proc.start()
     proc.join(CASE_TIMEOUT_S)
@@ -249,7 +364,9 @@ def fit_case(
         proc.join()
         return {
             "model": name,
-            "with_ti": with_ti,
+            "with_ti": ("DrivAge", "BonusMalus") in interactions,
+            "interactions": [f"{a}:{b}" for a, b in interactions],
+            "n_interactions": len(interactions),
             "timed_out": True,
             "timeout_s": timeout_s,
             "fit_s": timeout_s,
@@ -266,6 +383,9 @@ def fit_case(
             "reml_objective_s": None,
             "reml_hessian_newton_s": None,
             "reml_n_analytical_iters": None,
+            "coef_count": None,
+            "n_groups": None,
+            "n_smoothing_params": None,
         }
 
     result = queue.get()
@@ -288,27 +408,19 @@ def main() -> None:
     export_test["Exposure"] = w_test
     export_test.to_csv(OUT_TEST_CSV, index=False)
 
-    baseline = fit_case(
-        "baseline_discrete",
-        X_train,
-        X_test,
-        y_train,
-        y_test,
-        w_train,
-        w_test,
-        with_ti=False,
-    )
-    with_ti = fit_case(
-        "baseline_plus_ti_discrete",
-        X_train,
-        X_test,
-        y_train,
-        y_test,
-        w_train,
-        w_test,
-        with_ti=True,
-    )
-    rows = [baseline, with_ti]
+    rows = [
+        fit_case(
+            case.name,
+            X_train,
+            X_test,
+            y_train,
+            y_test,
+            w_train,
+            w_test,
+            interactions=case.interactions,
+        )
+        for case in build_superglm_cases()
+    ]
 
     out = {
         "dataset": "freMTPL2freq",
@@ -319,50 +431,14 @@ def main() -> None:
         "weight": "exposure",
         "feature_set": ["DrivAge", "VehAge", "BonusMalus", "Area"],
         "interaction": "DrivAge:BonusMalus",
+        "case_matrix": [
+            {"name": case.name, "interactions": [f"{a}:{b}" for a, b in case.interactions]}
+            for case in build_superglm_cases()
+        ],
         "split_seed": 42,
         "timeout_s": TIMEOUT_S,
         "results": rows,
-        "deltas": {
-            "fit_s": float(with_ti["fit_s"] - baseline["fit_s"]),
-            "predict_test_median_s": (
-                None
-                if with_ti["predict_test_median_s"] is None
-                else float(with_ti["predict_test_median_s"] - baseline["predict_test_median_s"])
-            ),
-            "gini_model": (
-                None
-                if with_ti["gini_model"] is None
-                else float(with_ti["gini_model"] - baseline["gini_model"])
-            ),
-            "gini_ratio": (
-                None
-                if with_ti["gini_ratio"] is None
-                else float(with_ti["gini_ratio"] - baseline["gini_ratio"])
-            ),
-            "effective_df": (
-                None
-                if with_ti["effective_df"] is None
-                else float(with_ti["effective_df"] - baseline["effective_df"])
-            ),
-            "reml_n_linesearch_fits": (
-                None
-                if with_ti["reml_n_linesearch_fits"] is None
-                else int(with_ti["reml_n_linesearch_fits"] - baseline["reml_n_linesearch_fits"])
-            ),
-            "reml_linesearch_s": (
-                None
-                if with_ti["reml_linesearch_s"] is None
-                else float(with_ti["reml_linesearch_s"] - baseline["reml_linesearch_s"])
-            ),
-            **{
-                key: (
-                    None
-                    if with_ti.get(key) is None
-                    else float(with_ti.get(key, 0.0) - baseline.get(key, 0.0))
-                )
-                for key in PROFILE_TIMING_KEYS
-            },
-        },
+        "deltas": build_case_deltas(rows),
     }
     OUT_JSON.write_text(json.dumps(out, indent=2))
 
@@ -378,6 +454,9 @@ def main() -> None:
             f"gini={row['gini_model'] if row['gini_model'] is None else format(row['gini_model'], '.6f')}  "
             f"gini_ratio={row['gini_ratio'] if row['gini_ratio'] is None else format(row['gini_ratio'], '.6f')}  "
             f"edf={row['effective_df'] if row['effective_df'] is None else format(row['effective_df'], '8.2f')}  "
+            f"p={row['coef_count']}  "
+            f"groups={row['n_groups']}  "
+            f"sp={row['n_smoothing_params']}  "
             f"ls_fits={row['reml_n_linesearch_fits']}  "
             f"converged={row['converged']}  "
             f"timed_out={row['timed_out']}"
