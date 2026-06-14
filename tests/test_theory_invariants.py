@@ -340,6 +340,24 @@ class TestBackendLinearAlgebraInvariants:
         np.testing.assert_allclose(compact.gram(W), masked.gram(W), atol=1e-12)
         np.testing.assert_allclose(compact.toarray(), masked.toarray(), atol=1e-12)
 
+    def test_spline_categorical_level_group_stores_row_indices_not_full_mask(self):
+        """Spline-by-category levels should store selected rows, not a full n-row mask."""
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import SplineCategoricalGroupMatrix
+
+        n = 80
+        B = sp.random(n, 6, density=0.25, format="csr", random_state=119)
+        R_inv = np.eye(6)
+        mask = np.zeros(n, dtype=bool)
+        mask[[2, 7, 19, 43, 71]] = True
+
+        compact = SplineCategoricalGroupMatrix(B, R_inv, mask)
+
+        assert not hasattr(compact, "mask")
+        np.testing.assert_array_equal(compact.row_idx, np.flatnonzero(mask))
+        assert compact.B_level.shape == (int(mask.sum()), B.shape[1])
+
     def test_spline_categorical_cross_level_gram_is_zero(self):
         """Disjoint spline-by-category level groups have an exact zero cross-block."""
         import scipy.sparse as sp

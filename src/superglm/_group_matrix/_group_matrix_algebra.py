@@ -87,13 +87,14 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
         )
         return B_agg @ gm.R_inv
     if isinstance(gm, SplineCategoricalGroupMatrix):
+        rows = gm.row_idx
         B_agg = _csr_weighted_bincount(
             gm._data,
             gm._indices,
             gm._indptr,
             gm._p_b,
-            bin_idx,
-            W * gm.mask,
+            bin_idx[rows],
+            W[rows],
             n_bins,
         )
         return B_agg @ gm.R_inv
@@ -184,16 +185,19 @@ def _cross_gram_tensor_spline_categorical(
     K1, K2 = B1.shape[1], B2.shape[1]
     K_cat = gm_spline_cat._p_b
     result_raw = np.empty((K1 * K2, K_cat), dtype=np.float64)
-    masked_W = W * gm_spline_cat.mask
+    rows = gm_spline_cat.row_idx
+    W_rows = W[rows]
+    idx1 = gm_tensor.idx1[rows]
+    idx2 = gm_tensor.idx2[rows]
 
     for j2 in range(K2):
-        w_col = masked_W * B2[gm_tensor.idx2, j2]
+        w_col = W_rows * B2[idx2, j2]
         B_cat_agg = _csr_weighted_bincount(
             gm_spline_cat._data,
             gm_spline_cat._indices,
             gm_spline_cat._indptr,
             K_cat,
-            gm_tensor.idx1,
+            idx1,
             w_col,
             gm_tensor.n_bins1,
         )
@@ -213,8 +217,8 @@ def _cross_gram_categorical_spline_categorical(
         gm_spline_cat._indices,
         gm_spline_cat._indptr,
         gm_spline_cat._p_b,
-        gm_cat.codes,
-        W * gm_spline_cat.mask,
+        gm_cat.codes[gm_spline_cat.row_idx],
+        W[gm_spline_cat.row_idx],
         gm_cat.n_levels + 1,
     )
     return B_agg[: gm_cat.n_levels] @ gm_spline_cat.R_inv
@@ -242,7 +246,7 @@ def _cross_gram(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     if isinstance(gm_i, SplineCategoricalGroupMatrix) and isinstance(
         gm_j, SplineCategoricalGroupMatrix
     ):
-        if not np.any(gm_i.mask & gm_j.mask):
+        if np.intersect1d(gm_i.row_idx, gm_j.row_idx, assume_unique=False).size == 0:
             return np.zeros((gm_i.shape[1], gm_j.shape[1]))
     # Tensor × tensor (same marginals, e.g. decomposed bilinear/wiggly)
     if (

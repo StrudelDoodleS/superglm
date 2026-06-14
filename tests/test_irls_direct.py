@@ -8,7 +8,7 @@ from superglm.features.categorical import Categorical
 from superglm.features.spline import Spline
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.model import SuperGLM
-from superglm.types import GroupSlice
+from superglm.types import GroupSlice, LinearConstraintSet
 
 
 # ── Fixtures ───────────────────────────────────────────────────
@@ -256,6 +256,53 @@ class TestDirectSolverBasic:
         np.testing.assert_allclose(cached.beta, uncached.beta, rtol=0, atol=1e-12)
         assert cached.intercept == pytest.approx(uncached.intercept, abs=1e-12)
         assert cached.deviance == pytest.approx(uncached.deviance, abs=1e-12)
+
+    def test_qp_constraints_are_assembled_once_across_iterations(self, monkeypatch):
+        """QP constraint blocks are fixed for a fit and should not be rebuilt per IRLS step."""
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+
+        rng = np.random.default_rng(457)
+        n = 80
+        X_raw = np.column_stack([rng.normal(size=n), rng.normal(size=n)])
+        y = 0.3 + X_raw @ np.array([0.1, -0.2]) + rng.normal(scale=0.1, size=n)
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
+        groups = [
+            GroupSlice(
+                name="x",
+                start=0,
+                end=2,
+                constraints=LinearConstraintSet(
+                    A=np.array([[1.0, 0.0]], dtype=np.float64),
+                    b=np.array([-100.0], dtype=np.float64),
+                ),
+            )
+        ]
+
+        original_qp = irls_direct.solve_constrained_qp
+        constraint_matrices = []
+
+        def recording_qp(H, g, A, b, *args, **kwargs):
+            constraint_matrices.append(A)
+            return original_qp(H, g, A, b, *args, **kwargs)
+
+        monkeypatch.setattr(irls_direct, "solve_constrained_qp", recording_qp)
+
+        result, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones(n),
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2=0.0,
+            max_iter=3,
+            tol=0.0,
+        )
+
+        assert result.n_iter == 3
+        assert len({id(A) for A in constraint_matrices}) == 1
 
     def test_variable_weight_fit_rebuilds_weighted_gram(self, monkeypatch):
         """Poisson log fits do not reuse X'WX because W changes with mu."""

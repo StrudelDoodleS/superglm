@@ -463,6 +463,19 @@ def fit_irls_direct(
     # ── Constrained QP support (monotone splines) ──
     has_constraints = any(g.constraints is not None for g in groups)
     prev_active_set: list[int] | None = None
+    A_all: NDArray | None = None
+    b_all: NDArray | None = None
+    if has_constraints:
+        A_blocks: list[np.ndarray] = []
+        b_blocks: list[np.ndarray] = []
+        for g in groups:
+            if g.constraints is not None:
+                A_model = np.zeros((g.constraints.n_constraints, p))
+                A_model[:, g.sl] = g.constraints.A
+                A_blocks.append(A_model)
+                b_blocks.append(g.constraints.b)
+        A_all = np.vstack(A_blocks)
+        b_all = np.concatenate(b_blocks)
 
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
@@ -847,19 +860,6 @@ def fit_irls_direct(
                 # Solve — constrained QP or Cholesky with SVD fallback
                 _t0 = time.perf_counter()
                 if has_constraints:
-                    # Assemble model-level constraint matrix from per-group constraints
-                    A_blocks: list[np.ndarray] = []
-                    b_blocks: list[np.ndarray] = []
-                    for g in groups:
-                        if g.constraints is not None:
-                            A_model = np.zeros((g.constraints.n_constraints, p))
-                            A_model[:, g.sl] = g.constraints.A
-                            A_blocks.append(A_model)
-                            b_blocks.append(g.constraints.b)
-
-                    A_all = np.vstack(A_blocks)
-                    b_all = np.concatenate(b_blocks)
-
                     # Profile out intercept (unconstrained):
                     # intercept = (rhs[0] - XtW1 @ beta) / sum_W
                     # Reduced system: H = XtWX + S, g_vec = XtWz - XtW1*(sum_Wz/sum_W)

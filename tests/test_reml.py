@@ -279,6 +279,29 @@ class TestComputeRInvOverride:
         R_inv_2 = compute_R_inv(gm.B, gm.omega, w, 1.0)
         assert not np.allclose(R_inv_1, R_inv_2, atol=1e-6)
 
+    def test_zero_total_weight_returns_finite_penalty_only_R_inv(self):
+        """Zero-weight spline-category levels should not create NaN SSP transforms."""
+        import scipy.sparse as sp
+
+        from superglm.dm_builder import compute_projected_R_inv, compute_R_inv
+
+        rng = np.random.default_rng(212)
+        B = sp.random(8, 5, density=0.4, format="csr", random_state=212)
+        omega = np.eye(5)
+        weights = np.zeros(B.shape[0])
+
+        R_inv = compute_R_inv(B, omega, weights, 0.7)
+
+        assert R_inv.shape == (5, 5)
+        assert np.all(np.isfinite(R_inv))
+
+        projection = rng.normal(size=(5, 3))
+        omega_proj = projection.T @ omega @ projection
+        R_inv_projected = compute_projected_R_inv(B, projection, omega_proj, weights, 0.7)
+
+        assert R_inv_projected.shape == (3, 3)
+        assert np.all(np.isfinite(R_inv_projected))
+
 
 class TestMgcvStyleSmoothTestInput:
     def test_summary_smooth_pvalue_uses_weighted_qr_factor(self):

@@ -66,10 +66,13 @@ def compute_R_inv(
     X_ssp = B @ R_inv has near-identity X'WX regardless of λ.
     """
     lam2 = _resolve_lambda2(lambda2)
-    if sp.issparse(B):
-        G = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / np.sum(sample_weight)
+    weight_sum = float(np.sum(sample_weight))
+    if weight_sum <= 0.0:
+        G = np.zeros((omega.shape[0], omega.shape[0]), dtype=np.float64)
+    elif sp.issparse(B):
+        G = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / weight_sum
     else:
-        G = (B * sample_weight[:, None]).T @ B / np.sum(sample_weight)
+        G = (B * sample_weight[:, None]).T @ B / weight_sum
     M = G + lam2 * omega + np.eye(omega.shape[0]) * 1e-8
     R = np.linalg.cholesky(M).T
     return np.linalg.inv(R)
@@ -84,12 +87,15 @@ def compute_projected_R_inv(
 ) -> NDArray:
     """Compute SSP R_inv within a projected subspace (linear-split range space)."""
     lam2 = _resolve_lambda2(lambda2)
-    if sp.issparse(B):
+    weight_sum = float(np.sum(sample_weight))
+    if weight_sum <= 0.0:
+        G_full = np.zeros((projection.shape[0], projection.shape[0]), dtype=np.float64)
+    elif sp.issparse(B):
         G_full = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / np.sum(
             sample_weight
         )
     else:
-        G_full = (B * sample_weight[:, None]).T @ B / np.sum(sample_weight)
+        G_full = (B * sample_weight[:, None]).T @ B / weight_sum
     G_sub = projection.T @ G_full @ projection
     n_sub = penalty_sub.shape[0]
     M_sub = G_sub + lam2 * penalty_sub + np.eye(n_sub) * 1e-8
@@ -1081,19 +1087,20 @@ def rebuild_design_matrix_with_lambdas(
                 new_gms.append(gm)
                 continue
             lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
-            masked_weight = sample_weight * gm.mask
+            level_weight = sample_weight[gm.row_idx]
             if gm.projection is not None:
                 P = gm.projection
                 omega_proj = P.T @ omega_eff @ P
-                R_inv_local = compute_projected_R_inv(gm.B, P, omega_proj, masked_weight, lam)
+                R_inv_local = compute_projected_R_inv(gm.B_level, P, omega_proj, level_weight, lam)
                 R_inv_new = P @ R_inv_local
             else:
-                R_inv_new = compute_R_inv(gm.B, omega_eff, masked_weight, lam)
-            new_gm = SplineCategoricalGroupMatrix(gm.B, R_inv_new, gm.mask)
+                R_inv_new = compute_R_inv(gm.B_level, omega_eff, level_weight, lam)
+            new_gm = SplineCategoricalGroupMatrix(gm.B, R_inv_new, gm.row_idx)
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
+            new_gm.lambda_policies = gm.lambda_policies
             new_gms.append(new_gm)
         elif isinstance(gm, DiscretizedTensorGroupMatrix) and _group_has_lambda(gm, g, lambdas):
             if gm.omega is None:

@@ -617,6 +617,48 @@ class TestSplineCategoricalPerLevel:
         assert interaction_gms
         assert all(isinstance(gm, SplineCategoricalGroupMatrix) for gm in interaction_gms)
 
+    def test_fit_storage_scales_with_level_rows_not_rows_times_levels(self):
+        """Spline-categorical groups should store only rows present in each non-base level."""
+        from superglm.group_matrix import SplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(231)
+        n = 240
+        levels = [f"L{i}" for i in range(12)]
+        X = pd.DataFrame(
+            {
+                "age": rng.uniform(18.0, 80.0, n),
+                "region": rng.choice(levels, size=n),
+            }
+        )
+        y = rng.poisson(1.2, size=n).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "age": Spline(n_knots=6),
+                "region": Categorical(base="first"),
+            },
+            interactions=[("age", "region")],
+            selection_penalty=0.0,
+        )
+        model.fit(X, y)
+
+        interaction_gms = [
+            gm
+            for gm, group in zip(model._dm.group_matrices, model._groups)
+            if group.feature_name == "age:region"
+        ]
+        assert interaction_gms
+        assert all(isinstance(gm, SplineCategoricalGroupMatrix) for gm in interaction_gms)
+
+        non_base_levels = set(model._interaction_specs["age:region"]._non_base)
+        expected_stored_rows = int(X["region"].isin(non_base_levels).sum())
+        stored_rows = sum(gm.row_idx.size for gm in interaction_gms)
+
+        assert stored_rows == expected_stored_rows
+        assert stored_rows <= n
+        assert stored_rows < n * len(non_base_levels)
+        assert all(not hasattr(gm, "mask") for gm in interaction_gms)
+
     def test_fit_reml_estimates_compact_group_penalties(self, interaction_data):
         """Compact spline-categorical levels remain REML-eligible SSP groups."""
         from superglm.group_matrix import SplineCategoricalGroupMatrix
