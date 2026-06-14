@@ -846,6 +846,58 @@ class TestBackendLinearAlgebraInvariants:
         cross2_dense = X_other.T @ (X_tensor * W[:, None])
         np.testing.assert_allclose(cross2, cross2_dense, atol=1e-9)
 
+    def test_tensor_main_cross_gram_channels_over_smaller_margin(self, monkeypatch):
+        """Unrelated tensor-main blocks should channel over the cheaper tensor margin."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+
+        rng = np.random.default_rng(125)
+        n = 120
+        n1, n2, n_main = 7, 6, 5
+        k1, k2, k_main = 2, 5, 4
+        p_tensor, p_main = 8, 3
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        main_idx = rng.integers(0, n_main, size=n)
+        B1 = rng.normal(size=(n1, k1))
+        B2 = rng.normal(size=(n2, k2))
+        B_main = rng.normal(size=(n_main, k_main))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), k1 * k2
+        )
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            rng.normal(size=(k1 * k2, p_tensor)),
+            pair_idx.astype(np.intp),
+            tensor_id=8,
+        )
+        main = DiscretizedSSPGroupMatrix(
+            B_main,
+            rng.normal(size=(k_main, p_main)),
+            main_idx,
+        )
+        W = rng.uniform(0.2, 1.8, size=n)
+
+        original = algebra._disc_disc_2d_hist_channels
+        channel_shapes = []
+
+        def spy_channels(idx_a, idx_b, channel_idx, weights, channel_basis, n_a, n_b):
+            channel_shapes.append(channel_basis.shape)
+            return original(idx_a, idx_b, channel_idx, weights, channel_basis, n_a, n_b)
+
+        monkeypatch.setattr(algebra, "_disc_disc_2d_hist_channels", spy_channels)
+
+        cross = algebra._cross_gram_tensor_main(tensor, main, W)
+        dense = main.toarray().T @ (tensor.toarray() * W[:, None])
+
+        np.testing.assert_allclose(cross, dense, rtol=1e-10, atol=1e-10)
+        assert channel_shapes == [B1.shape]
+
     def test_tensor_full_xtwx_matches_dense(self):
         """Full _block_xtwx with tensor interaction must match dense oracle."""
         rng = np.random.default_rng(99)

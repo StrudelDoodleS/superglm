@@ -974,6 +974,94 @@ class TestDiscretizedTensorInteraction:
             assert key in profile
             assert profile[key] >= 0.0
 
+    def test_penalty_context_cache_reuses_frozen_tensor_components(
+        self, tensor_interaction_data, monkeypatch
+    ):
+        """Penalty context rebuilds should reuse static tensor eigensystems."""
+        from superglm.reml import penalty_algebra
+
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit(X, y)
+        tensor_idx = next(i for i, g in enumerate(model._groups) if g.feature_name == "age:bm")
+        reml_groups = [(tensor_idx, model._groups[tensor_idx])]
+        cache = {}
+
+        penalties_first, _, _ = penalty_algebra.build_penalty_context(
+            model._dm.group_matrices,
+            reml_groups,
+            cache=cache,
+        )
+        assert any("age:bm" in pc.group_name for pc in penalties_first)
+
+        def fail_eigvalsh(*args, **kwargs):
+            raise AssertionError("cached penalty context should not recompute eigensystems")
+
+        monkeypatch.setattr(penalty_algebra.np.linalg, "eigvalsh", fail_eigvalsh)
+
+        penalties_second, _, _ = penalty_algebra.build_penalty_context(
+            model._dm.group_matrices,
+            reml_groups,
+            cache=cache,
+        )
+
+        assert [pc.name for pc in penalties_second] == [pc.name for pc in penalties_first]
+
+    def test_tensor_pair_summary_cache_reuses_static_marginal_eigenvalues(
+        self, tensor_interaction_data, monkeypatch
+    ):
+        """Tensor logdet summary rebuilds should reuse static marginal eigensystems."""
+        from superglm.model.reml_setup import collect_reml_groups
+        from superglm.reml import penalty_algebra
+
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit(X, y)
+        reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)
+        cache = {}
+        penalties, _, _ = penalty_algebra.build_penalty_context(
+            model._dm.group_matrices,
+            reml_groups,
+            cache=cache,
+        )
+        summaries_first = penalty_algebra.build_tensor_pair_logdet_summaries(
+            model._dm.group_matrices,
+            penalties,
+            cache=cache,
+        )
+        assert summaries_first
+
+        def fail_eigvalsh(*args, **kwargs):
+            raise AssertionError("cached tensor summaries should not recompute eigensystems")
+
+        monkeypatch.setattr(penalty_algebra.np.linalg, "eigvalsh", fail_eigvalsh)
+
+        summaries_second = penalty_algebra.build_tensor_pair_logdet_summaries(
+            model._dm.group_matrices,
+            penalties,
+            cache=cache,
+        )
+
+        assert summaries_second.keys() == summaries_first.keys()
+
     def test_build_discrete_returns_dataclass(self):
         """TensorInteraction.build_discrete() must return DiscreteTensorBuildResult."""
         from superglm.features.interaction import TensorInteraction

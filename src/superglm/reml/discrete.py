@@ -208,8 +208,13 @@ def optimize_discrete_reml_cached_w(
     _t_map_beta = 0.0
     _t_penalty_context = 0.0
     _t_tensor_summary = 0.0
+    penalty_context_cache: dict = {}
     _t0 = _time.perf_counter()
-    tensor_pair_summaries = build_tensor_pair_logdet_summaries(dm.group_matrices, penalties)
+    tensor_pair_summaries = build_tensor_pair_logdet_summaries(
+        dm.group_matrices,
+        penalties,
+        cache=penalty_context_cache,
+    )
     _t_tensor_summary += _time.perf_counter() - _t0
     use_tensor_surrogate_linesearch = scale_known and bool(shared_tensor_groups)
     # estimated_mask[i] = True  => component i is free to be optimized
@@ -261,6 +266,7 @@ def optimize_discrete_reml_cached_w(
     penalties_boot, penalty_caches_boot, penalty_ranks_boot = build_penalty_context(
         dm_boot.group_matrices,
         reml_groups,
+        cache=penalty_context_cache,
     )
     _t_penalty_context += _time.perf_counter() - _t0
     S_boot = build_penalty_matrix(
@@ -295,7 +301,11 @@ def optimize_discrete_reml_cached_w(
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
     shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
     _t0 = _time.perf_counter()
-    tensor_pair_summaries = build_tensor_pair_logdet_summaries(dm.group_matrices, penalties)
+    tensor_pair_summaries = build_tensor_pair_logdet_summaries(
+        dm.group_matrices,
+        penalties,
+        cache=penalty_context_cache,
+    )
     _t_tensor_summary += _time.perf_counter() - _t0
     _n_pirls_steps += boot_result.n_iter
     warm_beta = boot_result.beta.copy()
@@ -841,12 +851,17 @@ def optimize_discrete_reml_cached_w(
         penalties, penalty_caches, penalty_ranks = build_penalty_context(
             dm.group_matrices,
             reml_groups,
+            cache=penalty_context_cache,
         )
         _t_penalty_context += _time.perf_counter() - _t0
         shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
         shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
         _t0 = _time.perf_counter()
-        tensor_pair_summaries = build_tensor_pair_logdet_summaries(dm.group_matrices, penalties)
+        tensor_pair_summaries = build_tensor_pair_logdet_summaries(
+            dm.group_matrices,
+            penalties,
+            cache=penalty_context_cache,
+        )
         _t_tensor_summary += _time.perf_counter() - _t0
 
     # === Final full IRLS refit at converged lambdas ===
@@ -877,12 +892,17 @@ def optimize_discrete_reml_cached_w(
     penalties, penalty_caches, penalty_ranks = build_penalty_context(
         dm.group_matrices,
         reml_groups,
+        cache=penalty_context_cache,
     )
     _t_penalty_context += _time.perf_counter() - _t0
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
     shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
     _t0 = _time.perf_counter()
-    tensor_pair_summaries = build_tensor_pair_logdet_summaries(dm.group_matrices, penalties)
+    tensor_pair_summaries = build_tensor_pair_logdet_summaries(
+        dm.group_matrices,
+        penalties,
+        cache=penalty_context_cache,
+    )
     _t_tensor_summary += _time.perf_counter() - _t0
     S_final = build_penalty_matrix(
         dm.group_matrices, groups, final_lambdas, dm.p, reml_penalties=penalties
