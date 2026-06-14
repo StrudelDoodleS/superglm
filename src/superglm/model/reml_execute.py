@@ -268,6 +268,8 @@ def optimize_reml_best(
                 w_correction_order=w_correction_order,
                 reml_penalties=reml_penalties,
                 estimated_names=estimated_names,
+                pirls_tol=pirls_tol,
+                max_pirls_iter=max_pirls_iter,
             )
             _record_non_scop_reml_trace(best, debug_recorder)
             _record_non_scop_pirls_trace(
@@ -328,6 +330,8 @@ def optimize_reml_best(
             w_correction_order=w_correction_order,
             reml_penalties=reml_penalties,
             estimated_names=estimated_names,
+            pirls_tol=pirls_tol,
+            max_pirls_iter=max_pirls_iter,
         )
         _record_non_scop_reml_trace(best, debug_recorder)
         _record_non_scop_pirls_trace(

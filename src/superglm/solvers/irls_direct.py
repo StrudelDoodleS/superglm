@@ -622,6 +622,8 @@ def fit_irls_direct(
     _t_gram = 0.0
     _t_solve = 0.0
     _t_deviance = 0.0
+    _t_eta = 0.0
+    _t_deviance_eval = 0.0
 
     # Pre-compute initial eta/mu once — reused as the first iteration's
     # working quantities, then updated at the end of each iteration.
@@ -727,6 +729,7 @@ def fit_irls_direct(
                     W,
                     Wz_adj,
                     tabmat_split=None,
+                    profile=profile,
                 )
 
                 # Build augmented (p_reduced+1, p_reduced+1) system
@@ -839,7 +842,12 @@ def fit_irls_direct(
                 else:
                     # Combined gram + rmatvec: shares O(n) bincount for discretized groups
                     XtWX, XtW1, XtWz = _block_xtwx_rhs(
-                        gms, groups, W, Wz, tabmat_split=_tabmat_split
+                        gms,
+                        groups,
+                        W,
+                        Wz,
+                        tabmat_split=_tabmat_split,
+                        profile=profile,
                     )
                     if _can_reuse_weighted_gram:
                         _constant_w_gram_cache = (XtWX, XtW1, sum_W)
@@ -916,8 +924,13 @@ def fit_irls_direct(
         _t0 = time.perf_counter()
         eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
         mu = clip_mu(link.inverse(eta), family)
+        eta_elapsed = time.perf_counter() - _t0
+        _t_eta += eta_elapsed
+        _t0 = time.perf_counter()
         dev = float(np.sum(weights * family.deviance_unit(y, mu)))
-        _t_deviance += time.perf_counter() - _t0
+        deviance_eval_elapsed = time.perf_counter() - _t0
+        _t_deviance_eval += deviance_eval_elapsed
+        _t_deviance += eta_elapsed + deviance_eval_elapsed
 
         # Step halving: if deviance spiked dramatically (>2x), interpolate
         # between previous and current solution.  Small deviance increases
@@ -1040,6 +1053,10 @@ def fit_irls_direct(
         profile["irls_gram_s"] = profile.get("irls_gram_s", 0.0) + _t_gram
         profile["irls_solve_s"] = profile.get("irls_solve_s", 0.0) + _t_solve
         profile["irls_deviance_s"] = profile.get("irls_deviance_s", 0.0) + _t_deviance
+        profile["irls_eta_s"] = profile.get("irls_eta_s", 0.0) + _t_eta
+        profile["irls_deviance_eval_s"] = (
+            profile.get("irls_deviance_eval_s", 0.0) + _t_deviance_eval
+        )
         profile["irls_total_s"] = profile.get("irls_total_s", 0.0) + t_elapsed
         profile["irls_calls"] = profile.get("irls_calls", 0) + 1
         profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
@@ -1050,7 +1067,14 @@ def fit_irls_direct(
         z_off = z - offset
         Wz = W * z_off
         sum_W = float(np.sum(W))
-        XtWX, XtW1, XtWz = _block_xtwx_rhs(gms, groups, W, Wz, tabmat_split=_tabmat_split)
+        XtWX, XtW1, XtWz = _block_xtwx_rhs(
+            gms,
+            groups,
+            W,
+            Wz,
+            tabmat_split=_tabmat_split,
+            profile=profile,
+        )
 
     # Cache final-iteration RHS quantities for the cached-W fREML optimizer.
     # These allow re-solving the augmented system with a new penalty matrix S
