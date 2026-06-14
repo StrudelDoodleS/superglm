@@ -970,6 +970,8 @@ class TestDiscretizedTensorInteraction:
             "reml_map_beta_s",
             "reml_penalty_context_s",
             "reml_tensor_summary_s",
+            "irls_eta_s",
+            "irls_deviance_eval_s",
         ):
             assert key in profile
             assert profile[key] >= 0.0

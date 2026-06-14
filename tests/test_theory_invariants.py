@@ -605,6 +605,61 @@ class TestBackendLinearAlgebraInvariants:
 
         assert calls == 1
 
+    def test_block_xtwx_rhs_profiles_tensor_block_work(self):
+        """Optional block profiling should attribute tensor diagonal and cross work."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+        from superglm.types import GroupSlice
+
+        rng = np.random.default_rng(126)
+        n = 100
+        n1, n2, n3 = 7, 5, 4
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        idx3 = rng.integers(0, n3, size=n)
+        B1 = rng.normal(size=(n1, 3))
+        B2 = rng.normal(size=(n2, 2))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), 6
+        )
+        main_own = DiscretizedSSPGroupMatrix(rng.normal(size=(n1, 4)), np.eye(4), idx1)
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            np.eye(6),
+            pair_idx.astype(np.intp),
+            tensor_id=12,
+        )
+        main_other = DiscretizedSSPGroupMatrix(rng.normal(size=(n3, 3)), np.eye(3), idx3)
+        groups = [
+            GroupSlice(name="x1", start=0, end=4, weight=2.0),
+            GroupSlice(name="x1:x2", start=4, end=10, weight=np.sqrt(6.0)),
+            GroupSlice(name="x3", start=10, end=13, weight=np.sqrt(3.0)),
+        ]
+        W = rng.uniform(0.2, 1.8, size=n)
+        Wz = rng.normal(size=n)
+        profile: dict[str, float] = {}
+
+        profiled = algebra._block_xtwx_rhs(
+            [main_own, tensor, main_other], groups, W, Wz, profile=profile
+        )
+        plain = algebra._block_xtwx_rhs([main_own, tensor, main_other], groups, W, Wz)
+
+        for got, expected in zip(profiled, plain):
+            np.testing.assert_allclose(got, expected, rtol=1e-12, atol=1e-12)
+
+        assert profile["block_diag_tensor_s"] > 0.0
+        assert profile["block_diag_discrete_ssp_s"] > 0.0
+        assert profile["block_cross_tensor_own_margin_s"] > 0.0
+        assert profile["block_cross_tensor_main_s"] > 0.0
+        assert profile["block_cross_disc_disc_s"] > 0.0
+        assert profile["block_hist2d_s"] > 0.0
+        assert profile["block_calls"] == 1
+
     def test_categorical_spline_categorical_cross_gram_matches_dense_oracle(self):
         """Categorical × compact spline-category cross-Gram should use one aggregation."""
         import scipy.sparse as sp
