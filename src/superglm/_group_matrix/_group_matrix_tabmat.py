@@ -15,9 +15,19 @@ def _build_tabmat_split(gms):
         DiscretizedSSPGroupMatrix,
         SparseGroupMatrix,
         SparseSSPGroupMatrix,
+        SplineCategoricalGroupMatrix,
     )
 
-    if any(isinstance(gm, DiscretizedSSPGroupMatrix | DiscretizedSCOPGroupMatrix) for gm in gms):
+    if any(
+        isinstance(
+            gm,
+            SparseSSPGroupMatrix
+            | SplineCategoricalGroupMatrix
+            | DiscretizedSSPGroupMatrix
+            | DiscretizedSCOPGroupMatrix,
+        )
+        for gm in gms
+    ):
         return None
 
     if all(isinstance(gm, CategoricalGroupMatrix) for gm in gms) and all(

@@ -902,6 +902,78 @@ class TestDiscretizedTensorInteraction:
         assert gm_inter.idx1 is not None
         assert gm_inter.idx2 is not None
 
+    def test_rebuild_design_matrix_freezes_unprojected_tensor_basis(
+        self, tensor_interaction_data, monkeypatch
+    ):
+        """Changing tensor component lambdas should not rebuild the packed tensor basis."""
+        import superglm.dm_builder as dm_builder
+
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit(X, y)
+
+        tensor_idx = next(i for i, g in enumerate(model._groups) if g.feature_name == "age:bm")
+        tensor_group = model._groups[tensor_idx]
+        tensor_gm = model._dm.group_matrices[tensor_idx]
+        assert isinstance(tensor_gm, DiscretizedTensorGroupMatrix)
+        assert tensor_gm.projection is None
+        assert tensor_gm.omega_components is not None
+
+        lambdas = {
+            f"{tensor_group.name}:{suffix}": 2.0 + i
+            for i, (suffix, _omega) in enumerate(tensor_gm.omega_components)
+        }
+
+        def fail_reparam(*args, **kwargs):
+            raise AssertionError("unprojected tensor basis should stay fixed")
+
+        monkeypatch.setattr(dm_builder, "compute_R_inv", fail_reparam)
+        monkeypatch.setattr(dm_builder, "compute_projected_R_inv", fail_reparam)
+
+        rebuilt = dm_builder.rebuild_design_matrix_with_lambdas(
+            model._dm,
+            model._groups,
+            lambdas,
+            np.ones(len(X)),
+            lambdas,
+        )
+
+        assert rebuilt.group_matrices[tensor_idx] is tensor_gm
+
+    def test_discrete_tensor_reml_reports_rebuild_phase_profile(self, tensor_interaction_data):
+        """Discrete REML profile should expose rebuild and tensor-summary phase timings."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit_reml(X, y, max_reml_iter=2)
+
+        profile = model._reml_profile
+        for key in (
+            "reml_rebuild_dm_s",
+            "reml_map_beta_s",
+            "reml_penalty_context_s",
+            "reml_tensor_summary_s",
+        ):
+            assert key in profile
+            assert profile[key] >= 0.0
+
     def test_build_discrete_returns_dataclass(self):
         """TensorInteraction.build_discrete() must return DiscreteTensorBuildResult."""
         from superglm.features.interaction import TensorInteraction

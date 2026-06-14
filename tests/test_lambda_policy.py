@@ -115,6 +115,37 @@ class TestSplineLambdaPolicy:
         np.testing.assert_allclose(omega, info.penalty_matrix)
         assert info.lambda_policies["wiggle"].value == 2.0
 
+    def test_rebuild_spline_categorical_preserves_lambda_policies(self):
+        """Lambda rebuild should not drop per-component policy metadata."""
+        import scipy.sparse as sp
+
+        from superglm.dm_builder import rebuild_design_matrix_with_lambdas
+        from superglm.group_matrix import DesignMatrix, SplineCategoricalGroupMatrix
+        from superglm.types import GroupSlice
+
+        n = 20
+        B = sp.random(n, 4, density=0.5, format="csr", random_state=82)
+        mask = np.zeros(n, dtype=bool)
+        mask[::3] = True
+        gm = SplineCategoricalGroupMatrix(B, np.eye(4), mask)
+        gm.omega = np.eye(4)
+        gm.omega_components = [("wiggle", np.eye(4))]
+        gm.component_types = {"wiggle": "smooth"}
+        gm.lambda_policies = {"wiggle": LambdaPolicy.fixed(0.25)}
+        group = GroupSlice(name="x:area[A]", start=0, end=4, feature_name="x:area")
+        dm = DesignMatrix([gm], n=n, p=4)
+
+        rebuilt = rebuild_design_matrix_with_lambdas(
+            dm,
+            [group],
+            {"x:area[A]:wiggle": 0.25},
+            sample_weight=np.ones(n),
+            lambda2=1.0,
+        )
+
+        rebuilt_gm = rebuilt.group_matrices[0]
+        assert rebuilt_gm.lambda_policies == gm.lambda_policies
+
 
 # ---------------------------------------------------------------------------
 # fit_reml() integration tests for fixed lambda policies

@@ -451,6 +451,7 @@ def init_model(
     tol: float = 1e-6,
     max_iter: int = 100,
     convergence: str = "deviance",
+    retain_fit_state: bool = True,
 ):
     """Initialize model state (body of SuperGLM.__init__)."""
     if features is not None and splines is not None:
@@ -474,6 +475,7 @@ def init_model(
     model._n_bins = n_bins
     model._tol = tol
     model._max_iter = max_iter
+    model._retain_fit_state = bool(retain_fit_state)
     if convergence not in ("deviance", "coefficients"):
         raise ValueError(f"convergence must be 'deviance' or 'coefficients', got {convergence!r}")
     if convergence == "coefficients":

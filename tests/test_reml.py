@@ -279,6 +279,29 @@ class TestComputeRInvOverride:
         R_inv_2 = compute_R_inv(gm.B, gm.omega, w, 1.0)
         assert not np.allclose(R_inv_1, R_inv_2, atol=1e-6)
 
+    def test_zero_total_weight_returns_finite_penalty_only_R_inv(self):
+        """Zero-weight spline-category levels should not create NaN SSP transforms."""
+        import scipy.sparse as sp
+
+        from superglm.dm_builder import compute_projected_R_inv, compute_R_inv
+
+        rng = np.random.default_rng(212)
+        B = sp.random(8, 5, density=0.4, format="csr", random_state=212)
+        omega = np.eye(5)
+        weights = np.zeros(B.shape[0])
+
+        R_inv = compute_R_inv(B, omega, weights, 0.7)
+
+        assert R_inv.shape == (5, 5)
+        assert np.all(np.isfinite(R_inv))
+
+        projection = rng.normal(size=(5, 3))
+        omega_proj = projection.T @ omega @ projection
+        R_inv_projected = compute_projected_R_inv(B, projection, omega_proj, weights, 0.7)
+
+        assert R_inv_projected.shape == (3, 3)
+        assert np.all(np.isfinite(R_inv_projected))
+
 
 class TestMgcvStyleSmoothTestInput:
     def test_summary_smooth_pvalue_uses_weighted_qr_factor(self):
@@ -1203,6 +1226,66 @@ class TestREMLObjectiveFastPath:
 
 
 class TestDiscreteCachedSolve:
+    def test_tensor_surrogate_linesearch_defers_augmented_solve(self, monkeypatch):
+        import superglm.reml.discrete as discrete_reml
+
+        rng = np.random.default_rng(77)
+        n = 260
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.2 + np.sin(2 * np.pi * x1) + 0.3 * np.cos(2 * np.pi * x2)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        def fail_augmented_solve(*args, **kwargs):
+            raise AssertionError("tensor surrogate line search should not solve M_aug")
+
+        monkeypatch.setattr(discrete_reml, "_solve_cached_augmented", fail_augmented_solve)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            discrete=True,
+            features={"x1": Spline(n_knots=5), "x2": Spline(n_knots=5)},
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(X, y, max_reml_iter=3, reml_tol=1e-12)
+
+        assert model._reml_result.n_reml_iter >= 1
+
+    def test_penalty_block_trace_matches_materialized_hessian_product(self):
+        from superglm.reml.gradient import _penalty_block_trace
+
+        rng = np.random.default_rng(12)
+        p = 14
+        A = rng.standard_normal((p, p))
+        H_inv = np.linalg.inv(A @ A.T + np.eye(p))
+        slices = [slice(1, 5), slice(7, 12)]
+        omegas = []
+        lambdas = [0.8, 2.3]
+        for sl in slices:
+            q = sl.stop - sl.start
+            B = rng.standard_normal((q, q))
+            omegas.append(B @ B.T)
+
+        for i, sl_i in enumerate(slices):
+            for j, sl_j in enumerate(slices):
+                F_i = np.zeros((p, p))
+                F_i[:, sl_i] = H_inv[:, sl_i] @ (lambdas[i] * omegas[i])
+                F_j = np.zeros((p, p))
+                F_j[:, sl_j] = H_inv[:, sl_j] @ (lambdas[j] * omegas[j])
+                materialized = float(np.sum(F_i * F_j.T))
+
+                compact = _penalty_block_trace(
+                    H_inv,
+                    sl_i,
+                    lambdas[i] * omegas[i],
+                    sl_j,
+                    lambdas[j] * omegas[j],
+                )
+
+                np.testing.assert_allclose(compact, materialized, rtol=1e-12, atol=1e-12)
+
     def test_h_factor_solve_matches_augmented_system(self):
         from superglm.reml.discrete import _solve_cached_augmented, _solve_cached_h_system
 

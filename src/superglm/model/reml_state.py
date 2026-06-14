@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+from superglm.group_matrix import (
+    DiscretizedSSPGroupMatrix,
+    SparseSSPGroupMatrix,
+    SplineCategoricalGroupMatrix,
+)
+
+_SSP_LIKE = SparseSSPGroupMatrix | SplineCategoricalGroupMatrix | DiscretizedSSPGroupMatrix
 
 
 def update_reml_r_inv(model, reml_groups, lambdas) -> None:
@@ -19,7 +25,7 @@ def update_reml_r_inv(model, reml_groups, lambdas) -> None:
             for fg in fgroups:
                 fg_idx = next(i for i, gg in enumerate(model._groups) if gg.name == fg.name)
                 fg_gm = model._dm.group_matrices[fg_idx]
-                if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+                if isinstance(fg_gm, _SSP_LIKE):
                     r_inv_parts.append(fg_gm.R_inv)
             if r_inv_parts:
                 spec.set_reparametrisation(
@@ -45,7 +51,7 @@ def update_reml_r_inv(model, reml_groups, lambdas) -> None:
                 for fg in fgroups:
                     fg_idx = next(i for i, gg in enumerate(model._groups) if gg.name == fg.name)
                     fg_gm = model._dm.group_matrices[fg_idx]
-                    if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+                    if isinstance(fg_gm, _SSP_LIKE):
                         r_inv_parts.append(fg_gm.R_inv)
                 if r_inv_parts:
                     ispec.set_reparametrisation(np.hstack(r_inv_parts))
@@ -54,7 +60,7 @@ def update_reml_r_inv(model, reml_groups, lambdas) -> None:
                 for fg in fgroups:
                     fg_idx = next(i for i, gg in enumerate(model._groups) if gg.name == fg.name)
                     fg_gm = model._dm.group_matrices[fg_idx]
-                    if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+                    if isinstance(fg_gm, _SSP_LIKE):
                         level = fg.name.split("[")[1].rstrip("]") if "[" in fg.name else fg.name
                         r_inv_dict[level] = fg_gm.R_inv
                 if r_inv_dict:
@@ -63,5 +69,5 @@ def update_reml_r_inv(model, reml_groups, lambdas) -> None:
             fg = fgroups[0]
             fg_idx = next(i for i, gg in enumerate(model._groups) if gg.name == fg.name)
             fg_gm = model._dm.group_matrices[fg_idx]
-            if isinstance(fg_gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
+            if isinstance(fg_gm, _SSP_LIKE):
                 ispec.set_reparametrisation(fg_gm.R_inv)
