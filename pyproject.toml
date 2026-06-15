@@ -36,7 +36,7 @@ bench = [
 # Interactions are implemented in-core; keep this extra for install compatibility.
 interactions = []
 plotting = [
-    "plotly>=5.24",
+    "plotly>=6.8.0",
 ]
 all = [
     "superglm[dev,bench,interactions,plotting]",
