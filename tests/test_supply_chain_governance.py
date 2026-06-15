@@ -1,6 +1,14 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW_FILES = (
+    ".github/workflows/ci.yml",
+    ".github/workflows/dev-ci.yml",
+    ".github/workflows/docs.yml",
+    ".github/workflows/scorecard.yml",
+    ".github/workflows/security.yml",
+)
 
 
 def _read(path: str) -> str:
@@ -31,7 +39,7 @@ def test_security_workflow_collects_core_governance_evidence():
         "github/codeql-action/analyze",
         "actions/dependency-review-action",
         "pip-audit",
-        "python -m build",
+        "uvx --from 'build==1.2.2.post1' python -m build",
         "twine check dist/*",
         "check-wheel-contents",
         "cyclonedx-py environment",
@@ -43,6 +51,24 @@ def test_security_workflow_collects_core_governance_evidence():
 
     for marker in expected_markers:
         assert marker in workflow
+
+
+def test_workflow_actions_are_pinned_to_full_commit_shas():
+    uses_pattern = re.compile(r"uses:\s+[^@\s]+@([^\s#]+)")
+
+    for path in WORKFLOW_FILES:
+        workflow = _read(path)
+        refs = uses_pattern.findall(workflow)
+        assert refs, path
+        for ref in refs:
+            assert re.fullmatch(r"[0-9a-f]{40}", ref), f"{path} uses unpinned ref {ref}"
+
+
+def test_security_workflow_avoids_hash_unpinned_pip_installs():
+    workflow = _read(".github/workflows/security.yml")
+
+    assert "pip install" not in workflow
+    assert "python -m pip" not in workflow
 
 
 def test_scorecard_workflow_uploads_sarif_on_master_and_schedule():
