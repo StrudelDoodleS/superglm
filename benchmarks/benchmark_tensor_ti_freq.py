@@ -41,6 +41,7 @@ OUT_TRAIN_CSV = OUT_DIR / "tensor_ti_freq_train.csv"
 OUT_TEST_CSV = OUT_DIR / "tensor_ti_freq_test.csv"
 OUT_FAIRNESS_JSON = OUT_DIR / "tensor_ti_freq_fairness.json"
 OUT_VALIDATION_JSON = OUT_DIR / "tensor_ti_freq_runtime_validation.json"
+OUT_ATTRIBUTION_JSON = OUT_DIR / "tensor_ti_freq_attribution.json"
 TIMEOUT_S = 120.0
 CASE_TIMEOUT_S = 180.0
 THREAD_ENV_KEYS = (
@@ -177,6 +178,11 @@ def build_fairness_cases() -> tuple[BenchmarkCase, ...]:
     return build_superglm_cases()[:2]
 
 
+def build_attribution_cases() -> tuple[BenchmarkCase, ...]:
+    cases = build_superglm_cases()
+    return (cases[0], cases[1], cases[4], cases[6])
+
+
 def build_superglm_control_profiles() -> tuple[FitControls, ...]:
     return (
         FitControls("S0_current_default"),
@@ -285,6 +291,141 @@ def build_case_deltas(rows: list[dict]) -> dict:
     return deltas
 
 
+def _group_size(group) -> int:
+    size = getattr(group, "size", None)
+    if size is not None:
+        return int(size)
+    return int(getattr(group, "end") - getattr(group, "start"))
+
+
+def _lambda_keys_for_group(
+    group_name: str,
+    lambdas: dict[str, float],
+    all_group_names: frozenset[str],
+) -> list[str]:
+    matches = []
+    for key in lambdas:
+        if key != group_name and not key.startswith(f"{group_name}:"):
+            continue
+        if any(
+            other != group_name
+            and len(other) > len(group_name)
+            and (key == other or key.startswith(f"{other}:"))
+            for other in all_group_names
+        ):
+            continue
+        matches.append(key)
+    return sorted(matches)
+
+
+def summarize_group_attribution(
+    groups,
+    group_edf: dict[str, float] | None,
+    lambdas: dict[str, float] | None,
+) -> dict:
+    """Summarise EDF/lambda attribution by solver group and feature term."""
+    group_edf = group_edf or {}
+    lambdas = lambdas or {}
+    by_group: list[dict] = []
+    feature_acc: dict[str, dict] = {}
+    all_group_names = frozenset(str(getattr(group, "name")) for group in groups)
+
+    for group in groups:
+        group_name = str(getattr(group, "name"))
+        feature_name = str(getattr(group, "feature_name", group_name))
+        edf = group_edf.get(group_name)
+        coef_count = _group_size(group)
+        lambda_keys = _lambda_keys_for_group(group_name, lambdas, all_group_names)
+        row = {
+            "group_name": group_name,
+            "feature_name": feature_name,
+            "subgroup_type": getattr(group, "subgroup_type", None),
+            "coef_count": coef_count,
+            "edf": None if edf is None else float(edf),
+            "lambda_keys": lambda_keys,
+        }
+        by_group.append(row)
+
+        feature_row = feature_acc.setdefault(
+            feature_name,
+            {
+                "feature_name": feature_name,
+                "n_groups": 0,
+                "coef_count": 0,
+                "edf": 0.0,
+                "group_names": [],
+                "subgroup_types": set(),
+                "lambda_keys": set(),
+            },
+        )
+        feature_row["n_groups"] += 1
+        feature_row["coef_count"] += coef_count
+        feature_row["group_names"].append(group_name)
+        if row["subgroup_type"] is not None:
+            feature_row["subgroup_types"].add(row["subgroup_type"])
+        feature_row["lambda_keys"].update(lambda_keys)
+        if edf is not None:
+            feature_row["edf"] += float(edf)
+
+    by_feature = []
+    for feature_row in feature_acc.values():
+        by_feature.append(
+            {
+                "feature_name": feature_row["feature_name"],
+                "n_groups": int(feature_row["n_groups"]),
+                "coef_count": int(feature_row["coef_count"]),
+                "edf": float(feature_row["edf"]),
+                "group_names": list(feature_row["group_names"]),
+                "subgroup_types": sorted(feature_row["subgroup_types"]),
+                "lambda_keys": sorted(feature_row["lambda_keys"]),
+            }
+        )
+
+    return {
+        "by_group": by_group,
+        "by_feature": by_feature,
+        "total_group_edf": float(sum(row["edf"] or 0.0 for row in by_group)),
+    }
+
+
+def _average_ranks(x: np.ndarray) -> np.ndarray:
+    order = np.argsort(x, kind="mergesort")
+    ranks = np.empty(x.size, dtype=np.float64)
+    sorted_x = x[order]
+    start = 0
+    while start < x.size:
+        stop = start + 1
+        while stop < x.size and sorted_x[stop] == sorted_x[start]:
+            stop += 1
+        avg_rank = 0.5 * (start + stop - 1)
+        ranks[order[start:stop]] = avg_rank
+        start = stop
+    return ranks
+
+
+def summarize_eta_delta(eta: np.ndarray, reference_eta: np.ndarray) -> dict:
+    """Return eta delta and rank-agreement diagnostics against a reference."""
+    eta = np.asarray(eta, dtype=np.float64).ravel()
+    reference_eta = np.asarray(reference_eta, dtype=np.float64).ravel()
+    if eta.shape != reference_eta.shape:
+        raise ValueError("eta and reference_eta must have the same shape")
+    delta = eta - reference_eta
+    if eta.size <= 1:
+        rank_corr = 1.0
+    else:
+        eta_rank = _average_ranks(eta)
+        ref_rank = _average_ranks(reference_eta)
+        eta_rank = eta_rank - float(np.mean(eta_rank))
+        ref_rank = ref_rank - float(np.mean(ref_rank))
+        denom = float(np.linalg.norm(eta_rank) * np.linalg.norm(ref_rank))
+        rank_corr = 1.0 if denom == 0.0 else float(np.dot(eta_rank, ref_rank) / denom)
+    return {
+        "max_abs_eta_delta": float(np.max(np.abs(delta))) if delta.size else 0.0,
+        "mean_abs_eta_delta": float(np.mean(np.abs(delta))) if delta.size else 0.0,
+        "rank_corr_eta": rank_corr,
+    }
+
+
 def load_freq() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     df = pd.read_parquet(DATA_PATH)
     df["ClaimNb"] = df["ClaimNb"].clip(upper=4)
@@ -336,6 +477,7 @@ def _fit_case_result(
     interactions: tuple[tuple[str, str], ...],
     controls: FitControls | None = None,
     return_eta: bool = False,
+    return_attribution: bool = False,
 ) -> dict:
     controls = controls or FitControls("S0_current_default")
     model = SuperGLM(
@@ -431,6 +573,12 @@ def _fit_case_result(
     }
     if return_eta:
         row["_eta_test"] = eta
+    if return_attribution:
+        row["group_attribution"] = summarize_group_attribution(
+            model._groups,
+            model._group_edf,
+            model._reml_result.lambdas,
+        )
     return row
 
 
@@ -446,6 +594,7 @@ def _fit_case_worker(
     interactions: tuple[tuple[str, str], ...],
     controls: FitControls,
     return_eta: bool,
+    return_attribution: bool,
 ) -> None:
     try:
         queue.put(
@@ -460,6 +609,7 @@ def _fit_case_worker(
                 interactions=interactions,
                 controls=controls,
                 return_eta=return_eta,
+                return_attribution=return_attribution,
             )
         )
     except BaseException as exc:  # pragma: no cover - benchmark failure path
@@ -487,10 +637,11 @@ def fit_case(
     interactions: tuple[tuple[str, str], ...],
     controls: FitControls | None = None,
     return_eta: bool = False,
+    return_attribution: bool = False,
     timeout_s: float = TIMEOUT_S,
 ) -> dict:
     controls = controls or FitControls("S0_current_default")
-    if return_eta:
+    if return_eta or return_attribution:
         result = _fit_case_result(
             name,
             X_train,
@@ -501,7 +652,8 @@ def fit_case(
             w_test,
             interactions=interactions,
             controls=controls,
-            return_eta=True,
+            return_eta=return_eta,
+            return_attribution=return_attribution,
         )
         result.setdefault("timed_out", False)
         return result
@@ -522,6 +674,7 @@ def fit_case(
             interactions,
             controls,
             return_eta,
+            return_attribution,
         ),
     )
     proc.start()
@@ -786,13 +939,75 @@ def run_runtime_validation_ladder(profile_names: str | None = None) -> dict:
     return out
 
 
+def run_attribution_audit() -> dict:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    X_train, X_test, y_train, y_test, w_train, w_test = _prepare_split()
+    controls = FitControls("S0_current_default")
+    cases = build_attribution_cases()
+    rows: list[dict] = []
+    eta_by_case: dict[str, np.ndarray] = {}
+
+    for case in cases:
+        print(f"[SuperGLM attribution] fitting {case.name}", flush=True)
+        row = fit_case(
+            case.name,
+            X_train,
+            X_test,
+            y_train,
+            y_test,
+            w_train,
+            w_test,
+            interactions=case.interactions,
+            controls=controls,
+            return_eta=True,
+            return_attribution=True,
+        )
+        eta = row.pop("_eta_test", None)
+        if eta is not None:
+            eta_by_case[case.name] = np.asarray(eta, dtype=np.float64)
+        print(f"[SuperGLM attribution] finished {case.name}: fit={row.get('fit_s')}s", flush=True)
+        rows.append(row)
+
+    baseline_eta = eta_by_case.get("baseline_discrete")
+    one_tensor_eta = eta_by_case.get("baseline_plus_ti_discrete")
+    for row in rows:
+        eta = eta_by_case.get(row["model"])
+        row["eta_delta_vs_baseline"] = (
+            None
+            if baseline_eta is None or eta is None or row["model"] == "baseline_discrete"
+            else summarize_eta_delta(eta, baseline_eta)
+        )
+        row["eta_delta_vs_one_tensor"] = (
+            None
+            if one_tensor_eta is None or eta is None or row["model"] == "baseline_plus_ti_discrete"
+            else summarize_eta_delta(eta, one_tensor_eta)
+        )
+
+    out = _base_output(
+        n_total=len(X_train) + len(X_test),
+        n_train=len(X_train),
+        n_test=len(X_test),
+        case_matrix=cases,
+    )
+    out.update(
+        {
+            "suite": "attribution_audit",
+            "control": controls.metadata(),
+            "results": rows,
+            "deltas": build_case_deltas(rows),
+        }
+    )
+    OUT_ATTRIBUTION_JSON.write_text(json.dumps(out, indent=2))
+    return out
+
+
 def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--suite",
-        choices=("matrix", "fairness", "runtime-validation"),
+        choices=("matrix", "fairness", "runtime-validation", "attribution"),
         default="matrix",
         help="Benchmark suite to run.",
     )
@@ -809,6 +1024,9 @@ def main() -> None:
     elif args.suite == "runtime-validation":
         out = run_runtime_validation_ladder(profile_names=args.profiles)
         out_path = OUT_VALIDATION_JSON
+    elif args.suite == "attribution":
+        out = run_attribution_audit()
+        out_path = OUT_ATTRIBUTION_JSON
     else:
         out = run_case_matrix()
         out_path = OUT_JSON
