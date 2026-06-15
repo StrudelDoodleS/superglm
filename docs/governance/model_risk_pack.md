@@ -1,146 +1,198 @@
-# SuperGLM Model Risk Pack
+# SuperGLM Model Risk Telemetry Pack
 
-This document describes how to use SuperGLM's optional MLflow logging helper to
-produce an auditable model run for model risk, software governance, and pricing
-model review. The helper records metadata from an already-fitted model. It does
-not refit the model, change predictions, or alter fitting behaviour.
+This document describes how to collect SuperGLM training telemetry for model
+risk, software governance, and pricing model review. SuperGLM is tracking-system
+agnostic: it does not import MLflow and does not expose a `superglm.mlflow`
+integration. Instead, fitted models expose plain Python telemetry that project
+orchestration code can log to MLflow, files, model cards, or another governance
+system.
 
 ## Reproducibility Controls
 
-A governed SuperGLM run should identify the exact modelling code, fit settings,
-and feature specification used to produce the fitted coefficients. The MLflow
-helper records:
+A governed model run should identify the modelling code, fit controls, data
+snapshots, and feature specification used to produce the fitted coefficients.
+SuperGLM telemetry includes:
 
-- SuperGLM package version and source git SHA when available.
+- SuperGLM package version.
 - Model family, link, penalty settings, direct-solve mode, discrete setting, and
   binning metadata.
-- Fit method, tolerances, maximum iteration settings, convergence mode, and
-  REML profile fields when available.
+- Fit method, convergence mode, constructor tolerance, maximum iteration setting,
+  final deviance, effective degrees of freedom, dispersion, and convergence.
 - Ordered feature list, ordered interaction list, feature classes, interaction
-  classes, and constraints.
-- Smoothing parameters in `lambdas.json`.
-- EDF attribution in `edf_by_term.json`.
+  classes, and fit-time constraints.
+- REML smoothing parameters, lambda history, objective history, inner iteration
+  history, and REML profile fields when available.
+- EDF by solver group and by feature term.
 
-For production review, also record the training data snapshot identifier,
-validation data snapshot identifier, random seed, environment image, and any
-external rating-table or exposure filters as user-supplied MLflow tags or
-parameters.
+Project code should add run-level context that SuperGLM cannot know, such as:
+
+- Source git SHA and package lockfile identifier.
+- Training and validation data snapshot IDs.
+- Feature-engineering pipeline version.
+- Random seed and execution image.
+- Pull request, model change ticket, and approval stage.
+
+## Telemetry API
+
+For a fitted model:
+
+```python
+model.fit_reml(X_train, y_train, sample_weight=w_train, offset=offset_train)
+
+telemetry = model.training_telemetry()
+reml = model.reml_diagnostics()
+```
+
+For per-IRLS diagnostics, fit with diagnostics enabled:
+
+```python
+model.fit(X_train, y_train, record_diagnostics=True)
+iteration_df = model.iteration_diagnostics()
+```
+
+For regularization paths:
+
+```python
+path = model.fit_path(X_train, y_train, sample_weight=w_train)
+path_df = path.to_frame()
+path_payload = path.to_telemetry()
+```
+
+These APIs return plain dictionaries or pandas DataFrames. They do not know
+where the caller will log the information.
+
+## Caller-Owned MLflow Example
+
+If the training job already uses MLflow, pass the telemetry into MLflow from the
+project layer:
+
+```python
+import json
+
+
+def log_superglm_to_mlflow(mlflow, model, *, prefix="train"):
+    telemetry = model.training_telemetry()
+    fit = telemetry["fit"]
+
+    mlflow.log_metrics(
+        {
+            f"{prefix}.deviance": fit["deviance"],
+            f"{prefix}.effective_df": fit["effective_df"],
+            f"{prefix}.phi": fit["phi"],
+            f"{prefix}.n_iter": fit["n_iter"],
+            f"{prefix}.converged": float(fit["converged"]),
+        }
+    )
+
+    for name, value in telemetry["reml"]["lambdas"].items():
+        safe_name = name.replace(":", "_")
+        mlflow.log_metric(f"{prefix}.reml.lambda.{safe_name}", value)
+
+    mlflow.log_dict(telemetry, f"{prefix}_training_telemetry.json")
+
+    try:
+        iteration_df = model.iteration_diagnostics()
+    except RuntimeError:
+        iteration_df = None
+
+    if iteration_df is not None:
+        for row in iteration_df.to_dict("records"):
+            step = int(row["iter"])
+            mlflow.log_metrics(
+                {
+                    f"{prefix}.irls.deviance": row["deviance"],
+                    f"{prefix}.irls.W_ratio": row["W_ratio"],
+                    f"{prefix}.irls.step_halvings": row["step_halvings"],
+                },
+                step=step,
+            )
+        mlflow.log_text(
+            iteration_df.to_json(orient="records"),
+            f"{prefix}_iteration_diagnostics.json",
+        )
+
+    # Optional: log a stable copy through systems that do not support nested
+    # dictionaries natively.
+    mlflow.log_text(
+        json.dumps(telemetry["features"], indent=2, sort_keys=True),
+        f"{prefix}_feature_schema.json",
+    )
+```
+
+Candidate interaction search should use parent and child runs in caller code:
+
+```python
+with mlflow.start_run(run_name="baseline-main-effects"):
+    baseline.fit_reml(X_train, y_train, sample_weight=w_train)
+    log_superglm_to_mlflow(mlflow, baseline, prefix="baseline")
+
+    for candidate_name, candidate_model in candidates:
+        with mlflow.start_run(run_name=candidate_name, nested=True):
+            candidate_model.fit_reml(X_train, y_train, sample_weight=w_train)
+            log_superglm_to_mlflow(mlflow, candidate_model, prefix="candidate")
+            mlflow.log_param("candidate.name", candidate_name)
+            mlflow.log_metric("candidate.validation_gini", validation_gini)
+            mlflow.log_metric("candidate.delta_deviance", delta_deviance)
+```
+
+The important boundary is that MLflow is supplied by the caller. SuperGLM only
+provides telemetry.
 
 ## Interpretability
 
-SuperGLM models are designed to keep the modelling surface inspectable. The
-logged feature schema provides a reviewable inventory of:
+The telemetry feature schema provides a reviewable inventory of:
 
-- Main effects and their feature-spec classes.
-- Interactions and their parent features.
+- Main effects and feature-spec classes.
+- Interactions and parent features.
 - Fit-time constraints, such as monotonicity constraints.
 - Solver groups and group sizes.
 
-The EDF artifact separates effective degrees of freedom by solver group and by
+The EDF payload separates effective degrees of freedom by solver group and by
 feature term. Reviewers should use this to check that model flexibility is
-concentrated in intended rating factors and interaction terms, and that
-constrained terms remain interpretable on the linear predictor scale.
+concentrated in intended rating factors and interactions, and that constrained
+terms remain interpretable on the linear predictor scale.
 
 ## Validation And Benchmarking
 
-The MLflow helper logs model-fit metrics directly from the fitted model when
-available, including deviance, effective degrees of freedom, convergence flags,
-IRLS iterations, REML iterations, and fit statistics such as log likelihood or
-explained deviance.
+SuperGLM telemetry records training fit metrics. Validation metrics remain the
+caller's responsibility because SuperGLM does not own the validation split or
+business scoring policy.
 
-Validation metrics are supplied by the caller because the helper does not own
-the validation split or business scoring policy. Pass out-of-sample Gini,
-calibration, lift, actual-to-expected ratios, benchmark comparisons, and
-champion-challenger deltas through `validation_metrics`. Numeric values are
-logged as MLflow metrics under `validation.*`, and the complete nested payload is
-logged to `validation_metrics.json`.
+For model-risk review, log validation artifacts from the project layer:
 
-For material model changes, the governance pack should include:
-
-- Train and validation performance on fixed data snapshots.
+- Out-of-sample deviance and Gini.
 - Calibration by relevant portfolio segments.
-- Lift or decile charts for the target business decision.
-- Stability checks versus the previous production model.
-- Runtime and fit-quality comparison for any alternative fitting mode, such as
-  candidate interaction screening versus full REML.
+- Lift or decile charts for the target decision.
+- Actual-to-expected ratios.
+- Champion-challenger deltas.
+- Runtime and fit-quality comparison for candidate versus final fitting modes.
 
 ## Limitations
 
-The MLflow helper records what the fitted model exposes. It does not guarantee
-that every possible business validation has been run. In particular:
+Telemetry is not model approval. In particular:
 
-- It does not store training data or validation data by default.
-- It does not calculate Gini, calibration, lift, or fairness metrics unless the
-  caller supplies them.
-- It does not prove that feature engineering outside SuperGLM is reproducible.
-- It does not certify that constraints remain valid after adding unconstrained
-  interactions involving the same variables.
+- It does not store training or validation data.
+- It does not calculate validation Gini, lift, fairness, or calibration metrics
+  unless project code does so separately.
+- It does not prove external feature engineering is reproducible.
+- It does not certify that a monotone main effect remains globally monotone after
+  adding unconstrained interactions involving the same variable.
 - It does not replace independent code review, statistical review, or model risk
   approval.
 
-If the fitted model was produced with approximate or candidate-mode settings,
-label the run clearly using tags such as `run_type=candidate_interaction` and do
-not treat it as the final governed production fit without a full final run.
+If a model was fit with approximate or candidate-mode settings, label the run as
+candidate telemetry and run a full final fit before production approval.
 
 ## Change Control
 
-Each governed model change should have a traceable source-control and review
-path. Recommended controls:
+Recommended controls:
 
-- Log the git SHA and package version for every run.
-- Link the MLflow run to the pull request, issue, model change ticket, or
-  approval record using tags.
-- Keep candidate search runs nested under a parent experiment run so reviewers
-  can distinguish explored interactions from the selected model.
-- Record fit controls and validation data identifiers as tags or parameters.
-- Preserve model artifacts and validation reports in the MLflow run before
-  promoting a model to staging or production.
+- Log source git SHA, package version, and dependency lockfile ID.
+- Link the run to a pull request, model change ticket, and approval record.
+- Keep candidate interaction runs nested under a parent search run.
+- Record fit controls, data snapshot IDs, and validation split identifiers.
+- Preserve telemetry, validation reports, and benchmark outputs before promoting
+  a model to staging or production.
 
-Use nested runs for repeated candidate interaction searches:
-
-```python
-import superglm.mlflow as superglm_mlflow
-
-parent_run_id = superglm_mlflow.log_model_run(
-    baseline_model,
-    experiment_name="pricing-governance",
-    run_name="baseline-main-effects",
-    run_type="baseline",
-    validation_metrics=baseline_metrics,
-)
-
-candidate_run_id = superglm_mlflow.log_model_run(
-    candidate_model,
-    experiment_name="pricing-governance",
-    run_name="candidate-age-area",
-    nested=True,
-    run_type="candidate_interaction",
-    validation_metrics=candidate_metrics,
-    tags={"parent_run_id": parent_run_id},
-)
-```
-
-## What MLflow Captures
-
-`superglm.mlflow.log_model_run()` logs five JSON artifacts:
-
-- `model_config.json`: package version, git SHA, family, link, penalty settings,
-  discrete settings, fit tolerances, convergence status, REML metadata, and fit
-  statistics.
-- `feature_schema.json`: features, interactions, constraints, and solver group
-  metadata.
-- `lambdas.json`: smoothing parameters by term or component.
-- `edf_by_term.json`: effective degrees of freedom by solver group, by feature,
-  and in total.
-- `validation_metrics.json`: caller-supplied validation, lift, calibration, or
-  benchmark metrics.
-
-It also logs scalar MLflow metrics for deviance, effective degrees of freedom,
-convergence, IRLS/REML iterations, smoothing parameters, EDF by group, and any
-numeric validation metrics. Parameters and tags summarize model configuration,
-feature counts, interaction counts, constraint counts, version, run type, and
-git SHA.
-
-MLflow is an optional dependency. Importing `superglm.mlflow` does not require
-MLflow to be installed. Calling `log_model_run()` without MLflow installed raises
-a clear installation error.
+The goal is reproducibility and reviewability without coupling SuperGLM to any
+single experiment-tracking backend.

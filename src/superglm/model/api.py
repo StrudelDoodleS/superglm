@@ -503,6 +503,23 @@ class SuperGLM:
             )
         return pd.DataFrame(rows)
 
+    def training_telemetry(self) -> dict[str, Any]:
+        """Return dependency-free training telemetry for external tracking.
+
+        The payload contains plain JSON-serializable Python objects. SuperGLM
+        does not import or own any experiment-tracking backend; callers can send
+        this payload to MLflow, files, logs, or governance systems.
+        """
+        from superglm.model import telemetry_ops
+
+        return telemetry_ops.training_telemetry(self)
+
+    def reml_diagnostics(self) -> dict[str, Any]:
+        """Return dependency-free REML telemetry for external tracking."""
+        from superglm.model import telemetry_ops
+
+        return telemetry_ops.reml_diagnostics(self)
+
     def diagnostics(self) -> dict[str, Any]:
         """Per-group diagnostic dict for programmatic / audit access."""
         return report_ops.diagnostics(self)

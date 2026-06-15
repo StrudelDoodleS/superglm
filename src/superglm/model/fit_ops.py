@@ -80,6 +80,34 @@ class PathResult:
     converged_path: NDArray  # shape (n_lambda,) — bool
     edf_path: NDArray | None = None  # shape (n_lambda,) — effective df
 
+    def to_frame(self):
+        """Return path telemetry as a pandas DataFrame."""
+        import pandas as pd
+
+        data = {
+            "step": np.arange(len(self.lambda_seq), dtype=int),
+            "lambda": np.asarray(self.lambda_seq, dtype=np.float64),
+            "deviance": np.asarray(self.deviance_path, dtype=np.float64),
+            "n_iter": np.asarray(self.n_iter_path, dtype=int),
+            "converged": pd.Series([bool(v) for v in self.converged_path], dtype=object),
+        }
+        if self.edf_path is not None:
+            data["edf"] = np.asarray(self.edf_path, dtype=np.float64)
+        return pd.DataFrame(data)
+
+    def to_telemetry(self) -> dict[str, list]:
+        """Return path telemetry as JSON-serializable lists."""
+        telemetry = {
+            "lambda_seq": np.asarray(self.lambda_seq, dtype=np.float64).tolist(),
+            "deviance_path": np.asarray(self.deviance_path, dtype=np.float64).tolist(),
+            "n_iter_path": np.asarray(self.n_iter_path, dtype=int).tolist(),
+            "converged_path": [bool(v) for v in self.converged_path],
+            "intercept_path": np.asarray(self.intercept_path, dtype=np.float64).tolist(),
+        }
+        if self.edf_path is not None:
+            telemetry["edf_path"] = np.asarray(self.edf_path, dtype=np.float64).tolist()
+        return telemetry
+
 
 def _compute_null_mu(
     y: NDArray,
