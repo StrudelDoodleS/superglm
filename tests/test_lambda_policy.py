@@ -146,6 +146,36 @@ class TestSplineLambdaPolicy:
         rebuilt_gm = rebuilt.group_matrices[0]
         assert rebuilt_gm.lambda_policies == gm.lambda_policies
 
+    def test_rebuild_discretized_spline_categorical_preserves_lambda_policies(self):
+        """Lambda rebuild should preserve policy metadata on compressed spline-cat groups."""
+        from superglm.dm_builder import rebuild_design_matrix_with_lambdas
+        from superglm.group_matrix import DesignMatrix, DiscretizedSplineCategoricalGroupMatrix
+        from superglm.types import GroupSlice
+
+        n = 24
+        B_unique = np.eye(5, 4)
+        bin_idx = np.arange(n) % B_unique.shape[0]
+        row_idx = np.arange(0, n, 3)
+        gm = DiscretizedSplineCategoricalGroupMatrix(B_unique, np.eye(4), bin_idx, row_idx)
+        gm.omega = np.eye(4)
+        gm.omega_components = [("wiggle", np.eye(4))]
+        gm.component_types = {"wiggle": "smooth"}
+        gm.lambda_policies = {"wiggle": LambdaPolicy.fixed(0.25)}
+        group = GroupSlice(name="x:area[A]", start=0, end=4, feature_name="x:area")
+        dm = DesignMatrix([gm], n=n, p=4)
+
+        rebuilt = rebuild_design_matrix_with_lambdas(
+            dm,
+            [group],
+            {"x:area[A]:wiggle": 0.25},
+            sample_weight=np.ones(n),
+            lambda2=1.0,
+        )
+
+        rebuilt_gm = rebuilt.group_matrices[0]
+        assert isinstance(rebuilt_gm, DiscretizedSplineCategoricalGroupMatrix)
+        assert rebuilt_gm.lambda_policies == gm.lambda_policies
+
 
 # ---------------------------------------------------------------------------
 # fit_reml() integration tests for fixed lambda policies

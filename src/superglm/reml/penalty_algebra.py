@@ -19,6 +19,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.group_matrix import (
+    DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
     GroupMatrix,
@@ -339,7 +340,10 @@ def build_penalty_matrix(
 
         if isinstance(
             gm,
-            SparseSSPGroupMatrix | SplineCategoricalGroupMatrix | DiscretizedSSPGroupMatrix,
+            SparseSSPGroupMatrix
+            | SplineCategoricalGroupMatrix
+            | DiscretizedSplineCategoricalGroupMatrix
+            | DiscretizedSSPGroupMatrix,
         ):
             omega = gm.omega
             if omega is None:

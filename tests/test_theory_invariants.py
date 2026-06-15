@@ -358,6 +358,226 @@ class TestBackendLinearAlgebraInvariants:
         np.testing.assert_array_equal(compact.row_idx, np.flatnonzero(mask))
         assert compact.B_level.shape == (int(mask.sum()), B.shape[1])
 
+    def test_discretized_spline_categorical_matches_row_level_group(self):
+        """Discrete spline-category algebra should match the row-subset implementation."""
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import (
+            DiscretizedSplineCategoricalGroupMatrix,
+            SplineCategoricalGroupMatrix,
+        )
+
+        rng = np.random.default_rng(125)
+        n = 90
+        n_bins = 11
+        n_basis = 6
+        p_solver = 4
+        B_unique = rng.normal(size=(n_bins, n_basis))
+        bin_idx = rng.integers(0, n_bins, size=n)
+        row_idx = np.sort(rng.choice(n, size=37, replace=False))
+        R_inv = rng.normal(size=(n_basis, p_solver))
+        W = rng.uniform(0.2, 2.0, size=n)
+        Wz = rng.normal(size=n)
+        w = rng.normal(size=n)
+        beta = rng.normal(size=p_solver)
+
+        compressed = DiscretizedSplineCategoricalGroupMatrix(B_unique, R_inv, bin_idx, row_idx)
+        row_level = SplineCategoricalGroupMatrix(sp.csr_matrix(B_unique[bin_idx]), R_inv, row_idx)
+
+        np.testing.assert_allclose(compressed.matvec(beta), row_level.matvec(beta), atol=1e-12)
+        np.testing.assert_allclose(compressed.rmatvec(w), row_level.rmatvec(w), atol=1e-12)
+        np.testing.assert_allclose(compressed.gram(W), row_level.gram(W), atol=1e-12)
+        got_gram, got_xtw, got_xtwz = compressed.gram_rmatvec(W, Wz)
+        exp_gram, exp_xtw, exp_xtwz = row_level.gram_rmatvec(W, Wz)
+        np.testing.assert_allclose(got_gram, exp_gram, atol=1e-12)
+        np.testing.assert_allclose(got_xtw, exp_xtw, atol=1e-12)
+        np.testing.assert_allclose(got_xtwz, exp_xtwz, atol=1e-12)
+        np.testing.assert_allclose(compressed.toarray(), row_level.toarray(), atol=1e-12)
+
+        assert not hasattr(compressed, "B_level")
+        np.testing.assert_array_equal(compressed.bin_idx_level, bin_idx[row_idx])
+        np.testing.assert_array_equal(compressed.row_idx, row_idx)
+
+    def test_discretized_spline_categorical_row_subset_preserves_duplicate_rows(self):
+        """Duplicate row subsets should behave like dense row indexing."""
+        from superglm.group_matrix import DiscretizedSplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(131)
+        n_bins = 5
+        B_unique = rng.normal(size=(n_bins, 4))
+        bin_idx = np.array([0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1], dtype=np.intp)
+        row_idx = np.array([2, 5, 7, 9], dtype=np.intp)
+        R_inv = rng.normal(size=(4, 3))
+        gm = DiscretizedSplineCategoricalGroupMatrix(B_unique, R_inv, bin_idx, row_idx)
+
+        idx = np.array([5, 5, 2, 9, 2], dtype=np.intp)
+        sub = gm.row_subset(idx)
+
+        np.testing.assert_allclose(sub.toarray(), gm.toarray()[idx], atol=1e-12)
+
+    def test_discretized_spline_categorical_row_subset_accepts_boolean_mask(self):
+        """Boolean row subsets should follow NumPy row-indexing semantics."""
+        from superglm.group_matrix import DiscretizedSplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(132)
+        B_unique = rng.normal(size=(5, 4))
+        bin_idx = np.array([0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1], dtype=np.intp)
+        row_idx = np.array([2, 5, 7, 9], dtype=np.intp)
+        R_inv = rng.normal(size=(4, 3))
+        gm = DiscretizedSplineCategoricalGroupMatrix(B_unique, R_inv, bin_idx, row_idx)
+
+        mask = np.zeros(gm.shape[0], dtype=bool)
+        mask[[5, 2, 9]] = True
+        sub = gm.row_subset(mask)
+
+        np.testing.assert_allclose(sub.toarray(), gm.toarray()[mask], atol=1e-12)
+
+    def test_discretized_spline_categorical_cross_gram_matches_dense_oracle(self, monkeypatch):
+        """Discrete smooth × discrete spline-category cross-Gram should stay compressed."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+        from superglm.group_matrix import (
+            DiscretizedSplineCategoricalGroupMatrix,
+            DiscretizedSSPGroupMatrix,
+        )
+
+        rng = np.random.default_rng(126)
+        n = 100
+        n_main_bins = 9
+        n_sc_bins = 7
+        B_main = rng.normal(size=(n_main_bins, 5))
+        B_sc = rng.normal(size=(n_sc_bins, 4))
+        idx_main = rng.integers(0, n_main_bins, size=n)
+        idx_sc = rng.integers(0, n_sc_bins, size=n)
+        row_idx = np.sort(rng.choice(n, size=43, replace=False))
+        main = DiscretizedSSPGroupMatrix(B_main, rng.normal(size=(5, 3)), idx_main)
+        spline_cat = DiscretizedSplineCategoricalGroupMatrix(
+            B_sc,
+            rng.normal(size=(4, 2)),
+            idx_sc,
+            row_idx,
+        )
+        W = rng.uniform(0.1, 2.0, size=n)
+        dense = main.toarray().T @ (spline_cat.toarray() * W[:, None])
+
+        def fail_toarray(*args, **kwargs):
+            raise AssertionError("discrete spline-category cross-Gram should not materialize")
+
+        def fail_agg_by_bin(*args, **kwargs):
+            raise AssertionError("discrete spline-category cross-Gram should use support bins")
+
+        monkeypatch.setattr(DiscretizedSplineCategoricalGroupMatrix, "toarray", fail_toarray)
+        monkeypatch.setattr(algebra, "_agg_by_bin", fail_agg_by_bin)
+
+        compact = algebra._cross_gram(main, spline_cat, W)
+
+        np.testing.assert_allclose(compact, dense, rtol=1e-10, atol=1e-10)
+
+    def test_discretized_spline_categorical_pair_cross_gram_matches_dense_oracle(self, monkeypatch):
+        """Two discrete spline-category groups should use support-bin histograms."""
+        from superglm.group_matrix import DiscretizedSplineCategoricalGroupMatrix, _cross_gram
+
+        rng = np.random.default_rng(127)
+        n = 110
+        n_bins_i = 8
+        n_bins_j = 6
+        idx_i = rng.integers(0, n_bins_i, size=n)
+        idx_j = rng.integers(0, n_bins_j, size=n)
+        row_i = np.sort(rng.choice(n, size=52, replace=False))
+        row_j = np.sort(rng.choice(n, size=49, replace=False))
+        left = DiscretizedSplineCategoricalGroupMatrix(
+            rng.normal(size=(n_bins_i, 5)),
+            rng.normal(size=(5, 3)),
+            idx_i,
+            row_i,
+        )
+        right = DiscretizedSplineCategoricalGroupMatrix(
+            rng.normal(size=(n_bins_j, 4)),
+            rng.normal(size=(4, 2)),
+            idx_j,
+            row_j,
+        )
+        W = rng.normal(size=n)
+        dense = left.toarray().T @ (right.toarray() * W[:, None])
+
+        def fail_toarray(*args, **kwargs):
+            raise AssertionError("discrete spline-category pair cross-Gram should not materialize")
+
+        monkeypatch.setattr(DiscretizedSplineCategoricalGroupMatrix, "toarray", fail_toarray)
+
+        compact = _cross_gram(left, right, W)
+
+        np.testing.assert_allclose(compact, dense, rtol=1e-10, atol=1e-10)
+
+    def test_same_categorical_spline_cat_cross_gram_skips_row_intersection(self, monkeypatch):
+        """Same-parent spline-category levels should use level metadata before row intersect."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+        from superglm.group_matrix import DiscretizedSplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(129)
+        n = 100
+        row_idx = np.sort(rng.choice(n, size=44, replace=False))
+        idx_left = rng.integers(0, 8, size=n)
+        idx_right = rng.integers(0, 7, size=n)
+        left = DiscretizedSplineCategoricalGroupMatrix(
+            rng.normal(size=(8, 5)),
+            rng.normal(size=(5, 3)),
+            idx_left,
+            row_idx,
+        )
+        right = DiscretizedSplineCategoricalGroupMatrix(
+            rng.normal(size=(7, 4)),
+            rng.normal(size=(4, 2)),
+            idx_right,
+            row_idx,
+        )
+        left.spline_cat_feature = right.spline_cat_feature = "area"
+        left.spline_cat_level = right.spline_cat_level = "B"
+        W = rng.normal(size=n)
+        dense = left.toarray().T @ (right.toarray() * W[:, None])
+
+        def fail_intersect(*args, **kwargs):
+            raise AssertionError("same-level spline-category cross-Gram should not intersect rows")
+
+        monkeypatch.setattr(algebra.np, "intersect1d", fail_intersect)
+
+        compact = algebra._cross_gram(left, right, W)
+
+        np.testing.assert_allclose(compact, dense, rtol=1e-10, atol=1e-10)
+
+    def test_different_categorical_spline_cat_levels_return_zero_without_intersection(
+        self, monkeypatch
+    ):
+        """Different levels of the same categorical parent are disjoint by construction."""
+        import superglm._group_matrix._group_matrix_algebra as algebra
+        from superglm.group_matrix import DiscretizedSplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(130)
+        n = 100
+        left = DiscretizedSplineCategoricalGroupMatrix(
+            rng.normal(size=(8, 5)),
+            rng.normal(size=(5, 3)),
+            rng.integers(0, 8, size=n),
+            np.arange(0, n, 2),
+        )
+        right = DiscretizedSplineCategoricalGroupMatrix(
+            rng.normal(size=(7, 4)),
+            rng.normal(size=(4, 2)),
+            rng.integers(0, 7, size=n),
+            np.arange(1, n, 2),
+        )
+        left.spline_cat_feature = right.spline_cat_feature = "area"
+        left.spline_cat_level = "B"
+        right.spline_cat_level = "C"
+
+        def fail_intersect(*args, **kwargs):
+            raise AssertionError("different-level spline-category cross-Gram should be zero")
+
+        monkeypatch.setattr(algebra.np, "intersect1d", fail_intersect)
+
+        cross = algebra._cross_gram(left, right, rng.normal(size=n))
+
+        np.testing.assert_allclose(cross, np.zeros((left.shape[1], right.shape[1])), atol=0.0)
+
     def test_spline_categorical_cross_level_gram_is_zero(self):
         """Disjoint spline-by-category level groups have an exact zero cross-block."""
         import scipy.sparse as sp
@@ -440,6 +660,52 @@ class TestBackendLinearAlgebraInvariants:
         R_cat = rng.normal(size=(k_cat, 3))
         mask = rng.random(n) < 0.4
         spline_cat = SplineCategoricalGroupMatrix(B_cat, R_cat, mask)
+        W = rng.normal(size=n)
+
+        compact = _cross_gram_tensor_spline_categorical(tensor, spline_cat, W)
+        dense = tensor.toarray().T @ (spline_cat.toarray() * W[:, None])
+
+        np.testing.assert_allclose(compact, dense, rtol=1e-10, atol=1e-10)
+
+    def test_tensor_discretized_spline_categorical_cross_gram_matches_dense_oracle(self):
+        """Tensor × discrete spline-category should use support-bin cross algebra."""
+        from superglm._group_matrix._group_matrix_algebra import (
+            _cross_gram_tensor_spline_categorical,
+        )
+        from superglm.group_matrix import DiscretizedSplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(128)
+        n = 85
+        n1, n2, n_cat = 5, 4, 7
+        k1, k2, k_cat = 3, 2, 4
+        idx1 = rng.integers(0, n1, size=n)
+        idx2 = rng.integers(0, n2, size=n)
+        idx_cat = rng.integers(0, n_cat, size=n)
+        B1 = rng.normal(size=(n1, k1))
+        B2 = rng.normal(size=(n2, k2))
+        pair_codes = idx1 * n2 + idx2
+        observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+        B_joint = (B1[observed_codes // n2, :, None] * B2[observed_codes % n2, None, :]).reshape(
+            len(observed_codes), k1 * k2
+        )
+        R_tensor = rng.normal(size=(k1 * k2, 5))
+        tensor = DiscretizedTensorGroupMatrix(
+            B1,
+            B2,
+            idx1,
+            idx2,
+            B_joint,
+            R_tensor,
+            pair_idx.astype(np.intp),
+            tensor_id=7,
+        )
+        row_idx = np.sort(rng.choice(n, size=39, replace=False))
+        spline_cat = DiscretizedSplineCategoricalGroupMatrix(
+            rng.normal(size=(n_cat, k_cat)),
+            rng.normal(size=(k_cat, 3)),
+            idx_cat,
+            row_idx,
+        )
         W = rng.normal(size=n)
 
         compact = _cross_gram_tensor_spline_categorical(tensor, spline_cat, W)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from superglm.group_matrix import (
+    DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
@@ -23,7 +24,10 @@ def collect_reml_groups(
         if (
             isinstance(
                 group_matrix,
-                SparseSSPGroupMatrix | SplineCategoricalGroupMatrix | DiscretizedSSPGroupMatrix,
+                SparseSSPGroupMatrix
+                | SplineCategoricalGroupMatrix
+                | DiscretizedSplineCategoricalGroupMatrix
+                | DiscretizedSSPGroupMatrix,
             )
             and group.penalized
             and group_matrix.omega is not None
