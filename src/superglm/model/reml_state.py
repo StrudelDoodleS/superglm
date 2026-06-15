@@ -5,12 +5,18 @@ from __future__ import annotations
 import numpy as np
 
 from superglm.group_matrix import (
+    DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
 
-_SSP_LIKE = SparseSSPGroupMatrix | SplineCategoricalGroupMatrix | DiscretizedSSPGroupMatrix
+_SSP_LIKE = (
+    SparseSSPGroupMatrix
+    | SplineCategoricalGroupMatrix
+    | DiscretizedSplineCategoricalGroupMatrix
+    | DiscretizedSSPGroupMatrix
+)
 
 
 def update_reml_r_inv(model, reml_groups, lambdas) -> None:

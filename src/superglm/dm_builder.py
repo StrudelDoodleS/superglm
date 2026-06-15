@@ -26,6 +26,7 @@ from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
     DiscretizedSCOPGroupMatrix,
+    DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
     GroupMatrix,
@@ -128,6 +129,18 @@ def should_discretize_tensor_interaction(
     return should_discretize(specs[p1], model_discrete) and should_discretize(
         specs[p2], model_discrete
     )
+
+
+def should_discretize_spline_categorical_interaction(
+    ispec: Any, specs: dict[str, FeatureSpec], model_discrete: bool
+) -> bool:
+    """Check if a spline-categorical interaction should use spline support compression."""
+    from superglm.features.interaction import SplineCategorical
+
+    if not isinstance(ispec, SplineCategorical):
+        return False
+    spline_name, _cat_name = ispec.parent_names
+    return should_discretize(specs[spline_name], model_discrete)
 
 
 def resolve_discrete_n_bins(
@@ -356,19 +369,38 @@ def _process_info(
     # R_inv_local: SSP transform in post-identifiability space (projected -> solver).
     # Used to compose constraints that are already in post-identifiability space.
     R_inv_local: NDArray | None = None
-    is_spline_cat = info.spline_cat_basis is not None and info.spline_cat_mask is not None
+    is_spline_cat = info.spline_cat_mask is not None and (
+        info.spline_cat_basis is not None
+        or (info.spline_cat_basis_unique is not None and info.spline_cat_bin_idx is not None)
+    )
 
     if is_spline_cat:
-        B_for = sp.csr_matrix(info.spline_cat_basis)
         mask = np.asarray(info.spline_cat_mask, dtype=bool)
         row_idx = np.flatnonzero(mask)
-        B_level = B_for[row_idx]
-        level_weight = sample_weight[row_idx]
+        if info.spline_cat_basis_unique is not None and info.spline_cat_bin_idx is not None:
+            B_support: sp.spmatrix | NDArray = np.asarray(
+                info.spline_cat_basis_unique,
+                dtype=np.float64,
+            )
+            bin_idx_level = np.asarray(info.spline_cat_bin_idx, dtype=np.intp)[row_idx]
+            level_weight = np.bincount(
+                bin_idx_level,
+                weights=sample_weight[row_idx],
+                minlength=B_support.shape[0],
+            )
+            B_for: sp.spmatrix | NDArray = B_support
+            use_discrete_spline_cat = True
+        else:
+            B_full = sp.csr_matrix(info.spline_cat_basis)
+            B_level = B_full[row_idx]
+            B_for = B_level
+            level_weight = sample_weight[row_idx]
+            use_discrete_spline_cat = False
         if info.projection is not None:
             P = info.projection
             if info.reparametrize and info.penalty_matrix is not None:
                 R_inv_local = compute_projected_R_inv(
-                    B_level,
+                    B_for,
                     P,
                     info.penalty_matrix,
                     level_weight,
@@ -380,7 +412,7 @@ def _process_info(
                 R_inv_local = None
             omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
         elif info.reparametrize and info.penalty_matrix is not None:
-            R_inv = compute_R_inv(B_level, info.penalty_matrix, level_weight, lambda2)
+            R_inv = compute_R_inv(B_for, info.penalty_matrix, level_weight, lambda2)
             R_inv_local = R_inv
             omega_full = info.penalty_matrix
         else:
@@ -389,7 +421,17 @@ def _process_info(
             omega_full = info.penalty_matrix
 
         n_cols = R_inv.shape[1]
-        gm = SplineCategoricalGroupMatrix(B_for, R_inv, row_idx)
+        if use_discrete_spline_cat:
+            gm = DiscretizedSplineCategoricalGroupMatrix(
+                B_support,
+                R_inv,
+                info.spline_cat_bin_idx,
+                row_idx,
+            )
+        else:
+            gm = SplineCategoricalGroupMatrix(B_full, R_inv, row_idx)
+        gm.spline_cat_level = info.spline_cat_level
+        gm.spline_cat_feature = info.spline_cat_feature
         if omega_full is not None:
             gm.omega = omega_full
         if info.projection is not None:
@@ -811,6 +853,11 @@ def build_design_matrix(
         x1 = np.asarray(X[p1])
         x2 = np.asarray(X[p2])
         use_discrete_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)
+        use_discrete_spline_cat = should_discretize_spline_categorical_interaction(
+            ispec,
+            specs,
+            model_discrete,
+        )
         B_unique_inter = None
         bin_idx_inter = None
         exposure_agg_inter = None
@@ -836,6 +883,15 @@ def build_design_matrix(
             )
             tensor_id = _next_tensor_id
             _next_tensor_id += 1
+        elif use_discrete_spline_cat:
+            n_bins_spline = resolve_discrete_n_bins(p1, specs[p1], n_bins_config)
+            result = ispec.build_discrete(
+                x1,
+                x2,
+                specs,
+                n_bins_spline,
+                sample_weight=sample_weight,
+            )
         else:
             result = ispec.build(x1, x2, specs, sample_weight=sample_weight)
 
@@ -1103,6 +1159,49 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.lambda_policies = gm.lambda_policies
+            new_gm.spline_cat_level = gm.spline_cat_level
+            new_gm.spline_cat_feature = gm.spline_cat_feature
+            new_gms.append(new_gm)
+        elif isinstance(gm, DiscretizedSplineCategoricalGroupMatrix) and _group_has_lambda(
+            gm, g, lambdas
+        ):
+            if gm.omega is None:
+                new_gms.append(gm)
+                continue
+            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            level_weight = np.bincount(
+                gm.bin_idx_level,
+                weights=sample_weight[gm.row_idx],
+                minlength=gm.n_bins,
+            )
+            if gm.projection is not None:
+                P = gm.projection
+                omega_proj = P.T @ omega_eff @ P
+                R_inv_local = compute_projected_R_inv(
+                    gm.B_unique,
+                    P,
+                    omega_proj,
+                    level_weight,
+                    lam,
+                )
+                R_inv_new = P @ R_inv_local
+            else:
+                R_inv_new = compute_R_inv(gm.B_unique, omega_eff, level_weight, lam)
+            new_gm = DiscretizedSplineCategoricalGroupMatrix(
+                gm.B_unique,
+                R_inv_new,
+                gm.bin_idx_level,
+                gm.row_idx,
+                n_rows=gm.n_rows,
+                bin_idx_is_level=True,
+            )
+            new_gm.omega = gm.omega
+            new_gm.projection = gm.projection
+            new_gm.omega_components = gm.omega_components
+            new_gm.component_types = gm.component_types
+            new_gm.lambda_policies = gm.lambda_policies
+            new_gm.spline_cat_level = gm.spline_cat_level
+            new_gm.spline_cat_feature = gm.spline_cat_feature
             new_gms.append(new_gm)
         elif isinstance(gm, DiscretizedTensorGroupMatrix) and _group_has_lambda(gm, g, lambdas):
             if gm.omega is None:

@@ -193,6 +193,8 @@ class SplineCategoricalGroupMatrix:
         "omega_components",
         "component_types",
         "lambda_policies",
+        "spline_cat_level",
+        "spline_cat_feature",
     )
 
     def __init__(self, B_csr: sp.spmatrix, R_inv: NDArray, mask_or_idx: NDArray):
@@ -223,6 +225,8 @@ class SplineCategoricalGroupMatrix:
         self.omega_components = None
         self.component_types = None
         self.lambda_policies = None
+        self.spline_cat_level = None
+        self.spline_cat_feature = None
 
     def matvec(self, v: NDArray) -> NDArray:
         out = np.zeros(self.shape[0], dtype=np.float64)
@@ -279,4 +283,6 @@ class SplineCategoricalGroupMatrix:
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         sub.lambda_policies = self.lambda_policies
+        sub.spline_cat_level = self.spline_cat_level
+        sub.spline_cat_feature = self.spline_cat_feature
         return sub

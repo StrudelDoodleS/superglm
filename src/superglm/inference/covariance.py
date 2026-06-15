@@ -11,6 +11,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.group_matrix import (
+    DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
@@ -124,7 +125,10 @@ def _penalised_xtwx_inv(
 
             if isinstance(
                 gm_orig,
-                SparseSSPGroupMatrix | SplineCategoricalGroupMatrix | DiscretizedSSPGroupMatrix,
+                SparseSSPGroupMatrix
+                | SplineCategoricalGroupMatrix
+                | DiscretizedSplineCategoricalGroupMatrix
+                | DiscretizedSSPGroupMatrix,
             ):
                 R_inv = gm_orig.R_inv
                 omega = gm_orig.omega
@@ -261,7 +265,10 @@ def _penalised_xtwx_inv_gram(
 
             if isinstance(
                 gm_orig,
-                SparseSSPGroupMatrix | SplineCategoricalGroupMatrix | DiscretizedSSPGroupMatrix,
+                SparseSSPGroupMatrix
+                | SplineCategoricalGroupMatrix
+                | DiscretizedSplineCategoricalGroupMatrix
+                | DiscretizedSSPGroupMatrix,
             ):
                 R_inv = gm_orig.R_inv
                 omega = gm_orig.omega

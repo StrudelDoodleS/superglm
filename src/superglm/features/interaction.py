@@ -108,6 +108,68 @@ class SplineCategorical:
                     projection=self._projection,
                     spline_cat_basis=B,
                     spline_cat_mask=mask,
+                    spline_cat_level=str(level),
+                    spline_cat_feature=self.cat_name,
+                )
+            )
+        return groups
+
+    def build_discrete(
+        self,
+        x_spline: NDArray,
+        x_cat: NDArray,
+        parent_specs: dict,
+        n_bins: int,
+        sample_weight: NDArray | None = None,
+    ) -> list[GroupInfo]:
+        """Build spline-by-category groups from compressed spline support."""
+        from superglm.features.categorical import Categorical
+        from superglm.features.spline import _SplineBase
+
+        spline_spec = parent_specs[self.spline_name]
+        cat_spec = parent_specs[self.cat_name]
+        if not isinstance(spline_spec, _SplineBase):
+            raise TypeError(f"Expected a spline spec for {self.spline_name}")
+        if not isinstance(cat_spec, Categorical):
+            raise TypeError(f"Expected Categorical spec for {self.cat_name}")
+
+        self._spline_spec = spline_spec
+        self._knots = spline_spec._knots
+        self._n_basis = spline_spec._n_basis
+        self._degree = spline_spec.degree
+        self._lo = spline_spec._lo
+        self._hi = spline_spec._hi
+        self._non_base = list(cat_spec._non_base)
+        self._base_level = cat_spec._base_level
+        self._projection = getattr(spline_spec, "_interaction_projection", None)
+
+        x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
+        x_cat = np.asarray(x_cat).ravel()
+        support, bin_idx = _discretize_column(x_spline, int(n_bins))
+        B_unique = np.asarray(spline_spec._raw_basis_matrix(support), dtype=np.float64)
+
+        omega = spline_spec._build_penalty()
+        if self._projection is not None:
+            omega = self._projection.T @ omega @ self._projection
+            n_cols = self._projection.shape[1]
+        else:
+            n_cols = self._n_basis
+
+        groups: list[GroupInfo] = []
+        for level in self._non_base:
+            mask = x_cat == level
+            groups.append(
+                GroupInfo(
+                    columns=None,
+                    n_cols=n_cols,
+                    penalty_matrix=omega,
+                    reparametrize=True,
+                    projection=self._projection,
+                    spline_cat_mask=mask,
+                    spline_cat_basis_unique=B_unique,
+                    spline_cat_bin_idx=bin_idx,
+                    spline_cat_level=str(level),
+                    spline_cat_feature=self.cat_name,
                 )
             )
         return groups

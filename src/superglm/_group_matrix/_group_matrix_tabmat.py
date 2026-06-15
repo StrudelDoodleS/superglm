@@ -12,6 +12,7 @@ def _build_tabmat_split(gms):
         CategoricalGroupMatrix,
         DenseGroupMatrix,
         DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
         SparseGroupMatrix,
         SparseSSPGroupMatrix,
@@ -23,6 +24,7 @@ def _build_tabmat_split(gms):
             gm,
             SparseSSPGroupMatrix
             | SplineCategoricalGroupMatrix
+            | DiscretizedSplineCategoricalGroupMatrix
             | DiscretizedSSPGroupMatrix
             | DiscretizedSCOPGroupMatrix,
         )

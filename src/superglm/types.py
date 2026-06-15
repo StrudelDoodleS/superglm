@@ -153,6 +153,12 @@ class GroupInfo:
     # None so the builder can avoid materialising B * level_indicator.
     spline_cat_basis: sp.spmatrix | None = None
     spline_cat_mask: NDArray | None = None
+    # Discrete spline-by-categorical support representation.  When populated,
+    # the builder can keep fit algebra on B_unique/bin_idx instead of B_level.
+    spline_cat_basis_unique: NDArray | None = None
+    spline_cat_bin_idx: NDArray | None = None
+    spline_cat_level: str | None = None
+    spline_cat_feature: str | None = None
 
     def __post_init__(self):
         if self.columns is None:

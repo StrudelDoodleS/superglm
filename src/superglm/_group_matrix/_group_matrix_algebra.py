@@ -114,6 +114,7 @@ def _runtime_group_matrix_types():
     from ..group_matrix import (
         CategoricalGroupMatrix,
         DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
         SparseGroupMatrix,
@@ -124,6 +125,7 @@ def _runtime_group_matrix_types():
     return (
         CategoricalGroupMatrix,
         DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
         SparseGroupMatrix,
@@ -143,6 +145,7 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
     (
         CategoricalGroupMatrix,
         _DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
         _DiscretizedSSPGroupMatrix,
         _DiscretizedTensorGroupMatrix,
         SparseGroupMatrix,
@@ -166,6 +169,10 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
             gm._data, gm._indices, gm._indptr, gm._p_b, bin_idx, W, n_bins
         )
         return B_agg @ gm.R_inv
+    if isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
+        rows = gm.row_idx
+        X_level = (gm.B_unique @ gm.R_inv)[gm.bin_idx_level]
+        return _weighted_bincount_2d(bin_idx[rows], W[rows], X_level, n_bins)
     if isinstance(gm, SplineCategoricalGroupMatrix):
         rows = gm.row_idx
         B_agg = _csr_weighted_bincount(
@@ -482,6 +489,20 @@ def _cross_gram_tensor_spline_categorical(
     idx1 = gm_tensor.idx1[rows]
     idx2 = gm_tensor.idx2[rows]
 
+    if hasattr(gm_spline_cat, "B_unique"):
+        bin_cat = gm_spline_cat.bin_idx_level
+        for j2 in range(K2):
+            w_col = W_rows * B2[idx2, j2]
+            H = _disc_disc_2d_hist(
+                idx1,
+                bin_cat,
+                w_col,
+                gm_tensor.n_bins1,
+                gm_spline_cat.n_bins,
+            )
+            result_raw[j2::K2, :] = B1.T @ H @ gm_spline_cat.B_unique
+        return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
+
     for j2 in range(K2):
         w_col = W_rows * B2[idx2, j2]
         B_cat_agg = _csr_weighted_bincount(
@@ -504,6 +525,16 @@ def _cross_gram_categorical_spline_categorical(
     W: NDArray,
 ) -> NDArray:
     """Cross-gram X_cat.T W X_spline_cat via one categorical aggregation."""
+    if hasattr(gm_spline_cat, "B_unique"):
+        rows = gm_spline_cat.row_idx
+        B_agg = _weighted_bincount_2d(
+            gm_cat.codes[rows],
+            W[rows],
+            gm_spline_cat.B_unique[gm_spline_cat.bin_idx_level],
+            gm_cat.n_levels + 1,
+        )
+        return B_agg[: gm_cat.n_levels] @ gm_spline_cat.R_inv
+
     B_agg = _csr_weighted_bincount(
         gm_spline_cat._data,
         gm_spline_cat._indices,
@@ -522,6 +553,42 @@ def _cross_gram_spline_categorical_spline_categorical(
     W: NDArray,
 ) -> NDArray:
     """Cross-gram between compact spline-category level groups."""
+    same_cat_parent = getattr(gm_i, "spline_cat_feature", None) is not None and getattr(
+        gm_i, "spline_cat_feature", None
+    ) == getattr(gm_j, "spline_cat_feature", None)
+    if same_cat_parent and getattr(gm_i, "spline_cat_level", None) != getattr(
+        gm_j, "spline_cat_level", None
+    ):
+        return np.zeros((gm_i.shape[1], gm_j.shape[1]))
+
+    if same_cat_parent and np.array_equal(gm_i.row_idx, gm_j.row_idx):
+        rows = gm_i.row_idx
+        i_discrete = hasattr(gm_i, "B_unique")
+        j_discrete = hasattr(gm_j, "B_unique")
+        if i_discrete and j_discrete:
+            H = _disc_disc_2d_hist(
+                gm_i.bin_idx_level,
+                gm_j.bin_idx_level,
+                W[rows],
+                gm_i.n_bins,
+                gm_j.n_bins,
+            )
+            raw = gm_i.B_unique.T @ H @ gm_j.B_unique
+            return gm_i.R_inv.T @ raw @ gm_j.R_inv
+        if i_discrete:
+            B_i = gm_i.B_unique[gm_i.bin_idx_level]
+            raw = B_i.T @ np.asarray(gm_j.B_level.multiply(W[rows][:, None]).toarray())
+            return gm_i.R_inv.T @ np.asarray(raw, dtype=np.float64) @ gm_j.R_inv
+        if j_discrete:
+            B_j = gm_j.B_unique[gm_j.bin_idx_level]
+            raw = np.asarray((gm_i.B_level.multiply(W[rows][:, None]).T @ B_j), dtype=np.float64)
+            return gm_i.R_inv.T @ raw @ gm_j.R_inv
+
+        raw = gm_i.B_level.T @ gm_j.B_level.multiply(W[rows][:, None])
+        if hasattr(raw, "toarray"):
+            raw = raw.toarray()
+        return gm_i.R_inv.T @ np.asarray(raw, dtype=np.float64) @ gm_j.R_inv
+
     common_rows, pos_i, pos_j = np.intersect1d(
         gm_i.row_idx,
         gm_j.row_idx,
@@ -531,12 +598,60 @@ def _cross_gram_spline_categorical_spline_categorical(
     if common_rows.size == 0:
         return np.zeros((gm_i.shape[1], gm_j.shape[1]))
 
+    i_discrete = hasattr(gm_i, "B_unique")
+    j_discrete = hasattr(gm_j, "B_unique")
+    if i_discrete and j_discrete:
+        H = _disc_disc_2d_hist(
+            gm_i.bin_idx_level[pos_i],
+            gm_j.bin_idx_level[pos_j],
+            W[common_rows],
+            gm_i.n_bins,
+            gm_j.n_bins,
+        )
+        raw = gm_i.B_unique.T @ H @ gm_j.B_unique
+        return gm_i.R_inv.T @ raw @ gm_j.R_inv
+
+    if i_discrete:
+        B_i = gm_i.B_unique[gm_i.bin_idx_level[pos_i]]
+        B_j = gm_j.B_level[pos_j]
+        raw = B_i.T @ np.asarray(B_j.multiply(W[common_rows][:, None]).toarray())
+        return gm_i.R_inv.T @ np.asarray(raw, dtype=np.float64) @ gm_j.R_inv
+
+    if j_discrete:
+        B_i = gm_i.B_level[pos_i]
+        B_j = gm_j.B_unique[gm_j.bin_idx_level[pos_j]]
+        raw = np.asarray((B_i.multiply(W[common_rows][:, None]).T @ B_j), dtype=np.float64)
+        return gm_i.R_inv.T @ raw @ gm_j.R_inv
+
     B_i = gm_i.B_level[pos_i]
     B_j = gm_j.B_level[pos_j]
     raw = B_i.T @ B_j.multiply(W[common_rows][:, None])
     if hasattr(raw, "toarray"):
         raw = raw.toarray()
     return gm_i.R_inv.T @ np.asarray(raw, dtype=np.float64) @ gm_j.R_inv
+
+
+def _cross_gram_discrete_spline_categorical(
+    gm_disc: DiscretizedSSPGroupMatrix,
+    gm_spline_cat: GroupMatrix,
+    W: NDArray,
+) -> NDArray | None:
+    """Cross-gram X_disc.T W X_spline_cat from compressed support bins."""
+    if not hasattr(gm_spline_cat, "B_unique"):
+        return None
+    rows = gm_spline_cat.row_idx
+    n_joint = gm_disc.n_bins * gm_spline_cat.n_bins
+    if n_joint > _MAX_DISC_DISC_HIST_CELLS:
+        return None
+    H = _disc_disc_2d_hist(
+        gm_disc.bin_idx[rows],
+        gm_spline_cat.bin_idx_level,
+        W[rows],
+        gm_disc.n_bins,
+        gm_spline_cat.n_bins,
+    )
+    raw = gm_disc.B_unique.T @ H @ gm_spline_cat.B_unique
+    return gm_disc.R_inv.T @ raw @ gm_spline_cat.R_inv
 
 
 def _cross_gram(
@@ -557,16 +672,16 @@ def _cross_gram(
     (
         CategoricalGroupMatrix,
         DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
         _SparseGroupMatrix,
         _SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
     ) = _runtime_group_matrix_types()
+    SplineCatTypes = (SplineCategoricalGroupMatrix, DiscretizedSplineCategoricalGroupMatrix)
 
-    if isinstance(gm_i, SplineCategoricalGroupMatrix) and isinstance(
-        gm_j, SplineCategoricalGroupMatrix
-    ):
+    if isinstance(gm_i, SplineCatTypes) and isinstance(gm_j, SplineCatTypes):
         t0 = perf_counter() if profile is not None else 0.0
         result = _cross_gram_spline_categorical_spline_categorical(gm_i, gm_j, W)
         _profile_elapsed(profile, "block_cross_spline_cat_spline_cat_s", t0)
@@ -590,31 +705,48 @@ def _cross_gram(
             _profile_elapsed(profile, "block_cross_tensor_tensor_s", t0)
             return result
 
-    if isinstance(gm_i, DiscretizedTensorGroupMatrix) and isinstance(
-        gm_j, SplineCategoricalGroupMatrix
-    ):
+    if isinstance(gm_i, DiscretizedTensorGroupMatrix) and isinstance(gm_j, SplineCatTypes):
         t0 = perf_counter() if profile is not None else 0.0
         result = _cross_gram_tensor_spline_categorical(gm_i, gm_j, W)
         _profile_elapsed(profile, "block_cross_tensor_spline_cat_s", t0)
         return result
-    if isinstance(gm_j, DiscretizedTensorGroupMatrix) and isinstance(
-        gm_i, SplineCategoricalGroupMatrix
-    ):
+    if isinstance(gm_j, DiscretizedTensorGroupMatrix) and isinstance(gm_i, SplineCatTypes):
         t0 = perf_counter() if profile is not None else 0.0
         result = _cross_gram_tensor_spline_categorical(gm_j, gm_i, W).T
         _profile_elapsed(profile, "block_cross_tensor_spline_cat_s", t0)
         return result
 
-    if isinstance(gm_i, CategoricalGroupMatrix) and isinstance(gm_j, SplineCategoricalGroupMatrix):
+    if isinstance(gm_i, CategoricalGroupMatrix) and isinstance(gm_j, SplineCatTypes):
         t0 = perf_counter() if profile is not None else 0.0
         result = _cross_gram_categorical_spline_categorical(gm_i, gm_j, W)
         _profile_elapsed(profile, "block_cross_cat_spline_cat_s", t0)
         return result
-    if isinstance(gm_j, CategoricalGroupMatrix) and isinstance(gm_i, SplineCategoricalGroupMatrix):
+    if isinstance(gm_j, CategoricalGroupMatrix) and isinstance(gm_i, SplineCatTypes):
         t0 = perf_counter() if profile is not None else 0.0
         result = _cross_gram_categorical_spline_categorical(gm_j, gm_i, W).T
         _profile_elapsed(profile, "block_cross_cat_spline_cat_s", t0)
         return result
+
+    if (
+        isinstance(gm_i, DiscretizedSSPGroupMatrix)
+        and not isinstance(gm_i, DiscretizedTensorGroupMatrix)
+        and isinstance(gm_j, DiscretizedSplineCategoricalGroupMatrix)
+    ):
+        t0 = perf_counter() if profile is not None else 0.0
+        result = _cross_gram_discrete_spline_categorical(gm_i, gm_j, W)
+        if result is not None:
+            _profile_elapsed(profile, "block_cross_disc_other_s", t0)
+            return result
+    if (
+        isinstance(gm_j, DiscretizedSSPGroupMatrix)
+        and not isinstance(gm_j, DiscretizedTensorGroupMatrix)
+        and isinstance(gm_i, DiscretizedSplineCategoricalGroupMatrix)
+    ):
+        t0 = perf_counter() if profile is not None else 0.0
+        result = _cross_gram_discrete_spline_categorical(gm_j, gm_i, W)
+        if result is not None:
+            _profile_elapsed(profile, "block_cross_disc_other_s", t0)
+            return result.T
 
     # Tensor × discretized main-effect (not tensor × tensor with different ids)
     if (
@@ -770,6 +902,7 @@ def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
     (
         CategoricalGroupMatrix,
         DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
         _DiscretizedTensorGroupMatrix,
         _SparseGroupMatrix,
@@ -780,6 +913,7 @@ def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
         gm,
         SparseSSPGroupMatrix
         | SplineCategoricalGroupMatrix
+        | DiscretizedSplineCategoricalGroupMatrix
         | DiscretizedSSPGroupMatrix
         | DiscretizedSCOPGroupMatrix,
     ):
@@ -824,6 +958,7 @@ def _block_xtwx(
             (
                 _CategoricalGroupMatrix,
                 DiscretizedSCOPGroupMatrix,
+                DiscretizedSplineCategoricalGroupMatrix,
                 DiscretizedSSPGroupMatrix,
                 DiscretizedTensorGroupMatrix,
                 _SparseGroupMatrix,
@@ -836,6 +971,7 @@ def _block_xtwx(
                 gm_i,
                 DiscretizedSSPGroupMatrix
                 | DiscretizedSCOPGroupMatrix
+                | DiscretizedSplineCategoricalGroupMatrix
                 | SplineCategoricalGroupMatrix,
             ):
                 _profile_elapsed(profile, "block_diag_discrete_ssp_s", t0)
@@ -873,6 +1009,7 @@ def _block_xtwx_rhs(
     (
         _CategoricalGroupMatrix,
         DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
         _SparseGroupMatrix,
@@ -906,7 +1043,10 @@ def _block_xtwx_rhs(
             _profile_elapsed(profile, "block_diag_tensor_s", t0)
         elif isinstance(
             gm_i,
-            DiscretizedSSPGroupMatrix | DiscretizedSCOPGroupMatrix | SplineCategoricalGroupMatrix,
+            DiscretizedSSPGroupMatrix
+            | DiscretizedSCOPGroupMatrix
+            | DiscretizedSplineCategoricalGroupMatrix
+            | SplineCategoricalGroupMatrix,
         ):
             t0 = perf_counter() if profile is not None else 0.0
             gram_i, xtw_i, xtwz_i = gm_i.gram_rmatvec(W, Wz)
@@ -966,6 +1106,7 @@ def _block_xtwx_signed(
             (
                 _CategoricalGroupMatrix,
                 DiscretizedSCOPGroupMatrix,
+                DiscretizedSplineCategoricalGroupMatrix,
                 DiscretizedSSPGroupMatrix,
                 DiscretizedTensorGroupMatrix,
                 _SparseGroupMatrix,
@@ -978,6 +1119,7 @@ def _block_xtwx_signed(
                 gm_i,
                 DiscretizedSSPGroupMatrix
                 | DiscretizedSCOPGroupMatrix
+                | DiscretizedSplineCategoricalGroupMatrix
                 | SplineCategoricalGroupMatrix,
             ):
                 _profile_elapsed(profile, "block_diag_discrete_ssp_s", t0)
