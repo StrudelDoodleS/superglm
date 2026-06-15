@@ -51,6 +51,23 @@ def test_scorecard_workflow_uploads_sarif_on_master_and_schedule():
     assert "results_format: sarif" in workflow
     assert "github/codeql-action/upload-sarif" in workflow
     assert "security-events: write" in workflow
+    assert "upload-sarif:" in workflow
+    assert "needs: scorecard" in workflow
+    assert "name: scorecard-results" in workflow
+    assert (
+        "if: github.event_name == 'branch_protection_rule' || github.ref == 'refs/heads/master'"
+    ) in workflow
+
+
+def test_scorecard_generation_permissions_allow_openssf_publication():
+    workflow = _read(".github/workflows/scorecard.yml")
+    scorecard_job = workflow.split("  scorecard:", maxsplit=1)[1].split(
+        "  upload-sarif:", maxsplit=1
+    )[0]
+
+    assert "security-events: write" not in scorecard_job
+    assert "id-token: write" in scorecard_job
+    assert "publish_results: true" in scorecard_job
 
 
 def test_security_policy_and_codeowners_cover_governance_surfaces():
