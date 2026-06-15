@@ -217,6 +217,39 @@ def test_group_attribution_sums_group_edf_by_term():
     assert by_feature["area"]["edf"] == 1.0
 
 
+def test_group_attribution_does_not_attach_interaction_lambdas_to_parent_feature():
+    groups = [
+        SimpleNamespace(
+            name="DrivAge",
+            feature_name="DrivAge",
+            subgroup_type="spline",
+            start=0,
+            end=3,
+            size=3,
+        ),
+        SimpleNamespace(
+            name="DrivAge:BonusMalus",
+            feature_name="DrivAge:BonusMalus",
+            subgroup_type="tensor",
+            start=3,
+            end=8,
+            size=5,
+        ),
+    ]
+    lambdas = {
+        "DrivAge": 1.0,
+        "DrivAge:BonusMalus:margin_DrivAge": 2.0,
+    }
+
+    rows = bench.summarize_group_attribution(groups, {}, lambdas)
+
+    by_group = {row["group_name"]: row for row in rows["by_group"]}
+    by_feature = {row["feature_name"]: row for row in rows["by_feature"]}
+    assert by_group["DrivAge"]["lambda_keys"] == ["DrivAge"]
+    assert by_feature["DrivAge"]["lambda_keys"] == ["DrivAge"]
+    assert by_group["DrivAge:BonusMalus"]["lambda_keys"] == ["DrivAge:BonusMalus:margin_DrivAge"]
+
+
 def test_eta_attribution_reports_rank_and_delta_metrics():
     ref = np.array([0.1, 0.4, 0.2, 0.3])
     alt = np.array([0.1, 0.3, 0.2, 0.4])

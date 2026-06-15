@@ -299,16 +299,23 @@ def _group_size(group) -> int:
 
 
 def _lambda_keys_for_group(
-    group_name: str, feature_name: str, lambdas: dict[str, float]
+    group_name: str,
+    lambdas: dict[str, float],
+    all_group_names: frozenset[str],
 ) -> list[str]:
-    return sorted(
-        key
-        for key in lambdas
-        if key == group_name
-        or key.startswith(f"{group_name}:")
-        or key == feature_name
-        or key.startswith(f"{feature_name}:")
-    )
+    matches = []
+    for key in lambdas:
+        if key != group_name and not key.startswith(f"{group_name}:"):
+            continue
+        if any(
+            other != group_name
+            and len(other) > len(group_name)
+            and (key == other or key.startswith(f"{other}:"))
+            for other in all_group_names
+        ):
+            continue
+        matches.append(key)
+    return sorted(matches)
 
 
 def summarize_group_attribution(
@@ -321,13 +328,14 @@ def summarize_group_attribution(
     lambdas = lambdas or {}
     by_group: list[dict] = []
     feature_acc: dict[str, dict] = {}
+    all_group_names = frozenset(str(getattr(group, "name")) for group in groups)
 
     for group in groups:
         group_name = str(getattr(group, "name"))
         feature_name = str(getattr(group, "feature_name", group_name))
         edf = group_edf.get(group_name)
         coef_count = _group_size(group)
-        lambda_keys = _lambda_keys_for_group(group_name, feature_name, lambdas)
+        lambda_keys = _lambda_keys_for_group(group_name, lambdas, all_group_names)
         row = {
             "group_name": group_name,
             "feature_name": feature_name,
