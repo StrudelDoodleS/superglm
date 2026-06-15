@@ -31,6 +31,7 @@ from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initi
 from superglm.group_matrix import (
     DesignMatrix,
     DiscretizedSCOPGroupMatrix,
+    DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     GroupMatrix,
     _block_xtwx_rhs,
@@ -591,7 +592,10 @@ def fit_irls_direct(
     # Constrained QP / SCOP requires Gram path — force it if constraints present
     _use_qr = direct_solve == "qr" and not has_constraints and not _has_scop
     if _use_qr:
-        has_disc = any(isinstance(gm, DiscretizedSSPGroupMatrix) for gm in gms)
+        has_disc = any(
+            isinstance(gm, DiscretizedSSPGroupMatrix | DiscretizedSplineCategoricalGroupMatrix)
+            for gm in gms
+        )
         if has_disc:
             logger.warning(
                 "direct_solve='qr' with discretized groups materialises the full "

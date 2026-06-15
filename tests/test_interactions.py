@@ -617,6 +617,33 @@ class TestSplineCategoricalPerLevel:
         assert interaction_gms
         assert all(isinstance(gm, SplineCategoricalGroupMatrix) for gm in interaction_gms)
 
+    def test_discrete_fit_uses_discretized_compact_group_matrices(self, interaction_data):
+        """Discrete spline-categorical fits should use spline support compression."""
+        from superglm.group_matrix import DiscretizedSplineCategoricalGroupMatrix
+
+        X, y, sample_weight = interaction_data
+        model = SuperGLM(
+            discrete=True,
+            n_bins=16,
+            features={"age": Spline(n_knots=6), "region": Categorical(base="first")},
+            interactions=[("age", "region")],
+            selection_penalty=0.0,
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        interaction_gms = [
+            gm
+            for gm, group in zip(model._dm.group_matrices, model._groups)
+            if group.feature_name == "age:region"
+        ]
+
+        assert interaction_gms
+        assert all(
+            isinstance(gm, DiscretizedSplineCategoricalGroupMatrix) for gm in interaction_gms
+        )
+        assert all(gm.B_unique.shape[0] <= 16 for gm in interaction_gms)
+        assert all(not hasattr(gm, "B_level") for gm in interaction_gms)
+
     def test_fit_storage_scales_with_level_rows_not_rows_times_levels(self):
         """Spline-categorical groups should store only rows present in each non-base level."""
         from superglm.group_matrix import SplineCategoricalGroupMatrix

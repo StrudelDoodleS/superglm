@@ -8,12 +8,18 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.group_matrix import (
+    DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
 
-_SSP_LIKE = SparseSSPGroupMatrix | SplineCategoricalGroupMatrix | DiscretizedSSPGroupMatrix
+_SSP_LIKE = (
+    SparseSSPGroupMatrix
+    | SplineCategoricalGroupMatrix
+    | DiscretizedSplineCategoricalGroupMatrix
+    | DiscretizedSSPGroupMatrix
+)
 
 
 @dataclass

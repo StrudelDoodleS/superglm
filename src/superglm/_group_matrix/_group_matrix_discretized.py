@@ -139,6 +139,148 @@ class DiscretizedSCOPGroupMatrix:
         return DiscretizedSCOPGroupMatrix(self.B_scop_unique, self.bin_idx[idx])
 
 
+class DiscretizedSplineCategoricalGroupMatrix:
+    """One spline-by-category level using compressed spline support.
+
+    The effective full matrix is zero outside ``row_idx`` and equals
+    ``B_unique[bin_idx_level] @ R_inv`` on rows in the category level.  This
+    keeps fit algebra on the spline support grid instead of the observation
+    row subset used by :class:`SplineCategoricalGroupMatrix`.
+    """
+
+    __slots__ = (
+        "B_unique",
+        "R_inv",
+        "bin_idx_level",
+        "row_idx",
+        "n_bins",
+        "n_rows",
+        "shape",
+        "_p_b",
+        "omega",
+        "projection",
+        "omega_components",
+        "component_types",
+        "lambda_policies",
+        "spline_cat_level",
+        "spline_cat_feature",
+    )
+
+    def __init__(
+        self,
+        B_unique: NDArray,
+        R_inv: NDArray,
+        bin_idx: NDArray,
+        row_idx: NDArray,
+        *,
+        n_rows: int | None = None,
+        bin_idx_is_level: bool = False,
+    ):
+        self.B_unique = np.asarray(B_unique, dtype=np.float64)
+        self.R_inv = np.asarray(R_inv, dtype=np.float64)
+        self.row_idx = np.asarray(row_idx, dtype=np.intp)
+        bin_idx_arr = np.asarray(bin_idx, dtype=np.intp)
+        self.bin_idx_level = (
+            bin_idx_arr if bin_idx_is_level else bin_idx_arr[self.row_idx]
+        ).astype(np.intp, copy=False)
+        self.n_bins = self.B_unique.shape[0]
+        if n_rows is not None:
+            self.n_rows = int(n_rows)
+        elif bin_idx_is_level:
+            self.n_rows = int(self.row_idx.max()) + 1 if self.row_idx.size else 0
+        else:
+            self.n_rows = len(bin_idx_arr)
+        self.shape = (self.n_rows, self.R_inv.shape[1])
+        self._p_b = self.B_unique.shape[1]
+        self.omega = None
+        self.projection = None
+        self.omega_components = None
+        self.component_types = None
+        self.lambda_policies = None
+        self.spline_cat_level = None
+        self.spline_cat_feature = None
+
+    def matvec(self, v: NDArray) -> NDArray:
+        out = np.zeros(self.n_rows, dtype=np.float64)
+        if self.row_idx.size:
+            vals = self.B_unique @ (self.R_inv @ v)
+            out[self.row_idx] = vals[self.bin_idx_level]
+        return out
+
+    def rmatvec(self, w: NDArray) -> NDArray:
+        if self.row_idx.size:
+            w_agg = np.bincount(
+                self.bin_idx_level,
+                weights=w[self.row_idx],
+                minlength=self.n_bins,
+            )
+        else:
+            w_agg = np.zeros(self.n_bins, dtype=np.float64)
+        return self.R_inv.T @ (self.B_unique.T @ w_agg)
+
+    def gram(self, W: NDArray) -> NDArray:
+        if self.row_idx.size:
+            W_agg = np.bincount(
+                self.bin_idx_level,
+                weights=W[self.row_idx],
+                minlength=self.n_bins,
+            )
+        else:
+            W_agg = np.zeros(self.n_bins, dtype=np.float64)
+        BtWB = self.B_unique.T @ (self.B_unique * W_agg[:, None])
+        return self.R_inv.T @ BtWB @ self.R_inv
+
+    def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+        if self.row_idx.size:
+            W_agg, Wz_agg = _fused_bincount_2(
+                self.bin_idx_level,
+                W[self.row_idx],
+                Wz[self.row_idx],
+                self.n_bins,
+            )
+        else:
+            W_agg = np.zeros(self.n_bins, dtype=np.float64)
+            Wz_agg = np.zeros(self.n_bins, dtype=np.float64)
+        BtW_agg = self.B_unique.T @ W_agg
+        BtWz_agg = self.B_unique.T @ Wz_agg
+        BtWB = self.B_unique.T @ (self.B_unique * W_agg[:, None])
+        gram = self.R_inv.T @ BtWB @ self.R_inv
+        xtw = self.R_inv.T @ BtW_agg
+        xtwz = self.R_inv.T @ BtWz_agg
+        return gram, xtw, xtwz
+
+    def toarray(self) -> NDArray:
+        out = np.zeros(self.shape, dtype=np.float64)
+        if self.row_idx.size:
+            out[self.row_idx] = (self.B_unique @ self.R_inv)[self.bin_idx_level]
+        return out
+
+    def row_subset(self, idx: NDArray) -> DiscretizedSplineCategoricalGroupMatrix:
+        idx_arr = np.asarray(idx, dtype=np.intp)
+        common_rows, pos_self, pos_sub = np.intersect1d(
+            self.row_idx,
+            idx_arr,
+            assume_unique=True,
+            return_indices=True,
+        )
+        sub = DiscretizedSplineCategoricalGroupMatrix(
+            self.B_unique,
+            self.R_inv,
+            self.bin_idx_level[pos_self],
+            pos_sub,
+            n_rows=len(idx_arr),
+            bin_idx_is_level=True,
+        )
+        sub.omega = self.omega
+        sub.projection = self.projection
+        sub.omega_components = self.omega_components
+        sub.component_types = self.component_types
+        sub.lambda_policies = self.lambda_policies
+        sub.spline_cat_level = self.spline_cat_level
+        sub.spline_cat_feature = self.spline_cat_feature
+        return sub
+
+
 class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
     """Discretized tensor interaction with factored Kronecker structure.
 
