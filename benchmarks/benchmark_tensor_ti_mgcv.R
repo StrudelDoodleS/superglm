@@ -190,6 +190,13 @@ fit_case <- function(case_def, control_def, train_df, test_df) {
   gini_model <- weighted_gini(test_df$y_freq, pred, test_df$Exposure)
   sm <- summary(fit)
   edf_smooth <- if (!is.null(sm$s.table)) sum(sm$s.table[, "edf"]) else 0
+  smooth_edf_by_label <- list()
+  if (!is.null(sm$s.table)) {
+    smooth_labels <- rownames(sm$s.table)
+    smooth_edf_values <- as.numeric(sm$s.table[, "edf"])
+    smooth_edf_by_label <- as.list(smooth_edf_values)
+    names(smooth_edf_by_label) <- smooth_labels
+  }
   total_edf <- sum(fit$edf)
 
   list(
@@ -202,6 +209,7 @@ fit_case <- function(case_def, control_def, train_df, test_df) {
     gini_model = unname(gini_model),
     effective_df = total_edf,
     smooth_edf = edf_smooth,
+    smooth_edf_by_label = smooth_edf_by_label,
     converged = fit$converged,
     n_outer_iter = if (!is.null(fit$outer.info)) fit$outer.info$iter else NA,
     deviance = deviance(fit)

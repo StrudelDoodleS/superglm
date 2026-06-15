@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import benchmarks.benchmark_tensor_ti_freq as bench
 import numpy as np
 import pandas as pd
+import pytest
 from benchmarks.benchmark_tensor_ti_freq import (
     ROOT,
     FitControls,
@@ -57,6 +60,13 @@ def test_mgcv_comparator_declares_matching_scaling_cases():
         assert expected_name in script
 
 
+def test_mgcv_comparator_records_per_smooth_edf():
+    script = (ROOT / "benchmarks" / "benchmark_tensor_ti_mgcv.R").read_text()
+
+    assert "smooth_edf_by_label" in script
+    assert "rownames(sm$s.table)" in script
+
+
 def test_superglm_fairness_profiles_record_strict_and_candidate_controls():
     profiles = build_superglm_control_profiles()
     by_name = {profile.name: profile for profile in profiles}
@@ -81,6 +91,19 @@ def test_superglm_fairness_cases_cover_baseline_and_one_tensor_only():
         "baseline_discrete",
         "baseline_plus_ti_discrete",
     ]
+
+
+def test_attribution_cases_cover_baseline_and_interaction_models():
+    assert [case.name for case in bench.build_attribution_cases()] == [
+        "baseline_discrete",
+        "baseline_plus_ti_discrete",
+        "baseline_plus_spline_cat_discrete",
+        "baseline_plus_mixed_tensor_spline_cat_discrete",
+    ]
+
+
+def test_attribution_output_path_is_separate_from_matrix_output():
+    assert bench.OUT_ATTRIBUTION_JSON.name == "tensor_ti_freq_attribution.json"
 
 
 def test_select_named_items_filters_profiles_by_comma_separated_names():
@@ -153,6 +176,56 @@ def test_thread_control_metadata_records_expected_environment_keys(monkeypatch):
     assert metadata["OMP_NUM_THREADS"] == "1"
     assert metadata["OPENBLAS_NUM_THREADS"] == "1"
     assert "MKL_NUM_THREADS" in metadata
+
+
+def test_group_attribution_sums_group_edf_by_term():
+    groups = [
+        SimpleNamespace(
+            name="age",
+            feature_name="age",
+            subgroup_type="spline",
+            start=0,
+            end=3,
+            size=3,
+        ),
+        SimpleNamespace(
+            name="age:wiggle",
+            feature_name="age",
+            subgroup_type="spline",
+            start=3,
+            end=5,
+            size=2,
+        ),
+        SimpleNamespace(
+            name="area",
+            feature_name="area",
+            subgroup_type="categorical",
+            start=5,
+            end=7,
+            size=2,
+        ),
+    ]
+    group_edf = {"age": 1.5, "age:wiggle": 2.0, "area": 1.0}
+
+    rows = bench.summarize_group_attribution(groups, group_edf, {"age": 2.0})
+
+    by_feature = {row["feature_name"]: row for row in rows["by_feature"]}
+    assert by_feature["age"]["edf"] == 3.5
+    assert by_feature["age"]["n_groups"] == 2
+    assert by_feature["age"]["coef_count"] == 5
+    assert by_feature["age"]["lambda_keys"] == ["age"]
+    assert by_feature["area"]["edf"] == 1.0
+
+
+def test_eta_attribution_reports_rank_and_delta_metrics():
+    ref = np.array([0.1, 0.4, 0.2, 0.3])
+    alt = np.array([0.1, 0.3, 0.2, 0.4])
+
+    out = bench.summarize_eta_delta(alt, ref)
+
+    assert out["max_abs_eta_delta"] == pytest.approx(0.1)
+    assert out["mean_abs_eta_delta"] == pytest.approx(0.05)
+    assert 0.0 <= out["rank_corr_eta"] <= 1.0
 
 
 def test_mgcv_comparator_declares_fairness_controls_and_threads():
