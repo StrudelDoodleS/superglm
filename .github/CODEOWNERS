@@ -1,0 +1,4 @@
+.github/workflows/ @StrudelDoodleS
+pyproject.toml @StrudelDoodleS
+uv.lock @StrudelDoodleS
+src/superglm/ @StrudelDoodleS

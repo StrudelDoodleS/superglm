@@ -1,0 +1,157 @@
+name: Security / Supply Chain
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Run CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
+          comment-summary-in-pr: true
+
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install audit tooling
+        run: python -m pip install --upgrade pip pip-audit
+
+      - name: Audit project dependency metadata
+        run: pip-audit . --strict --progress-spinner off
+
+  package-audit:
+    name: Build and inspect package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade pip build check-wheel-contents twine
+          python -m build
+
+      - name: Check package metadata
+        run: twine check dist/*
+
+      - name: Check wheel contents
+        run: check-wheel-contents dist/*.whl
+
+      - name: Inspect package archive entries
+        run: |
+          python - <<'PY'
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+
+          def reject_bad_archive_names(names, archive):
+              bad = []
+              for name in names:
+                  parts = Path(name).parts
+                  if (
+                      name.startswith("/")
+                      or ".." in parts
+                      or name.endswith((".exe", ".dll", ".so", ".dylib"))
+                  ):
+                      bad.append(name)
+              if bad:
+                  raise SystemExit(f"Unexpected entries in {archive}: {bad[:20]}")
+
+
+          for wheel in Path("dist").glob("*.whl"):
+              print(f"Inspecting {wheel}")
+              with zipfile.ZipFile(wheel) as zf:
+                  names = zf.namelist()
+              reject_bad_archive_names(names, wheel)
+              for name in names[:50]:
+                  print(" ", name)
+
+          for sdist in Path("dist").glob("*.tar.gz"):
+              print(f"Inspecting {sdist}")
+              with tarfile.open(sdist) as tf:
+                  names = tf.getnames()
+              reject_bad_archive_names(names, sdist)
+              for name in names[:50]:
+                  print(" ", name)
+          PY
+
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          python -m pip install --upgrade pip cyclonedx-bom
+          python -m pip install -e ".[dev]"
+          cyclonedx-py environment --output-format json --output-file cyclonedx-sbom.json
+
+      - name: Upload CycloneDX SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyclonedx-sbom
+          path: cyclonedx-sbom.json
