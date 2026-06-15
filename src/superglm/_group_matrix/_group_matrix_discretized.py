@@ -256,7 +256,11 @@ class DiscretizedSplineCategoricalGroupMatrix:
         return out
 
     def row_subset(self, idx: NDArray) -> DiscretizedSplineCategoricalGroupMatrix:
-        idx_arr = np.asarray(idx, dtype=np.intp)
+        idx_raw = np.asarray(idx)
+        if np.issubdtype(idx_raw.dtype, np.bool_):
+            idx_arr = np.flatnonzero(idx_raw).astype(np.intp, copy=False)
+        else:
+            idx_arr = idx_raw.astype(np.intp, copy=False)
         if self.row_idx.size and idx_arr.size:
             order = np.argsort(self.row_idx)
             sorted_rows = self.row_idx[order]

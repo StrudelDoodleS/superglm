@@ -415,6 +415,23 @@ class TestBackendLinearAlgebraInvariants:
 
         np.testing.assert_allclose(sub.toarray(), gm.toarray()[idx], atol=1e-12)
 
+    def test_discretized_spline_categorical_row_subset_accepts_boolean_mask(self):
+        """Boolean row subsets should follow NumPy row-indexing semantics."""
+        from superglm.group_matrix import DiscretizedSplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(132)
+        B_unique = rng.normal(size=(5, 4))
+        bin_idx = np.array([0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1], dtype=np.intp)
+        row_idx = np.array([2, 5, 7, 9], dtype=np.intp)
+        R_inv = rng.normal(size=(4, 3))
+        gm = DiscretizedSplineCategoricalGroupMatrix(B_unique, R_inv, bin_idx, row_idx)
+
+        mask = np.zeros(gm.shape[0], dtype=bool)
+        mask[[5, 2, 9]] = True
+        sub = gm.row_subset(mask)
+
+        np.testing.assert_allclose(sub.toarray(), gm.toarray()[mask], atol=1e-12)
+
     def test_discretized_spline_categorical_cross_gram_matches_dense_oracle(self, monkeypatch):
         """Discrete smooth × discrete spline-category cross-Gram should stay compressed."""
         import superglm._group_matrix._group_matrix_algebra as algebra
