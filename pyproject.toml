@@ -33,9 +33,8 @@ bench = [
     "statsmodels>=0.14",
     "pyarrow>=10.0",
 ]
-interactions = [
-    "interpret>=0.7",
-]
+# Interactions are implemented in-core; keep this extra for install compatibility.
+interactions = []
 plotting = [
     "plotly>=5.24",
 ]
