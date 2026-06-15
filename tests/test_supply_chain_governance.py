@@ -111,6 +111,24 @@ def test_dependabot_updates_python_and_github_actions():
     assert 'interval: "weekly"' in dependabot
 
 
+def test_dependabot_groups_python_and_github_actions_updates():
+    dependabot = _read(".github/dependabot.yml")
+    uv_config = dependabot.split('package-ecosystem: "uv"', maxsplit=1)[1].split(
+        'package-ecosystem: "github-actions"', maxsplit=1
+    )[0]
+    actions_config = dependabot.split('package-ecosystem: "github-actions"', maxsplit=1)[1]
+
+    assert "groups:" in uv_config
+    assert "python-dependencies:" in uv_config
+    assert "patterns:" in uv_config
+    assert '- "*"' in uv_config
+
+    assert "groups:" in actions_config
+    assert "github-actions:" in actions_config
+    assert "patterns:" in actions_config
+    assert '- "*"' in actions_config
+
+
 def test_security_policy_and_codeowners_cover_governance_surfaces():
     security_policy = _read("SECURITY.md")
     security_policy_lower = security_policy.lower()
