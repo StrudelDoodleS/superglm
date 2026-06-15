@@ -152,6 +152,39 @@ def test_reml_diagnostics_returns_reml_only_payload():
     assert diagnostics["inner_iter_history"] == [3, 2]
 
 
+def test_reml_diagnostics_non_reml_has_empty_reml_lambdas():
+    from superglm.model import telemetry_ops
+
+    model = _dummy_model()
+    model._reml_result = None
+    model._reml_lambdas = None
+    model._last_fit_meta = {"method": "fit", "discrete": True}
+
+    diagnostics = telemetry_ops.reml_diagnostics(model)
+
+    assert diagnostics == {
+        "enabled": False,
+        "lambdas": {},
+        "lambda_history": [],
+        "profile": model._reml_profile,
+    }
+
+
+def test_metrics_for_logging_returns_scalar_tracking_payload():
+    from superglm.model import telemetry_ops
+
+    metrics = telemetry_ops.metrics_for_logging(_dummy_model(), prefix="train")
+
+    assert metrics["train.deviance"] == pytest.approx(123.4)
+    assert metrics["train.effective_df"] == pytest.approx(2.75)
+    assert metrics["train.converged"] == pytest.approx(1.0)
+    assert metrics["train.null_deviance"] == pytest.approx(150.0)
+    assert metrics["train.lambda.DrivAge_Area"] == pytest.approx(3.5)
+    assert metrics["train.edf.DrivAge_Area"] == pytest.approx(1.25)
+    assert metrics["train.reml.n_iter"] == pytest.approx(5.0)
+    assert metrics["train.reml.objective"] == pytest.approx(42.0)
+
+
 def test_fitted_model_training_telemetry_method_smoke():
     X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 20)})
     y = np.array([0, 1] * 10, dtype=float)
@@ -185,7 +218,8 @@ def test_path_result_to_frame_and_telemetry():
     frame = result.to_frame()
     assert list(frame.columns) == ["step", "lambda", "deviance", "n_iter", "converged", "edf"]
     assert frame.loc[1, "lambda"] == pytest.approx(0.1)
-    assert frame.loc[1, "converged"] is False
+    assert frame["converged"].dtype == bool
+    assert bool(frame.loc[1, "converged"]) is False
 
     telemetry = result.to_telemetry()
     assert telemetry["lambda_seq"] == [1.0, 0.1]

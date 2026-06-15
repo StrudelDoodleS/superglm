@@ -20,8 +20,8 @@ SuperGLM telemetry includes:
   final deviance, effective degrees of freedom, dispersion, and convergence.
 - Ordered feature list, ordered interaction list, feature classes, interaction
   classes, and fit-time constraints.
-- REML smoothing parameters, lambda history, objective history, inner iteration
-  history, and REML profile fields when available.
+- REML smoothing parameters, lambda history, optional objective history,
+  optional inner iteration history, and REML profile fields when available.
 - EDF by solver group and by feature term.
 
 Project code should add run-level context that SuperGLM cannot know, such as:
@@ -41,6 +41,19 @@ model.fit_reml(X_train, y_train, sample_weight=w_train, offset=offset_train)
 
 telemetry = model.training_telemetry()
 reml = model.reml_diagnostics()
+```
+
+`reml["lambda_history"]` is the reliable REML path history when REML was used.
+`objective_history` and `inner_iter_history` are optional and path-dependent:
+they are exposed when the underlying REML optimiser collected them, but callers
+should not assume they are populated for every REML backend.
+
+For scalar experiment-tracking metrics, use the dependency-free helper:
+
+```python
+from superglm.model.telemetry_ops import metrics_for_logging
+
+scalar_metrics = metrics_for_logging(model, prefix="train")
 ```
 
 For per-IRLS diagnostics, fit with diagnostics enabled:
@@ -69,25 +82,13 @@ project layer:
 ```python
 import json
 
+from superglm.model.telemetry_ops import metrics_for_logging
+
 
 def log_superglm_to_mlflow(mlflow, model, *, prefix="train"):
     telemetry = model.training_telemetry()
-    fit = telemetry["fit"]
 
-    mlflow.log_metrics(
-        {
-            f"{prefix}.deviance": fit["deviance"],
-            f"{prefix}.effective_df": fit["effective_df"],
-            f"{prefix}.phi": fit["phi"],
-            f"{prefix}.n_iter": fit["n_iter"],
-            f"{prefix}.converged": float(fit["converged"]),
-        }
-    )
-
-    for name, value in telemetry["reml"]["lambdas"].items():
-        safe_name = name.replace(":", "_")
-        mlflow.log_metric(f"{prefix}.reml.lambda.{safe_name}", value)
-
+    mlflow.log_metrics(metrics_for_logging(model, prefix=prefix))
     mlflow.log_dict(telemetry, f"{prefix}_training_telemetry.json")
 
     try:
@@ -128,7 +129,12 @@ with mlflow.start_run(run_name="baseline-main-effects"):
 
     for candidate_name, candidate_model in candidates:
         with mlflow.start_run(run_name=candidate_name, nested=True):
-            candidate_model.fit_reml(X_train, y_train, sample_weight=w_train)
+            candidate_model.fit_reml(
+                X_train,
+                y_train,
+                sample_weight=w_train,
+                interaction_mode="fast_candidate",
+            )
             log_superglm_to_mlflow(mlflow, candidate_model, prefix="candidate")
             mlflow.log_param("candidate.name", candidate_name)
             mlflow.log_metric("candidate.validation_gini", validation_gini)

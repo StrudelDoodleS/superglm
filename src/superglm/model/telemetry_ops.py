@@ -50,7 +50,7 @@ def reml_diagnostics(model) -> dict[str, Any]:
         return _json_ready(
             {
                 "enabled": False,
-                "lambdas": lambdas,
+                "lambdas": {},
                 "lambda_history": [],
                 "profile": profile,
             }

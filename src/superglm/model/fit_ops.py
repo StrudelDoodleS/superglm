@@ -89,7 +89,7 @@ class PathResult:
             "lambda": np.asarray(self.lambda_seq, dtype=np.float64),
             "deviance": np.asarray(self.deviance_path, dtype=np.float64),
             "n_iter": np.asarray(self.n_iter_path, dtype=int),
-            "converged": pd.Series([bool(v) for v in self.converged_path], dtype=object),
+            "converged": np.asarray(self.converged_path, dtype=bool),
         }
         if self.edf_path is not None:
             data["edf"] = np.asarray(self.edf_path, dtype=np.float64)
