@@ -61,10 +61,12 @@ def test_scorecard_workflow_uploads_sarif_on_master_and_schedule():
 
 def test_scorecard_generation_permissions_allow_openssf_publication():
     workflow = _read(".github/workflows/scorecard.yml")
+    workflow_header = workflow.split("jobs:", maxsplit=1)[0]
     scorecard_job = workflow.split("  scorecard:", maxsplit=1)[1].split(
         "  upload-sarif:", maxsplit=1
     )[0]
 
+    assert "id-token: write" not in workflow_header
     assert "security-events: write" not in scorecard_job
     assert "id-token: write" in scorecard_job
     assert "publish_results: true" in scorecard_job
