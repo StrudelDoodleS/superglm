@@ -132,7 +132,7 @@ jobs:
           PY
 
       - name: Upload inspected package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: package-dist
           path: dist/*
@@ -158,7 +158,7 @@ jobs:
           cyclonedx-py environment --output-format json --output-file cyclonedx-sbom.json
 
       - name: Upload CycloneDX SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cyclonedx-sbom
           path: cyclonedx-sbom.json
