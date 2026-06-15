@@ -257,16 +257,23 @@ class DiscretizedSplineCategoricalGroupMatrix:
 
     def row_subset(self, idx: NDArray) -> DiscretizedSplineCategoricalGroupMatrix:
         idx_arr = np.asarray(idx, dtype=np.intp)
-        common_rows, pos_self, pos_sub = np.intersect1d(
-            self.row_idx,
-            idx_arr,
-            assume_unique=True,
-            return_indices=True,
-        )
+        if self.row_idx.size and idx_arr.size:
+            order = np.argsort(self.row_idx)
+            sorted_rows = self.row_idx[order]
+            pos = np.searchsorted(sorted_rows, idx_arr)
+            in_bounds = pos < sorted_rows.size
+            matched = np.zeros(idx_arr.size, dtype=bool)
+            matched[in_bounds] = sorted_rows[pos[in_bounds]] == idx_arr[in_bounds]
+            pos_sub = np.flatnonzero(matched).astype(np.intp, copy=False)
+            pos_self = order[pos[matched]]
+            bin_idx_level = self.bin_idx_level[pos_self]
+        else:
+            pos_sub = np.empty(0, dtype=np.intp)
+            bin_idx_level = np.empty(0, dtype=np.intp)
         sub = DiscretizedSplineCategoricalGroupMatrix(
             self.B_unique,
             self.R_inv,
-            self.bin_idx_level[pos_self],
+            bin_idx_level,
             pos_sub,
             n_rows=len(idx_arr),
             bin_idx_is_level=True,

@@ -398,6 +398,23 @@ class TestBackendLinearAlgebraInvariants:
         np.testing.assert_array_equal(compressed.bin_idx_level, bin_idx[row_idx])
         np.testing.assert_array_equal(compressed.row_idx, row_idx)
 
+    def test_discretized_spline_categorical_row_subset_preserves_duplicate_rows(self):
+        """Duplicate row subsets should behave like dense row indexing."""
+        from superglm.group_matrix import DiscretizedSplineCategoricalGroupMatrix
+
+        rng = np.random.default_rng(131)
+        n_bins = 5
+        B_unique = rng.normal(size=(n_bins, 4))
+        bin_idx = np.array([0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1], dtype=np.intp)
+        row_idx = np.array([2, 5, 7, 9], dtype=np.intp)
+        R_inv = rng.normal(size=(4, 3))
+        gm = DiscretizedSplineCategoricalGroupMatrix(B_unique, R_inv, bin_idx, row_idx)
+
+        idx = np.array([5, 5, 2, 9, 2], dtype=np.intp)
+        sub = gm.row_subset(idx)
+
+        np.testing.assert_allclose(sub.toarray(), gm.toarray()[idx], atol=1e-12)
+
     def test_discretized_spline_categorical_cross_gram_matches_dense_oracle(self, monkeypatch):
         """Discrete smooth × discrete spline-category cross-Gram should stay compressed."""
         import superglm._group_matrix._group_matrix_algebra as algebra
