@@ -131,6 +131,13 @@ jobs:
                   print(" ", name)
           PY
 
+      - name: Upload inspected package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-dist
+          path: dist/*
+          retention-days: 30
+
   sbom:
     name: Generate SBOM
     runs-on: ubuntu-latest
@@ -155,3 +162,4 @@ jobs:
         with:
           name: cyclonedx-sbom
           path: cyclonedx-sbom.json
+          retention-days: 30

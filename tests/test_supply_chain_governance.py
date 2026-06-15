@@ -33,6 +33,8 @@ def test_security_workflow_collects_core_governance_evidence():
         "cyclonedx-py environment",
         "actions/upload-artifact",
         "cyclonedx-sbom.json",
+        "package-dist",
+        "retention-days: 30",
     ]
 
     for marker in expected_markers:
@@ -63,5 +65,7 @@ def test_security_policy_and_codeowners_cover_governance_surfaces():
     assert "package build/content checks" in security_policy_lower
 
     assert ".github/workflows/" in codeowners
+    assert ".github/CODEOWNERS" in codeowners
+    assert "SECURITY.md" in codeowners
     assert "pyproject.toml" in codeowners
     assert "src/superglm/" in codeowners
