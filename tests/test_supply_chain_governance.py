@@ -7,6 +7,10 @@ def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def _workflow_header(workflow: str) -> str:
+    return workflow.split("jobs:", maxsplit=1)[0]
+
+
 def test_security_workflow_runs_on_master_prs_and_schedule():
     workflow = _read(".github/workflows/security.yml")
 
@@ -61,7 +65,7 @@ def test_scorecard_workflow_uploads_sarif_on_master_and_schedule():
 
 def test_scorecard_generation_permissions_allow_openssf_publication():
     workflow = _read(".github/workflows/scorecard.yml")
-    workflow_header = workflow.split("jobs:", maxsplit=1)[0]
+    workflow_header = _workflow_header(workflow)
     scorecard_job = workflow.split("  scorecard:", maxsplit=1)[1].split(
         "  upload-sarif:", maxsplit=1
     )[0]
@@ -70,6 +74,41 @@ def test_scorecard_generation_permissions_allow_openssf_publication():
     assert "security-events: write" not in scorecard_job
     assert "id-token: write" in scorecard_job
     assert "publish_results: true" in scorecard_job
+
+
+def test_ci_workflows_define_read_only_top_level_permissions():
+    ci = _read(".github/workflows/ci.yml")
+    dev_ci = _read(".github/workflows/dev-ci.yml")
+
+    for workflow in (ci, dev_ci):
+        header = _workflow_header(workflow)
+        assert "permissions:" in header
+        assert "contents: read" in header
+        assert "contents: write" not in header
+        assert "id-token: write" not in header
+        assert "security-events: write" not in header
+
+
+def test_docs_workflow_scopes_write_permission_to_deploy_job():
+    workflow = _read(".github/workflows/docs.yml")
+    header = _workflow_header(workflow)
+    deploy_job = workflow.split("  deploy:", maxsplit=1)[1]
+
+    assert "permissions:" in header
+    assert "contents: read" in header
+    assert "contents: write" not in header
+
+    assert "permissions:" in deploy_job
+    assert "contents: write" in deploy_job
+
+
+def test_dependabot_updates_python_and_github_actions():
+    dependabot = _read(".github/dependabot.yml")
+
+    assert 'package-ecosystem: "uv"' in dependabot
+    assert 'package-ecosystem: "github-actions"' in dependabot
+    assert 'directory: "/"' in dependabot
+    assert 'interval: "weekly"' in dependabot
 
 
 def test_security_policy_and_codeowners_cover_governance_surfaces():

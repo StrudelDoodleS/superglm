@@ -5,6 +5,9 @@ on:
     branches-ignore: [master]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: dev-ci-${{ github.ref }}
   cancel-in-progress: true
