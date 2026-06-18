@@ -124,6 +124,7 @@ def discretization_impact(
     y: NDArray,
     sample_weight: NDArray | None = None,
     *,
+    offset: NDArray | None = None,
     n_bins: int = 100,
     bin_strategy: str = "exposure_quantile",
     features: list[str] | None = None,
@@ -144,6 +145,9 @@ def discretization_impact(
         Response variable.
     sample_weight : NDArray, optional
         Exposure weights. Defaults to ones.
+    offset : NDArray, optional
+        Link-scale offset aligned to ``X``. Used when comparing original and
+        discretized predictions for offset-fitted models.
     n_bins : int
         Number of bins per feature (default 100).
     bin_strategy : str
@@ -187,7 +191,7 @@ def discretization_impact(
             name for name in model._feature_order if _is_continuous_feature(model, name)
         ]
 
-    eta_orig = predict_eta_exact(model, X)
+    eta_orig = predict_eta_exact(model, X, offset=offset)
     original_predictions = clip_mu(model._link.inverse(eta_orig), model._distribution)
 
     # For each target feature, compute the delta (binned - smooth)

@@ -88,10 +88,16 @@ model = SuperGLM(
 )
 model.fit(train_df[["region"]], y, sample_weight=w, offset=offset)
 
-payload = model.rating_table_payload(train_df[["region"]], y, sample_weight=w)
-offset_table = next(
-    block.table for block in payload.main_effects if block.name == "Offset Multiplier"
+term = train_df["term_months"].to_numpy()
+payload = model.rating_table_payload(
+    train_df[["region"]],
+    y,
+    sample_weight=w,
+    offset=offset,
+    offset_source=term,
+    offset_name="Term",
 )
+offset_table = next(block.table for block in payload.main_effects if block.name == "Term")
 print(offset_table)
 
 model.export_rating_tables(
@@ -99,14 +105,38 @@ model.export_rating_tables(
     train_df[["region"]],
     y,
     sample_weight=w,
+    offset=offset,
+    offset_source=term,
+    offset_name="Term",
 )
 ```
 
-The exported `Offset Multiplier` table contains exact levels when the fitted
-offset has fewer than 20 distinct multipliers. In this example the rows are
-`1.0` and `3.0`, matching `term_months / 12`. If the fitted offset has many
-distinct values, the exporter bins the multiplier into the selected rating-table
-bin count and writes the exposure-weighted average multiplier per bin.
+The source-aware offset table is keyed by the raw deployment value:
+
+```text
+Term    Relativity    Weight
+12      1.0           ...
+36      3.0           ...
+```
+
+The fitted model still receives the link-scale offset:
+
+```text
+Raw source:        Term = 36
+Link-scale offset: log(36 / 12)
+Response factor:   3
+```
+
+When `offset_source` is supplied, the exporter validates that each raw source
+level maps to one offset multiplier. High-cardinality source-aware offsets are
+rejected rather than silently binned; keep truly continuous offset calculations in
+deployment code or provide an explicit discrete source.
+
+If no `offset_source` is supplied, the backward-compatible `Offset Multiplier`
+fallback remains. It contains exact multiplier levels when the fitted offset has
+fewer than 20 distinct multipliers. If the fitted offset has many distinct values,
+the exporter bins the multiplier into the selected rating-table bin count and
+writes the exposure-weighted average multiplier per bin.
 
 ## Production Framing
 

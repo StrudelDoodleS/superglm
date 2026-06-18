@@ -16,6 +16,7 @@ from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
+from superglm.links import LogLink
 
 if TYPE_CHECKING:
     from superglm.model import SuperGLM
@@ -48,6 +49,9 @@ class RatingTablePayload:
     interactions: list[InteractionTableBlock]
     discretization_impact: pd.DataFrame
     summary_lines: list[str]
+
+
+_OFFSET_SOURCE_RESERVED_COLUMNS = frozenset({"Relativity", "Weight"})
 
 
 def _resolve_format(file_path: str | Path, format: str | None) -> str:
@@ -149,30 +153,110 @@ def _numeric_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlo
     )
 
 
-def _offset_multiplier_block(
+def _fit_used_offset(model: SuperGLM) -> bool:
+    return bool(
+        getattr(
+            model,
+            "_fit_used_offset",
+            getattr(model, "_fit_offset", None) is not None,
+        )
+    )
+
+
+def _require_log_link_offset_export(model: SuperGLM) -> None:
+    if not isinstance(model._link, LogLink):
+        raise ValueError(
+            "Rating-table offset relativities are currently supported only for log-link models."
+        )
+
+
+def _resolve_export_offset(
+    offset,
     model: SuperGLM,
+    X: pd.DataFrame,
+) -> NDArray | None:
+    if offset is not None:
+        offset_arr = np.asarray(offset, dtype=np.float64).ravel()
+        if len(offset_arr) != len(X):
+            raise ValueError("offset must have the same length as X.")
+        return offset_arr
+
+    fit_offset = getattr(model, "_fit_offset", None)
+    if X is getattr(model, "_fit_X_ref", None) and fit_offset is not None:
+        offset_arr = np.asarray(fit_offset, dtype=np.float64).ravel()
+        if len(offset_arr) != len(X):
+            raise ValueError(
+                "The fitted offset has a different length from X; pass offset= "
+                "when exporting a frame other than the original fit frame."
+            )
+        return offset_arr
+
+    raise ValueError("Pass offset= when exporting a frame other than the original fit frame.")
+
+
+def _resolve_offset_source(
+    offset_source,
+    X: pd.DataFrame,
+    *,
+    offset_name: str | None,
+) -> tuple[pd.Series, str]:
+    if isinstance(offset_source, str):
+        if offset_source not in X:
+            raise ValueError(f"offset_source column {offset_source!r} is not present in X.")
+        source = pd.Series(X[offset_source].to_numpy(), name=offset_source)
+        name = offset_name if offset_name is not None else offset_source
+    elif isinstance(offset_source, pd.Series):
+        source = offset_source.reset_index(drop=True)
+        if offset_name is not None:
+            name = offset_name
+        elif offset_source.name is not None:
+            name = str(offset_source.name)
+        else:
+            raise ValueError(
+                "offset_name is required when offset_source is an unnamed array-like object."
+            )
+    else:
+        if offset_name is None:
+            raise ValueError(
+                "offset_name is required when offset_source is an unnamed array-like object."
+            )
+        source = pd.Series(offset_source)
+        name = offset_name
+
+    if len(source) != len(X):
+        raise ValueError("offset_source must have the same length as X.")
+    if source.isna().any():
+        raise ValueError("offset_source cannot contain missing values.")
+    if not str(name).strip():
+        raise ValueError("offset_name must not be blank.")
+    if str(name) in _OFFSET_SOURCE_RESERVED_COLUMNS:
+        reserved = ", ".join(sorted(_OFFSET_SOURCE_RESERVED_COLUMNS))
+        raise ValueError(f"offset_name cannot be one of the reserved columns: {reserved}.")
+    return source.reset_index(drop=True), name
+
+
+def _weights_array(n_rows: int, sample_weight: NDArray | None) -> NDArray:
+    if sample_weight is None:
+        return np.ones(n_rows, dtype=np.float64)
+    weights = np.asarray(sample_weight, dtype=np.float64).ravel()
+    if len(weights) != n_rows:
+        raise ValueError("sample_weight must have the same length as X.")
+    return weights
+
+
+def _offset_multiplier_block(
+    offset: NDArray,
     n_rows: int,
     sample_weight: NDArray | None,
     *,
     n_bins: int,
     bin_strategy: str,
 ) -> RatingTableBlock | None:
-    offset = getattr(model, "_fit_offset", None)
-    if offset is None:
-        return None
-
     offset_arr = np.asarray(offset, dtype=np.float64).ravel()
     if len(offset_arr) != n_rows:
-        raise ValueError(
-            "The fitted offset has a different length from X; rating-table offset "
-            "multipliers can only be exported for the fit-time rows."
-        )
+        raise ValueError("offset must have the same length as X.")
 
-    weights = (
-        np.ones(n_rows, dtype=np.float64)
-        if sample_weight is None
-        else np.asarray(sample_weight, dtype=np.float64)
-    )
+    weights = _weights_array(n_rows, sample_weight)
     multiplier = np.exp(offset_arr)
     exact_multiplier = np.round(multiplier, 12)
     levels, inverse = np.unique(exact_multiplier, return_inverse=True)
@@ -215,6 +299,84 @@ def _offset_multiplier_block(
         name="Offset Multiplier",
         kind="offset",
         table=pd.DataFrame(rows),
+    )
+
+
+def _offset_source_block(
+    offset: NDArray,
+    offset_source,
+    X: pd.DataFrame,
+    sample_weight: NDArray | None,
+    *,
+    offset_name: str | None,
+    offset_kind: str,
+    offset_max_exact_levels: int,
+    offset_mapping_rtol: float,
+    offset_mapping_atol: float,
+) -> RatingTableBlock:
+    if offset_kind not in {"auto", "discrete"}:
+        raise ValueError("offset_kind must be 'auto' or 'discrete'.")
+
+    source, source_name = _resolve_offset_source(offset_source, X, offset_name=offset_name)
+    n_unique = int(source.nunique(dropna=False))
+    if n_unique > offset_max_exact_levels:
+        raise ValueError(
+            f"Offset source {source_name!r} has {n_unique} distinct values, exceeding "
+            f"offset_max_exact_levels={offset_max_exact_levels}. Increase "
+            "offset_max_exact_levels explicitly if all values are intended tariff levels."
+        )
+
+    offset_arr = np.asarray(offset, dtype=np.float64).ravel()
+    weights = _weights_array(len(X), sample_weight)
+    df = pd.DataFrame(
+        {
+            "__offset_source__": source,
+            "__offset__": offset_arr,
+            "__weight__": weights,
+        }
+    )
+
+    rows: list[dict[str, object | float]] = []
+    for level, group in df.groupby(
+        "__offset_source__",
+        sort=False,
+        dropna=False,
+        observed=True,
+    ):
+        if group.empty:
+            continue
+        offset_values = group["__offset__"].to_numpy(dtype=np.float64)
+        multipliers = np.exp(offset_values)
+        group_weights = group["__weight__"].to_numpy(dtype=np.float64)
+        weight_sum = float(group_weights.sum())
+        if weight_sum > 0.0:
+            representative = float(np.exp(np.average(offset_values, weights=group_weights)))
+        else:
+            representative = float(multipliers[0])
+        if not np.allclose(
+            multipliers,
+            representative,
+            rtol=offset_mapping_rtol,
+            atol=offset_mapping_atol,
+        ):
+            raise ValueError(
+                f"Offset source {source_name!r} is not a valid discrete lookup: "
+                f"level {level!r} maps to multiple offset multipliers. Pass a more "
+                "granular offset_source, or keep the offset calculation outside the "
+                "rating table."
+            )
+        rows.append(
+            {
+                source_name: level,
+                "Relativity": representative,
+                "Weight": weight_sum,
+            }
+        )
+
+    return RatingTableBlock(
+        name=source_name,
+        kind="offset",
+        table=pd.DataFrame(rows, columns=[source_name, "Relativity", "Weight"]),
     )
 
 
@@ -303,6 +465,7 @@ def _impact_sweep(
     y: NDArray,
     sample_weight: NDArray | None,
     *,
+    offset: NDArray | None,
     impact_bins: tuple[int, ...],
     bin_strategy: str,
     features: list[str],
@@ -316,6 +479,7 @@ def _impact_sweep(
             X,
             y,
             sample_weight=sample_weight,
+            offset=offset,
             n_bins=int(n_bins),
             bin_strategy=bin_strategy,
             features=features,
@@ -339,6 +503,13 @@ def build_rating_table_payload(
     y: NDArray,
     sample_weight: NDArray | None = None,
     *,
+    offset: NDArray | None = None,
+    offset_source=None,
+    offset_name: str | None = None,
+    offset_kind: str = "auto",
+    offset_max_exact_levels: int = 20,
+    offset_mapping_rtol: float = 1e-10,
+    offset_mapping_atol: float = 1e-12,
     n_bins: int = 150,
     impact_bins: tuple[int, ...] = (20, 50, 100, 200, 250),
     bin_strategy: str = "exposure_quantile",
@@ -353,12 +524,20 @@ def build_rating_table_payload(
     if sample_weight is not None and len(sample_weight) != len(X):
         raise ValueError("sample_weight must have the same length as X.")
 
+    export_offset: NDArray | None = None
+    if _fit_used_offset(model):
+        _require_log_link_offset_export(model)
+        export_offset = _resolve_export_offset(offset, model, X)
+    elif offset is not None or offset_source is not None:
+        raise ValueError("Offset rating-table export requires a model fitted with an offset.")
+
     continuous = _continuous_features(model)
     selected = (
         model.discretization_impact(
             X,
             y_arr,
             sample_weight=sample_weight,
+            offset=export_offset,
             n_bins=n_bins,
             bin_strategy=bin_strategy,
             features=continuous,
@@ -377,14 +556,27 @@ def build_rating_table_payload(
         elif isinstance(spec, Numeric):
             main_effects.append(_numeric_block(model, name, centering))
 
-    offset_block = _offset_multiplier_block(
-        model,
-        len(X),
-        sample_weight,
-        n_bins=n_bins,
-        bin_strategy=bin_strategy,
-    )
-    if offset_block is not None:
+    if export_offset is not None:
+        if offset_source is None:
+            offset_block = _offset_multiplier_block(
+                export_offset,
+                len(X),
+                sample_weight,
+                n_bins=n_bins,
+                bin_strategy=bin_strategy,
+            )
+        else:
+            offset_block = _offset_source_block(
+                export_offset,
+                offset_source,
+                X,
+                sample_weight,
+                offset_name=offset_name,
+                offset_kind=offset_kind,
+                offset_max_exact_levels=offset_max_exact_levels,
+                offset_mapping_rtol=offset_mapping_rtol,
+                offset_mapping_atol=offset_mapping_atol,
+            )
         main_effects.append(offset_block)
 
     impact = _impact_sweep(
@@ -392,6 +584,7 @@ def build_rating_table_payload(
         X,
         y_arr,
         sample_weight,
+        offset=export_offset,
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
         features=continuous,
@@ -413,6 +606,13 @@ def export_rating_tables(
     y: NDArray,
     sample_weight: NDArray | None = None,
     *,
+    offset: NDArray | None = None,
+    offset_source=None,
+    offset_name: str | None = None,
+    offset_kind: str = "auto",
+    offset_max_exact_levels: int = 20,
+    offset_mapping_rtol: float = 1e-10,
+    offset_mapping_atol: float = 1e-12,
     n_bins: int = 150,
     impact_bins: tuple[int, ...] = (20, 50, 100, 200, 250),
     bin_strategy: str = "exposure_quantile",
@@ -432,6 +632,13 @@ def export_rating_tables(
         X,
         y,
         sample_weight=sample_weight,
+        offset=offset,
+        offset_source=offset_source,
+        offset_name=offset_name,
+        offset_kind=offset_kind,
+        offset_max_exact_levels=offset_max_exact_levels,
+        offset_mapping_rtol=offset_mapping_rtol,
+        offset_mapping_atol=offset_mapping_atol,
         n_bins=n_bins,
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
