@@ -228,6 +228,7 @@ def _store_fit_arrays(model, sample_weight, offset):
     """Persist training weights/offset arrays on the model and return them."""
     model._fit_weights = np.array(sample_weight)
     model._fit_offset = np.array(offset) if offset is not None else None
+    model._fit_used_offset = offset is not None
     return model._fit_weights, model._fit_offset
 
 
