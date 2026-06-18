@@ -55,6 +55,59 @@ The loaded model can still:
 
 without refitting.
 
+## Rating Table Export With Term Offsets
+
+For rating-table deployment, offsets are exported as an applied multiplier
+when the model was fitted with an offset. This is useful for policy-term
+adjustments such as a 36-month policy costing three times a 12-month policy.
+
+```python
+import numpy as np
+import pandas as pd
+
+from superglm import Categorical, SuperGLM
+
+train_df = pd.DataFrame(
+    {
+        "region": ["A", "B", "A", "B"] * 40,
+        "term_months": [12.0, 12.0, 36.0, 36.0] * 40,
+        "exposure": np.linspace(0.5, 2.0, 160),
+    }
+)
+train_df["paid"] = np.array([0.3, 0.5, 1.1, 1.5] * 40) * train_df["exposure"]
+
+y = train_df["paid"].to_numpy() / train_df["exposure"].to_numpy()
+w = train_df["exposure"].to_numpy()
+offset = np.log(train_df["term_months"].to_numpy() / 12.0)
+
+model = SuperGLM(
+    family="gamma",
+    link="log",
+    selection_penalty=0.0,
+    features={"region": Categorical(base="first")},
+)
+model.fit(train_df[["region"]], y, sample_weight=w, offset=offset)
+
+payload = model.rating_table_payload(train_df[["region"]], y, sample_weight=w)
+offset_table = next(
+    block.table for block in payload.main_effects if block.name == "Offset Multiplier"
+)
+print(offset_table)
+
+model.export_rating_tables(
+    "rating_tables.xlsx",
+    train_df[["region"]],
+    y,
+    sample_weight=w,
+)
+```
+
+The exported `Offset Multiplier` table contains exact levels when the fitted
+offset has fewer than 20 distinct multipliers. In this example the rows are
+`1.0` and `3.0`, matching `term_months / 12`. If the fitted offset has many
+distinct values, the exporter bins the multiplier into the selected rating-table
+bin count and writes the exposure-weighted average multiplier per bin.
+
 ## Production Framing
 
 For deployment, the key question is usually not "how do I rebuild the design

@@ -34,15 +34,38 @@ def _fit_export_model():
     return model, X, y, w
 
 
+def _fit_offset_export_model(distinct_terms: int = 2):
+    rng = np.random.default_rng(987)
+    n = 240
+    if distinct_terms == 2:
+        term = np.resize(np.array([12.0, 36.0]), n)
+    else:
+        term = np.linspace(12.0, 48.0, n)
+    X = pd.DataFrame({"region": rng.choice(["A", "B"], n)})
+    offset = np.log(term / 12.0)
+    exposure = rng.uniform(0.5, 2.0, n)
+    eta = -1.4 + 0.25 * (X["region"].to_numpy() == "B") + offset
+    y = rng.poisson(np.exp(eta)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"region": Categorical(base="first")},
+    )
+    model.fit(X, y, sample_weight=exposure, offset=offset)
+    return model, X, y, exposure
+
+
 def test_public_export_api_exists(tmp_path):
     model, X, y, w = _fit_export_model()
     output = tmp_path / "rating_tables.xlsx"
 
+    payload = model.rating_table_payload(X, y, sample_weight=w)
     result_path = export_rating_tables(model, output, X, y, sample_weight=w)
     method_path = model.export_rating_tables(
         tmp_path / "rating_tables_method.xlsx", X, y, sample_weight=w
     )
 
+    assert payload.base_relativity > 0.0
     assert result_path == output
     assert output.exists()
     assert method_path.exists()
@@ -88,6 +111,39 @@ def test_categorical_and_numeric_blocks_are_exported():
     assert score.table["score"].tolist() == ["per_unit"]
 
 
+def test_fit_offset_exports_exact_multiplier_block_when_support_is_small():
+    model, X, y, w = _fit_offset_export_model(distinct_terms=2)
+
+    payload = build_rating_table_payload(model, X, y, sample_weight=w)
+
+    offset_block = next(
+        block for block in payload.main_effects if block.name == "Offset Multiplier"
+    )
+    assert offset_block.kind == "offset"
+    assert offset_block.table.columns.tolist() == ["Offset Multiplier", "Relativity", "Weight"]
+    assert sorted(offset_block.table["Offset Multiplier"].tolist()) == [1.0, 3.0]
+    np.testing.assert_allclose(
+        offset_block.table.sort_values("Offset Multiplier")["Relativity"].to_numpy(),
+        [1.0, 3.0],
+    )
+    assert np.isclose(offset_block.table["Weight"].sum(), w.sum())
+
+
+def test_fit_offset_exports_binned_multiplier_block_when_support_is_large():
+    model, X, y, w = _fit_offset_export_model(distinct_terms=40)
+
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, n_bins=5)
+
+    offset_block = next(
+        block for block in payload.main_effects if block.name == "Offset Multiplier"
+    )
+    assert offset_block.kind == "offset"
+    assert len(offset_block.table) == 5
+    assert offset_block.table["Offset Multiplier"].str.startswith("[").all()
+    assert np.isclose(offset_block.table["Weight"].sum(), w.sum())
+    assert offset_block.table["Relativity"].between(1.0, 4.0).all()
+
+
 def test_excel_workbook_layout(tmp_path):
     model, X, y, w = _fit_export_model()
     output = tmp_path / "tables.xlsx"
@@ -111,6 +167,19 @@ def test_excel_workbook_layout(tmp_path):
     impact_ws = wb["Discretization Impact"]
     headers = [impact_ws.cell(row=1, column=i).value for i in range(1, 11)]
     assert headers[:3] == ["n_bins", "feature", "actual_bins"]
+
+
+def test_excel_workbook_includes_fit_offset_multiplier(tmp_path):
+    model, X, y, w = _fit_offset_export_model(distinct_terms=2)
+    output = tmp_path / "tables_with_offset.xlsx"
+
+    model.export_rating_tables(output, X, y, sample_weight=w)
+
+    ws = load_workbook(output, data_only=True)["Rating Tables"]
+    assert ws["D5"].value == "Offset Multiplier"
+    assert ws["D7"].value == "Offset Multiplier"
+    assert ws["E7"].value == "Relativity"
+    assert sorted([ws["D8"].value, ws["D9"].value]) == [1.0, 3.0]
 
 
 def test_interactions_start_two_blank_rows_below_main_effects(tmp_path):

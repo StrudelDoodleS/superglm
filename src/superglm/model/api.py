@@ -1153,6 +1153,18 @@ class SuperGLM:
 
         return export_rating_tables(self, file_path, X, y, sample_weight=sample_weight, **kwargs)
 
+    def rating_table_payload(
+        self,
+        X: pd.DataFrame,
+        y: NDArray,
+        sample_weight: NDArray | None = None,
+        **kwargs,
+    ):
+        """Build the renderer-independent deployment rating-table payload."""
+        from superglm.export.rating_tables import build_rating_table_payload
+
+        return build_rating_table_payload(self, X, y, sample_weight=sample_weight, **kwargs)
+
     # ── REML adapter methods (used by reml_optimizer) ─────────────
 
     def _compute_dW_deta(self, mu, eta, sample_weight):
