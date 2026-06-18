@@ -113,7 +113,8 @@ def _weights_by_level(
         .groupby("level", sort=False)["weight"]
         .sum()
     )
-    return np.array([float(grouped.get(level, 0.0)) for level in levels], dtype=np.float64)
+    level_keys = [str(level) for level in levels]
+    return grouped.reindex(level_keys, fill_value=0.0).to_numpy(dtype=np.float64)
 
 
 def _categorical_block(
