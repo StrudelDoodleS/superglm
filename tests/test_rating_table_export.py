@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -131,6 +133,32 @@ def test_categorical_and_numeric_blocks_are_exported():
     assert set(region.table["region"]) == {"A", "B", "C"}
     assert np.isclose(region.table["Weight"].sum(), w.sum())
     assert score.table["score"].tolist() == ["per_unit"]
+
+
+def test_integer_categorical_block_weights_do_not_warn_on_pandas_integer_keys():
+    rng = np.random.default_rng(124)
+    n = 120
+    X = pd.DataFrame({"region": rng.choice([1, 2, 3], n)})
+    eta = -1.0 + 0.2 * (X["region"].to_numpy() == 2)
+    y = rng.poisson(np.exp(eta)).astype(float)
+    w = rng.uniform(0.5, 2.0, n)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"region": Categorical(base="first")},
+    )
+    model.fit(X, y, sample_weight=w)
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "error",
+            message="Series.__getitem__ treating keys as positions is deprecated",
+            category=FutureWarning,
+        )
+        payload = build_rating_table_payload(model, X, y, sample_weight=w)
+
+    region = next(block for block in payload.main_effects if block.name == "region")
+    assert np.isclose(region.table["Weight"].sum(), w.sum())
 
 
 def test_fit_offset_exports_exact_multiplier_block_when_support_is_small():
