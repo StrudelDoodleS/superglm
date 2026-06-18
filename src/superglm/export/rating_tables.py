@@ -149,6 +149,75 @@ def _numeric_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlo
     )
 
 
+def _offset_multiplier_block(
+    model: SuperGLM,
+    n_rows: int,
+    sample_weight: NDArray | None,
+    *,
+    n_bins: int,
+    bin_strategy: str,
+) -> RatingTableBlock | None:
+    offset = getattr(model, "_fit_offset", None)
+    if offset is None:
+        return None
+
+    offset_arr = np.asarray(offset, dtype=np.float64).ravel()
+    if len(offset_arr) != n_rows:
+        raise ValueError(
+            "The fitted offset has a different length from X; rating-table offset "
+            "multipliers can only be exported for the fit-time rows."
+        )
+
+    weights = (
+        np.ones(n_rows, dtype=np.float64)
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=np.float64)
+    )
+    multiplier = np.exp(offset_arr)
+    exact_multiplier = np.round(multiplier, 12)
+    levels, inverse = np.unique(exact_multiplier, return_inverse=True)
+
+    if len(levels) < 20:
+        exposure = np.bincount(inverse, weights=weights, minlength=len(levels))
+        table = pd.DataFrame(
+            {
+                "Offset Multiplier": levels.astype(float),
+                "Relativity": levels.astype(float),
+                "Weight": exposure.astype(float),
+            }
+        )
+        return RatingTableBlock(name="Offset Multiplier", kind="offset", table=table)
+
+    from superglm.diagnostics.discretize import _compute_edges
+
+    edges = _compute_edges(multiplier, weights, n_bins, bin_strategy)
+    actual_n_bins = len(edges) - 1
+    bin_idx = np.digitize(multiplier, edges, right=False)
+    bin_idx = np.clip(bin_idx, 1, actual_n_bins) - 1
+
+    rows: list[dict[str, str | float]] = []
+    for b in range(actual_n_bins):
+        mask = bin_idx == b
+        if not np.any(mask):
+            avg_multiplier = 0.0
+            exposure = 0.0
+        else:
+            exposure = float(weights[mask].sum())
+            avg_multiplier = float(np.average(multiplier[mask], weights=weights[mask]))
+        rows.append(
+            {
+                "Offset Multiplier": _format_interval(float(edges[b]), float(edges[b + 1])),
+                "Relativity": avg_multiplier,
+                "Weight": exposure,
+            }
+        )
+    return RatingTableBlock(
+        name="Offset Multiplier",
+        kind="offset",
+        table=pd.DataFrame(rows),
+    )
+
+
 def _interaction_beta(model: SuperGLM, name: str) -> np.ndarray:
     groups = [g for g in model._groups if g.feature_name == name]
     return np.concatenate([model.result.beta[g.sl] for g in groups])
@@ -307,6 +376,16 @@ def build_rating_table_payload(
             main_effects.append(_categorical_block(model, X, name, sample_weight, centering))
         elif isinstance(spec, Numeric):
             main_effects.append(_numeric_block(model, name, centering))
+
+    offset_block = _offset_multiplier_block(
+        model,
+        len(X),
+        sample_weight,
+        n_bins=n_bins,
+        bin_strategy=bin_strategy,
+    )
+    if offset_block is not None:
+        main_effects.append(offset_block)
 
     impact = _impact_sweep(
         model,
