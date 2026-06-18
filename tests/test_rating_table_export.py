@@ -55,6 +55,28 @@ def _fit_offset_export_model(distinct_terms: int = 2):
     return model, X, y, exposure
 
 
+def _fit_term_offset_export_model(distinct_terms: int = 2, *, retain_fit_state: bool = True):
+    rng = np.random.default_rng(988)
+    n = 240
+    if distinct_terms == 2:
+        term = np.resize(np.array([12.0, 36.0]), n)
+    else:
+        term = np.linspace(12.0, 48.0, n)
+    X = pd.DataFrame({"region": rng.choice(["A", "B"], n)})
+    offset = np.log(term / 12.0)
+    exposure = rng.uniform(0.5, 2.0, n)
+    eta = -1.35 + 0.2 * (X["region"].to_numpy() == "B") + offset
+    y = rng.poisson(np.exp(eta)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        retain_fit_state=retain_fit_state,
+        features={"region": Categorical(base="first")},
+    )
+    model.fit(X, y, sample_weight=exposure, offset=offset)
+    return model, X, y, exposure, term, offset
+
+
 def test_public_export_api_exists(tmp_path):
     model, X, y, w = _fit_export_model()
     output = tmp_path / "rating_tables.xlsx"
@@ -144,6 +166,271 @@ def test_fit_offset_exports_binned_multiplier_block_when_support_is_large():
     assert offset_block.table["Relativity"].between(1.0, 4.0).all()
 
 
+def test_fit_offset_source_exports_raw_term_lookup():
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+
+    payload = build_rating_table_payload(
+        model,
+        X,
+        y,
+        sample_weight=w,
+        offset=offset,
+        offset_source=term,
+        offset_name="Term",
+    )
+
+    offset_block = next(block for block in payload.main_effects if block.name == "Term")
+    assert offset_block.kind == "offset"
+    assert offset_block.table.columns.tolist() == ["Term", "Relativity", "Weight"]
+    table = offset_block.table.sort_values("Term")
+    assert table["Term"].tolist() == [12.0, 36.0]
+    np.testing.assert_allclose(table["Relativity"].to_numpy(), [1.0, 3.0])
+    assert np.isclose(table["Weight"].sum(), w.sum())
+
+
+def test_fit_offset_source_resolves_string_and_series_names():
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+    X_with_term = X.assign(term_months=term)
+
+    from_column = build_rating_table_payload(
+        model,
+        X_with_term,
+        y,
+        sample_weight=w,
+        offset=offset,
+        offset_source="term_months",
+    )
+    from_series = build_rating_table_payload(
+        model,
+        X,
+        y,
+        sample_weight=w,
+        offset=offset,
+        offset_source=pd.Series(term, name="Policy Term"),
+    )
+
+    assert any(block.name == "term_months" for block in from_column.main_effects)
+    assert any(block.name == "Policy Term" for block in from_series.main_effects)
+
+
+def test_fit_offset_source_requires_name_for_unnamed_array():
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+
+    with pytest.raises(ValueError, match="offset_name is required"):
+        build_rating_table_payload(
+            model,
+            X,
+            y,
+            sample_weight=w,
+            offset=offset,
+            offset_source=term,
+        )
+
+
+def test_fit_offset_source_rejects_inconsistent_mapping():
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+    bad_offset = offset.copy()
+    bad_offset[term == 12.0] = 0.0
+    bad_offset[np.flatnonzero(term == 12.0)[0]] = np.log(1.2)
+
+    with pytest.raises(ValueError, match="maps to multiple offset multipliers"):
+        build_rating_table_payload(
+            model,
+            X,
+            y,
+            sample_weight=w,
+            offset=bad_offset,
+            offset_source=term,
+            offset_name="Term",
+        )
+
+
+def test_fit_offset_source_rejects_high_cardinality_source():
+    model, X, y, w, term, offset = _fit_term_offset_export_model(distinct_terms=40)
+
+    with pytest.raises(ValueError, match="exceeding offset_max_exact_levels=20"):
+        build_rating_table_payload(
+            model,
+            X,
+            y,
+            sample_weight=w,
+            offset=offset,
+            offset_source=term,
+            offset_name="Term",
+        )
+
+
+def test_fit_offset_source_rejects_missing_source_values():
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+    source = term.copy()
+    source[0] = np.nan
+
+    with pytest.raises(ValueError, match="offset_source cannot contain missing values"):
+        build_rating_table_payload(
+            model,
+            X,
+            y,
+            sample_weight=w,
+            offset=offset,
+            offset_source=source,
+            offset_name="Term",
+        )
+
+
+def test_fit_offset_source_allows_non_bijective_mapping():
+    model, X, y, w, _term, offset = _fit_term_offset_export_model()
+    source = np.resize(np.array([-1.0, 1.0]), len(X))
+    shared_offset = np.zeros(len(X), dtype=np.float64)
+
+    payload = build_rating_table_payload(
+        model,
+        X,
+        y,
+        sample_weight=w,
+        offset=shared_offset,
+        offset_source=source,
+        offset_name="Signed Source",
+    )
+
+    offset_block = next(block for block in payload.main_effects if block.name == "Signed Source")
+    table = offset_block.table.sort_values("Signed Source")
+    assert table["Signed Source"].tolist() == [-1.0, 1.0]
+    np.testing.assert_allclose(table["Relativity"].to_numpy(), [1.0, 1.0])
+
+
+def test_fit_offset_source_reordered_frame_requires_explicit_offset():
+    model, X, y, w, term, _offset = _fit_term_offset_export_model()
+    order = np.arange(len(X))[::-1]
+
+    with pytest.raises(ValueError, match="Pass offset="):
+        build_rating_table_payload(
+            model,
+            X.iloc[order].reset_index(drop=True),
+            y[order],
+            sample_weight=w[order],
+            offset_source=term[order],
+            offset_name="Term",
+        )
+
+
+def test_fit_offset_source_reordered_frame_uses_aligned_offset():
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+    order = np.arange(len(X))[::-1]
+
+    payload = build_rating_table_payload(
+        model,
+        X.iloc[order].reset_index(drop=True),
+        y[order],
+        sample_weight=w[order],
+        offset=offset[order],
+        offset_source=term[order],
+        offset_name="Term",
+    )
+
+    offset_block = next(block for block in payload.main_effects if block.name == "Term")
+    table = offset_block.table.sort_values("Term")
+    assert table["Term"].tolist() == [12.0, 36.0]
+    np.testing.assert_allclose(table["Relativity"].to_numpy(), [1.0, 3.0])
+
+
+def test_fit_offset_export_rejects_offset_for_model_fit_without_offset():
+    model, X, y, w = _fit_export_model()
+
+    with pytest.raises(ValueError, match="requires a model fitted with an offset"):
+        build_rating_table_payload(
+            model,
+            X,
+            y,
+            sample_weight=w,
+            offset=np.zeros(len(X)),
+            offset_source=np.ones(len(X)),
+            offset_name="Term",
+        )
+
+
+def test_fit_offset_export_with_released_fit_state_requires_explicit_offset():
+    model, X, y, w, term, _offset = _fit_term_offset_export_model(retain_fit_state=False)
+
+    with pytest.raises(ValueError, match="Pass offset="):
+        build_rating_table_payload(
+            model,
+            X,
+            y,
+            sample_weight=w,
+            offset_source=term,
+            offset_name="Term",
+        )
+
+
+def test_fit_offset_export_rejects_non_log_link_model():
+    rng = np.random.default_rng(989)
+    n = 80
+    X = pd.DataFrame({"score": rng.normal(size=n)})
+    offset = np.resize(np.array([0.0, 1.0]), n)
+    y = 1.0 + 0.5 * X["score"].to_numpy() + offset
+    model = SuperGLM(
+        family="gaussian",
+        link="identity",
+        selection_penalty=0.0,
+        features={"score": Numeric()},
+    )
+    model.fit(X, y, offset=offset)
+
+    with pytest.raises(ValueError, match="log-link models"):
+        build_rating_table_payload(
+            model,
+            X,
+            y,
+            offset=offset,
+            offset_source=np.exp(offset),
+            offset_name="Offset Source",
+        )
+
+
+def test_rating_table_payload_passes_offset_to_discretization_impact(monkeypatch):
+    model, X, y, w = _fit_export_model()
+    offset = np.full(len(X), np.log(2.0), dtype=np.float64)
+    model.fit(X, y, sample_weight=w, offset=offset)
+    seen_offsets: list[np.ndarray | None] = []
+
+    def fake_discretization_impact(_X, _y, sample_weight=None, **kwargs):
+        seen_offsets.append(kwargs.get("offset"))
+        table = pd.DataFrame(
+            {
+                "bin_from": [18.0],
+                "bin_to": [80.0],
+                "relativity": [1.0],
+                "log_relativity": [0.0],
+                "n_obs": [len(_X)],
+                "sample_weight": [float(np.sum(sample_weight))],
+            }
+        )
+        return type(
+            "FakeDiscretizationResult",
+            (),
+            {
+                "tables": {"age": table},
+                "metrics": {
+                    "deviance_original": 1.0,
+                    "deviance_discretized": 1.0,
+                    "deviance_change": 0.0,
+                    "deviance_change_pct": 0.0,
+                    "mean_abs_prediction_change_pct": 0.0,
+                    "max_abs_prediction_change_pct": 0.0,
+                    "prediction_correlation": 1.0,
+                },
+            },
+        )()
+
+    monkeypatch.setattr(model, "discretization_impact", fake_discretization_impact)
+
+    build_rating_table_payload(model, X, y, sample_weight=w, offset=offset, n_bins=1)
+
+    assert len(seen_offsets) == 6
+    for seen in seen_offsets:
+        np.testing.assert_allclose(seen, offset)
+
+
 def test_excel_workbook_layout(tmp_path):
     model, X, y, w = _fit_export_model()
     output = tmp_path / "tables.xlsx"
@@ -180,6 +467,33 @@ def test_excel_workbook_includes_fit_offset_multiplier(tmp_path):
     assert ws["D7"].value == "Offset Multiplier"
     assert ws["E7"].value == "Relativity"
     assert sorted([ws["D8"].value, ws["D9"].value]) == [1.0, 3.0]
+
+
+def test_excel_workbook_includes_source_aware_fit_offset(tmp_path):
+    model, X, y, w, term, offset = _fit_term_offset_export_model(distinct_terms=2)
+    output = tmp_path / "tables_with_source_offset.xlsx"
+
+    model.export_rating_tables(
+        output,
+        X,
+        y,
+        sample_weight=w,
+        offset=offset,
+        offset_source=term,
+        offset_name="Term",
+    )
+
+    ws = load_workbook(output, data_only=True)["Rating Tables"]
+    assert ws["D5"].value == "Term"
+    assert ws["D7"].value == "Term"
+    assert ws["E7"].value == "Relativity"
+    assert sorted([ws["D8"].value, ws["D9"].value]) == [12.0, 36.0]
+    rows = sorted(
+        [(ws["D8"].value, ws["E8"].value), (ws["D9"].value, ws["E9"].value)],
+        key=lambda row: row[0],
+    )
+    assert [row[0] for row in rows] == [12.0, 36.0]
+    np.testing.assert_allclose([row[1] for row in rows], [1.0, 3.0])
 
 
 def test_interactions_start_two_blank_rows_below_main_effects(tmp_path):
