@@ -80,6 +80,7 @@ from superglm.links import (
 )
 from superglm.model import PathResult, SuperGLM
 from superglm.model_selection import CrossValidationResult, cross_validate
+from superglm.offsets import LogRatioOffset
 from superglm.penalties.flavors import Adaptive
 from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
@@ -127,6 +128,7 @@ __all__ = [
     "DiscretizationResult",
     "discretization_impact",
     "export_rating_tables",
+    "LogRatioOffset",
     "ModelMetrics",
     "ModelSummary",
     "SuperGLMRegressor",
