@@ -213,6 +213,22 @@ def test_fit_offset_source_resolves_string_and_series_names():
     assert any(block.name == "Policy Term" for block in from_series.main_effects)
 
 
+def test_fit_offset_source_rejects_reserved_and_blank_names():
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+
+    for bad_name in ["", "   ", "Relativity", "Weight"]:
+        with pytest.raises(ValueError, match="offset_name"):
+            build_rating_table_payload(
+                model,
+                X,
+                y,
+                sample_weight=w,
+                offset=offset,
+                offset_source=term,
+                offset_name=bad_name,
+            )
+
+
 def test_fit_offset_source_requires_name_for_unnamed_array():
     model, X, y, w, term, offset = _fit_term_offset_export_model()
 
@@ -296,6 +312,28 @@ def test_fit_offset_source_allows_non_bijective_mapping():
     table = offset_block.table.sort_values("Signed Source")
     assert table["Signed Source"].tolist() == [-1.0, 1.0]
     np.testing.assert_allclose(table["Relativity"].to_numpy(), [1.0, 1.0])
+
+
+def test_fit_offset_source_ignores_unused_categorical_levels():
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+    source = pd.Series(
+        pd.Categorical(term, categories=[12.0, 36.0, 60.0]),
+        name="Term",
+    )
+
+    payload = build_rating_table_payload(
+        model,
+        X,
+        y,
+        sample_weight=w,
+        offset=offset,
+        offset_source=source,
+    )
+
+    offset_block = next(block for block in payload.main_effects if block.name == "Term")
+    table = offset_block.table.sort_values("Term")
+    assert table["Term"].tolist() == [12.0, 36.0]
+    np.testing.assert_allclose(table["Relativity"].to_numpy(), [1.0, 3.0])
 
 
 def test_fit_offset_source_reordered_frame_requires_explicit_offset():

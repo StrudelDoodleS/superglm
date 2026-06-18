@@ -51,6 +51,9 @@ class RatingTablePayload:
     summary_lines: list[str]
 
 
+_OFFSET_SOURCE_RESERVED_COLUMNS = frozenset({"Relativity", "Weight"})
+
+
 def _resolve_format(file_path: str | Path, format: str | None) -> str:
     if format is not None:
         fmt = format.lower().lstrip(".")
@@ -224,6 +227,11 @@ def _resolve_offset_source(
         raise ValueError("offset_source must have the same length as X.")
     if source.isna().any():
         raise ValueError("offset_source cannot contain missing values.")
+    if not str(name).strip():
+        raise ValueError("offset_name must not be blank.")
+    if str(name) in _OFFSET_SOURCE_RESERVED_COLUMNS:
+        reserved = ", ".join(sorted(_OFFSET_SOURCE_RESERVED_COLUMNS))
+        raise ValueError(f"offset_name cannot be one of the reserved columns: {reserved}.")
     return source.reset_index(drop=True), name
 
 
@@ -329,7 +337,14 @@ def _offset_source_block(
     )
 
     rows: list[dict[str, object | float]] = []
-    for level, group in df.groupby("__offset_source__", sort=False, dropna=False):
+    for level, group in df.groupby(
+        "__offset_source__",
+        sort=False,
+        dropna=False,
+        observed=True,
+    ):
+        if group.empty:
+            continue
         offset_values = group["__offset__"].to_numpy(dtype=np.float64)
         multipliers = np.exp(offset_values)
         group_weights = group["__weight__"].to_numpy(dtype=np.float64)
