@@ -45,6 +45,8 @@ class RatingTablePayload:
 
     base_relativity: float
     selected_n_bins: int
+    offset_scoring_rule: str
+    sql_exposure_instruction: str
     main_effects: list[RatingTableBlock]
     interactions: list[InteractionTableBlock]
     discretization_impact: pd.DataFrame
@@ -52,6 +54,15 @@ class RatingTablePayload:
 
 
 _OFFSET_SOURCE_RESERVED_COLUMNS = frozenset({"Relativity", "Weight"})
+_OFFSET_SCORING_EXPORTED_FACTOR = "EXPORTED_FACTOR"
+_OFFSET_SCORING_ALREADY_APPLIED_SQL_EXPOSURE = "ALREADY_APPLIED_SQL_EXPOSURE"
+_OFFSET_SCORING_NO_OFFSET = "NO_OFFSET"
+_OFFSET_SCORING_RULES = frozenset(
+    {
+        _OFFSET_SCORING_EXPORTED_FACTOR,
+        _OFFSET_SCORING_ALREADY_APPLIED_SQL_EXPOSURE,
+    }
+)
 
 
 def _resolve_format(file_path: str | Path, format: str | None) -> str:
@@ -65,6 +76,25 @@ def _resolve_format(file_path: str | Path, format: str | None) -> str:
     raise ValueError(
         f"Unsupported rating table export format: {format or Path(file_path).suffix!r}"
     )
+
+
+def _resolve_offset_scoring_rule(rule: str) -> str:
+    resolved = str(rule).upper()
+    if resolved not in _OFFSET_SCORING_RULES:
+        allowed = ", ".join(sorted(_OFFSET_SCORING_RULES))
+        raise ValueError(f"offset_scoring_rule must be one of: {allowed}.")
+    return resolved
+
+
+def _sql_exposure_instruction(rule: str) -> str:
+    if rule == _OFFSET_SCORING_EXPORTED_FACTOR:
+        return (
+            "Offset factor is exported as a rating-table block; call SQL scoring "
+            "with @exposure = 1.0 to avoid double-counting."
+        )
+    if rule == _OFFSET_SCORING_ALREADY_APPLIED_SQL_EXPOSURE:
+        return "Offset factor is not exported; pass EXP(offset) through SQL @exposure."
+    return "No fitted offset was exported."
 
 
 def _continuous_features(model: SuperGLM) -> list[str]:
@@ -507,6 +537,7 @@ def build_rating_table_payload(
     offset: NDArray | None = None,
     offset_source=None,
     offset_name: str | None = None,
+    offset_scoring_rule: str = _OFFSET_SCORING_EXPORTED_FACTOR,
     offset_kind: str = "auto",
     offset_max_exact_levels: int = 20,
     offset_mapping_rtol: float = 1e-10,
@@ -518,6 +549,7 @@ def build_rating_table_payload(
 ) -> RatingTablePayload:
     if model._result is None:
         raise RuntimeError("Model must be fitted before exporting rating tables.")
+    offset_scoring_rule = _resolve_offset_scoring_rule(offset_scoring_rule)
 
     y_arr = np.asarray(y, dtype=np.float64)
     if len(X) != len(y_arr):
@@ -526,11 +558,15 @@ def build_rating_table_payload(
         raise ValueError("sample_weight must have the same length as X.")
 
     export_offset: NDArray | None = None
+    payload_offset_scoring_rule = _OFFSET_SCORING_NO_OFFSET
     if _fit_used_offset(model):
         _require_log_link_offset_export(model)
         export_offset = _resolve_export_offset(offset, model, X)
+        payload_offset_scoring_rule = offset_scoring_rule
     elif offset is not None or offset_source is not None:
         raise ValueError("Offset rating-table export requires a model fitted with an offset.")
+    elif offset_scoring_rule != _OFFSET_SCORING_EXPORTED_FACTOR:
+        raise ValueError("offset_scoring_rule is only meaningful for models fitted with an offset.")
 
     continuous = _continuous_features(model)
     selected = (
@@ -558,7 +594,13 @@ def build_rating_table_payload(
             main_effects.append(_numeric_block(model, name, centering))
 
     if export_offset is not None:
-        if offset_source is None:
+        if payload_offset_scoring_rule == _OFFSET_SCORING_ALREADY_APPLIED_SQL_EXPOSURE:
+            if offset_source is not None:
+                raise ValueError(
+                    "offset_source is only used when offset_scoring_rule='EXPORTED_FACTOR'."
+                )
+            offset_block = None
+        elif offset_source is None:
             offset_block = _offset_multiplier_block(
                 export_offset,
                 len(X),
@@ -578,7 +620,8 @@ def build_rating_table_payload(
                 offset_mapping_rtol=offset_mapping_rtol,
                 offset_mapping_atol=offset_mapping_atol,
             )
-        main_effects.append(offset_block)
+        if offset_block is not None:
+            main_effects.append(offset_block)
 
     impact = _impact_sweep(
         model,
@@ -593,10 +636,17 @@ def build_rating_table_payload(
     return RatingTablePayload(
         base_relativity=float(np.exp(model.result.intercept)),
         selected_n_bins=int(n_bins),
+        offset_scoring_rule=payload_offset_scoring_rule,
+        sql_exposure_instruction=_sql_exposure_instruction(payload_offset_scoring_rule),
         main_effects=main_effects,
         interactions=_interaction_blocks(model, n_bins),
         discretization_impact=impact,
-        summary_lines=str(model.summary(detail="compact")).splitlines(),
+        summary_lines=[
+            f"SQL offset scoring rule: {payload_offset_scoring_rule}",
+            _sql_exposure_instruction(payload_offset_scoring_rule),
+            "",
+            *str(model.summary(detail="compact")).splitlines(),
+        ],
     )
 
 
@@ -610,6 +660,7 @@ def export_rating_tables(
     offset: NDArray | None = None,
     offset_source=None,
     offset_name: str | None = None,
+    offset_scoring_rule: str = _OFFSET_SCORING_EXPORTED_FACTOR,
     offset_kind: str = "auto",
     offset_max_exact_levels: int = 20,
     offset_mapping_rtol: float = 1e-10,
@@ -636,6 +687,7 @@ def export_rating_tables(
         offset=offset,
         offset_source=offset_source,
         offset_name=offset_name,
+        offset_scoring_rule=offset_scoring_rule,
         offset_kind=offset_kind,
         offset_max_exact_levels=offset_max_exact_levels,
         offset_mapping_rtol=offset_mapping_rtol,
