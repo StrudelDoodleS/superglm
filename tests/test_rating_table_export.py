@@ -79,6 +79,19 @@ def _fit_term_offset_export_model(distinct_terms: int = 2, *, retain_fit_state: 
     return model, X, y, exposure, term, offset
 
 
+def _score_payload_row(payload, row: dict, *, sql_exposure: float) -> float:
+    score = float(payload.base_relativity) * float(sql_exposure)
+    for block in payload.main_effects:
+        key_col = block.table.columns[0]
+        if key_col not in row:
+            continue
+        matches = block.table[block.table[key_col] == row[key_col]]
+        if matches.empty:
+            raise AssertionError(f"No exported row for {key_col}={row[key_col]!r}")
+        score *= float(matches["Relativity"].iloc[0])
+    return score
+
+
 def test_public_export_api_exists(tmp_path):
     model, X, y, w = _fit_export_model()
     output = tmp_path / "rating_tables.xlsx"
@@ -214,6 +227,65 @@ def test_fit_offset_source_exports_raw_term_lookup():
     assert table["Term"].tolist() == [12.0, 36.0]
     np.testing.assert_allclose(table["Relativity"].to_numpy(), [1.0, 3.0])
     assert np.isclose(table["Weight"].sum(), w.sum())
+
+
+def test_exported_factor_offset_scoring_rule_uses_unit_sql_exposure():
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+
+    payload = build_rating_table_payload(
+        model,
+        X,
+        y,
+        sample_weight=w,
+        offset=offset,
+        offset_source=term,
+        offset_name="Term",
+    )
+
+    assert payload.offset_scoring_rule == "EXPORTED_FACTOR"
+    assert any(block.name == "Term" for block in payload.main_effects)
+
+    expected = model.predict(X.iloc[:6].reset_index(drop=True), offset=offset[:6])
+    scored = np.array(
+        [
+            _score_payload_row(
+                payload,
+                {"region": X.iloc[i]["region"], "Term": term[i]},
+                sql_exposure=1.0,
+            )
+            for i in range(6)
+        ]
+    )
+    np.testing.assert_allclose(scored, expected, rtol=1e-10, atol=1e-12)
+
+
+def test_already_applied_sql_exposure_rule_omits_offset_block_and_uses_exp_offset():
+    model, X, y, w, _term, offset = _fit_term_offset_export_model()
+
+    payload = build_rating_table_payload(
+        model,
+        X,
+        y,
+        sample_weight=w,
+        offset=offset,
+        offset_scoring_rule="ALREADY_APPLIED_SQL_EXPOSURE",
+    )
+
+    assert payload.offset_scoring_rule == "ALREADY_APPLIED_SQL_EXPOSURE"
+    assert not any(block.kind == "offset" for block in payload.main_effects)
+
+    expected = model.predict(X.iloc[:6].reset_index(drop=True), offset=offset[:6])
+    scored = np.array(
+        [
+            _score_payload_row(
+                payload,
+                {"region": X.iloc[i]["region"]},
+                sql_exposure=float(np.exp(offset[i])),
+            )
+            for i in range(6)
+        ]
+    )
+    np.testing.assert_allclose(scored, expected, rtol=1e-10, atol=1e-12)
 
 
 def test_fit_offset_source_resolves_string_and_series_names():
@@ -550,6 +622,10 @@ def test_excel_workbook_includes_source_aware_fit_offset(tmp_path):
     )
 
     ws = load_workbook(output, data_only=True)["Rating Tables"]
+    assert ws["A3"].value == "SQL Offset Scoring Rule"
+    assert ws["C3"].value == "EXPORTED_FACTOR"
+    assert ws["A4"].value == "SQL Exposure Input"
+    assert "@exposure = 1.0" in ws["C4"].value
     assert ws["D5"].value == "Term"
     assert ws["D7"].value == "Term"
     assert ws["E7"].value == "Relativity"

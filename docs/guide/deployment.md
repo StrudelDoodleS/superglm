@@ -127,6 +127,56 @@ Link-scale offset: log(36 / 12)
 Response factor:   3
 ```
 
+SQL scoring must then use exactly one of these offset paths:
+
+```text
+EXPORTED_FACTOR:
+    The offset factor is in the rating table, e.g. Term 36 -> 3.
+    Call SQL scoring with @exposure = 1.0.
+
+ALREADY_APPLIED_SQL_EXPOSURE:
+    The offset factor is not exported as a rating-table block.
+    Pass EXP(offset) through SQL @exposure instead.
+```
+
+The common scoring shape is:
+
+```text
+score = base_rate * @exposure * EXP(sum(log_coefficient))
+```
+
+So do not both export `Term` as a factor and pass `@exposure = EXP(offset)`;
+that would multiply the term factor twice.
+
+The default export path is `EXPORTED_FACTOR`:
+
+```python
+model.export_rating_tables(
+    "rating_tables.xlsx",
+    train_df[["region"]],
+    y,
+    sample_weight=w,
+    offset=offset,
+    offset_source=term,
+    offset_name="Term",
+    offset_scoring_rule="EXPORTED_FACTOR",
+)
+```
+
+If the SQL caller already passes the offset multiplier as `@exposure`, omit the
+offset block from the workbook:
+
+```python
+model.export_rating_tables(
+    "rating_tables.xlsx",
+    train_df[["region"]],
+    y,
+    sample_weight=w,
+    offset=offset,
+    offset_scoring_rule="ALREADY_APPLIED_SQL_EXPOSURE",
+)
+```
+
 When `offset_source` is supplied, the exporter validates that each raw source
 level maps to one offset multiplier. High-cardinality source-aware offsets are
 rejected rather than silently binned; keep truly continuous offset calculations in

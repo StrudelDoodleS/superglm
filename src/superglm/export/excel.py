@@ -53,6 +53,13 @@ def write_rating_table_workbook(
     ws["C2"] = float(payload.base_relativity)
     ws["C2"].number_format = "0.000000"
 
+    ws["A3"] = "SQL Offset Scoring Rule"
+    ws["A3"].font = Font(bold=True)
+    ws["C3"] = payload.offset_scoring_rule
+    ws["A4"] = "SQL Exposure Input"
+    ws["A4"].font = Font(bold=True)
+    ws["C4"] = payload.sql_exposure_instruction
+
     max_main_row = 8
     for idx, block in enumerate(payload.main_effects):
         start_col = 1 + idx * 3
