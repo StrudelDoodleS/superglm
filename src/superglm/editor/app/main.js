@@ -51,6 +51,7 @@ const statusNode = document.getElementById("status");
 let state = null;
 let showCi = false;
 let showContrib = false;
+let graphMode = "select";
 let buildProgress = null;
 let buildFrame = null;
 let renderedTerm = "";
@@ -63,6 +64,7 @@ const chartContext = {
   modeSelect,
   zoomState,
   selectedTerm,
+  visualMode: () => graphMode,
   showCi: () => showCi,
   showContrib: () => showContrib,
   buildProgress: () => buildProgress
@@ -209,7 +211,7 @@ function updateResetOrderAction(term) {
 
 function updateHandleCount(term) {
   const controls = term.controls;
-  const active = modeSelect.value === "handles" && controls && controls.count;
+  const active = graphMode === "handles" && controls && controls.count;
   handleCountWrap.hidden = !active;
   const canShowContrib = active && Array.isArray(controls.basis) && controls.basis.length > 0;
   basisToggle.hidden = !canShowContrib;
@@ -236,9 +238,11 @@ function applyTermDefaults(term) {
   stopContributionBuild();
   if (canShowContributions(term)) {
     modeSelect.value = "handles";
+    graphMode = "handles";
     showContrib = true;
-  } else if (modeSelect.value === "handles") {
+  } else if (modeSelect.value === "handles" || graphMode === "handles") {
     modeSelect.value = "select";
+    graphMode = "select";
     showContrib = false;
   }
 }
@@ -270,6 +274,7 @@ function startContributionBuild() {
   if (!canShowContributions(term)) return;
   stopContributionBuild();
   modeSelect.value = "handles";
+  graphMode = "handles";
   showContrib = true;
   runContributionBuild(0);
 }
@@ -360,7 +365,8 @@ termSelect.addEventListener("change", async () => {
 
 modeSelect.addEventListener("change", () => {
   stopContributionBuild();
-  if (modeSelect.value === "handles" && canShowContributions(currentTerm())) {
+  if (modeSelect.value !== "zoom") graphMode = modeSelect.value;
+  if (graphMode === "handles" && canShowContributions(currentTerm())) {
     showContrib = true;
   }
   render();

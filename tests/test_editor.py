@@ -1834,6 +1834,9 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "Contrib" in shell
         assert "Build" in shell
         assert "showContrib" in js
+        assert "graphMode" in js
+        assert "visualMode" in js
+        assert 'modeSelect.value !== "zoom"' in js
         assert "requestAnimationFrame" in js
         assert "buildDurationMs" in js
         assert "advanceContributionBuild" in js
