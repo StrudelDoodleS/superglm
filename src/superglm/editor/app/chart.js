@@ -23,6 +23,7 @@ export function drawChart(term, selection, context) {
   // module only turns the current payload into SVG plus scale metadata used by
   // interactions.js.
   const { svg, modeSelect, zoomState } = context;
+  const visualMode = context.visualMode ? context.visualMode() : modeSelect.value;
   svg.innerHTML = "";
   const width = 940, height = 520;
   const margin = { left: 76, right: 76, top: 48, bottom: 72 };
@@ -41,11 +42,11 @@ export function drawChart(term, selection, context) {
   const ciValues = context.showCi() && term.ci_lower_y && term.ci_upper_y
     ? [...term.ci_lower_y, ...term.ci_upper_y]
     : [];
-  const controlValues = modeSelect.value === "handles" && term.controls && term.controls.y
+  const controlValues = visualMode === "handles" && term.controls && term.controls.y
     ? term.controls.y
     : [];
   const buildProgress = context.buildProgress ? context.buildProgress() : null;
-  const buildActive = modeSelect.value === "handles" &&
+  const buildActive = visualMode === "handles" &&
     context.buildProgress &&
     buildProgress !== null;
   const buildEnvelope = buildActive ? buildContributionEnvelope(term) : [];
@@ -91,10 +92,10 @@ export function drawChart(term, selection, context) {
       band(svg, x, term.ci_lower_y, term.ci_upper_y, sx, sy, "ci");
     }
   }
-  if (modeSelect.value === "handles" && context.showContrib && context.showContrib()) {
+  if (visualMode === "handles" && context.showContrib && context.showContrib()) {
     basisContributions(svg, term, sx, sy, buildActive);
   }
-  if (modeSelect.value === "handles" && buildProgress !== null) {
+  if (visualMode === "handles" && buildProgress !== null) {
     const progress = Math.min(Math.max(Number(buildProgress) || 0, 0), 1);
     const buildCurve = buildAccumulationCurve(term, progress);
     drawActiveBasis(svg, term, buildCurve.activeIndex, sx, sy);
@@ -107,7 +108,7 @@ export function drawChart(term, selection, context) {
   if (!buildActive) path(svg, x, original, sx, sy, "original");
   if (!buildActive) path(svg, x, y, sx, sy, "edited");
   const selectedBounds = selectionBounds(x, y, selection, sx, sy, margin, innerW, innerH);
-  const handlesMode = modeSelect.value === "handles" && term.controls;
+  const handlesMode = visualMode === "handles" && term.controls;
   if (!handlesMode && selectedBounds) drawSelectionBounds(svg, selectedBounds);
   if (!handlesMode) drawLevelGroups(svg, term, sx, sy);
   const visiblePoints = visiblePointIndices(term, selection);
