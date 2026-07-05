@@ -342,7 +342,17 @@ def _profile_phi(
 # Profile likelihood result
 # ---------------------------------------------------------------------------
 
-_TRACE_COLUMNS = ["step", "p", "phi", "nll", "n_iter", "fit_converged", "source"]
+_TRACE_COLUMNS = [
+    "step",
+    "p",
+    "phi",
+    "nll",
+    "n_iter",
+    "fit_converged",
+    "source",
+    "fit_trace",
+    "fit_trace_kind",
+]
 _SADDLEPOINT_NOTE_THRESHOLD = 0.10
 _SADDLEPOINT_WARN_THRESHOLD = 0.25
 
@@ -549,6 +559,34 @@ def _build_saddlepoint_messages(p: float, diagnostics: _TweedieLogpdfDiagnostics
     return [message]
 
 
+def _fit_iteration_trace(iteration_log) -> list[dict[str, float | int]]:
+    """Convert solver diagnostics into a compact frontend learning curve."""
+    if not iteration_log:
+        return []
+    return [
+        {
+            "iteration": int(row.iteration),
+            "loss": float(row.deviance),
+        }
+        for row in iteration_log
+    ]
+
+
+def _reml_iteration_trace(reml_result) -> list[dict[str, float | int]]:
+    """Convert REML objective history into the same compact curve shape."""
+    history = getattr(reml_result, "objective_history", None)
+    if not history:
+        return []
+    return [
+        {
+            "iteration": int(i),
+            "loss": float(value),
+        }
+        for i, value in enumerate(history)
+        if np.isfinite(value)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Profile context — fit path
 # ---------------------------------------------------------------------------
@@ -575,6 +613,8 @@ class _ProfileContext:
     phi_method: str
     verbose: bool
     ll_scale: float
+    trace_callback: Any = field(default=None, repr=False)
+    trace_iterations: bool = False
 
     # Mutable warm-start state
     warm_beta: NDArray | None = field(default=None, repr=False)
@@ -613,6 +653,7 @@ class _ProfileContext:
                 beta_init=self.warm_beta,
                 intercept_init=self.warm_intercept,
                 direct_solve=self.direct_solve,
+                record_diagnostics=self.trace_iterations,
             )
         else:
             result = fit_pirls(
@@ -626,6 +667,7 @@ class _ProfileContext:
                 offset=self.offset_arr,
                 beta_init=self.warm_beta,
                 intercept_init=self.warm_intercept,
+                record_diagnostics=self.trace_iterations,
             )
 
         eta = stabilize_eta(
@@ -651,17 +693,20 @@ class _ProfileContext:
         self.last_edf = float(result.effective_df)
 
         # Record trace
-        self.trace_rows.append(
-            {
-                "step": self.n_evals,
-                "p": p,
-                "phi": phi,
-                "nll": nll,
-                "n_iter": result.n_iter,
-                "fit_converged": result.converged,
-                "source": source,
-            }
-        )
+        row = {
+            "step": self.n_evals,
+            "p": p,
+            "phi": phi,
+            "nll": nll,
+            "n_iter": result.n_iter,
+            "fit_converged": result.converged,
+            "source": source,
+            "fit_trace": _fit_iteration_trace(result.iteration_log),
+            "fit_trace_kind": "weighted deviance" if self.trace_iterations else "",
+        }
+        self.trace_rows.append(row)
+        if self.trace_callback is not None and source:
+            self.trace_callback(dict(row))
         self._nll_cache[key] = nll
         self.n_evals += 1
         _elapsed = _time.perf_counter() - _t0
@@ -738,6 +783,8 @@ def _build_profile_context(
     offset,
     phi_method: str,
     verbose: bool,
+    trace_callback=None,
+    trace_iterations: bool = False,
 ) -> _ProfileContext:
     """One-time setup: build design matrix, calibrate lambda, create context."""
     from superglm.distributions import Tweedie
@@ -780,6 +827,8 @@ def _build_profile_context(
         phi_method=phi_method,
         verbose=verbose,
         ll_scale=float(len(y_arr)),
+        trace_callback=trace_callback,
+        trace_iterations=trace_iterations,
     )
 
 
@@ -805,6 +854,8 @@ class _ProfileContextREML:
     phi_method: str
     verbose: bool
     ll_scale: float
+    trace_callback: Any = field(default=None, repr=False)
+    trace_iterations: bool = False
 
     # Mutable state
     last_p_eval: float | None = field(default=None, repr=False)
@@ -851,17 +902,24 @@ class _ProfileContextREML:
             else 0
         )
 
-        self.trace_rows.append(
-            {
-                "step": self.n_evals,
-                "p": p,
-                "phi": phi,
-                "nll": nll,
-                "n_iter": n_iter,
-                "fit_converged": self.model.result.converged,
-                "source": source,
-            }
-        )
+        row = {
+            "step": self.n_evals,
+            "p": p,
+            "phi": phi,
+            "nll": nll,
+            "n_iter": n_iter,
+            "fit_converged": self.model.result.converged,
+            "source": source,
+            "fit_trace": (
+                _reml_iteration_trace(getattr(self.model, "_reml_result", None))
+                if self.trace_iterations
+                else []
+            ),
+            "fit_trace_kind": "REML objective" if self.trace_iterations else "",
+        }
+        self.trace_rows.append(row)
+        if self.trace_callback is not None and source:
+            self.trace_callback(dict(row))
         self._nll_cache[key] = nll
         self.n_evals += 1
         _elapsed = _time.perf_counter() - _t0
@@ -933,6 +991,8 @@ def _build_profile_context_reml(
     offset,
     phi_method: str,
     verbose: bool,
+    trace_callback=None,
+    trace_iterations: bool = False,
 ) -> _ProfileContextREML:
     """Build context for REML-based profile estimation."""
     y_np = np.asarray(y, dtype=np.float64)
@@ -951,6 +1011,8 @@ def _build_profile_context_reml(
         phi_method=phi_method,
         verbose=verbose,
         ll_scale=float(len(y_np)),
+        trace_callback=trace_callback,
+        trace_iterations=trace_iterations,
     )
 
 
@@ -1104,6 +1166,8 @@ def estimate_tweedie_p(
     grid: NDArray | None = None,
     n_grid_coarse: int = 10,
     optimizer: str = "L-BFGS-B",
+    trace_callback=None,
+    trace_iterations: bool = False,
 ) -> TweedieProfileResult:
     """Estimate the Tweedie power parameter via profile likelihood.
 
@@ -1151,6 +1215,9 @@ def estimate_tweedie_p(
     optimizer : str
         Optimizer backend for ``method="profile_opt"``. One of
         ``"L-BFGS-B"`` (default) or ``"Powell"``.
+    trace_iterations : bool
+        If True, include the nested fit learning curve for each candidate
+        ``p`` evaluation in ``search_trace["fit_trace"]``.
 
     Returns
     -------
@@ -1191,9 +1258,29 @@ def estimate_tweedie_p(
 
     # Build context
     if fit_mode == "fit_reml":
-        ctx = _build_profile_context_reml(model, X, y, sample_weight, offset, phi_method, verbose)
+        ctx = _build_profile_context_reml(
+            model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            phi_method,
+            verbose,
+            trace_callback,
+            trace_iterations,
+        )
     else:
-        ctx = _build_profile_context(model, X, y, sample_weight, offset, phi_method, verbose)
+        ctx = _build_profile_context(
+            model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            phi_method,
+            verbose,
+            trace_callback,
+            trace_iterations,
+        )
 
     # Dispatch search
     if method == "brent":

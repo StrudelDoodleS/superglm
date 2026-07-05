@@ -64,7 +64,7 @@ def summary_payload(widget, source: str) -> dict[str, Any]:
         }
 
     summary = model.summary()
-    compact = _compact_summary_payload(summary, source, offset_terms, offset_labels)
+    compact = _compact_summary_payload(summary, source, offset_terms, offset_labels, model=model)
     return {
         "available": True,
         "source": source,
@@ -139,11 +139,15 @@ def _compact_summary_payload(
     source: str,
     offset_terms: list[str],
     offset_labels: list[dict[str, Any]],
+    *,
+    model=None,
 ) -> dict[str, Any]:
     # The browser renders this typed payload instead of scraping the notebook
     # HTML. The raw HTML remains available behind the "Full summary" disclosure.
     info = getattr(summary, "_info", {})
     rows = [_compact_summary_row(row) for row in getattr(summary, "_coef_rows", [])]
+    if model is not None:
+        rows = _with_reference_rows(rows, model)
     return {
         "source": source,
         "model": {
@@ -163,6 +167,56 @@ def _compact_summary_payload(
         "rows": rows,
         "offset_terms": offset_terms,
         "offset_labels": offset_labels,
+    }
+
+
+def _with_reference_rows(rows: list[dict[str, Any]], model) -> list[dict[str, Any]]:
+    existing = {row["name"] for row in rows}
+    additions: dict[str, list[dict[str, Any]]] = {}
+    for term, spec in getattr(model, "_specs", {}).items():
+        base_level = str(getattr(spec, "_base_level", "") or "")
+        if not base_level:
+            continue
+        row_name = f"{term}[{base_level}]"
+        if row_name in existing:
+            continue
+        additions.setdefault(str(term), []).append(_compact_reference_row(str(term), base_level))
+
+    if not additions:
+        return rows
+
+    inserted: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        group = str(row.get("group") or "")
+        if group in additions and group not in inserted:
+            out.extend(additions[group])
+            inserted.add(group)
+        out.append(row)
+    for group, group_rows in additions.items():
+        if group not in inserted:
+            out.extend(group_rows)
+    return out
+
+
+def _compact_reference_row(term: str, level: str) -> dict[str, Any]:
+    return {
+        "name": f"{term}[{level}]",
+        "group": term,
+        "kind": "reference",
+        "coef": 0.0,
+        "se": None,
+        "se_label": "ref",
+        "stat": None,
+        "stat_label": "",
+        "p_value": None,
+        "sig_code": "",
+        "sig_class": "sig-reference",
+        "quasi_separated": False,
+        "active": True,
+        "n_params": 0,
+        "ref_df": None,
+        "edf": None,
     }
 
 

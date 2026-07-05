@@ -556,11 +556,17 @@ class EditorSession:
         sample_weight=None,
         offset=None,
         fit_mode: str = "inherit",
+        progress_callback=None,
         **profile_kwargs: Any,
     ):
         """Explicitly re-estimate a distribution parameter for the in-force model."""
         if self.model is None:
             raise RuntimeError("Cannot reprofile without a source model.")
+        if self.edited_terms():
+            raise RuntimeError(
+                "Cannot re-profile distribution parameters while manual coefficient edits "
+                "are pending. Reset edits, apply them as fixed offsets, or refit first."
+            )
         X_ref, y_ref, sample_weight_ref, base_offset = self._resolve_refit_data(
             X,
             y,
@@ -570,10 +576,16 @@ class EditorSession:
         if y_ref is None:
             raise RuntimeError("Fit response data was not retained on the source model.")
 
+        profile_model = self.model._clone_without_features(set())
+        if getattr(self.model, "_last_fit_meta", None) is not None:
+            profile_model._last_fit_meta = dict(self.model._last_fit_meta)
+
         key = parameter.lower().replace("-", "_")
         if key in {"tweedie", "tweedie_p", "p"}:
             profile_kwargs.setdefault("fit_mode", fit_mode)
-            result = self.model.estimate_p(
+            if progress_callback is not None:
+                profile_kwargs.setdefault("progress_callback", progress_callback)
+            result = profile_model.estimate_p(
                 X_ref,
                 y_ref,
                 sample_weight=sample_weight_ref,
@@ -581,7 +593,9 @@ class EditorSession:
                 **profile_kwargs,
             )
         elif key in {"nb2", "nb2_theta", "negative_binomial", "theta"}:
-            result = self.model.estimate_theta(
+            if progress_callback is not None:
+                profile_kwargs.setdefault("progress_callback", progress_callback)
+            result = profile_model.estimate_theta(
                 X_ref,
                 y_ref,
                 sample_weight=sample_weight_ref,
@@ -591,7 +605,7 @@ class EditorSession:
         else:
             raise ValueError("parameter must be 'tweedie_p' or 'nb2_theta'.")
 
-        self.replace_in_force_model(self.model)
+        self.replace_in_force_model(profile_model)
         return result
 
     def refit_with_collapsed_levels(

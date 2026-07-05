@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -9,7 +11,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Numeric, OrderedCategorical, Polynomial, Spline, SuperGLM
+from superglm import (
+    Categorical,
+    Numeric,
+    OrderedCategorical,
+    Polynomial,
+    Spline,
+    SuperGLM,
+    families,
+    generate_tweedie_cpg,
+)
 from superglm.editor import EditableTerm, EditorSession
 from superglm.inference.summary import ModelSummary, _BasisDetailRow, _CoefRow
 
@@ -25,8 +36,15 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     assert "## Cross-Validated k Check" in source
     assert "from sklearn.model_selection import KFold" in source
     assert "from sklearn.model_selection import KFold, train_test_split" in source
+    assert "families" in source
+    assert "generate_tweedie_cpg" in source
     assert "X_train_val, X_test" in source
     assert "X_train, X_val" in source
+    assert "TRUE_TWEEDIE_P" in source
+    assert "TRUE_TWEEDIE_P_INIT" in source
+    assert "TRUE_TWEEDIE_PHI" in source
+    assert "mu = np.exp(eta)" in source
+    assert "y = generate_tweedie_cpg(" in source
     assert "TERRITORY_LEVELS" in source
     assert "territory_effect_map" in source
     assert "territory_probs" in source
@@ -34,6 +52,11 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     assert '"T01"' in source
     assert '"T10"' in source
     assert "territory_effect" in source
+    assert "family=families.tweedie(p=TRUE_TWEEDIE_P_INIT)" in source
+    assert "model.estimate_p(" in source
+    assert "tweedie_profile.search_trace" in source
+    assert 'method="brent"' in source
+    assert 'phi_method="mle"' in source
     assert '"territory": Categorical(base="most_exposed")' in source
     assert 'terms=["age", "mileage", "region", "age_band", "territory"]' in source
     assert "## Collapse Sparse Categorical Levels" in source
@@ -59,19 +82,19 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     assert "edf_share" in source
     assert "chosen_k" in source
     assert 'Spline(kind="bs", k=age_k' in source
-    assert "model = fit_age_model(chosen_k, X_fit=X_train, y_fit=y_train)" in source
+    assert "model = fit_age_model(chosen_k, X_fit=X_train, y_fit=y_train, w_fit=w_train)" in source
     assert "cv_loss_records = []" in source
     assert "fold_train_loss" in source
     assert "fold_validation_loss" in source
     assert "cv_loss_summary" in source
     assert "split_loss" in source
-    assert '"metric": "mean unit deviance"' in source
+    assert '"metric": "weighted mean unit deviance"' in source
     assert '"rows": cv_loss.round(6).to_dict("records")' in source
     assert '"summary": cv_loss_summary.round(6).to_dict("records")' in source
     assert '"split_loss": split_loss.round(6).to_dict("records")' in source
-    assert "train_data=(X_train, y_train, None)" in source
-    assert "validation_data=(X_val, y_val, None)" in source
-    assert "test_data=(X_test, y_test, None)" in source
+    assert "train_data=(X_train, y_train, w_train)" in source
+    assert "validation_data=(X_val, y_val, w_val)" in source
+    assert "test_data=(X_test, y_test, w_test)" in source
     assert "cv_report=cv_report" in source
 
 
@@ -692,6 +715,80 @@ def test_repeated_categorical_collapses_create_distinct_level_groups():
     ]
 
 
+def test_compact_summary_shows_collapsed_reference_level_group():
+    from superglm.editor.summaries import summary_payload
+
+    rng = np.random.default_rng(20260709)
+    levels = [f"T{i:02d}" for i in range(1, 11)]
+    territory = np.repeat(levels, 40)
+    X = pd.DataFrame({"territory": territory})
+    effects = {
+        "T01": 0.02,
+        "T02": 0.03,
+        "T03": 0.12,
+        "T04": 0.13,
+        "T05": 0.11,
+        "T06": -0.04,
+        "T07": -0.03,
+        "T08": -0.05,
+        "T09": -0.15,
+        "T10": 0.05,
+    }
+    y = 0.5 + np.array([effects[value] for value in territory]) + rng.normal(0.0, 0.02, len(X))
+    sample_weight = np.ones(len(X), dtype=np.float64)
+    sample_weight[np.isin(territory, ["T03", "T04", "T05"])] = 3.0
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"territory": Categorical(base="most_exposed")},
+    )
+    model.fit(X, y, sample_weight=sample_weight)
+    session = EditorSession.from_model(
+        model,
+        terms=["territory"],
+        train_data=(X, y, sample_weight),
+    )
+
+    session.select_levels("territory", ["T03", "T04", "T05"])
+    session.replace_with_collapsed_levels("territory", method="fit")
+    session.select_levels("territory", ["T06", "T07", "T08"])
+    session.replace_with_collapsed_levels("territory", method="fit")
+    assert session.model.features["territory"]._base_level == "T03+T04+T05"
+
+    widget = session.widget()
+    try:
+        payload = summary_payload(widget, "in_force")
+    finally:
+        widget.close()
+
+    rows = payload["compact"]["rows"]
+    names = [row["name"] for row in rows]
+    assert "territory[T03+T04+T05]" in names
+    assert "territory[T06+T07+T08]" in names
+    reference_row = next(row for row in rows if row["name"] == "territory[T03+T04+T05]")
+    assert reference_row["kind"] == "reference"
+    assert reference_row["coef"] == 0.0
+    assert reference_row["se_label"] == "ref"
+
+
+def test_compact_summary_shows_regular_reference_level(editor_model):
+    from superglm.editor.summaries import summary_payload
+
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    try:
+        payload = summary_payload(widget, "in_force")
+    finally:
+        widget.close()
+
+    rows = payload["compact"]["rows"]
+    reference_row = next(row for row in rows if row["name"] == "region[A]")
+    assert reference_row["kind"] == "reference"
+    assert reference_row["coef"] == 0.0
+    assert reference_row["se_label"] == "ref"
+    assert reference_row["sig_class"] == "sig-reference"
+
+
 def test_collapse_selected_levels_across_existing_groups_preserves_remainders():
     rng = np.random.default_rng(20260707)
     levels = [f"T{i:02d}" for i in range(1, 7)]
@@ -875,6 +972,20 @@ def test_reorder_multiple_categorical_levels_can_move_to_far_right():
     assert session.selection("territory").tolist() == [3, 4]
 
 
+def test_save_load_preserves_display_only_level_order(editor_model, tmp_path):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    session.select_levels("region", ["C"])
+    session.reorder_levels("region", target_index=1)
+    path = tmp_path / "editor-session.json"
+
+    session.save(path)
+    loaded = EditorSession.load(path, model=editor_model)
+
+    assert loaded.terms["region"].levels == ["A", "C", "B"]
+    assert loaded.selection("region").tolist() == [1]
+    assert loaded.level_order_changed("region")
+
+
 def test_reprofile_distribution_parameter_dispatches_to_model(
     editor_model, editor_frame, monkeypatch
 ):
@@ -886,10 +997,13 @@ def test_reprofile_distribution_parameter_dispatches_to_model(
     )
     calls: list[dict[str, object]] = []
 
-    def fake_estimate_p(X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
+    replaced: list[object] = []
+
+    def fake_estimate_p(self, X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
         calls.append(
             {
                 "parameter": "p",
+                "model": self,
                 "X": X_arg,
                 "y": y_arg,
                 "sample_weight": sample_weight,
@@ -899,10 +1013,11 @@ def test_reprofile_distribution_parameter_dispatches_to_model(
         )
         return "p-result"
 
-    def fake_estimate_theta(X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
+    def fake_estimate_theta(self, X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
         calls.append(
             {
                 "parameter": "theta",
+                "model": self,
                 "X": X_arg,
                 "y": y_arg,
                 "sample_weight": sample_weight,
@@ -912,8 +1027,13 @@ def test_reprofile_distribution_parameter_dispatches_to_model(
         )
         return "theta-result"
 
-    monkeypatch.setattr(editor_model, "estimate_p", fake_estimate_p)
-    monkeypatch.setattr(editor_model, "estimate_theta", fake_estimate_theta)
+    def fake_replace(model):
+        replaced.append(model)
+        return session
+
+    monkeypatch.setattr(type(editor_model), "estimate_p", fake_estimate_p)
+    monkeypatch.setattr(type(editor_model), "estimate_theta", fake_estimate_theta)
+    monkeypatch.setattr(session, "replace_in_force_model", fake_replace)
 
     p_result = session.reprofile_distribution("tweedie_p", method="grid", n_grid=7)
     theta_result = session.reprofile_distribution("nb2_theta", theta_bounds=(0.2, 20.0))
@@ -921,11 +1041,380 @@ def test_reprofile_distribution_parameter_dispatches_to_model(
     assert p_result == "p-result"
     assert theta_result == "theta-result"
     assert calls[0]["parameter"] == "p"
+    assert calls[0]["model"] is not editor_model
     assert calls[0]["X"] is X
     assert calls[0]["y"] is y
     assert calls[0]["kwargs"] == {"method": "grid", "n_grid": 7, "fit_mode": "inherit"}
     assert calls[1]["parameter"] == "theta"
+    assert calls[1]["model"] is not editor_model
     assert calls[1]["kwargs"] == {"theta_bounds": (0.2, 20.0)}
+    assert replaced == [calls[0]["model"], calls[1]["model"]]
+
+
+def test_reprofile_distribution_uses_cloned_in_force_model():
+    rng = np.random.default_rng(20260711)
+    n = 120
+    x = rng.uniform(0.0, 1.0, n)
+    X = pd.DataFrame({"x": x})
+    mu = np.exp(0.2 + 0.4 * x)
+    y = generate_tweedie_cpg(n, mu=mu, phi=0.5, p=1.45, rng=rng)
+    model = SuperGLM(
+        family=families.tweedie(p=1.3),
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"x": Spline(n_knots=5)},
+    )
+    model.fit(X, y)
+    original_beta = model.result.beta.copy()
+    original_intercept = model.result.intercept
+    session = EditorSession.from_model(model, terms=["x"], train_data=(X, y, None))
+
+    session.reprofile_distribution(
+        "tweedie_p",
+        fit_mode="fit",
+        method="grid",
+        grid=np.array([1.25, 1.45]),
+    )
+
+    assert session.model is not model
+    assert session.reference_model is model
+    assert model.family.p == 1.3
+    np.testing.assert_allclose(model.result.beta, original_beta)
+    assert model.result.intercept == original_intercept
+
+
+def test_reprofile_distribution_rejects_pending_manual_edits(editor_model, editor_frame):
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(X, y, None),
+    )
+    session.select_indices("x_spline", [0, 1])
+    session.shift("x_spline", 0.1)
+
+    with pytest.raises(RuntimeError, match="manual coefficient edits"):
+        session.reprofile_distribution("tweedie_p", method="grid", grid=np.array([1.25, 1.45]))
+
+
+def test_tweedie_profile_trace_can_include_candidate_fit_curves():
+    rng = np.random.default_rng(20260706)
+    n = 120
+    x = rng.uniform(0.0, 1.0, n)
+    X = pd.DataFrame({"x": x})
+    mu = np.exp(0.2 + 0.4 * np.sin(2 * np.pi * x))
+    y = generate_tweedie_cpg(n, mu=mu, phi=0.5, p=1.45, rng=rng)
+    model = SuperGLM(
+        family=families.tweedie(p=1.3),
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"x": Spline(n_knots=5)},
+    )
+
+    result = model.estimate_p(
+        X,
+        y,
+        fit_mode="fit",
+        method="grid",
+        grid=np.array([1.25, 1.45, 1.65]),
+        trace_iterations=True,
+    )
+
+    assert "fit_trace" in result.search_trace.columns
+    traces = result.search_trace["fit_trace"].tolist()
+    assert all(isinstance(trace, list) for trace in traces)
+    assert any(len(trace) >= 1 for trace in traces)
+    first_trace = next(trace for trace in traces if trace)
+    assert {"iteration", "loss"}.issubset(first_trace[0])
+
+
+def test_tweedie_reml_profile_trace_can_include_candidate_objective_curves():
+    rng = np.random.default_rng(20260707)
+    n = 120
+    x = rng.uniform(0.0, 1.0, n)
+    X = pd.DataFrame({"x": x})
+    mu = np.exp(0.2 + 0.4 * np.sin(2 * np.pi * x))
+    y = generate_tweedie_cpg(n, mu=mu, phi=0.5, p=1.45, rng=rng)
+    model = SuperGLM(
+        family=families.tweedie(p=1.3),
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"x": Spline(n_knots=5)},
+    )
+    model.fit_reml(X, y, max_reml_iter=5)
+
+    result = model.estimate_p(
+        X,
+        y,
+        fit_mode="inherit",
+        method="grid",
+        grid=np.array([1.25, 1.45]),
+        trace_iterations=True,
+    )
+
+    traces = result.search_trace["fit_trace"].tolist()
+    assert all(isinstance(trace, list) for trace in traces)
+    assert any(len(trace) >= 1 for trace in traces)
+    assert set(result.search_trace["fit_trace_kind"]) == {"REML objective"}
+
+
+def test_widget_profile_distribution_forwards_options_and_returns_trace(
+    editor_model, editor_frame, monkeypatch
+):
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(X, y, None),
+    )
+    widget = session.widget()
+    calls: list[dict[str, object]] = []
+
+    class FakeTrace:
+        def to_dict(self, orient):
+            assert orient == "records"
+            return [{"step": 0, "p": 1.42, "phi": 0.3, "nll": 0.12, "source": "brent"}]
+
+    class FakeResult:
+        p_hat = 1.42
+        phi_hat = 0.3
+        nll = 0.12
+        method = "brent"
+        phi_method = "mle"
+        search_trace = FakeTrace()
+
+        def ci(self, alpha=0.05):
+            assert alpha == 0.05
+            return (1.31, 1.53)
+
+    def fake_reprofile(parameter, **kwargs):
+        calls.append({"parameter": parameter, "kwargs": kwargs})
+        return FakeResult()
+
+    monkeypatch.setattr(session, "reprofile_distribution", fake_reprofile)
+    monkeypatch.setattr(
+        "superglm.editor.widget.summary_payload",
+        lambda _widget, source: {"available": True, "source": source, "compact": {"model": {}}},
+    )
+
+    try:
+        payload = widget._profile_distribution(
+            "tweedie_p",
+            method="brent",
+            phi_method="mle",
+            xatol=0.002,
+        )
+    finally:
+        widget.close()
+
+    assert calls == [
+        {
+            "parameter": "tweedie_p",
+            "kwargs": {"method": "brent", "phi_method": "mle", "xatol": 0.002},
+        }
+    ]
+    assert payload["profile_trace"] == [
+        {"step": 0, "p": 1.42, "phi": 0.3, "nll": 0.12, "source": "brent"}
+    ]
+    assert payload["profile_estimate"] == {
+        "parameter": "p",
+        "label": "p_hat",
+        "value": 1.42,
+        "ci_low": 1.31,
+        "ci_high": 1.53,
+        "objective": 0.12,
+        "objective_label": "loss",
+        "lower_is_better": True,
+    }
+
+
+def test_widget_profile_distribution_job_reports_live_trace(
+    editor_model, editor_frame, monkeypatch
+):
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(X, y, None),
+    )
+    widget = session.widget()
+
+    class FakeTrace:
+        def to_dict(self, orient):
+            assert orient == "records"
+            return [{"step": 1, "p": 1.5, "phi": 0.2, "nll": 0.1, "source": "final"}]
+
+    class FakeResult:
+        search_trace = FakeTrace()
+
+    def fake_reprofile(parameter, **kwargs):
+        trace_callback = kwargs["trace_callback"]
+        trace_callback({"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"})
+        return FakeResult()
+
+    monkeypatch.setattr(session, "reprofile_distribution", fake_reprofile)
+    monkeypatch.setattr(
+        "superglm.editor.widget.summary_payload",
+        lambda _widget, source: {"available": True, "source": source, "compact": {"model": {}}},
+    )
+
+    try:
+        started = widget._start_profile_distribution_job(
+            "tweedie_p",
+            method="brent",
+            phi_method="mle",
+            xatol=0.001,
+        )
+        job_id = started["job_id"]
+        status = widget._profile_distribution_status(job_id, wait=True)
+    finally:
+        widget.close()
+
+    assert started["status"] in {"running", "complete"}
+    assert status["status"] == "complete"
+    assert status["options"]["xatol"] == 0.001
+    assert status["trace"] == [
+        {"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"},
+        {"step": 1, "p": 1.5, "phi": 0.2, "nll": 0.1, "source": "final"},
+    ]
+    assert status["result"]["source"] == "in_force"
+
+
+def test_widget_profile_distribution_job_reports_finalizing_phase(
+    editor_model, editor_frame, monkeypatch
+):
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(X, y, None),
+    )
+    widget = session.widget()
+    summary_started = threading.Event()
+    release_summary = threading.Event()
+
+    class FakeTrace:
+        def to_dict(self, orient):
+            assert orient == "records"
+            return [{"step": 1, "p": 1.5, "phi": 0.2, "nll": 0.1, "source": "final"}]
+
+    class FakeResult:
+        search_trace = FakeTrace()
+
+    def fake_reprofile(parameter, **kwargs):
+        trace_callback = kwargs["trace_callback"]
+        trace_callback({"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"})
+        return FakeResult()
+
+    def blocking_summary(_widget, source):
+        summary_started.set()
+        assert release_summary.wait(timeout=2.0)
+        return {"available": True, "source": source, "compact": {"model": {}}}
+
+    monkeypatch.setattr(session, "reprofile_distribution", fake_reprofile)
+    monkeypatch.setattr("superglm.editor.widget.summary_payload", blocking_summary)
+
+    try:
+        started = widget._start_profile_distribution_job(
+            "tweedie_p",
+            method="brent",
+            phi_method="mle",
+            xatol=0.001,
+        )
+        job_id = started["job_id"]
+        assert summary_started.wait(timeout=2.0)
+        status = widget._profile_distribution_status(job_id)
+        release_summary.set()
+        complete = widget._profile_distribution_status(job_id, wait=True)
+    finally:
+        release_summary.set()
+        widget.close()
+
+    assert status["status"] == "running"
+    assert status["phase"] == "finalizing"
+    assert status["trace"] == [{"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"}]
+    assert complete["status"] == "complete"
+    assert complete["phase"] == "complete"
+
+
+def test_widget_profile_distribution_job_reports_best_parameter_and_refit_phase(
+    editor_model, editor_frame, monkeypatch
+):
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(X, y, None),
+    )
+    widget = session.widget()
+    refit_started = threading.Event()
+    release_refit = threading.Event()
+
+    class FakeTrace:
+        def to_dict(self, orient):
+            assert orient == "records"
+            return [{"step": 1, "p": 1.5, "phi": 0.2, "nll": 0.1, "source": "final"}]
+
+    class FakeResult:
+        p_hat = 1.5
+        phi_hat = 0.2
+        nll = 0.1
+        search_trace = FakeTrace()
+
+        def ci(self, alpha=0.05):
+            assert alpha == 0.05
+            return (1.4, 1.6)
+
+    def fake_reprofile(parameter, **kwargs):
+        kwargs["trace_callback"]({"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"})
+        kwargs["progress_callback"](
+            "best_found",
+            {
+                "profile_estimate": {
+                    "parameter": "p",
+                    "label": "p_hat",
+                    "value": 1.5,
+                    "objective": 0.1,
+                    "objective_label": "loss",
+                    "lower_is_better": True,
+                }
+            },
+        )
+        kwargs["progress_callback"]("final_refit")
+        refit_started.set()
+        assert release_refit.wait(timeout=2.0)
+        return FakeResult()
+
+    monkeypatch.setattr(session, "reprofile_distribution", fake_reprofile)
+    monkeypatch.setattr(
+        "superglm.editor.widget.summary_payload",
+        lambda _widget, source: {"available": True, "source": source, "compact": {"model": {}}},
+    )
+
+    try:
+        started = widget._start_profile_distribution_job(
+            "tweedie_p",
+            method="brent",
+            phi_method="mle",
+            xatol=0.001,
+        )
+        job_id = started["job_id"]
+        assert refit_started.wait(timeout=2.0)
+        status = widget._profile_distribution_status(job_id)
+        release_refit.set()
+        complete = widget._profile_distribution_status(job_id, wait=True)
+    finally:
+        release_refit.set()
+        widget.close()
+
+    assert status["status"] == "running"
+    assert status["phase"] == "final_refit"
+    assert status["profile_estimate"]["value"] == 1.5
+    assert status["profile_estimate"]["ci_low"] is None
+    assert complete["status"] == "complete"
+    assert complete["phase"] == "complete"
+    assert complete["result"]["profile_estimate"]["ci_low"] == 1.4
+    assert complete["result"]["profile_estimate"]["ci_high"] == 1.6
 
 
 def test_reprofile_distribution_parameter_rejects_unknown_parameter(editor_model, editor_frame):
@@ -1226,6 +1715,7 @@ def test_widget_renders_plain_iframe_app(editor_model):
 
         assert "<iframe" in html
         assert "127.0.0.1" in html
+        assert "token=" in html
         assert not hasattr(widget, "_model_module")
         assert widget.selected_term == "x_spline"
         assert widget.terms["x_spline"]["n_points"] == session.terms["x_spline"].size
@@ -1233,6 +1723,18 @@ def test_widget_renders_plain_iframe_app(editor_model):
         payload = _get_json(f"{widget.url}/state")
         assert payload["selected_term"] == "x_spline"
         assert payload["terms"]["x_spline"]["n_points"] == session.terms["x_spline"].size
+    finally:
+        widget.close()
+
+
+def test_widget_http_rejects_missing_editor_token(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(f"{widget.url}/state", timeout=5)
+        assert excinfo.value.code == 403
+        assert _get_json(f"{widget.url}/state")["selected_term"] == "x_spline"
     finally:
         widget.close()
 
@@ -1667,7 +2169,10 @@ def test_widget_http_report_sanitizes_non_finite_cv_values(editor_model, editor_
             f"{widget.url}/report",
             data=data,
             method="POST",
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                **_editor_token_header(f"{widget.url}/report"),
+            },
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             body = response.read().decode("utf-8")
@@ -1679,6 +2184,198 @@ def test_widget_http_report_sanitizes_non_finite_cv_values(editor_model, editor_
         assert row["se_val_deviance"] is None
     finally:
         widget.close()
+
+
+def test_widget_http_save_model_writes_edited_joblib(editor_model, tmp_path):
+    import joblib
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    original_beta = editor_model.result.beta.copy()
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    try:
+        payload = _post_json(
+            f"{widget.url}/save_model",
+            {"directory": str(tmp_path), "filename": "edited-model"},
+        )
+    finally:
+        widget.close()
+
+    path = Path(payload["path"])
+    assert path == tmp_path / "edited-model.joblib"
+    assert path.exists()
+    saved_model = joblib.load(path)
+    assert saved_model is not editor_model
+    np.testing.assert_allclose(editor_model.result.beta, original_beta)
+    assert not np.allclose(saved_model.result.beta, original_beta)
+
+
+def test_widget_http_download_model_returns_joblib_attachment(editor_model):
+    import io
+
+    import joblib
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    original_beta = editor_model.result.beta.copy()
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    try:
+        request = urllib.request.Request(
+            f"{widget.url}/download_model?filename=edited-model.joblib",
+            headers=_editor_token_header(widget.url),
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = response.read()
+            content_type = response.headers["content-type"]
+            disposition = response.headers["content-disposition"]
+    finally:
+        widget.close()
+
+    downloaded_model = joblib.load(io.BytesIO(payload))
+    assert content_type == "application/octet-stream"
+    assert 'filename="edited-model.joblib"' in disposition
+    assert downloaded_model is not editor_model
+    np.testing.assert_allclose(editor_model.result.beta, original_beta)
+    assert not np.allclose(downloaded_model.result.beta, original_beta)
+
+
+def test_widget_http_native_save_dialog_returns_selected_path(editor_model, tmp_path, monkeypatch):
+    from superglm.editor import widget as widget_module
+
+    selected = tmp_path / "picked-model.joblib"
+    monkeypatch.setattr(widget_module, "choose_save_path", lambda **_kwargs: str(selected))
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        payload = _post_json(
+            f"{widget.url}/native_save_dialog",
+            {"directory": str(tmp_path), "filename": "default-name.joblib"},
+        )
+    finally:
+        widget.close()
+
+    assert payload == {
+        "cancelled": False,
+        "path": str(selected),
+        "directory": str(tmp_path),
+        "filename": "picked-model.joblib",
+    }
+
+
+def test_widget_http_native_save_dialog_handles_cancel(editor_model, monkeypatch):
+    from superglm.editor import widget as widget_module
+
+    monkeypatch.setattr(widget_module, "choose_save_path", lambda **_kwargs: None)
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        payload = _post_json(f"{widget.url}/native_save_dialog", {})
+    finally:
+        widget.close()
+
+    assert payload == {"cancelled": True}
+
+
+def test_widget_http_open_directory_launches_current_folder(editor_model, tmp_path, monkeypatch):
+    from superglm.editor import widget as widget_module
+
+    opened: list[str] = []
+
+    def fake_open_directory(path):
+        opened.append(str(path))
+        return Path(path)
+
+    monkeypatch.setattr(widget_module, "open_directory_path", fake_open_directory)
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        payload = _post_json(f"{widget.url}/open_directory", {"path": str(tmp_path)})
+    finally:
+        widget.close()
+
+    assert payload == {"path": str(tmp_path.resolve())}
+    assert opened == [str(tmp_path.resolve())]
+
+
+def test_open_directory_prefers_dolphin_on_kde(tmp_path, monkeypatch):
+    from superglm.editor import native_dialogs
+
+    commands = []
+
+    class FakeProcess:
+        def __init__(self, command):
+            self.command = command
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    monkeypatch.setattr(native_dialogs.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
+    monkeypatch.setattr(native_dialogs.shutil, "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(
+        native_dialogs.subprocess,
+        "Popen",
+        lambda command, **_kwargs: commands.append(tuple(command)) or FakeProcess(command),
+    )
+
+    opened = native_dialogs.open_directory_path(tmp_path)
+
+    assert opened == tmp_path.resolve()
+    assert commands[0] == ("dolphin", "--new-window", str(tmp_path.resolve()))
+
+
+def test_open_directory_raises_when_launcher_exits_immediately(tmp_path, monkeypatch):
+    from superglm.editor import native_dialogs
+
+    class FailedProcess:
+        def poll(self):
+            return 1
+
+        def communicate(self, timeout=None):
+            return "", "could not open"
+
+    monkeypatch.setattr(native_dialogs.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
+    monkeypatch.setattr(native_dialogs.shutil, "which", lambda command: "/usr/bin/dolphin")
+    monkeypatch.setattr(
+        native_dialogs.subprocess, "Popen", lambda *_args, **_kwargs: FailedProcess()
+    )
+
+    with pytest.raises(RuntimeError, match="could not open"):
+        native_dialogs.open_directory_path(tmp_path)
+
+
+def test_widget_save_directory_defaults_to_cwd(editor_model, tmp_path, monkeypatch):
+    child = tmp_path / "models"
+    child.mkdir()
+    file_path = tmp_path / "existing-model.joblib"
+    file_path.write_text("placeholder")
+    monkeypatch.chdir(tmp_path)
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        payload = widget._save_directory()
+    finally:
+        widget.close()
+
+    assert payload["cwd"] == str(tmp_path.resolve())
+    assert payload["path"] == str(tmp_path.resolve())
+    assert {
+        "kind": "directory",
+        "name": "models",
+        "path": str(child.resolve()),
+    } in payload["entries"]
+    assert {
+        "kind": "file",
+        "name": "existing-model.joblib",
+        "path": str(file_path.resolve()),
+    } in payload["entries"]
+    assert [entry["kind"] for entry in payload["entries"]] == ["directory", "file"]
 
 
 def test_widget_reset_and_undo_target_current_term_after_switching(editor_model):
@@ -1783,6 +2480,17 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert ">Redo</button>" not in shell
         assert "Ref CI" in shell
         assert "Reset" in shell
+        assert "saveModel" in shell
+        assert "saveDialog" in shell
+        assert "saveDirectory" in shell
+        assert "saveBrowse" in shell
+        assert "saveFilename" in shell
+        assert "Save edited model" in shell
+        assert "app-shell" in shell
+        assert "app-shell" in css
+        assert "justify-content: center" in css
+        assert "openSaveDialog" in js
+        assert 'aria-haspopup="dialog"' in shell
         assert "Reset order" in shell
         assert "resetOrder" in shell
         assert "metricSelect" in shell
@@ -1823,6 +2531,8 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "selectedPoints" in js
         assert "optgroup" in js
         assert "relativity" in js
+        assert "X-SuperGLM-Editor-Token" in js
+        assert "URLSearchParams(window.location.search)" in js
         assert "/drag" in js
         assert "/control" in js
         assert "/control_count" in js
@@ -1887,10 +2597,80 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "/metrics" in js
         assert "/summary" in js
         assert "/profile_distribution" in js
+        assert "/save_model" in js
+        assert "/download_model" in js
+        assert "/native_save_dialog" in js
+        assert "/open_directory" in js
+        assert "saveEditedModel" in js
+        assert "downloadEditedModel" in js
+        assert "openNativeSaveDialog" in js
+        assert "openDirectoryInFileManager" in js
+        assert "formatSaveRouteError" in js
+        assert "Rerun session.widget()" in js
+        assert "Opening file dialog" in js
+        assert "Opening folder" in js
+        assert "saveBlobToFile" in js
+        assert "showSaveFilePicker" in js
+        assert "URL.createObjectURL" in js
+        assert "openSaveDialog" in js
+        assert "directoryDialog" not in shell
+        assert "Choose Save Location" not in shell
+        assert 'id="saveDownload"' in shell
+        assert 'id="saveOpenDirectory"' in shell
+        assert "Open Folder" in shell
+        assert "Download Edited Model" in shell
+        assert "Saved " in js
+        assert "/profile_distribution/start" in js
+        assert "/profile_distribution/status/" in js
         assert "runDistributionProfile" in js
         assert "reprofileTweedie" in shell
         assert "reprofileNb2" in shell
+        assert "profileDialog" in shell
+        assert "profileDialogClose" in shell
+        assert "profileRun" in shell
+        assert "profileOptions" in shell
+        assert "profileTolerance" in shell
+        assert '<option value="mle" selected>MLE</option>' in shell
+        assert "profileTracePlot" in shell
+        assert "profile-dialog" in css
+        assert "profile-trace-line" in css
+        assert "profile-trace-best" in css
+        assert "profile-learning-curve" in css
+        assert "profile-learning-point" in css
+        assert "profileLearningCurvesSVG" in js
+        assert "profileFitTraceRows" in js
+        assert "profileFitIterTicks" in js
+        assert "fitTraceKind" in js
+        assert "profileStatusLabel" in js
+        assert "profile-running" in css
+        assert "profile-spin" in css
+        assert "profileTraceLegend" in shell
+        assert "profile-trace-figure" in css
+        assert "profile-trace-legend" in css
+        assert "profileEstimate" in js
+        assert "outerProfileObjective" in js
+        assert "profileObjectiveSVG" in js
+        assert "return profileObjectiveSVG" in js
+        assert "profile loss" in js
+        assert "inner fit trace" in js
+        assert "profile_ci" in js
+        assert "final refit" in js
+        assert "p_hat" in js
+        assert "CI" in js
+        assert "start -> final" in js
+        assert "showModal" in js
+        assert "openProfileDialog" in js
+        assert "showDistributionProfileDialog" in js
+        assert "profileRun.addEventListener" in js
+        assert "trace_iterations" in js
+        assert "Profile trace" in shell
+        assert "profileOptionsPayload" in js
+        assert "renderProfileTrace" in js
         assert "updateDistributionProfileActions" in js
+        assert "renderSummaryRows" in js
+        assert "summary-group-row" in js
+        assert "summary-group-row" in css
+        assert 'colspan="6"' in js
         assert "/refit_offset" in js
         assert "/collapse_levels" in js
         assert "/uncollapse_levels" in js
@@ -2018,8 +2798,12 @@ def test_widget_unknown_route_uses_editor_error_shape(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     widget = session.widget()
     try:
+        request = urllib.request.Request(
+            f"{widget.url}/missing-route",
+            headers=_editor_token_header(f"{widget.url}/missing-route"),
+        )
         with pytest.raises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(f"{widget.url}/missing-route", timeout=5)
+            urllib.request.urlopen(request, timeout=5)
 
         assert error.value.code == 404
         payload = json.loads(error.value.read().decode("utf-8"))
@@ -2052,7 +2836,15 @@ def test_editor_server_declares_fastapi_routes():
     assert ("/metrics", frozenset({"POST"})) in routes
     assert ("/summary", frozenset({"POST"})) in routes
     assert ("/report", frozenset({"POST"})) in routes
+    assert ("/save_model", frozenset({"POST"})) in routes
+    assert ("/download_model", frozenset({"GET"})) in routes
+    assert ("/native_save_dialog", frozenset({"POST"})) in routes
+    assert ("/open_directory", frozenset({"POST"})) in routes
+    assert ("/save_directory", frozenset({"POST"})) in routes
     assert ("/refit_offset", frozenset({"POST"})) in routes
+    assert ("/profile_distribution", frozenset({"POST"})) in routes
+    assert ("/profile_distribution/start", frozenset({"POST"})) in routes
+    assert ("/profile_distribution/status/{job_id}", frozenset({"GET"})) in routes
     assert ("/collapse_levels", frozenset({"POST"})) in routes
     assert ("/ungroup_levels", frozenset({"POST"})) in routes
     assert ("/reorder_levels", frozenset({"POST"})) in routes
@@ -2118,17 +2910,31 @@ def test_summary_html_keeps_spline_significance_out_of_qs_column():
 
 
 def _get_json(url: str):
-    with urllib.request.urlopen(url, timeout=5) as response:
+    request = urllib.request.Request(url, headers=_editor_token_header(url))
+    with urllib.request.urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def _post_json(url: str, payload: dict):
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(_editor_token_header(url))
     request = urllib.request.Request(
         url,
         data=data,
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     with urllib.request.urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _editor_token_header(url: str) -> dict[str, str]:
+    from superglm.editor.widget import _LIVE_WIDGETS
+
+    parsed = urllib.parse.urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    for widget in list(_LIVE_WIDGETS):
+        if getattr(widget, "url", "") == origin:
+            return {"X-SuperGLM-Editor-Token": widget._token}
+    return {}
