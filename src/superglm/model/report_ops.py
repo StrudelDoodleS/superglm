@@ -169,6 +169,22 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
             else res.n_iter
         ),
     }
+    editor_meta = getattr(model, "_editor_edits", None)
+    if getattr(model, "_editor_inference_stale", False):
+        model_info["editor_inference_stale"] = True
+        model_info["editor_edited_terms"] = list((editor_meta or {}).get("terms", []))
+        model_info["editor_message"] = (editor_meta or {}).get(
+            "message",
+            "Manual editor edits were applied; fitted inference is reference-only.",
+        )
+
+    offset_meta = getattr(model, "_editor_offset", None)
+    if offset_meta is not None:
+        model_info["editor_offset_terms"] = list(offset_meta.get("terms", []))
+        model_info["editor_offset_message"] = offset_meta.get(
+            "message",
+            "Manual editor terms are fixed as an offset.",
+        )
 
     nb_pr = getattr(model, "_nb_profile_result", None)
     if nb_pr is not None:
@@ -215,6 +231,9 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,
     )
+    editor_inference_stale = bool(model_info.get("editor_inference_stale", False))
+    if editor_inference_stale:
+        _suppress_editor_inference(coef_rows)
 
     phi = res.phi
     se_dict: dict[str, np.ndarray] = {}
@@ -235,21 +254,24 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
                 se_raw_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
                 se_dict[g.name] = np.sqrt(np.maximum(phi * var_diag, 0.0))
 
-    data["standard_errors"] = {
-        "coefficient_se": se_dict,
-        "coefficient_se_raw": se_raw_dict,
-    }
-
-    basis_detail = build_basis_detail(
-        groups=model._groups,
-        specs=model._specs,
-        interaction_specs=model._interaction_specs,
-        result=res,
-        XtWX_inv_aug=XtWX_inv_aug,
-        active_groups=active_groups,
-        known_scale=known_scale,
-        alpha=alpha,
-    )
+    if editor_inference_stale:
+        data["standard_errors"] = {"inference_stale": True}
+        basis_detail = {}
+    else:
+        data["standard_errors"] = {
+            "coefficient_se": se_dict,
+            "coefficient_se_raw": se_raw_dict,
+        }
+        basis_detail = build_basis_detail(
+            groups=model._groups,
+            specs=model._specs,
+            interaction_specs=model._interaction_specs,
+            result=res,
+            XtWX_inv_aug=XtWX_inv_aug,
+            active_groups=active_groups,
+            known_scale=known_scale,
+            alpha=alpha,
+        )
 
     summary_obj = ModelSummary(
         data, model_info, coef_rows, alpha=alpha, detail=detail, basis_detail=basis_detail
@@ -261,6 +283,20 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
 def feature_groups(model, name: str) -> list[GroupSlice]:
     """Get all groups belonging to a feature."""
     return [g for g in model._groups if g.feature_name == name]
+
+
+def _suppress_editor_inference(coef_rows) -> None:
+    for row in coef_rows:
+        row.se = None
+        row.z = None
+        row.p = None
+        row.ci_low = None
+        row.ci_high = None
+        row.wald_chi2 = None
+        row.wald_p = None
+        row.ref_df = None
+        row.curve_se_min = None
+        row.curve_se_max = None
 
 
 def reconstruct_feature(model, name: str) -> dict[str, Any]:

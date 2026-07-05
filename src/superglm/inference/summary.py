@@ -82,6 +82,12 @@ def _camel_to_spaced(name: str) -> str:
     return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
 
 
+def _display_method(method: Any) -> str:
+    """Return the presentation label for the fitting method."""
+    method_str = str(method)
+    return "MLE" if method_str == "ML" else method_str
+
+
 _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
 _QS_NOTE = (
     "QS: quasi-complete separation — a predictor perfectly or nearly predicts\n"
@@ -92,6 +98,15 @@ _WALD_NOTE = (
     "Note: smooth p-values use Wood (2013) Bayesian test.\n"
     "Parametric p-values are Wald approximations.\n"
     "For borderline significance, use a likelihood ratio test."
+)
+_EDITOR_STALE_NOTE = (
+    "Editor edits applied: coefficient standard errors, confidence intervals, "
+    "and p-values are suppressed because they belong to the original fitted "
+    "model, not the manually edited coefficients."
+)
+_EDITOR_OFFSET_NOTE = (
+    "Editor offset refit: listed editor terms are fixed offset factors. "
+    "Inference is conditional on those fixed offsets."
 )
 
 
@@ -198,7 +213,7 @@ class ModelSummary:
         rows = [
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
             ("Link", info["link"], "Df (effective)", edf_str),
-            ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
+            ("Method", _display_method(info.get("method", "ML")), "Penalty", info["penalty"]),
             ("Scale (phi)", _fmt(info["phi"]), "Pearson chi2", _fmt(info.get("pearson_chi2", ""))),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
             ("AICc", _fmt(info["aicc"]), "BIC", _fmt(info["bic"])),
@@ -441,14 +456,17 @@ class ModelSummary:
         abbrevs = info.get("penalty_abbrevs", {})
         if abbrevs:
             lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
+        for note in _editor_notes(info):
+            lines.append(note)
         has_smooth = any(r.is_spline for r in self._coef_rows)
-        if has_smooth:
-            lines.append(_WALD_NOTE)
-        else:
-            lines.append(
-                "Parametric p-values are Wald approximations.\n"
-                "For borderline significance, use a likelihood ratio test."
-            )
+        if not info.get("editor_inference_stale", False):
+            if has_smooth:
+                lines.append(_WALD_NOTE)
+            else:
+                lines.append(
+                    "Parametric p-values are Wald approximations.\n"
+                    "For borderline significance, use a likelihood ratio test."
+                )
 
         # Quasi-separated footnote
         qs_rows = [r for r in self._coef_rows if r.quasi_separated and r.level_n_obs is not None]
@@ -503,7 +521,7 @@ class ModelSummary:
         header_rows = [
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
             ("Link", info["link"], "Df (effective)", edf_str_html),
-            ("Method", info.get("method", "ML"), "Penalty", info["penalty"]),
+            ("Method", _display_method(info.get("method", "ML")), "Penalty", info["penalty"]),
             ("Scale (phi)", _fmt(info["phi"]), "Pearson chi2", _fmt(info.get("pearson_chi2", ""))),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
             ("AICc", _fmt(info["aicc"]), "BIC", _fmt(info["bic"])),
@@ -619,9 +637,10 @@ class ModelSummary:
                     parts.append(
                         f"<tr>"
                         f'<td style="{cell_l}">{row.name}</td>'
-                        f'<td colspan="{ncols - 2}" style="{cell_l};color:#666;'
+                        f'<td colspan="{ncols - 3}" style="{cell_l};color:#666;'
                         f'font-style:italic;">{text}</td>'
                         f'<td style="{sig_cell}">{stars}</td>'
+                        f'<td style="{sig_cell}"></td>'
                         f"</tr>"
                     )
                 elif row.active:
@@ -657,6 +676,7 @@ class ModelSummary:
                             f"<td style='padding:1px 6px;'>{br.ci_low:.3f}</td>"
                             f"<td style='padding:1px 6px;'>{br.ci_high:.3f}</td>"
                             f"<td style='padding:1px 6px;'>{b_stars}</td>"
+                            f"<td style='padding:1px 6px;'></td>"
                             f"</tr>"
                         )
                     inner_table = (
@@ -727,19 +747,25 @@ class ModelSummary:
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
                 f'color:#c60;border:none;">{_QS_NOTE}</td></tr>'
             )
-        has_smooth = any(r.is_spline for r in self._coef_rows)
-        if has_smooth:
-            note_text = _WALD_NOTE
-        else:
-            note_text = (
-                "Parametric p-values are Wald approximations.\n"
-                "For borderline significance, use a likelihood ratio test."
+        for note in _editor_notes(info):
+            parts.append(
+                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+                f'color:#8a4b00;font-style:italic;border:none;">{note}</td></tr>'
             )
-        note_html = note_text.replace("\n", "<br>")
-        parts.append(
-            f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-            f'color:#888;font-style:italic;border:none;">{note_html}</td></tr>'
-        )
+        has_smooth = any(r.is_spline for r in self._coef_rows)
+        if not info.get("editor_inference_stale", False):
+            if has_smooth:
+                note_text = _WALD_NOTE
+            else:
+                note_text = (
+                    "Parametric p-values are Wald approximations.\n"
+                    "For borderline significance, use a likelihood ratio test."
+                )
+            note_html = note_text.replace("\n", "<br>")
+            parts.append(
+                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+                f'color:#888;font-style:italic;border:none;">{note_html}</td></tr>'
+            )
         # Quasi-separated footnote
         qs_rows = [r for r in self._coef_rows if r.quasi_separated and r.level_n_obs is not None]
         if qs_rows:
@@ -757,3 +783,15 @@ class ModelSummary:
 
         parts.append("</table>")
         return "\n".join(parts)
+
+
+def _editor_notes(info: dict[str, Any]) -> list[str]:
+    notes: list[str] = []
+    if info.get("editor_inference_stale", False):
+        terms = ", ".join(info.get("editor_edited_terms") or [])
+        suffix = f" Edited terms: {terms}." if terms else ""
+        notes.append(_EDITOR_STALE_NOTE + suffix)
+    if info.get("editor_offset_terms"):
+        terms = ", ".join(info.get("editor_offset_terms") or [])
+        notes.append(f"{_EDITOR_OFFSET_NOTE} Offset terms: {terms}.")
+    return notes

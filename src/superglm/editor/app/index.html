@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SuperGLM Editor</title>
+<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="app-tabs" role="tablist" aria-label="Editor views">
+    <button class="app-tab active" type="button" data-view="editor" role="tab" aria-selected="true">
+      Editor
+    </button>
+    <button class="app-tab" type="button" data-view="validation" role="tab" aria-selected="false">
+      Validation Report
+    </button>
+    <button class="app-tab" type="button" data-view="final" role="tab" aria-selected="false">
+      Final Fit Report
+    </button>
+  </div>
+  <div id="editorView" class="app-view">
+  <div class="toolbar">
+    <div class="toolbar-section">
+      <label>Term <select id="term"></select></label>
+      <label>Mode <select id="mode"><option value="select">Select</option><option value="move">Move</option><option value="handles">Handles</option></select></label>
+      <label id="handleCountWrap" class="handle-count" hidden>
+        <span>Handles</span>
+        <input id="handleCount" type="range" min="3" max="12" value="12">
+        <output id="handleCountValue">12</output>
+      </label>
+      <button id="basisToggle" type="button" hidden title="Show spline basis contributions">
+        Contrib
+      </button>
+      <button id="contribPlay" type="button" hidden title="Animate basis contributions into the spline">
+        Build
+      </button>
+      <label id="buildDurationWrap" class="build-duration" hidden title="Debug: tune Build animation duration">
+        <span>Build</span>
+        <input id="buildDuration" type="range" min="4000" max="30000" step="500" value="10000">
+        <output id="buildDurationValue">10s</output>
+      </label>
+    </div>
+    <div class="toolbar-section">
+      <button data-op="select_all">Select all</button>
+      <button id="resetZoom" type="button">Home</button>
+      <button id="ciToggle" type="button">Ref CI</button>
+      <button id="resetOrder" type="button" data-op="reset_order" hidden>Reset order</button>
+      <button data-op="reset">Reset</button>
+    </div>
+  </div>
+  <div id="status"></div>
+  <div class="main">
+    <div class="plot-column">
+      <div class="chart-shell">
+        <svg id="chart" viewBox="0 0 940 520" role="img" aria-label="SuperGLM editable effect"></svg>
+        <div id="selectionMenu" class="selection-menu" aria-label="Selection actions" hidden>
+        <button class="selection-item" data-op="shift_up" type="button"
+          title="Increase selected values 5%" aria-label="Increase selected values 5%">
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 20V5"></path><path d="m7 10 5-5 5 5"></path>
+            <path d="M6 20h12"></path><path d="M18 14h4"></path><path d="M20 12v4"></path>
+          </svg>
+        </button>
+        <button class="selection-item" data-op="shift_down" type="button"
+          title="Decrease selected values 5%" aria-label="Decrease selected values 5%">
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 4v15"></path><path d="m7 14 5 5 5-5"></path>
+            <path d="M6 4h12"></path><path d="M18 11h4"></path>
+          </svg>
+        </button>
+        <div class="selection-separator" aria-hidden="true"></div>
+        <button class="selection-item" data-op="smooth" type="button"
+          title="Smooth" aria-label="Smooth">
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 14c2.5-6 5.5-6 8 0s5.5 6 10 0"></path>
+          </svg>
+        </button>
+        <button class="selection-item" data-op="linearise" type="button"
+          title="Linearise" aria-label="Linearise">
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 18 20 6"></path><path d="M5 17h3v3"></path><path d="M16 4h3v3"></path>
+          </svg>
+        </button>
+        <div class="selection-separator" aria-hidden="true"></div>
+        <button class="selection-item" data-op="increasing" type="button"
+          title="Increasing" aria-label="Increasing">
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 17h4l3-5 3 2 5-7"></path><path d="M15 7h4v4"></path>
+          </svg>
+        </button>
+        <button class="selection-item" data-op="decreasing" type="button"
+          title="Decreasing" aria-label="Decreasing">
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h4l3 5 3-2 5 7"></path><path d="M15 17h4v-4"></path>
+          </svg>
+        </button>
+        <div class="selection-separator" aria-hidden="true"></div>
+        <div class="selection-menu-node">
+          <button class="selection-item" type="button" title="Level selected values"
+            aria-label="Level selected values" aria-haspopup="true">
+            <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 9h16"></path><path d="M4 15h16"></path>
+              <path d="M7 6v6"></path><path d="M17 12v6"></path>
+            </svg>
+          </button>
+          <div class="selection-submenu" role="menu" aria-label="Level options">
+            <button class="selection-item" data-op="level_left" type="button" role="menuitem"
+              title="Level left" aria-label="Level left">
+              <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 7v10"></path><path d="M5 12h14"></path><path d="M9 9h10"></path><path d="M9 15h10"></path>
+              </svg>
+            </button>
+            <button class="selection-item" data-op="average" type="button" role="menuitem"
+              title="Average" aria-label="Average">
+              <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 8h16"></path><path d="M4 16h16"></path><path d="M7 12h10"></path>
+              </svg>
+            </button>
+            <button class="selection-item" data-op="level_right" type="button" role="menuitem"
+              title="Level right" aria-label="Level right">
+              <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M19 7v10"></path><path d="M5 12h14"></path><path d="M5 9h10"></path><path d="M5 15h10"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="selection-menu-node">
+          <button class="selection-item" type="button" title="Snap selected values"
+            aria-label="Snap selected values" aria-haspopup="true">
+            <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 6h14"></path><path d="M5 18h14"></path>
+              <path d="m8 10 4-4 4 4"></path><path d="m8 14 4 4 4-4"></path>
+            </svg>
+          </button>
+          <div class="selection-submenu" role="menu" aria-label="Snap options">
+            <button class="selection-item" data-op="snap_highest" type="button" role="menuitem"
+              title="Snap highest" aria-label="Snap highest">
+              <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 6h14"></path><path d="M12 18V7"></path><path d="m8 11 4-4 4 4"></path>
+              </svg>
+            </button>
+            <button class="selection-item" data-op="snap_lowest" type="button" role="menuitem"
+              title="Snap lowest" aria-label="Snap lowest">
+              <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 18h14"></path><path d="M12 6v11"></path><path d="m8 13 4 4 4-4"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="selection-separator" aria-hidden="true"></div>
+        <button id="collapseLevels" class="selection-item" type="button"
+          title="Collapse selected levels and refit" aria-label="Collapse selected levels and refit" hidden>
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 7h5"></path><path d="M13 7h5"></path>
+            <path d="M6 17h12"></path><path d="M11 7v4"></path><path d="M13 7v4"></path>
+            <path d="M10 13h4"></path><path d="M12 13v4"></path>
+          </svg>
+        </button>
+        <button id="ungroupLevels" class="selection-item" type="button"
+          title="Ungroup selected levels" aria-label="Ungroup selected levels" hidden>
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 7h12"></path><path d="M6 17h5"></path><path d="M13 17h5"></path>
+            <path d="M12 8v8"></path><path d="m9 11 3-3 3 3"></path>
+            <path d="m9 13 3 3 3-3"></path>
+          </svg>
+        </button>
+        <button id="uncollapseLevels" class="selection-item" type="button"
+          title="Undo collapse" aria-label="Undo collapse" hidden>
+          <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 7h10"></path><path d="M7 17h10"></path>
+            <path d="M10 7v10"></path><path d="M14 7v10"></path>
+            <path d="M5 12h4"></path><path d="m7 10-2 2 2 2"></path>
+            <path d="M19 12h-4"></path><path d="m17 10 2 2-2 2"></path>
+          </svg>
+        </button>
+        </div>
+      </div>
+      <div class="metrics-strip" aria-label="Model metrics">
+        <select id="metricSelect" hidden>
+          <option value="deviance">Deviance</option>
+          <option value="aic">AIC</option>
+          <option value="aicc">AICc</option>
+          <option value="bic">BIC</option>
+          <option value="log_likelihood">Log Likelihood</option>
+          <option value="explained_deviance">Explained Deviance</option>
+          <option value="pearson_chi2">Pearson Chi2</option>
+          <option value="effective_df">Total EDF</option>
+        </select>
+        <div id="metricGrid" class="metric-grid">Computing metrics...</div>
+      </div>
+    </div>
+    <aside id="summaryPanel" class="sidepanel">
+      <h2>Model summary</h2>
+      <div class="summary-controls">
+        <select id="summarySource" hidden>
+          <option value="selected">Selected model</option>
+          <option value="refit">Fixed-offset refit</option>
+        </select>
+        <button id="refitOffset" type="button">Refit offsets</button>
+      </div>
+      <div id="summaryStatus">Loading summary...</div>
+      <div id="summaryNote" class="summary-note"></div>
+      <div id="summaryFrame" class="summary-frame"></div>
+    </aside>
+  </div>
+  </div>
+  <section id="reportPanel" class="report-panel app-view" hidden>
+    <div class="report-header">
+      <div>
+        <h2 id="reportTitle">Validation Report</h2>
+        <p id="reportStatus">Loading report...</p>
+      </div>
+    </div>
+    <div id="reportFrame" class="report-frame"></div>
+  </section>
+
+<script type="module" src="/assets/main.js"></script>
+</body>
+</html>

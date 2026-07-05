@@ -1,0 +1,362 @@
+"""Categorical level-collapse refits for the editor."""
+
+from __future__ import annotations
+
+import copy
+from typing import Any
+
+import numpy as np
+
+from superglm.editor._types import EditableTerm
+from superglm.features.categorical import Categorical
+from superglm.features.grouping import LevelGrouping, collapse_levels
+from superglm.features.ordered_categorical import OrderedCategorical
+
+_SYMBOLIC_BASE_POLICIES = {"first", "most_exposed"}
+
+
+def collapsed_feature_spec(
+    model,
+    term: EditableTerm,
+    selected_indices: np.ndarray,
+    *,
+    X,
+    group_label: str | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Return a replacement feature spec that collapses selected levels."""
+    if term.levels is None:
+        raise TypeError(f"Term {term.name!r} does not expose categorical levels.")
+    if selected_indices.size < 2:
+        raise ValueError(f"Select at least two levels to collapse term {term.name!r}.")
+
+    spec = model._specs[term.name]
+    if not isinstance(spec, Categorical | OrderedCategorical):
+        raise TypeError(
+            f"Collapse levels is only available for categorical terms, got {term.name!r}."
+        )
+
+    idx = np.unique(np.asarray(selected_indices, dtype=np.intp))
+    if idx.min() < 0 or idx.max() >= len(term.levels):
+        raise IndexError(f"Selection indices out of range for term {term.name!r}.")
+    selected_levels = [str(term.levels[i]) for i in idx]
+    if isinstance(spec, OrderedCategorical):
+        _require_contiguous(idx, term.name)
+
+    existing = getattr(spec, "_grouping", None)
+    existing_labels = [str(level) for level in term.levels]
+    if existing is not None:
+        existing_labels.extend(str(level) for level in existing.grouped_levels)
+    label = _unique_group_label(
+        _default_group_label(selected_levels),
+        existing_levels=existing_labels,
+        selected_levels=selected_levels,
+    )
+    if group_label is not None:
+        label = _unique_group_label(
+            str(group_label),
+            existing_levels=existing_labels,
+            selected_levels=selected_levels,
+        )
+    grouping = _collapse_grouping(
+        spec,
+        term,
+        X[term.name],
+        selected_levels=selected_levels,
+        group_label=label,
+    )
+
+    if isinstance(spec, OrderedCategorical):
+        replacement = _ordered_spec_with_grouping(
+            spec,
+            grouping,
+            selected_levels,
+            _collapsed_base(spec.base, selected_levels, label),
+        )
+    else:
+        replacement = Categorical(
+            base=_collapsed_base(spec.base, selected_levels, label),
+            grouping=grouping,
+        )
+
+    metadata = {
+        "format": "superglm.editor.level_collapse.v1",
+        "term": term.name,
+        "group_label": label,
+        "levels": selected_levels,
+        "message": "Selected categorical levels were collapsed and the full model was refit.",
+    }
+    return replacement, metadata
+
+
+def ungrouped_feature_spec(
+    model,
+    term: EditableTerm,
+    selected_indices: np.ndarray,
+    *,
+    X,
+) -> tuple[Any, dict[str, Any]]:
+    """Return a replacement feature spec that removes selected levels from groups."""
+    if term.levels is None:
+        raise TypeError(f"Term {term.name!r} does not expose categorical levels.")
+
+    spec = model._specs[term.name]
+    if not isinstance(spec, Categorical | OrderedCategorical):
+        raise TypeError(
+            f"Ungroup levels is only available for categorical terms, got {term.name!r}."
+        )
+    existing = getattr(spec, "_grouping", None)
+    if existing is None:
+        raise ValueError(f"Term {term.name!r} does not have collapsed levels.")
+
+    idx = np.unique(np.asarray(selected_indices, dtype=np.intp))
+    if idx.size == 0:
+        raise ValueError(f"Select at least one grouped level to ungroup term {term.name!r}.")
+    if idx.min() < 0 or idx.max() >= len(term.levels):
+        raise IndexError(f"Selection indices out of range for term {term.name!r}.")
+    selected_levels = [str(term.levels[i]) for i in idx]
+    grouping = _ungroup_grouping(
+        spec,
+        term,
+        X[term.name],
+        selected_levels=selected_levels,
+    )
+    replacement_grouping = None if _is_identity_grouping(grouping) else grouping
+
+    base = _valid_base_after_ungroup(spec.base, selected_levels, grouping)
+    if isinstance(spec, OrderedCategorical):
+        replacement = _ordered_spec_with_grouping(spec, replacement_grouping, selected_levels, base)
+    else:
+        replacement = Categorical(base=base, grouping=replacement_grouping)
+
+    metadata = {
+        "format": "superglm.editor.level_ungroup.v1",
+        "term": term.name,
+        "levels": selected_levels,
+        "message": "Selected categorical levels were removed from collapsed groups and the full model was refit.",
+    }
+    return replacement, metadata
+
+
+def clone_with_replaced_feature(model, term: str, replacement, *, lambda1=..., lambda2=...):
+    """Clone a model and replace one feature spec before fitting."""
+    new_model = model._clone_without_features(set(), lambda1=lambda1, lambda2=lambda2)
+    new_model._specs[term] = replacement
+    return new_model
+
+
+def _collapse_grouping(
+    spec,
+    term: EditableTerm,
+    data,
+    *,
+    selected_levels: list[str],
+    group_label: str,
+) -> LevelGrouping:
+    existing = getattr(spec, "_grouping", None)
+    displayed_members = _displayed_members(term, existing)
+    selected_set = set(selected_levels)
+    selected_originals = _selected_original_members(selected_levels, existing, displayed_members)
+    selected_original_set = set(selected_originals)
+    groups: dict[str, list[str]] = {group_label: selected_originals}
+    if existing is not None:
+        for label in existing.grouped_levels:
+            members = [str(member) for member in existing.group_to_originals.get(label, [])]
+            if len(members) < 2:
+                continue
+            remaining = [member for member in members if member not in selected_original_set]
+            if len(remaining) < 2:
+                continue
+            if remaining == members:
+                groups[str(label)] = members
+            else:
+                groups[
+                    _unique_group_label(
+                        _default_group_label(remaining),
+                        existing_levels=_existing_labels_for_grouping(term, existing),
+                        selected_levels=remaining,
+                    )
+                ] = remaining
+    else:
+        for level, members in displayed_members.items():
+            if level in selected_set:
+                continue
+            if len(members) > 1 or members[0] != level:
+                groups[level] = list(members)
+
+    return collapse_levels(
+        data,
+        groups=groups,
+        order=_original_level_order(spec, term, existing),
+    )
+
+
+def _selected_original_members(
+    selected_levels: list[str],
+    grouping,
+    displayed_members: dict[str, list[str]],
+) -> list[str]:
+    if grouping is None:
+        candidates = [
+            member for level in selected_levels for member in displayed_members.get(level, [level])
+        ]
+    else:
+        originals = {str(level) for level in grouping.all_original_levels}
+        candidates = []
+        for level in selected_levels:
+            if level in originals:
+                candidates.append(level)
+            else:
+                candidates.extend(
+                    str(member) for member in grouping.group_to_originals.get(level, [level])
+                )
+    return list(dict.fromkeys(candidates))
+
+
+def _existing_labels_for_grouping(term: EditableTerm, grouping) -> list[str]:
+    labels = [str(level) for level in term.levels or []]
+    if grouping is not None:
+        labels.extend(str(level) for level in grouping.grouped_levels)
+    return labels
+
+
+def _ungroup_grouping(
+    spec,
+    term: EditableTerm,
+    data,
+    *,
+    selected_levels: list[str],
+) -> LevelGrouping:
+    existing = getattr(spec, "_grouping", None)
+    selected = set(selected_levels)
+    groups: dict[str, list[str]] = {}
+    existing_labels = [str(level) for level in term.levels]
+    existing_labels.extend(str(level) for level in existing.grouped_levels)
+    for label in existing.grouped_levels:
+        members = [str(member) for member in existing.group_to_originals.get(label, [])]
+        if len(members) < 2:
+            continue
+        remaining = [member for member in members if member not in selected]
+        if len(remaining) < 2:
+            continue
+        if remaining == members:
+            groups[str(label)] = members
+        else:
+            new_label = _unique_group_label(
+                _default_group_label(remaining),
+                existing_levels=existing_labels,
+                selected_levels=remaining,
+            )
+            groups[new_label] = remaining
+
+    if not any(
+        len(existing.group_to_originals.get(existing.original_to_group.get(level, level), [])) > 1
+        for level in selected
+    ):
+        raise ValueError("Selected levels are not part of a collapsed group.")
+
+    return collapse_levels(
+        data,
+        groups=groups,
+        order=_original_level_order(spec, term, existing),
+    )
+
+
+def _displayed_members(term: EditableTerm, grouping) -> dict[str, list[str]]:
+    if grouping is None:
+        return {str(level): [str(level)] for level in term.levels or []}
+    return {
+        str(level): [
+            str(member)
+            for member in grouping.group_to_originals.get(
+                grouping.original_to_group.get(str(level), str(level)),
+                [level],
+            )
+        ]
+        for level in term.levels or []
+    }
+
+
+def _original_level_order(spec, term: EditableTerm, grouping) -> list[str]:
+    if grouping is not None:
+        return [str(level) for level in grouping.all_original_levels]
+    if isinstance(spec, OrderedCategorical):
+        original_values = getattr(spec, "_original_level_to_value", None)
+        if original_values is not None:
+            return [str(level) for level in original_values]
+        return [str(level) for level in getattr(spec, "_ordered_levels", term.levels or [])]
+    return [str(level) for level in term.levels or []]
+
+
+def _ordered_spec_with_grouping(
+    spec: OrderedCategorical,
+    grouping: LevelGrouping | None,
+    selected_levels: list[str],
+    base: str,
+) -> OrderedCategorical:
+    values = _ordered_original_values(spec)
+    basis = copy.deepcopy(spec._spline_obj) if spec._spline_obj is not None else spec.basis
+    return OrderedCategorical(
+        values=values,
+        basis=basis,
+        kind=spec.kind,
+        base=base,
+        n_knots=spec.n_knots,
+        degree=spec.degree,
+        select=spec.select,
+        penalty=spec.penalty,
+        grouping=grouping,
+    )
+
+
+def _ordered_original_values(spec: OrderedCategorical) -> dict[str, float]:
+    original_values = getattr(spec, "_original_level_to_value", None)
+    if original_values is not None:
+        return {str(k): float(v) for k, v in original_values.items()}
+    return {str(k): float(v) for k, v in spec._level_to_value.items()}
+
+
+def _collapsed_base(base: str, selected_levels: list[str], group_label: str) -> str:
+    return group_label if str(base) in set(selected_levels) else base
+
+
+def _valid_base_after_ungroup(
+    base: str, selected_levels: list[str], grouping: LevelGrouping
+) -> str:
+    base = str(base)
+    if base in _SYMBOLIC_BASE_POLICIES:
+        return base
+    valid = set(grouping.grouped_levels) | set(grouping.all_original_levels)
+    if base in valid:
+        return base
+    return selected_levels[0] if selected_levels else "most_exposed"
+
+
+def _is_identity_grouping(grouping: LevelGrouping) -> bool:
+    return not any(
+        len([str(member) for member in grouping.group_to_originals.get(label, [])]) > 1
+        for label in grouping.grouped_levels
+    )
+
+
+def _require_contiguous(indices: np.ndarray, term_name: str) -> None:
+    if indices.size and np.any(np.diff(np.sort(indices)) != 1):
+        raise ValueError(f"Ordered categorical collapse for {term_name!r} must be contiguous.")
+
+
+def _default_group_label(selected_levels: list[str]) -> str:
+    return "+".join(str(level) for level in selected_levels)
+
+
+def _unique_group_label(
+    candidate: str,
+    *,
+    existing_levels: list[str],
+    selected_levels: list[str],
+) -> str:
+    blocked = set(existing_levels) - set(selected_levels)
+    if candidate not in blocked:
+        return candidate
+    i = 2
+    while f"{candidate} ({i})" in blocked:
+        i += 1
+    return f"{candidate} ({i})"

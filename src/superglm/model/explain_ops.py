@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 from superglm.inference._term_covariance import (
     feature_se_from_cov,
 )
@@ -145,6 +147,15 @@ def term_inference(
     """Per-term inference: curve, uncertainty, and metadata in one object."""
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling term_inference().")
+    if getattr(model, "_editor_inference_stale", False) and with_se:
+        warnings.warn(
+            "Editor coefficient edits make fitted standard errors and confidence "
+            "intervals reference-only; returning term inference without SE/CI.",
+            UserWarning,
+            stacklevel=2,
+        )
+        with_se = False
+        simultaneous = False
     return _term_inference(
         name,
         result=model.result,
