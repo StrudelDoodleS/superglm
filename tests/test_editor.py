@@ -875,6 +875,67 @@ def test_reorder_multiple_categorical_levels_can_move_to_far_right():
     assert session.selection("territory").tolist() == [3, 4]
 
 
+def test_reprofile_distribution_parameter_dispatches_to_model(
+    editor_model, editor_frame, monkeypatch
+):
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(X, y, None),
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_estimate_p(X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
+        calls.append(
+            {
+                "parameter": "p",
+                "X": X_arg,
+                "y": y_arg,
+                "sample_weight": sample_weight,
+                "offset": offset,
+                "kwargs": kwargs,
+            }
+        )
+        return "p-result"
+
+    def fake_estimate_theta(X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
+        calls.append(
+            {
+                "parameter": "theta",
+                "X": X_arg,
+                "y": y_arg,
+                "sample_weight": sample_weight,
+                "offset": offset,
+                "kwargs": kwargs,
+            }
+        )
+        return "theta-result"
+
+    monkeypatch.setattr(editor_model, "estimate_p", fake_estimate_p)
+    monkeypatch.setattr(editor_model, "estimate_theta", fake_estimate_theta)
+
+    p_result = session.reprofile_distribution("tweedie_p", method="grid", n_grid=7)
+    theta_result = session.reprofile_distribution("nb2_theta", theta_bounds=(0.2, 20.0))
+
+    assert p_result == "p-result"
+    assert theta_result == "theta-result"
+    assert calls[0]["parameter"] == "p"
+    assert calls[0]["X"] is X
+    assert calls[0]["y"] is y
+    assert calls[0]["kwargs"] == {"method": "grid", "n_grid": 7, "fit_mode": "inherit"}
+    assert calls[1]["parameter"] == "theta"
+    assert calls[1]["kwargs"] == {"theta_bounds": (0.2, 20.0)}
+
+
+def test_reprofile_distribution_parameter_rejects_unknown_parameter(editor_model, editor_frame):
+    X, y = editor_frame
+    session = EditorSession.from_model(editor_model, terms=["x_spline"], train_data=(X, y, None))
+
+    with pytest.raises(ValueError, match="parameter must be"):
+        session.reprofile_distribution("dispersion")
+
+
 def test_reordered_categorical_levels_persist_across_collapse_refit(editor_model):
     session = EditorSession.from_model(editor_model, terms=["region"])
 
@@ -1813,10 +1874,20 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "Fold Loss" in js
         assert "Run CV" not in js
         assert "modelSource" not in js
+        assert '<option value="zoom">Zoom</option>' in shell
+        assert "zoomBox" in js
+        assert "beginBoxZoom" in js
+        assert "applyBoxZoom" in js
+        assert "box-zoom" in js
         assert 'metricGrid.textContent = "Computing metrics..."' not in js
         assert 'summaryFrame.innerHTML = ""' not in js
         assert "/metrics" in js
         assert "/summary" in js
+        assert "/profile_distribution" in js
+        assert "runDistributionProfile" in js
+        assert "reprofileTweedie" in shell
+        assert "reprofileNb2" in shell
+        assert "updateDistributionProfileActions" in js
         assert "/refit_offset" in js
         assert "/collapse_levels" in js
         assert "/uncollapse_levels" in js

@@ -157,6 +157,8 @@ def _compact_summary_payload(
             "aic": _compact_scalar(info.get("aic")),
             "bic": _compact_scalar(info.get("bic")),
             "log_likelihood": _compact_scalar(info.get("log_likelihood")),
+            "tweedie_p": _compact_scalar(info.get("tweedie_p")),
+            "nb_theta": _compact_scalar(info.get("nb_theta")),
         },
         "rows": rows,
         "offset_terms": offset_terms,

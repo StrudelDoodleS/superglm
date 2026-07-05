@@ -44,6 +44,32 @@ export async function runOffsetRefit(nodes, refreshMetrics) {
   }
 }
 
+export async function runDistributionProfile(nodes, parameter, refreshMetrics) {
+  const { summaryStatus, summaryFrame, reprofileTweedie, reprofileNb2 } = nodes;
+  const button = parameter === "tweedie_p" ? reprofileTweedie : reprofileNb2;
+  summaryStatus.textContent = parameter === "tweedie_p"
+    ? "Re-profiling Tweedie p..."
+    : "Re-estimating NB2 theta...";
+  summaryFrame.setAttribute("aria-busy", "true");
+  if (button) button.disabled = true;
+  try {
+    const payload = await requestJSON("/profile_distribution", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ parameter })
+    });
+    renderSummary(payload, nodes);
+    await refreshMetrics();
+    return payload;
+  } catch (error) {
+    summaryStatus.textContent = error.message;
+    return null;
+  } finally {
+    summaryFrame.setAttribute("aria-busy", "false");
+    if (button) button.disabled = false;
+  }
+}
+
 export async function runCollapseRefit(nodes, termName, refreshMetrics) {
   const { summarySource, summaryStatus, summaryFrame, collapseLevels } = nodes;
   summaryStatus.textContent = "Refitting collapsed levels...";
@@ -116,7 +142,9 @@ export async function runUncollapseRefit(nodes, refreshMetrics) {
   }
 }
 
-function renderSummary(payload, { summaryStatus, summaryNote, summaryFrame }) {
+function renderSummary(payload, nodes) {
+  const { summaryStatus, summaryNote, summaryFrame } = nodes;
+  updateDistributionProfileActions(payload, nodes);
   if (!payload.available) {
     summaryStatus.textContent = payload.label || "Summary";
     summaryNote.textContent = "";
@@ -128,6 +156,18 @@ function renderSummary(payload, { summaryStatus, summaryNote, summaryFrame }) {
   // Prefer the typed compact payload for the immediate panel. The raw HTML is
   // still included inside the disclosure for full notebook-style detail.
   summaryFrame.innerHTML = payload.compact ? renderCompactSummary(payload) : payload.html || "";
+}
+
+export function updateDistributionProfileActions(payload, { reprofileTweedie, reprofileNb2 }) {
+  const family = String(payload && payload.compact && payload.compact.model
+    ? payload.compact.model.family || ""
+    : "");
+  if (reprofileTweedie) {
+    reprofileTweedie.hidden = !(payload.available && family === "Tweedie");
+  }
+  if (reprofileNb2) {
+    reprofileNb2.hidden = !(payload.available && family === "Neg. Binomial");
+  }
 }
 
 function renderCompactSummary(payload) {
@@ -144,6 +184,8 @@ function renderCompactSummary(payload) {
     ["BIC", model.bic],
     ["Log lik", model.log_likelihood]
   ];
+  if (model.tweedie_p !== null && model.tweedie_p !== undefined) facts.push(["Tweedie p", model.tweedie_p]);
+  if (model.nb_theta !== null && model.nb_theta !== undefined) facts.push(["NB2 theta", model.nb_theta]);
   return `
     <div class="compact-summary">
       <div class="summary-facts">

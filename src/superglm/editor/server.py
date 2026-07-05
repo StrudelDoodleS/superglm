@@ -132,6 +132,12 @@ def create_editor_app(widget: Any) -> FastAPI:
     def refit_offset(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(lambda: widget._refit_offset(str(payload.get("method", "auto"))))
 
+    @app.post("/profile_distribution")
+    def profile_distribution(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._profile_distribution(str(payload.get("parameter", "")))
+        )
+
     @app.post("/collapse_levels")
     def collapse_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(

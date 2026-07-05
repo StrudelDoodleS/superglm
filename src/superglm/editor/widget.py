@@ -242,6 +242,13 @@ class EditorWidget:
             self._offset_refit_labels = offset_label_payload(self.session, terms)
             return summary_payload(self, "refit")
 
+    def _profile_distribution(self, parameter: str) -> dict[str, Any]:
+        with self._lock:
+            self.session.reprofile_distribution(parameter)
+            if self.selected_term not in self.session.terms:
+                self.selected_term = next(iter(self.session.terms), "")
+            return summary_payload(self, "in_force")
+
     def _collapse_levels(self, term: str | None = None, method: str = "auto") -> dict[str, Any]:
         with self._lock:
             if term is not None:
