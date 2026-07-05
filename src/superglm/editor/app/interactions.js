@@ -8,6 +8,7 @@ export function bindInteractions(context) {
     pointDrag: null,
     controlDrag: null,
     panDrag: null,
+    zoomBox: null,
     orderDrag: null,
     pendingClickIndex: null
   };
@@ -21,6 +22,7 @@ export function bindInteractions(context) {
       interaction.dragStart = null;
       interaction.pointDrag = null;
       interaction.controlDrag = null;
+      clearBoxZoom(interaction);
       clearOrderDropPreview(interaction);
       interaction.orderDrag = null;
       svg.setPointerCapture(event.pointerId);
@@ -31,6 +33,7 @@ export function bindInteractions(context) {
     if (modeSelect.value === "handles") {
       interaction.pendingClickIndex = null;
       interaction.dragStart = null;
+      clearBoxZoom(interaction);
       clearOrderDropPreview(interaction);
       interaction.orderDrag = null;
       if (controlIndex === undefined) return;
@@ -49,6 +52,7 @@ export function bindInteractions(context) {
     }
     if (modeSelect.value === "move" && index !== undefined) {
       interaction.pendingClickIndex = null;
+      clearBoxZoom(interaction);
       clearOrderDropPreview(interaction);
       interaction.orderDrag = null;
       const i = Number(index);
@@ -69,8 +73,18 @@ export function bindInteractions(context) {
       svg.setPointerCapture(event.pointerId);
       return;
     }
+    if (modeSelect.value === "zoom") {
+      interaction.pendingClickIndex = null;
+      interaction.dragStart = null;
+      clearOrderDropPreview(interaction);
+      interaction.orderDrag = null;
+      beginBoxZoom(context, interaction, event);
+      svg.setPointerCapture(event.pointerId);
+      return;
+    }
     if (modeSelect.value !== "select") {
       interaction.pendingClickIndex = null;
+      clearBoxZoom(interaction);
       clearOrderDropPreview(interaction);
       interaction.orderDrag = null;
       return;
@@ -80,6 +94,7 @@ export function bindInteractions(context) {
       interaction.pendingClickIndex = null;
       interaction.dragStart = null;
       interaction.brush = null;
+      clearBoxZoom(interaction);
       clearOrderDropPreview(interaction);
       interaction.orderDrag = null;
       const indices = togglePointSelection(context.currentSelection(), Number(index));
@@ -91,6 +106,7 @@ export function bindInteractions(context) {
       interaction.pendingClickIndex = null;
       interaction.dragStart = null;
       interaction.brush = null;
+      clearBoxZoom(interaction);
       svg.setPointerCapture(event.pointerId);
       return;
     }
@@ -148,6 +164,10 @@ export function bindInteractions(context) {
       updateOrderDrag(context, interaction, svgPoint(context, event));
       return;
     }
+    if (interaction.zoomBox) {
+      updateBoxZoom(interaction, svgPoint(context, event));
+      return;
+    }
     if (!interaction.dragStart || !interaction.brush) return;
     const point = svgPoint(context, event);
     interaction.brush.setAttribute("x", Math.min(interaction.dragStart.x, point.x));
@@ -195,6 +215,13 @@ export function bindInteractions(context) {
           { refreshMetrics: false, refreshSummary: false }
         );
       }
+      return;
+    }
+    if (interaction.zoomBox) {
+      const zoomBox = interaction.zoomBox;
+      const point = svgPoint(context, event);
+      clearBoxZoom(interaction);
+      applyBoxZoom(context, zoomBox.start, point);
       return;
     }
     if (!interaction.dragStart) return;
@@ -258,6 +285,36 @@ function togglePointSelection(selection, index) {
   if (next.has(index)) next.delete(index);
   else next.add(index);
   return Array.from(next).sort((a, b) => a - b);
+}
+
+function beginBoxZoom(context, interaction, event) {
+  if (!context.svg._scale) return;
+  const start = svgPoint(context, event);
+  const brush = svgRect({
+    class: "brush box-zoom",
+    x: start.x,
+    y: start.y,
+    width: 0,
+    height: 0
+  });
+  context.svg.appendChild(brush);
+  interaction.zoomBox = { start, brush };
+}
+
+function updateBoxZoom(interaction, point) {
+  const zoomBox = interaction.zoomBox;
+  if (!zoomBox || !zoomBox.brush) return;
+  zoomBox.brush.setAttribute("x", Math.min(zoomBox.start.x, point.x));
+  zoomBox.brush.setAttribute("y", Math.min(zoomBox.start.y, point.y));
+  zoomBox.brush.setAttribute("width", Math.abs(point.x - zoomBox.start.x));
+  zoomBox.brush.setAttribute("height", Math.abs(point.y - zoomBox.start.y));
+}
+
+function clearBoxZoom(interaction) {
+  if (interaction.zoomBox && interaction.zoomBox.brush) {
+    interaction.zoomBox.brush.remove();
+  }
+  interaction.zoomBox = null;
 }
 
 function beginOrderDrag(context, interaction, event, index) {
@@ -433,6 +490,25 @@ function zoomAround(context, point, factor) {
   xMax = Math.min(scale.baseXMax, xMax);
   yMin = Math.max(scale.baseYMin, yMin);
   yMax = Math.min(scale.baseYMax, yMax);
+  if (xMax <= xMin || yMax <= yMin) return;
+  context.zoomState[context.selectedTerm()] = { xMin, xMax, yMin, yMax };
+  context.render();
+}
+
+function applyBoxZoom(context, start, end) {
+  if (!context.svg._scale) return;
+  const scale = context.svg._scale;
+  const x0 = Math.max(scale.margin.left, Math.min(start.x, end.x));
+  const x1 = Math.min(scale.margin.left + scale.innerW, Math.max(start.x, end.x));
+  const y0 = Math.max(scale.margin.top, Math.min(start.y, end.y));
+  const y1 = Math.min(scale.margin.top + scale.innerH, Math.max(start.y, end.y));
+  if (x1 - x0 < 8 || y1 - y0 < 8) return;
+  const lo = dataFromPoint(context, { x: x0, y: y1 });
+  const hi = dataFromPoint(context, { x: x1, y: y0 });
+  const xMin = Math.max(scale.baseXMin, Math.min(lo.x, hi.x));
+  const xMax = Math.min(scale.baseXMax, Math.max(lo.x, hi.x));
+  const yMin = Math.max(scale.baseYMin, Math.min(lo.y, hi.y));
+  const yMax = Math.min(scale.baseYMax, Math.max(lo.y, hi.y));
   if (xMax <= xMin || yMax <= yMin) return;
   context.zoomState[context.selectedTerm()] = { xMin, xMax, yMin, yMax };
   context.render();

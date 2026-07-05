@@ -5,6 +5,7 @@ import { refreshMetrics } from "./metrics.js";
 import { refreshReport } from "./reports.js";
 import {
   refreshSummary,
+  runDistributionProfile,
   runCollapseRefit,
   runOffsetRefit,
   runUncollapseRefit,
@@ -40,6 +41,8 @@ const metricSelect = document.getElementById("metricSelect");
 const metricGrid = document.getElementById("metricGrid");
 const summarySource = document.getElementById("summarySource");
 const refitOffset = document.getElementById("refitOffset");
+const reprofileTweedie = document.getElementById("reprofileTweedie");
+const reprofileNb2 = document.getElementById("reprofileNb2");
 const summaryStatus = document.getElementById("summaryStatus");
 const summaryNote = document.getElementById("summaryNote");
 const summaryFrame = document.getElementById("summaryFrame");
@@ -95,6 +98,8 @@ function summaryNodes() {
   return {
     summarySource,
     refitOffset,
+    reprofileTweedie,
+    reprofileNb2,
     collapseLevels,
     ungroupLevels,
     uncollapseLevels,
@@ -415,6 +420,26 @@ refitOffset.addEventListener("click", async () => {
   await runOffsetRefit(summaryNodes(), refreshMetricsView);
   await refreshActiveReport();
 });
+if (reprofileTweedie) {
+  reprofileTweedie.addEventListener("click", async () => {
+    stopContributionBuild();
+    summarySource.value = "selected";
+    await runDistributionProfile(summaryNodes(), "tweedie_p", refreshMetricsView);
+    state = await requestJSON("/state");
+    render();
+    await refreshActiveReport();
+  });
+}
+if (reprofileNb2) {
+  reprofileNb2.addEventListener("click", async () => {
+    stopContributionBuild();
+    summarySource.value = "selected";
+    await runDistributionProfile(summaryNodes(), "nb2_theta", refreshMetricsView);
+    state = await requestJSON("/state");
+    render();
+    await refreshActiveReport();
+  });
+}
 if (collapseLevels) {
   collapseLevels.addEventListener("click", async () => {
     stopContributionBuild();

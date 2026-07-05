@@ -22,7 +22,7 @@
   <div class="toolbar">
     <div class="toolbar-section">
       <label>Term <select id="term"></select></label>
-      <label>Mode <select id="mode"><option value="select">Select</option><option value="move">Move</option><option value="handles">Handles</option></select></label>
+      <label>Mode <select id="mode"><option value="select">Select</option><option value="zoom">Zoom</option><option value="move">Move</option><option value="handles">Handles</option></select></label>
       <label id="handleCountWrap" class="handle-count" hidden>
         <span>Handles</span>
         <input id="handleCount" type="range" min="3" max="12" value="12">
@@ -197,6 +197,8 @@
           <option value="refit">Fixed-offset refit</option>
         </select>
         <button id="refitOffset" type="button">Refit offsets</button>
+        <button id="reprofileTweedie" type="button" hidden>Re-profile p</button>
+        <button id="reprofileNb2" type="button" hidden>Re-estimate theta</button>
       </div>
       <div id="summaryStatus">Loading summary...</div>
       <div id="summaryNote" class="summary-note"></div>
