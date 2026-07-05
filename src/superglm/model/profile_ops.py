@@ -86,25 +86,13 @@ def estimate_p(
         y, mu, weights, offset_arr, model._distribution, model._link, result.phi_hat
     )
 
-    # Eagerly compute the default CI so summary() doesn't trigger
-    # expensive profile refits on first access.  The REML CI objective
-    # mutates model.family during Brent evaluations, so save and restore
-    # the full model state around the CI computation.
+    # Eagerly compute the default CI so summary() doesn't trigger expensive
+    # profile refits on first access. REML profile objectives evaluate against
+    # an isolated scratch model, so CI probes cannot mutate this fitted model.
     if result._objective is not None:
         if progress_callback is not None:
             progress_callback("profile_ci", {"profile_estimate": _tweedie_estimate_payload(result)})
-        saved_family = model.family
-        saved_result = model._result
-        saved_fit_stats = model._fit_stats
-        saved_profile = model._tweedie_profile_result
-
         result.ci(alpha=0.05)
-
-        # Restore model state (CI refits leave model at last Brent eval)
-        model.family = saved_family
-        model._result = saved_result
-        model._fit_stats = saved_fit_stats
-        model._tweedie_profile_result = saved_profile
         if progress_callback is not None:
             progress_callback("profile_ci", {"profile_estimate": _tweedie_estimate_payload(result)})
 
