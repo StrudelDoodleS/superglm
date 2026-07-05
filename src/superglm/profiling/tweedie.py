@@ -798,8 +798,10 @@ def _build_profile_context(
     # The design matrix itself doesn't depend on p.
     saved_family = model.family
     model.family = Tweedie(p=1.5)
-    y_arr, w_arr, offset_arr = model._build_design_matrix(X, y_arr, sample_weight, offset)
-    model.family = saved_family
+    try:
+        y_arr, w_arr, offset_arr = model._build_design_matrix(X, y_arr, sample_weight, offset)
+    finally:
+        model.family = saved_family
 
     if model.penalty.lambda1 is None:
         model.penalty.lambda1 = model._compute_lambda_max(y_arr, w_arr) * 0.1

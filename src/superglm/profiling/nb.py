@@ -309,8 +309,10 @@ def estimate_nb_theta(
 
     saved_family = model.family
     model.family = NegativeBinomial(theta=1.0)
-    y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, sample_weight, offset)
-    model.family = saved_family
+    try:
+        y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, sample_weight, offset)
+    finally:
+        model.family = saved_family
 
     if model.penalty.lambda1 is None:
         model.penalty.lambda1 = model._compute_lambda_max(y_arr, w_arr) * 0.1

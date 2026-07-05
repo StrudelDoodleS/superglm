@@ -242,6 +242,25 @@ class TestNB2ProfileTheta:
         with pytest.raises(ValueError, match="NegativeBinomial"):
             estimate_nb_theta(model, X, y)
 
+    def test_design_matrix_error_restores_temporary_family(self, monkeypatch):
+        model = SuperGLM(
+            family=NegativeBinomial(theta=2.5),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
+        y = np.array([1.0, 2.0, 3.0])
+
+        def fail_build(*args, **kwargs):
+            raise RuntimeError("build failed")
+
+        monkeypatch.setattr(model, "_build_design_matrix", fail_build)
+
+        with pytest.raises(RuntimeError, match="build failed"):
+            estimate_nb_theta(model, X, y)
+
+        assert model.family.theta == pytest.approx(2.5)
+
 
 class TestNB2AutoTheta:
     def test_auto_theta_flow(self):

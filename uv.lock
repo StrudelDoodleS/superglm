@@ -3650,11 +3650,13 @@ bench = [
     { name = "statsmodels" },
 ]
 dev = [
+    { name = "fastapi" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "uvicorn" },
 ]
 editor = [
     { name = "fastapi" },
@@ -3678,6 +3680,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'editor'", specifier = ">=0.115" },
     { name = "glum", marker = "extra == 'bench'", specifier = ">=3.0" },
     { name = "ipykernel", marker = "extra == 'editor'", specifier = ">=6.0" },
@@ -3699,6 +3702,7 @@ requires-dist = [
     { name = "statsmodels", marker = "extra == 'bench'", specifier = ">=0.14" },
     { name = "superglm", extras = ["dev", "bench", "interactions", "plotting", "editor"], marker = "extra == 'all'" },
     { name = "tabmat", specifier = ">=4.0" },
+    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.30" },
     { name = "uvicorn", marker = "extra == 'editor'", specifier = ">=0.30" },
 ]
 provides-extras = ["dev", "bench", "interactions", "plotting", "editor", "all"]
