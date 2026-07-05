@@ -352,6 +352,26 @@ class TestProfileLikelihood:
         with pytest.raises(ValueError, match="tweedie"):
             estimate_tweedie_p(model, X, y)
 
+    def test_design_matrix_error_restores_temporary_family(self, monkeypatch):
+        """Temporary p used for design-matrix setup should be exception-safe."""
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.7),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
+        y = np.array([1.0, 2.0, 3.0])
+
+        def fail_build(*args, **kwargs):
+            raise RuntimeError("build failed")
+
+        monkeypatch.setattr(model, "_build_design_matrix", fail_build)
+
+        with pytest.raises(RuntimeError, match="build failed"):
+            estimate_tweedie_p(model, X, y)
+
+        assert model.family.p == pytest.approx(1.7)
+
     def test_result_has_search_trace(self):
         """search_trace should be populated with >= 3 entries from Brent."""
         import pandas as pd

@@ -21,11 +21,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "fastapi>=0.115",
     "pytest>=7.0",
     "pytest-cov",
     "ruff",
     "mypy",
     "pre-commit",
+    "uvicorn>=0.30",
 ]
 bench = [
     "glum>=3.0",
