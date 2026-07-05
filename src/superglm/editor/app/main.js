@@ -1,4 +1,4 @@
-import { requestJSON, postJSON } from "./api.js";
+import { requestBlob, requestJSON, postJSON } from "./api.js";
 import { drawChart, groupedTerms } from "./chart.js";
 import { fmt, fmtPercent } from "./format.js";
 import { refreshMetrics } from "./metrics.js";
@@ -6,6 +6,7 @@ import { refreshReport } from "./reports.js";
 import {
   refreshSummary,
   runDistributionProfile,
+  showDistributionProfileDialog,
   runCollapseRefit,
   runOffsetRefit,
   runUncollapseRefit,
@@ -34,6 +35,16 @@ const buildDurationValue = document.getElementById("buildDurationValue");
 const resetZoom = document.getElementById("resetZoom");
 const ciToggle = document.getElementById("ciToggle");
 const resetOrder = document.getElementById("resetOrder");
+const saveModel = document.getElementById("saveModel");
+const saveDialog = document.getElementById("saveDialog");
+const saveDialogClose = document.getElementById("saveDialogClose");
+const saveDirectory = document.getElementById("saveDirectory");
+const saveBrowse = document.getElementById("saveBrowse");
+const saveOpenDirectory = document.getElementById("saveOpenDirectory");
+const saveFilename = document.getElementById("saveFilename");
+const saveConfirm = document.getElementById("saveConfirm");
+const saveDownload = document.getElementById("saveDownload");
+const saveStatus = document.getElementById("saveStatus");
 const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
 const uncollapseLevels = document.getElementById("uncollapseLevels");
@@ -43,6 +54,22 @@ const summarySource = document.getElementById("summarySource");
 const refitOffset = document.getElementById("refitOffset");
 const reprofileTweedie = document.getElementById("reprofileTweedie");
 const reprofileNb2 = document.getElementById("reprofileNb2");
+const profileDialog = document.getElementById("profileDialog");
+const profileDialogTitle = document.getElementById("profileDialogTitle");
+const profileDialogDescription = document.getElementById("profileDialogDescription");
+const profileDialogClose = document.getElementById("profileDialogClose");
+const profileOptions = document.getElementById("profileOptions");
+const profileMethodWrap = document.getElementById("profileMethodWrap");
+const profileMethod = document.getElementById("profileMethod");
+const profilePhiWrap = document.getElementById("profilePhiWrap");
+const profilePhiMethod = document.getElementById("profilePhiMethod");
+const profileTolerance = document.getElementById("profileTolerance");
+const profileRun = document.getElementById("profileRun");
+const profileProgress = document.getElementById("profileProgress");
+const profileTraceStatus = document.getElementById("profileTraceStatus");
+const profileTraceLegend = document.getElementById("profileTraceLegend");
+const profileTracePlot = document.getElementById("profileTracePlot");
+const profileTraceTable = document.getElementById("profileTraceTable");
 const summaryStatus = document.getElementById("summaryStatus");
 const summaryNote = document.getElementById("summaryNote");
 const summaryFrame = document.getElementById("summaryFrame");
@@ -102,6 +129,21 @@ function summaryNodes() {
     refitOffset,
     reprofileTweedie,
     reprofileNb2,
+    profileDialog,
+    profileDialogTitle,
+    profileDialogDescription,
+    profileRun,
+    profileOptions,
+    profileMethodWrap,
+    profileMethod,
+    profilePhiWrap,
+    profilePhiMethod,
+    profileTolerance,
+    profileProgress,
+    profileTraceStatus,
+    profileTraceLegend,
+    profileTracePlot,
+    profileTraceTable,
     collapseLevels,
     ungroupLevels,
     uncollapseLevels,
@@ -109,6 +151,184 @@ function summaryNodes() {
     summaryNote,
     summaryFrame
   };
+}
+
+if (profileDialogClose && profileDialog) {
+  profileDialogClose.addEventListener("click", () => {
+    if (typeof profileDialog.close === "function") {
+      profileDialog.close();
+    } else {
+      profileDialog.removeAttribute("open");
+    }
+  });
+}
+
+if (saveDialogClose && saveDialog) {
+  saveDialogClose.addEventListener("click", () => {
+    if (typeof saveDialog.close === "function") {
+      saveDialog.close();
+    } else {
+      saveDialog.removeAttribute("open");
+    }
+  });
+}
+
+async function runProfileFromDialog() {
+  if (!profileDialog) return;
+  const parameter = profileDialog.dataset.parameter || "tweedie_p";
+  stopContributionBuild();
+  summarySource.value = "selected";
+  await runDistributionProfile(summaryNodes(), parameter, refreshMetricsView);
+  state = await requestJSON("/state");
+  render();
+  await refreshActiveReport();
+}
+
+async function saveEditedModel() {
+  if (!saveConfirm) return;
+  saveConfirm.disabled = true;
+  if (saveStatus) saveStatus.textContent = "Saving...";
+  try {
+    const payload = await requestJSON("/save_model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        directory: saveDirectory ? saveDirectory.value : ".",
+        filename: saveFilename ? saveFilename.value : "superglm_edited_model.joblib"
+      })
+    });
+    if (saveStatus) saveStatus.textContent = `Saved ${payload.path}`;
+  } catch (error) {
+    if (saveStatus) saveStatus.textContent = error.message;
+  } finally {
+    saveConfirm.disabled = false;
+  }
+}
+
+async function downloadEditedModel() {
+  if (!saveDownload) return;
+  saveDownload.disabled = true;
+  if (saveStatus) saveStatus.textContent = "Preparing download...";
+  const requestedName = saveFilename ? saveFilename.value : "superglm_edited_model.joblib";
+  try {
+    const response = await requestBlob(
+      `/download_model?filename=${encodeURIComponent(requestedName || "superglm_edited_model.joblib")}`
+    );
+    const blob = await response.blob();
+    const filename =
+      filenameFromDisposition(response.headers.get("content-disposition")) ||
+      requestedName ||
+      "superglm_edited_model.joblib";
+    const message = await saveBlobToFile(blob, filename);
+    if (saveStatus) saveStatus.textContent = message;
+  } catch (error) {
+    if (saveStatus) saveStatus.textContent = error.message;
+  } finally {
+    saveDownload.disabled = false;
+  }
+}
+
+function filenameFromDisposition(disposition) {
+  if (!disposition) return "";
+  const match = disposition.match(/filename="([^"]+)"/i);
+  return match ? match[1] : "";
+}
+
+async function saveBlobToFile(blob, filename) {
+  if (typeof window.showSaveFilePicker === "function" && window.isSecureContext) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [
+          {
+            description: "Joblib model",
+            accept: { "application/octet-stream": [".joblib"] }
+          }
+        ]
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return `Saved ${filename}`;
+    } catch (error) {
+      if (error && error.name === "AbortError") return "Download cancelled.";
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  anchor.style.display = "none";
+  document.body.append(anchor);
+  anchor.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+    anchor.remove();
+  }, 0);
+  return `Downloaded ${filename}`;
+}
+
+async function openSaveDialog() {
+  if (saveStatus) saveStatus.textContent = "";
+  if (saveDialog && typeof saveDialog.showModal === "function") {
+    saveDialog.showModal();
+  } else if (saveDialog) {
+    saveDialog.setAttribute("open", "");
+  }
+}
+
+async function openNativeSaveDialog() {
+  if (!saveBrowse) return;
+  saveBrowse.disabled = true;
+  if (saveStatus) saveStatus.textContent = "Opening file dialog...";
+  try {
+    const payload = await requestJSON("/native_save_dialog", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        directory: saveDirectory ? saveDirectory.value : ".",
+        filename: saveFilename ? saveFilename.value : "superglm_edited_model.joblib"
+      })
+    });
+    if (payload.cancelled) {
+      if (saveStatus) saveStatus.textContent = "Save location unchanged.";
+      return;
+    }
+    if (saveDirectory) saveDirectory.value = payload.directory || ".";
+    if (saveFilename) saveFilename.value = payload.filename || "superglm_edited_model.joblib";
+    if (saveStatus) saveStatus.textContent = `Selected ${payload.path}`;
+  } catch (error) {
+    if (saveStatus) saveStatus.textContent = formatSaveRouteError(error);
+  } finally {
+    saveBrowse.disabled = false;
+  }
+}
+
+async function openDirectoryInFileManager() {
+  if (!saveOpenDirectory) return;
+  saveOpenDirectory.disabled = true;
+  if (saveStatus) saveStatus.textContent = "Opening folder...";
+  try {
+    const payload = await requestJSON("/open_directory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: saveDirectory ? saveDirectory.value : "." })
+    });
+    if (saveStatus) saveStatus.textContent = `Opened ${payload.path}`;
+  } catch (error) {
+    if (saveStatus) saveStatus.textContent = formatSaveRouteError(error);
+  } finally {
+    saveOpenDirectory.disabled = false;
+  }
+}
+
+function formatSaveRouteError(error) {
+  const message = error && error.message ? error.message : String(error);
+  if (message === "not found") {
+    return "Save controls are newer than this running editor server. Rerun session.widget() or restart the kernel.";
+  }
+  return message;
 }
 
 async function refreshMetricsView() {
@@ -421,30 +641,42 @@ ciToggle.addEventListener("click", () => {
 });
 
 resetZoom.addEventListener("click", interactions.resetZoomView);
+if (saveModel) {
+  saveModel.addEventListener("click", openSaveDialog);
+}
+if (saveConfirm) {
+  saveConfirm.addEventListener("click", saveEditedModel);
+}
+if (saveDownload) {
+  saveDownload.addEventListener("click", downloadEditedModel);
+}
+if (saveBrowse) {
+  saveBrowse.addEventListener("click", openNativeSaveDialog);
+}
+if (saveOpenDirectory) {
+  saveOpenDirectory.addEventListener("click", openDirectoryInFileManager);
+}
 summarySource.addEventListener("change", refreshSummaryView);
 refitOffset.addEventListener("click", async () => {
   await runOffsetRefit(summaryNodes(), refreshMetricsView);
   await refreshActiveReport();
 });
 if (reprofileTweedie) {
-  reprofileTweedie.addEventListener("click", async () => {
+  reprofileTweedie.addEventListener("click", () => {
     stopContributionBuild();
     summarySource.value = "selected";
-    await runDistributionProfile(summaryNodes(), "tweedie_p", refreshMetricsView);
-    state = await requestJSON("/state");
-    render();
-    await refreshActiveReport();
+    showDistributionProfileDialog(summaryNodes(), "tweedie_p");
   });
 }
 if (reprofileNb2) {
-  reprofileNb2.addEventListener("click", async () => {
+  reprofileNb2.addEventListener("click", () => {
     stopContributionBuild();
     summarySource.value = "selected";
-    await runDistributionProfile(summaryNodes(), "nb2_theta", refreshMetricsView);
-    state = await requestJSON("/state");
-    render();
-    await refreshActiveReport();
+    showDistributionProfileDialog(summaryNodes(), "nb2_theta");
   });
+}
+if (profileRun) {
+  profileRun.addEventListener("click", runProfileFromDialog);
 }
 if (collapseLevels) {
   collapseLevels.addEventListener("click", async () => {

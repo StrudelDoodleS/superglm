@@ -41,6 +41,7 @@ plotting = [
 editor = [
     "fastapi>=0.115",
     "ipykernel>=6.0",
+    "PySide6>=6.7",
     "uvicorn>=0.30",
 ]
 all = [

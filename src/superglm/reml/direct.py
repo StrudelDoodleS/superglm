@@ -116,6 +116,7 @@ def optimize_direct_reml(
     _tol = reml_tol
 
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
+    objective_history: list[float] = []
     warm_beta: NDArray | None = None
     warm_intercept: float | None = None
 
@@ -288,6 +289,7 @@ def optimize_direct_reml(
             M_p = compute_total_penalty_rank(penalties)
             phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
         _t_objective += _time.perf_counter() - _t0
+        objective_history.append(float(obj))
 
         _t0 = _time.perf_counter()
         grad_partial = reml_direct_gradient(
@@ -538,4 +540,5 @@ def optimize_direct_reml(
         converged=converged,
         lambda_history=lambda_history,
         objective=float(best_obj),
+        objective_history=objective_history,
     )

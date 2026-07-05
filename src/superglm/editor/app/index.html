@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
+  <div class="app-shell">
   <div class="app-tabs" role="tablist" aria-label="Editor views">
     <button class="app-tab active" type="button" data-view="editor" role="tab" aria-selected="true">
       Editor
@@ -46,6 +47,15 @@
       <button id="ciToggle" type="button">Ref CI</button>
       <button id="resetOrder" type="button" data-op="reset_order" hidden>Reset order</button>
       <button data-op="reset">Reset</button>
+      <button id="saveModel" class="icon-button" type="button"
+        title="Save edited model" aria-label="Save edited model">
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 4h12l2 2v14H5z"></path>
+          <path d="M8 4v6h8V4"></path>
+          <path d="M8 15h8v5H8z"></path>
+          <path d="M14 4v4"></path>
+        </svg>
+      </button>
     </div>
   </div>
   <div id="status"></div>
@@ -215,6 +225,78 @@
     </div>
     <div id="reportFrame" class="report-frame"></div>
   </section>
+  </div>
+
+  <dialog id="profileDialog" class="profile-dialog" aria-labelledby="profileDialogTitle">
+    <div class="profile-dialog-head">
+      <div>
+        <h2 id="profileDialogTitle">Profile Search</h2>
+        <p id="profileDialogDescription">Candidate parameter fits and loss trace.</p>
+      </div>
+      <button id="profileDialogClose" type="button" aria-label="Close profile search">Close</button>
+    </div>
+    <div id="profileOptions" class="profile-options" hidden>
+      <label id="profileMethodWrap">Search
+        <select id="profileMethod">
+          <option value="brent">Brent</option>
+          <option value="grid">Grid</option>
+          <option value="grid_refine">Grid refine</option>
+        </select>
+      </label>
+      <label id="profilePhiWrap">Phi
+        <select id="profilePhiMethod">
+          <option value="mle" selected>MLE</option>
+          <option value="pearson">Pearson</option>
+        </select>
+      </label>
+      <label>Tolerance
+        <input id="profileTolerance" type="number" min="0.0001" max="0.1" step="0.0005" value="0.001">
+      </label>
+    </div>
+    <button id="profileRun" class="profile-run" type="button">Run profile</button>
+    <div id="profileProgress" class="profile-progress" hidden>
+      <div class="profile-progress-head">
+        <strong>Profile trace</strong>
+        <span id="profileTraceStatus">Idle</span>
+      </div>
+      <div class="profile-trace-figure">
+        <div id="profileTraceLegend" class="profile-trace-legend" aria-label="Profile trace legend"></div>
+        <svg id="profileTracePlot" viewBox="0 0 320 120" role="img" aria-label="Profile loss trace"></svg>
+      </div>
+      <div id="profileTraceTable" class="profile-trace-table"></div>
+    </div>
+  </dialog>
+
+  <dialog id="saveDialog" class="save-dialog" aria-labelledby="saveDialogTitle">
+    <div class="profile-dialog-head">
+      <div>
+        <h2 id="saveDialogTitle">Save Edited Model</h2>
+        <p>Write the current in-force edited model copy as a joblib artifact.</p>
+      </div>
+      <button id="saveDialogClose" type="button" aria-label="Close save dialog">Close</button>
+    </div>
+    <div class="save-options">
+      <div class="save-directory-row">
+        <label>Directory
+          <input id="saveDirectory" type="text" value=".">
+        </label>
+        <button
+          id="saveBrowse"
+          type="button"
+          aria-haspopup="dialog"
+        >Browse</button>
+        <button id="saveOpenDirectory" type="button">Open Folder</button>
+      </div>
+      <label>Filename
+        <input id="saveFilename" type="text" value="superglm_edited_model.joblib">
+      </label>
+    </div>
+    <div class="save-actions">
+      <button id="saveDownload" class="profile-run" type="button">Download Edited Model</button>
+      <button id="saveConfirm" class="profile-run" type="button">Save To Kernel Path</button>
+    </div>
+    <div id="saveStatus" class="save-status" aria-live="polite"></div>
+  </dialog>
 
 <script type="module" src="/assets/main.js"></script>
 </body>

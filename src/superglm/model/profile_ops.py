@@ -19,6 +19,7 @@ def estimate_p(
     fit_mode="fit",
     phi_method="pearson",
     method="brent",
+    progress_callback=None,
     **kwargs,
 ):
     """Estimate Tweedie p via profile likelihood, refit, and return result."""
@@ -51,9 +52,13 @@ def estimate_p(
         method=method,
         **kwargs,
     )
+    if progress_callback is not None:
+        progress_callback("best_found", {"profile_estimate": _tweedie_estimate_payload(result)})
     model.family = Tweedie(p=result.p_hat)
 
     # Refit with the same regime used for profiling (clears stale profile results)
+    if progress_callback is not None:
+        progress_callback("final_refit", {"profile_estimate": _tweedie_estimate_payload(result)})
     if resolved_mode == "fit_reml":
         model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
     else:
@@ -86,6 +91,8 @@ def estimate_p(
     # mutates model.family during Brent evaluations, so save and restore
     # the full model state around the CI computation.
     if result._objective is not None:
+        if progress_callback is not None:
+            progress_callback("profile_ci", {"profile_estimate": _tweedie_estimate_payload(result)})
         saved_family = model.family
         saved_result = model._result
         saved_fit_stats = model._fit_stats
@@ -98,6 +105,8 @@ def estimate_p(
         model._result = saved_result
         model._fit_stats = saved_fit_stats
         model._tweedie_profile_result = saved_profile
+        if progress_callback is not None:
+            progress_callback("profile_ci", {"profile_estimate": _tweedie_estimate_payload(result)})
 
     return result
 
@@ -106,8 +115,46 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, **kwargs):
     """Estimate NB theta via profile likelihood, refit, and return result."""
     from superglm.profiling.nb import estimate_nb_theta
 
+    progress_callback = kwargs.pop("progress_callback", None)
     result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset, **kwargs)
+    if progress_callback is not None:
+        progress_callback("best_found", {"profile_estimate": _theta_estimate_payload(result)})
     model.family = NegativeBinomial(theta=result.theta_hat)
+    if progress_callback is not None:
+        progress_callback("final_refit", {"profile_estimate": _theta_estimate_payload(result)})
     model.fit(X, y, sample_weight=sample_weight, offset=offset)
     model._nb_profile_result = result  # after refit so fit()'s clear doesn't wipe it
     return result
+
+
+def _tweedie_estimate_payload(result):
+    return {
+        "parameter": "p",
+        "label": "p_hat",
+        "value": getattr(result, "p_hat", None),
+        "ci_low": _cached_ci(result)[0],
+        "ci_high": _cached_ci(result)[1],
+        "objective": getattr(result, "nll", None),
+        "objective_label": "loss",
+        "lower_is_better": True,
+    }
+
+
+def _theta_estimate_payload(result):
+    return {
+        "parameter": "theta",
+        "label": "theta_hat",
+        "value": getattr(result, "theta_hat", None),
+        "ci_low": _cached_ci(result)[0],
+        "ci_high": _cached_ci(result)[1],
+        "objective": getattr(result, "nll", None),
+        "objective_label": "loss",
+        "lower_is_better": True,
+    }
+
+
+def _cached_ci(result):
+    cache = getattr(result, "_ci_cache", None)
+    if isinstance(cache, dict) and 0.05 in cache:
+        return cache[0.05]
+    return (None, None)

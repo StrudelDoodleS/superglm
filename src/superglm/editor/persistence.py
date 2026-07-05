@@ -35,6 +35,7 @@ def save_session(session, path: str | Path) -> None:
         "n_points": session.n_points,
         "centering": session.centering,
         "terms": [term_to_payload(term) for term in session.terms.values()],
+        "level_orders": {name: list(labels) for name, labels in session._level_orders.items()},
         "selection": {
             name: session._selection[name].astype(int).tolist() for name in session.terms
         },
@@ -56,6 +57,11 @@ def load_session(session_cls, path: str | Path, *, model):
         n_points=int(payload.get("n_points", 200)),
         centering=str(payload.get("centering", "native")),
     )
+    session._level_orders = {
+        str(name): [str(label) for label in labels]
+        for name, labels in payload.get("level_orders", {}).items()
+    }
+    session._reapply_level_orders()
     for term_payload in term_payloads:
         term = session.terms[term_payload["name"]]
         validate_loaded_term(term, term_payload)

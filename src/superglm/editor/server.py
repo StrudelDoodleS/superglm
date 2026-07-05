@@ -11,7 +11,6 @@ from typing import Any
 import uvicorn
 from fastapi import Body, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -22,12 +21,14 @@ from superglm.editor.io import jsonable
 def create_editor_app(widget: Any) -> FastAPI:
     """Create the local HTTP app that binds browser routes to an editor widget."""
     app = FastAPI(title="SuperGLM Editor", docs_url=None, redoc_url=None, openapi_url=None)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type"],
-    )
+
+    @app.middleware("http")
+    async def require_editor_token(request: Request, call_next):
+        if _is_public_path(request.url.path):
+            return await call_next(request)
+        if _request_token(request) == getattr(widget, "_token", None):
+            return await call_next(request)
+        return _json_response({"error": "invalid or missing editor token"}, status_code=403)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception(_request: Request, exc: StarletteHTTPException) -> Response:
@@ -128,6 +129,60 @@ def create_editor_app(widget: Any) -> FastAPI:
     def report(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(lambda: widget._report(str(payload.get("report", "validation"))))
 
+    @app.post("/save_model")
+    def save_model(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._save_model(
+                directory=None if "directory" not in payload else str(payload["directory"]),
+                filename=None if "filename" not in payload else str(payload["filename"]),
+                path=None if "path" not in payload else str(payload["path"]),
+            )
+        )
+
+    @app.get("/download_model")
+    def download_model(filename: str = "superglm_edited_model.joblib") -> Response:
+        try:
+            data, safe_name = widget._download_model(filename)
+        except Exception as exc:  # pragma: no cover - surfaced to browser/tests as JSON
+            return _json_response({"error": str(exc)}, status_code=400)
+        return Response(
+            content=data,
+            media_type="application/octet-stream",
+            headers={
+                **_no_store_headers(),
+                "Content-Disposition": f'attachment; filename="{safe_name}"',
+            },
+        )
+
+    @app.post("/native_save_dialog")
+    def native_save_dialog(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._native_save_dialog(
+                directory=None if "directory" not in payload else str(payload["directory"]),
+                filename=None if "filename" not in payload else str(payload["filename"]),
+            )
+        )
+
+    @app.post("/open_directory")
+    def open_directory(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._open_directory(
+                None
+                if "path" not in payload or payload["path"] in (None, "")
+                else str(payload["path"])
+            )
+        )
+
+    @app.post("/save_directory")
+    def save_directory(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._save_directory(
+                None
+                if "path" not in payload or payload["path"] in (None, "")
+                else str(payload["path"])
+            )
+        )
+
     @app.post("/refit_offset")
     def refit_offset(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(lambda: widget._refit_offset(str(payload.get("method", "auto"))))
@@ -135,8 +190,26 @@ def create_editor_app(widget: Any) -> FastAPI:
     @app.post("/profile_distribution")
     def profile_distribution(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
-            lambda: widget._profile_distribution(str(payload.get("parameter", "")))
+            lambda: widget._profile_distribution(
+                str(payload.get("parameter", "")),
+                **_profile_options(payload),
+            )
         )
+
+    @app.post("/profile_distribution/start")
+    def start_profile_distribution(
+        payload: dict[str, Any] = Body(default_factory=dict),
+    ) -> Response:
+        return _guarded_json(
+            lambda: widget._start_profile_distribution_job(
+                str(payload.get("parameter", "")),
+                **_profile_options(payload),
+            )
+        )
+
+    @app.get("/profile_distribution/status/{job_id}")
+    def profile_distribution_status(job_id: str, wait: bool = False) -> Response:
+        return _guarded_json(lambda: widget._profile_distribution_status(job_id, wait=wait))
 
     @app.post("/collapse_levels")
     def collapse_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
@@ -239,6 +312,29 @@ def _bound_local_socket() -> socket.socket:
     return sock
 
 
+def _profile_options(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "fit_mode",
+        "phi_method",
+        "method",
+        "xatol",
+        "maxiter",
+        "p_bounds",
+        "n_grid",
+        "grid",
+        "n_grid_coarse",
+        "optimizer",
+        "theta_bounds",
+        "trace_iterations",
+        "verbose",
+    }
+    options = {key: value for key, value in payload.items() if key in allowed}
+    for key in ("p_bounds", "theta_bounds"):
+        if key in options and isinstance(options[key], list):
+            options[key] = tuple(options[key])
+    return options
+
+
 def _asset_response(path: str) -> Response:
     try:
         data = read_app_asset(path)
@@ -248,6 +344,16 @@ def _asset_response(path: str) -> Response:
         content=data,
         media_type=app_asset_content_type(path),
         headers=_no_store_headers(),
+    )
+
+
+def _is_public_path(path: str) -> bool:
+    return path == "/" or path == "/favicon.ico" or path.startswith("/assets/")
+
+
+def _request_token(request: Request) -> str:
+    return request.headers.get("X-SuperGLM-Editor-Token", "") or request.query_params.get(
+        "token", ""
     )
 
 
