@@ -995,6 +995,16 @@ def _build_profile_context_reml(
     trace_iterations: bool = False,
 ) -> _ProfileContextREML:
     """Build context for REML-based profile estimation."""
+    if model._splines is not None and not model._specs:
+        model._auto_detect_features(X, sample_weight)
+
+    # REML profile evaluations call fit_reml(), which rewrites the fitted model
+    # state. Keep that mutation inside an isolated scratch model so result.ci()
+    # and profile plots cannot leave the caller's model at a probe p.
+    profile_model = model._clone_without_features(set())
+    if getattr(model, "_last_fit_meta", None) is not None:
+        profile_model._last_fit_meta = dict(model._last_fit_meta)
+
     y_np = np.asarray(y, dtype=np.float64)
     w_arr = (
         np.asarray(sample_weight, dtype=np.float64)
@@ -1002,7 +1012,7 @@ def _build_profile_context_reml(
         else np.ones(len(y_np))
     )
     return _ProfileContextREML(
-        model=model,
+        model=profile_model,
         X=X,
         y=y_np,
         sample_weight=sample_weight,

@@ -578,6 +578,28 @@ class TestEstimatePFitMode:
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.25)
         assert model._last_fit_meta["method"] == "fit_reml"
 
+    @pytest.mark.slow
+    def test_fit_mode_reml_profile_ci_leaves_final_fit_state(self):
+        """Eager profile CI should not leave the fitted model at a CI probe p."""
+        X, y, _ = _tweedie_data(n=600, seed=17)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Spline(n_knots=5, penalty="ssp")},
+        )
+
+        result = model.estimate_p(
+            X,
+            y,
+            fit_mode="reml",
+            method="grid",
+            grid=np.array([1.35, 1.5, 1.65]),
+        )
+
+        assert 0.05 in result._ci_cache
+        assert model.family.p == pytest.approx(result.p_hat)
+        assert model._distribution.p == pytest.approx(result.p_hat)
+
     def test_fit_mode_inherit_from_fit(self):
         """After fit(), inherit should use the fit path."""
         X, y, p_true = _tweedie_data()
