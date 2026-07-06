@@ -64,17 +64,18 @@ def collapsed_feature_spec(
         selected_levels=selected_levels,
         group_label=label,
     )
+    base = _collapsed_base(spec.base, selected_levels, label, existing, grouping)
 
     if isinstance(spec, OrderedCategorical):
         replacement = _ordered_spec_with_grouping(
             spec,
             grouping,
             selected_levels,
-            _collapsed_base(spec.base, selected_levels, label),
+            base,
         )
     else:
         replacement = Categorical(
-            base=_collapsed_base(spec.base, selected_levels, label),
+            base=base,
             grouping=grouping,
         )
 
@@ -315,8 +316,44 @@ def _ordered_original_values(spec: OrderedCategorical) -> dict[str, float]:
     return {str(k): float(v) for k, v in spec._level_to_value.items()}
 
 
-def _collapsed_base(base: str, selected_levels: list[str], group_label: str) -> str:
-    return group_label if str(base) in set(selected_levels) else base
+def _collapsed_base(
+    base: str,
+    selected_levels: list[str],
+    group_label: str,
+    existing_grouping: LevelGrouping | None,
+    grouping: LevelGrouping,
+) -> str:
+    base = str(base)
+    if base in _SYMBOLIC_BASE_POLICIES:
+        return base
+
+    valid = {str(level) for level in grouping.grouped_levels}
+    if base in valid:
+        return base
+    if base in set(selected_levels) and group_label in valid:
+        return group_label
+
+    base_originals = _base_original_members(base, existing_grouping)
+    if not base_originals:
+        return group_label if group_label in valid else base
+
+    mapped = [str(grouping.original_to_group.get(member, member)) for member in base_originals]
+    candidates = [candidate for candidate in mapped if candidate in valid]
+    if not candidates:
+        return group_label if group_label in valid else base
+
+    counts = {candidate: candidates.count(candidate) for candidate in dict.fromkeys(candidates)}
+    return max(counts, key=counts.__getitem__)
+
+
+def _base_original_members(base: str, grouping: LevelGrouping | None) -> list[str]:
+    if grouping is None:
+        return [base]
+    if base in grouping.group_to_originals:
+        return [str(member) for member in grouping.group_to_originals[base]]
+    if base in grouping.all_original_levels:
+        return [base]
+    return []
 
 
 def _valid_base_after_ungroup(

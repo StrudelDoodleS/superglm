@@ -1064,6 +1064,37 @@ def test_collapse_selected_levels_across_existing_groups_preserves_remainders():
     assert grouping.original_to_group["T06"] == "T05+T06"
 
 
+def test_regrouping_split_base_group_chooses_valid_remaining_base():
+    rng = np.random.default_rng(20260722)
+    levels = [f"T{i:02d}" for i in range(1, 7)]
+    territory = rng.choice(levels, 720, p=[0.22, 0.20, 0.08, 0.09, 0.20, 0.21])
+    effects = {"T01": 0.10, "T02": 0.11, "T03": 0.12, "T04": -0.18, "T05": -0.17, "T06": -0.16}
+    X = pd.DataFrame({"territory": territory})
+    y = 0.5 + np.array([effects[value] for value in territory]) + rng.normal(0.0, 0.05, 720)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"territory": Categorical(base="T01")},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["territory"], train_data=(X, y, None))
+
+    session.select_levels("territory", ["T01", "T02", "T03"])
+    first = session.replace_with_collapsed_levels("territory", method="fit")
+    assert first.features["territory"].base == "T01+T02+T03"
+
+    session.select_levels("territory", ["T03", "T04"])
+    refit = session.replace_with_collapsed_levels("territory", method="fit")
+
+    grouping = refit.features["territory"]._grouping
+    assert grouping.original_to_group["T01"] == "T01+T02"
+    assert grouping.original_to_group["T02"] == "T01+T02"
+    assert grouping.original_to_group["T03"] == "T03+T04"
+    assert grouping.original_to_group["T04"] == "T03+T04"
+    assert refit.features["territory"].base == "T01+T02"
+    assert refit.features["territory"]._base_level == "T01+T02"
+
+
 def test_ungroup_selected_levels_removes_subset_from_collapsed_group():
     rng = np.random.default_rng(20260706)
     levels = [f"T{i:02d}" for i in range(1, 7)]
