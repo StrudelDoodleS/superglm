@@ -3045,6 +3045,8 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "summarySource" in shell
         assert "refitOffset" in shell
         assert "Fixed-offset refit" in shell
+        assert "resetSummarySourceAfterInvalidatingEdit" in js
+        assert "invalidatesRefitSummary" in js
         assert "better" not in shell
         assert "worse" not in shell
         state = _get_json(f"{widget.url}/state")

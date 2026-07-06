@@ -84,6 +84,7 @@ let buildFrame = null;
 let renderedTerm = "";
 let activeView = "editor";
 const zoomState = {};
+const REFIT_INVALIDATING_ROUTES = new Set(["/op", "/drag", "/control"]);
 
 const chartContext = {
   svg,
@@ -105,9 +106,18 @@ async function loadState() {
 async function postJSONWithRefresh(path, payload, options = {}) {
   state = await postJSON(path, payload);
   render();
+  resetSummarySourceAfterInvalidatingEdit(path, options);
   if (options.refreshMetrics) await refreshMetricsView();
   if (options.refreshSummary) await refreshSummaryView();
   await refreshActiveReport();
+}
+
+function resetSummarySourceAfterInvalidatingEdit(path, options) {
+  const invalidatesRefitSummary = options.invalidatesRefitSummary ??
+    (options.refreshSummary && REFIT_INVALIDATING_ROUTES.has(path));
+  if (invalidatesRefitSummary && summarySource.value === "refit") {
+    summarySource.value = "selected";
+  }
 }
 
 function selectedTerm() {
