@@ -24,8 +24,24 @@ def save_model(session, path: str | Path) -> Path:
     if not target.suffix:
         target = target.with_suffix(".joblib")
     target.parent.mkdir(exist_ok=True, parents=True)
-    joblib.dump(session.to_model(), target)
+    joblib.dump(edited_model_for_export(session), target)
     return target
+
+
+def edited_model_for_export(session):
+    """Return an edited model copy scored on the editor's default split when available."""
+    from superglm.editor.evaluation import default_metrics_dataset
+
+    if session.edited_terms():
+        dataset = default_metrics_dataset(session)
+        if dataset is not None:
+            return session.to_model(
+                X=dataset.X,
+                y=dataset.y,
+                sample_weight=dataset.sample_weight,
+                offset=dataset.offset,
+            )
+    return session.to_model()
 
 
 def save_session(session, path: str | Path) -> None:

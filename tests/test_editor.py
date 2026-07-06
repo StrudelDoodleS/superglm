@@ -2723,6 +2723,25 @@ def test_widget_average_falls_back_when_selected_exposure_is_zero(editor_model):
         widget.close()
 
 
+def test_widget_average_expands_collapsed_level_groups_before_weighting(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    widget = session.widget()
+    try:
+        term = session.terms["region"]
+        term.weights = np.array([1.0, 1.0, 100.0])
+        term.edited_log_effect = np.log(np.array([1.0, 3.0, 3.0]))
+
+        _post_json(f"{widget.url}/select", {"term": "region", "indices": [0, 1]})
+        _post_json(f"{widget.url}/op", {"operation": "average"})
+
+        expected = np.log(np.average([1.0, 3.0, 3.0], weights=[1.0, 1.0, 100.0]))
+        np.testing.assert_allclose(term.edited_log_effect[[0, 1, 2]], expected)
+    finally:
+        widget.close()
+
+
 def test_widget_http_collapse_levels_refit_updates_summary_source(editor_model):
     session = EditorSession.from_model(editor_model, terms=["region"])
     widget = session.widget()
@@ -3307,6 +3326,35 @@ def test_save_model_uses_session_train_data_without_retained_fit_state(tmp_path)
     assert saved_model.summary()["deviance"]["deviance"] is not None
 
 
+def test_save_model_uses_validation_data_without_retained_fit_state(tmp_path):
+    import joblib
+
+    rng = np.random.default_rng(20260731)
+    n_train = 180
+    n_val = 70
+    X_train = pd.DataFrame({"x": rng.normal(size=n_train)})
+    y_train = 0.4 + 0.3 * X_train["x"].to_numpy() + rng.normal(0.0, 0.04, size=n_train)
+    X_val = pd.DataFrame({"x": rng.normal(size=n_val)})
+    y_val = 0.4 + 0.3 * X_val["x"].to_numpy() + rng.normal(0.0, 0.04, size=n_val)
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X_train, y_train)
+    session = EditorSession.from_model(model, terms=["x"], validation_data=(X_val, y_val, None))
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+
+    path = session.save_model(tmp_path / "edited-model.joblib")
+    saved_model = joblib.load(path)
+
+    assert saved_model._fit_stats is not None
+    assert saved_model._fit_y_ref.shape[0] == n_val
+    assert saved_model.summary()["deviance"]["deviance"] is not None
+
+
 def test_widget_http_download_model_returns_joblib_attachment(editor_model):
     import io
 
@@ -3369,6 +3417,45 @@ def test_widget_http_download_model_uses_session_train_data_without_retained_fit
 
     downloaded_model = joblib.load(io.BytesIO(payload))
     assert downloaded_model._fit_stats is not None
+    assert downloaded_model.summary()["deviance"]["deviance"] is not None
+
+
+def test_widget_http_download_model_uses_validation_data_without_retained_fit_state():
+    import io
+
+    import joblib
+
+    rng = np.random.default_rng(20260801)
+    n_train = 180
+    n_val = 70
+    X_train = pd.DataFrame({"x": rng.normal(size=n_train)})
+    y_train = 0.4 + 0.3 * X_train["x"].to_numpy() + rng.normal(0.0, 0.04, size=n_train)
+    X_val = pd.DataFrame({"x": rng.normal(size=n_val)})
+    y_val = 0.4 + 0.3 * X_val["x"].to_numpy() + rng.normal(0.0, 0.04, size=n_val)
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X_train, y_train)
+    session = EditorSession.from_model(model, terms=["x"], validation_data=(X_val, y_val, None))
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+    widget = session.widget()
+    try:
+        request = urllib.request.Request(
+            f"{widget.url}/download_model?filename=edited-model.joblib",
+            headers=_editor_token_header(widget.url),
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = response.read()
+    finally:
+        widget.close()
+
+    downloaded_model = joblib.load(io.BytesIO(payload))
+    assert downloaded_model._fit_stats is not None
+    assert downloaded_model._fit_y_ref.shape[0] == n_val
     assert downloaded_model.summary()["deviance"]["deviance"] is not None
 
 

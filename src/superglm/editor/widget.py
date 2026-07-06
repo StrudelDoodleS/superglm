@@ -20,6 +20,7 @@ from superglm.editor.io import jsonable
 from superglm.editor.metrics import metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.payloads import session_payload
+from superglm.editor.persistence import edited_model_for_export
 from superglm.editor.reports import report_payload
 from superglm.editor.server import EditorAppServer
 from superglm.editor.summaries import offset_label_payload, summary_payload
@@ -216,6 +217,7 @@ class EditorWidget:
         idx = self.session.selection(term)
         if idx.size == 0:
             raise ValueError(f"No points selected for term {term!r}.")
+        idx = self.session._expand_collapsed_level_indices(term, idx)
         editable = self.session.terms[term]
         weights = np.ones(idx.size, dtype=np.float64)
         if editable.weights is not None:
@@ -276,7 +278,7 @@ class EditorWidget:
             if not Path(name).suffix:
                 name = f"{name}.joblib"
             buffer = io.BytesIO()
-            joblib.dump(self.session.to_model(), buffer)
+            joblib.dump(edited_model_for_export(self.session), buffer)
             return buffer.getvalue(), name
 
     def _open_directory(self, path: str | None = None) -> dict[str, str]:
