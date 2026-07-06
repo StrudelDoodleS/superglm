@@ -148,6 +148,9 @@ def _apply_ordered_step_term(
 def _ordered_spline_x(term: EditableTerm) -> NDArray:
     if term.levels is None:
         raise NotImplementedError(f"Term {term.name!r} has no editable levels.")
+    native_levels = term.metadata.get("native_levels")
+    if native_levels is not None and len(native_levels) == len(term.levels):
+        return np.asarray(native_levels, dtype=object)
     return np.asarray(term.levels, dtype=object)
 
 

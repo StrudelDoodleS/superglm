@@ -22,6 +22,8 @@ def term_from_inference(ti) -> EditableTerm:
         "smoothing_lambda": ti.smoothing_lambda,
         "monotone": ti.monotone,
     }
+    if ti.levels is not None:
+        metadata["native_levels"] = list(ti.levels)
     if ti.spline is not None:
         metadata["spline"] = {
             "kind": ti.spline.kind,

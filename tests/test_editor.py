@@ -948,6 +948,28 @@ def test_edited_offset_factor_and_refit_with_fixed_offset(editor_model, editor_f
     assert inference.se_log_relativity is not None
 
 
+def test_offset_refit_rejects_terms_used_by_interactions():
+    rng = np.random.default_rng(20260731)
+    n = 180
+    x = rng.normal(size=n)
+    region = rng.choice(["A", "B", "C"], n)
+    X = pd.DataFrame({"x": x, "region": region})
+    y = 0.3 + 0.4 * x + 0.2 * (region == "B") * x + rng.normal(0.0, 0.04, n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric(), "region": Categorical(base="first")},
+        interactions=[("x", "region")],
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["x", "region"], train_data=(X, y, None))
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+
+    with pytest.raises(ValueError, match="used by interaction"):
+        session.refit_with_edited_offset("x", method="fit")
+
+
 def test_refit_explicit_data_omits_session_train_weights_and_offsets_when_not_supplied():
     rng = np.random.default_rng(20260721)
     n_train = 180
@@ -1562,6 +1584,39 @@ def test_ungroup_last_collapsed_levels_restores_pre_collapse_in_force_model(edit
     assert restored is profiled_model
     assert session.model is profiled_model
     assert session.model._editor_profile_marker == "kept"
+    assert session.can_uncollapse_levels() is False
+
+
+def test_final_ungroup_after_partial_ungroup_does_not_restore_stale_history():
+    rng = np.random.default_rng(20260801)
+    levels = [f"T{i:02d}" for i in range(1, 5)]
+    territory = rng.choice(levels, 520, p=[0.25, 0.25, 0.25, 0.25])
+    effects = {"T01": 0.12, "T02": 0.10, "T03": -0.08, "T04": -0.10}
+    X = pd.DataFrame({"territory": territory})
+    y = 0.5 + np.array([effects[value] for value in territory]) + rng.normal(0.0, 0.05, 520)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"territory": Categorical(base="most_exposed")},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["territory"], train_data=(X, y, None))
+
+    session.select_levels("territory", ["T01", "T02"])
+    session.replace_with_collapsed_levels("territory", method="fit")
+    session.select_levels("territory", ["T03", "T04"])
+    session.replace_with_collapsed_levels("territory", method="fit")
+
+    session.select_levels("territory", ["T01", "T02"])
+    partial = session.replace_with_ungrouped_levels("territory", method="fit")
+    assert partial.features["territory"]._grouping.original_to_group["T03"] == "T03+T04"
+
+    session.select_levels("territory", ["T03", "T04"])
+    final = session.replace_with_ungrouped_levels("territory", method="fit")
+
+    assert final is not partial
+    assert getattr(final.features["territory"], "_grouping", None) is None
+    assert getattr(session.model.features["territory"], "_grouping", None) is None
     assert session.can_uncollapse_levels() is False
 
 
@@ -2366,6 +2421,41 @@ def test_ordered_categorical_spline_level_edit_applies_to_model_copy():
 
     eta_delta = edited._predict_eta_exact(X) - model._predict_eta_exact(X)
     assert np.mean(eta_delta[X["age_band"] == "older"]) > 0.1
+
+
+def test_ordered_categorical_spline_integer_level_edit_applies_to_model_copy():
+    rng = np.random.default_rng(20260802)
+    levels = [1, 2, 3, 4]
+    n = 360
+    X = pd.DataFrame(
+        {
+            "age_band": rng.choice(levels, n, p=[0.25, 0.35, 0.25, 0.15]),
+            "x": rng.normal(size=n),
+        }
+    )
+    level_effect = {1: -0.1, 2: 0.0, 3: 0.2, 4: 0.35}
+    y = (
+        np.array([level_effect[level] for level in X["age_band"]])
+        + 0.1 * X["x"].to_numpy()
+        + rng.normal(0.0, 0.05, n)
+    )
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "age_band": OrderedCategorical(order=levels, basis="spline", n_knots=3),
+            "x": Numeric(),
+        },
+    )
+    model.fit(X, y)
+
+    session = EditorSession.from_model(model, terms=["age_band"])
+    session.select_levels("age_band", ["4"])
+    session.shift("age_band", 0.3)
+    edited = session.to_model()
+
+    eta_delta = edited._predict_eta_exact(X) - model._predict_eta_exact(X)
+    assert np.mean(eta_delta[X["age_band"] == 4]) > 0.1
 
 
 def test_ordered_categorical_spline_edited_summary_reports_level_rows():

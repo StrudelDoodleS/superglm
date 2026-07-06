@@ -584,6 +584,7 @@ class EditorSession:
         if self.model is None:
             raise RuntimeError("Cannot refit without a source model.")
         names = self._resolve_offset_terms(terms)
+        self._require_not_interaction_parent(names, operation="fixed-offset refit")
         X_ref, y_ref, sample_weight_ref, base_offset = self._resolve_refit_data(
             X,
             y,
@@ -817,20 +818,30 @@ class EditorSession:
         previous_model = self.model
         restore_previous = self._ungroup_restores_reference_model(term, **kwargs)
         restored_history_model = None
-        if restore_previous and self.collapse_history:
+        clear_history_after_refit = False
+        if (
+            restore_previous
+            and self.collapse_history
+            and not self._model_has_collapsed_level_groups(self.collapse_history[-1])
+        ):
             refit_model = self.collapse_history.pop()
             restored_history_model = refit_model
         else:
             refit_model = self.refit_with_ungrouped_levels(term, **kwargs)
-            self.collapse_history.append(previous_model)
+            if restore_previous:
+                clear_history_after_refit = True
+            else:
+                self.collapse_history.append(previous_model)
         try:
             self.replace_in_force_model(refit_model)
         except Exception:
             if restored_history_model is not None:
                 self.collapse_history.append(restored_history_model)
-            else:
+            elif not clear_history_after_refit:
                 self.collapse_history.pop()
             raise
+        if clear_history_after_refit:
+            self.collapse_history.clear()
         return refit_model
 
     def _ungroup_restores_reference_model(self, term: str, **kwargs: Any) -> bool:
@@ -916,6 +927,29 @@ class EditorSession:
         for name in names:
             self._require_term(name)
         return names
+
+    def _require_not_interaction_parent(self, terms: list[str], *, operation: str) -> None:
+        blocked: dict[str, list[str]] = {}
+        for term in terms:
+            interactions = self._interaction_names_for_parent(term)
+            if interactions:
+                blocked[term] = interactions
+        if not blocked:
+            return
+        detail = "; ".join(
+            f"{term!r}: {', '.join(interactions)}" for term, interactions in blocked.items()
+        )
+        raise ValueError(
+            f"Cannot run {operation} for term(s) used by interaction(s): {detail}. "
+            "Refit a model without those interactions first."
+        )
+
+    def _interaction_names_for_parent(self, term: str) -> list[str]:
+        interactions: list[str] = []
+        for name, spec in getattr(self.model, "_interaction_specs", {}).items():
+            if term in getattr(spec, "parent_names", ()):
+                interactions.append(str(name))
+        return interactions
 
     def _resolve_offset_frame(self, X):
         if X is not None:
@@ -1144,6 +1178,18 @@ class EditorSession:
         for name, spec in self.model._specs.items():
             candidate = replacement if name == term else spec
             grouping = getattr(candidate, "_grouping", None)
+            if grouping is None:
+                continue
+            if any(
+                len([str(member) for member in grouping.group_to_originals.get(label, [])]) > 1
+                for label in grouping.grouped_levels
+            ):
+                return True
+        return False
+
+    def _model_has_collapsed_level_groups(self, model) -> bool:
+        for spec in getattr(model, "_specs", {}).values():
+            grouping = getattr(spec, "_grouping", None)
             if grouping is None:
                 continue
             if any(
