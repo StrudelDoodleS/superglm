@@ -654,6 +654,35 @@ def test_in_force_summary_uses_session_train_data_without_retained_fit_state():
     assert payload["compact"]["model"]["deviance"] is not None
 
 
+def test_in_force_summary_uses_validation_data_without_retained_fit_state():
+    from superglm.editor.summaries import summary_payload
+
+    rng = np.random.default_rng(20260730)
+    n_train = 180
+    n_val = 70
+    X_train = pd.DataFrame({"x": rng.normal(size=n_train)})
+    y_train = 0.4 + 0.3 * X_train["x"].to_numpy() + rng.normal(0.0, 0.04, size=n_train)
+    X_val = pd.DataFrame({"x": rng.normal(size=n_val)})
+    y_val = 0.4 + 0.3 * X_val["x"].to_numpy() + rng.normal(0.0, 0.04, size=n_val)
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X_train, y_train)
+    session = EditorSession.from_model(model, terms=["x"], validation_data=(X_val, y_val, None))
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+
+    widget = SimpleNamespace(session=session, _in_force_info=None)
+    payload = summary_payload(widget, "in_force")
+
+    assert payload["available"] is True
+    assert payload["compact"]["model"]["deviance"] is not None
+    assert payload["compact"]["model"]["n_obs"] == n_val
+
+
 def test_unedited_in_force_summary_preserves_retained_inference_without_fit_state():
     from superglm.editor.summaries import summary_payload
 
@@ -860,6 +889,40 @@ def test_replacement_reuses_supplied_train_data_for_weights_without_retained_fit
 
     expected = np.array([3.0, 12.0, 6.0])
     np.testing.assert_allclose(session.terms["region"].weights, expected)
+
+
+def test_collapsed_level_member_edits_apply_to_whole_group(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+
+    term = session.terms["region"]
+    b_idx = term.levels.index("B")
+    c_idx = term.levels.index("C")
+    original = term.edited_log_effect.copy()
+
+    session.select_levels("region", ["B"])
+    np.testing.assert_array_equal(session.selection("region"), np.array([b_idx]))
+
+    session.shift("region", 0.2)
+    assert term.edited_log_effect[b_idx] == pytest.approx(original[b_idx] + 0.2)
+    assert term.edited_log_effect[c_idx] == pytest.approx(original[c_idx] + 0.2)
+
+    session.set_values("region", [b_idx], [1.25])
+    assert term.edited_log_effect[b_idx] == pytest.approx(1.25)
+    assert term.edited_log_effect[c_idx] == pytest.approx(1.25)
+
+
+def test_collapsed_level_member_conflicting_values_are_rejected(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    term = session.terms["region"]
+    b_idx = term.levels.index("B")
+    c_idx = term.levels.index("C")
+
+    with pytest.raises(ValueError, match="Conflicting values"):
+        session.set_values("region", [b_idx, c_idx], [0.1, 0.2])
 
 
 def test_edited_offset_factor_and_refit_with_fixed_offset(editor_model, editor_frame):
@@ -3172,43 +3235,6 @@ def test_widget_http_download_model_uses_session_train_data_without_retained_fit
     assert downloaded_model.summary()["deviance"]["deviance"] is not None
 
 
-def test_widget_http_native_save_dialog_returns_selected_path(editor_model, tmp_path, monkeypatch):
-    from superglm.editor import widget as widget_module
-
-    selected = tmp_path / "picked-model.joblib"
-    monkeypatch.setattr(widget_module, "choose_save_path", lambda **_kwargs: str(selected))
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
-    widget = session.widget()
-    try:
-        payload = _post_json(
-            f"{widget.url}/native_save_dialog",
-            {"directory": str(tmp_path), "filename": "default-name.joblib"},
-        )
-    finally:
-        widget.close()
-
-    assert payload == {
-        "cancelled": False,
-        "path": str(selected),
-        "directory": str(tmp_path),
-        "filename": "picked-model.joblib",
-    }
-
-
-def test_widget_http_native_save_dialog_handles_cancel(editor_model, monkeypatch):
-    from superglm.editor import widget as widget_module
-
-    monkeypatch.setattr(widget_module, "choose_save_path", lambda **_kwargs: None)
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
-    widget = session.widget()
-    try:
-        payload = _post_json(f"{widget.url}/native_save_dialog", {})
-    finally:
-        widget.close()
-
-    assert payload == {"cancelled": True}
-
-
 def test_widget_http_open_directory_launches_current_folder(editor_model, tmp_path, monkeypatch):
     from superglm.editor import widget as widget_module
 
@@ -3414,14 +3440,12 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "saveModel" in shell
         assert "saveDialog" in shell
         assert "saveDirectory" in shell
-        assert "saveBrowse" in shell
         assert "saveFilename" in shell
         assert "Save edited model" in shell
         assert "app-shell" in shell
         assert "app-shell" in css
         assert "justify-content: center" in css
         assert "openSaveDialog" in js
-        assert 'aria-haspopup="dialog"' in shell
         assert "Reset order" in shell
         assert "resetOrder" in shell
         assert "metricSelect" in shell
@@ -3532,15 +3556,12 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "/profile_distribution" in js
         assert "/save_model" in js
         assert "/download_model" in js
-        assert "/native_save_dialog" in js
         assert "/open_directory" in js
         assert "saveEditedModel" in js
         assert "downloadEditedModel" in js
-        assert "openNativeSaveDialog" in js
         assert "openDirectoryInFileManager" in js
         assert "formatSaveRouteError" in js
         assert "Rerun session.widget()" in js
-        assert "Opening file dialog" in js
         assert "Opening folder" in js
         assert "saveBlobToFile" in js
         assert "showSaveFilePicker" in js
@@ -3806,7 +3827,7 @@ def test_editor_server_declares_fastapi_routes():
     assert ("/report", frozenset({"POST"})) in routes
     assert ("/save_model", frozenset({"POST"})) in routes
     assert ("/download_model", frozenset({"GET"})) in routes
-    assert ("/native_save_dialog", frozenset({"POST"})) in routes
+    assert ("/native_save_dialog", frozenset({"POST"})) not in routes
     assert ("/open_directory", frozenset({"POST"})) in routes
     assert ("/save_directory", frozenset({"POST"})) in routes
     assert ("/refit_offset", frozenset({"POST"})) in routes

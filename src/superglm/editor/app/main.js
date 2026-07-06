@@ -39,7 +39,6 @@ const saveModel = document.getElementById("saveModel");
 const saveDialog = document.getElementById("saveDialog");
 const saveDialogClose = document.getElementById("saveDialogClose");
 const saveDirectory = document.getElementById("saveDirectory");
-const saveBrowse = document.getElementById("saveBrowse");
 const saveOpenDirectory = document.getElementById("saveOpenDirectory");
 const saveFilename = document.getElementById("saveFilename");
 const saveConfirm = document.getElementById("saveConfirm");
@@ -285,33 +284,6 @@ async function openSaveDialog() {
     saveDialog.showModal();
   } else if (saveDialog) {
     saveDialog.setAttribute("open", "");
-  }
-}
-
-async function openNativeSaveDialog() {
-  if (!saveBrowse) return;
-  saveBrowse.disabled = true;
-  if (saveStatus) saveStatus.textContent = "Opening file dialog...";
-  try {
-    const payload = await requestJSON("/native_save_dialog", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        directory: saveDirectory ? saveDirectory.value : ".",
-        filename: saveFilename ? saveFilename.value : "superglm_edited_model.joblib"
-      })
-    });
-    if (payload.cancelled) {
-      if (saveStatus) saveStatus.textContent = "Save location unchanged.";
-      return;
-    }
-    if (saveDirectory) saveDirectory.value = payload.directory || ".";
-    if (saveFilename) saveFilename.value = payload.filename || "superglm_edited_model.joblib";
-    if (saveStatus) saveStatus.textContent = `Selected ${payload.path}`;
-  } catch (error) {
-    if (saveStatus) saveStatus.textContent = formatSaveRouteError(error);
-  } finally {
-    saveBrowse.disabled = false;
   }
 }
 
@@ -658,9 +630,6 @@ if (saveConfirm) {
 }
 if (saveDownload) {
   saveDownload.addEventListener("click", downloadEditedModel);
-}
-if (saveBrowse) {
-  saveBrowse.addEventListener("click", openNativeSaveDialog);
 }
 if (saveOpenDirectory) {
   saveOpenDirectory.addEventListener("click", openDirectoryInFileManager);

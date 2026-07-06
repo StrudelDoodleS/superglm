@@ -161,15 +161,6 @@ def create_editor_app(widget: Any) -> FastAPI:
             },
         )
 
-    @app.post("/native_save_dialog")
-    def native_save_dialog(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(
-            lambda: widget._native_save_dialog(
-                directory=None if "directory" not in payload else str(payload["directory"]),
-                filename=None if "filename" not in payload else str(payload["filename"]),
-            )
-        )
-
     @app.post("/open_directory")
     def open_directory(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(

@@ -234,6 +234,8 @@ class EditorSession:
         idx = self._selection[term]
         if idx.size == 0:
             idx = np.arange(editable.size, dtype=np.intp)
+        else:
+            idx = self._expand_collapsed_level_indices(term, idx)
         before = editable.edited_log_effect[idx].copy()
         after = editable.original_log_effect[idx].copy()
         self._commit(term, "reset", idx, before, after, {})
@@ -241,7 +243,7 @@ class EditorSession:
 
     def shift(self, term: str, delta: float) -> EditorSession:
         """Add a link-scale delta to the selected values."""
-        idx = self._require_selection(term)
+        idx = self._require_edit_selection(term)
         editable = self._require_term(term)
         before = editable.edited_log_effect[idx].copy()
         after = before + float(delta)
@@ -250,7 +252,7 @@ class EditorSession:
 
     def set_value(self, term: str, value: float) -> EditorSession:
         """Set selected values to one link-scale value."""
-        idx = self._require_selection(term)
+        idx = self._require_edit_selection(term)
         editable = self._require_term(term)
         before = editable.edited_log_effect[idx].copy()
         after = np.full(idx.size, float(value), dtype=np.float64)
@@ -266,13 +268,14 @@ class EditorSession:
         after = np.asarray(values, dtype=np.float64).ravel()
         if after.size != idx.size:
             raise ValueError(f"Expected {idx.size} values for term {term!r}, got {after.size}.")
+        idx, after = self._expand_collapsed_level_assignments(term, idx, after)
         before = editable.edited_log_effect[idx].copy()
         self._commit(term, "set_values", idx, before, after, {})
         return self
 
     def weighted_average(self, term: str) -> EditorSession:
         """Flatten the selected region to its weighted mean."""
-        idx = self._require_selection(term)
+        idx = self._require_edit_selection(term)
         editable = self._require_term(term)
         before = editable.edited_log_effect[idx].copy()
         weights = np.ones(idx.size, dtype=np.float64)
@@ -287,7 +290,7 @@ class EditorSession:
         """Move selected values toward a line between selected endpoints."""
         if not 0.0 <= strength <= 1.0:
             raise ValueError(f"strength must be between 0 and 1, got {strength!r}")
-        idx = self._require_selection(term)
+        idx = self._require_edit_selection(term)
         if idx.size < 2:
             return self
         editable = self._require_term(term)
@@ -382,7 +385,7 @@ class EditorSession:
         if direction not in ("increasing", "decreasing"):
             raise ValueError(f"direction must be 'increasing' or 'decreasing', got {direction!r}")
         editable = self._require_term(term)
-        idx = self._selection_or_all(term)
+        idx = self._edit_selection_or_all(term)
         before = editable.edited_log_effect[idx].copy()
         if editable.levels is not None:
             after = monotone_clamp_values(editable.edited_log_effect, idx, direction)
@@ -406,7 +409,7 @@ class EditorSession:
         if not 0.0 <= strength <= 1.0:
             raise ValueError(f"strength must be between 0 and 1, got {strength!r}")
         editable = self._require_term(term)
-        idx = self._selection_or_all(term)
+        idx = self._edit_selection_or_all(term)
         before = editable.edited_log_effect[idx].copy()
         if strength == 0.0:
             after = before.copy()
@@ -971,12 +974,82 @@ class EditorSession:
             raise ValueError(f"No points selected for term {term!r}.")
         return idx
 
+    def _require_edit_selection(self, term: str) -> NDArray[np.intp]:
+        return self._expand_collapsed_level_indices(term, self._require_selection(term))
+
     def _selection_or_all(self, term: str) -> NDArray[np.intp]:
         editable = self._require_term(term)
         idx = self._selection[term]
         if idx.size == 0:
             return np.arange(editable.size, dtype=np.intp)
         return idx
+
+    def _edit_selection_or_all(self, term: str) -> NDArray[np.intp]:
+        idx = self._selection_or_all(term)
+        return self._expand_collapsed_level_indices(term, idx)
+
+    def _expand_collapsed_level_indices(self, term: str, idx: NDArray[np.intp]) -> NDArray[np.intp]:
+        if idx.size == 0:
+            return np.unique(idx)
+        grouped = self._collapsed_level_index_groups(term)
+        if not grouped:
+            return np.unique(idx)
+        selected: set[int] = set()
+        for index in idx:
+            selected.update(grouped.get(int(index), (int(index),)))
+        return np.array(sorted(selected), dtype=np.intp)
+
+    def _expand_collapsed_level_assignments(
+        self,
+        term: str,
+        idx: NDArray[np.intp],
+        values: NDArray[np.float64],
+    ) -> tuple[NDArray[np.intp], NDArray[np.float64]]:
+        grouped = self._collapsed_level_index_groups(term)
+        if idx.size == 0 or not grouped:
+            return idx, values
+        assignments: dict[int, float] = {}
+        for raw_index, raw_value in zip(idx, values, strict=True):
+            value = float(raw_value)
+            for expanded_index in grouped.get(int(raw_index), (int(raw_index),)):
+                existing = assignments.get(expanded_index)
+                if existing is not None and not np.isclose(
+                    existing,
+                    value,
+                    rtol=0.0,
+                    atol=1e-12,
+                ):
+                    raise ValueError(
+                        f"Conflicting values were supplied for collapsed level group "
+                        f"in term {term!r}."
+                    )
+                assignments[expanded_index] = value
+        expanded_idx = np.array(sorted(assignments), dtype=np.intp)
+        expanded_values = np.array([assignments[int(index)] for index in expanded_idx])
+        return expanded_idx, expanded_values
+
+    def _collapsed_level_index_groups(self, term: str) -> dict[int, tuple[int, ...]]:
+        editable = self._require_term(term)
+        if editable.levels is None or self.model is None:
+            return {}
+        spec = getattr(self.model, "_specs", {}).get(term)
+        grouping = getattr(spec, "_grouping", None)
+        if grouping is None:
+            return {}
+        level_to_index = {str(level): i for i, level in enumerate(editable.levels)}
+        index_groups: dict[int, tuple[int, ...]] = {}
+        for group_label in grouping.grouped_levels:
+            members = [
+                level_to_index[str(level)]
+                for level in grouping.group_to_originals.get(group_label, [])
+                if str(level) in level_to_index
+            ]
+            if len(members) < 2:
+                continue
+            member_group = tuple(sorted(set(int(index) for index in members)))
+            for index in member_group:
+                index_groups[index] = member_group
+        return index_groups
 
     def _require_control_term(self, term: str) -> EditableTerm:
         editable = self._require_term(term)
@@ -1115,7 +1188,7 @@ class EditorSession:
         return None
 
     def _level_selected(self, term: str, operation: str, mode: str) -> EditorSession:
-        idx = self._require_selection(term)
+        idx = self._require_edit_selection(term)
         editable = self._require_term(term)
         before = editable.edited_log_effect[idx].copy()
         if mode == "left":

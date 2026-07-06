@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from superglm.editor.evaluation import evaluation_datasets
+from superglm.editor.evaluation import default_metrics_dataset
 from superglm.editor.terms import native_log_effect_values
 
 
@@ -84,22 +84,15 @@ def summary_payload(widget, source: str) -> dict[str, Any]:
 def _in_force_summary_model(session):
     if not session.edited_terms():
         return session.model
-    train = _summary_train_dataset(session)
-    if train is None:
+    dataset = default_metrics_dataset(session)
+    if dataset is None:
         return session.to_model()
     return session.to_model(
-        X=train.X,
-        y=train.y,
-        sample_weight=train.sample_weight,
-        offset=train.offset,
+        X=dataset.X,
+        y=dataset.y,
+        sample_weight=dataset.sample_weight,
+        offset=dataset.offset,
     )
-
-
-def _summary_train_dataset(session):
-    for dataset in evaluation_datasets(session):
-        if dataset.name == "train":
-            return dataset
-    return None
 
 
 def offset_label_payload(session, terms: list[str]) -> list[dict[str, Any]]:

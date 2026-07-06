@@ -18,7 +18,7 @@ import numpy as np
 
 from superglm.editor.io import jsonable
 from superglm.editor.metrics import metrics_payload
-from superglm.editor.native_dialogs import choose_save_path, open_directory_path
+from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.payloads import session_payload
 from superglm.editor.reports import report_payload
 from superglm.editor.server import EditorAppServer
@@ -278,25 +278,6 @@ class EditorWidget:
             buffer = io.BytesIO()
             joblib.dump(self.session.to_model(), buffer)
             return buffer.getvalue(), name
-
-    def _native_save_dialog(
-        self,
-        *,
-        directory: str | None = None,
-        filename: str | None = None,
-    ) -> dict[str, Any]:
-        selected = choose_save_path(directory=directory, filename=filename)
-        if selected is None:
-            return {"cancelled": True}
-        path = Path(selected).expanduser()
-        if not path.suffix:
-            path = path.with_suffix(".joblib")
-        return {
-            "cancelled": False,
-            "path": str(path),
-            "directory": str(path.parent),
-            "filename": path.name,
-        }
 
     def _open_directory(self, path: str | None = None) -> dict[str, str]:
         opened = open_directory_path(path)
