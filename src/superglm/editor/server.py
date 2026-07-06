@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
@@ -16,6 +17,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from superglm.editor.assets import app_asset_content_type, read_app_asset
 from superglm.editor.io import jsonable
+
+_LOGGER = logging.getLogger(__name__)
+_CLIENT_ERROR_TYPES = (KeyError, ValueError, TypeError, IndexError, FileNotFoundError)
 
 
 def create_editor_app(widget: Any) -> FastAPI:
@@ -143,8 +147,11 @@ def create_editor_app(widget: Any) -> FastAPI:
     def download_model(filename: str = "superglm_edited_model.joblib") -> Response:
         try:
             data, safe_name = widget._download_model(filename)
-        except Exception as exc:  # pragma: no cover - surfaced to browser/tests as JSON
-            return _json_response({"error": str(exc)}, status_code=400)
+        except _CLIENT_ERROR_TYPES as exc:
+            return _json_response({"error": _client_error_message(exc)}, status_code=400)
+        except Exception:  # pragma: no cover - surfaced to browser/tests as JSON
+            _LOGGER.exception("Unhandled SuperGLM editor download error.")
+            return _json_response({"error": "internal editor error"}, status_code=500)
         return Response(
             content=data,
             media_type="application/octet-stream",
@@ -360,8 +367,17 @@ def _request_token(request: Request) -> str:
 def _guarded_json(factory: Callable[[], dict[str, Any]]) -> Response:
     try:
         return _json_response(factory())
-    except Exception as exc:  # pragma: no cover - surfaced to browser/tests as JSON
-        return _json_response({"error": str(exc)}, status_code=400)
+    except _CLIENT_ERROR_TYPES as exc:
+        return _json_response({"error": _client_error_message(exc)}, status_code=400)
+    except Exception:  # pragma: no cover - surfaced to browser/tests as JSON
+        _LOGGER.exception("Unhandled SuperGLM editor request error.")
+        return _json_response({"error": "internal editor error"}, status_code=500)
+
+
+def _client_error_message(exc: BaseException) -> str:
+    if isinstance(exc, KeyError) and exc.args:
+        return str(exc.args[0])
+    return str(exc)
 
 
 def _json_response(payload: dict[str, Any], *, status_code: int = 200) -> Response:

@@ -71,14 +71,22 @@ def term_type_from_spec(spec) -> str:
 def term_weights_from_fit(model, name: str, term: EditableTerm) -> NDArray:
     # Exposure bars/densities use retained fit weights. If fit data was not
     # retained, fall back to equal weights so the editor remains usable.
-    fallback = np.ones(term.size, dtype=np.float64)
     X_ref = getattr(model, "_fit_X_ref", None)
     fit_weights = getattr(model, "_fit_weights", None)
-    if X_ref is None or fit_weights is None or name not in X_ref:
-        return fallback
+    return term_weights_from_data(X_ref, fit_weights, name, term)
 
+
+def term_weights_from_data(X_ref, sample_weight, name: str, term: EditableTerm) -> NDArray:
+    """Compute editable-term exposure weights from row-level feature data."""
+    fallback = np.ones(term.size, dtype=np.float64)
+    if X_ref is None or name not in X_ref:
+        return fallback
     values = X_ref[name]
-    weights = np.asarray(fit_weights, dtype=np.float64).ravel()
+    weights = (
+        np.ones(len(values), dtype=np.float64)
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=np.float64).ravel()
+    )
     if weights.size != len(values):
         return fallback
 

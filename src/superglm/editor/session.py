@@ -33,6 +33,7 @@ from superglm.editor.terms import (
     term_from_inference,
     term_offset_values,
     term_type_from_spec,
+    term_weights_from_data,
     term_weights_from_fit,
 )
 
@@ -89,6 +90,11 @@ class EditorSession:
         if getattr(model, "_result", None) is None:
             raise RuntimeError("Model must be fitted before creating an editor session.")
 
+        evaluation_data = coerce_evaluation_data(
+            train_data=train_data,
+            validation_data=validation_data,
+            test_data=test_data,
+        )
         names = list(model._feature_order if terms is None else terms)
         editable = cls._editable_terms_from_model(
             model,
@@ -96,11 +102,7 @@ class EditorSession:
             n_points=n_points,
             centering=centering,
             with_se=with_se,
-        )
-        evaluation_data = coerce_evaluation_data(
-            train_data=train_data,
-            validation_data=validation_data,
-            test_data=test_data,
+            train_data=evaluation_data.get("train"),
         )
         return cls(
             model,
@@ -120,6 +122,7 @@ class EditorSession:
         n_points: int,
         centering: str,
         with_se: bool,
+        train_data=None,
     ) -> dict[str, EditableTerm]:
         editable: dict[str, EditableTerm] = {}
         for name in names:
@@ -143,7 +146,11 @@ class EditorSession:
                 )
                 EditorSession._attach_native_log_effect(term, native_ti)
             term.metadata["term_type"] = term_type_from_spec(model._specs[name])
-            term.weights = term_weights_from_fit(model, name, term)
+            term.weights = (
+                term_weights_from_data(train_data.X, train_data.sample_weight, name, term)
+                if train_data is not None
+                else term_weights_from_fit(model, name, term)
+            )
             editable[name] = term
         return editable
 

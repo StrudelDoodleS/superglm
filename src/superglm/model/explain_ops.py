@@ -23,6 +23,11 @@ from superglm.inference._term_ops import (
     term_inference as _term_inference,
 )
 
+_EDITOR_STALE_INFERENCE_MESSAGE = (
+    "Editor coefficient edits make fitted standard errors and confidence "
+    "intervals reference-only; returning term inference without SE/CI."
+)
+
 
 def metrics(model, X, y, sample_weight=None, offset=None):
     """Compute comprehensive diagnostics for the fitted model."""
@@ -88,6 +93,9 @@ def relativities(model, with_se=False, centering="native"):
     Pass ``centering="mean"`` to shift so geometric mean of
     relativities = 1 — a reporting convenience, not the fitted term.
     """
+    if getattr(model, "_editor_inference_stale", False) and with_se:
+        warnings.warn(_EDITOR_STALE_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
+        with_se = False
     return _relativities(
         model._feature_order,
         model._interaction_order,
@@ -119,6 +127,10 @@ def simultaneous_bands(model, feature, *, alpha=0.05, n_sim=10_000, n_points=200
     """Simultaneous confidence bands for a spline feature."""
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling simultaneous_bands().")
+    if getattr(model, "_editor_inference_stale", False):
+        raise RuntimeError(
+            "Editor coefficient edits make simultaneous bands unavailable until the model is refit."
+        )
     return _simultaneous_bands(
         feature,
         result=model.result,
@@ -148,12 +160,7 @@ def term_inference(
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling term_inference().")
     if getattr(model, "_editor_inference_stale", False) and with_se:
-        warnings.warn(
-            "Editor coefficient edits make fitted standard errors and confidence "
-            "intervals reference-only; returning term inference without SE/CI.",
-            UserWarning,
-            stacklevel=2,
-        )
+        warnings.warn(_EDITOR_STALE_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
         with_se = False
         simultaneous = False
     return _term_inference(

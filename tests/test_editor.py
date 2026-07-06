@@ -719,6 +719,9 @@ def test_to_model_marks_edited_copy_inference_stale(editor_model):
         inference = edited.term_inference("x_spline", with_se=True)
     assert inference.se_log_relativity is None
     assert inference.ci_lower is None
+    with pytest.warns(UserWarning, match="Editor coefficient edits"):
+        relativities = edited.relativities(with_se=True)
+    assert "se_log_relativity" not in relativities["x_spline"].columns
 
 
 def test_stale_editor_summary_skips_coef_row_inference(editor_model, monkeypatch):
@@ -737,6 +740,35 @@ def test_stale_editor_summary_skips_coef_row_inference(editor_model, monkeypatch
     assert summary["standard_errors"] == {"inference_stale": True}
     spline_row = next(row for row in summary._coef_rows if row.name == "x_spline")
     assert spline_row.wald_p is None
+
+
+def test_session_uses_supplied_train_data_for_weights_without_retained_fit_state():
+    rng = np.random.default_rng(20260724)
+    X = pd.DataFrame(
+        {
+            "region": ["A", "A", "B", "B", "B", "C"],
+            "x": rng.normal(size=6),
+        }
+    )
+    sample_weight = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    y = np.array([0.2, 0.3, 0.9, 1.0, 1.1, -0.1])
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"region": Categorical(base="first"), "x": Numeric()},
+    )
+    model.fit(X, y, sample_weight=sample_weight)
+    assert getattr(model, "_fit_X_ref", None) is None
+
+    session = EditorSession.from_model(
+        model,
+        terms=["region"],
+        train_data=(X, y, sample_weight),
+    )
+
+    expected = np.array([3.0, 12.0, 6.0])
+    np.testing.assert_allclose(session.terms["region"].weights, expected)
 
 
 def test_edited_offset_factor_and_refit_with_fixed_offset(editor_model, editor_frame):
@@ -3401,6 +3433,35 @@ def test_widget_unknown_route_uses_editor_error_shape(editor_model):
         assert error.value.code == 404
         payload = json.loads(error.value.read().decode("utf-8"))
         assert payload == {"error": "not found"}
+    finally:
+        widget.close()
+
+
+def test_widget_http_unexpected_errors_do_not_expose_exception_text(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+
+    def fail_operation(*_args, **_kwargs):
+        raise RuntimeError("secret traceback detail")
+
+    widget._operate = fail_operation
+    try:
+        data = json.dumps({"operation": "reset"}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{widget.url}/op",
+            data=data,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                **_editor_token_header(widget.url),
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5)
+
+        assert error.value.code == 500
+        payload = json.loads(error.value.read().decode("utf-8"))
+        assert payload == {"error": "internal editor error"}
     finally:
         widget.close()
 
