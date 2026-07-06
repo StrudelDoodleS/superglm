@@ -1094,6 +1094,25 @@ def test_reorder_categorical_levels_is_display_only(editor_model):
     assert session.edited_terms() == []
 
 
+def test_reorder_categorical_levels_keeps_native_metadata_aligned(editor_model):
+    from superglm.editor.terms import native_log_effect_values
+
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["region"],
+        centering="mean",
+        with_se=False,
+    )
+    term = session.terms["region"]
+    original_native = dict(zip(term.levels, native_log_effect_values(term), strict=False))
+
+    session.select_levels("region", ["C"])
+    session.reorder_levels("region", target_index=1)
+
+    reordered_native = dict(zip(term.levels, native_log_effect_values(term), strict=False))
+    assert reordered_native == pytest.approx(original_native)
+
+
 def test_reorder_multiple_categorical_levels_moves_selection_as_contiguous_block():
     values = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float64)
     session = EditorSession(
@@ -2463,6 +2482,31 @@ def test_widget_http_save_model_writes_edited_joblib(editor_model, tmp_path):
     assert not np.allclose(saved_model.result.beta, original_beta)
 
 
+def test_save_model_uses_session_train_data_without_retained_fit_state(tmp_path):
+    import joblib
+
+    rng = np.random.default_rng(20260718)
+    n = 180
+    X = pd.DataFrame({"x": rng.normal(size=n)})
+    y = 0.4 + 0.3 * X["x"].to_numpy() + rng.normal(0.0, 0.04, size=n)
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["x"], train_data=(X, y, None))
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+
+    path = session.save_model(tmp_path / "edited-model.joblib")
+    saved_model = joblib.load(path)
+
+    assert saved_model._fit_stats is not None
+    assert saved_model.summary()["deviance"]["deviance"] is not None
+
+
 def test_widget_http_download_model_returns_joblib_attachment(editor_model):
     import io
 
@@ -2491,6 +2535,41 @@ def test_widget_http_download_model_returns_joblib_attachment(editor_model):
     assert downloaded_model is not editor_model
     np.testing.assert_allclose(editor_model.result.beta, original_beta)
     assert not np.allclose(downloaded_model.result.beta, original_beta)
+
+
+def test_widget_http_download_model_uses_session_train_data_without_retained_fit_state():
+    import io
+
+    import joblib
+
+    rng = np.random.default_rng(20260719)
+    n = 180
+    X = pd.DataFrame({"x": rng.normal(size=n)})
+    y = 0.4 + 0.3 * X["x"].to_numpy() + rng.normal(0.0, 0.04, size=n)
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["x"], train_data=(X, y, None))
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+    widget = session.widget()
+    try:
+        request = urllib.request.Request(
+            f"{widget.url}/download_model?filename=edited-model.joblib",
+            headers=_editor_token_header(widget.url),
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = response.read()
+    finally:
+        widget.close()
+
+    downloaded_model = joblib.load(io.BytesIO(payload))
+    assert downloaded_model._fit_stats is not None
+    assert downloaded_model.summary()["deviance"]["deviance"] is not None
 
 
 def test_widget_http_native_save_dialog_returns_selected_path(editor_model, tmp_path, monkeypatch):

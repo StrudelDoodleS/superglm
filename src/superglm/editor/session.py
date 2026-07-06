@@ -471,6 +471,13 @@ class EditorSession:
         """
         from superglm.editor.apply import apply_edits_to_model_copy_with_data
 
+        if X is None and y is None and sample_weight is None and offset is None:
+            train = self._evaluation_data.get("train")
+            if train is not None:
+                X = train.X
+                y = train.y
+                sample_weight = train.sample_weight
+                offset = train.offset
         return apply_edits_to_model_copy_with_data(
             self.model,
             self.terms,
@@ -955,6 +962,11 @@ class EditorSession:
         editable.edited_log_effect = editable.edited_log_effect[order]
         editable.x = np.arange(editable.size, dtype=np.float64)
         editable.levels = [editable.levels[int(i)] for i in order] if editable.levels else None
+        native_original = editable.metadata.get("native_original_log_effect")
+        if native_original is not None:
+            native = np.asarray(native_original, dtype=np.float64).ravel()
+            if native.shape == (editable.size,):
+                editable.metadata["native_original_log_effect"] = native[order].tolist()
         if editable.weights is not None:
             editable.weights = editable.weights[order]
         if editable.ci_lower_log_effect is not None:
