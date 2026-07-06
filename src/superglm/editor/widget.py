@@ -220,6 +220,8 @@ class EditorWidget:
         weights = np.ones(idx.size, dtype=np.float64)
         if editable.weights is not None:
             weights = np.asarray(editable.weights[idx], dtype=np.float64)
+        if float(np.sum(weights)) <= 0.0:
+            weights = None
         value = float(np.average(np.exp(editable.edited_log_effect[idx]), weights=weights))
         self.session.set_values(term, idx, np.full(idx.size, np.log(max(value, 1e-12))))
 

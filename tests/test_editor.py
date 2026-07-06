@@ -946,6 +946,29 @@ def test_collapse_levels_replaces_in_force_model_and_clears_manual_edits(editor_
     assert grouping.original_to_group["C"] == "B+C"
 
 
+def test_collapse_levels_refits_numeric_categorical_levels():
+    rng = np.random.default_rng(20260712)
+    code = rng.choice([1, 2, 3, 4], 320, p=[0.35, 0.30, 0.20, 0.15])
+    X = pd.DataFrame({"code": code})
+    effects = {1: 0.0, 2: 0.05, 3: -0.20, 4: 0.15}
+    y = 0.7 + np.array([effects[value] for value in code]) + rng.normal(0.0, 0.04, code.size)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"code": Categorical(base="most_exposed")},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["code"], train_data=(X, y, None))
+
+    session.select_levels("code", ["1", "2"])
+    collapsed = session.replace_with_collapsed_levels("code", method="fit")
+
+    grouping = collapsed.features["code"]._grouping
+    assert grouping.original_to_group["1"] == "1+2"
+    assert grouping.original_to_group["2"] == "1+2"
+    assert np.isfinite(collapsed.predict(X)).all()
+
+
 def test_to_model_applies_manual_edit_after_level_collapse(editor_model):
     session = EditorSession.from_model(editor_model, terms=["region"])
     session.select_levels("region", ["B", "C"])
@@ -2249,6 +2272,24 @@ def test_widget_http_selection_and_average_updates_session(editor_model):
         term.edited_log_effect[indices] = np.array([0.2, 1.0, -0.4, 0.8])
         _post_json(f"{widget.url}/op", {"operation": "snap_lowest"})
         np.testing.assert_allclose(term.edited_log_effect[indices], -0.4)
+    finally:
+        widget.close()
+
+
+def test_widget_average_falls_back_when_selected_exposure_is_zero(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        term = session.terms["x_spline"]
+        indices = [8, 9, 10]
+        term.weights[indices] = 0.0
+        term.edited_log_effect[indices] = np.log(np.array([1.0, 1.4, 2.0]))
+
+        _post_json(f"{widget.url}/select", {"term": "x_spline", "indices": indices})
+        _post_json(f"{widget.url}/op", {"operation": "average"})
+
+        expected = np.log(np.mean([1.0, 1.4, 2.0]))
+        np.testing.assert_allclose(term.edited_log_effect[indices], expected)
     finally:
         widget.close()
 

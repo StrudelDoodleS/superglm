@@ -19,7 +19,7 @@ import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
-from superglm.features.categorical import _validate_categorical_levels
+from superglm.features.categorical import _grouping_labels, _validate_categorical_levels
 from superglm.types import GroupInfo
 
 
@@ -271,10 +271,13 @@ class OrderedCategorical:
     ) -> GroupInfo | list[GroupInfo]:
         """Build design columns from ordered categorical data."""
         x = np.asarray(x).ravel()
-        _validate_categorical_levels(x, self._known_levels)
 
         if self._grouping is not None:
+            x = _grouping_labels(x)
+            _validate_categorical_levels(x, self._known_levels)
             x = pd.Series(x).map(self._grouping.original_to_group).values
+        else:
+            _validate_categorical_levels(x, self._known_levels)
 
         if self.basis == "spline":
             return self._build_spline(x, sample_weight)
@@ -347,10 +350,11 @@ class OrderedCategorical:
         """Build design matrix for new data using learned parameters."""
         x = np.asarray(x).ravel()
         if self._grouping is not None:
+            x = _grouping_labels(x)
             valid_levels = self._known_levels | set(self._grouping.grouped_levels)
             _validate_categorical_levels(x, valid_levels)
             x = np.array(
-                [self._grouping.original_to_group.get(str(v), str(v)) for v in x],
+                [self._grouping.original_to_group.get(v, v) for v in x],
                 dtype=object,
             )
         else:
@@ -370,10 +374,11 @@ class OrderedCategorical:
         """Score the fitted ordered-categorical contribution directly on new data."""
         x = np.asarray(x).ravel()
         if self._grouping is not None:
+            x = _grouping_labels(x)
             valid_levels = self._known_levels | set(self._grouping.grouped_levels)
             _validate_categorical_levels(x, valid_levels)
             x = np.array(
-                [self._grouping.original_to_group.get(str(v), str(v)) for v in x],
+                [self._grouping.original_to_group.get(v, v) for v in x],
                 dtype=object,
             )
         else:
