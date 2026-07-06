@@ -658,9 +658,24 @@ function renderCompactSummary(payload) {
       </table>
       <details class="raw-summary">
         <summary>Full summary</summary>
-        <div class="raw-summary-body">${payload.html || ""}</div>
+        <div class="raw-summary-body">${renderRawSummaryFrame(payload.html)}</div>
       </details>
     </div>
+  `;
+}
+
+function renderRawSummaryFrame(html) {
+  if (!html) {
+    return '<div class="summary-empty">Full summary unavailable.</div>';
+  }
+  return `
+    <iframe
+      class="raw-summary-frame"
+      title="Full model summary"
+      sandbox=""
+      referrerpolicy="no-referrer"
+      srcdoc="${escapeHTML(html)}"
+    ></iframe>
   `;
 }
 

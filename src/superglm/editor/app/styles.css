@@ -771,8 +771,12 @@ button:active { background: #e6edf3; }
   margin-top: 6px;
   overflow: auto;
 }
-.raw-summary-body table {
-  max-width: none;
+.raw-summary-frame {
+  width: 100%;
+  min-height: 360px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
 }
 .summary-empty {
   color: var(--gray);

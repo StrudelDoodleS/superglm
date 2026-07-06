@@ -3300,6 +3300,10 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "summary-number" in css
         assert "se-cell" in js
         assert "raw-summary" in js
+        assert "renderRawSummaryFrame" in js
+        assert 'sandbox=""' in js
+        assert 'srcdoc="${escapeHTML' in js
+        assert '<div class="raw-summary-body">${payload.html || ""}</div>' not in js
         assert "payloadNumber" in js
         assert "rotate(-90" in js
         assert "toExponential" not in js
