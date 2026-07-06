@@ -152,12 +152,15 @@ def _x_domain(x_values: list[float], *, pad_discrete: bool = False) -> list[floa
         return [float(x_min), float(x_max)]
     if len(x_values) > 1:
         sorted_x = sorted(x_values)
-        spacing = min(
+        positive_spacings = [
             abs(sorted_x[i + 1] - sorted_x[i])
             for i in range(len(sorted_x) - 1)
             if abs(sorted_x[i + 1] - sorted_x[i]) > 1e-15
-        )
-        pad = spacing * 0.5
+        ]
+        if positive_spacings:
+            pad = min(positive_spacings) * 0.5
+        else:
+            pad = max(abs(float(x_min)) * 0.1, 0.5)
     else:
         pad = max(abs(float(x_min)) * 0.1, 0.5)
     return [float(x_min - pad), float(x_max + pad)]

@@ -629,6 +629,26 @@ def test_to_model_rejects_partial_explicit_scoring_data(editor_model, editor_fra
         session.to_model(X=X)
 
 
+def test_x_domain_handles_constant_continuous_grid():
+    from superglm.editor.payloads import _x_domain
+
+    assert _x_domain([3.0, 3.0, 3.0]) == [2.5, 3.5]
+    assert _x_domain([0.0, 0.0]) == [-0.5, 0.5]
+
+
+def test_jsonable_converts_numpy_boolean_scalars():
+    import json
+
+    from superglm.editor.io import jsonable
+
+    payload = jsonable({"ok": np.bool_(True), "bad": np.bool_(False)})
+
+    assert payload == {"ok": True, "bad": False}
+    assert type(payload["ok"]) is bool
+    assert type(payload["bad"]) is bool
+    assert json.dumps(payload, allow_nan=False) == '{"ok": true, "bad": false}'
+
+
 def test_in_force_summary_uses_session_train_data_without_retained_fit_state():
     from superglm.editor.summaries import summary_payload
 
@@ -1566,6 +1586,33 @@ def test_ungroup_pre_collapsed_model_refits_without_history():
     assert refit is not collapsed
     assert getattr(refit.features["territory"], "_grouping", None) is None
     assert getattr(session.model.features["territory"], "_grouping", None) is None
+
+
+def test_ordered_integer_ungroup_pre_collapsed_model_refits_without_history():
+    rng = np.random.default_rng(20260803)
+    levels = [1, 2, 3, 4]
+    band = rng.choice(levels, 500, p=[0.20, 0.35, 0.25, 0.20])
+    X = pd.DataFrame({"band": band})
+    effects = {1: -0.15, 2: -0.05, 3: 0.10, 4: 0.25}
+    y = 0.7 + np.array([effects[value] for value in band]) + rng.normal(0.0, 0.04, band.size)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"band": OrderedCategorical(order=levels, basis="step", base="first")},
+    )
+    model.fit(X, y)
+    setup = EditorSession.from_model(model, terms=["band"], train_data=(X, y, None))
+    setup.select_levels("band", ["1", "2"])
+    collapsed = setup.replace_with_collapsed_levels("band", method="fit")
+
+    session = EditorSession.from_model(collapsed, terms=["band"], train_data=(X, y, None))
+    session.select_levels("band", ["1", "2"])
+    refit = session.replace_with_ungrouped_levels("band", method="fit")
+
+    assert refit is not collapsed
+    assert getattr(refit.features["band"], "_grouping", None) is None
+    assert getattr(session.model.features["band"], "_grouping", None) is None
+    assert np.isfinite(refit.predict(X)).all()
 
 
 def test_ungroup_last_collapsed_levels_restores_pre_collapse_in_force_model(editor_model):

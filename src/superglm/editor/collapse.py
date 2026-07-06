@@ -86,6 +86,7 @@ def collapsed_feature_spec(
             grouping,
             selected_levels,
             base,
+            X[term.name],
         )
     else:
         replacement = Categorical(
@@ -140,7 +141,13 @@ def ungrouped_feature_spec(
 
     base = _valid_base_after_ungroup(spec.base, selected_levels, grouping)
     if isinstance(spec, OrderedCategorical):
-        replacement = _ordered_spec_with_grouping(spec, replacement_grouping, selected_levels, base)
+        replacement = _ordered_spec_with_grouping(
+            spec,
+            replacement_grouping,
+            selected_levels,
+            base,
+            X[term.name],
+        )
     else:
         replacement = Categorical(base=base, grouping=replacement_grouping)
 
@@ -329,14 +336,15 @@ def _ordered_spec_with_grouping(
     grouping: LevelGrouping | None,
     selected_levels: list[str],
     base: str,
+    data,
 ) -> OrderedCategorical:
-    values = _ordered_original_values(spec)
+    values, native_base = _ordered_original_values(spec, grouping, data, base)
     basis = copy.deepcopy(spec._spline_obj) if spec._spline_obj is not None else spec.basis
     return OrderedCategorical(
         values=values,
         basis=basis,
         kind=spec.kind,
-        base=base,
+        base=native_base,
         n_knots=spec.n_knots,
         degree=spec.degree,
         select=spec.select,
@@ -345,11 +353,26 @@ def _ordered_spec_with_grouping(
     )
 
 
-def _ordered_original_values(spec: OrderedCategorical) -> dict[str, float]:
+def _ordered_original_values(
+    spec: OrderedCategorical,
+    grouping: LevelGrouping | None,
+    data,
+    base,
+) -> tuple[dict[Any, float], Any]:
     original_values = getattr(spec, "_original_level_to_value", None)
     if original_values is not None:
-        return {str(k): float(v) for k, v in original_values.items()}
-    return {str(k): float(v) for k, v in spec._level_to_value.items()}
+        values = {str(k): float(v) for k, v in original_values.items()}
+    else:
+        values = {str(k): float(v) for k, v in spec._level_to_value.items()}
+    if grouping is not None:
+        return values, base
+
+    native_by_label: dict[str, Any] = {}
+    for raw in np.asarray(data, dtype=object).ravel():
+        native_by_label.setdefault(str(raw), raw)
+    native_values = {native_by_label.get(label, label): value for label, value in values.items()}
+    native_base = base if base in _SYMBOLIC_BASE_POLICIES else native_by_label.get(str(base), base)
+    return native_values, native_base
 
 
 def _collapsed_base(

@@ -90,6 +90,8 @@ def jsonable(value):
     # Shared conversion for session artifacts and HTTP JSON responses.
     if isinstance(value, np.ndarray):
         return jsonable(value.tolist())
+    if isinstance(value, np.bool_):
+        return bool(value)
     if isinstance(value, np.integer):
         return int(value)
     if isinstance(value, np.floating):
