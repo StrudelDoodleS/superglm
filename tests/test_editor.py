@@ -1029,6 +1029,29 @@ def test_uncollapse_levels_rolls_back_one_collapse_at_a_time(editor_model):
     assert session.can_uncollapse_levels() is False
 
 
+def test_ordered_categorical_ungroup_rejects_non_contiguous_remainder():
+    rng = np.random.default_rng(20260713)
+    levels = ["A", "B", "C", "D"]
+    band = rng.choice(levels, 400, p=[0.25, 0.30, 0.25, 0.20])
+    X = pd.DataFrame({"band": band})
+    effects = {"A": -0.15, "B": -0.05, "C": 0.10, "D": 0.25}
+    y = 0.7 + np.array([effects[value] for value in band]) + rng.normal(0.0, 0.04, band.size)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"band": OrderedCategorical(order=levels, basis="step", base="first")},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["band"], train_data=(X, y, None))
+
+    session.select_levels("band", ["A", "B", "C"])
+    session.replace_with_collapsed_levels("band", method="fit")
+    session.select_levels("band", ["B"])
+
+    with pytest.raises(ValueError, match="non-contiguous ordered group"):
+        session.replace_with_ungrouped_levels("band", method="fit")
+
+
 def test_repeated_categorical_collapses_create_distinct_level_groups():
     rng = np.random.default_rng(20260705)
     levels = [f"T{i:02d}" for i in range(1, 11)]
@@ -2132,6 +2155,32 @@ def test_ordered_categorical_spline_level_edit_applies_to_model_copy():
 
     eta_delta = edited._predict_eta_exact(X) - model._predict_eta_exact(X)
     assert np.mean(eta_delta[X["age_band"] == "older"]) > 0.1
+
+
+def test_ordered_categorical_spline_edited_summary_reports_level_rows():
+    rng = np.random.default_rng(20260713)
+    levels = ["young", "mid", "senior", "older"]
+    n = 360
+    X = pd.DataFrame({"age_band": rng.choice(levels, n, p=[0.25, 0.35, 0.25, 0.15])})
+    level_effect = {"young": -0.1, "mid": 0.0, "senior": 0.2, "older": 0.35}
+    y = np.array([level_effect[level] for level in X["age_band"]]) + rng.normal(0.0, 0.05, n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"age_band": OrderedCategorical(order=levels, basis="spline", n_knots=3)},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["age_band"])
+    session.select_levels("age_band", ["older"])
+    session.shift("age_band", 0.2)
+
+    edited = session.to_model()
+    summary = edited.summary()
+    row_names = [row.name for row in summary._coef_rows]
+
+    assert all(f"age_band[{level}]" in row_names for level in levels)
+    assert "age_band" not in row_names
+    assert not any("[bs" in name or "[basis" in name for name in row_names)
 
 
 def test_save_load_roundtrip(editor_model, tmp_path):

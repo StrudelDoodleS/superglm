@@ -232,6 +232,7 @@ def _ungroup_grouping(
     groups: dict[str, list[str]] = {}
     existing_labels = [str(level) for level in term.levels]
     existing_labels.extend(str(level) for level in existing.grouped_levels)
+    original_order = _original_level_order(spec, term, existing)
     for label in existing.grouped_levels:
         members = [str(member) for member in existing.group_to_originals.get(label, [])]
         if len(members) < 2:
@@ -247,6 +248,12 @@ def _ungroup_grouping(
                 existing_levels=existing_labels,
                 selected_levels=remaining,
             )
+            if isinstance(spec, OrderedCategorical) and not _members_are_contiguous(
+                remaining, original_order
+            ):
+                raise ValueError(
+                    "Ungrouping selected levels would leave a non-contiguous ordered group."
+                )
             groups[new_label] = remaining
 
     if not any(
@@ -258,7 +265,7 @@ def _ungroup_grouping(
     return collapse_levels(
         data,
         groups=groups,
-        order=_original_level_order(spec, term, existing),
+        order=original_order,
     )
 
 
@@ -378,6 +385,13 @@ def _is_identity_grouping(grouping: LevelGrouping) -> bool:
 def _require_contiguous(indices: np.ndarray, term_name: str) -> None:
     if indices.size and np.any(np.diff(np.sort(indices)) != 1):
         raise ValueError(f"Ordered categorical collapse for {term_name!r} must be contiguous.")
+
+
+def _members_are_contiguous(members: list[str], order: list[str]) -> bool:
+    if len(members) < 2:
+        return True
+    positions = sorted(order.index(member) for member in members)
+    return bool(np.all(np.diff(positions) == 1))
 
 
 def _default_group_label(selected_levels: list[str]) -> str:

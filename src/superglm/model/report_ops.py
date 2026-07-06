@@ -288,9 +288,12 @@ def feature_groups(model, name: str) -> list[GroupSlice]:
 
 
 def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
+    from superglm.features.ordered_categorical import OrderedCategorical
+
     rows = [_CoefRow(name="Intercept", coef=float(model.result.intercept))]
     group_edf = getattr(model, "_group_edf", None)
     reml_lambdas = getattr(model, "_reml_lambdas", None)
+    handled_ordered_features: set[str] = set()
 
     for g in model._groups:
         beta_g = np.asarray(model.result.beta[g.sl], dtype=float)
@@ -298,6 +301,43 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
         active = norm > 1e-12
         spec = model._specs.get(g.feature_name) or model._interaction_specs.get(g.feature_name)
         edf = group_edf.get(g.name) if group_edf else None
+
+        if isinstance(spec, OrderedCategorical):
+            if g.feature_name in handled_ordered_features:
+                continue
+            handled_ordered_features.add(g.feature_name)
+
+            feature_groups = [fg for fg in model._groups if fg.feature_name == g.feature_name]
+            beta_combined = np.concatenate([model.result.beta[fg.sl] for fg in feature_groups])
+            feature_edf = (
+                sum(group_edf.get(fg.name, 0.0) for fg in feature_groups) if group_edf else None
+            )
+            raw = spec.reconstruct(beta_combined)
+            if spec.basis == "spline":
+                for i, level in enumerate(raw["levels"]):
+                    rows.append(
+                        _CoefRow(
+                            name=f"{g.feature_name}[{level}]",
+                            group=g.feature_name,
+                            coef=float(raw["level_log_relativities"][level]),
+                            edf=feature_edf if i == 0 else None,
+                        )
+                    )
+            else:
+                row_idx = 0
+                for level in raw["levels"]:
+                    if level == spec._base_level:
+                        continue
+                    rows.append(
+                        _CoefRow(
+                            name=f"{g.feature_name}[{level}]",
+                            group=g.feature_name,
+                            coef=float(raw["log_relativities"][level]),
+                            edf=feature_edf if row_idx == 0 else None,
+                        )
+                    )
+                    row_idx += 1
+            continue
 
         non_base = getattr(spec, "_non_base", None)
         if non_base is not None and len(non_base) >= g.size:
