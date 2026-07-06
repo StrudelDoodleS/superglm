@@ -6,6 +6,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -524,6 +525,31 @@ def test_to_model_can_refresh_fit_statistics_from_explicit_data():
     assert edited._fit_stats.pearson_chi2 == pytest.approx(expected_deviance)
 
 
+def test_in_force_summary_uses_session_train_data_without_retained_fit_state():
+    from superglm.editor.summaries import summary_payload
+
+    rng = np.random.default_rng(20260717)
+    n = 180
+    X = pd.DataFrame({"x": rng.normal(size=n)})
+    y = 0.4 + 0.3 * X["x"].to_numpy() + rng.normal(0.0, 0.04, size=n)
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["x"], train_data=(X, y, None))
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+
+    widget = SimpleNamespace(session=session, _in_force_info=None)
+    payload = summary_payload(widget, "in_force")
+
+    assert payload["available"] is True
+    assert payload["compact"]["model"]["deviance"] is not None
+
+
 def test_to_model_mean_centering_applies_equivalent_native_curve_edit(editor_model):
     native_session = EditorSession.from_model(
         editor_model,
@@ -585,6 +611,27 @@ def test_edited_offset_mean_centering_applies_equivalent_native_curve_edit(edito
         rtol=1e-10,
         atol=1e-10,
     )
+
+
+def test_offset_labels_use_native_values_for_mean_centered_terms(editor_model):
+    from superglm.editor.summaries import offset_label_payload
+    from superglm.editor.terms import native_log_effect_values
+
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        n_points=40,
+        centering="mean",
+        with_se=False,
+    )
+    session.select_indices("x_spline", [10, 11, 12])
+    session.shift("x_spline", 0.35)
+
+    label = offset_label_payload(session, ["x_spline"])[0]
+    actual = np.asarray([row["log_offset"] for row in label["values"]], dtype=np.float64)
+    expected = native_log_effect_values(session.terms["x_spline"])
+
+    np.testing.assert_allclose(actual, expected)
 
 
 def test_to_model_marks_edited_copy_inference_stale(editor_model):

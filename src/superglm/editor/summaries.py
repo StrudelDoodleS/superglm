@@ -6,6 +6,9 @@ from typing import Any
 
 import numpy as np
 
+from superglm.editor.evaluation import evaluation_datasets
+from superglm.editor.terms import native_log_effect_values
+
 
 def summary_payload(widget, source: str) -> dict[str, Any]:
     # The editor has one working lane: the in-force editable model. The
@@ -23,7 +26,7 @@ def summary_payload(widget, source: str) -> dict[str, Any]:
         offset_labels: list[dict[str, Any]] = []
         collapse_info = None
     elif source == "in_force":
-        model = widget.session.to_model()
+        model = _in_force_summary_model(widget.session)
         label = "In-force edit model"
         offset_terms = []
         offset_labels = []
@@ -78,6 +81,25 @@ def summary_payload(widget, source: str) -> dict[str, Any]:
     }
 
 
+def _in_force_summary_model(session):
+    train = _summary_train_dataset(session)
+    if train is None:
+        return session.to_model()
+    return session.to_model(
+        X=train.X,
+        y=train.y,
+        sample_weight=train.sample_weight,
+        offset=train.offset,
+    )
+
+
+def _summary_train_dataset(session):
+    for dataset in evaluation_datasets(session):
+        if dataset.name == "train":
+            return dataset
+    return None
+
+
 def offset_label_payload(session, terms: list[str]) -> list[dict[str, Any]]:
     # Edited offset terms are absent from the refit coefficient table, so expose
     # their fixed factors separately for audit/display.
@@ -98,7 +120,7 @@ def offset_label_payload(session, terms: list[str]) -> list[dict[str, Any]]:
 
 
 def _offset_values(term) -> tuple[list[dict[str, Any]], int]:
-    log_effect = np.asarray(term.edited_log_effect, dtype=np.float64).ravel()
+    log_effect = native_log_effect_values(term)
     if term.levels is not None:
         return [
             {

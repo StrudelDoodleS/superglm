@@ -44,7 +44,7 @@ def apply_edits_to_model_copy_with_data(
         edited_terms.append(term.name)
     if edited_terms:
         _stamp_stale_inference(edited_model, edited_terms)
-    _invalidate_model_caches(edited_model)
+    _invalidate_model_caches(edited_model, keep_inference=bool(edited_terms))
     if edited_terms:
         _refresh_fit_statistics(
             edited_model,
@@ -232,17 +232,18 @@ def _adjust_intercept(model, delta: float) -> None:
             result.intercept = float(result.intercept + delta)
 
 
-def _invalidate_model_caches(model) -> None:
-    for attr in (
-        "_coef_covariance",
-        "_fit_active_info",
-        "_fit_inference_info",
-        "_group_edf",
-    ):
-        try:
-            delattr(model, attr)
-        except AttributeError:
-            pass
+def _invalidate_model_caches(model, *, keep_inference: bool = False) -> None:
+    if not keep_inference:
+        for attr in (
+            "_coef_covariance",
+            "_fit_active_info",
+            "_fit_inference_info",
+            "_group_edf",
+        ):
+            try:
+                delattr(model, attr)
+            except AttributeError:
+                pass
     model._prediction_plan = None
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
