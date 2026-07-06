@@ -44,8 +44,7 @@ def apply_edits_to_model_copy_with_data(
         edited_terms.append(term.name)
     if edited_terms:
         _stamp_stale_inference(edited_model, edited_terms)
-    _invalidate_model_caches(edited_model, keep_inference=bool(edited_terms))
-    if edited_terms:
+        _invalidate_model_caches(edited_model, keep_inference=True)
         _refresh_fit_statistics(
             edited_model,
             X=X,

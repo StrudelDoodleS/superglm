@@ -593,6 +593,29 @@ def test_in_force_summary_uses_session_train_data_without_retained_fit_state():
     assert payload["compact"]["model"]["deviance"] is not None
 
 
+def test_unedited_in_force_summary_preserves_retained_inference_without_fit_state():
+    from superglm.editor.summaries import summary_payload
+
+    rng = np.random.default_rng(20260723)
+    n = 180
+    X = pd.DataFrame({"x": rng.normal(size=n)})
+    y = 0.4 + 0.3 * X["x"].to_numpy() + rng.normal(0.0, 0.04, size=n)
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["x"])
+
+    widget = SimpleNamespace(session=session, _in_force_info=None)
+    payload = summary_payload(widget, "in_force")
+
+    assert payload["available"] is True
+    assert payload["compact"]["model"]["deviance"] is not None
+
+
 def test_to_model_mean_centering_applies_equivalent_native_curve_edit(editor_model):
     native_session = EditorSession.from_model(
         editor_model,
@@ -1202,6 +1225,31 @@ def test_ungroup_last_collapsed_levels_removes_identity_grouping():
     assert payload["level_groups"] == []
     np.testing.assert_allclose(payload["y"], payload["original_y"])
     assert payload["impact"]["weighted_mean_relativity"] == pytest.approx(1.0)
+
+
+def test_ungroup_pre_collapsed_model_refits_without_history():
+    rng = np.random.default_rng(20260724)
+    levels = [f"T{i:02d}" for i in range(1, 5)]
+    territory = rng.choice(levels, 500, p=[0.20, 0.35, 0.25, 0.20])
+    X = pd.DataFrame({"territory": territory})
+    y = 0.6 + (territory == "T03") * 0.2 + rng.normal(0.0, 0.05, 500)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"territory": Categorical(base="most_exposed")},
+    )
+    model.fit(X, y)
+    setup = EditorSession.from_model(model, terms=["territory"], train_data=(X, y, None))
+    setup.select_levels("territory", ["T01", "T04"])
+    collapsed = setup.replace_with_collapsed_levels("territory", method="fit")
+
+    session = EditorSession.from_model(collapsed, terms=["territory"], train_data=(X, y, None))
+    session.select_levels("territory", ["T01", "T04"])
+    refit = session.replace_with_ungrouped_levels("territory", method="fit")
+
+    assert refit is not collapsed
+    assert getattr(refit.features["territory"], "_grouping", None) is None
+    assert getattr(session.model.features["territory"], "_grouping", None) is None
 
 
 def test_ungroup_last_collapsed_levels_restores_pre_collapse_in_force_model(editor_model):

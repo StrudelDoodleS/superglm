@@ -794,11 +794,7 @@ class EditorSession:
             refit_model = self.collapse_history.pop()
             restored_history_model = refit_model
         else:
-            refit_model = (
-                self.reference_model
-                if restore_previous
-                else self.refit_with_ungrouped_levels(term, **kwargs)
-            )
+            refit_model = self.refit_with_ungrouped_levels(term, **kwargs)
             self.collapse_history.append(previous_model)
         try:
             self.replace_in_force_model(refit_model)
