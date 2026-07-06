@@ -82,6 +82,8 @@ def summary_payload(widget, source: str) -> dict[str, Any]:
 
 
 def _in_force_summary_model(session):
+    if not session.edited_terms():
+        return session.model
     train = _summary_train_dataset(session)
     if train is None:
         return session.to_model()

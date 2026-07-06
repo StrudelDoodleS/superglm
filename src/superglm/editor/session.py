@@ -487,7 +487,13 @@ class EditorSession:
         """
         from superglm.editor.apply import apply_edits_to_model_copy_with_data
 
-        if X is None and y is None and sample_weight is None and offset is None:
+        if (
+            X is None
+            and y is None
+            and sample_weight is None
+            and offset is None
+            and self.edited_terms()
+        ):
             train = self._evaluation_data.get("train")
             if train is not None:
                 X = train.X

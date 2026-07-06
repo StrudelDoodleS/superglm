@@ -525,6 +525,33 @@ def test_to_model_can_refresh_fit_statistics_from_explicit_data():
     assert edited._fit_stats.pearson_chi2 == pytest.approx(expected_deviance)
 
 
+def test_to_model_refreshes_fit_statistics_from_explicit_data_without_manual_edits():
+    rng = np.random.default_rng(20260725)
+    n_train = 160
+    n_val = 60
+    X_train = pd.DataFrame({"x": rng.normal(size=n_train)})
+    y_train = 0.4 + 0.3 * X_train["x"].to_numpy() + rng.normal(0.0, 0.04, size=n_train)
+    X_val = pd.DataFrame({"x": rng.normal(size=n_val)})
+    y_val = 0.4 + 0.3 * X_val["x"].to_numpy() + rng.normal(0.0, 0.12, size=n_val)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X_train, y_train)
+    original_deviance = model.result.deviance
+    session = EditorSession.from_model(model, terms=["x"])
+
+    edited = session.to_model(X=X_val, y=y_val)
+    mu = edited.predict(X_val)
+    expected_deviance = float(np.sum(edited._distribution.deviance_unit(y_val, mu)))
+
+    assert edited.result.deviance == pytest.approx(expected_deviance)
+    assert edited.summary()["deviance"]["deviance"] == pytest.approx(expected_deviance)
+    assert edited._fit_stats.pearson_chi2 == pytest.approx(expected_deviance)
+    assert edited.result.deviance != pytest.approx(original_deviance)
+
+
 def test_to_model_explicit_data_omits_retained_offset_and_weights_when_not_supplied():
     rng = np.random.default_rng(20260720)
     n_train = 180
