@@ -904,8 +904,10 @@ class EditorSession:
         return X_ref
 
     def _resolve_refit_data(self, X, y, sample_weight, offset):
+        if (X is None) != (y is None):
+            raise ValueError("Explicit refit data requires both X and y.")
         train = self._evaluation_data.get("train")
-        explicit_refit_data = X is not None or y is not None
+        explicit_refit_data = X is not None and y is not None
         X_ref = (
             X
             if X is not None

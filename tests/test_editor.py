@@ -558,6 +558,16 @@ def test_to_model_explicit_data_omits_retained_offset_and_weights_when_not_suppl
     assert edited._fit_sample_weight_ref is None
 
 
+def test_to_model_rejects_partial_explicit_scoring_data(editor_model, editor_frame):
+    X, _ = editor_frame
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_x("x_spline", 2.0, 5.0)
+    session.shift("x_spline", 0.2)
+
+    with pytest.raises(ValueError, match="Explicit scoring data requires both X and y"):
+        session.to_model(X=X)
+
+
 def test_in_force_summary_uses_session_train_data_without_retained_fit_state():
     from superglm.editor.summaries import summary_payload
 
@@ -752,6 +762,16 @@ def test_refit_explicit_data_omits_session_train_weights_and_offsets_when_not_su
     np.testing.assert_allclose(refit._fit_offset, expected_offset)
     np.testing.assert_allclose(refit._fit_weights, np.ones(n_val))
     assert refit._fit_sample_weight_ref is None
+
+
+def test_refit_rejects_partial_explicit_data(editor_model, editor_frame):
+    X, _ = editor_frame
+    session = EditorSession.from_model(editor_model, terms=["region", "x_spline"])
+    session.select_levels("region", ["B"])
+    session.shift("region", 0.4)
+
+    with pytest.raises(ValueError, match="Explicit refit data requires both X and y"):
+        session.refit_with_edited_offset("region", X=X)
 
 
 def test_collapse_selected_categorical_levels_refits_copied_model(editor_model, editor_frame):

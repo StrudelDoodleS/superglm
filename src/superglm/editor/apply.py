@@ -263,6 +263,9 @@ def _refresh_fit_statistics(
     from superglm.links import stabilize_eta
     from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
 
+    if (X is None) != (y is None):
+        raise ValueError("Explicit scoring data requires both X and y.")
+
     X_ref = getattr(model, "_fit_X_ref", None) if X is None else X
     y_ref = getattr(model, "_fit_y_ref", None) if y is None else y
     if y_ref is None:
