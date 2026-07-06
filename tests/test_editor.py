@@ -479,6 +479,51 @@ def test_to_model_returns_copy_and_leaves_source_unchanged(editor_model):
     assert not np.allclose(edited.result.beta, original_beta)
 
 
+def test_to_model_refreshes_fit_statistics_after_manual_edit(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    original_deviance = editor_model.result.deviance
+
+    session.select_x("x_spline", 2.0, 5.0)
+    session.shift("x_spline", 1.25)
+    edited = session.to_model()
+
+    y = np.asarray(edited._fit_y_ref, dtype=np.float64)
+    mu = edited.predict(edited._fit_X_ref, offset=edited._fit_offset_ref)
+    expected_deviance = float(
+        np.sum(edited._fit_weights * edited._distribution.deviance_unit(y, mu))
+    )
+
+    assert edited.result.deviance == pytest.approx(expected_deviance)
+    assert edited.summary()["deviance"]["deviance"] == pytest.approx(expected_deviance)
+    assert edited.result.deviance != pytest.approx(original_deviance)
+
+
+def test_to_model_can_refresh_fit_statistics_from_explicit_data():
+    rng = np.random.default_rng(20260710)
+    n = 180
+    X = pd.DataFrame({"x": rng.normal(size=n)})
+    sample_weight = rng.uniform(0.5, 2.0, size=n)
+    offset = rng.normal(0.0, 0.05, size=n)
+    y = 0.4 + 0.3 * X["x"].to_numpy() + offset + rng.normal(0.0, 0.04, size=n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X, y, sample_weight=sample_weight, offset=offset)
+    session = EditorSession.from_model(model, terms=["x"])
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+
+    eval_offset = offset + 0.01
+    edited = session.to_model(X=X, y=y, sample_weight=sample_weight, offset=eval_offset)
+    mu = edited.predict(X, offset=eval_offset)
+    expected_deviance = float(np.sum(sample_weight * edited._distribution.deviance_unit(y, mu)))
+
+    assert edited.result.deviance == pytest.approx(expected_deviance)
+    assert edited._fit_stats.pearson_chi2 == pytest.approx(expected_deviance)
+
+
 def test_to_model_marks_edited_copy_inference_stale(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     session.select_x("x_spline", 2.0, 5.0)

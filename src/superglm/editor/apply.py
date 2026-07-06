@@ -21,6 +21,19 @@ if TYPE_CHECKING:
 
 def apply_edits_to_model_copy(model, terms: dict[str, EditableTerm]):
     """Return a deep-copied model with changed editor terms applied."""
+    return apply_edits_to_model_copy_with_data(model, terms)
+
+
+def apply_edits_to_model_copy_with_data(
+    model,
+    terms: dict[str, EditableTerm],
+    *,
+    X=None,
+    y=None,
+    sample_weight=None,
+    offset=None,
+):
+    """Return a deep-copied model and refresh scalar fit stats if data is available."""
     edited_model = copy.deepcopy(model)
     edited_terms: list[str] = []
     for term in terms.values():
@@ -31,6 +44,14 @@ def apply_edits_to_model_copy(model, terms: dict[str, EditableTerm]):
     if edited_terms:
         _stamp_stale_inference(edited_model, edited_terms)
     _invalidate_model_caches(edited_model)
+    if edited_terms:
+        _refresh_fit_statistics(
+            edited_model,
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
     return edited_model
 
 
@@ -200,6 +221,95 @@ def _invalidate_model_caches(model) -> None:
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
     model._fit_mu = None
+
+
+def _refresh_fit_statistics(
+    model,
+    *,
+    X=None,
+    y=None,
+    sample_weight=None,
+    offset=None,
+) -> None:
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+    from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
+
+    X_ref = getattr(model, "_fit_X_ref", None) if X is None else X
+    y_ref = getattr(model, "_fit_y_ref", None) if y is None else y
+    if y_ref is None:
+        model._fit_stats = None
+        return
+
+    y_arr = np.asarray(y_ref, dtype=np.float64).ravel()
+    if sample_weight is None:
+        weights = getattr(model, "_fit_weights", None)
+        if weights is None:
+            weights = np.ones(y_arr.size, dtype=np.float64)
+    else:
+        weights = np.asarray(sample_weight, dtype=np.float64).ravel()
+    if weights.size != y_arr.size:
+        raise ValueError(f"sample_weight has length {weights.size}, expected {y_arr.size}.")
+
+    if offset is None:
+        offset_arr = getattr(model, "_fit_offset", None)
+        offset_ref = getattr(model, "_fit_offset_ref", None)
+    else:
+        offset_arr = np.asarray(offset, dtype=np.float64).ravel()
+        offset_ref = offset
+    if offset_arr is not None and offset_arr.size != y_arr.size:
+        raise ValueError(f"offset has length {offset_arr.size}, expected {y_arr.size}.")
+
+    if X_ref is not None:
+        mu = model.predict(X_ref, offset=offset_arr)
+    elif getattr(model, "_dm", None) is not None and model._dm.n == y_arr.size:
+        solver_result = (
+            model._solver_pirls_result() if model._solver_result is not None else model.result
+        )
+        eta = model._dm.matvec(solver_result.beta) + solver_result.intercept
+        if offset_arr is not None:
+            eta = eta + offset_arr
+        eta = stabilize_eta(eta, model._link)
+        mu = clip_mu(model._link.inverse(eta), model._distribution)
+    else:
+        model._fit_stats = None
+        return
+
+    mu = np.asarray(mu, dtype=np.float64).ravel()
+    if mu.size != y_arr.size:
+        raise ValueError(f"Predictions have length {mu.size}, expected {y_arr.size}.")
+
+    null_mu = _compute_null_mu(y_arr, weights, offset_arr, model._distribution, model._link)
+    deviance = float(np.sum(weights * model._distribution.deviance_unit(y_arr, mu)))
+    model._fit_stats = _compute_fit_stats(
+        y_arr,
+        mu,
+        weights,
+        offset_arr,
+        model._distribution,
+        model._link,
+        model.result.phi,
+        null_mu=null_mu,
+    )
+    for result_name in ("_result", "_solver_result"):
+        result = getattr(model, result_name, None)
+        if result is not None:
+            result.deviance = deviance
+    model._fit_mu = mu
+    model._fit_null_mu = null_mu
+    if X is not None:
+        model._fit_X_ref = X
+    if y is not None:
+        model._fit_y_ref = y
+    if sample_weight is not None:
+        model._fit_weights = weights
+        model._fit_sample_weight_ref = sample_weight
+    if offset is not None:
+        model._fit_offset = offset_arr
+        model._fit_offset_ref = offset_ref
+    model._fit_metrics_cache = None
+    model._fit_metrics_cache_signature = None
+    model._summary_cache = None
 
 
 def _stamp_stale_inference(model, edited_terms: list[str]) -> None:

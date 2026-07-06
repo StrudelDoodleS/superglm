@@ -428,11 +428,23 @@ class EditorSession:
         self.history.append(record)
         return self
 
-    def to_model(self):
-        """Return an edited copy of the source model."""
-        from superglm.editor.apply import apply_edits_to_model_copy
+    def to_model(self, *, X=None, y=None, sample_weight=None, offset=None):
+        """Return an edited copy of the source model.
 
-        return apply_edits_to_model_copy(self.model, self.terms)
+        If explicit evaluation data is supplied, scalar fit statistics on the
+        copy are refreshed against that data. Otherwise the fitted model's
+        retained fit data is used when available.
+        """
+        from superglm.editor.apply import apply_edits_to_model_copy_with_data
+
+        return apply_edits_to_model_copy_with_data(
+            self.model,
+            self.terms,
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
 
     def save_model(self, path: str | Path) -> Path:
         return persistence.save_model(self, path)
