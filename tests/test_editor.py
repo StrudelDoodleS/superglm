@@ -1067,8 +1067,7 @@ def test_ordered_categorical_collapse_checks_fitted_order_after_display_reorder(
     model.fit(X, y)
     session = EditorSession.from_model(model, terms=["band"], train_data=(X, y, None))
 
-    session.select_levels("band", ["C"])
-    session.reorder_levels("band", target_index=1)
+    session._apply_level_order("band", np.asarray([0, 2, 1, 3], dtype=np.intp), persist=False)
     assert session.terms["band"].levels == ["A", "C", "B", "D"]
 
     session.select_levels("band", ["A", "C"])
@@ -1406,6 +1405,19 @@ def test_reorder_categorical_levels_is_display_only(editor_model):
         original_values
     )
     assert session.edited_terms() == []
+
+
+def test_reorder_ordered_categorical_levels_is_rejected(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["band"])
+    session.select_levels("band", ["medium"])
+
+    with pytest.raises(TypeError, match="cannot be display-reordered"):
+        session.reorder_levels("band", target_index=0)
+
+    session._level_orders["band"] = ["medium", "low", "high"]
+    session.reset_level_order("band")
+    assert session.level_order_changed("band") is False
+    assert "band" not in session._level_orders
 
 
 def test_reorder_categorical_levels_keeps_native_metadata_aligned(editor_model):
@@ -2221,6 +2233,38 @@ def test_save_load_roundtrip(editor_model, tmp_path):
         session.terms["x_spline"].edited_log_effect,
     )
     assert loaded.history[-1].operation == "shift"
+
+
+def test_load_rejects_same_shape_artifact_from_different_baseline(
+    editor_model, editor_frame, tmp_path
+):
+    X, y = editor_frame
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [1, 2])
+    session.shift("x_spline", 0.2)
+    path = tmp_path / "edits.json"
+    session.save(path)
+
+    refit = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={
+            "x_spline": Spline(n_knots=8),
+            "x_poly": Polynomial(degree=2),
+            "x_num": Numeric(),
+            "region": Categorical(base="first"),
+            "band": OrderedCategorical(order=["low", "medium", "high"], basis="step", base="first"),
+        },
+    )
+    shifted_y = y + 0.35 * np.sin(np.asarray(X["x_spline"], dtype=np.float64))
+    refit.fit(X, shifted_y)
+
+    assert (
+        refit.term_inference("x_spline", with_se=False).x.shape == session.terms["x_spline"].x.shape
+    )
+    with pytest.raises(ValueError, match="Loaded baseline"):
+        EditorSession.load(path, model=refit)
 
 
 def test_widget_import_is_lazy():
@@ -3413,9 +3457,11 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "last_collapse" in js
         assert "selectionTouchesCollapsedGroup" in js
         assert "updateResetOrderAction" in js
+        assert 'type === "categorical" && term.level_order_changed' in js
         assert "reset_order" in js
         assert "orderDrag" in js
         assert "beginOrderDrag" in js
+        assert '(term.term_type || term.kind || "") !== "categorical"' in js
         assert "drawOrderDropPreview" in js
         assert "clearOrderDropPreview" in js
         assert "order-drop-preview" in js

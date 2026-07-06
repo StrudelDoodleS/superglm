@@ -435,8 +435,7 @@ function selectionTouchesCollapsedGroup(term, selection) {
 function updateResetOrderAction(term) {
   if (!resetOrder) return;
   const type = term.term_type || term.kind || "";
-  const isLevelTerm = type === "categorical" || type === "ordered categorical";
-  resetOrder.hidden = !(isLevelTerm && term.level_order_changed);
+  resetOrder.hidden = !(type === "categorical" && term.level_order_changed);
 }
 
 function updateHandleCount(term) {

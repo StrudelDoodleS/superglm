@@ -64,6 +64,14 @@ def validate_loaded_term(term: EditableTerm, payload: dict[str, Any]) -> None:
             f"Loaded term {term.name!r} has shape {edited.shape}, "
             f"but model exposes {term.edited_log_effect.shape}."
         )
+    original = np.asarray(payload.get("original_log_effect"), dtype=np.float64)
+    if original.shape != term.original_log_effect.shape or not np.allclose(
+        original,
+        term.original_log_effect,
+        rtol=1e-8,
+        atol=1e-10,
+    ):
+        raise ValueError(f"Loaded baseline for term {term.name!r} does not match the fitted model.")
     for key in ("ci_lower_log_effect", "ci_upper_log_effect"):
         if payload.get(key) is None:
             continue

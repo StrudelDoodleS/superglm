@@ -333,6 +333,8 @@ class EditorSession:
         editable = self._require_term(term)
         if editable.levels is None:
             raise TypeError(f"Term {term!r} does not have levels.")
+        if self._is_ordered_level_term(term):
+            raise TypeError(f"Ordered categorical term {term!r} cannot be display-reordered.")
         idx = self._selection[term]
         if idx.size == 0:
             return self
@@ -350,6 +352,9 @@ class EditorSession:
         editable = self._require_term(term)
         if editable.levels is None:
             raise TypeError(f"Term {term!r} does not have levels.")
+        if self._is_ordered_level_term(term):
+            self._level_orders.pop(term, None)
+            return self
         order = level_order_for_labels(editable.levels, self._model_level_order(term))
         self._level_orders.pop(term, None)
         if order != list(range(editable.size)):
@@ -359,7 +364,11 @@ class EditorSession:
     def level_order_changed(self, term: str) -> bool:
         """Return whether a categorical term has a custom display order."""
         editable = self._require_term(term)
-        return editable.levels is not None and term in self._level_orders
+        return (
+            editable.levels is not None
+            and not self._is_ordered_level_term(term)
+            and term in self._level_orders
+        )
 
     # Shape-changing operations anchor selected runs to adjacent unselected
     # values so local edits do not create artificial jumps at selection edges.
@@ -1011,7 +1020,11 @@ class EditorSession:
 
     def _reapply_level_orders(self) -> None:
         for term, labels in list(self._level_orders.items()):
-            if term not in self.terms or self.terms[term].levels is None:
+            if (
+                term not in self.terms
+                or self.terms[term].levels is None
+                or self._is_ordered_level_term(term)
+            ):
                 self._level_orders.pop(term, None)
                 continue
             order = level_order_for_labels(self.terms[term].levels, labels)
@@ -1034,6 +1047,16 @@ class EditorSession:
         )
         fresh = term_from_inference(ti)
         return [] if fresh.levels is None else [str(level) for level in fresh.levels]
+
+    def _is_ordered_level_term(self, term: str) -> bool:
+        from superglm.features.ordered_categorical import OrderedCategorical
+
+        editable = self._require_term(term)
+        if str(editable.metadata.get("term_type", editable.kind)) == "ordered categorical":
+            return True
+        source_model = self.reference_model if self.reference_model is not None else self.model
+        spec = None if source_model is None else getattr(source_model, "_specs", {}).get(term)
+        return isinstance(spec, OrderedCategorical)
 
     def _has_collapsed_level_groups_after_replacement(self, term: str, replacement) -> bool:
         for name, spec in self.model._specs.items():
