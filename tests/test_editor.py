@@ -524,6 +524,39 @@ def test_to_model_can_refresh_fit_statistics_from_explicit_data():
     assert edited._fit_stats.pearson_chi2 == pytest.approx(expected_deviance)
 
 
+def test_to_model_mean_centering_applies_equivalent_native_curve_edit(editor_model):
+    native_session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        n_points=80,
+        centering="native",
+        with_se=False,
+    )
+    mean_session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        n_points=80,
+        centering="mean",
+        with_se=False,
+    )
+    indices = [22, 23, 24, 25]
+    native_session.select_indices("x_spline", indices)
+    mean_session.select_indices("x_spline", indices)
+    native_session.shift("x_spline", 0.35)
+    mean_session.shift("x_spline", 0.35)
+
+    native_model = native_session.to_model()
+    mean_model = mean_session.to_model()
+
+    X_ref = editor_model._fit_X_ref
+    np.testing.assert_allclose(
+        mean_model.predict(X_ref),
+        native_model.predict(X_ref),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
 def test_to_model_marks_edited_copy_inference_stale(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     session.select_x("x_spline", 2.0, 5.0)
@@ -665,6 +698,19 @@ def test_collapse_levels_replaces_in_force_model_and_clears_manual_edits(editor_
     grouping = session.model.features["region"]._grouping
     assert grouping.original_to_group["B"] == "B+C"
     assert grouping.original_to_group["C"] == "B+C"
+
+
+def test_to_model_applies_manual_edit_after_level_collapse(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+
+    session.select_levels("region", ["B"])
+    session.shift("region", 0.2)
+    edited = session.to_model()
+
+    mu = edited.predict(editor_model._fit_X_ref)
+    assert np.isfinite(mu).all()
 
 
 def test_uncollapse_levels_restores_previous_in_force_model(editor_model):
@@ -2073,6 +2119,48 @@ def test_editor_session_accepts_plain_evaluation_tuples_and_cv_report(editor_mod
     assert report["splits"][2]["n_obs"] == len(X_test)
     assert report["cv_report"] == cv_report
     assert report["can_run_cv"] is False
+
+
+def test_dataset_metrics_use_offset_aware_null_deviance():
+    from superglm.editor.evaluation import EvaluationDataset
+    from superglm.editor.metrics import compute_dataset_metrics
+    from superglm.model.fit_ops import _compute_null_mu
+
+    rng = np.random.default_rng(20260711)
+    n = 160
+    x = rng.normal(size=n)
+    offset = np.linspace(-1.0, 1.0, n)
+    sample_weight = rng.uniform(0.7, 1.6, size=n)
+    X = pd.DataFrame({"x": x})
+    y = 1.2 + 0.25 * x + offset + rng.normal(0.0, 0.04, n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X, y, sample_weight=sample_weight, offset=offset)
+
+    dataset = EvaluationDataset(
+        name="validation",
+        label="Validation",
+        X=X,
+        y=y,
+        sample_weight=sample_weight,
+        offset=offset,
+    )
+    metrics = compute_dataset_metrics(model, dataset)
+
+    mu = model.predict(X, offset=offset)
+    deviance = float(np.sum(sample_weight * model._distribution.deviance_unit(y, mu)))
+    null_mu = _compute_null_mu(
+        y,
+        sample_weight,
+        offset,
+        model._distribution,
+        model._link,
+    )
+    null_deviance = float(np.sum(sample_weight * model._distribution.deviance_unit(y, null_mu)))
+    assert metrics["explained_deviance"] == pytest.approx(1.0 - deviance / null_deviance)
 
 
 def test_widget_http_summary_and_fixed_offset_refit(editor_model):

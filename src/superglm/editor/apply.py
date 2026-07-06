@@ -71,7 +71,7 @@ def _apply_term_edit(model, term: EditableTerm) -> None:
         return
 
     if isinstance(spec, Numeric):
-        _patch_beta_block(model, groups, np.asarray(term.edited_log_effect, dtype=np.float64))
+        _patch_beta_block(model, groups, _native_target_values(term))
         return
 
     if isinstance(spec, Polynomial | _SplineBase):
@@ -94,7 +94,7 @@ def _apply_projected_term(
     weights = _term_weights(term)
     intercept_delta, beta_new = _solve_with_intercept(
         B,
-        np.asarray(term.edited_log_effect, dtype=np.float64),
+        _native_target_values(term),
         weights,
     )
     _adjust_intercept(model, intercept_delta)
@@ -109,10 +109,10 @@ def _apply_categorical_term(
 ) -> None:
     if term.levels is None:
         raise NotImplementedError(f"Term {term.name!r} has no editable levels.")
-    target = _level_target_map(term)
-    base_value = float(target[spec._base_level])
+    target = _level_target_map(term, spec)
+    base_value = float(target[str(spec._base_level)])
     beta_new = np.array(
-        [float(target[level]) - base_value for level in spec._non_base],
+        [float(target[str(level)]) - base_value for level in spec._non_base],
         dtype=np.float64,
     )
     _adjust_intercept(model, base_value)
@@ -127,10 +127,10 @@ def _apply_ordered_step_term(
 ) -> None:
     if term.levels is None:
         raise NotImplementedError(f"Term {term.name!r} has no editable levels.")
-    target = _level_target_map(term)
-    base_value = float(target[spec._base_level])
+    target = _level_target_map(term, spec)
+    base_value = float(target[str(spec._base_level)])
     beta_orig = np.array(
-        [float(target[level]) - base_value for level in spec._non_base],
+        [float(target[str(level)]) - base_value for level in spec._non_base],
         dtype=np.float64,
     )
     if spec._R_inv is not None:
@@ -147,9 +147,48 @@ def _ordered_spline_x(term: EditableTerm) -> NDArray:
     return np.asarray(term.levels, dtype=object)
 
 
-def _level_target_map(term: EditableTerm) -> dict[str, float]:
+def _level_target_map(term: EditableTerm, spec) -> dict[str, float]:
     assert term.levels is not None
-    return {level: float(term.edited_log_effect[i]) for i, level in enumerate(term.levels)}
+    effects = _native_target_values(term)
+    target = {str(level): float(effects[i]) for i, level in enumerate(term.levels)}
+    grouping = getattr(spec, "_grouping", None)
+    if grouping is None:
+        return target
+
+    weights = (
+        np.ones(len(term.levels), dtype=np.float64)
+        if term.weights is None
+        else np.asarray(term.weights, dtype=np.float64).ravel()
+    )
+    weight_by_level = {str(level): float(weights[i]) for i, level in enumerate(term.levels)}
+    for group_label in grouping.grouped_levels:
+        members = [str(level) for level in grouping.group_to_originals.get(group_label, [])]
+        present = [level for level in members if level in target]
+        if not present:
+            continue
+        member_values = np.asarray([target[level] for level in present], dtype=np.float64)
+        member_weights = np.asarray(
+            [max(weight_by_level.get(level, 0.0), 0.0) for level in present],
+            dtype=np.float64,
+        )
+        if float(np.sum(member_weights)) <= 0.0:
+            target[str(group_label)] = float(np.mean(member_values))
+        else:
+            target[str(group_label)] = float(np.average(member_values, weights=member_weights))
+    return target
+
+
+def _native_target_values(term: EditableTerm) -> NDArray:
+    values = np.asarray(term.edited_log_effect, dtype=np.float64).ravel()
+    native_original = term.metadata.get("native_original_log_effect")
+    if native_original is None:
+        return values
+
+    native = np.asarray(native_original, dtype=np.float64).ravel()
+    if native.shape != values.shape:
+        return values
+    display_original = np.asarray(term.original_log_effect, dtype=np.float64).ravel()
+    return values + native - display_original
 
 
 def _feature_groups(model, name: str) -> list[GroupSlice]:

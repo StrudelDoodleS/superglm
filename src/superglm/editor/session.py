@@ -134,10 +134,44 @@ class EditorSession:
                 centering=centering,
             )
             term = term_from_inference(ti)
+            if centering != "native":
+                native_ti = model.term_inference(
+                    name,
+                    with_se=False,
+                    n_points=n_points,
+                    centering="native",
+                )
+                EditorSession._attach_native_log_effect(term, native_ti)
             term.metadata["term_type"] = term_type_from_spec(model._specs[name])
             term.weights = term_weights_from_fit(model, name, term)
             editable[name] = term
         return editable
+
+    @staticmethod
+    def _attach_native_log_effect(term: EditableTerm, native_ti) -> None:
+        native = np.asarray(native_ti.log_relativity, dtype=np.float64).ravel()
+        if term.levels is not None and native_ti.levels is not None:
+            native_levels = [str(level) for level in native_ti.levels]
+            native_by_level = dict(zip(native_levels, native, strict=True))
+            term.metadata["native_original_log_effect"] = [
+                float(native_by_level[level]) for level in term.levels
+            ]
+            return
+
+        native_x = (
+            None if native_ti.x is None else np.asarray(native_ti.x, dtype=np.float64).ravel()
+        )
+        if term.x is not None and native_x is not None:
+            if native.shape == term.x.shape and np.allclose(native_x, term.x):
+                values = native
+            else:
+                order = np.argsort(native_x)
+                values = np.interp(term.x, native_x[order], native[order])
+            term.metadata["native_original_log_effect"] = [float(value) for value in values]
+            return
+
+        if native.shape == term.original_log_effect.shape:
+            term.metadata["native_original_log_effect"] = [float(value) for value in native]
 
     # Selection is term-local and always stored as display-grid indices. The UI
     # may select by x range or category label, but downstream edit operations

@@ -83,7 +83,7 @@ def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
     bic = float(-2.0 * log_likelihood + np.log(max(n, 1)) * edf)
     denom = n - edf - 1.0
     aicc = float(aic + 2.0 * edf * (edf + 1.0) / denom) if denom > 0 else float("inf")
-    null_deviance = _null_deviance(model, y_arr, w)
+    null_deviance = _null_deviance(model, y_arr, w, offset_arg)
     explained = float(1.0 - deviance / null_deviance) if null_deviance > 0 else float("nan")
     variance = np.maximum(family.variance(mu), 1e-300)
     pearson = float(np.sum(w * (y_arr - mu) ** 2 / variance))
@@ -99,7 +99,8 @@ def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
     }
 
 
-def _null_deviance(model, y: np.ndarray, weights: np.ndarray) -> float:
-    y_bar = float(np.average(y, weights=weights))
-    mu = np.full(y.size, y_bar, dtype=np.float64)
+def _null_deviance(model, y: np.ndarray, weights: np.ndarray, offset: np.ndarray | None) -> float:
+    from superglm.model.fit_ops import _compute_null_mu
+
+    mu = _compute_null_mu(y, weights, offset, model._distribution, model._link)
     return float(np.sum(weights * model._distribution.deviance_unit(y, mu)))
