@@ -389,6 +389,7 @@ function updateCollapseAction(term, selection) {
       isLevelTerm &&
       state.can_uncollapse_levels &&
       state.last_collapse &&
+      state.last_collapse.term === selectedTerm() &&
       selectionTouchesCollapsedGroup(term, selection)
     );
   }

@@ -649,6 +649,18 @@ def test_jsonable_converts_numpy_boolean_scalars():
     assert json.dumps(payload, allow_nan=False) == '{"ok": true, "bad": false}'
 
 
+def test_weighted_average_falls_back_when_selected_exposure_is_zero(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    term = session.terms["region"]
+    term.weights = np.array([1.0, 0.0, 0.0])
+    term.edited_log_effect = np.array([0.0, 0.2, 0.8])
+
+    session.select_levels("region", ["B", "C"])
+    session.weighted_average("region")
+
+    np.testing.assert_allclose(term.edited_log_effect[[1, 2]], 0.5)
+
+
 def test_in_force_summary_uses_session_train_data_without_retained_fit_state():
     from superglm.editor.summaries import summary_payload
 
@@ -3645,6 +3657,7 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "selection-icon" in shell
         assert 'id="uncollapseLevels" class="selection-item"' in shell
         assert ">Undo collapse</button>" not in shell
+        assert "state.last_collapse.term === selectedTerm()" in js
         assert 'aria-label="Smooth"' in shell
         assert 'aria-label="Level selected values"' in shell
         assert 'aria-label="Snap selected values"' in shell

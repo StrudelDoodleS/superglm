@@ -281,6 +281,8 @@ class EditorSession:
         weights = np.ones(idx.size, dtype=np.float64)
         if editable.weights is not None:
             weights = np.asarray(editable.weights[idx], dtype=np.float64)
+        if float(np.sum(weights)) <= 0.0:
+            weights = None
         value = float(np.average(before, weights=weights))
         after = np.full(idx.size, value, dtype=np.float64)
         self._commit(term, "weighted_average", idx, before, after, {"value": value})
