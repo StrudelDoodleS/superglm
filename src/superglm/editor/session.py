@@ -854,12 +854,14 @@ class EditorSession:
     def replace_in_force_model(self, model, *, with_se: bool = True) -> EditorSession:
         """Replace the editable in-force model while retaining the original reference model."""
         self.model = model
+        train_data = self._evaluation_data.get("train")
         self.terms = self._editable_terms_from_model(
             model,
             list(self._term_names),
             n_points=self.n_points,
             centering=self.centering,
             with_se=with_se,
+            train_data=train_data,
         )
         self._selection = {name: np.array([], dtype=np.intp) for name in self.terms}
         self._reapply_level_orders()

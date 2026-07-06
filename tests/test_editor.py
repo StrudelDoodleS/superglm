@@ -771,6 +771,36 @@ def test_session_uses_supplied_train_data_for_weights_without_retained_fit_state
     np.testing.assert_allclose(session.terms["region"].weights, expected)
 
 
+def test_replacement_reuses_supplied_train_data_for_weights_without_retained_fit_state():
+    rng = np.random.default_rng(20260724)
+    X = pd.DataFrame(
+        {
+            "region": ["A", "A", "B", "B", "B", "C"],
+            "x": rng.normal(size=6),
+        }
+    )
+    sample_weight = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    y = np.array([0.2, 0.3, 0.9, 1.0, 1.1, -0.1])
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"region": Categorical(base="first"), "x": Numeric()},
+    )
+    model.fit(X, y, sample_weight=sample_weight)
+    session = EditorSession.from_model(
+        model,
+        terms=["region"],
+        train_data=(X, y, sample_weight),
+    )
+
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+
+    expected = np.array([3.0, 12.0, 6.0])
+    np.testing.assert_allclose(session.terms["region"].weights, expected)
+
+
 def test_edited_offset_factor_and_refit_with_fixed_offset(editor_model, editor_frame):
     X, _ = editor_frame
     session = EditorSession.from_model(editor_model, terms=["region", "x_spline"])
@@ -2438,6 +2468,48 @@ def test_widget_http_collapse_levels_refit_updates_summary_source(editor_model):
         assert summary["available"] is True
         assert summary["source"] == "in_force"
         assert "Current editable model" in summary["note"]
+    finally:
+        widget.close()
+
+
+def test_widget_collapse_restores_selection_by_level_when_indices_are_stale(
+    editor_model,
+    monkeypatch,
+):
+    import superglm.editor.widget as widget_module
+
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    try:
+        session.select_indices("region", [1, 2])
+
+        def replace_with_smaller_term(term, *, method="auto"):
+            assert term == "region"
+            assert method == "fit"
+            session.terms["region"] = EditableTerm(
+                name="region",
+                kind="categorical",
+                x=np.array([0.0, 1.0]),
+                levels=["A", "B"],
+                original_log_effect=np.zeros(2),
+                edited_log_effect=np.zeros(2),
+                weights=np.ones(2),
+                metadata={"term_type": "categorical"},
+            )
+            session._selection["region"] = np.array([], dtype=np.intp)
+            return editor_model
+
+        monkeypatch.setattr(session, "replace_with_collapsed_levels", replace_with_smaller_term)
+        monkeypatch.setattr(
+            widget_module,
+            "summary_payload",
+            lambda *_args, **_kwargs: {"available": True, "source": "in_force"},
+        )
+
+        payload = widget._collapse_levels("region", method="fit")
+
+        assert payload["available"] is True
+        assert session.selection("region").tolist() == [1]
     finally:
         widget.close()
 

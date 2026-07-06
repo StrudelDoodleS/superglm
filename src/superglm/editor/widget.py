@@ -476,6 +476,7 @@ class EditorWidget:
                 self._set_term(term)
             target = self.selected_term
             selected_indices = self.session.selection(target).astype(int).tolist()
+            selected_levels = self._selected_level_labels(target)
             previous_info = None if self._in_force_info is None else dict(self._in_force_info)
             refit_model = self.session.replace_with_collapsed_levels(target, method=method)
             self._collapse_info_history.append(previous_info)
@@ -483,8 +484,7 @@ class EditorWidget:
             self._collapsed_refit_info = dict(getattr(refit_model, "_editor_level_collapse", {}))
             self._in_force_info = dict(self._collapsed_refit_info)
             self._invalidate_refit()
-            if selected_indices:
-                self.session.select_indices(target, selected_indices)
+            self._restore_selection(target, selected_levels, selected_indices)
             return summary_payload(self, "in_force")
 
     def _ungroup_levels(self, term: str | None = None, method: str = "auto") -> dict[str, Any]:
@@ -493,6 +493,7 @@ class EditorWidget:
                 self._set_term(term)
             target = self.selected_term
             selected_indices = self.session.selection(target).astype(int).tolist()
+            selected_levels = self._selected_level_labels(target)
             previous_info = None if self._in_force_info is None else dict(self._in_force_info)
             refit_model = self.session.replace_with_ungrouped_levels(target, method=method)
             self._collapse_info_history.append(previous_info)
@@ -500,8 +501,7 @@ class EditorWidget:
             self._collapsed_refit_info = dict(getattr(refit_model, "_editor_level_collapse", {}))
             self._in_force_info = dict(self._collapsed_refit_info)
             self._invalidate_refit()
-            if selected_indices:
-                self.session.select_indices(target, selected_indices)
+            self._restore_selection(target, selected_levels, selected_indices)
             return summary_payload(self, "in_force")
 
     def _reorder_levels(self, term: str | None = None, target_index: int = 0) -> dict[str, Any]:
@@ -526,6 +526,38 @@ class EditorWidget:
             if self.selected_term not in self.session.terms:
                 self.selected_term = next(iter(self.session.terms), "")
             return summary_payload(self, "in_force")
+
+    def _selected_level_labels(self, term: str) -> list[str]:
+        editable = self.session.terms.get(term)
+        if editable is None or editable.levels is None:
+            return []
+        labels = editable.levels
+        return [
+            labels[int(index)]
+            for index in self.session.selection(term)
+            if 0 <= int(index) < len(labels)
+        ]
+
+    def _restore_selection(
+        self,
+        term: str,
+        levels: list[str],
+        fallback_indices: list[int],
+    ) -> None:
+        editable = self.session.terms.get(term)
+        if editable is None:
+            return
+        if editable.levels is not None and levels:
+            available = set(editable.levels)
+            restored_levels = [level for level in levels if level in available]
+            if restored_levels:
+                self.session.select_levels(term, restored_levels)
+                return
+        valid_indices = [
+            int(index) for index in fallback_indices if 0 <= int(index) < editable.size
+        ]
+        if valid_indices:
+            self.session.select_indices(term, valid_indices)
 
     def _invalidate_refit(self) -> None:
         self._offset_refit_model = None
