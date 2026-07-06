@@ -69,10 +69,16 @@ def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, floa
 
 
 def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
-    y_arr = np.asarray(y, dtype=np.float64)
-    w = np.asarray(weights, dtype=np.float64)
-    offset_arg = None if offset is None else np.asarray(offset, dtype=np.float64)
-    mu = np.asarray(model.predict(X, offset=offset_arg), dtype=np.float64)
+    y_arr = np.asarray(y, dtype=np.float64).ravel()
+    w = np.asarray(weights, dtype=np.float64).ravel()
+    offset_arg = None if offset is None else np.asarray(offset, dtype=np.float64).ravel()
+    mu = np.asarray(model.predict(X, offset=offset_arg), dtype=np.float64).ravel()
+    if w.size != y_arr.size:
+        raise ValueError(f"sample_weight has length {w.size}, expected {y_arr.size}.")
+    if offset_arg is not None and offset_arg.size != y_arr.size:
+        raise ValueError(f"offset has length {offset_arg.size}, expected {y_arr.size}.")
+    if mu.size != y_arr.size:
+        raise ValueError(f"Predictions have length {mu.size}, expected {y_arr.size}.")
     family = model._distribution
     phi = float(model.result.phi)
     edf = float(model.result.effective_df)

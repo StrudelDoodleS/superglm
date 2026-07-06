@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.editor.terms import native_log_effect_values
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
@@ -71,7 +72,7 @@ def _apply_term_edit(model, term: EditableTerm) -> None:
         return
 
     if isinstance(spec, Numeric):
-        _patch_beta_block(model, groups, _native_target_values(term))
+        _patch_beta_block(model, groups, native_log_effect_values(term))
         return
 
     if isinstance(spec, Polynomial | _SplineBase):
@@ -94,7 +95,7 @@ def _apply_projected_term(
     weights = _term_weights(term)
     intercept_delta, beta_new = _solve_with_intercept(
         B,
-        _native_target_values(term),
+        native_log_effect_values(term),
         weights,
     )
     _adjust_intercept(model, intercept_delta)
@@ -149,7 +150,7 @@ def _ordered_spline_x(term: EditableTerm) -> NDArray:
 
 def _level_target_map(term: EditableTerm, spec) -> dict[str, float]:
     assert term.levels is not None
-    effects = _native_target_values(term)
+    effects = native_log_effect_values(term)
     target = {str(level): float(effects[i]) for i, level in enumerate(term.levels)}
     grouping = getattr(spec, "_grouping", None)
     if grouping is None:
@@ -176,19 +177,6 @@ def _level_target_map(term: EditableTerm, spec) -> dict[str, float]:
         else:
             target[str(group_label)] = float(np.average(member_values, weights=member_weights))
     return target
-
-
-def _native_target_values(term: EditableTerm) -> NDArray:
-    values = np.asarray(term.edited_log_effect, dtype=np.float64).ravel()
-    native_original = term.metadata.get("native_original_log_effect")
-    if native_original is None:
-        return values
-
-    native = np.asarray(native_original, dtype=np.float64).ravel()
-    if native.shape != values.shape:
-        return values
-    display_original = np.asarray(term.original_log_effect, dtype=np.float64).ravel()
-    return values + native - display_original
 
 
 def _feature_groups(model, name: str) -> list[GroupSlice]:

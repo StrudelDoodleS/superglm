@@ -557,6 +557,36 @@ def test_to_model_mean_centering_applies_equivalent_native_curve_edit(editor_mod
     )
 
 
+def test_edited_offset_mean_centering_applies_equivalent_native_curve_edit(editor_model):
+    native_session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        n_points=80,
+        centering="native",
+        with_se=False,
+    )
+    mean_session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        n_points=80,
+        centering="mean",
+        with_se=False,
+    )
+    indices = [22, 23, 24, 25]
+    native_session.select_indices("x_spline", indices)
+    mean_session.select_indices("x_spline", indices)
+    native_session.shift("x_spline", 0.35)
+    mean_session.shift("x_spline", 0.35)
+
+    X_ref = editor_model._fit_X_ref
+    np.testing.assert_allclose(
+        mean_session.edited_offset("x_spline", X=X_ref),
+        native_session.edited_offset("x_spline", X=X_ref),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
 def test_to_model_marks_edited_copy_inference_stale(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     session.select_x("x_spline", 2.0, 5.0)
@@ -2161,6 +2191,48 @@ def test_dataset_metrics_use_offset_aware_null_deviance():
     )
     null_deviance = float(np.sum(sample_weight * model._distribution.deviance_unit(y, null_mu)))
     assert metrics["explained_deviance"] == pytest.approx(1.0 - deviance / null_deviance)
+
+
+def test_dataset_metrics_flatten_column_vector_inputs():
+    from superglm.editor.evaluation import EvaluationDataset
+    from superglm.editor.metrics import compute_dataset_metrics
+
+    rng = np.random.default_rng(20260712)
+    n = 120
+    x = rng.normal(size=n)
+    offset = np.linspace(-0.5, 0.5, n)
+    sample_weight = rng.uniform(0.8, 1.4, size=n)
+    X = pd.DataFrame({"x": x})
+    y = 0.7 + 0.2 * x + offset + rng.normal(0.0, 0.03, n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X, y, sample_weight=sample_weight, offset=offset)
+
+    flat = EvaluationDataset(
+        name="validation",
+        label="Validation",
+        X=X,
+        y=y,
+        sample_weight=sample_weight,
+        offset=offset,
+    )
+    column = EvaluationDataset(
+        name="validation",
+        label="Validation",
+        X=X,
+        y=y.reshape(-1, 1),
+        sample_weight=sample_weight.reshape(-1, 1),
+        offset=offset.reshape(-1, 1),
+    )
+
+    flat_metrics = compute_dataset_metrics(model, flat)
+    column_metrics = compute_dataset_metrics(model, column)
+
+    for key, value in flat_metrics.items():
+        assert column_metrics[key] == pytest.approx(value)
 
 
 def test_widget_http_summary_and_fixed_offset_refit(editor_model):

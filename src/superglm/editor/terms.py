@@ -104,7 +104,7 @@ def term_weights_from_fit(model, name: str, term: EditableTerm) -> NDArray:
 def term_offset_values(term: EditableTerm, values) -> NDArray:
     # Score edited terms back onto raw rows for fixed-offset refits. Categoricals
     # map by label; continuous terms interpolate over the editor grid.
-    effects = np.asarray(term.edited_log_effect, dtype=np.float64).ravel()
+    effects = native_log_effect_values(term)
     if term.levels is not None:
         mapping = {level: float(effects[i]) for i, level in enumerate(term.levels)}
         raw = [str(v) for v in np.asarray(values, dtype=object).ravel()]
@@ -124,6 +124,20 @@ def term_offset_values(term: EditableTerm, values) -> NDArray:
     x_sorted = x_grid[order]
     y_sorted = effects[order]
     return np.interp(x_values, x_sorted, y_sorted, left=y_sorted[0], right=y_sorted[-1])
+
+
+def native_log_effect_values(term: EditableTerm) -> NDArray:
+    """Return edited log effects in the model's native centering."""
+    values = np.asarray(term.edited_log_effect, dtype=np.float64).ravel()
+    native_original = term.metadata.get("native_original_log_effect")
+    if native_original is None:
+        return values
+
+    native = np.asarray(native_original, dtype=np.float64).ravel()
+    if native.shape != values.shape:
+        return values
+    display_original = np.asarray(term.original_log_effect, dtype=np.float64).ravel()
+    return values + native - display_original
 
 
 def resolve_refit_method(model, method: str) -> str:
