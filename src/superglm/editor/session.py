@@ -668,6 +668,7 @@ class EditorSession:
                 **profile_kwargs,
             )
         elif key in {"nb2", "nb2_theta", "negative_binomial", "theta"}:
+            profile_kwargs.setdefault("fit_mode", fit_mode)
             if progress_callback is not None:
                 profile_kwargs.setdefault("progress_callback", progress_callback)
             result = profile_model.estimate_theta(

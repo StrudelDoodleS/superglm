@@ -34,6 +34,7 @@ def collapsed_feature_spec(
         raise TypeError(
             f"Collapse levels is only available for categorical terms, got {term.name!r}."
         )
+    _require_not_interaction_parent(model, term.name, operation="collapse levels")
 
     idx = np.unique(np.asarray(selected_indices, dtype=np.intp))
     if idx.min() < 0 or idx.max() >= len(term.levels):
@@ -118,6 +119,7 @@ def ungrouped_feature_spec(
         raise TypeError(
             f"Ungroup levels is only available for categorical terms, got {term.name!r}."
         )
+    _require_not_interaction_parent(model, term.name, operation="ungroup levels")
     existing = getattr(spec, "_grouping", None)
     if existing is None:
         raise ValueError(f"Term {term.name!r} does not have collapsed levels.")
@@ -156,6 +158,20 @@ def clone_with_replaced_feature(model, term: str, replacement, *, lambda1=..., l
     new_model = model._clone_without_features(set(), lambda1=lambda1, lambda2=lambda2)
     new_model._specs[term] = replacement
     return new_model
+
+
+def _require_not_interaction_parent(model, term: str, *, operation: str) -> None:
+    interactions: list[str] = []
+    for name, spec in getattr(model, "_interaction_specs", {}).items():
+        parent_names = getattr(spec, "parent_names", ())
+        if term in parent_names:
+            interactions.append(str(name))
+    if interactions:
+        joined = ", ".join(interactions)
+        raise ValueError(
+            f"Cannot {operation} for term {term!r} because it is used by interaction(s): "
+            f"{joined}. Refit a model without those interactions first."
+        )
 
 
 def _collapse_grouping(

@@ -288,6 +288,7 @@ def feature_groups(model, name: str) -> list[GroupSlice]:
 
 
 def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
+    from superglm.features.interaction import PolynomialCategorical, SplineCategorical
     from superglm.features.ordered_categorical import OrderedCategorical
 
     rows = [_CoefRow(name="Intercept", coef=float(model.result.intercept))]
@@ -337,6 +338,22 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
                         )
                     )
                     row_idx += 1
+            continue
+
+        if isinstance(spec, SplineCategorical | PolynomialCategorical):
+            metadata = spline_group_enrichment(g.name, spec, group_edf, reml_lambdas, model.lambda2)
+            rows.append(
+                _CoefRow(
+                    name=g.name,
+                    group=g.feature_name,
+                    is_spline=True,
+                    n_params=g.size,
+                    active=active,
+                    group_norm=norm,
+                    subgroup_type=g.subgroup_type,
+                    **metadata,
+                )
+            )
             continue
 
         non_base = getattr(spec, "_non_base", None)

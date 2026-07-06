@@ -99,9 +99,24 @@ def estimate_p(
     return result
 
 
-def estimate_theta(model, X, y, sample_weight=None, offset=None, **kwargs):
+def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fit", **kwargs):
     """Estimate NB theta via profile likelihood, refit, and return result."""
     from superglm.profiling.nb import estimate_nb_theta
+
+    _VALID_FIT_MODES = {"fit", "reml", "inherit"}
+    if fit_mode not in _VALID_FIT_MODES:
+        raise ValueError(
+            f"fit_mode={fit_mode!r} is not valid, expected one of {sorted(_VALID_FIT_MODES)}"
+        )
+    if fit_mode == "reml":
+        resolved_mode = "fit_reml"
+    elif fit_mode == "inherit":
+        if model._last_fit_meta is not None:
+            resolved_mode = model._last_fit_meta["method"]
+        else:
+            resolved_mode = "fit"
+    else:
+        resolved_mode = "fit"
 
     progress_callback = kwargs.pop("progress_callback", None)
     result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset, **kwargs)
@@ -110,7 +125,10 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, **kwargs):
     model.family = NegativeBinomial(theta=result.theta_hat)
     if progress_callback is not None:
         progress_callback("final_refit", {"profile_estimate": _theta_estimate_payload(result)})
-    model.fit(X, y, sample_weight=sample_weight, offset=offset)
+    if resolved_mode == "fit_reml":
+        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
+    else:
+        model.fit(X, y, sample_weight=sample_weight, offset=offset)
     model._nb_profile_result = result  # after refit so fit()'s clear doesn't wipe it
     return result
 

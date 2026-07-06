@@ -499,6 +499,40 @@ def test_to_model_refreshes_fit_statistics_after_manual_edit(editor_model):
     assert edited.result.deviance != pytest.approx(original_deviance)
 
 
+def test_stale_summary_routes_varying_interactions_as_curve_groups():
+    rng = np.random.default_rng(20260726)
+    n = 260
+    x = rng.uniform(-1.0, 1.0, n)
+    cat = rng.choice(["A", "B", "C", "D"], n)
+    X = pd.DataFrame({"x": x, "cat": cat})
+    y = (
+        0.2
+        + 0.3 * x
+        + 0.15 * x**2 * (cat == "B")
+        - 0.10 * x**2 * (cat == "C")
+        + rng.normal(0.0, 0.05, n)
+    )
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Polynomial(degree=2), "cat": Categorical(base="first")},
+        interactions=[("x", "cat")],
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["x"])
+    session.select_indices("x", [0])
+    session.shift("x", 0.05)
+
+    edited = session.to_model()
+    rows = edited.summary()._coef_rows
+    row_by_name = {row.name: row for row in rows}
+
+    assert "x:cat[B]" in row_by_name
+    assert row_by_name["x:cat[B]"].is_spline is True
+    assert row_by_name["x:cat[B]"].n_params == 2
+    assert "x:cat[B][B]" not in row_by_name
+
+
 def test_to_model_can_refresh_fit_statistics_from_explicit_data():
     rng = np.random.default_rng(20260710)
     n = 180
@@ -1001,6 +1035,27 @@ def test_collapse_levels_replaces_in_force_model_and_clears_manual_edits(editor_
     grouping = session.model.features["region"]._grouping
     assert grouping.original_to_group["B"] == "B+C"
     assert grouping.original_to_group["C"] == "B+C"
+
+
+def test_collapse_levels_rejects_terms_used_by_interactions():
+    rng = np.random.default_rng(20260726)
+    n = 180
+    x = rng.normal(size=n)
+    region = rng.choice(["A", "B", "C"], n)
+    X = pd.DataFrame({"x": x, "region": region})
+    y = 0.3 + 0.4 * x + 0.2 * (region == "B") * x + rng.normal(0.0, 0.04, n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric(), "region": Categorical(base="first")},
+        interactions=[("x", "region")],
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["region"], train_data=(X, y, None))
+    session.select_levels("region", ["B", "C"])
+
+    with pytest.raises(ValueError, match="used by interaction"):
+        session.replace_with_collapsed_levels("region", method="fit")
 
 
 def test_collapse_levels_refits_numeric_categorical_levels():
@@ -1617,7 +1672,7 @@ def test_reprofile_distribution_parameter_dispatches_to_model(
     assert calls[0]["kwargs"] == {"method": "grid", "n_grid": 7, "fit_mode": "inherit"}
     assert calls[1]["parameter"] == "theta"
     assert calls[1]["model"] is not editor_model
-    assert calls[1]["kwargs"] == {"theta_bounds": (0.2, 20.0)}
+    assert calls[1]["kwargs"] == {"theta_bounds": (0.2, 20.0), "fit_mode": "inherit"}
     assert replaced == [calls[0]["model"], calls[1]["model"]]
 
 
