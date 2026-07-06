@@ -659,6 +659,7 @@ class EditorSession:
             raise ValueError("parameter must be 'tweedie_p' or 'nb2_theta'.")
 
         self.replace_in_force_model(profile_model)
+        self.collapse_history.clear()
         return result
 
     def refit_with_collapsed_levels(

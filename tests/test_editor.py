@@ -721,6 +721,24 @@ def test_to_model_marks_edited_copy_inference_stale(editor_model):
     assert inference.ci_lower is None
 
 
+def test_stale_editor_summary_skips_coef_row_inference(editor_model, monkeypatch):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_x("x_spline", 2.0, 5.0)
+    session.shift("x_spline", 0.35)
+    edited = session.to_model()
+
+    def fail_build_coef_rows(*args, **kwargs):
+        raise AssertionError("stale editor summary should not build inference rows")
+
+    monkeypatch.setattr("superglm.inference.coef_tables.build_coef_rows", fail_build_coef_rows)
+
+    summary = edited.summary()
+
+    assert summary["standard_errors"] == {"inference_stale": True}
+    spline_row = next(row for row in summary._coef_rows if row.name == "x_spline")
+    assert spline_row.wald_p is None
+
+
 def test_edited_offset_factor_and_refit_with_fixed_offset(editor_model, editor_frame):
     X, _ = editor_frame
     session = EditorSession.from_model(editor_model, terms=["region", "x_spline"])
@@ -1462,6 +1480,31 @@ def test_reprofile_distribution_uses_cloned_in_force_model():
     assert model.family.p == 1.3
     np.testing.assert_allclose(model.result.beta, original_beta)
     assert model.result.intercept == original_intercept
+
+
+def test_reprofile_distribution_clears_collapse_history(editor_model, editor_frame, monkeypatch):
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["region"],
+        train_data=(X, y, None),
+    )
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    assert session.can_uncollapse_levels()
+
+    def fake_estimate_p(self, X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
+        self.fit(X_arg, y_arg, sample_weight=sample_weight, offset=offset)
+        self._editor_profile_marker = "profiled"
+        return "p-result"
+
+    monkeypatch.setattr(type(editor_model), "estimate_p", fake_estimate_p)
+
+    result = session.reprofile_distribution("tweedie_p", method="grid", grid=np.array([1.45]))
+
+    assert result == "p-result"
+    assert session.model._editor_profile_marker == "profiled"
+    assert session.can_uncollapse_levels() is False
 
 
 def test_reprofile_distribution_rejects_pending_manual_edits(editor_model, editor_frame):

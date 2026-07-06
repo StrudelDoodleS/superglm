@@ -8,6 +8,7 @@ from typing import Any, cast
 import numpy as np
 
 from superglm.inference._term_helpers import spline_group_enrichment
+from superglm.inference.summary import _CoefRow
 from superglm.types import GroupSlice
 
 
@@ -203,6 +204,15 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         model_info["tweedie_p_method"] = f"Profile ({tw_pr.method}, phi={tw_pr.phi_method})"
         model_info["tweedie_profile_nll"] = tw_pr.nll
 
+    editor_inference_stale = bool(model_info.get("editor_inference_stale", False))
+    if editor_inference_stale:
+        coef_rows = _build_editor_stale_coef_rows(model)
+        _suppress_editor_inference(coef_rows)
+        data["standard_errors"] = {"inference_stale": True}
+        summary_obj = ModelSummary(data, model_info, coef_rows, alpha=alpha, detail=detail)
+        cache[key] = summary_obj
+        return summary_obj
+
     inf = model._fit_inference_info
     XtWX_inv = inf["XtWX_inv"]
     XtWX_inv_aug = inf["XtWX_inv_aug"]
@@ -231,10 +241,6 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,
     )
-    editor_inference_stale = bool(model_info.get("editor_inference_stale", False))
-    if editor_inference_stale:
-        _suppress_editor_inference(coef_rows)
-
     phi = res.phi
     se_dict: dict[str, np.ndarray] = {}
     se_raw_dict: dict[str, np.ndarray] = {}
@@ -254,24 +260,20 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
                 se_raw_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
                 se_dict[g.name] = np.sqrt(np.maximum(phi * var_diag, 0.0))
 
-    if editor_inference_stale:
-        data["standard_errors"] = {"inference_stale": True}
-        basis_detail = {}
-    else:
-        data["standard_errors"] = {
-            "coefficient_se": se_dict,
-            "coefficient_se_raw": se_raw_dict,
-        }
-        basis_detail = build_basis_detail(
-            groups=model._groups,
-            specs=model._specs,
-            interaction_specs=model._interaction_specs,
-            result=res,
-            XtWX_inv_aug=XtWX_inv_aug,
-            active_groups=active_groups,
-            known_scale=known_scale,
-            alpha=alpha,
-        )
+    data["standard_errors"] = {
+        "coefficient_se": se_dict,
+        "coefficient_se_raw": se_raw_dict,
+    }
+    basis_detail = build_basis_detail(
+        groups=model._groups,
+        specs=model._specs,
+        interaction_specs=model._interaction_specs,
+        result=res,
+        XtWX_inv_aug=XtWX_inv_aug,
+        active_groups=active_groups,
+        known_scale=known_scale,
+        alpha=alpha,
+    )
 
     summary_obj = ModelSummary(
         data, model_info, coef_rows, alpha=alpha, detail=detail, basis_detail=basis_detail
@@ -283,6 +285,69 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
 def feature_groups(model, name: str) -> list[GroupSlice]:
     """Get all groups belonging to a feature."""
     return [g for g in model._groups if g.feature_name == name]
+
+
+def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
+    rows = [_CoefRow(name="Intercept", coef=float(model.result.intercept))]
+    group_edf = getattr(model, "_group_edf", None)
+    reml_lambdas = getattr(model, "_reml_lambdas", None)
+
+    for g in model._groups:
+        beta_g = np.asarray(model.result.beta[g.sl], dtype=float)
+        norm = float(np.linalg.norm(beta_g))
+        active = norm > 1e-12
+        spec = model._specs.get(g.feature_name) or model._interaction_specs.get(g.feature_name)
+        edf = group_edf.get(g.name) if group_edf else None
+
+        non_base = getattr(spec, "_non_base", None)
+        if non_base is not None and len(non_base) >= g.size:
+            for i, level in enumerate(non_base[: g.size]):
+                rows.append(
+                    _CoefRow(
+                        name=f"{g.name}[{level}]",
+                        group=g.name,
+                        coef=float(beta_g[i]),
+                        edf=edf if i == 0 else None,
+                    )
+                )
+            continue
+
+        pairs = getattr(spec, "_pairs", None)
+        if pairs is not None and len(pairs) >= g.size:
+            for i, (lev1, lev2) in enumerate(pairs[: g.size]):
+                rows.append(
+                    _CoefRow(
+                        name=f"{g.name}[{lev1}:{lev2}]",
+                        group=g.name,
+                        coef=float(beta_g[i]),
+                        edf=edf if i == 0 else None,
+                    )
+                )
+            continue
+
+        if g.size == 1:
+            rows.append(_CoefRow(name=g.name, group=g.name, coef=float(beta_g[0]), edf=edf))
+            continue
+
+        metadata = (
+            spline_group_enrichment(g.name, spec, group_edf, reml_lambdas, model.lambda2)
+            if spec is not None
+            else {}
+        )
+        rows.append(
+            _CoefRow(
+                name=g.name,
+                group=g.feature_name,
+                is_spline=True,
+                n_params=g.size,
+                active=active,
+                group_norm=norm,
+                subgroup_type=g.subgroup_type,
+                **metadata,
+            )
+        )
+
+    return rows
 
 
 def _suppress_editor_inference(coef_rows) -> None:
