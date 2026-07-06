@@ -480,6 +480,7 @@ class EditorWidget:
             self._collapsed_refit_model = refit_model
             self._collapsed_refit_info = dict(getattr(refit_model, "_editor_level_collapse", {}))
             self._in_force_info = dict(self._collapsed_refit_info)
+            self._invalidate_refit()
             if selected_indices:
                 self.session.select_indices(target, selected_indices)
             return summary_payload(self, "in_force")
@@ -496,6 +497,7 @@ class EditorWidget:
             self._collapsed_refit_model = refit_model
             self._collapsed_refit_info = dict(getattr(refit_model, "_editor_level_collapse", {}))
             self._in_force_info = dict(self._collapsed_refit_info)
+            self._invalidate_refit()
             if selected_indices:
                 self.session.select_indices(target, selected_indices)
             return summary_payload(self, "in_force")
@@ -518,6 +520,7 @@ class EditorWidget:
             )
             self._collapsed_refit_info = None if restored_info is None else dict(restored_info)
             self._in_force_info = None if restored_info is None else dict(restored_info)
+            self._invalidate_refit()
             if self.selected_term not in self.session.terms:
                 self.selected_term = next(iter(self.session.terms), "")
             return summary_payload(self, "in_force")

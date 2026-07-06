@@ -269,9 +269,10 @@ def _refresh_fit_statistics(
         model._fit_stats = None
         return
 
+    explicit_scoring_data = X is not None or y is not None
     y_arr = np.asarray(y_ref, dtype=np.float64).ravel()
     if sample_weight is None:
-        weights = getattr(model, "_fit_weights", None)
+        weights = None if explicit_scoring_data else getattr(model, "_fit_weights", None)
         if weights is None:
             weights = np.ones(y_arr.size, dtype=np.float64)
     else:
@@ -280,8 +281,8 @@ def _refresh_fit_statistics(
         raise ValueError(f"sample_weight has length {weights.size}, expected {y_arr.size}.")
 
     if offset is None:
-        offset_arr = getattr(model, "_fit_offset", None)
-        offset_ref = getattr(model, "_fit_offset_ref", None)
+        offset_arr = None if explicit_scoring_data else getattr(model, "_fit_offset", None)
+        offset_ref = None if explicit_scoring_data else getattr(model, "_fit_offset_ref", None)
     else:
         offset_arr = np.asarray(offset, dtype=np.float64).ravel()
         offset_ref = offset
@@ -329,10 +330,10 @@ def _refresh_fit_statistics(
         model._fit_X_ref = X
     if y is not None:
         model._fit_y_ref = y
-    if sample_weight is not None:
+    if sample_weight is not None or explicit_scoring_data:
         model._fit_weights = weights
         model._fit_sample_weight_ref = sample_weight
-    if offset is not None:
+    if offset is not None or explicit_scoring_data:
         model._fit_offset = offset_arr
         model._fit_offset_ref = offset_ref
     model._fit_metrics_cache = None

@@ -525,6 +525,39 @@ def test_to_model_can_refresh_fit_statistics_from_explicit_data():
     assert edited._fit_stats.pearson_chi2 == pytest.approx(expected_deviance)
 
 
+def test_to_model_explicit_data_omits_retained_offset_and_weights_when_not_supplied():
+    rng = np.random.default_rng(20260720)
+    n_train = 180
+    n_val = 70
+    X_train = pd.DataFrame({"x": rng.normal(size=n_train)})
+    train_weight = rng.uniform(0.5, 2.0, size=n_train)
+    train_offset = rng.normal(0.0, 0.05, size=n_train)
+    y_train = (
+        0.4 + 0.3 * X_train["x"].to_numpy() + train_offset + rng.normal(0.0, 0.04, size=n_train)
+    )
+    X_val = pd.DataFrame({"x": rng.normal(size=n_val)})
+    y_val = 0.4 + 0.3 * X_val["x"].to_numpy() + rng.normal(0.0, 0.04, size=n_val)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X_train, y_train, sample_weight=train_weight, offset=train_offset)
+    session = EditorSession.from_model(model, terms=["x"])
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+
+    edited = session.to_model(X=X_val, y=y_val)
+    mu = edited.predict(X_val)
+    expected_deviance = float(np.sum(edited._distribution.deviance_unit(y_val, mu)))
+
+    assert edited.result.deviance == pytest.approx(expected_deviance)
+    assert edited._fit_offset is None
+    assert edited._fit_offset_ref is None
+    np.testing.assert_allclose(edited._fit_weights, np.ones(n_val))
+    assert edited._fit_sample_weight_ref is None
+
+
 def test_in_force_summary_uses_session_train_data_without_retained_fit_state():
     from superglm.editor.summaries import summary_payload
 
@@ -2366,6 +2399,25 @@ def test_widget_http_summary_and_fixed_offset_refit(editor_model):
         after_refit = _post_json(f"{widget.url}/summary", {"source": "refit"})
         assert after_refit["available"] is True
         assert after_refit["offset_terms"] == ["region"]
+    finally:
+        widget.close()
+
+
+def test_widget_http_collapse_invalidates_stale_fixed_offset_refit(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    try:
+        _post_json(f"{widget.url}/select", {"term": "region", "indices": [1]})
+        _post_json(f"{widget.url}/op", {"operation": "shift_up"})
+        refit = _post_json(f"{widget.url}/refit_offset", {})
+        assert refit["available"] is True
+
+        _post_json(f"{widget.url}/select", {"term": "region", "indices": [1, 2]})
+        _post_json(f"{widget.url}/collapse_levels", {"term": "region", "method": "fit"})
+
+        stale_refit = _post_json(f"{widget.url}/summary", {"source": "refit"})
+        assert stale_refit["available"] is False
+        assert "No fixed-offset refit" in stale_refit["error"]
     finally:
         widget.close()
 
