@@ -39,10 +39,23 @@ def collapsed_feature_spec(
     if idx.min() < 0 or idx.max() >= len(term.levels):
         raise IndexError(f"Selection indices out of range for term {term.name!r}.")
     selected_levels = [str(term.levels[i]) for i in idx]
-    if isinstance(spec, OrderedCategorical):
-        _require_contiguous(idx, term.name)
 
     existing = getattr(spec, "_grouping", None)
+    if isinstance(spec, OrderedCategorical):
+        selected_originals = _selected_original_members(
+            selected_levels,
+            existing,
+            _displayed_members(term, existing),
+        )
+        if not _members_are_contiguous(
+            selected_originals,
+            _original_level_order(spec, term, existing),
+        ):
+            raise ValueError(
+                f"Ordered categorical collapse for {term.name!r} must be contiguous "
+                "in fitted order."
+            )
+
     existing_labels = [str(level) for level in term.levels]
     if existing is not None:
         existing_labels.extend(str(level) for level in existing.grouped_levels)

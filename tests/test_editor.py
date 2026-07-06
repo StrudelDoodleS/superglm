@@ -1052,6 +1052,30 @@ def test_ordered_categorical_ungroup_rejects_non_contiguous_remainder():
         session.replace_with_ungrouped_levels("band", method="fit")
 
 
+def test_ordered_categorical_collapse_checks_fitted_order_after_display_reorder():
+    rng = np.random.default_rng(20260714)
+    levels = ["A", "B", "C", "D"]
+    band = rng.choice(levels, 400, p=[0.25, 0.30, 0.25, 0.20])
+    X = pd.DataFrame({"band": band})
+    effects = {"A": -0.15, "B": -0.05, "C": 0.10, "D": 0.25}
+    y = 0.7 + np.array([effects[value] for value in band]) + rng.normal(0.0, 0.04, band.size)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"band": OrderedCategorical(order=levels, basis="step", base="first")},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["band"], train_data=(X, y, None))
+
+    session.select_levels("band", ["C"])
+    session.reorder_levels("band", target_index=1)
+    assert session.terms["band"].levels == ["A", "C", "B", "D"]
+
+    session.select_levels("band", ["A", "C"])
+    with pytest.raises(ValueError, match="contiguous in fitted order"):
+        session.replace_with_collapsed_levels("band", method="fit")
+
+
 def test_repeated_categorical_collapses_create_distinct_level_groups():
     rng = np.random.default_rng(20260705)
     levels = [f"T{i:02d}" for i in range(1, 11)]
