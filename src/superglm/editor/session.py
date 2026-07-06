@@ -788,17 +788,25 @@ class EditorSession:
     def replace_with_ungrouped_levels(self, term: str, **kwargs: Any):
         """Ungroup selected levels, refit, and make the refit the in-force model."""
         previous_model = self.model
-        restore_reference = self._ungroup_restores_reference_model(term, **kwargs)
-        refit_model = (
-            self.reference_model
-            if restore_reference
-            else self.refit_with_ungrouped_levels(term, **kwargs)
-        )
-        self.collapse_history.append(previous_model)
+        restore_previous = self._ungroup_restores_reference_model(term, **kwargs)
+        restored_history_model = None
+        if restore_previous and self.collapse_history:
+            refit_model = self.collapse_history.pop()
+            restored_history_model = refit_model
+        else:
+            refit_model = (
+                self.reference_model
+                if restore_previous
+                else self.refit_with_ungrouped_levels(term, **kwargs)
+            )
+            self.collapse_history.append(previous_model)
         try:
             self.replace_in_force_model(refit_model)
         except Exception:
-            self.collapse_history.pop()
+            if restored_history_model is not None:
+                self.collapse_history.append(restored_history_model)
+            else:
+                self.collapse_history.pop()
             raise
         return refit_model
 
@@ -897,6 +905,7 @@ class EditorSession:
 
     def _resolve_refit_data(self, X, y, sample_weight, offset):
         train = self._evaluation_data.get("train")
+        explicit_refit_data = X is not None or y is not None
         X_ref = (
             X
             if X is not None
@@ -909,14 +918,18 @@ class EditorSession:
         )
         if sample_weight is not None:
             sample_weight_ref = sample_weight
-        elif train is not None:
+        elif train is not None and not explicit_refit_data:
             sample_weight_ref = train.sample_weight
+        elif explicit_refit_data:
+            sample_weight_ref = None
         else:
             sample_weight_ref = getattr(self.model, "_fit_sample_weight_ref", None)
         if offset is not None:
             base_offset = offset
-        elif train is not None:
+        elif train is not None and not explicit_refit_data:
             base_offset = train.offset
+        elif explicit_refit_data:
+            base_offset = None
         else:
             base_offset = getattr(self.model, "_fit_offset", None)
         return X_ref, y_ref, sample_weight_ref, base_offset

@@ -711,6 +711,49 @@ def test_edited_offset_factor_and_refit_with_fixed_offset(editor_model, editor_f
     assert inference.se_log_relativity is not None
 
 
+def test_refit_explicit_data_omits_session_train_weights_and_offsets_when_not_supplied():
+    rng = np.random.default_rng(20260721)
+    n_train = 180
+    n_val = 70
+    X_train = pd.DataFrame({"x": rng.normal(size=n_train), "z": rng.normal(size=n_train)})
+    train_weight = rng.uniform(0.5, 2.0, size=n_train)
+    train_offset = rng.normal(0.0, 0.05, size=n_train)
+    y_train = (
+        0.4
+        + 0.3 * X_train["x"].to_numpy()
+        - 0.2 * X_train["z"].to_numpy()
+        + train_offset
+        + rng.normal(0.0, 0.04, n_train)
+    )
+    X_val = pd.DataFrame({"x": rng.normal(size=n_val), "z": rng.normal(size=n_val)})
+    y_val = (
+        0.4
+        + 0.3 * X_val["x"].to_numpy()
+        - 0.2 * X_val["z"].to_numpy()
+        + rng.normal(0.0, 0.04, n_val)
+    )
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric(), "z": Numeric()},
+    )
+    model.fit(X_train, y_train, sample_weight=train_weight, offset=train_offset)
+    session = EditorSession.from_model(
+        model,
+        terms=["x", "z"],
+        train_data=(X_train, y_train, train_weight, train_offset),
+    )
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+
+    refit = session.refit_with_edited_offset("x", X=X_val, y=y_val, method="fit")
+
+    expected_offset = session.edited_offset("x", X=X_val)
+    np.testing.assert_allclose(refit._fit_offset, expected_offset)
+    np.testing.assert_allclose(refit._fit_weights, np.ones(n_val))
+    assert refit._fit_sample_weight_ref is None
+
+
 def test_collapse_selected_categorical_levels_refits_copied_model(editor_model, editor_frame):
     X, _ = editor_frame
     session = EditorSession.from_model(editor_model, terms=["region", "x_spline"])
@@ -1108,6 +1151,25 @@ def test_ungroup_last_collapsed_levels_removes_identity_grouping():
     assert payload["level_groups"] == []
     np.testing.assert_allclose(payload["y"], payload["original_y"])
     assert payload["impact"]["weighted_mean_relativity"] == pytest.approx(1.0)
+
+
+def test_ungroup_last_collapsed_levels_restores_pre_collapse_in_force_model(editor_model):
+    profiled_model = editor_model._clone_without_features(set())
+    profiled_model.fit(editor_model._fit_X_ref, editor_model._fit_y_ref)
+    profiled_model._editor_profile_marker = "kept"
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    session.replace_in_force_model(profiled_model)
+
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    session.select_levels("region", ["B", "C"])
+
+    restored = session.replace_with_ungrouped_levels("region", method="fit")
+
+    assert restored is profiled_model
+    assert session.model is profiled_model
+    assert session.model._editor_profile_marker == "kept"
+    assert session.can_uncollapse_levels() is False
 
 
 def test_reorder_categorical_levels_is_display_only(editor_model):
