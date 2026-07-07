@@ -1,6 +1,6 @@
 [project]
 name = "superglm"
-version = "0.10.0"
+version = "0.11.0"
 description = "Penalised GLMs for insurance pricing: group lasso, P-splines, Tweedie"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,11 +22,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "fastapi>=0.115",
     "pytest>=7.0",
     "pytest-cov",
     "ruff",
     "mypy",
     "pre-commit",
+    "uvicorn>=0.30",
 ]
 bench = [
     "glum>=3.0",
@@ -38,8 +40,13 @@ interactions = []
 plotting = [
     "plotly>=5.24",
 ]
+editor = [
+    "fastapi>=0.115",
+    "ipykernel>=6.0",
+    "uvicorn>=0.30",
+]
 all = [
-    "superglm[dev,bench,interactions,plotting]",
+    "superglm[dev,bench,interactions,plotting,editor]",
 ]
 
 [build-system]

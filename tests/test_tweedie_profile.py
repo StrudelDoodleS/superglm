@@ -352,6 +352,26 @@ class TestProfileLikelihood:
         with pytest.raises(ValueError, match="tweedie"):
             estimate_tweedie_p(model, X, y)
 
+    def test_design_matrix_error_restores_temporary_family(self, monkeypatch):
+        """Temporary p used for design-matrix setup should be exception-safe."""
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.7),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
+        y = np.array([1.0, 2.0, 3.0])
+
+        def fail_build(*args, **kwargs):
+            raise RuntimeError("build failed")
+
+        monkeypatch.setattr(model, "_build_design_matrix", fail_build)
+
+        with pytest.raises(RuntimeError, match="build failed"):
+            estimate_tweedie_p(model, X, y)
+
+        assert model.family.p == pytest.approx(1.7)
+
     def test_result_has_search_trace(self):
         """search_trace should be populated with >= 3 entries from Brent."""
         import pandas as pd
@@ -578,6 +598,28 @@ class TestEstimatePFitMode:
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.25)
         assert model._last_fit_meta["method"] == "fit_reml"
 
+    @pytest.mark.slow
+    def test_fit_mode_reml_profile_ci_leaves_final_fit_state(self):
+        """Eager profile CI should not leave the fitted model at a CI probe p."""
+        X, y, _ = _tweedie_data(n=600, seed=17)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Spline(n_knots=5, penalty="ssp")},
+        )
+
+        result = model.estimate_p(
+            X,
+            y,
+            fit_mode="reml",
+            method="grid",
+            grid=np.array([1.35, 1.5, 1.65]),
+        )
+
+        assert 0.05 in result._ci_cache
+        assert model.family.p == pytest.approx(result.p_hat)
+        assert model._distribution.p == pytest.approx(result.p_hat)
+
     def test_fit_mode_inherit_from_fit(self):
         """After fit(), inherit should use the fit path."""
         X, y, p_true = _tweedie_data()
@@ -592,6 +634,37 @@ class TestEstimatePFitMode:
         result = model.estimate_p(X, y, fit_mode="inherit")
         assert model._last_fit_meta["method"] == "fit"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
+
+    def test_fit_mode_inherit_from_fit_path_falls_back_to_fit(self, monkeypatch):
+        """After fit_path(), inherit should profile with ordinary ML fits."""
+        X, y, _ = _tweedie_data(n=80, seed=20260803)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        model._last_fit_meta = {"method": "fit_path", "discrete": False}
+        calls: list[str] = []
+
+        class FakeResult:
+            p_hat = 1.45
+            phi_hat = 1.0
+            _objective = None
+
+        def fake_estimate_tweedie_p(*args, **kwargs):
+            calls.append(kwargs["fit_mode"])
+            return FakeResult()
+
+        monkeypatch.setattr(
+            "superglm.profiling.tweedie.estimate_tweedie_p",
+            fake_estimate_tweedie_p,
+        )
+
+        result = model.estimate_p(X, y, fit_mode="inherit")
+
+        assert result.p_hat == 1.45
+        assert calls == ["fit"]
+        assert model._last_fit_meta["method"] == "fit"
 
     @pytest.mark.slow
     def test_fit_mode_inherit_from_reml(self):

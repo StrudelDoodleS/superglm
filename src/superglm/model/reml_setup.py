@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from superglm.group_matrix import (
@@ -38,7 +39,7 @@ def collect_reml_groups(
 
 def initialize_component_lambdas(
     reml_penalties: list[Any],
-    default_lambda: float,
+    default_lambda: float | Mapping[str, float],
 ) -> tuple[dict[str, float], set[str]]:
     """Seed the REML lambda dict from per-component policies."""
     lambdas: dict[str, float] = {}
@@ -48,7 +49,14 @@ def initialize_component_lambdas(
         if lambda_policy is not None and lambda_policy.mode == "fixed":
             lambdas[penalty_component.name] = float(lambda_policy.value)
             continue
-        lambdas[penalty_component.name] = default_lambda
+        if isinstance(default_lambda, Mapping):
+            lam = default_lambda.get(
+                penalty_component.name,
+                default_lambda.get(penalty_component.group_name, 0.1),
+            )
+        else:
+            lam = default_lambda
+        lambdas[penalty_component.name] = float(lam)
         estimated_names.add(penalty_component.name)
     return lambdas, estimated_names
 

@@ -46,6 +46,16 @@ def _validate_categorical_levels(x: NDArray, known_levels: set, *, context: str 
         raise ValueError(msg)
 
 
+def _grouping_labels(x: NDArray) -> NDArray:
+    """Return string labels used by LevelGrouping, preserving missing-value checks."""
+    import pandas as pd
+
+    x = np.asarray(x).ravel()
+    if np.asarray(pd.isna(x)).any():
+        raise ValueError("Categorical column contains missing values (NaN or None).")
+    return pd.Series(x).astype(str).to_numpy()
+
+
 class Categorical:
     """One-hot encoded categorical feature.
 
@@ -84,6 +94,7 @@ class Categorical:
         # Apply grouping mapping before factorization
         if self._grouping is not None:
             # Validate against original levels
+            x = _grouping_labels(x)
             _validate_categorical_levels(x, set(self._grouping.all_original_levels))
             x = pd.Series(x).map(self._grouping.original_to_group).values
 
@@ -142,6 +153,7 @@ class Categorical:
 
         x = np.asarray(x).ravel()
         if self._grouping is not None:
+            x = _grouping_labels(x)
             _validate_categorical_levels(x, set(self._grouping.all_original_levels))
             x = pd.Series(x).map(self._grouping.original_to_group).values
         else:
@@ -154,6 +166,7 @@ class Categorical:
 
         x = np.asarray(x).ravel()
         if self._grouping is not None:
+            x = _grouping_labels(x)
             _validate_categorical_levels(x, set(self._grouping.all_original_levels))
             x = pd.Series(x).map(self._grouping.original_to_group).values
         else:

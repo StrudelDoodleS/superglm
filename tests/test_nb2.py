@@ -242,8 +242,69 @@ class TestNB2ProfileTheta:
         with pytest.raises(ValueError, match="NegativeBinomial"):
             estimate_nb_theta(model, X, y)
 
+    def test_design_matrix_error_restores_temporary_family(self, monkeypatch):
+        model = SuperGLM(
+            family=NegativeBinomial(theta=2.5),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
+        y = np.array([1.0, 2.0, 3.0])
+
+        def fail_build(*args, **kwargs):
+            raise RuntimeError("build failed")
+
+        monkeypatch.setattr(model, "_build_design_matrix", fail_build)
+
+        with pytest.raises(RuntimeError, match="build failed"):
+            estimate_nb_theta(model, X, y)
+
+        assert model.family.theta == pytest.approx(2.5)
+
 
 class TestNB2AutoTheta:
+    def test_estimate_theta_inherit_preserves_reml_final_refit(self, monkeypatch):
+        X = pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]})
+        y = np.array([1.0, 2.0, 3.0, 4.0])
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            penalty=GroupLasso(lambda1=0.0),
+            features={"x": Numeric()},
+        )
+        model._last_fit_meta = {"method": "fit_reml"}
+        result = NBProfileResult(
+            theta_hat=2.5,
+            nll=1.2,
+            n_evaluations=1,
+            converged=True,
+        )
+        calls: list[str] = []
+
+        def fake_profile(model_arg, X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
+            assert model_arg is model
+            assert X_arg is X
+            assert y_arg is y
+            return result
+
+        def fake_fit(X_arg, y_arg, sample_weight=None, offset=None):
+            calls.append("fit")
+            return model
+
+        def fake_fit_reml(X_arg, y_arg, sample_weight=None, offset=None):
+            calls.append("fit_reml")
+            return model
+
+        monkeypatch.setattr("superglm.profiling.nb.estimate_nb_theta", fake_profile)
+        monkeypatch.setattr(model, "fit", fake_fit)
+        monkeypatch.setattr(model, "fit_reml", fake_fit_reml)
+
+        returned = model.estimate_theta(X, y, fit_mode="inherit")
+
+        assert returned is result
+        assert calls == ["fit_reml"]
+        assert model.family.theta == pytest.approx(2.5)
+        assert model._nb_profile_result is result
+
     def test_auto_theta_flow(self):
         """nb_theta='auto' triggers profile estimation in fit()."""
         rng = np.random.default_rng(42)

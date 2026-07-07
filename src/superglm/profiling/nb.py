@@ -250,6 +250,7 @@ def estimate_nb_theta(
     xatol: float = 1e-2,
     maxiter: int = 30,
     verbose: bool = False,
+    trace_callback=None,
 ) -> NBProfileResult:
     """Estimate NB2 theta via alternating GLM fit + Newton (MASS::glm.nb).
 
@@ -308,8 +309,10 @@ def estimate_nb_theta(
 
     saved_family = model.family
     model.family = NegativeBinomial(theta=1.0)
-    y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, sample_weight, offset)
-    model.family = saved_family
+    try:
+        y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, sample_weight, offset)
+    finally:
+        model.family = saved_family
 
     if model.penalty.lambda1 is None:
         model.penalty.lambda1 = model._compute_lambda_max(y_arr, w_arr) * 0.1
@@ -377,6 +380,17 @@ def estimate_nb_theta(
 
         nll = _nb2_nll(y_arr, mu, w_arr, theta_new)
         cache[round(theta_new, 6)] = nll
+        if trace_callback is not None:
+            trace_callback(
+                {
+                    "step": iteration,
+                    "theta": theta_new,
+                    "nll": nll,
+                    "n_iter": pirls_result.n_iter,
+                    "fit_converged": pirls_result.converged,
+                    "source": "newton",
+                }
+            )
 
         if verbose:
             print(
