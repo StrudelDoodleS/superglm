@@ -19,26 +19,13 @@ def estimate_p(
     fit_mode="fit",
     phi_method="pearson",
     method="brent",
+    progress_callback=None,
     **kwargs,
 ):
     """Estimate Tweedie p via profile likelihood, refit, and return result."""
     from superglm.profiling.tweedie import estimate_tweedie_p
 
-    # Resolve to internal method name: "fit" or "fit_reml"
-    _VALID_FIT_MODES = {"fit", "reml", "inherit"}
-    if fit_mode not in _VALID_FIT_MODES:
-        raise ValueError(
-            f"fit_mode={fit_mode!r} is not valid, expected one of {sorted(_VALID_FIT_MODES)}"
-        )
-    if fit_mode == "reml":
-        resolved_mode = "fit_reml"
-    elif fit_mode == "inherit":
-        if model._last_fit_meta is not None:
-            resolved_mode = model._last_fit_meta["method"]
-        else:
-            resolved_mode = "fit"
-    else:
-        resolved_mode = "fit"
+    resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
 
     result = estimate_tweedie_p(
         model,
@@ -51,9 +38,13 @@ def estimate_p(
         method=method,
         **kwargs,
     )
+    if progress_callback is not None:
+        progress_callback("best_found", {"profile_estimate": _tweedie_estimate_payload(result)})
     model.family = Tweedie(p=result.p_hat)
 
     # Refit with the same regime used for profiling (clears stale profile results)
+    if progress_callback is not None:
+        progress_callback("final_refit", {"profile_estimate": _tweedie_estimate_payload(result)})
     if resolved_mode == "fit_reml":
         model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
     else:
@@ -81,33 +72,84 @@ def estimate_p(
         y, mu, weights, offset_arr, model._distribution, model._link, result.phi_hat
     )
 
-    # Eagerly compute the default CI so summary() doesn't trigger
-    # expensive profile refits on first access.  The REML CI objective
-    # mutates model.family during Brent evaluations, so save and restore
-    # the full model state around the CI computation.
+    # Eagerly compute the default CI so summary() doesn't trigger expensive
+    # profile refits on first access. REML profile objectives evaluate against
+    # an isolated scratch model, so CI probes cannot mutate this fitted model.
     if result._objective is not None:
-        saved_family = model.family
-        saved_result = model._result
-        saved_fit_stats = model._fit_stats
-        saved_profile = model._tweedie_profile_result
-
+        if progress_callback is not None:
+            progress_callback("profile_ci", {"profile_estimate": _tweedie_estimate_payload(result)})
         result.ci(alpha=0.05)
-
-        # Restore model state (CI refits leave model at last Brent eval)
-        model.family = saved_family
-        model._result = saved_result
-        model._fit_stats = saved_fit_stats
-        model._tweedie_profile_result = saved_profile
+        if progress_callback is not None:
+            progress_callback("profile_ci", {"profile_estimate": _tweedie_estimate_payload(result)})
 
     return result
 
 
-def estimate_theta(model, X, y, sample_weight=None, offset=None, **kwargs):
+def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fit", **kwargs):
     """Estimate NB theta via profile likelihood, refit, and return result."""
     from superglm.profiling.nb import estimate_nb_theta
 
+    resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
+
+    progress_callback = kwargs.pop("progress_callback", None)
     result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset, **kwargs)
+    if progress_callback is not None:
+        progress_callback("best_found", {"profile_estimate": _theta_estimate_payload(result)})
     model.family = NegativeBinomial(theta=result.theta_hat)
-    model.fit(X, y, sample_weight=sample_weight, offset=offset)
+    if progress_callback is not None:
+        progress_callback("final_refit", {"profile_estimate": _theta_estimate_payload(result)})
+    if resolved_mode == "fit_reml":
+        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
+    else:
+        model.fit(X, y, sample_weight=sample_weight, offset=offset)
     model._nb_profile_result = result  # after refit so fit()'s clear doesn't wipe it
     return result
+
+
+def _resolve_profile_fit_mode(model, fit_mode: str) -> str:
+    """Resolve public profile fit mode to an internal final-refit method."""
+    valid_fit_modes = {"fit", "reml", "inherit"}
+    if fit_mode not in valid_fit_modes:
+        raise ValueError(
+            f"fit_mode={fit_mode!r} is not valid, expected one of {sorted(valid_fit_modes)}"
+        )
+    if fit_mode == "reml":
+        return "fit_reml"
+    if fit_mode == "inherit":
+        meta = getattr(model, "_last_fit_meta", None)
+        if meta is not None and meta.get("method") == "fit_reml":
+            return "fit_reml"
+    return "fit"
+
+
+def _tweedie_estimate_payload(result):
+    return {
+        "parameter": "p",
+        "label": "p_hat",
+        "value": getattr(result, "p_hat", None),
+        "ci_low": _cached_ci(result)[0],
+        "ci_high": _cached_ci(result)[1],
+        "objective": getattr(result, "nll", None),
+        "objective_label": "loss",
+        "lower_is_better": True,
+    }
+
+
+def _theta_estimate_payload(result):
+    return {
+        "parameter": "theta",
+        "label": "theta_hat",
+        "value": getattr(result, "theta_hat", None),
+        "ci_low": _cached_ci(result)[0],
+        "ci_high": _cached_ci(result)[1],
+        "objective": getattr(result, "nll", None),
+        "objective_label": "loss",
+        "lower_is_better": True,
+    }
+
+
+def _cached_ci(result):
+    cache = getattr(result, "_ci_cache", None)
+    if isinstance(cache, dict) and 0.05 in cache:
+        return cache[0.05]
+    return (None, None)
