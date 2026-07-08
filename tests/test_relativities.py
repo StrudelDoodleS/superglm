@@ -7,10 +7,12 @@ import pytest
 from superglm import (
     Categorical,
     Numeric,
+    OrderedCategorical,
     Polynomial,
     Spline,
     SuperGLM,
 )
+from superglm.editor import EditorSession
 from superglm.plotting import plot_relativities, plot_term
 
 
@@ -58,6 +60,50 @@ def polynomial_model():
     model = SuperGLM(features={"age": Polynomial(degree=2)})
     model.fit(X, y, sample_weight=sample_weight)
     return X, sample_weight, model
+
+
+@pytest.fixture
+def collapsed_ordered_model():
+    rng = np.random.default_rng(20260708)
+    levels = ["18-24", "25-34", "35-49", "50-64", "65-80"]
+    age_band = rng.choice(levels, 600, p=[0.12, 0.24, 0.26, 0.25, 0.13])
+    mileage = rng.normal(0.0, 1.0, len(age_band))
+    sample_weight = rng.uniform(0.5, 1.5, len(age_band))
+    effects = {
+        "18-24": 0.00,
+        "25-34": 0.01,
+        "35-49": 0.01,
+        "50-64": -0.08,
+        "65-80": -0.14,
+    }
+    X = pd.DataFrame({"age_band": age_band, "mileage": mileage})
+    y = (
+        0.8
+        + np.array([effects[value] for value in age_band])
+        + 0.04 * mileage
+        + rng.normal(0.0, 0.05, len(X))
+    )
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "age_band": OrderedCategorical(
+                order=levels,
+                basis="step",
+                base="first",
+            ),
+            "mileage": Numeric(),
+        },
+    )
+    model.fit(X, y, sample_weight=sample_weight)
+    session = EditorSession.from_model(
+        model,
+        terms=["age_band"],
+        train_data=(X, y, sample_weight),
+    )
+    session.select_levels("age_band", ["18-24", "25-34", "35-49"])
+    collapsed = session.replace_with_collapsed_levels("age_band", method="fit")
+    return X, sample_weight, collapsed
 
 
 class TestRelativities:
@@ -480,6 +526,136 @@ class TestPlotRelativity:
         expected_vals = np.array([expected.get(level, 0.0) for level in ti.levels], dtype=float)
         heights = np.array([patch.get_height() for patch in ax2.patches], dtype=float)
         np.testing.assert_allclose(heights, expected_vals)
+
+    def test_ordered_categorical_plot_defaults_to_collapsed_group_display(
+        self,
+        collapsed_ordered_model,
+    ):
+        import matplotlib
+
+        matplotlib.use("Agg")
+
+        X, sample_weight, model = collapsed_ordered_model
+        fig = model.plot("age_band", X=X, sample_weight=sample_weight)
+        ax = fig.axes[0]
+        labels = [tick.get_text() for tick in ax.get_xticklabels()]
+
+        assert labels == ["18-24+25-34+35-49", "50-64", "65-80"]
+        ax2 = fig.axes[1]
+        heights = np.array([patch.get_height() for patch in ax2.patches], dtype=float)
+        expected = (
+            pd.DataFrame({"level": X["age_band"], "weight": sample_weight})
+            .groupby("level", sort=False)["weight"]
+            .sum()
+        )
+        np.testing.assert_allclose(
+            heights,
+            [
+                sum(expected.get(level, 0.0) for level in ["18-24", "25-34", "35-49"]),
+                expected.get("50-64", 0.0),
+                expected.get("65-80", 0.0),
+            ],
+        )
+
+    def test_ordered_categorical_plot_can_show_expanded_group_members(
+        self,
+        collapsed_ordered_model,
+    ):
+        import matplotlib
+
+        matplotlib.use("Agg")
+
+        X, sample_weight, model = collapsed_ordered_model
+        fig = model.plot(
+            "age_band",
+            X=X,
+            sample_weight=sample_weight,
+            grouped_level_display="expanded",
+        )
+        ax = fig.axes[0]
+        labels = [tick.get_text() for tick in ax.get_xticklabels()]
+
+        assert labels == ["18-24", "25-34", "35-49", "50-64", "65-80"]
+
+    def test_plotly_ordered_categorical_group_display_uses_collapsed_labels(
+        self,
+        collapsed_ordered_model,
+    ):
+        go = pytest.importorskip("plotly.graph_objects")
+
+        X, sample_weight, model = collapsed_ordered_model
+        fig = model.plot(
+            ["age_band", "mileage"],
+            engine="plotly",
+            X=X,
+            sample_weight=sample_weight,
+            grouped_level_display="collapsed",
+        )
+        marker_traces = [
+            trace
+            for trace in fig.data
+            if isinstance(trace, go.Scatter)
+            and trace.name == "Relativity"
+            and list(trace.x) == ["18-24+25-34+35-49", "50-64", "65-80"]
+        ]
+
+        assert marker_traces
+
+    def test_plotly_collapsed_ordered_categorical_suppresses_stale_knot_diagnostics(self):
+        go = pytest.importorskip("plotly.graph_objects")
+
+        rng = np.random.default_rng(20260708)
+        levels = ["18-24", "25-34", "35-49", "50-64", "65-80"]
+        values = {
+            "18-24": 21.0,
+            "25-34": 30.0,
+            "35-49": 42.0,
+            "50-64": 57.0,
+            "65-80": 72.0,
+        }
+        age_band = rng.choice(levels, 700, p=[0.12, 0.23, 0.30, 0.22, 0.13])
+        mileage = rng.normal(0.0, 1.0, len(age_band))
+        X = pd.DataFrame({"age_band": age_band, "mileage": mileage})
+        y = (
+            0.8
+            + 0.16 * np.sin(np.array([values[level] for level in age_band]) / 10.0)
+            + 0.04 * mileage
+            + rng.normal(0.0, 0.05, len(age_band))
+        )
+        sample_weight = np.ones(len(X), dtype=np.float64)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={
+                "age_band": OrderedCategorical(values=values, basis="spline", n_knots=3),
+                "mileage": Numeric(),
+            },
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+        session = EditorSession.from_model(
+            model,
+            terms=["age_band"],
+            train_data=(X, y, sample_weight),
+        )
+        session.select_levels("age_band", ["18-24", "25-34", "35-49"])
+        model = session.replace_with_collapsed_levels("age_band", method="fit")
+
+        fig = model.plot(
+            ["age_band", "mileage"],
+            engine="plotly",
+            X=X,
+            sample_weight=sample_weight,
+            grouped_level_display="collapsed",
+            show_knots=True,
+        )
+
+        knot_traces = [
+            trace
+            for trace in fig.data
+            if isinstance(trace, go.Scatter) and trace.name == "Interior knots"
+        ]
+
+        assert knot_traces == []
 
     def test_numeric_returns_figure(self, fitted_model):
         import matplotlib

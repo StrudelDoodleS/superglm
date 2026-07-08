@@ -19,7 +19,7 @@ import numpy as np
 from superglm.editor.io import jsonable
 from superglm.editor.metrics import metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
-from superglm.editor.payloads import session_payload
+from superglm.editor.payloads import history_payload, session_payload
 from superglm.editor.persistence import edited_model_for_export
 from superglm.editor.reports import report_payload
 from superglm.editor.server import EditorAppServer
@@ -104,6 +104,7 @@ class EditorWidget:
                     or self._collapsed_refit_info is None
                     else dict(self._collapsed_refit_info)
                 ),
+                "history": history_payload(self.session),
             }
 
     def _set_term(self, term: str) -> dict[str, Any]:

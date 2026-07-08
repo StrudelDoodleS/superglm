@@ -32,6 +32,11 @@ from superglm.plotting.common import (
     _exposure_kde,
     _make_continuous_figure,
 )
+from superglm.plotting.group_display import (
+    GroupedTermDisplay,
+    grouped_level_exposure,
+    project_grouped_term_for_display,
+)
 
 if TYPE_CHECKING:
     from superglm.inference.term import TermInference
@@ -40,6 +45,7 @@ if TYPE_CHECKING:
 def plot_relativities(
     terms: list[TermInference],
     *,
+    model=None,
     X: pd.DataFrame | None = None,
     sample_weight: NDArray | None = None,
     ncols: int = 2,
@@ -50,6 +56,7 @@ def plot_relativities(
     show_knots: bool = False,
     title: str | None = None,
     subtitle: str | None = None,
+    grouped_level_display: str = "auto",
 ) -> Figure:
     """Create a grid of relativity plots from ``TermInference`` objects.
 
@@ -92,6 +99,7 @@ def plot_relativities(
 
     return _plot_relativities_new(
         terms,
+        model=model,
         X=X,
         sample_weight=sample_weight,
         ncols=ncols,
@@ -101,6 +109,7 @@ def plot_relativities(
         show_knots=show_knots,
         title=title,
         subtitle=subtitle,
+        grouped_level_display=grouped_level_display,
     )
 
 
@@ -294,6 +303,7 @@ def _plot_numeric_panel_continuous(
 def plot_term(
     ti: TermInference,
     *,
+    model=None,
     X: pd.DataFrame | None = None,
     sample_weight: NDArray | None = None,
     interval: str | None = "pointwise",
@@ -302,6 +312,7 @@ def plot_term(
     figsize: tuple[float, float] | None = None,
     title: str | None = None,
     subtitle: str | None = None,
+    grouped_level_display: str = "auto",
 ) -> Figure:
     """Plot a single term's relativity.
 
@@ -346,6 +357,11 @@ def plot_term(
     weight_label = "Weight" if weighted else "Count"
     has_density = show_exposure and X is not None and sample_weight is not None
 
+    display: GroupedTermDisplay | None = None
+    if ti.kind == "categorical":
+        display = project_grouped_term_for_display(model, ti, grouped_level_display)
+        ti = display.term
+
     if ti.kind in ("spline", "polynomial"):
         needs_strip = has_density and ti.name in X.columns
         fig, ax, ax_den = _make_continuous_figure(needs_strip, figsize)
@@ -384,6 +400,7 @@ def plot_term(
             X=X,
             sample_weight=sample_weight if has_density else None,
             weight_label=weight_label,
+            display=display,
         )
 
     elif ti.kind == "categorical":
@@ -397,6 +414,7 @@ def plot_term(
             X=X,
             sample_weight=sample_weight if has_density else None,
             weight_label=weight_label,
+            display=display,
         )
 
     else:
@@ -508,6 +526,7 @@ def _plot_ordered_spline_panel(
     X: pd.DataFrame | None = None,
     sample_weight: NDArray | None = None,
     weight_label: str = "Weight",
+    display: GroupedTermDisplay | None = None,
 ):
     """Render an OrderedCategorical(spline) panel.
 
@@ -522,12 +541,14 @@ def _plot_ordered_spline_panel(
 
     # Exposure bars in background
     if sample_weight is not None and X is not None and ti.name in X.columns:
-        level_exp = (
-            pd.DataFrame({"level": X[ti.name], "sample_weight": sample_weight})
-            .groupby("level", sort=False)["sample_weight"]
-            .sum()
-        )
-        exp_vals = np.array([level_exp.get(lv, 0.0) for lv in levels])
+        exp_vals = grouped_level_exposure(display, X, sample_weight)
+        if exp_vals is None:
+            level_exp = (
+                pd.DataFrame({"level": X[ti.name], "sample_weight": sample_weight})
+                .groupby("level", sort=False)["sample_weight"]
+                .sum()
+            )
+            exp_vals = np.array([level_exp.get(lv, 0.0) for lv in levels])
         ax2 = ax.twinx()
         ax2.bar(
             x_pos,
@@ -613,6 +634,7 @@ def _plot_categorical_panel_vertical(
     X: pd.DataFrame | None = None,
     sample_weight: NDArray | None = None,
     weight_label: str = "Weight",
+    display: GroupedTermDisplay | None = None,
 ):
     """Render a categorical panel with vertical orientation.
 
@@ -625,12 +647,14 @@ def _plot_categorical_panel_vertical(
 
     # Exposure bars in background
     if sample_weight is not None and X is not None and ti.name in X.columns:
-        level_exp = (
-            pd.DataFrame({"level": X[ti.name], "sample_weight": sample_weight})
-            .groupby("level", sort=False)["sample_weight"]
-            .sum()
-        )
-        exp_vals = np.array([level_exp.get(lv, 0.0) for lv in levels])
+        exp_vals = grouped_level_exposure(display, X, sample_weight)
+        if exp_vals is None:
+            level_exp = (
+                pd.DataFrame({"level": X[ti.name], "sample_weight": sample_weight})
+                .groupby("level", sort=False)["sample_weight"]
+                .sum()
+            )
+            exp_vals = np.array([level_exp.get(lv, 0.0) for lv in levels])
         ax2 = ax.twinx()
         ax2.bar(
             x_pos,
@@ -686,6 +710,7 @@ def _plot_categorical_panel_vertical(
 def _plot_relativities_new(
     terms: list[TermInference],
     *,
+    model=None,
     X: pd.DataFrame | None = None,
     sample_weight: NDArray | None = None,
     ncols: int = 2,
@@ -695,6 +720,7 @@ def _plot_relativities_new(
     show_knots: bool = False,
     title: str | None = None,
     subtitle: str | None = None,
+    grouped_level_display: str = "auto",
 ) -> Figure:
     """TermInference-based relativity grid with the new visual language."""
     import matplotlib.pyplot as plt
@@ -777,51 +803,60 @@ def _plot_relativities_new(
     for idx, ti in enumerate(terms):
         ax = main_axes[idx]
         ax_den = density_axes[idx]
+        display: GroupedTermDisplay | None = None
+        display_ti = ti
+        if ti.kind == "categorical":
+            display = project_grouped_term_for_display(model, ti, grouped_level_display)
+            display_ti = display.term
 
-        if ti.kind in ("spline", "polynomial"):
-            _plot_spline_panel(ax, ti, interval, show_knots)
+        if display_ti.kind in ("spline", "polynomial"):
+            _plot_spline_panel(ax, display_ti, interval, show_knots)
             if idx % ncols == 0:
                 ax.set_ylabel("Relativity")
 
             if ax_den is not None:
-                knots = ti.spline.interior_knots if ti.spline is not None else None
-                _plot_density_strip(ax_den, ti.name, X, sample_weight, ti.x, show_knots, knots)
+                knots = display_ti.spline.interior_knots if display_ti.spline is not None else None
+                _plot_density_strip(
+                    ax_den, display_ti.name, X, sample_weight, display_ti.x, show_knots, knots
+                )
                 if idx % ncols == 0:
                     ax_den.set_ylabel(density_label, fontsize=8)
                 ax_den.set_xlabel("")
 
-        elif ti.kind == "categorical" and ti.smooth_curve is not None:
+        elif display_ti.kind == "categorical" and display_ti.smooth_curve is not None:
             _plot_ordered_spline_panel(
                 ax,
-                ti,
+                display_ti,
                 interval,
                 X=X,
                 sample_weight=sample_weight if has_density else None,
                 weight_label=weight_label,
+                display=display,
             )
 
-        elif ti.kind == "categorical":
+        elif display_ti.kind == "categorical":
             _plot_categorical_panel_vertical(
                 ax,
-                ti,
+                display_ti,
                 interval,
                 X=X,
                 sample_weight=sample_weight if has_density else None,
                 weight_label=weight_label,
+                display=display,
             )
 
-        elif ti.kind == "numeric":
-            if X is not None and ti.name in X.columns:
-                x_vals = X[ti.name].to_numpy(dtype=np.float64)
+        elif display_ti.kind == "numeric":
+            if X is not None and display_ti.name in X.columns:
+                x_vals = X[display_ti.name].to_numpy(dtype=np.float64)
                 x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
             else:
                 x_grid = np.linspace(0.0, 1.0, 200)
-            _plot_numeric_panel_continuous(ax, ti, interval, x_grid)
+            _plot_numeric_panel_continuous(ax, display_ti, interval, x_grid)
             if idx % ncols == 0:
                 ax.set_ylabel("Relativity")
 
             if ax_den is not None:
-                _plot_density_strip(ax_den, ti.name, X, sample_weight, x_grid, False, None)
+                _plot_density_strip(ax_den, display_ti.name, X, sample_weight, x_grid, False, None)
                 if idx % ncols == 0:
                     ax_den.set_ylabel(density_label, fontsize=8)
                 ax_den.set_xlabel("")
