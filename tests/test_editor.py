@@ -4332,6 +4332,29 @@ def test_editor_chart_renders_previous_edit_line():
     assert "#f59e0b" in css
 
 
+def test_editor_chart_labels_ordered_categorical_levels_up_to_thirty():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    chart_js = (root / "chart.js").read_text()
+
+    assert "MAX_LEVEL_LABELS = 30" in chart_js
+    assert "term.levels.length <= MAX_LEVEL_LABELS" in chart_js
+    assert "rotate: term.levels.length > 8" in chart_js
+    assert 'tick.rotate ? "end" : "middle"' in chart_js
+
+
+def test_editor_chart_points_have_relativity_exposure_tooltips():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    chart_js = (root / "chart.js").read_text()
+    css = (root / "styles.css").read_text()
+
+    assert "pointTooltipLines(term, i)" in chart_js
+    assert "Relativity: ${fmt(term.y[i])}" in chart_js
+    assert "Exposure: ${fmt(exposure)}" in chart_js
+    assert "showPointTooltip(svg, circle, pointTooltipLines(term, i))" in chart_js
+    assert "hidePointTooltip(svg)" in chart_js
+    assert "point-tooltip" in css
+
+
 def test_editor_right_panel_has_history_tab():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     html = (root / "index.html").read_text()
