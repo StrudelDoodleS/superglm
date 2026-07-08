@@ -1014,6 +1014,7 @@ button:active { background: #e6edf3; }
   -webkit-user-select: text;
 }
 .axis, .tick { stroke: #8c959f; stroke-width: 1; }
+.tick-label.angled { font-size: 10px; }
 .grid { stroke: var(--grid); stroke-width: 1; }
 .zero { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 4; }
 .original { fill: none; stroke: #8c959f; stroke-width: 1.7; stroke-dasharray: 7 5; }
@@ -1032,6 +1033,18 @@ button:active { background: #e6edf3; }
 .basis-final-dot { fill: var(--blue); stroke: #fff; stroke-width: 1.3; }
 .point { fill: #fff; stroke: var(--blue); stroke-width: 1.5; pointer-events: all; }
 .point.selected { fill: var(--red); stroke: var(--red); }
+.point-tooltip { pointer-events: none; }
+.point-tooltip rect {
+  fill: rgba(255, 255, 255, 0.96);
+  stroke: var(--border);
+  stroke-width: 1;
+  filter: drop-shadow(0 3px 10px rgba(31, 35, 40, 0.18));
+}
+.point-tooltip-label,
+.point-tooltip-value {
+  fill: var(--text);
+  font-size: 11px;
+}
 .level-group-link {
   fill: none;
   stroke-width: 7;

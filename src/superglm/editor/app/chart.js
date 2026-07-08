@@ -1,5 +1,7 @@
 import { fmt } from "./format.js";
 
+const MAX_LEVEL_LABELS = 30;
+
 export function groupedTerms(terms) {
   const order = ["spline", "ordered categorical", "categorical", "polynomial", "numeric"];
   const groups = new Map();
@@ -92,8 +94,18 @@ export function drawChart(term, selection, context) {
     text(svg, margin.left - 10, sy(tick) + 4, fmt(tick), "tick-label", "end");
   }
   for (const tick of xTicks(view, xMin, xMax)) {
-    line(svg, sx(tick.value), margin.top + innerH, sx(tick.value), margin.top + innerH + 5, "tick");
-    text(svg, sx(tick.value), margin.top + innerH + 22, tick.label, "tick-label", "middle");
+    const tickX = sx(tick.value);
+    const tickY = margin.top + innerH + (tick.rotate ? 30 : 22);
+    line(svg, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
+    const tickLabel = text(
+      svg,
+      tickX,
+      tickY,
+      tick.label,
+      tick.rotate ? "tick-label angled" : "tick-label",
+      tick.rotate ? "end" : "middle"
+    );
+    if (tick.rotate) tickLabel.setAttribute("transform", `rotate(-45 ${tickX} ${tickY})`);
   }
   const baseline = Math.min(Math.max(1, yMin), yMax);
   line(svg, margin.left, sy(baseline), margin.left + innerW, sy(baseline), "zero");
@@ -144,8 +156,8 @@ export function drawChart(term, selection, context) {
       if (displaySelected.has(i)) selectedPoints.push(i);
       else unselectedPoints.push(i);
     }
-    for (const i of unselectedPoints) drawPoint(svg, x, y, sx, sy, i, false);
-    for (const i of selectedPoints) drawPoint(svg, x, y, sx, sy, i, true);
+    for (const i of unselectedPoints) drawPoint(svg, view, x, y, sx, sy, i, false);
+    for (const i of selectedPoints) drawPoint(svg, view, x, y, sx, sy, i, true);
   } else {
     drawControlHandles(svg, term, sx, sy, margin, innerH);
   }
@@ -253,13 +265,75 @@ function visiblePointIndices(term, selection) {
   return Array.from(out).sort((a, b) => a - b);
 }
 
-function drawPoint(svg, x, y, sx, sy, i, selected) {
+function drawPoint(svg, term, x, y, sx, sy, i, selected) {
   const circle = el("circle", {
     cx: sx(x[i]), cy: sy(y[i]), r: selected ? 4.6 : 3.4,
     class: selected ? "point selected" : "point",
     "data-index": i
   });
+  circle.addEventListener("pointerenter", () => {
+    showPointTooltip(svg, circle, pointTooltipLines(term, i));
+  });
+  circle.addEventListener("pointermove", () => {
+    showPointTooltip(svg, circle, pointTooltipLines(term, i));
+  });
+  circle.addEventListener("pointerleave", () => hidePointTooltip(svg));
   svg.appendChild(circle);
+}
+
+function pointTooltipLines(term, i) {
+  const label = pointLabel(term, i);
+  const exposure = Array.isArray(term.weights) ? term.weights[i] : null;
+  return [
+    label,
+    `Relativity: ${fmt(term.y[i])}`,
+    `Exposure: ${fmt(exposure)}`
+  ];
+}
+
+function pointLabel(term, i) {
+  if (Array.isArray(term.levels) && term.levels[i] !== undefined) return String(term.levels[i]);
+  if (Array.isArray(term.displayLevels) && term.displayLevels[i] !== undefined) {
+    return String(term.displayLevels[i]);
+  }
+  const label = term.x_label || "x";
+  return `${label}: ${fmt(term.x[i])}`;
+}
+
+function showPointTooltip(svg, target, lines) {
+  hidePointTooltip(svg);
+  const cx = Number(target.getAttribute("cx") || 0);
+  const cy = Number(target.getAttribute("cy") || 0);
+  const width = tooltipWidth(lines);
+  const height = 12 + lines.length * 16;
+  const bounds = svg.viewBox.baseVal;
+  const svgWidth = bounds && bounds.width ? bounds.width : Number(svg.getAttribute("width")) || 940;
+  const svgHeight = bounds && bounds.height ? bounds.height : Number(svg.getAttribute("height")) || 520;
+  const x = Math.max(8, Math.min(svgWidth - width - 8, cx + 12));
+  const y = Math.max(8, Math.min(svgHeight - height - 8, cy - height - 12));
+  const group = el("g", { class: "point-tooltip" });
+  group.appendChild(el("rect", { x, y, width, height, rx: 4, ry: 4 }));
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const node = text(
+      group,
+      x + 8,
+      y + 18 + lineIndex * 16,
+      lines[lineIndex],
+      lineIndex === 0 ? "point-tooltip-label" : "point-tooltip-value",
+      "start"
+    );
+    if (lineIndex === 0) node.setAttribute("font-weight", "700");
+  }
+  svg.appendChild(group);
+}
+
+function hidePointTooltip(svg) {
+  for (const node of svg.querySelectorAll(".point-tooltip")) node.remove();
+}
+
+function tooltipWidth(lines) {
+  const longest = Math.max(...lines.map((line) => String(line).length));
+  return Math.min(Math.max(longest * 7 + 18, 120), 240);
 }
 
 function drawLevelGroups(svg, term, sx, sy) {
@@ -600,8 +674,18 @@ function svgClientPoint(svg, x, y) {
 }
 
 function xTicks(term, xMin, xMax) {
-  if (term.levels && term.levels.length <= 14) {
-    return term.x.map((value, i) => ({ value, label: term.levels[i] }));
+  if (term.levels && term.levels.length <= MAX_LEVEL_LABELS) {
+    return term.x.map((value, i) => ({
+      value,
+      label: term.levels[i],
+      rotate: term.levels.length > 8
+    }));
+  }
+  if (term.levels) {
+    const step = Math.max(1, Math.ceil(term.levels.length / MAX_LEVEL_LABELS));
+    return term.x
+      .map((value, i) => ({ value, label: term.levels[i], rotate: true, index: i }))
+      .filter((tick) => tick.index === 0 || tick.index === term.levels.length - 1 || tick.index % step === 0);
   }
   return ticks(xMin, xMax, 6).map((value) => ({ value, label: fmt(value) }));
 }
