@@ -408,6 +408,8 @@ function clearBoxZoom(interaction) {
 
 function beginOrderDrag(context, interaction, event, index) {
   const term = context.currentTerm();
+  const scale = context.svg._scale || {};
+  if (scale.displayIsCollapsed) return false;
   if (!term || !Array.isArray(term.levels) || !term.levels.length) return false;
   if ((term.term_type || term.kind || "") !== "categorical") return false;
   const selection = context.currentSelection();

@@ -42,10 +42,13 @@ def build_group_display(term_payload: dict[str, Any]) -> dict[str, Any]:
     if previous_y is not None:
         collapsed["previous_y"] = []
 
-    for indices in source_groups:
+    for source_group in source_groups:
+        indices = source_group["indices"]
         source_levels = [str(levels[i]) for i in indices]
         group_weight = weights[indices]
-        label = "+".join(source_levels)
+        label = str(source_group.get("label") or "+".join(source_levels))
+        if len(indices) == 1:
+            label = source_levels[0]
 
         collapsed["levels"].append(label)
         collapsed["source_indices"].append([int(i) for i in indices])
@@ -76,25 +79,25 @@ def build_group_display(term_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _source_groups(n_levels: int, groups: list[dict[str, Any]]) -> list[list[int]]:
-    grouped_by_first: dict[int, list[int]] = {}
+def _source_groups(n_levels: int, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped_by_first: dict[int, dict[str, Any]] = {}
     for group in groups:
         indices = sorted(
             {int(index) for index in group.get("indices", []) if 0 <= int(index) < n_levels}
         )
         if len(indices) >= 2:
-            grouped_by_first[min(indices)] = indices
+            grouped_by_first[min(indices)] = {"label": group.get("label"), "indices": indices}
 
     used: set[int] = set()
-    out: list[list[int]] = []
+    out: list[dict[str, Any]] = []
     for index in range(n_levels):
         if index in used:
             continue
         group = grouped_by_first.get(index)
         if group is None:
-            group = [index]
+            group = {"label": None, "indices": [index]}
         out.append(group)
-        used.update(group)
+        used.update(group["indices"])
     return out
 
 

@@ -2402,6 +2402,29 @@ def test_reset_clears_term_history_without_creating_reset_edit(editor_model):
     assert session_payload(session)["x_spline"]["previous_y"] is None
 
 
+def test_partial_reset_preserves_history_for_unreset_points(editor_model):
+    from superglm.editor.payloads import history_payload
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    term = session.terms["x_spline"]
+    original = term.original_log_effect.copy()
+    session.select_indices("x_spline", [0, 1])
+    session.shift("x_spline", 0.05)
+
+    session.select_indices("x_spline", [0])
+    session.reset("x_spline")
+
+    history = history_payload(session)
+    assert term.edited_log_effect[0] == pytest.approx(original[0])
+    assert term.edited_log_effect[1] == pytest.approx(original[1] + 0.05)
+    assert history["active"][0]["term"] == "x_spline"
+    assert history["active"][0]["n_points"] == 1
+
+    session.undo("x_spline")
+    assert term.edited_log_effect[0] == pytest.approx(original[0])
+    assert term.edited_log_effect[1] == pytest.approx(original[1])
+
+
 def test_widget_state_includes_edit_history(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     session.select_indices("x_spline", [0])
@@ -2466,6 +2489,24 @@ def test_session_payload_group_display_projects_previous_y_for_collapsed_levels(
     assert collapsed["previous_y"] is not None
     assert len(collapsed["previous_y"]) == len(collapsed["y"])
     assert collapsed["previous_y"][1] == pytest.approx(payload["y"][1] / np.exp(0.05))
+
+
+def test_session_payload_collapsed_group_display_uses_custom_group_label(
+    editor_model, editor_frame
+):
+    from superglm.editor.payloads import session_payload
+
+    X, y = editor_frame
+    session = EditorSession.from_model(editor_model, terms=["band"], train_data=(X, y, None))
+    session.select_levels("band", ["medium", "high"])
+    session.replace_with_collapsed_levels("band", method="fit", group_label="Upper")
+
+    payload = session_payload(session)["band"]
+    collapsed = payload["group_display"]["collapsed"]
+
+    assert collapsed["levels"] == ["low", "Upper"]
+    assert collapsed["group_labels"] == ["low", "Upper"]
+    assert collapsed["source_levels"] == [["low"], ["medium", "high"]]
 
 
 def test_session_payload_group_display_defaults_expanded_for_unordered_categorical(
@@ -4162,6 +4203,16 @@ def test_editor_collapsed_group_display_explains_original_projection():
     assert "original projection" in chart_js
     assert "collapsedOriginalNote" in main_js
     assert "original line is grouped by exposure-weighted averaging" in main_js
+
+
+def test_editor_group_display_change_resets_zoom_and_blocks_collapsed_reorder():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    main_js = (root / "main.js").read_text()
+    interactions_js = (root / "interactions.js").read_text()
+
+    assert "delete zoomState[selectedTerm()]" in main_js
+    assert "scale.displayIsCollapsed" in interactions_js
+    assert "if (scale.displayIsCollapsed) return false" in interactions_js
 
 
 def test_editor_chart_renders_previous_edit_line():

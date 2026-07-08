@@ -601,6 +601,62 @@ class TestPlotRelativity:
 
         assert marker_traces
 
+    def test_plotly_collapsed_ordered_categorical_suppresses_stale_knot_diagnostics(self):
+        go = pytest.importorskip("plotly.graph_objects")
+
+        rng = np.random.default_rng(20260708)
+        levels = ["18-24", "25-34", "35-49", "50-64", "65-80"]
+        values = {
+            "18-24": 21.0,
+            "25-34": 30.0,
+            "35-49": 42.0,
+            "50-64": 57.0,
+            "65-80": 72.0,
+        }
+        age_band = rng.choice(levels, 700, p=[0.12, 0.23, 0.30, 0.22, 0.13])
+        mileage = rng.normal(0.0, 1.0, len(age_band))
+        X = pd.DataFrame({"age_band": age_band, "mileage": mileage})
+        y = (
+            0.8
+            + 0.16 * np.sin(np.array([values[level] for level in age_band]) / 10.0)
+            + 0.04 * mileage
+            + rng.normal(0.0, 0.05, len(age_band))
+        )
+        sample_weight = np.ones(len(X), dtype=np.float64)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={
+                "age_band": OrderedCategorical(values=values, basis="spline", n_knots=3),
+                "mileage": Numeric(),
+            },
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+        session = EditorSession.from_model(
+            model,
+            terms=["age_band"],
+            train_data=(X, y, sample_weight),
+        )
+        session.select_levels("age_band", ["18-24", "25-34", "35-49"])
+        model = session.replace_with_collapsed_levels("age_band", method="fit")
+
+        fig = model.plot(
+            ["age_band", "mileage"],
+            engine="plotly",
+            X=X,
+            sample_weight=sample_weight,
+            grouped_level_display="collapsed",
+            show_knots=True,
+        )
+
+        knot_traces = [
+            trace
+            for trace in fig.data
+            if isinstance(trace, go.Scatter) and trace.name == "Interior knots"
+        ]
+
+        assert knot_traces == []
+
     def test_numeric_returns_figure(self, fitted_model):
         import matplotlib
 

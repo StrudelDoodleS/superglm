@@ -46,27 +46,32 @@ def project_grouped_term_for_display(
         return expanded
 
     groups = _source_groups(levels, grouping)
-    if all(len(indices) == 1 for indices in groups):
+    group_indices = [group["indices"] for group in groups]
+    if all(len(indices) == 1 for indices in group_indices):
         return expanded
 
-    log_rel = _collapse_array(ti.log_relativity, groups)
+    log_rel = _collapse_array(ti.log_relativity, group_indices)
     if log_rel is None:
         return expanded
-    display_levels = ["+".join(levels[i] for i in indices) for indices in groups]
+    display_levels = [
+        str(group["label"]) if len(group["indices"]) > 1 else levels[group["indices"][0]]
+        for group in groups
+    ]
     display_term = replace(
         ti,
         levels=display_levels,
         log_relativity=log_rel,
         relativity=np.exp(log_rel),
-        se_log_relativity=_collapse_array(ti.se_log_relativity, groups),
-        ci_lower=_collapse_array(ti.ci_lower, groups),
-        ci_upper=_collapse_array(ti.ci_upper, groups),
+        se_log_relativity=_collapse_array(ti.se_log_relativity, group_indices),
+        ci_lower=_collapse_array(ti.ci_lower, group_indices),
+        ci_upper=_collapse_array(ti.ci_upper, group_indices),
+        spline=None,
         smooth_curve=_collapsed_smooth_curve(ti, log_rel, len(display_levels)),
     )
     return GroupedTermDisplay(
         term=display_term,
-        source_levels=[[levels[i] for i in indices] for indices in groups],
-        source_indices=groups,
+        source_levels=[[levels[i] for i in indices] for indices in group_indices],
+        source_indices=group_indices,
         collapsed=True,
     )
 
@@ -123,10 +128,10 @@ def _is_ordered_categorical(model: Any, ti: TermInference) -> bool:
     return isinstance(spec, OrderedCategorical)
 
 
-def _source_groups(levels: list[str], grouping: Any) -> list[list[int]]:
+def _source_groups(levels: list[str], grouping: Any) -> list[dict[str, Any]]:
     index_by_level = {str(level): i for i, level in enumerate(levels)}
     used: set[int] = set()
-    groups: list[list[int]] = []
+    groups: list[dict[str, Any]] = []
     for level in levels:
         index = index_by_level[level]
         if index in used:
@@ -138,7 +143,7 @@ def _source_groups(levels: list[str], grouping: Any) -> list[list[int]]:
         indices = [index_by_level[original] for original in originals if original in index_by_level]
         if not indices:
             indices = [index]
-        groups.append(indices)
+        groups.append({"label": group_label, "indices": indices})
         used.update(indices)
     return groups
 

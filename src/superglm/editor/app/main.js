@@ -646,6 +646,7 @@ modeSelect.addEventListener("change", () => {
 if (groupDisplayMode) {
   groupDisplayMode.addEventListener("change", () => {
     groupDisplayModeByTerm[selectedTerm()] = groupDisplayMode.value;
+    delete zoomState[selectedTerm()];
     render();
   });
 }
