@@ -32,7 +32,7 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
 
     assert "## Choose Spline Capacity With A k Sweep" in source
-    assert "n = 10_000" in source
+    assert "n = 150_000" in source
     assert "## In-Sample k Adequacy" in source
     assert "## Cross-Validated k Check" in source
     assert "from sklearn.model_selection import KFold" in source
@@ -44,6 +44,8 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     assert "TRUE_TWEEDIE_P" in source
     assert "TRUE_TWEEDIE_P_INIT" in source
     assert "TRUE_TWEEDIE_PHI" in source
+    assert "age = np.clip(rng.normal(" in source
+    assert "age_effect -= np.average(age_effect, weights=exposure)" in source
     assert "mu = np.exp(eta)" in source
     assert "y = generate_tweedie_cpg(" in source
     assert "TERRITORY_LEVELS" in source
@@ -54,6 +56,8 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     assert '"T10"' in source
     assert "territory_effect" in source
     assert "family=families.tweedie(p=TRUE_TWEEDIE_P_INIT)" in source
+    assert "discrete=True" in source
+    assert "n_bins=512" in source
     assert "model.estimate_p(" in source
     assert "tweedie_profile.search_trace" in source
     assert 'method="brent"' in source
