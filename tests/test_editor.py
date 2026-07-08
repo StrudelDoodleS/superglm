@@ -3716,6 +3716,7 @@ def test_open_directory_prefers_dolphin_on_kde(tmp_path, monkeypatch):
             return "", ""
 
     monkeypatch.setattr(native_dialogs.sys, "platform", "linux")
+    monkeypatch.setattr(native_dialogs, "_is_wsl", lambda: False)
     monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
     monkeypatch.setattr(native_dialogs.shutil, "which", lambda command: f"/usr/bin/{command}")
     monkeypatch.setattr(
@@ -3728,6 +3729,110 @@ def test_open_directory_prefers_dolphin_on_kde(tmp_path, monkeypatch):
 
     assert opened == tmp_path.resolve()
     assert commands[0] == ("dolphin", "--new-window", str(tmp_path.resolve()))
+
+
+def test_open_directory_detects_wsl_from_environment(monkeypatch):
+    from superglm.editor import native_dialogs
+
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+
+    assert native_dialogs._is_wsl()
+
+
+def test_open_directory_detects_wsl_from_proc_version(monkeypatch):
+    from superglm.editor import native_dialogs
+
+    original_read_text = Path.read_text
+
+    def fake_read_text(self, *args, **kwargs):
+        if str(self) == "/proc/version":
+            return "Linux version 6.6.87.2-microsoft-standard-WSL2"
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.setattr(native_dialogs.Path, "read_text", fake_read_text)
+
+    assert native_dialogs._is_wsl()
+
+
+def test_open_directory_uses_windows_explorer_inside_wsl(tmp_path, monkeypatch):
+    from superglm.editor import native_dialogs
+
+    commands = []
+    windows_path = r"\\wsl.localhost\Ubuntu\home\user\project"
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    def fake_run(command, **kwargs):
+        assert tuple(command) == ("wslpath", "-w", str(tmp_path.resolve()))
+        assert kwargs["check"] is True
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        return SimpleNamespace(stdout=f"{windows_path}\n")
+
+    monkeypatch.setattr(native_dialogs.sys, "platform", "linux")
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    monkeypatch.setattr(native_dialogs.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        native_dialogs.subprocess,
+        "Popen",
+        lambda command, **_kwargs: commands.append(tuple(command)) or FakeProcess(),
+    )
+
+    opened = native_dialogs.open_directory_path(tmp_path)
+
+    assert opened == tmp_path.resolve()
+    assert commands == [("explorer.exe", windows_path)]
+
+
+def test_open_directory_falls_back_to_linux_opener_when_wsl_explorer_fails(tmp_path, monkeypatch):
+    from superglm.editor import native_dialogs
+
+    commands = []
+
+    class FailedProcess:
+        def poll(self):
+            return 1
+
+        def communicate(self, timeout=None):
+            return "", "explorer failed"
+
+    class RunningProcess:
+        def poll(self):
+            return None
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    def fake_popen(command, **_kwargs):
+        commands.append(tuple(command))
+        if command[0] == "explorer.exe":
+            return FailedProcess()
+        return RunningProcess()
+
+    monkeypatch.setattr(native_dialogs.sys, "platform", "linux")
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    monkeypatch.setattr(
+        native_dialogs.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="C:\\Users\\me\\project\n"),
+    )
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "")
+    monkeypatch.setattr(native_dialogs.shutil, "which", lambda command: "/usr/bin/xdg-open")
+    monkeypatch.setattr(native_dialogs.subprocess, "Popen", fake_popen)
+
+    opened = native_dialogs.open_directory_path(tmp_path)
+
+    assert opened == tmp_path.resolve()
+    assert commands == [
+        ("explorer.exe", "C:\\Users\\me\\project"),
+        ("xdg-open", str(tmp_path.resolve())),
+    ]
 
 
 def test_open_directory_raises_when_launcher_exits_immediately(tmp_path, monkeypatch):
