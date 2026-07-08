@@ -632,7 +632,8 @@ def fit_irls_direct(
     # Pre-compute initial eta/mu once — reused as the first iteration's
     # working quantities, then updated at the end of each iteration.
     # This eliminates one redundant matvec + link.inverse per iteration.
-    eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
+    eta_unclipped = dm.matvec(beta) + intercept + offset
+    eta = stabilize_eta(eta_unclipped, link)
     mu = clip_mu(link.inverse(eta), family)
     iteration_log: list[IterationDiagnostics] = [] if record_diagnostics else []
     base_debug_context = dict(debug_context or {})
@@ -651,9 +652,6 @@ def fit_irls_direct(
         V = np.maximum(V, _VARIANCE_FLOOR)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
-        w_max = W.max()
-        if w_max > 0:
-            W = np.maximum(W, w_max * 1e-10)
         z = eta + (y - mu) / dmu_deta
         _t_working += time.perf_counter() - _t0
 
@@ -926,7 +924,8 @@ def fit_irls_direct(
         # Update eta/mu from new beta — reused as next iteration's working
         # quantities (no redundant matvec at the start of the loop).
         _t0 = time.perf_counter()
-        eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
+        eta_unclipped = dm.matvec(beta) + intercept + offset
+        eta = stabilize_eta(eta_unclipped, link)
         mu = clip_mu(link.inverse(eta), family)
         eta_elapsed = time.perf_counter() - _t0
         _t_eta += eta_elapsed
@@ -946,7 +945,8 @@ def fit_irls_direct(
             for halving in range(max_halving):
                 beta = 0.5 * (beta + beta_prev)
                 intercept = 0.5 * (intercept + intercept_prev)
-                eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
+                eta_unclipped = dm.matvec(beta) + intercept + offset
+                eta = stabilize_eta(eta_unclipped, link)
                 mu = clip_mu(link.inverse(eta), family)
                 dev_h = float(np.sum(weights * family.deviance_unit(y, mu)))
                 if not np.isfinite(dev_h) or dev_h >= dev:
@@ -974,6 +974,10 @@ def fit_irls_direct(
             k = min(5, n)
             top_idx = np.argpartition(W, -k)[-k:]
             bot_idx = np.argpartition(W, k)[:k]
+            eta_clipped = bool(
+                float(np.min(eta_unclipped)) < float(np.min(eta))
+                or float(np.max(eta_unclipped)) > float(np.max(eta))
+            )
             iteration_log.append(
                 IterationDiagnostics(
                     iteration=it + 1,
@@ -991,6 +995,12 @@ def fit_irls_direct(
                     bottom_w_indices=bot_idx[np.argsort(W[bot_idx])],
                     cond_estimate=_cond_est,
                     used_svd_fallback=_used_svd,
+                    raw_w_min=float(W.min()),
+                    raw_w_max=float(W.max()),
+                    raw_w_ratio=w_ratio,
+                    eta_min_unclipped=float(np.min(eta_unclipped)),
+                    eta_max_unclipped=float(np.max(eta_unclipped)),
+                    eta_clipped=eta_clipped,
                 )
             )
 
@@ -1032,8 +1042,15 @@ def fit_irls_direct(
                     "converged": bool(converged_this_iter),
                     "w_min": float(W.min()),
                     "w_max": float(W.max()),
+                    "w_ratio": float(W.max() / max(W.min(), 1e-300)),
                     "mu_min": float(mu.min()),
                     "mu_max": float(mu.max()),
+                    "eta_min_unclipped": float(np.min(eta_unclipped)),
+                    "eta_max_unclipped": float(np.max(eta_unclipped)),
+                    "eta_clipped": bool(
+                        float(np.min(eta_unclipped)) < float(np.min(eta))
+                        or float(np.max(eta_unclipped)) > float(np.max(eta))
+                    ),
                     "eta_min": float(eta.min()),
                     "eta_max": float(eta.max()),
                     "step_halvings": int(n_halvings),

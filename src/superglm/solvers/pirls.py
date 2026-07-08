@@ -45,6 +45,12 @@ class IterationDiagnostics:
     # Condition estimate and SVD fallback flag (direct solver only)
     cond_estimate: float | None = None
     used_svd_fallback: bool | None = None
+    raw_w_min: float | None = None
+    raw_w_max: float | None = None
+    raw_w_ratio: float | None = None
+    eta_min_unclipped: float | None = None
+    eta_max_unclipped: float | None = None
+    eta_clipped: bool | None = None
 
 
 @dataclass
@@ -131,7 +137,8 @@ def _fit_pirls_inner(
 
     # Compute initial deviance for step-halving baseline (catches divergence
     # from iteration 1, e.g. NB2 deviance going negative under L1 penalty).
-    eta_init = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
+    eta_init_unclipped = dm.matvec(beta) + intercept + offset
+    eta_init = stabilize_eta(eta_init_unclipped, link)
     mu_init = clip_mu(link.inverse(eta_init), family)
     dev_prev = float(np.sum(weights * family.deviance_unit(y, mu_init)))
     if not np.isfinite(dev_prev):
@@ -146,7 +153,8 @@ def _fit_pirls_inner(
         intercept_prev = intercept
 
         # Current predictions
-        eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
+        eta_unclipped = dm.matvec(beta) + intercept + offset
+        eta = stabilize_eta(eta_unclipped, link)
         mu = clip_mu(link.inverse(eta), family)
 
         # Working weights and response (PIRLS)
@@ -154,13 +162,6 @@ def _fit_pirls_inner(
         V = np.maximum(V, _VARIANCE_FLOOR)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
-        # Clamp W ratio to prevent ill-conditioned gram matrices when
-        # group lasso shrinks groups toward zero (mu → 0, W → 0 for some
-        # observations while others stay normal).  Floor at 1e-10 * max(W)
-        # matches R glm.fit's effective treatment of negligible-weight obs.
-        w_max = W.max()
-        if w_max > 0:
-            W = np.maximum(W, w_max * 1e-10)
         z = eta + (y - mu) / dmu_deta
 
         # Per-group Hessians and Lipschitz constants
@@ -286,6 +287,10 @@ def _fit_pirls_inner(
             k = min(5, n)
             top_idx = np.argpartition(W, -k)[-k:]
             bot_idx = np.argpartition(W, k)[:k]
+            eta_clipped = bool(
+                float(np.min(eta_unclipped)) < float(np.min(eta))
+                or float(np.max(eta_unclipped)) > float(np.max(eta))
+            )
             iteration_log.append(
                 IterationDiagnostics(
                     iteration=outer + 1,
@@ -301,6 +306,12 @@ def _fit_pirls_inner(
                     step_halvings=n_halvings,
                     top_w_indices=top_idx[np.argsort(W[top_idx])[::-1]],
                     bottom_w_indices=bot_idx[np.argsort(W[bot_idx])],
+                    raw_w_min=float(W.min()),
+                    raw_w_max=float(W.max()),
+                    raw_w_ratio=w_ratio,
+                    eta_min_unclipped=float(np.min(eta_unclipped)),
+                    eta_max_unclipped=float(np.max(eta_unclipped)),
+                    eta_clipped=eta_clipped,
                 )
             )
 

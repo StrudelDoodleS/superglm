@@ -60,6 +60,44 @@ class TestSEFiniteForRareLevel:
         assert rare_row.se > 1.0, "SE should be large for near-separated level"
 
 
+class TestSeparatedTailDiagnostics:
+    """Diagnostics should expose, not hide, separated-tail IRLS geometry."""
+
+    def test_working_weight_ratio_is_not_artificially_capped(self):
+        rng = np.random.default_rng(123)
+        n = 1_000
+        n_rare = 5
+        cat = np.array(["base"] * (n - n_rare) + ["rare"] * n_rare)
+        y = rng.gamma(shape=2.0, scale=3.0, size=n)
+        y[cat == "rare"] = 0.0
+
+        idx = rng.permutation(n)
+        df = pd.DataFrame({"cat": cat[idx]})
+        y = y[idx]
+
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="first")},
+        )
+        with pytest.warns(UserWarning, match="coefficient-based convergence"):
+            model.fit(
+                df,
+                y,
+                convergence="coefficients",
+                max_iter=100,
+                tol=0.0,
+                record_diagnostics=True,
+            )
+
+        diagnostics = model.iteration_diagnostics()
+        assert diagnostics["W_ratio"].max() > 1e12
+        assert diagnostics["raw_W_ratio"].max() == pytest.approx(diagnostics["W_ratio"].max())
+        assert diagnostics["eta_min"].min() == pytest.approx(-80.0)
+        assert diagnostics["eta_min_unclipped"].min() < -80.0
+        assert diagnostics["eta_clipped"].any()
+
+
 class TestQuasiSeparatedMarker:
     """The ? marker must appear on rare levels."""
 
