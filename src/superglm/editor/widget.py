@@ -456,37 +456,65 @@ class EditorWidget:
 
     def _collapse_levels(self, term: str | None = None, method: str = "auto") -> dict[str, Any]:
         with self._lock:
+            operation_start = time.perf_counter()
             if term is not None:
                 self._set_term(term)
             target = self.selected_term
             selected_indices = self.session.selection(target).astype(int).tolist()
             selected_levels = self._selected_level_labels(target)
             previous_info = None if self._in_force_info is None else dict(self._in_force_info)
+            fit_start = time.perf_counter()
             refit_model = self.session.replace_with_collapsed_levels(target, method=method)
+            fit_end = time.perf_counter()
             self._collapse_info_history.append(previous_info)
             self._collapsed_refit_model = refit_model
             self._collapsed_refit_info = dict(getattr(refit_model, "_editor_level_collapse", {}))
             self._in_force_info = dict(self._collapsed_refit_info)
             self._invalidate_refit()
             self._restore_selection(target, selected_levels, selected_indices)
-            return summary_payload(self, "in_force")
+            summary_start = time.perf_counter()
+            payload = summary_payload(self, "in_force")
+            summary_end = time.perf_counter()
+            payload["timing"] = _timing_payload(
+                "collapse_levels",
+                operation_start,
+                fit_start,
+                fit_end,
+                summary_start,
+                summary_end,
+            )
+            return payload
 
     def _ungroup_levels(self, term: str | None = None, method: str = "auto") -> dict[str, Any]:
         with self._lock:
+            operation_start = time.perf_counter()
             if term is not None:
                 self._set_term(term)
             target = self.selected_term
             selected_indices = self.session.selection(target).astype(int).tolist()
             selected_levels = self._selected_level_labels(target)
             previous_info = None if self._in_force_info is None else dict(self._in_force_info)
+            fit_start = time.perf_counter()
             refit_model = self.session.replace_with_ungrouped_levels(target, method=method)
+            fit_end = time.perf_counter()
             self._collapse_info_history.append(previous_info)
             self._collapsed_refit_model = refit_model
             self._collapsed_refit_info = dict(getattr(refit_model, "_editor_level_collapse", {}))
             self._in_force_info = dict(self._collapsed_refit_info)
             self._invalidate_refit()
             self._restore_selection(target, selected_levels, selected_indices)
-            return summary_payload(self, "in_force")
+            summary_start = time.perf_counter()
+            payload = summary_payload(self, "in_force")
+            summary_end = time.perf_counter()
+            payload["timing"] = _timing_payload(
+                "ungroup_levels",
+                operation_start,
+                fit_start,
+                fit_end,
+                summary_start,
+                summary_end,
+            )
+            return payload
 
     def _reorder_levels(self, term: str | None = None, target_index: int = 0) -> dict[str, Any]:
         with self._lock:
@@ -497,7 +525,10 @@ class EditorWidget:
 
     def _uncollapse_levels(self) -> dict[str, Any]:
         with self._lock:
+            operation_start = time.perf_counter()
+            fit_start = time.perf_counter()
             restored_model = self.session.uncollapse_levels()
+            fit_end = time.perf_counter()
             restored_info = (
                 self._collapse_info_history.pop() if self._collapse_info_history else None
             )
@@ -509,7 +540,18 @@ class EditorWidget:
             self._invalidate_refit()
             if self.selected_term not in self.session.terms:
                 self.selected_term = next(iter(self.session.terms), "")
-            return summary_payload(self, "in_force")
+            summary_start = time.perf_counter()
+            payload = summary_payload(self, "in_force")
+            summary_end = time.perf_counter()
+            payload["timing"] = _timing_payload(
+                "uncollapse_levels",
+                operation_start,
+                fit_start,
+                fit_end,
+                summary_start,
+                summary_end,
+            )
+            return payload
 
     def _selected_level_labels(self, term: str) -> list[str]:
         editable = self.session.terms.get(term)
@@ -620,6 +662,28 @@ def _normalise_profile_estimate(estimate: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("objective_label", "loss")
     payload.setdefault("lower_is_better", True)
     return jsonable(payload)
+
+
+def _timing_payload(
+    operation: str,
+    operation_start: float,
+    fit_start: float,
+    fit_end: float,
+    summary_start: float,
+    summary_end: float,
+) -> dict[str, Any]:
+    return jsonable(
+        {
+            "operation": operation,
+            "fit_ms": _elapsed_ms(fit_start, fit_end),
+            "summary_ms": _elapsed_ms(summary_start, summary_end),
+            "server_total_ms": _elapsed_ms(operation_start, summary_end),
+        }
+    )
+
+
+def _elapsed_ms(start: float, end: float) -> float:
+    return max(0.0, (end - start) * 1000.0)
 
 
 def _merge_profile_trace_rows(job: dict[str, Any], rows: list[dict[str, Any]]) -> None:

@@ -3032,6 +3032,35 @@ def test_widget_collapse_restores_selection_by_level_when_indices_are_stale(
         widget.close()
 
 
+def test_widget_collapse_levels_reports_refit_timing(editor_model, monkeypatch):
+    import superglm.editor.widget as widget_module
+
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    clock = iter([10.00, 10.01, 10.06, 10.07, 10.09])
+    try:
+        monkeypatch.setattr(widget_module.time, "perf_counter", lambda: next(clock))
+        monkeypatch.setattr(
+            session,
+            "replace_with_collapsed_levels",
+            lambda term, *, method="auto": editor_model,
+        )
+        monkeypatch.setattr(
+            widget_module,
+            "summary_payload",
+            lambda *_args, **_kwargs: {"available": True, "source": "in_force"},
+        )
+
+        payload = widget._collapse_levels("region", method="fit")
+
+        assert payload["timing"]["operation"] == "collapse_levels"
+        assert payload["timing"]["fit_ms"] == pytest.approx(50.0)
+        assert payload["timing"]["summary_ms"] == pytest.approx(20.0)
+        assert payload["timing"]["server_total_ms"] == pytest.approx(90.0)
+    finally:
+        widget.close()
+
+
 def test_widget_http_uncollapse_levels_restores_previous_model(editor_model):
     session = EditorSession.from_model(editor_model, terms=["region"])
     widget = session.widget()
@@ -4353,6 +4382,30 @@ def test_editor_chart_points_have_relativity_exposure_tooltips():
     assert "showPointTooltip(svg, circle, pointTooltipLines(term, i))" in chart_js
     assert "hidePointTooltip(svg)" in chart_js
     assert "point-tooltip" in css
+
+
+def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    html = (root / "index.html").read_text()
+    main_js = (root / "main.js").read_text()
+    summary_js = (root / "summary.js").read_text()
+    css = (root / "styles.css").read_text()
+
+    assert 'id="appBusyOverlay"' in html
+    assert "setAppBusy" in main_js
+    assert "runStructuralRefit" in main_js
+    assert "client_request_ms" in main_js
+    assert "client_recovery_ms" in main_js
+    assert "client_total_ms" in main_js
+    assert "formatTimingDetails" in main_js
+    assert "Refit completed in" in main_js
+    assert "runCollapseRefit(summaryNodes(), selectedTerm())" in main_js
+    assert "runCollapseRefit(summaryNodes(), selectedTerm(), refreshMetricsView)" not in main_js
+    assert "runCollapseRefit(nodes, termName)" in summary_js
+    assert "runCollapseRefit(nodes, termName, refreshMetrics)" not in summary_js
+    assert "app-busy-overlay" in css
+    assert "app-shell.is-busy" in css
+    assert "busy-spinner" in css
 
 
 def test_editor_right_panel_has_history_tab():

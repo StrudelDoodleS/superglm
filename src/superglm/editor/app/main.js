@@ -16,6 +16,10 @@ import {
 import { bindInteractions } from "./interactions.js";
 
 const appTabs = Array.from(document.querySelectorAll(".app-tab"));
+const appShell = document.querySelector(".app-shell");
+const appBusyOverlay = document.getElementById("appBusyOverlay");
+const appBusyTitle = document.getElementById("appBusyTitle");
+const appBusyDetail = document.getElementById("appBusyDetail");
 const editorView = document.getElementById("editorView");
 const reportPanel = document.getElementById("reportPanel");
 const reportTitle = document.getElementById("reportTitle");
@@ -90,6 +94,8 @@ let buildProgress = null;
 let buildFrame = null;
 let renderedTerm = "";
 let activeView = "editor";
+let appBusyTimer = null;
+let appBusyStarted = 0;
 const zoomState = {};
 const groupDisplayModeByTerm = {};
 const REFIT_INVALIDATING_ROUTES = new Set(["/op", "/drag", "/control"]);
@@ -355,6 +361,94 @@ async function refreshSummaryView() {
 async function refreshActiveReport() {
   if (activeView === "editor") return;
   await refreshReport({ report: activeView, reportTitle, reportStatus, reportFrame });
+}
+
+async function runStructuralRefit(label, action) {
+  const operationStart = performance.now();
+  setAppBusy(true, label, "Starting...");
+  try {
+    const requestStart = performance.now();
+    const payload = await action();
+    const requestEnd = performance.now();
+    if (!payload) return null;
+    state = await requestJSON("/state");
+    render();
+    await refreshMetricsView();
+    await refreshActiveReport();
+    const completed = performance.now();
+    const timing = debugTiming(payload, operationStart, requestStart, requestEnd, completed);
+    showTimingStatus(payload, timing);
+    return payload;
+  } finally {
+    setAppBusy(false);
+  }
+}
+
+function setAppBusy(active, title = "Working...", detail = "") {
+  if (!appShell || !appBusyOverlay) return;
+  if (appBusyTimer !== null) {
+    clearInterval(appBusyTimer);
+    appBusyTimer = null;
+  }
+  appShell.classList.toggle("is-busy", active);
+  appShell.setAttribute("aria-busy", active ? "true" : "false");
+  appBusyOverlay.hidden = !active;
+  if (!active) return;
+  appBusyStarted = performance.now();
+  const update = () => {
+    const elapsed = performance.now() - appBusyStarted;
+    if (appBusyTitle) appBusyTitle.textContent = title;
+    if (appBusyDetail) {
+      appBusyDetail.textContent = `${detail || "Refitting model"} · ${formatMilliseconds(elapsed)} elapsed`;
+    }
+  };
+  update();
+  appBusyTimer = window.setInterval(update, 250);
+}
+
+function debugTiming(payload, operationStart, requestStart, requestEnd, completed) {
+  const server = payload && payload.timing ? payload.timing : {};
+  return {
+    ...server,
+    client_request_ms: Math.max(0, requestEnd - requestStart),
+    client_recovery_ms: Math.max(0, completed - requestEnd),
+    client_total_ms: Math.max(0, completed - operationStart)
+  };
+}
+
+function showTimingStatus(payload, timing) {
+  if (!timing) return;
+  if (summaryStatus) {
+    summaryStatus.textContent = `Refit completed in ${formatMilliseconds(timing.client_total_ms)}`;
+  }
+  if (summaryNote) {
+    const details = formatTimingDetails(timing);
+    summaryNote.textContent = payload.note ? `${payload.note} · ${details}` : details;
+  }
+}
+
+function formatTimingDetails(timing) {
+  const parts = [];
+  if (Number.isFinite(Number(timing.server_total_ms))) {
+    parts.push(`server ${formatMilliseconds(timing.server_total_ms)}`);
+  }
+  if (Number.isFinite(Number(timing.fit_ms))) {
+    parts.push(`fit ${formatMilliseconds(timing.fit_ms)}`);
+  }
+  if (Number.isFinite(Number(timing.summary_ms))) {
+    parts.push(`summary ${formatMilliseconds(timing.summary_ms)}`);
+  }
+  if (Number.isFinite(Number(timing.client_recovery_ms))) {
+    parts.push(`browser recovery ${formatMilliseconds(timing.client_recovery_ms)}`);
+  }
+  return parts.length ? `Timing: ${parts.join(", ")}` : "";
+}
+
+function formatMilliseconds(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  if (number < 1000) return `${Math.round(number)} ms`;
+  return `${(number / 1000).toFixed(2)} s`;
 }
 
 async function showView(view) {
@@ -744,32 +838,29 @@ if (collapseLevels) {
   collapseLevels.addEventListener("click", async () => {
     stopContributionBuild();
     summarySource.value = "selected";
-    await runCollapseRefit(summaryNodes(), selectedTerm(), refreshMetricsView);
-    state = await requestJSON("/state");
-    render();
-    await refreshMetricsView();
-    await refreshActiveReport();
+    await runStructuralRefit(
+      "Refitting collapsed levels",
+      () => runCollapseRefit(summaryNodes(), selectedTerm())
+    );
   });
 }
 if (ungroupLevels) {
   ungroupLevels.addEventListener("click", async () => {
     stopContributionBuild();
     summarySource.value = "selected";
-    await runUngroupRefit(summaryNodes(), selectedTerm(), refreshMetricsView);
-    state = await requestJSON("/state");
-    render();
-    await refreshMetricsView();
-    await refreshActiveReport();
+    await runStructuralRefit(
+      "Refitting ungrouped levels",
+      () => runUngroupRefit(summaryNodes(), selectedTerm())
+    );
   });
 }
 if (uncollapseLevels) {
   uncollapseLevels.addEventListener("click", async () => {
     stopContributionBuild();
-    await runUncollapseRefit(summaryNodes(), refreshMetricsView);
-    state = await requestJSON("/state");
-    render();
-    await refreshMetricsView();
-    await refreshActiveReport();
+    await runStructuralRefit(
+      "Restoring previous collapsed-level model",
+      () => runUncollapseRefit(summaryNodes())
+    );
   });
 }
 

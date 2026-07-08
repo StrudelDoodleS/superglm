@@ -131,7 +131,7 @@ function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-export async function runCollapseRefit(nodes, termName, refreshMetrics) {
+export async function runCollapseRefit(nodes, termName) {
   const { summarySource, summaryStatus, summaryFrame, collapseLevels } = nodes;
   summaryStatus.textContent = "Refitting collapsed levels...";
   summaryFrame.setAttribute("aria-busy", "true");
@@ -144,7 +144,6 @@ export async function runCollapseRefit(nodes, termName, refreshMetrics) {
     });
     summarySource.value = "selected";
     renderSummary(payload, nodes);
-    await refreshMetrics();
     return payload;
   } catch (error) {
     summaryStatus.textContent = error.message;
@@ -155,7 +154,7 @@ export async function runCollapseRefit(nodes, termName, refreshMetrics) {
   }
 }
 
-export async function runUngroupRefit(nodes, termName, refreshMetrics) {
+export async function runUngroupRefit(nodes, termName) {
   const { summarySource, summaryStatus, summaryFrame, ungroupLevels } = nodes;
   summaryStatus.textContent = "Refitting ungrouped levels...";
   summaryFrame.setAttribute("aria-busy", "true");
@@ -168,7 +167,6 @@ export async function runUngroupRefit(nodes, termName, refreshMetrics) {
     });
     summarySource.value = "selected";
     renderSummary(payload, nodes);
-    await refreshMetrics();
     return payload;
   } catch (error) {
     summaryStatus.textContent = error.message;
@@ -179,7 +177,7 @@ export async function runUngroupRefit(nodes, termName, refreshMetrics) {
   }
 }
 
-export async function runUncollapseRefit(nodes, refreshMetrics) {
+export async function runUncollapseRefit(nodes) {
   const { summarySource, summaryStatus, summaryFrame, uncollapseLevels } = nodes;
   summaryStatus.textContent = "Restoring previous collapsed-level model...";
   summaryFrame.setAttribute("aria-busy", "true");
@@ -192,7 +190,6 @@ export async function runUncollapseRefit(nodes, refreshMetrics) {
     });
     summarySource.value = "selected";
     renderSummary(payload, nodes);
-    await refreshMetrics();
     return payload;
   } catch (error) {
     summaryStatus.textContent = error.message;

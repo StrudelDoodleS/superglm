@@ -25,12 +25,64 @@ body {
   box-sizing: inherit;
 }
 .app-shell {
+  position: relative;
   width: min(100%, 1400px);
   min-width: 0;
   height: 100%;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   margin: 0 auto;
+}
+.app-busy-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.62);
+  backdrop-filter: blur(1px);
+}
+.app-busy-overlay[hidden] {
+  display: none;
+}
+.app-shell.is-busy .app-view,
+.app-shell.is-busy .toolbar,
+.app-shell.is-busy .app-tabs {
+  pointer-events: none;
+}
+.app-busy-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 280px;
+  max-width: min(440px, calc(100% - 48px));
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 12px 34px rgba(31, 35, 40, 0.14);
+}
+.app-busy-card strong,
+.app-busy-card span {
+  display: block;
+}
+.app-busy-card span {
+  color: var(--gray);
+  font-size: 12px;
+}
+.busy-spinner {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border: 3px solid #d8dee4;
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: busy-spin 0.8s linear infinite;
+}
+@keyframes busy-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .toolbar {
   display: flex;

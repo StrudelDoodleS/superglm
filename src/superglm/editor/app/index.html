@@ -8,6 +8,15 @@
 </head>
 <body>
   <div class="app-shell">
+  <div id="appBusyOverlay" class="app-busy-overlay" hidden aria-live="polite">
+    <div class="app-busy-card">
+      <div class="busy-spinner" aria-hidden="true"></div>
+      <div>
+        <strong id="appBusyTitle">Working...</strong>
+        <span id="appBusyDetail">Please wait.</span>
+      </div>
+    </div>
+  </div>
   <div class="app-tabs" role="tablist" aria-label="Editor views">
     <button class="app-tab active" type="button" data-view="editor" role="tab" aria-selected="true">
       Editor
