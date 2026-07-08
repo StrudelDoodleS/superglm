@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 import numpy as np
 
+from superglm.editor.group_display import build_group_display
 from superglm.editor.terms import term_from_inference
 
 _MAX_INTERACTIVE_HANDLES = 420
@@ -25,13 +28,14 @@ def session_payload(
         edit_delta = np.asarray(term.edited_log_effect - term.original_log_effect, dtype=np.float64)
         reference_log_effect = _reference_log_effect(session, name, term)
         ci_lower, ci_upper = _ci_payload(term, edit_delta)
-        payload[name] = {
+        term_payload = {
             "kind": term.kind,
             "term_type": str(term.metadata.get("term_type", term.kind)),
             "x": x_values,
             "x_domain": _x_domain(x_values, pad_discrete=term.levels is not None),
             "y": [float(v) for v in np.exp(term.edited_log_effect)],
             "original_y": [float(v) for v in np.exp(reference_log_effect)],
+            "previous_y": _previous_y(session, name, term),
             "controls": _controls_payload(
                 session,
                 name,
@@ -53,7 +57,80 @@ def session_payload(
             "y_label": "relativity",
             "title": name,
         }
+        term_payload["group_display"] = build_group_display(term_payload)
+        payload[name] = term_payload
     return payload
+
+
+def history_payload(session) -> dict[str, Any]:
+    """Return display metadata for the session's linear edit history."""
+    active = _history_records_payload(getattr(session, "history", []))
+    redo = _history_records_payload(getattr(session, "redo_stack", []))
+    if active:
+        active[0]["is_head"] = True
+    return {"active": active, "redo": redo}
+
+
+def _history_records_payload(records) -> list[dict[str, Any]]:
+    parent_hash: str | None = None
+    chronological = []
+    for record in records:
+        record_hash = _record_hash(record, parent_hash)
+        chronological.append(
+            {
+                "hash": record_hash,
+                "parent": parent_hash,
+                "term": str(record.term),
+                "operation": str(record.operation),
+                "n_points": int(np.asarray(record.indices, dtype=np.intp).size),
+                "params": _json_safe(record.params),
+                "is_head": False,
+            }
+        )
+        parent_hash = record_hash
+    return list(reversed(chronological))
+
+
+def _record_hash(record, parent_hash: str | None) -> str:
+    data = {
+        "parent": parent_hash,
+        "term": str(record.term),
+        "operation": str(record.operation),
+        "indices": np.asarray(record.indices, dtype=np.intp).tolist(),
+        "before": np.round(np.asarray(record.before, dtype=np.float64), 12).tolist(),
+        "after": np.round(np.asarray(record.after, dtype=np.float64), 12).tolist(),
+        "params": _json_safe(record.params),
+    }
+    encoded = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha1(encoded).hexdigest()[:7]
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(value[key]) for key in sorted(value)}
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, float):
+        return round(value, 12)
+    if isinstance(value, int | str | bool) or value is None:
+        return value
+    return str(value)
+
+
+def _previous_y(session, name: str, term) -> list[float] | None:
+    for record in reversed(getattr(session, "history", [])):
+        if record.term != name:
+            continue
+        previous = np.asarray(term.edited_log_effect, dtype=np.float64).copy()
+        previous[np.asarray(record.indices, dtype=np.intp)] = np.asarray(
+            record.before, dtype=np.float64
+        )
+        return [float(v) for v in np.exp(previous)]
+    return None
 
 
 def _level_order_changed(session, name: str) -> bool:

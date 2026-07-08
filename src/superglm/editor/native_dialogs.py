@@ -20,6 +20,8 @@ def open_directory_path(path: str | Path | None = None) -> Path:
     if sys.platform == "darwin":
         subprocess.Popen(["open", str(target)])
         return target
+    if sys.platform.startswith("linux") and _is_wsl() and _open_wsl_directory(target):
+        return target
 
     commands = _open_directory_commands(target)
     for command in commands:
@@ -31,6 +33,31 @@ def open_directory_path(path: str | Path | None = None) -> Path:
         "Could not find a desktop file manager opener. Install xdg-open/gio/kde-open "
         "or open the directory manually."
     )
+
+
+def _is_wsl() -> bool:
+    try:
+        proc_version = Path("/proc/version").read_text(errors="ignore").lower()
+    except OSError:
+        proc_version = ""
+    return "microsoft" in proc_version or bool(os.environ.get("WSL_DISTRO_NAME"))
+
+
+def _open_wsl_directory(target: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["wslpath", "-w", str(target)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        windows_path = result.stdout.strip()
+        if not windows_path:
+            return False
+        _launch_directory_command(("explorer.exe", windows_path))
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return False
+    return True
 
 
 def _open_directory_commands(target: Path) -> tuple[tuple[str, ...], ...]:

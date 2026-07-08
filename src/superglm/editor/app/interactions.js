@@ -55,19 +55,24 @@ export function bindInteractions(context) {
       clearBoxZoom(interaction);
       clearOrderDropPreview(interaction);
       interaction.orderDrag = null;
-      const i = Number(index);
       const term = context.currentTerm();
       const selection = context.currentSelection();
-      const indices = selection.has(i) ? Array.from(selection).sort((a, b) => a - b) : [i];
+      const displayIndex = Number(index);
+      const sourceForPoint = sourceIndicesForDisplayIndex(context, displayIndex);
+      const selectionTouchesPoint = sourceForPoint.some((sourceIndex) => selection.has(sourceIndex));
+      const indices = selectionTouchesPoint
+        ? Array.from(selection).sort((a, b) => a - b)
+        : sourceForPoint;
       interaction.pointDrag = {
-        index: i,
-        startValue: term.y[i],
+        displayIndex,
+        sourceForPoint,
+        startValue: displayedTermValue(term, displayIndex, context),
         indices,
         values: indices.map((j) => term.y[j]),
         delta: 0
       };
-      if (!selection.has(i)) {
-        context.getState().selection[context.selectedTerm()] = [i];
+      if (!selectionTouchesPoint) {
+        context.getState().selection[context.selectedTerm()] = sourceForPoint;
         context.render();
       }
       svg.setPointerCapture(event.pointerId);
@@ -97,7 +102,8 @@ export function bindInteractions(context) {
       clearBoxZoom(interaction);
       clearOrderDropPreview(interaction);
       interaction.orderDrag = null;
-      const indices = togglePointSelection(context.currentSelection(), Number(index));
+      const source = sourceIndicesForDisplayIndex(context, Number(index));
+      const indices = toggleSourceSelection(context.currentSelection(), source);
       await context.postJSON("/select", { term: context.selectedTerm(), indices });
       return;
     }
@@ -151,12 +157,7 @@ export function bindInteractions(context) {
       const term = context.currentTerm();
       const value = yFromPoint(context, svgPoint(context, event));
       interaction.pointDrag.delta = value - interaction.pointDrag.startValue;
-      for (let k = 0; k < interaction.pointDrag.indices.length; k++) {
-        term.y[interaction.pointDrag.indices[k]] = Math.max(
-          1e-12,
-          interaction.pointDrag.values[k] + interaction.pointDrag.delta
-        );
-      }
+      updateDraggedSourceValues(term, interaction.pointDrag, context);
       context.drawChart(term, context.currentSelection());
       return;
     }
@@ -194,10 +195,17 @@ export function bindInteractions(context) {
       return;
     }
     if (interaction.pointDrag) {
+      const term = context.currentTerm();
+      const displayValue = displayedTermValue(term, interaction.pointDrag.displayIndex, context);
       const payload = {
         term: context.selectedTerm(),
         indices: interaction.pointDrag.indices,
-        values: interaction.pointDrag.indices.map((i) => context.currentTerm().y[i])
+        values: valuesForSourceIndices(
+          term,
+          interaction.pointDrag.indices,
+          interaction.pointDrag.sourceForPoint,
+          displayValue
+        )
       };
       interaction.pointDrag = null;
       await context.postJSON("/drag", payload, { refreshMetrics: true, refreshSummary: true });
@@ -228,14 +236,15 @@ export function bindInteractions(context) {
     const point = svgPoint(context, event);
     const moved = Math.abs(point.x - interaction.dragStart.x) > 3 ||
       Math.abs(point.y - interaction.dragStart.y) > 3;
-    const indices = moved ? indicesInBox(context, interaction.dragStart, point) : (
+    const displayIndices = moved ? indicesInBox(context, interaction.dragStart, point) : (
       interaction.pendingClickIndex === null ? null : [interaction.pendingClickIndex]
     );
     if (interaction.brush) interaction.brush.remove();
     interaction.brush = null;
     interaction.dragStart = null;
     interaction.pendingClickIndex = null;
-    if (indices === null) return;
+    if (displayIndices === null) return;
+    const indices = sourceIndicesForDisplayIndices(context, displayIndices);
     await context.postJSON("/select", { term: context.selectedTerm(), indices });
   });
 
@@ -287,6 +296,86 @@ function togglePointSelection(selection, index) {
   return Array.from(next).sort((a, b) => a - b);
 }
 
+function toggleSourceSelection(selection, sourceIndices) {
+  const next = new Set(selection);
+  const allSelected = sourceIndices.every((index) => next.has(index));
+  for (const index of sourceIndices) {
+    if (allSelected) next.delete(index);
+    else next.add(index);
+  }
+  return Array.from(next).sort((a, b) => a - b);
+}
+
+function sourceIndicesForDisplayIndex(context, displayIndex) {
+  const term = context.currentTerm();
+  const index = Number(displayIndex);
+  const scale = context.svg._scale || {};
+  if (!scale.displayIsCollapsed) return expandedGroupSourceForIndex(term, index);
+  const mapping = scale.displayToSourceIndices;
+  if (!Array.isArray(mapping)) return [index];
+  const source = mapping[index];
+  if (!Array.isArray(source) || !source.length) return [index];
+  return source.map(Number).filter((i) => Number.isInteger(i) && i >= 0);
+}
+
+function sourceIndicesForDisplayIndices(context, displayIndices) {
+  const out = new Set();
+  for (const displayIndex of displayIndices) {
+    for (const sourceIndex of sourceIndicesForDisplayIndex(context, displayIndex)) {
+      out.add(sourceIndex);
+    }
+  }
+  return Array.from(out).sort((a, b) => a - b);
+}
+
+function expandedGroupSourceForIndex(term, index) {
+  const groups = Array.isArray(term && term.level_groups) ? term.level_groups : [];
+  for (const group of groups) {
+    const indices = Array.isArray(group.indices) ? group.indices.map(Number) : [];
+    if (indices.includes(Number(index))) return indices;
+  }
+  return [Number(index)];
+}
+
+function displayedTermValue(term, displayIndex, context) {
+  const scale = context.svg._scale || {};
+  if (!scale.displayIsCollapsed) return term.y[displayIndex];
+  const collapsed = term.group_display && term.group_display.collapsed;
+  if (!collapsed || !Array.isArray(collapsed.y)) return term.y[displayIndex];
+  return collapsed.y[displayIndex];
+}
+
+function updateDraggedSourceValues(term, drag, context) {
+  for (let k = 0; k < drag.indices.length; k++) {
+    term.y[drag.indices[k]] = Math.max(1e-12, drag.values[k] + drag.delta);
+  }
+  syncCollapsedDisplayFromRaw(term, context, drag.indices);
+}
+
+function syncCollapsedDisplayFromRaw(term, context, sourceIndices) {
+  const scale = context.svg._scale || {};
+  if (!scale.displayIsCollapsed) return;
+  const collapsed = term.group_display && term.group_display.collapsed;
+  if (!collapsed || !Array.isArray(collapsed.y)) return;
+  const touched = new Set(sourceIndices);
+  const mapping = Array.isArray(scale.displayToSourceIndices) ? scale.displayToSourceIndices : [];
+  for (let displayIndex = 0; displayIndex < mapping.length; displayIndex++) {
+    const source = Array.isArray(mapping[displayIndex]) ? mapping[displayIndex].map(Number) : [];
+    if (!source.some((index) => touched.has(index))) continue;
+    const values = source.map((index) => term.y[index]).filter(Number.isFinite);
+    if (values.length) {
+      collapsed.y[displayIndex] = values.reduce((acc, value) => acc + value, 0) / values.length;
+    }
+  }
+}
+
+function valuesForSourceIndices(term, sourceIndices, sourceForMovedDisplayPoint, displayValue) {
+  const moved = new Set(sourceForMovedDisplayPoint);
+  return sourceIndices.map((sourceIndex) => (
+    moved.has(sourceIndex) && Number.isFinite(displayValue) ? displayValue : term.y[sourceIndex]
+  ));
+}
+
 function beginBoxZoom(context, interaction, event) {
   if (!context.svg._scale) return;
   const start = svgPoint(context, event);
@@ -319,6 +408,8 @@ function clearBoxZoom(interaction) {
 
 function beginOrderDrag(context, interaction, event, index) {
   const term = context.currentTerm();
+  const scale = context.svg._scale || {};
+  if (scale.displayIsCollapsed) return false;
   if (!term || !Array.isArray(term.levels) || !term.levels.length) return false;
   if ((term.term_type || term.kind || "") !== "categorical") return false;
   const selection = context.currentSelection();

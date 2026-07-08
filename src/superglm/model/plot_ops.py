@@ -31,6 +31,7 @@ def plot(
     scale="response",
     ci_style="band",
     categorical_display="auto",
+    grouped_level_display="auto",
     engine="matplotlib",
     n_points=200,
     figsize=None,
@@ -161,6 +162,7 @@ def plot(
             show_bases=show_bases,
             ci_style=ci_style,
             categorical_display=categorical_display,
+            grouped_level_display=grouped_level_display,
             scale=scale,
             title=title,
             subtitle=subtitle,
@@ -170,6 +172,7 @@ def plot(
     if mode == "single_main":
         return plot_term(
             term_inferences[0],
+            model=model,
             X=X,
             sample_weight=sample_weight,
             interval=interval,
@@ -178,6 +181,7 @@ def plot(
             figsize=figsize,
             title=title,
             subtitle=subtitle,
+            grouped_level_display=grouped_level_display,
         )
 
     return plot_relativities(
@@ -190,6 +194,8 @@ def plot(
         title=title,
         subtitle=subtitle,
         figsize=figsize,
+        model=model,
+        grouped_level_display=grouped_level_display,
         **kwargs,
     )
 

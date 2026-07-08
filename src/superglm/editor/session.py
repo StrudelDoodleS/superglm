@@ -236,9 +236,12 @@ class EditorSession:
             idx = np.arange(editable.size, dtype=np.intp)
         else:
             idx = self._expand_collapsed_level_indices(term, idx)
-        before = editable.edited_log_effect[idx].copy()
-        after = editable.original_log_effect[idx].copy()
-        self._commit(term, "reset", idx, before, after, {})
+        idx = np.unique(np.asarray(idx, dtype=np.intp))
+        editable.edited_log_effect[idx] = editable.original_log_effect[idx]
+        if idx.size == editable.size:
+            self._clear_term_history(term)
+        else:
+            self._trim_term_history(term, idx)
         return self
 
     def shift(self, term: str, delta: float) -> EditorSession:
@@ -1234,6 +1237,43 @@ class EditorSession:
             if records[i].term == term:
                 return records.pop(i)
         return None
+
+    def _clear_term_history(self, term: str) -> None:
+        self._require_term(term)
+        self.history = [record for record in self.history if record.term != term]
+        self.redo_stack = [record for record in self.redo_stack if record.term != term]
+
+    def _trim_term_history(self, term: str, reset_indices: NDArray[np.intp]) -> None:
+        self._require_term(term)
+        reset = set(np.asarray(reset_indices, dtype=np.intp).tolist())
+        self.history = self._records_without_indices(self.history, term, reset)
+        self.redo_stack = self._records_without_indices(self.redo_stack, term, reset)
+
+    @staticmethod
+    def _records_without_indices(
+        records: list[EditRecord],
+        term: str,
+        reset: set[int],
+    ) -> list[EditRecord]:
+        out: list[EditRecord] = []
+        for record in records:
+            if record.term != term:
+                out.append(record)
+                continue
+            keep = np.array([int(index) not in reset for index in record.indices], dtype=bool)
+            if not bool(np.any(keep)):
+                continue
+            out.append(
+                EditRecord(
+                    term=record.term,
+                    operation=record.operation,
+                    indices=record.indices[keep].copy(),
+                    before=record.before[keep].copy(),
+                    after=record.after[keep].copy(),
+                    params=dict(record.params),
+                )
+            )
+        return out
 
     def _level_selected(self, term: str, operation: str, mode: str) -> EditorSession:
         idx = self._require_edit_selection(term)

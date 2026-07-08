@@ -49,3 +49,15 @@ EditorSession
   offset workflow.
 - Structural refits replace the in-force model copy and clear edit history.
 - Display-only level order is saved separately from model coefficients.
+
+## Grouped Level Display
+
+Grouped categorical terms keep their raw payload expanded over original levels.
+When a term has collapsed level groups, the payload also includes a
+`group_display` projection for rendering one visual node per group.
+
+Selections and edits are still posted with original source indices. Ordered
+categorical grouped terms default to collapsed display because drawing through
+expanded grouped members can imply spatial structure that the fitted model no
+longer has. Unordered categoricals default to expanded display, with collapsed
+display available from the toolbar.
