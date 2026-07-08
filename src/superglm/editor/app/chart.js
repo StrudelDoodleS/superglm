@@ -30,17 +30,22 @@ export function drawChart(term, selection, context) {
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
   definePlotClip(svg, margin, innerW, innerH);
-  const x = term.x;
-  const y = term.y;
-  const original = term.original_y;
-  const exposure = term.exposure || null;
+  const view = resolveDisplayTerm(
+    term,
+    context.groupDisplayMode ? context.groupDisplayMode() : "expanded"
+  );
+  const x = view.x;
+  const y = view.y;
+  const original = view.original_y;
+  const previous = view.previous_y || null;
+  const exposure = view.exposure || null;
   if (!y.length) return;
 
-  const xDomain = term.x_domain || [Math.min(...x), Math.max(...x)];
+  const xDomain = view.x_domain || [Math.min(...x), Math.max(...x)];
   const baseXMin = xDomain[0];
   const baseXMax = xDomain[1];
-  const ciValues = context.showCi() && term.ci_lower_y && term.ci_upper_y
-    ? [...term.ci_lower_y, ...term.ci_upper_y]
+  const ciValues = context.showCi() && view.ci_lower_y && view.ci_upper_y
+    ? [...view.ci_lower_y, ...view.ci_upper_y]
     : [];
   const controlValues = visualMode === "handles" && term.controls && term.controls.y
     ? term.controls.y
@@ -51,8 +56,23 @@ export function drawChart(term, selection, context) {
     buildProgress !== null;
   const buildEnvelope = buildActive ? buildContributionEnvelope(term) : [];
   const buildValues = buildEnvelope.flat();
-  const yMinRaw = Math.min(...y, ...original, ...ciValues, ...controlValues, ...buildValues);
-  const yMaxRaw = Math.max(...y, ...original, ...ciValues, ...controlValues, ...buildValues);
+  const previousValues = previous || [];
+  const yMinRaw = Math.min(
+    ...y,
+    ...original,
+    ...previousValues,
+    ...ciValues,
+    ...controlValues,
+    ...buildValues
+  );
+  const yMaxRaw = Math.max(
+    ...y,
+    ...original,
+    ...previousValues,
+    ...ciValues,
+    ...controlValues,
+    ...buildValues
+  );
   const yPad = Math.max((yMaxRaw - yMinRaw) * 0.12, 0.05);
   const baseYMin = yMinRaw - yPad;
   const baseYMax = yMaxRaw + yPad;
@@ -66,12 +86,12 @@ export function drawChart(term, selection, context) {
 
   // Draw back-to-front: exposure context, axes/grid, reference intervals, then
   // curves and interactive handles/points.
-  exposureLayer(svg, term, sx, margin, innerW, innerH, exposure);
+  exposureLayer(svg, view, sx, margin, innerW, innerH, exposure);
   for (const tick of ticks(yMin, yMax, 6)) {
     line(svg, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
     text(svg, margin.left - 10, sy(tick) + 4, fmt(tick), "tick-label", "end");
   }
-  for (const tick of xTicks(term, xMin, xMax)) {
+  for (const tick of xTicks(view, xMin, xMax)) {
     line(svg, sx(tick.value), margin.top + innerH, sx(tick.value), margin.top + innerH + 5, "tick");
     text(svg, sx(tick.value), margin.top + innerH + 22, tick.label, "tick-label", "middle");
   }
@@ -85,11 +105,11 @@ export function drawChart(term, selection, context) {
   const yLabel = text(svg, 22, margin.top + innerH / 2, term.y_label, "label", "middle");
   yLabel.setAttribute("transform", `rotate(-90 22 ${margin.top + innerH / 2})`);
 
-  if (context.showCi() && term.ci_lower_y && term.ci_upper_y) {
-    if (term.levels) {
-      errorBars(svg, x, term.ci_lower_y, term.ci_upper_y, sx, sy);
+  if (context.showCi() && view.ci_lower_y && view.ci_upper_y) {
+    if (view.levels) {
+      errorBars(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy);
     } else {
-      band(svg, x, term.ci_lower_y, term.ci_upper_y, sx, sy, "ci");
+      band(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy, "ci");
     }
   }
   if (visualMode === "handles" && context.showContrib && context.showContrib()) {
@@ -106,17 +126,22 @@ export function drawChart(term, selection, context) {
     build.setAttribute("style", `stroke: ${mixBuildColor(progress)}`);
   }
   if (!buildActive) path(svg, x, original, sx, sy, "original");
+  if (!buildActive && previous) path(svg, x, previous, sx, sy, "previous-edit");
   if (!buildActive) path(svg, x, y, sx, sy, "edited");
-  const selectedBounds = selectionBounds(x, y, selection, sx, sy, margin, innerW, innerH);
+  const displaySelected = displaySelection(view, selection);
+  const selectedBounds = selectionBounds(x, y, displaySelected, sx, sy, margin, innerW, innerH);
   const handlesMode = visualMode === "handles" && term.controls;
   if (!handlesMode && selectedBounds) drawSelectionBounds(svg, selectedBounds);
-  if (!handlesMode) drawLevelGroups(svg, term, sx, sy);
-  const visiblePoints = visiblePointIndices(term, selection);
+  if (!handlesMode) {
+    if (view.displayIsCollapsed) drawCollapsedLevelGroups(svg, view, sx, sy);
+    else drawLevelGroups(svg, view, sx, sy);
+  }
+  const visiblePoints = visiblePointIndices(view, displaySelected);
   const selectedPoints = [];
   const unselectedPoints = [];
   if (!handlesMode) {
     for (const i of visiblePoints) {
-      if (selection.has(i)) selectedPoints.push(i);
+      if (displaySelected.has(i)) selectedPoints.push(i);
       else unselectedPoints.push(i);
     }
     for (const i of unselectedPoints) drawPoint(svg, x, y, sx, sy, i, false);
@@ -125,14 +150,57 @@ export function drawChart(term, selection, context) {
     drawControlHandles(svg, term, sx, sy, margin, innerH);
   }
   applyPlotClip(svg);
-  legend(svg, width - 145, 26);
+  legend(svg, width - 160, 26, view.displayIsCollapsed, Boolean(previous));
 
   svg._scale = {
     sx, sy, x, y, xMin, xMax, yMin, yMax,
     baseXMin, baseXMax, baseYMin, baseYMax,
-    margin, innerW, innerH
+    margin, innerW, innerH,
+    displayToSourceIndices: view.displayToSourceIndices,
+    displayIsCollapsed: view.displayIsCollapsed
   };
   positionSelectionMenu(svg, context.selectionMenu, handlesMode ? null : selectedBounds);
+}
+
+function resolveDisplayTerm(term, mode) {
+  const display = term.group_display;
+  if (mode !== "collapsed" || !display || !display.available || !display.collapsed) {
+    return {
+      ...term,
+      displayToSourceIndices: term.x.map((_, i) => [i]),
+      displayIsCollapsed: false
+    };
+  }
+  const collapsed = display.collapsed;
+  return {
+    ...term,
+    x: collapsed.x,
+    x_domain: collapsed.x_domain,
+    y: collapsed.y,
+    original_y: collapsed.original_y,
+    previous_y: collapsed.previous_y || null,
+    ci_lower_y: collapsed.ci_lower_y || null,
+    ci_upper_y: collapsed.ci_upper_y || null,
+    weights: collapsed.weights,
+    exposure: collapsed.exposure,
+    levels: collapsed.levels,
+    handle_indices: collapsed.x.map((_, i) => i),
+    displayToSourceIndices: collapsed.source_indices,
+    displayLevels: collapsed.levels,
+    displaySourceLevels: collapsed.source_levels,
+    displayIsGroup: collapsed.is_group,
+    displayIsCollapsed: true
+  };
+}
+
+function displaySelection(view, selection) {
+  if (!view.displayToSourceIndices) return selection;
+  const selected = new Set();
+  for (let i = 0; i < view.displayToSourceIndices.length; i++) {
+    const source = view.displayToSourceIndices[i] || [];
+    if (source.some((index) => selection.has(Number(index)))) selected.add(i);
+  }
+  return selected;
 }
 
 function definePlotClip(svg, margin, innerW, innerH) {
@@ -153,6 +221,7 @@ function definePlotClip(svg, margin, innerW, innerH) {
 function applyPlotClip(svg) {
   const clipped = [
     ".original",
+    ".previous-edit",
     ".edited",
     ".ci",
     ".ci-whisker",
@@ -220,6 +289,26 @@ function drawLevelGroups(svg, term, sx, sy) {
       "middle"
     );
     label.setAttribute("style", `fill: ${levelGroupColor(groupIndex, 1)}`);
+  }
+}
+
+function drawCollapsedLevelGroups(svg, term, sx, sy) {
+  const isGroup = Array.isArray(term.displayIsGroup) ? term.displayIsGroup : [];
+  let groupIndex = 0;
+  for (let i = 0; i < term.x.length; i++) {
+    if (!isGroup[i]) continue;
+    const color = levelGroupColor(groupIndex, 1);
+    drawLevelGroupMarker(svg, term.x[i], term.y[i], sx, sy, groupIndex);
+    const label = text(
+      svg,
+      sx(term.x[i]),
+      sy(term.y[i]) - 12,
+      term.levels?.[i] || "group",
+      "level-group-label",
+      "middle"
+    );
+    label.setAttribute("style", `fill: ${color}`);
+    groupIndex += 1;
   }
 }
 
@@ -610,13 +699,19 @@ function text(svg, x, y, value, cls, anchor) {
   return node;
 }
 
-function legend(svg, x, y) {
+function legend(svg, x, y, originalProjected = false, hasPrevious = false) {
   line(svg, x, y, x + 28, y, "original");
-  text(svg, x + 36, y + 4, "original", "legend", "start");
-  line(svg, x, y + 22, x + 28, y + 22, "edited");
-  text(svg, x + 36, y + 26, "edited", "legend", "start");
-  svg.appendChild(el("circle", { cx: x + 14, cy: y + 44, r: 4.6, class: "point selected" }));
-  text(svg, x + 36, y + 48, "selected", "legend", "start");
+  text(svg, x + 36, y + 4, originalProjected ? "original projection" : "original", "legend", "start");
+  let row = 1;
+  if (hasPrevious) {
+    line(svg, x, y + 22, x + 28, y + 22, "previous-edit");
+    text(svg, x + 36, y + 26, "previous edit", "legend", "start");
+    row += 1;
+  }
+  line(svg, x, y + 22 * row, x + 28, y + 22 * row, "edited");
+  text(svg, x + 36, y + 4 + 22 * row, "current edit", "legend", "start");
+  svg.appendChild(el("circle", { cx: x + 14, cy: y + 22 * (row + 1), r: 4.6, class: "point selected" }));
+  text(svg, x + 36, y + 4 + 22 * (row + 1), "selected", "legend", "start");
 }
 
 function el(tag, attrs) {

@@ -236,9 +236,8 @@ class EditorSession:
             idx = np.arange(editable.size, dtype=np.intp)
         else:
             idx = self._expand_collapsed_level_indices(term, idx)
-        before = editable.edited_log_effect[idx].copy()
-        after = editable.original_log_effect[idx].copy()
-        self._commit(term, "reset", idx, before, after, {})
+        editable.edited_log_effect[idx] = editable.original_log_effect[idx]
+        self._clear_term_history(term)
         return self
 
     def shift(self, term: str, delta: float) -> EditorSession:
@@ -1234,6 +1233,11 @@ class EditorSession:
             if records[i].term == term:
                 return records.pop(i)
         return None
+
+    def _clear_term_history(self, term: str) -> None:
+        self._require_term(term)
+        self.history = [record for record in self.history if record.term != term]
+        self.redo_stack = [record for record in self.redo_stack if record.term != term]
 
     def _level_selected(self, term: str, operation: str, mode: str) -> EditorSession:
         idx = self._require_edit_selection(term)

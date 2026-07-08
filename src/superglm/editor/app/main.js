@@ -1,6 +1,7 @@
 import { requestBlob, requestJSON, postJSON } from "./api.js";
 import { drawChart, groupedTerms } from "./chart.js";
 import { fmt, fmtPercent } from "./format.js";
+import { renderHistory } from "./history.js";
 import { refreshMetrics } from "./metrics.js";
 import { refreshReport } from "./reports.js";
 import {
@@ -24,6 +25,8 @@ const svg = document.getElementById("chart");
 const selectionMenu = document.getElementById("selectionMenu");
 const termSelect = document.getElementById("term");
 const modeSelect = document.getElementById("mode");
+const groupDisplayWrap = document.getElementById("groupDisplayWrap");
+const groupDisplayMode = document.getElementById("groupDisplayMode");
 const handleCountWrap = document.getElementById("handleCountWrap");
 const handleCount = document.getElementById("handleCount");
 const handleCountValue = document.getElementById("handleCountValue");
@@ -72,6 +75,11 @@ const profileTraceTable = document.getElementById("profileTraceTable");
 const summaryStatus = document.getElementById("summaryStatus");
 const summaryNote = document.getElementById("summaryNote");
 const summaryFrame = document.getElementById("summaryFrame");
+const summaryTab = document.getElementById("summaryTab");
+const historyTab = document.getElementById("historyTab");
+const summaryPane = document.getElementById("summaryPane");
+const historyPane = document.getElementById("historyPane");
+const historyFrame = document.getElementById("historyFrame");
 const statusNode = document.getElementById("status");
 
 let state = null;
@@ -83,6 +91,7 @@ let buildFrame = null;
 let renderedTerm = "";
 let activeView = "editor";
 const zoomState = {};
+const groupDisplayModeByTerm = {};
 const REFIT_INVALIDATING_ROUTES = new Set(["/op", "/drag", "/control"]);
 
 const chartContext = {
@@ -94,7 +103,8 @@ const chartContext = {
   visualMode: () => graphMode,
   showCi: () => showCi,
   showContrib: () => showContrib,
-  buildProgress: () => buildProgress
+  buildProgress: () => buildProgress,
+  groupDisplayMode: () => activeGroupDisplayMode()
 };
 
 async function loadState() {
@@ -130,6 +140,12 @@ function currentTerm() {
 
 function currentSelection() {
   return state ? new Set(state.selection[selectedTerm()] || []) : new Set();
+}
+
+function activeGroupDisplayMode() {
+  const term = currentTerm();
+  if (!term || !term.group_display || !term.group_display.available) return "expanded";
+  return groupDisplayModeByTerm[selectedTerm()] || term.group_display.default_mode || "expanded";
 }
 
 function summaryNodes() {
@@ -280,10 +296,25 @@ async function saveBlobToFile(blob, filename) {
 
 async function openSaveDialog() {
   if (saveStatus) saveStatus.textContent = "";
+  await initializeSaveDirectory();
   if (saveDialog && typeof saveDialog.showModal === "function") {
     saveDialog.showModal();
   } else if (saveDialog) {
     saveDialog.setAttribute("open", "");
+  }
+}
+
+async function initializeSaveDirectory() {
+  if (!saveDirectory || saveDirectory.value) return;
+  try {
+    const payload = await requestJSON("/save_directory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: saveDirectory ? saveDirectory.value : "" })
+    });
+    if (payload && payload.path) saveDirectory.value = payload.path;
+  } catch (error) {
+    if (saveStatus) saveStatus.textContent = formatSaveRouteError(error);
   }
 }
 
@@ -340,6 +371,7 @@ async function showView(view) {
 
 function render() {
   if (!state) return;
+  renderHistory(state.history, historyFrame);
   const terms = state.terms || {};
   const selected = selectedTerm();
   termSelect.innerHTML = "";
@@ -368,11 +400,41 @@ function render() {
   const edf = term.effective_df === null || term.effective_df === undefined
     ? ""
     : ` · EDF ${fmt(term.effective_df)}`;
-  statusNode.textContent = `${selected} · ${term.term_type || term.kind}${edf} · ${selection.size} of ${term.n_points} selected · average edit relativity ${rel}x · selected exposure ${selectedShare}`;
+  const collapsedOriginalNote =
+    activeGroupDisplayMode() === "collapsed" && term.group_display && term.group_display.available
+      ? " · original line is grouped by exposure-weighted averaging"
+      : "";
+  statusNode.textContent = `${selected} · ${term.term_type || term.kind}${edf} · ${selection.size} of ${term.n_points} selected · average edit relativity ${rel}x · selected exposure ${selectedShare}${collapsedOriginalNote}`;
   updateHandleCount(term);
+  updateGroupDisplayControl(term);
   updateCollapseAction(term, selection);
   updateResetOrderAction(term);
   drawChart(term, selection, chartContext);
+}
+
+function showSidepanelPane(view) {
+  const showHistory = view === "history";
+  if (summaryPane) summaryPane.hidden = showHistory;
+  if (historyPane) historyPane.hidden = !showHistory;
+  if (summaryTab) {
+    summaryTab.classList.toggle("active", !showHistory);
+    summaryTab.setAttribute("aria-selected", showHistory ? "false" : "true");
+  }
+  if (historyTab) {
+    historyTab.classList.toggle("active", showHistory);
+    historyTab.setAttribute("aria-selected", showHistory ? "true" : "false");
+  }
+}
+
+function updateGroupDisplayControl(term) {
+  if (!groupDisplayWrap || !groupDisplayMode) return;
+  const available = Boolean(term && term.group_display && term.group_display.available);
+  groupDisplayMode.disabled = !available;
+  if (!available) {
+    groupDisplayMode.value = "expanded";
+    return;
+  }
+  groupDisplayMode.value = activeGroupDisplayMode();
 }
 
 function updateCollapseAction(term, selection) {
@@ -438,6 +500,13 @@ function updateHandleCount(term) {
 
 function applyTermDefaults(term) {
   stopContributionBuild();
+  if (
+    term.group_display &&
+    term.group_display.available &&
+    !groupDisplayModeByTerm[selectedTerm()]
+  ) {
+    groupDisplayModeByTerm[selectedTerm()] = term.group_display.default_mode || "expanded";
+  }
   if (canShowContributions(term)) {
     modeSelect.value = "handles";
     graphMode = "handles";
@@ -574,6 +643,13 @@ modeSelect.addEventListener("change", () => {
   render();
 });
 
+if (groupDisplayMode) {
+  groupDisplayMode.addEventListener("change", () => {
+    groupDisplayModeByTerm[selectedTerm()] = groupDisplayMode.value;
+    render();
+  });
+}
+
 basisToggle.addEventListener("click", () => {
   stopContributionBuild();
   showContrib = !showContrib;
@@ -634,6 +710,12 @@ if (saveDownload) {
 }
 if (saveOpenDirectory) {
   saveOpenDirectory.addEventListener("click", openDirectoryInFileManager);
+}
+if (summaryTab) {
+  summaryTab.addEventListener("click", () => showSidepanelPane("summary"));
+}
+if (historyTab) {
+  historyTab.addEventListener("click", () => showSidepanelPane("history"));
 }
 summarySource.addEventListener("change", refreshSummaryView);
 refitOffset.addEventListener("click", async () => {

@@ -31,6 +31,10 @@ from superglm.plotting.common import (
     _exposure_kde,
     _hex_to_rgba,
 )
+from superglm.plotting.group_display import (
+    grouped_level_exposure,
+    project_grouped_term_for_display,
+)
 
 _LINE_COLOR = _PLOTLY_LINE_COLOR
 _PW_FILL = _PLOTLY_PW_FILL
@@ -143,6 +147,7 @@ def plot_main_effects_plotly(
     show_bases: bool = False,
     scale: str = "response",
     categorical_display: str = "auto",
+    grouped_level_display: str = "auto",
     title: str | None = None,
     subtitle: str | None = None,
     style: dict[str, Any] | None = None,
@@ -254,6 +259,7 @@ def plot_main_effects_plotly(
                 needs_lower_panel=needs_lower_panel,
                 style_cfg=style_cfg,
                 categorical_display=categorical_display,
+                grouped_level_display=grouped_level_display,
             )
         )
 
@@ -609,6 +615,7 @@ def _add_term_traces(
     needs_lower_panel: bool,
     style_cfg: dict[str, Any],
     categorical_display: str,
+    grouped_level_display: str,
 ) -> _XAxisConfig:
     """Append all traces for one term (response Y) and collect link variants."""
 
@@ -682,6 +689,9 @@ def _add_term_traces(
             resp_y_range=[max(0, float(resp_vals.min()) - pad), float(resp_vals.max()) + pad],
         )
 
+    display = project_grouped_term_for_display(model, ti, grouped_level_display)
+    ti = display.term
+
     # Compute y-axis range from relativity values (markers/curve, not CIs)
     resp_vals = np.asarray(ti.relativity)
     if ti.smooth_curve is not None:
@@ -701,6 +711,7 @@ def _add_term_traces(
         density_visible=density_visible,
         style_cfg=style_cfg,
         overlay_top=True,
+        display=display,
     )
     _add_categorical_term_trace(
         fig,
@@ -1312,6 +1323,7 @@ def _add_categorical_density_trace(
     density_visible: bool,
     style_cfg: dict[str, Any],
     overlay_top: bool = False,
+    display=None,
 ):
     """Add absolute exposure bars for categorical terms.
 
@@ -1325,12 +1337,14 @@ def _add_categorical_density_trace(
         return
 
     levels = list(ti.levels)
-    exp = (
-        pd.DataFrame({"level": X[ti.name].astype(str), "sample_weight": sample_weight})
-        .groupby("level", sort=False)["sample_weight"]
-        .sum()
-    )
-    weights = np.array([float(exp.get(level, 0.0)) for level in levels], dtype=np.float64)
+    weights = grouped_level_exposure(display, X, sample_weight)
+    if weights is None:
+        exp = (
+            pd.DataFrame({"level": X[ti.name].astype(str), "sample_weight": sample_weight})
+            .groupby("level", sort=False)["sample_weight"]
+            .sum()
+        )
+        weights = np.array([float(exp.get(level, 0.0)) for level in levels], dtype=np.float64)
 
     bar_opacity = 0.3
 

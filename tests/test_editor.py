@@ -2322,6 +2322,170 @@ def test_session_payload_compares_in_force_against_reference_model_after_collaps
     )
 
 
+def test_session_payload_omits_previous_y_without_term_history(editor_model):
+    from superglm.editor.payloads import session_payload
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+
+    payload = session_payload(session)["x_spline"]
+
+    assert payload["previous_y"] is None
+
+
+def test_session_payload_previous_y_uses_latest_edit_for_that_term(editor_model):
+    from superglm.editor.payloads import session_payload
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline", "x_num"])
+    spline = session.terms["x_spline"]
+    previous_spline = spline.edited_log_effect.copy()
+
+    session.select_indices("x_spline", [0, 1])
+    session.shift("x_spline", 0.05)
+    session.select_indices("x_num", [0])
+    session.shift("x_num", 0.10)
+
+    payload = session_payload(session)
+
+    assert payload["x_spline"]["previous_y"] == pytest.approx(np.exp(previous_spline).tolist())
+    assert payload["x_num"]["previous_y"] is not None
+
+
+def test_history_payload_includes_stable_linear_history(editor_model):
+    from superglm.editor.payloads import history_payload
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [0, 1])
+    session.shift("x_spline", 0.05)
+
+    first = history_payload(session)["active"][0]
+    second = history_payload(session)["active"][0]
+
+    assert first["hash"] == second["hash"]
+    assert len(first["hash"]) == 7
+    assert first["term"] == "x_spline"
+    assert first["operation"] == "shift"
+    assert first["n_points"] == 2
+    assert first["is_head"] is True
+
+
+def test_history_payload_reports_redo_stack_after_undo(editor_model):
+    from superglm.editor.payloads import history_payload
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [0])
+    session.shift("x_spline", 0.05)
+    session.undo()
+
+    history = history_payload(session)
+
+    assert history["active"] == []
+    assert len(history["redo"]) == 1
+    assert history["redo"][0]["operation"] == "shift"
+    assert history["redo"][0]["is_head"] is False
+
+
+def test_reset_clears_term_history_without_creating_reset_edit(editor_model):
+    from superglm.editor.payloads import history_payload, session_payload
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline", "x_num"])
+    session.select_indices("x_spline", [0, 1])
+    session.shift("x_spline", 0.05)
+    session.select_indices("x_num", [0])
+    session.shift("x_num", 0.10)
+    session.undo("x_spline")
+
+    session.reset("x_spline")
+
+    history = history_payload(session)
+    assert [record["term"] for record in history["active"]] == ["x_num"]
+    assert history["redo"] == []
+    assert session_payload(session)["x_spline"]["previous_y"] is None
+
+
+def test_widget_state_includes_edit_history(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [0])
+    session.shift("x_spline", 0.05)
+    widget = session.widget()
+
+    try:
+        state = widget._state()
+    finally:
+        widget.close()
+
+    assert state["history"]["active"][0]["term"] == "x_spline"
+
+
+def test_session_payload_adds_collapsed_group_display_for_ordered_levels(
+    editor_model, editor_frame
+):
+    from superglm.editor.payloads import session_payload
+
+    X, y = editor_frame
+    session = EditorSession.from_model(editor_model, terms=["band"], train_data=(X, y, None))
+    session.select_levels("band", ["medium", "high"])
+    session.replace_with_collapsed_levels("band", method="fit")
+
+    payload = session_payload(session)
+    band = payload["band"]
+
+    assert band["levels"] == ["low", "medium", "high"]
+    assert band["level_groups"] == [
+        {"label": "medium+high", "indices": [1, 2], "levels": ["medium", "high"]}
+    ]
+    assert band["group_display"]["available"] is True
+    assert band["group_display"]["default_mode"] == "collapsed"
+
+    collapsed = band["group_display"]["collapsed"]
+    assert collapsed["levels"] == ["low", "medium+high"]
+    assert collapsed["source_indices"] == [[0], [1, 2]]
+    assert collapsed["source_levels"] == [["low"], ["medium", "high"]]
+    assert collapsed["is_group"] == [False, True]
+    assert collapsed["x"] == [0.0, 1.0]
+    assert collapsed["exposure"]["kind"] == "bars"
+    assert collapsed["exposure"]["y"][1] == pytest.approx(band["weights"][1] + band["weights"][2])
+    assert collapsed["y"][1] == pytest.approx(band["y"][1])
+    assert collapsed["y"][1] == pytest.approx(band["y"][2])
+
+
+def test_session_payload_group_display_projects_previous_y_for_collapsed_levels(
+    editor_model, editor_frame
+):
+    from superglm.editor.payloads import session_payload
+
+    X, y = editor_frame
+    session = EditorSession.from_model(editor_model, terms=["band"], train_data=(X, y, None))
+    session.select_levels("band", ["medium", "high"])
+    session.replace_with_collapsed_levels("band", method="fit")
+    session.select_levels("band", ["medium", "high"])
+    session.shift("band", 0.05)
+
+    payload = session_payload(session)["band"]
+    collapsed = payload["group_display"]["collapsed"]
+
+    assert collapsed["previous_y"] is not None
+    assert len(collapsed["previous_y"]) == len(collapsed["y"])
+    assert collapsed["previous_y"][1] == pytest.approx(payload["y"][1] / np.exp(0.05))
+
+
+def test_session_payload_group_display_defaults_expanded_for_unordered_categorical(
+    editor_model, editor_frame
+):
+    from superglm.editor.payloads import session_payload
+
+    X, y = editor_frame
+    session = EditorSession.from_model(editor_model, terms=["region"], train_data=(X, y, None))
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+
+    region = session_payload(session)["region"]
+
+    assert region["group_display"]["available"] is True
+    assert region["group_display"]["default_mode"] == "expanded"
+    assert region["group_display"]["collapsed"]["levels"] == ["A", "B+C"]
+    assert region["group_display"]["collapsed"]["source_indices"] == [[0], [1, 2]]
+
+
 def test_categorical_level_edit_changes_copied_predictions(editor_model, editor_frame):
     X, _ = editor_frame
     session = EditorSession.from_model(editor_model, terms=["region"])
@@ -2885,6 +3049,9 @@ def test_widget_http_drag_and_reset_updates_session(editor_model):
 
         _post_json(f"{widget.url}/op", {"operation": "reset"})
         assert term.edited_log_effect[5] == pytest.approx(original[5])
+        state = _get_json(f"{widget.url}/state")
+        assert state["history"]["active"] == []
+        assert state["terms"]["x_spline"]["previous_y"] is None
     finally:
         widget.close()
 
@@ -3797,6 +3964,9 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "saveEditedModel" in js
         assert "downloadEditedModel" in js
         assert "openDirectoryInFileManager" in js
+        assert "initializeSaveDirectory" in js
+        assert "/save_directory" in js
+        assert 'body: JSON.stringify({ path: saveDirectory ? saveDirectory.value : "" })' in js
         assert "formatSaveRouteError" in js
         assert "Rerun session.widget()" in js
         assert "Opening folder" in js
@@ -3810,6 +3980,8 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert 'id="saveOpenDirectory"' in shell
         assert "Open Folder" in shell
         assert "Download Edited Model" in shell
+        assert 'id="saveDownload" class="profile-run save-inline-action"' in shell
+        assert 'id="saveDirectory" type="text" value=""' in shell
         assert "Saved " in js
         assert "/profile_distribution/start" in js
         assert "/profile_distribution/status/" in js
@@ -3940,6 +4112,95 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "#D8A10F" in css
     finally:
         widget.close()
+
+
+def test_editor_frontend_includes_grouped_display_control_and_view_mapping():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    html = (root / "index.html").read_text()
+    main_js = (root / "main.js").read_text()
+    chart_js = (root / "chart.js").read_text()
+    css = (root / "styles.css").read_text()
+
+    assert 'id="groupDisplayMode"' in html
+    assert 'id="groupDisplayWrap" class="toolbar-field group-display-toggle"' in html
+    assert 'id="groupDisplayWrap" class="toolbar-field group-display-toggle" hidden' not in html
+    assert "groupDisplayModeByTerm" in main_js
+    assert "groupDisplayMode.disabled = !available" in main_js
+    assert "groupDisplayWrap.hidden = !available" not in main_js
+    assert "resolveDisplayTerm" in chart_js
+    assert "source_indices" in chart_js
+    assert "displayToSourceIndices" in chart_js
+    assert ".group-display-toggle" in css
+
+
+def test_editor_interactions_map_group_display_indices_to_source_indices():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    interactions_js = (root / "interactions.js").read_text()
+    chart_js = (root / "chart.js").read_text()
+
+    assert "sourceIndicesForDisplayIndex" in interactions_js
+    assert "sourceIndicesForDisplayIndices" in interactions_js
+    assert "valuesForSourceIndices" in interactions_js
+    assert "expandedGroupSourceForIndex" in interactions_js
+    assert "displayToSourceIndices" in chart_js
+
+
+def test_editor_collapsed_group_display_does_not_reuse_expanded_group_geometry():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    chart_js = (root / "chart.js").read_text()
+
+    assert "drawCollapsedLevelGroups(svg, view, sx, sy)" in chart_js
+    assert "else drawLevelGroups(svg, view, sx, sy)" in chart_js
+    assert "term.displayIsGroup" in chart_js
+
+
+def test_editor_collapsed_group_display_explains_original_projection():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    chart_js = (root / "chart.js").read_text()
+    main_js = (root / "main.js").read_text()
+
+    assert "original projection" in chart_js
+    assert "collapsedOriginalNote" in main_js
+    assert "original line is grouped by exposure-weighted averaging" in main_js
+
+
+def test_editor_chart_renders_previous_edit_line():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    chart_js = (root / "chart.js").read_text()
+    css = (root / "styles.css").read_text()
+
+    assert "previous_y" in chart_js
+    assert "previous edit" in chart_js
+    assert "previous-edit" in chart_js
+    assert ".previous-edit" in css
+    assert "#f59e0b" in css
+
+
+def test_editor_right_panel_has_history_tab():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    html = (root / "index.html").read_text()
+    main_js = (root / "main.js").read_text()
+    css = (root / "styles.css").read_text()
+    history_js_path = root / "history.js"
+
+    assert "Model summary" in html
+    assert "Edit history" in html
+    assert "historyFrame" in html
+    assert 'from "./history.js"' in main_js
+    assert ".sidepanel-pane[hidden]" in css
+    assert history_js_path.exists()
+
+
+def test_editor_history_module_renders_hashes_and_redo_stack():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    history_js_path = root / "history.js"
+
+    assert history_js_path.exists()
+    source = history_js_path.read_text()
+
+    assert "renderHistory" in source
+    assert "Redo stack" in source
+    assert "history-hash" in source
 
 
 def test_widget_serves_editor_app_assets(editor_model):

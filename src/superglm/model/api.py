@@ -722,6 +722,7 @@ class SuperGLM:
         scale: str = "response",
         ci_style: str = "band",
         categorical_display: str = "auto",
+        grouped_level_display: str = "auto",
         engine: str = "matplotlib",
         n_points: int = 200,
         figsize: tuple[float, float] | None = None,
@@ -782,6 +783,12 @@ class SuperGLM:
         categorical_display : {"auto", "bars", "markers", "bars+markers"}
             Plotly categorical rendering mode. ``"auto"`` (default) uses
             bars+markers up to 30 levels and markers-only above that.
+        grouped_level_display : {"auto", "expanded", "collapsed"}
+            Display option for grouped categorical levels in main-effect plots.
+            ``"auto"`` collapses grouped ordered-categorical terms and leaves
+            unordered categoricals expanded. This is a plotting-only option;
+            scoring, inference tables, and exports remain expanded over the
+            original levels.
         engine : {"matplotlib", "plotly"}
             Plotting backend. ``"matplotlib"`` is the chart/export path for
             single terms and grids. ``"plotly"`` is the interactive
@@ -839,6 +846,7 @@ class SuperGLM:
             scale=scale,
             ci_style=ci_style,
             categorical_display=categorical_display,
+            grouped_level_display=grouped_level_display,
             engine=engine,
             n_points=n_points,
             figsize=figsize,
