@@ -48,6 +48,9 @@ from superglm.types import GroupSlice, PenaltyComponent
 
 logger = logging.getLogger(__name__)
 
+_NORMAL_EQUATION_RCOND = 1e-10
+_QR_RCOND = float(np.sqrt(_NORMAL_EQUATION_RCOND))
+
 
 def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
     """Return True when PIRLS weights are independent of ``mu``.
@@ -153,7 +156,7 @@ def _robust_solve(
 
     # === Fallback: Truncated SVD (backward-stable for any condition) ===
     U_svd, s, Vh = np.linalg.svd(M, full_matrices=False)
-    thresh = s[0] * 1e-10
+    thresh = s[0] * _NORMAL_EQUATION_RCOND
     mask = s > thresh
     inv_s = np.zeros_like(s)
     np.divide(1.0, s, out=inv_s, where=mask)
@@ -344,7 +347,7 @@ def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, 
 
     # === Fallback: Truncated SVD (backward-stable for any condition) ===
     U_svd, s, Vh = np.linalg.svd(H, full_matrices=False)
-    thresh = s[0] * 1e-10
+    thresh = s[0] * _NORMAL_EQUATION_RCOND
     mask = s > thresh
     inv_s = np.zeros_like(s)
     np.divide(1.0, s, out=inv_s, where=mask)
@@ -680,15 +683,19 @@ def fit_irls_direct(
             z_off = z - offset
             A = np.vstack([sqrtW[:, None] * _X_qr_aug, _L_aug])
             rhs_qr = np.concatenate([sqrtW * z_off, np.zeros(p + 1)])
-            Q, R = np.linalg.qr(A, mode="reduced")
-            # Truncated SVD on R for near-singular truncation
+            column_scale = np.linalg.norm(A, axis=0)
+            active_columns = column_scale > 0.0
+            A_scaled = A[:, active_columns] / column_scale[active_columns]
+            Q, R = np.linalg.qr(A_scaled, mode="reduced")
             U_r, s_r, Vh_r = np.linalg.svd(R, full_matrices=False)
-            thresh = s_r[0] * np.finfo(float).eps * max(R.shape)
-            inv_s = np.where(s_r > thresh, 1.0 / s_r, 0.0)
-            beta_aug = (Vh_r.T * inv_s) @ (U_r.T @ (Q.T @ rhs_qr))
+            thresh = s_r[0] * _QR_RCOND
+            inv_s = np.zeros_like(s_r)
+            np.divide(1.0, s_r, out=inv_s, where=s_r > thresh)
+            scaled_active_beta = (Vh_r.T * inv_s) @ (U_r.T @ (Q.T @ rhs_qr))
+            beta_aug = np.zeros(p + 1)
+            beta_aug[active_columns] = scaled_active_beta / column_scale[active_columns]
             _cond_est = float(s_r[0] / max(s_r[-1], 1e-300))
-            # Report whether SVD truncation actually dropped any directions
-            _used_svd = bool(np.any(s_r <= thresh))
+            _used_svd = bool(np.any(~active_columns) or np.any(s_r <= thresh))
             intercept = float(beta_aug[0])
             beta = beta_aug[1:]
             _t_solve += time.perf_counter() - _t0

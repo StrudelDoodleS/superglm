@@ -247,6 +247,30 @@ class TestQRSolverPath:
         np.testing.assert_allclose(qr._result.deviance, gram._result.deviance, rtol=1e-8)
         assert qr._result.beta[0] < -50.0
 
+    def test_qr_truncates_nearly_collinear_contrast(self):
+        rng = np.random.default_rng(7)
+        n = 500
+        x = rng.normal(size=n)
+        x2 = x + 1e-10 * rng.normal(size=n)
+        y = 1.0 + 3.0 * x + rng.normal(scale=0.1, size=n)
+        df = pd.DataFrame({"x1": x, "x2": x2})
+        common = dict(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        gram = SuperGLM(**common, direct_solve="gram")
+        qr = SuperGLM(**common, direct_solve="qr")
+
+        gram.fit(df, y)
+        qr.fit(df, y)
+
+        assert np.max(np.abs(qr.result.beta)) < 10.0
+        np.testing.assert_allclose(qr.predict(df), gram.predict(df), atol=1e-6, rtol=1e-7)
+        np.testing.assert_allclose(qr.result.deviance, gram.result.deviance, rtol=1e-7)
+        assert qr.result.effective_df == pytest.approx(gram.result.effective_df)
+        assert qr.result.effective_df == pytest.approx(2.0)
+
     def test_auto_near_collinear_converges(self, caplog):
         """'auto' mode handles near-collinear data without SVD fallback.
 
