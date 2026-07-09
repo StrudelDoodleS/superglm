@@ -35,7 +35,8 @@ def _positive_working_weight_stats(W: NDArray) -> tuple[float, float, float]:
     if not np.isfinite(positive_max):
         ratio = float("inf")
     else:
-        ratio = positive_max / max(positive_min, 1e-300)
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            ratio = float(np.divide(positive_max, positive_min))
     return positive_min, positive_max, ratio
 
 

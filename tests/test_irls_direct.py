@@ -41,8 +41,148 @@ def select_data():
     return X, y, sample_weight
 
 
+class _LevelTwoRecorder:
+    enabled_level = 2
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, object]] = []
+
+    def append_jsonl(self, name: str, payload: dict[str, object]) -> None:
+        assert name == "pirls"
+        self.rows.append(payload)
+
+
 # ── Basic solver tests ─────────────────────────────────────────
 class TestDirectSolverBasic:
+    def test_skips_extrema_scans_when_diagnostics_disabled(self, monkeypatch):
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+
+        x = np.linspace(-1.0, 1.0, 20)
+        X_raw = x[:, None]
+        y = 1.0 + 0.5 * x
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=len(y), p=1)
+        groups = [GroupSlice(name="x", start=0, end=1)]
+
+        original_stats = irls_direct._positive_working_weight_stats
+        original_min = irls_direct.np.min
+        original_max = irls_direct.np.max
+        count_extrema = False
+        stats_calls = 0
+        min_calls = 0
+        max_calls = 0
+
+        def stats_then_count(W):
+            nonlocal count_extrema, stats_calls
+            stats_calls += 1
+            stats = original_stats(W)
+            count_extrema = True
+            return stats
+
+        def counting_min(*args, **kwargs):
+            nonlocal min_calls
+            if count_extrema:
+                min_calls += 1
+            return original_min(*args, **kwargs)
+
+        def counting_max(*args, **kwargs):
+            nonlocal max_calls
+            if count_extrema:
+                max_calls += 1
+            return original_max(*args, **kwargs)
+
+        monkeypatch.setattr(irls_direct, "_positive_working_weight_stats", stats_then_count)
+        monkeypatch.setattr(irls_direct.np, "min", counting_min)
+        monkeypatch.setattr(irls_direct.np, "max", counting_max)
+
+        irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones_like(y),
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2=0.0,
+            max_iter=1,
+            record_diagnostics=False,
+        )
+
+        assert stats_calls == 1
+        assert min_calls == 0
+        assert max_calls == 0
+
+    def test_level_two_recorder_keeps_extrema_without_iteration_diagnostics(self):
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+
+        x = np.linspace(-1.0, 1.0, 20)
+        X_raw = x[:, None]
+        y = 1.0 + 0.5 * x
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=len(y), p=1)
+        groups = [GroupSlice(name="x", start=0, end=1)]
+        recorder = _LevelTwoRecorder()
+
+        irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones_like(y),
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2=0.0,
+            max_iter=1,
+            record_diagnostics=False,
+            debug_recorder=recorder,
+        )
+
+        assert len(recorder.rows) == 1
+        assert {
+            "eta_min_unclipped",
+            "eta_max_unclipped",
+            "working_eta_min_unclipped",
+            "working_eta_max_unclipped",
+        } <= recorder.rows[0].keys()
+
+    def test_level_two_recorder_decision_is_frozen_before_iterations(self):
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+
+        class ChangingLevelRecorder(_LevelTwoRecorder):
+            def __init__(self) -> None:
+                super().__init__()
+                self.level_reads = 0
+
+            @property
+            def enabled_level(self) -> int:
+                self.level_reads += 1
+                return 2 if self.level_reads == 1 else 1
+
+        x = np.linspace(-1.0, 1.0, 20)
+        X_raw = x[:, None]
+        y = 1.0 + 0.5 * x
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=len(y), p=1)
+        groups = [GroupSlice(name="x", start=0, end=1)]
+        recorder = ChangingLevelRecorder()
+
+        irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones_like(y),
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2=0.0,
+            max_iter=1,
+            record_diagnostics=False,
+            debug_recorder=recorder,
+        )
+
+        assert recorder.level_reads == 1
+        assert len(recorder.rows) == 1
+
     def test_h_inverse_profiled_intercept_solve_matches_augmented_system(self):
         from superglm.solvers.irls_direct import (
             _robust_solve,

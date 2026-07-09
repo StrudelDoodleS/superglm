@@ -5,6 +5,25 @@ import pytest
 from superglm import SuperGLM
 from superglm.debug_weights import compare_irls_weights
 from superglm.features.numeric import Numeric
+from superglm.solvers.pirls import _positive_working_weight_stats
+
+
+def test_positive_working_weight_stats_are_scale_invariant_for_subnormals():
+    tiny = np.nextafter(0.0, 1.0)
+
+    w_min, w_max, w_ratio = _positive_working_weight_stats(np.array([0.0, tiny, 4.0 * tiny]))
+
+    assert w_min == tiny
+    assert w_max == 4.0 * tiny
+    assert w_ratio == 4.0
+
+
+def test_positive_working_weight_stats_for_all_zero_weights():
+    w_min, w_max, w_ratio = _positive_working_weight_stats(np.zeros(3))
+
+    assert np.isnan(w_min)
+    assert np.isnan(w_max)
+    assert np.isinf(w_ratio)
 
 
 def test_compare_irls_weights_ignores_zero_frequency_rows():

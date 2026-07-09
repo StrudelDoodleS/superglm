@@ -644,6 +644,10 @@ def fit_irls_direct(
     mu = clip_mu(link.inverse(eta), family)
     iteration_log: list[IterationDiagnostics] = [] if record_diagnostics else []
     base_debug_context = dict(debug_context or {})
+    record_debug_extrema = (
+        debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2
+    )
+    capture_extrema = record_diagnostics or record_debug_extrema
 
     max_halving = 5  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
@@ -997,14 +1001,17 @@ def fit_irls_direct(
             mu = clip_mu(link.inverse(eta), family)
             dev = float(np.sum(weights * family.deviance_unit(y, mu)))
 
-        working_eta_clipped = bool(
-            float(np.min(working_eta_unclipped)) < float(np.min(working_eta))
-            or float(np.max(working_eta_unclipped)) > float(np.max(working_eta))
-        )
-        eta_clipped = bool(
-            float(np.min(eta_unclipped)) < float(np.min(eta))
-            or float(np.max(eta_unclipped)) > float(np.max(eta))
-        )
+        working_eta_clipped = False
+        eta_clipped = False
+        if capture_extrema:
+            working_eta_clipped = bool(
+                float(np.min(working_eta_unclipped)) < float(np.min(working_eta))
+                or float(np.max(working_eta_unclipped)) > float(np.max(working_eta))
+            )
+            eta_clipped = bool(
+                float(np.min(eta_unclipped)) < float(np.min(eta))
+                or float(np.max(eta_unclipped)) > float(np.max(eta))
+            )
 
         # Record per-iteration diagnostics
         if record_diagnostics:
@@ -1067,7 +1074,7 @@ def fit_irls_direct(
                 dev_rel_change = abs(dev - dev_prev) / (abs(dev_prev) + 1.0)
             converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
 
-        if debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2:
+        if record_debug_extrema:
             debug_recorder.append_jsonl(
                 "pirls",
                 {
