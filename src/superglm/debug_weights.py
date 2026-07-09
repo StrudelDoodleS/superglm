@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm.solvers.pirls import _positive_working_weight_stats
+
 logger = logging.getLogger(__name__)
 
 
@@ -128,6 +130,7 @@ def compare_irls_weights(
             mu_it = sm_result.mu
             w_family = sm_family.weights(mu_it)
             W_it = freq_weights * w_family
+            _, _, w_ratio = _positive_working_weight_stats(W_it)
             n_sm = len(W_it)
             k = min(5, n_sm)
             top_idx = np.argpartition(W_it, -k)[-k:]
@@ -138,7 +141,7 @@ def compare_irls_weights(
                     "source": "statsmodels",
                     "W_min": float(W_it.min()),
                     "W_max": float(W_it.max()),
-                    "W_ratio": float(W_it.max() / max(W_it.min(), 1e-300)),
+                    "W_ratio": w_ratio,
                     "mu_min": float(mu_it.min()),
                     "mu_max": float(mu_it.max()),
                     "deviance": float(sm_result.deviance),

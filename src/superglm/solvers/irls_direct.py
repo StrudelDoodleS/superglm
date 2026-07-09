@@ -38,7 +38,11 @@ from superglm.group_matrix import (
 )
 from superglm.links import Link, stabilize_eta
 from superglm.solvers.constrained_qp import solve_constrained_qp
-from superglm.solvers.pirls import IterationDiagnostics, PIRLSResult
+from superglm.solvers.pirls import (
+    IterationDiagnostics,
+    PIRLSResult,
+    _positive_working_weight_stats,
+)
 from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -656,16 +660,16 @@ def fit_irls_direct(
         diagnostic_eta_unclipped = eta_unclipped
         diagnostic_eta = eta
         diagnostic_mu = mu
-        w_ratio = W.max() / max(W.min(), 1e-300)
+        positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(W)
         _t_working += time.perf_counter() - _t0
 
         if w_ratio > 1e12:
             logger.warning(
-                "IRLS direct iter=%d: extreme W ratio %.1e (W range [%.2e, %.2e])",
+                "IRLS direct iter=%d: extreme W ratio %.1e (positive W range [%.2e, %.2e])",
                 it + 1,
                 w_ratio,
-                W.min(),
-                W.max(),
+                positive_w_min,
+                positive_w_max,
             )
 
         if _use_qr:

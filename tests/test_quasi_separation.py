@@ -148,6 +148,48 @@ class TestSeparatedTailDiagnostics:
         assert any("extreme W ratio" in record.message for record in caplog.records)
 
 
+class TestZeroWeightDiagnostics:
+    """Zero-frequency rows stay visible without creating false W-ratio alerts."""
+
+    @staticmethod
+    def _data():
+        x = np.linspace(-1.0, 1.0, 50)
+        y = 1.0 + 2.0 * x
+        weights = np.ones_like(x)
+        weights[0] = 0.0
+        return pd.DataFrame({"x": x}), y, weights
+
+    @pytest.mark.parametrize(
+        ("selection_penalty", "logger_name"),
+        [
+            (0.0, "superglm.solvers.irls_direct"),
+            (0.01, "superglm.solvers.pirls"),
+        ],
+    )
+    def test_zero_weight_row_does_not_inflate_ratio(self, selection_penalty, logger_name, caplog):
+        df, y, weights = self._data()
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=selection_penalty,
+            features={"x": Numeric()},
+        )
+
+        with caplog.at_level(logging.WARNING, logger=logger_name):
+            model.fit(
+                df,
+                y,
+                sample_weight=weights,
+                max_iter=1,
+                record_diagnostics=True,
+            )
+
+        first = model.iteration_diagnostics().iloc[0]
+        assert first["raw_W_min"] == 0.0
+        assert first["W_ratio"] == pytest.approx(1.0)
+        assert first["raw_W_ratio"] == pytest.approx(1.0)
+        assert not any("extreme W ratio" in record.message for record in caplog.records)
+
+
 class TestQuasiSeparatedMarker:
     """The ? marker must appear on rare levels."""
 

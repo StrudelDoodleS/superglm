@@ -24,6 +24,21 @@ from superglm.types import GroupSlice
 logger = logging.getLogger(__name__)
 
 
+def _positive_working_weight_stats(W: NDArray) -> tuple[float, float, float]:
+    """Return positive W minimum, maximum, and ratio, excluding zero-weight rows."""
+    positive = W[W > 0]
+    if positive.size == 0:
+        return float("nan"), float("nan"), float("inf")
+
+    positive_min = float(np.min(positive))
+    positive_max = float(np.max(positive))
+    if not np.isfinite(positive_max):
+        ratio = float("inf")
+    else:
+        ratio = positive_max / max(positive_min, 1e-300)
+    return positive_min, positive_max, ratio
+
+
 @dataclass
 class IterationDiagnostics:
     """Per-iteration IRLS diagnostics for debugging convergence issues."""
@@ -275,11 +290,11 @@ def _fit_pirls_inner(
                     break
 
         # Warn on extreme working weight range (helps diagnose bad data)
-        w_ratio = W.max() / max(W.min(), 1e-300)
+        positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(W)
         if w_ratio > 1e12:
             logger.warning(
                 f"PIRLS outer={outer + 1}: extreme W ratio {w_ratio:.1e} "
-                f"(W range [{W.min():.2e}, {W.max():.2e}])"
+                f"(positive W range [{positive_w_min:.2e}, {positive_w_max:.2e}])"
             )
 
         # Record per-iteration diagnostics
