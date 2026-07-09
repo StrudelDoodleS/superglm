@@ -91,6 +91,28 @@ class TestSeparatedTailDiagnostics:
         assert first["intercept"] == pytest.approx(model.result.intercept)
         assert first["eta_min_unclipped"] != pytest.approx(first["working_eta_min_unclipped"])
 
+    def test_first_pirls_diagnostic_separates_working_and_updated_state(self):
+        rng = np.random.default_rng(654)
+        x = rng.normal(size=200)
+        y = rng.gamma(shape=2.0, scale=np.exp(0.3 * x), size=200)
+        df = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.01,
+            features={"x": Numeric()},
+        )
+
+        model.fit(df, y, max_iter=1, record_diagnostics=True)
+
+        first = model.iteration_diagnostics().iloc[0]
+        updated_eta = model._dm.matvec(model.result.beta) + model.result.intercept
+        assert first["working_eta_min_unclipped"] == pytest.approx(
+            first["working_eta_max_unclipped"]
+        )
+        assert first["eta_min_unclipped"] == pytest.approx(float(updated_eta.min()))
+        assert first["eta_max_unclipped"] == pytest.approx(float(updated_eta.max()))
+        assert first["intercept"] == pytest.approx(model.result.intercept)
+
     def test_working_weight_ratio_is_not_artificially_capped(self):
         rng = np.random.default_rng(123)
         n = 1_000

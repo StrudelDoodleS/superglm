@@ -262,7 +262,8 @@ def _fit_pirls_inner(
         t_inner_total += time.perf_counter() - t_inner_start
 
         # Deviance for outer convergence
-        eta_new = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
+        eta_new_unclipped = dm.matvec(beta) + intercept + offset
+        eta_new = stabilize_eta(eta_new_unclipped, link)
         mu_new = clip_mu(link.inverse(eta_new), family)
         dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
 
@@ -284,7 +285,8 @@ def _fit_pirls_inner(
             for halving in range(max_halving):
                 beta = 0.5 * (beta + beta_prev)
                 intercept = 0.5 * (intercept + intercept_prev)
-                eta_h = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
+                eta_h_unclipped = dm.matvec(beta) + intercept + offset
+                eta_h = stabilize_eta(eta_h_unclipped, link)
                 mu_h = clip_mu(link.inverse(eta_h), family)
                 dev_h = float(np.sum(weights * family.deviance_unit(y, mu_h)))
                 if not np.isfinite(dev_h) or dev_h >= dev:
@@ -295,6 +297,11 @@ def _fit_pirls_inner(
                 logger.info(f"  PIRLS outer={outer + 1}: step halving {halving + 1}, dev={dev:.2e}")
                 if dev <= dev_prev:
                     break
+
+            eta_new_unclipped = dm.matvec(beta) + intercept + offset
+            eta_new = stabilize_eta(eta_new_unclipped, link)
+            mu_new = clip_mu(link.inverse(eta_new), family)
+            dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
 
         # Warn on extreme working weight range (helps diagnose bad data)
         positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(W)
@@ -309,9 +316,13 @@ def _fit_pirls_inner(
             k = min(5, n)
             top_idx = np.argpartition(W, -k)[-k:]
             bot_idx = np.argpartition(W, k)[:k]
-            eta_clipped = bool(
+            working_eta_clipped = bool(
                 float(np.min(eta_unclipped)) < float(np.min(eta))
                 or float(np.max(eta_unclipped)) > float(np.max(eta))
+            )
+            eta_clipped = bool(
+                float(np.min(eta_new_unclipped)) < float(np.min(eta_new))
+                or float(np.max(eta_new_unclipped)) > float(np.max(eta_new))
             )
             iteration_log.append(
                 IterationDiagnostics(
@@ -320,10 +331,10 @@ def _fit_pirls_inner(
                     w_min=float(W.min()),
                     w_max=float(W.max()),
                     w_ratio=w_ratio,
-                    mu_min=float(mu.min()),
-                    mu_max=float(mu.max()),
-                    eta_min=float(eta.min()),
-                    eta_max=float(eta.max()),
+                    mu_min=float(mu_new.min()),
+                    mu_max=float(mu_new.max()),
+                    eta_min=float(eta_new.min()),
+                    eta_max=float(eta_new.max()),
                     intercept=intercept,
                     step_halvings=n_halvings,
                     top_w_indices=top_idx[np.argsort(W[top_idx])[::-1]],
@@ -331,9 +342,16 @@ def _fit_pirls_inner(
                     raw_w_min=float(W.min()),
                     raw_w_max=float(W.max()),
                     raw_w_ratio=w_ratio,
-                    eta_min_unclipped=float(np.min(eta_unclipped)),
-                    eta_max_unclipped=float(np.max(eta_unclipped)),
+                    eta_min_unclipped=float(np.min(eta_new_unclipped)),
+                    eta_max_unclipped=float(np.max(eta_new_unclipped)),
                     eta_clipped=eta_clipped,
+                    working_mu_min=float(mu.min()),
+                    working_mu_max=float(mu.max()),
+                    working_eta_min=float(eta.min()),
+                    working_eta_max=float(eta.max()),
+                    working_eta_min_unclipped=float(np.min(eta_unclipped)),
+                    working_eta_max_unclipped=float(np.max(eta_unclipped)),
+                    working_eta_clipped=working_eta_clipped,
                 )
             )
 
