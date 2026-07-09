@@ -66,23 +66,30 @@ class TestSEFiniteForRareLevel:
 class TestSeparatedTailDiagnostics:
     """Diagnostics should expose, not hide, separated-tail IRLS geometry."""
 
-    def test_first_direct_diagnostic_eta_matches_working_state(self):
+    def test_first_direct_diagnostic_separates_working_and_updated_state(self):
         rng = np.random.default_rng(321)
         n = 200
         x = rng.normal(size=n)
         y = rng.gamma(shape=2.0, scale=np.exp(0.4 * x), size=n)
         df = pd.DataFrame({"x": x})
-
         model = SuperGLM(
             family=Tweedie(p=1.5),
             selection_penalty=0.0,
             features={"x": Numeric()},
         )
+
         model.fit(df, y, max_iter=1, record_diagnostics=True)
 
         first = model.iteration_diagnostics().iloc[0]
-        assert first["eta_min_unclipped"] == pytest.approx(first["eta_max_unclipped"])
-        assert not bool(first["eta_clipped"])
+        updated_eta = model._dm.matvec(model.result.beta) + model.result.intercept
+        assert first["working_eta_min_unclipped"] == pytest.approx(
+            first["working_eta_max_unclipped"]
+        )
+        assert not bool(first["working_eta_clipped"])
+        assert first["eta_min_unclipped"] == pytest.approx(float(updated_eta.min()))
+        assert first["eta_max_unclipped"] == pytest.approx(float(updated_eta.max()))
+        assert first["intercept"] == pytest.approx(model.result.intercept)
+        assert first["eta_min_unclipped"] != pytest.approx(first["working_eta_min_unclipped"])
 
     def test_working_weight_ratio_is_not_artificially_capped(self):
         rng = np.random.default_rng(123)

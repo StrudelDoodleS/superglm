@@ -66,6 +66,13 @@ class IterationDiagnostics:
     eta_min_unclipped: float | None = None
     eta_max_unclipped: float | None = None
     eta_clipped: bool | None = None
+    working_mu_min: float | None = None
+    working_mu_max: float | None = None
+    working_eta_min: float | None = None
+    working_eta_max: float | None = None
+    working_eta_min_unclipped: float | None = None
+    working_eta_max_unclipped: float | None = None
+    working_eta_clipped: bool | None = None
 
 
 @dataclass
