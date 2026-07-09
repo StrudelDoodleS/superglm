@@ -158,7 +158,7 @@ class TestDirectSolverBasic:
             @property
             def enabled_level(self) -> int:
                 self.level_reads += 1
-                return 2 if self.level_reads == 1 else 1
+                return 2 if self.level_reads <= 2 else 1
 
         x = np.linspace(-1.0, 1.0, 20)
         X_raw = x[:, None]
@@ -167,7 +167,7 @@ class TestDirectSolverBasic:
         groups = [GroupSlice(name="x", start=0, end=1)]
         recorder = ChangingLevelRecorder()
 
-        irls_direct.fit_irls_direct(
+        result, _ = irls_direct.fit_irls_direct(
             X=dm,
             y=y,
             weights=np.ones_like(y),
@@ -175,13 +175,15 @@ class TestDirectSolverBasic:
             link=IdentityLink(),
             groups=groups,
             lambda2=0.0,
-            max_iter=1,
+            max_iter=2,
+            tol=0.0,
             record_diagnostics=False,
             debug_recorder=recorder,
         )
 
+        assert result.n_iter == 2
+        assert len(recorder.rows) == 2
         assert recorder.level_reads == 1
-        assert len(recorder.rows) == 1
 
     def test_h_inverse_profiled_intercept_solve_matches_augmented_system(self):
         from superglm.solvers.irls_direct import (
