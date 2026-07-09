@@ -644,10 +644,11 @@ def fit_irls_direct(
     mu = clip_mu(link.inverse(eta), family)
     iteration_log: list[IterationDiagnostics] = [] if record_diagnostics else []
     base_debug_context = dict(debug_context or {})
-    record_debug_extrema = (
+    # Level 2 fixes the row schema for the whole fit, so snapshot it at fit entry.
+    record_debug_rows = (
         debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2
     )
-    capture_extrema = record_diagnostics or record_debug_extrema
+    capture_extrema = record_diagnostics or record_debug_rows
 
     max_halving = 5  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
@@ -1074,7 +1075,7 @@ def fit_irls_direct(
                 dev_rel_change = abs(dev - dev_prev) / (abs(dev_prev) + 1.0)
             converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
 
-        if record_debug_extrema:
+        if record_debug_rows:
             debug_recorder.append_jsonl(
                 "pirls",
                 {

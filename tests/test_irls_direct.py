@@ -65,36 +65,34 @@ class TestDirectSolverBasic:
         dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=len(y), p=1)
         groups = [GroupSlice(name="x", start=0, end=1)]
 
+        class NumpyExtremaSpy:
+            def __init__(self, delegate):
+                self._delegate = delegate
+                self.min_calls = 0
+                self.max_calls = 0
+
+            def __getattr__(self, name):
+                return getattr(self._delegate, name)
+
+            def min(self, *args, **kwargs):
+                self.min_calls += 1
+                return self._delegate.min(*args, **kwargs)
+
+            def max(self, *args, **kwargs):
+                self.max_calls += 1
+                return self._delegate.max(*args, **kwargs)
+
         original_stats = irls_direct._positive_working_weight_stats
-        original_min = irls_direct.np.min
-        original_max = irls_direct.np.max
-        count_extrema = False
         stats_calls = 0
-        min_calls = 0
-        max_calls = 0
 
-        def stats_then_count(W):
-            nonlocal count_extrema, stats_calls
+        def counting_stats(W):
+            nonlocal stats_calls
             stats_calls += 1
-            stats = original_stats(W)
-            count_extrema = True
-            return stats
+            return original_stats(W)
 
-        def counting_min(*args, **kwargs):
-            nonlocal min_calls
-            if count_extrema:
-                min_calls += 1
-            return original_min(*args, **kwargs)
-
-        def counting_max(*args, **kwargs):
-            nonlocal max_calls
-            if count_extrema:
-                max_calls += 1
-            return original_max(*args, **kwargs)
-
-        monkeypatch.setattr(irls_direct, "_positive_working_weight_stats", stats_then_count)
-        monkeypatch.setattr(irls_direct.np, "min", counting_min)
-        monkeypatch.setattr(irls_direct.np, "max", counting_max)
+        extrema_spy = NumpyExtremaSpy(np)
+        monkeypatch.setattr(irls_direct, "_positive_working_weight_stats", counting_stats)
+        monkeypatch.setattr(irls_direct, "np", extrema_spy)
 
         irls_direct.fit_irls_direct(
             X=dm,
@@ -109,8 +107,8 @@ class TestDirectSolverBasic:
         )
 
         assert stats_calls == 1
-        assert min_calls == 0
-        assert max_calls == 0
+        assert extrema_spy.min_calls == 0
+        assert extrema_spy.max_calls == 0
 
     def test_level_two_recorder_keeps_extrema_without_iteration_diagnostics(self):
         import superglm.solvers.irls_direct as irls_direct
