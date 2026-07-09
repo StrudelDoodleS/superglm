@@ -1,5 +1,7 @@
 """Tests for quasi-separation detection and numerical stability."""
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,6 +9,7 @@ import pytest
 from superglm import SuperGLM
 from superglm.distributions import Tweedie
 from superglm.features.categorical import Categorical
+from superglm.features.numeric import Numeric
 
 
 def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42):
@@ -63,6 +66,24 @@ class TestSEFiniteForRareLevel:
 class TestSeparatedTailDiagnostics:
     """Diagnostics should expose, not hide, separated-tail IRLS geometry."""
 
+    def test_first_direct_diagnostic_eta_matches_working_state(self):
+        rng = np.random.default_rng(321)
+        n = 200
+        x = rng.normal(size=n)
+        y = rng.gamma(shape=2.0, scale=np.exp(0.4 * x), size=n)
+        df = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        model.fit(df, y, max_iter=1, record_diagnostics=True)
+
+        first = model.iteration_diagnostics().iloc[0]
+        assert first["eta_min_unclipped"] == pytest.approx(first["eta_max_unclipped"])
+        assert not bool(first["eta_clipped"])
+
     def test_working_weight_ratio_is_not_artificially_capped(self):
         rng = np.random.default_rng(123)
         n = 1_000
@@ -96,6 +117,35 @@ class TestSeparatedTailDiagnostics:
         assert diagnostics["eta_min"].min() == pytest.approx(-80.0)
         assert diagnostics["eta_min_unclipped"].min() < -80.0
         assert diagnostics["eta_clipped"].any()
+
+    def test_direct_path_warns_on_extreme_working_weight_ratio(self, caplog):
+        rng = np.random.default_rng(123)
+        n = 1_000
+        n_rare = 5
+        cat = np.array(["base"] * (n - n_rare) + ["rare"] * n_rare)
+        y = rng.gamma(shape=2.0, scale=3.0, size=n)
+        y[cat == "rare"] = 0.0
+
+        idx = rng.permutation(n)
+        df = pd.DataFrame({"cat": cat[idx]})
+        y = y[idx]
+
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="first")},
+        )
+        with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+            with pytest.warns(UserWarning, match="coefficient-based convergence"):
+                model.fit(
+                    df,
+                    y,
+                    convergence="coefficients",
+                    max_iter=100,
+                    tol=0.0,
+                )
+
+        assert any("extreme W ratio" in record.message for record in caplog.records)
 
 
 class TestQuasiSeparatedMarker:

@@ -653,7 +653,20 @@ def fit_irls_direct(
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
         z = eta + (y - mu) / dmu_deta
+        diagnostic_eta_unclipped = eta_unclipped
+        diagnostic_eta = eta
+        diagnostic_mu = mu
+        w_ratio = W.max() / max(W.min(), 1e-300)
         _t_working += time.perf_counter() - _t0
+
+        if w_ratio > 1e12:
+            logger.warning(
+                "IRLS direct iter=%d: extreme W ratio %.1e (W range [%.2e, %.2e])",
+                it + 1,
+                w_ratio,
+                W.min(),
+                W.max(),
+            )
 
         if _use_qr:
             # QR path: solve via QR on [sqrt(W)·X_aug; sqrt(S_aug)].
@@ -666,7 +679,7 @@ def fit_irls_direct(
             Q, R = np.linalg.qr(A, mode="reduced")
             # Truncated SVD on R for near-singular truncation
             U_r, s_r, Vh_r = np.linalg.svd(R, full_matrices=False)
-            thresh = s_r[0] * 1e-10
+            thresh = s_r[0] * np.finfo(float).eps * max(R.shape)
             inv_s = np.where(s_r > thresh, 1.0 / s_r, 0.0)
             beta_aug = (Vh_r.T * inv_s) @ (U_r.T @ (Q.T @ rhs_qr))
             _cond_est = float(s_r[0] / max(s_r[-1], 1e-300))
@@ -970,13 +983,12 @@ def fit_irls_direct(
 
         # Record per-iteration diagnostics
         if record_diagnostics:
-            w_ratio = W.max() / max(W.min(), 1e-300)
             k = min(5, n)
             top_idx = np.argpartition(W, -k)[-k:]
             bot_idx = np.argpartition(W, k)[:k]
             eta_clipped = bool(
-                float(np.min(eta_unclipped)) < float(np.min(eta))
-                or float(np.max(eta_unclipped)) > float(np.max(eta))
+                float(np.min(diagnostic_eta_unclipped)) < float(np.min(diagnostic_eta))
+                or float(np.max(diagnostic_eta_unclipped)) > float(np.max(diagnostic_eta))
             )
             iteration_log.append(
                 IterationDiagnostics(
@@ -985,10 +997,10 @@ def fit_irls_direct(
                     w_min=float(W.min()),
                     w_max=float(W.max()),
                     w_ratio=w_ratio,
-                    mu_min=float(mu.min()),
-                    mu_max=float(mu.max()),
-                    eta_min=float(eta.min()),
-                    eta_max=float(eta.max()),
+                    mu_min=float(diagnostic_mu.min()),
+                    mu_max=float(diagnostic_mu.max()),
+                    eta_min=float(diagnostic_eta.min()),
+                    eta_max=float(diagnostic_eta.max()),
                     intercept=intercept,
                     step_halvings=n_halvings,
                     top_w_indices=top_idx[np.argsort(W[top_idx])[::-1]],
@@ -998,8 +1010,8 @@ def fit_irls_direct(
                     raw_w_min=float(W.min()),
                     raw_w_max=float(W.max()),
                     raw_w_ratio=w_ratio,
-                    eta_min_unclipped=float(np.min(eta_unclipped)),
-                    eta_max_unclipped=float(np.max(eta_unclipped)),
+                    eta_min_unclipped=float(np.min(diagnostic_eta_unclipped)),
+                    eta_max_unclipped=float(np.max(diagnostic_eta_unclipped)),
                     eta_clipped=eta_clipped,
                 )
             )
@@ -1042,17 +1054,17 @@ def fit_irls_direct(
                     "converged": bool(converged_this_iter),
                     "w_min": float(W.min()),
                     "w_max": float(W.max()),
-                    "w_ratio": float(W.max() / max(W.min(), 1e-300)),
-                    "mu_min": float(mu.min()),
-                    "mu_max": float(mu.max()),
-                    "eta_min_unclipped": float(np.min(eta_unclipped)),
-                    "eta_max_unclipped": float(np.max(eta_unclipped)),
+                    "w_ratio": float(w_ratio),
+                    "mu_min": float(diagnostic_mu.min()),
+                    "mu_max": float(diagnostic_mu.max()),
+                    "eta_min_unclipped": float(np.min(diagnostic_eta_unclipped)),
+                    "eta_max_unclipped": float(np.max(diagnostic_eta_unclipped)),
                     "eta_clipped": bool(
-                        float(np.min(eta_unclipped)) < float(np.min(eta))
-                        or float(np.max(eta_unclipped)) > float(np.max(eta))
+                        float(np.min(diagnostic_eta_unclipped)) < float(np.min(diagnostic_eta))
+                        or float(np.max(diagnostic_eta_unclipped)) > float(np.max(diagnostic_eta))
                     ),
-                    "eta_min": float(eta.min()),
-                    "eta_max": float(eta.max()),
+                    "eta_min": float(diagnostic_eta.min()),
+                    "eta_max": float(diagnostic_eta.max()),
                     "step_halvings": int(n_halvings),
                     "cond_estimate": float(_cond_est),
                     "used_svd_fallback": bool(_used_svd),

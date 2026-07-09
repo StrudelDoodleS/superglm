@@ -218,6 +218,35 @@ class TestQRSolverPath:
         assert model._result.converged
         assert np.isfinite(model._result.deviance)
 
+    def test_qr_preserves_sparse_tail_direction(self):
+        """QR must not truncate a separated sparse-tail direction."""
+        rng = np.random.default_rng(123)
+        n = 1000
+        n_rare = 5
+        cat = np.array(["base"] * (n - n_rare) + ["rare"] * n_rare)
+        y = rng.gamma(shape=2.0, scale=3.0, size=n)
+        y[cat == "rare"] = 0.0
+
+        idx = rng.permutation(n)
+        df = pd.DataFrame({"cat": cat[idx]})
+        y = y[idx]
+
+        common = dict(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="first")},
+        )
+        gram = SuperGLM(**common, direct_solve="gram")
+        qr = SuperGLM(**common, direct_solve="qr")
+
+        with pytest.warns(UserWarning, match="coefficient-based convergence"):
+            gram.fit(df, y, convergence="coefficients", max_iter=100, tol=0.0)
+        with pytest.warns(UserWarning, match="coefficient-based convergence"):
+            qr.fit(df, y, convergence="coefficients", max_iter=100, tol=0.0)
+
+        np.testing.assert_allclose(qr._result.deviance, gram._result.deviance, rtol=1e-8)
+        assert qr._result.beta[0] < -50.0
+
     def test_auto_near_collinear_converges(self, caplog):
         """'auto' mode handles near-collinear data without SVD fallback.
 
