@@ -56,14 +56,18 @@ def packed_centered_gram_rhs(
     z_centered: NDArray,
 ) -> tuple[NDArray, NDArray, NDArray] | None:
     """Build centered products from indexed supports when every group is eligible."""
-    from superglm.group_matrix import CategoricalGroupMatrix, DiscretizedSSPGroupMatrix
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+        DiscretizedTensorGroupMatrix,
+    )
 
     supports: list[_CenteredSupport] = []
     widths: list[int] = []
     weighted_z = W * z_centered
     sum_w = float(np.sum(W, dtype=np.float64))
     for gm in dm.group_matrices:
-        if type(gm) is DiscretizedSSPGroupMatrix:
+        if type(gm) in (DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix):
             supports.append(
                 _anchor_center_support(
                     values=gm.B_unique,

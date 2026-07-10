@@ -14,6 +14,7 @@ from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
     DiscretizedSSPGroupMatrix,
+    DiscretizedTensorGroupMatrix,
 )
 from superglm.links import IdentityLink
 from superglm.penalties.group_lasso import GroupLasso
@@ -154,6 +155,89 @@ def test_packed_centering_avoids_materializing_discrete_and_categorical_rows(
     np.testing.assert_allclose(system.mean_x, mean_x, rtol=0.0, atol=1e-12)
     np.testing.assert_allclose(system.data_gram, expected_gram, rtol=1e-12, atol=1e-10)
     np.testing.assert_allclose(system.rhs, expected_rhs, rtol=1e-12, atol=1e-10)
+
+
+def test_packed_centering_avoids_materializing_tensor_rows(monkeypatch) -> None:
+    idx1 = np.array([0, 0, 1, 1, 2, 2, 0, 1, 2, 0, 1, 2], dtype=np.intp)
+    idx2 = np.array([0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0], dtype=np.intp)
+    B1 = np.column_stack(
+        (
+            1e6 + np.array([0.0, 2.0, 5.0]),
+            np.array([1.0, -1.0, 3.0]),
+        )
+    )
+    B2 = np.column_stack(
+        (
+            1e6 + np.array([0.0, 4.0]),
+            np.array([-2.0, 2.0]),
+        )
+    )
+    pair_codes = idx1 * len(B2) + idx2
+    observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+    B_joint = (
+        B1[observed_codes // len(B2), :, None] * B2[observed_codes % len(B2), None, :]
+    ).reshape(len(observed_codes), 4)
+    R_inv = np.array(
+        [
+            [1.0, 0.0, 0.25],
+            [0.0, 1.0, -0.5],
+            [0.0, 0.0, 1.0],
+            [0.25, -0.25, 0.0],
+        ]
+    )
+    tensor = DiscretizedTensorGroupMatrix(
+        B1,
+        B2,
+        idx1,
+        idx2,
+        B_joint,
+        R_inv,
+        pair_idx.astype(np.intp),
+        tensor_id=147,
+    )
+    dm = DesignMatrix([tensor], n=len(idx1), p=R_inv.shape[1])
+    W = np.linspace(0.25, 2.0, len(idx1))
+    z = np.cos(np.arange(len(idx1), dtype=float))
+    support_mass = np.bincount(pair_idx, weights=W, minlength=len(B_joint))
+    anchor = int(np.argmax(support_mass))
+    support_differences = B_joint - B_joint[anchor]
+    mean_difference = support_mass @ support_differences / np.sum(W)
+    centered_support = (support_differences - mean_difference) @ R_inv
+    mean_x = (B_joint[anchor] + mean_difference) @ R_inv
+    X_centered = centered_support[pair_idx]
+    mean_z = float(np.dot(W, z) / np.sum(W))
+
+    monkeypatch.setattr(
+        dm,
+        "row_subset",
+        lambda _rows: pytest.fail("packed tensor centering must not materialize rows"),
+    )
+    monkeypatch.setattr(
+        DiscretizedTensorGroupMatrix,
+        "toarray",
+        lambda _self: pytest.fail("packed tensor centering must not call toarray"),
+    )
+
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=np.zeros((R_inv.shape[1], R_inv.shape[1])),
+    )
+
+    np.testing.assert_allclose(system.mean_x, mean_x, rtol=0.0, atol=1e-10)
+    np.testing.assert_allclose(
+        system.data_gram,
+        X_centered.T @ (W[:, None] * X_centered),
+        rtol=1e-12,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        system.rhs,
+        X_centered.T @ (W * (z - mean_z)),
+        rtol=1e-12,
+        atol=1e-8,
+    )
 
 
 def test_centered_system_reconstructs_raw_weighted_moments() -> None:
