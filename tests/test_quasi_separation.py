@@ -147,7 +147,7 @@ class TestSeparatedTailDiagnostics:
         assert diagnostics["eta_min_unclipped"].min() < -80.0
         assert diagnostics["eta_clipped"].any()
 
-    def test_direct_path_warns_on_extreme_working_weight_ratio(self, caplog):
+    def test_direct_path_keeps_extreme_working_weight_ratio_out_of_warning_log(self, caplog):
         rng = np.random.default_rng(123)
         n = 1_000
         n_rare = 5
@@ -164,7 +164,7 @@ class TestSeparatedTailDiagnostics:
             selection_penalty=0.0,
             features={"cat": Categorical(base="first")},
         )
-        with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+        with caplog.at_level(logging.DEBUG, logger="superglm.solvers.irls_direct"):
             with pytest.warns(UserWarning, match="coefficient-based convergence"):
                 model.fit(
                     df,
@@ -174,7 +174,31 @@ class TestSeparatedTailDiagnostics:
                     tol=0.0,
                 )
 
-        assert any("extreme W ratio" in record.message for record in caplog.records)
+        ratio_records = [record for record in caplog.records if "extreme W ratio" in record.message]
+        assert ratio_records
+        assert all(record.levelno == logging.DEBUG for record in ratio_records)
+
+    def test_pirls_keeps_extreme_working_weight_ratio_out_of_warning_log(self, monkeypatch, caplog):
+        import superglm.solvers.pirls as pirls
+
+        monkeypatch.setattr(
+            pirls,
+            "_positive_working_weight_stats",
+            lambda _weights: (1e-20, 1.0, 1e20),
+        )
+        frame = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 40)})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.01,
+            features={"x": Numeric()},
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="superglm.solvers.pirls"):
+            model.fit(frame, np.linspace(0.0, 1.0, len(frame)), max_iter=1)
+
+        ratio_records = [record for record in caplog.records if "extreme W ratio" in record.message]
+        assert ratio_records
+        assert all(record.levelno == logging.DEBUG for record in ratio_records)
 
 
 class TestZeroWeightDiagnostics:

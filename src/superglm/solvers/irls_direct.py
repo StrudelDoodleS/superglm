@@ -671,7 +671,7 @@ def fit_irls_direct(
         _t_working += time.perf_counter() - _t0
 
         if w_ratio > 1e12:
-            logger.warning(
+            logger.debug(
                 "IRLS direct iter=%d: extreme W ratio %.1e (positive W range [%.2e, %.2e])",
                 it + 1,
                 w_ratio,

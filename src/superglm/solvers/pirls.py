@@ -325,7 +325,7 @@ def _fit_pirls_inner(
         # Warn on extreme working weight range (helps diagnose bad data)
         positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(W)
         if w_ratio > 1e12:
-            logger.warning(
+            logger.debug(
                 f"PIRLS outer={outer + 1}: extreme W ratio {w_ratio:.1e} "
                 f"(positive W range [{positive_w_min:.2e}, {positive_w_max:.2e}])"
             )
