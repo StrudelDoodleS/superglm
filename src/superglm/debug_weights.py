@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm.solvers.pirls import _positive_working_weight_stats
+
 logger = logging.getLogger(__name__)
 
 
@@ -128,6 +130,7 @@ def compare_irls_weights(
             mu_it = sm_result.mu
             w_family = sm_family.weights(mu_it)
             W_it = freq_weights * w_family
+            _, _, w_ratio = _positive_working_weight_stats(W_it)
             n_sm = len(W_it)
             k = min(5, n_sm)
             top_idx = np.argpartition(W_it, -k)[-k:]
@@ -138,7 +141,7 @@ def compare_irls_weights(
                     "source": "statsmodels",
                     "W_min": float(W_it.min()),
                     "W_max": float(W_it.max()),
-                    "W_ratio": float(W_it.max() / max(W_it.min(), 1e-300)),
+                    "W_ratio": w_ratio,
                     "mu_min": float(mu_it.min()),
                     "mu_max": float(mu_it.max()),
                     "deviance": float(sm_result.deviance),
@@ -175,10 +178,28 @@ def compare_irls_weights(
                     "W_min": d.w_min,
                     "W_max": d.w_max,
                     "W_ratio": d.w_ratio,
+                    "raw_W_min": d.raw_w_min,
+                    "raw_W_max": d.raw_w_max,
+                    "raw_W_ratio": d.raw_w_ratio,
                     "mu_min": d.mu_min,
                     "mu_max": d.mu_max,
+                    "eta_min": d.eta_min,
+                    "eta_max": d.eta_max,
+                    "eta_min_unclipped": d.eta_min_unclipped,
+                    "eta_max_unclipped": d.eta_max_unclipped,
+                    "eta_clipped": d.eta_clipped,
+                    "working_mu_min": d.working_mu_min,
+                    "working_mu_max": d.working_mu_max,
+                    "working_eta_min": d.working_eta_min,
+                    "working_eta_max": d.working_eta_max,
+                    "working_eta_min_unclipped": d.working_eta_min_unclipped,
+                    "working_eta_max_unclipped": d.working_eta_max_unclipped,
+                    "working_eta_clipped": d.working_eta_clipped,
                     "deviance": d.deviance,
                     "converged": None,
+                    "step_halvings": d.step_halvings,
+                    "step_rejected": d.step_rejected,
+                    "rank_truncated": d.rank_truncated,
                     "top_W_obs": list(d.top_w_indices),
                     "bottom_W_obs": list(d.bottom_w_indices),
                     "cond_estimate": d.cond_estimate,

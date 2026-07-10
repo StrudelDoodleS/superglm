@@ -167,7 +167,13 @@ def build_knots_and_penalty(
     return omega_ident, n_cols, projection
 
 
-def tensor_marginal_info(spec: Any, x: NDArray) -> TensorMarginalInfo:
+def tensor_marginal_info(
+    spec: Any,
+    x: NDArray,
+    *,
+    support: NDArray | None = None,
+    counts: NDArray | None = None,
+) -> TensorMarginalInfo:
     """Compute tensor-product marginal ingredients for an already-built spline spec."""
     if not spec._tensor_supported:
         raise NotImplementedError(
@@ -189,7 +195,14 @@ def tensor_marginal_info(spec: Any, x: NDArray) -> TensorMarginalInfo:
         )
 
     x = np.asarray(x, dtype=np.float64).ravel()
-    basis_raw = spec._raw_basis_matrix(x)
+    if (support is None) != (counts is None):
+        raise ValueError("support and counts must be provided together")
+    evaluation_points = x if support is None else np.asarray(support, dtype=np.float64).ravel()
+    support_counts = None if counts is None else np.asarray(counts, dtype=np.float64).ravel()
+    if support_counts is not None and support_counts.shape != evaluation_points.shape:
+        raise ValueError("counts must match the tensor marginal support")
+
+    basis_raw = spec._raw_basis_matrix(evaluation_points)
     omega = spec._build_penalty()
     _, omega_constrained, _, projection_constraints = spec._apply_constraints(None, omega)
 
@@ -198,7 +211,11 @@ def tensor_marginal_info(spec: Any, x: NDArray) -> TensorMarginalInfo:
     else:
         basis_constrained = basis_raw
 
-    centered_direction = basis_constrained.sum(axis=0)
+    centered_direction = (
+        basis_constrained.sum(axis=0)
+        if support_counts is None
+        else support_counts @ basis_constrained
+    )
     centered_norm = np.linalg.norm(centered_direction)
     if centered_norm < 1e-12:
         projection_ident = np.eye(basis_constrained.shape[1])

@@ -106,9 +106,6 @@ def _spline_se(
         When provided, propagate uncertainty for ``f(x_eval) - f(reference_x)``.
     """
     n_out = len(x_eval) if x_eval is not None else n_points
-    beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
-    if np.linalg.norm(beta_combined) < 1e-12:
-        return np.zeros(n_out)
     active_subs = [ag for ag in active_groups if ag.feature_name == name]
     if not active_subs:
         return np.zeros(n_out)

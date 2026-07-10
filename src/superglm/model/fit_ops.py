@@ -6,7 +6,7 @@ import logging
 import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -41,7 +41,7 @@ from superglm.model.reml_setup import (
     strip_qp_constraints,
 )
 from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.pirls import PIRLSResult, fit_pirls
+from superglm.solvers.pirls import fit_pirls
 from superglm.types import FitStats
 
 logger = logging.getLogger(__name__)
@@ -560,17 +560,7 @@ def fit(
     # Fix phi for known-scale families (Poisson): phi is always 1.0.
     scale_known = getattr(model._distribution, "scale_known", True)
     if scale_known and model._result.phi != 1.0:
-        model._result = PIRLSResult(
-            beta=model._result.beta,
-            intercept=model._result.intercept,
-            n_iter=model._result.n_iter,
-            deviance=model._result.deviance,
-            converged=model._result.converged,
-            phi=1.0,
-            effective_df=model._result.effective_df,
-            iteration_log=model._result.iteration_log,
-            log_det_H=model._result.log_det_H,
-        )
+        model._result = replace(model._result, phi=1.0)
 
     eta = model._dm.matvec(model._result.beta) + model._result.intercept
     if offset is not None:

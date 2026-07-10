@@ -22,6 +22,7 @@ class _CoefRow:
     p: float | None = None
     ci_low: float | None = None
     ci_high: float | None = None
+    estimable: bool = True
     # Spline summary row (group-level Wald test)
     is_spline: bool = False
     n_params: int = 0

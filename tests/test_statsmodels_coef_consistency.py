@@ -160,6 +160,53 @@ class TestStatsmodelsCoefConsistency:
         sg_model = _fit_superglm(df, y, features, Tweedie, P)
         _assert_coef_and_se_match(sm_res, sg_model)
 
+    def test_matched_parameter_convergence_with_weights_and_offset(self, tweedie_data):
+        import statsmodels.api as sm
+
+        df, y, p, Tweedie = tweedie_data
+        weights = np.linspace(0.5, 1.5, len(y))
+        offset = 0.1 * np.sin(df["x1"].to_numpy())
+        X_sm = sm.add_constant(df[["x1", "x2"]].to_numpy())
+        family_sm = sm.families.Tweedie(
+            var_power=p,
+            link=sm.families.links.Log(),
+        )
+        sm_model = sm.GLM(
+            y,
+            X_sm,
+            family=family_sm,
+            freq_weights=weights,
+            offset=offset,
+        )
+        sm_result = sm_model.fit(
+            maxiter=500,
+            tol=1e-13,
+            atol=1e-13,
+            rtol=0.0,
+            tol_criterion="params",
+        )
+        sg_model = SuperGLM(
+            family=Tweedie(p=p),
+            link="log",
+            selection_penalty=0.0,
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        with pytest.warns(UserWarning, match="coefficient-based convergence"):
+            sg_model.fit(
+                df,
+                y,
+                sample_weight=weights,
+                offset=offset,
+                max_iter=500,
+                tol=1e-12,
+                convergence="coefficients",
+            )
+
+        sg_params = np.r_[sg_model.result.intercept, sg_model.result.beta]
+        np.testing.assert_allclose(sg_params, sm_result.params, atol=1e-10, rtol=1e-10)
+        assert np.max(np.abs(sm_model.score(sg_params, scale=1.0))) < 1e-6
+        assert np.max(np.abs(sm_model.score(sm_result.params, scale=1.0))) < 1e-6
+
 
 class TestNearSeparatedTweedieConsistency:
     """Tweedie model with near-separated categories, weights, and offset.

@@ -171,6 +171,8 @@ class DesignMatrix:
         self.shape = (n, p)
         self._tabmat_split = None  # lazily built
         self._tabmat_built = False
+        self._centered_pattern_plan = None
+        self._centered_solver_supports = None
 
     @property
     def tabmat_split(self):

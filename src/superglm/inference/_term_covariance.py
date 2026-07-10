@@ -104,9 +104,6 @@ def feature_se_from_cov(
                 x_eval=np.array(spec._ordered_levels, dtype=object),
                 reference_x=np.array([spec._base_level], dtype=object),
             )
-        beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
-        if np.linalg.norm(beta_combined) < 1e-12:
-            return np.zeros(len(spec._ordered_levels))
         active_subs = [ag for ag in active_groups if ag.feature_name == name]
         if not active_subs:
             return np.zeros(len(spec._ordered_levels))
@@ -123,14 +120,6 @@ def feature_se_from_cov(
                 idx = spec._non_base.index(lev)
                 se_all[i] = se_nonbase[idx]
         return se_all
-
-    beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
-    if np.linalg.norm(beta_combined) < 1e-12:
-        if isinstance(spec, _SplineBase | Polynomial):
-            return np.zeros(n_points)
-        if isinstance(spec, Categorical):
-            return np.zeros(len(spec._levels))
-        return np.zeros(1)
 
     active_subs = [ag for ag in active_groups if ag.feature_name == name]
     if not active_subs:

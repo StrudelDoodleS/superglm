@@ -1,5 +1,7 @@
 """Tests for ModelMetrics diagnostics module."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -11,6 +13,7 @@ from superglm.distributions import Gamma, Poisson, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
+from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, DiscretizedTensorGroupMatrix
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -104,6 +107,715 @@ class TestMetricsCaching:
         metrics2 = model.metrics(X, y, sample_weight=w)
 
         assert metrics1 is metrics2
+
+    def test_changed_offset_recomputes_inverse_from_evaluation_working_weights(self):
+        """Fit-time rank inverses are invalid when a new offset changes Fisher weights."""
+        rng = np.random.default_rng(20260710)
+        n = 240
+        x = rng.normal(size=n)
+        X = pd.DataFrame({"x": x})
+        y = rng.poisson(np.exp(0.2 + 0.35 * x)).astype(float)
+        weights = np.ones(n)
+        fit_offset = np.zeros(n)
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        model.fit(X, y, sample_weight=weights, offset=fit_offset)
+
+        changed_offset = np.linspace(-0.8, 0.8, n)
+        metrics = model.metrics(X, y, sample_weight=weights, offset=changed_offset)
+        X_active, working_weights, inverse, _, _ = metrics._active_info
+        X_active_dense = (
+            X_active.toarray() if hasattr(X_active, "toarray") else np.asarray(X_active)
+        )
+
+        expected = np.linalg.inv(X_active_dense.T @ (working_weights[:, None] * X_active_dense))
+        np.testing.assert_allclose(inverse, expected, rtol=1e-10, atol=1e-12)
+
+        fit_inverse = model.result.rank_info.coefficient.pseudo_inverse()
+        assert not np.allclose(inverse, fit_inverse, rtol=1e-5, atol=1e-8)
+
+    def test_fit_rank_reuse_uses_solver_eta_before_binomial_mu_clipping(self):
+        """Clipped public means must not change the retained fit working weights."""
+        x = np.linspace(-1.0, 1.0, 120)
+        X = pd.DataFrame({"x": x})
+        y = (x > 0.0).astype(float)
+        model = SuperGLM(
+            family="binomial",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+            max_iter=100,
+        )
+        model.fit(X, y)
+
+        metrics = model.metrics(X, y)
+        _, working_weights, inverse, _, _ = metrics._active_info
+
+        np.testing.assert_array_equal(working_weights, metrics._fit_working_weights)
+        assert metrics._working_weights_match_fit(working_weights)
+        np.testing.assert_allclose(
+            inverse,
+            model.result.rank_info.coefficient.pseudo_inverse(),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    @pytest.mark.parametrize("link", ["logit", "probit", "cloglog", "cauchit"])
+    def test_unchanged_binomial_fit_reuses_rank_without_roundtrip_weight_comparison(self, link):
+        """Fit identity, not inverse-link roundoff, controls rank-state reuse."""
+        rng = np.random.default_rng(20260714)
+        x = rng.normal(size=300)
+        X = pd.DataFrame({"x": x})
+        probability = 1.0 / (1.0 + np.exp(-(-0.25 + 0.7 * x)))
+        y = rng.binomial(1, probability).astype(float)
+        model = SuperGLM(
+            family="binomial",
+            link=link,
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        model.fit(X, y)
+
+        metrics = model.metrics(X, y)
+        _, working_weights, inverse, _, _ = metrics._active_info
+
+        assert metrics._working_weights_match_fit(working_weights)
+        np.testing.assert_allclose(
+            inverse,
+            model.result.rank_info.coefficient.pseudo_inverse(),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_changed_offset_discrete_metrics_use_one_public_coordinate_system(self):
+        """Changed-offset means, Fisher weights, and design use the exact public basis."""
+        from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+        from superglm.model import base
+
+        rng = np.random.default_rng(20260715)
+        x = np.linspace(-3.0, 3.0, 360)
+        X = pd.DataFrame({"x": x})
+        y = rng.poisson(np.exp(0.2 + 0.35 * np.sin(x))).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins=16,
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+        model.fit(X, y, offset=np.zeros(len(X)))
+
+        changed_offset = np.linspace(-0.45, 0.35, len(X))
+        metrics = model.metrics(X, y, offset=changed_offset)
+        design, working_weights, _, _, _ = metrics._active_info
+        eta, working_mu = metrics._working_eta_mu
+        expected_eta = base.predict_eta_exact(model, X, offset=changed_offset)
+        expected_mu = clip_mu(model._link.inverse(expected_eta), model._distribution)
+        expected_weights = model._link.deriv_inverse(expected_eta) ** 2 / np.maximum(
+            model._distribution.variance(expected_mu), _VARIANCE_FLOOR
+        )
+
+        np.testing.assert_allclose(eta, expected_eta, rtol=0.0, atol=1e-14)
+        np.testing.assert_allclose(working_mu, metrics._mu, rtol=0.0, atol=1e-14)
+        np.testing.assert_allclose(working_weights, expected_weights, rtol=1e-13, atol=1e-15)
+        assert type(design).__name__ == "EvaluationDesign"
+
+    def test_different_gaussian_X_uses_evaluation_design_despite_equal_working_weights(self):
+        """Evaluation diagnostics must not reuse fit geometry merely because W is unchanged."""
+        x_fit = np.linspace(-1.0, 1.0, 80)
+        X_fit = pd.DataFrame({"x": x_fit})
+        y_fit = 1.25 + 0.8 * x_fit
+
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        model.fit(X_fit, y_fit)
+
+        x_eval = np.linspace(2.0, 5.0, len(X_fit))
+        X_eval = pd.DataFrame({"x": x_eval})
+        metrics = model.metrics(X_eval, 1.25 + 0.8 * x_eval)
+        X_active, working_weights, inverse, _, _ = metrics._active_info
+        X_active_dense = (
+            X_active.toarray() if hasattr(X_active, "toarray") else np.asarray(X_active)
+        )
+
+        expected_design = x_eval[:, None]
+        expected_inverse = np.linalg.inv(
+            expected_design.T @ (working_weights[:, None] * expected_design)
+        )
+        expected_leverage = working_weights * np.sum(
+            (expected_design @ expected_inverse) * expected_design,
+            axis=1,
+        )
+
+        assert not metrics._working_weights_match_fit(working_weights)
+        np.testing.assert_allclose(X_active_dense, expected_design, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(inverse, expected_inverse, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(metrics.leverage, expected_leverage, rtol=1e-12, atol=1e-12)
+
+    def test_evaluation_large_translation_keeps_profiled_inference_stable(self):
+        """Evaluation covariance must profile the intercept before rank work."""
+        n = 1000
+        x_fit = np.linspace(-1.0, 1.0, n)
+        X_fit = pd.DataFrame({"x": x_fit})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        model.fit(X_fit, 1.0 + 0.75 * x_fit)
+
+        x_eval = 1e12 + x_fit
+        X_eval = pd.DataFrame({"x": x_eval})
+        metrics = model.metrics(X_eval, 1.0 + 0.75 * x_fit)
+        _, working_weights, _, inverse_augmented, _ = metrics._active_info
+
+        anchored = x_eval - x_eval[0]
+        centered = anchored - np.average(anchored, weights=working_weights)
+        expected_gram = float(np.dot(working_weights, centered**2))
+
+        assert metrics._active_centered_data_gram[0, 0] == pytest.approx(
+            expected_gram,
+            rel=1e-12,
+        )
+        assert inverse_augmented[1, 1] == pytest.approx(1.0 / expected_gram, rel=1e-12)
+
+    def test_changed_offset_large_translation_uses_stable_grouped_centering(self):
+        """Changed-W fit diagnostics must retain the fitted centered-system stability."""
+        rng = np.random.default_rng(20260713)
+        n = 500
+        local_x = np.linspace(-1.0, 1.0, n)
+        x = 1e10 + local_x
+        X = pd.DataFrame({"x": x})
+        y = rng.poisson(np.exp(0.1 + 0.2 * local_x)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        model.fit(X, y, offset=np.zeros(n))
+
+        metrics = model.metrics(X, y, offset=np.linspace(-0.3, 0.3, n))
+        _, working_weights, _, inverse_augmented, _ = metrics._active_info
+        anchored = x - x[0]
+        centered = anchored - np.average(anchored, weights=working_weights)
+        expected_gram = float(np.dot(working_weights, centered**2))
+
+        assert metrics._active_centered_data_gram[0, 0] == pytest.approx(
+            expected_gram,
+            rel=1e-12,
+        )
+        assert inverse_augmented[1, 1] == pytest.approx(1.0 / expected_gram, rel=1e-12)
+
+    def test_fit_discrete_tensor_inference_does_not_materialize_observation_rows(self, monkeypatch):
+        """Fit-data SE, influence, and summary paths must stay on grouped tensor algebra."""
+        support1 = np.linspace(18.0, 70.0, 12)
+        support2 = np.linspace(0.0, 18.0, 9)
+        pairs = np.array(np.meshgrid(support1, support2)).reshape(2, -1).T
+        X = pd.DataFrame(
+            {
+                "age": np.tile(pairs[:, 0], 3),
+                "vehicle_age": np.tile(pairs[:, 1], 3),
+            }
+        )
+        eta = -0.7 + 0.012 * (X["age"].to_numpy() - 40.0) - 0.025 * X["vehicle_age"].to_numpy()
+        rng = np.random.default_rng(20260711)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins=64,
+            features={
+                "age": Spline(n_knots=6, penalty="ssp"),
+                "vehicle_age": Spline(n_knots=5, penalty="ssp"),
+            },
+            interactions=[("age", "vehicle_age")],
+        )
+        model.fit(X, y)
+        assert any(
+            isinstance(group_matrix, DiscretizedTensorGroupMatrix)
+            for group_matrix in model._dm.group_matrices
+        )
+        metrics = model.metrics(X, y)
+
+        monkeypatch.setattr(
+            DiscretizedTensorGroupMatrix,
+            "toarray",
+            lambda _self: pytest.fail("metrics inference materialized full tensor rows"),
+        )
+
+        coefficient_se = metrics.coefficient_se
+        edf, edf1 = metrics._influence_edf
+        summary = metrics.summary()
+
+        assert coefficient_se
+        assert np.all(np.isfinite(edf))
+        assert np.all(np.isfinite(edf1))
+        assert summary._coef_rows
+
+        model.result.rank_info = None
+        model._solver_pirls_result().rank_info = None
+        legacy_metrics = ModelMetrics(model, X, y, _mu=model._fit_mu)
+        assert legacy_metrics.coefficient_se
+        assert legacy_metrics.summary()._coef_rows
+
+        from superglm.model import state_ops
+
+        legacy_design, _, _, _, _ = state_ops.fit_active_info(model)
+        covariance, _ = state_ops.coef_covariance(model)
+        assert isinstance(legacy_design, DesignMatrix)
+        assert covariance.shape[0] == legacy_design.shape[1]
+
+    def test_recomputed_influence_edf1_uses_centered_diag_f_squared(self):
+        """Changed-W inference uses 2*diag(F)-diag(F@F) after profiling the intercept."""
+        rng = np.random.default_rng(20260712)
+        x = np.linspace(-2.0, 2.0, 240)
+        X = pd.DataFrame({"x": x})
+        y = rng.poisson(np.exp(0.1 + 0.4 * np.sin(1.5 * x))).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            spline_penalty=2.5,
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+        model.fit(X, y, offset=np.zeros(len(X)))
+
+        changed_offset = np.linspace(-0.9, 0.7, len(X))
+        metrics = model.metrics(X, y, offset=changed_offset)
+        X_active, W, _, inverse_augmented, _ = metrics._active_info
+        X_dense = X_active.toarray() if hasattr(X_active, "toarray") else np.asarray(X_active)
+
+        sum_w = float(np.sum(W))
+        mean_x = (X_dense.T @ W) / sum_w
+        X_centered = X_dense - mean_x
+        data_gram = X_centered.T @ (W[:, None] * X_centered)
+        influence = inverse_augmented[1:, 1:] @ data_gram
+        expected_edf = np.diag(influence)
+        expected_edf1 = 2.0 * expected_edf - np.diag(influence @ influence)
+
+        actual_edf, actual_edf1 = metrics._influence_edf
+
+        np.testing.assert_allclose(actual_edf, expected_edf, rtol=1e-11, atol=1e-12)
+        np.testing.assert_allclose(actual_edf1, expected_edf1, rtol=1e-11, atol=1e-12)
+
+    def test_coef_table_fallback_uses_diag_f_squared(self, monkeypatch):
+        """Standalone coefficient rows use diag(F@F), not row squared norms."""
+        from superglm.inference.coef_tables import build_coef_rows
+        from superglm.stats import wood_pvalue
+
+        x = np.linspace(-3.0, 3.0, 180)
+        X = pd.DataFrame({"x": x})
+        y = 0.3 + np.sin(x) + 0.05 * np.cos(4.0 * x)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            spline_penalty=4.0,
+            features={"x": Spline(n_knots=9, penalty="ssp")},
+        )
+        model.fit(X, y)
+        p = len(model.result.beta)
+        synthetic_rng = np.random.default_rng(411)
+        factor = synthetic_rng.normal(size=(p, p))
+        data_gram = factor.T @ factor + np.eye(p)
+        penalty = np.diag(np.geomspace(0.05, 30.0, p))
+        inverse = np.linalg.inv(data_gram + penalty)
+        X_dense = np.linalg.cholesky(data_gram).T
+        W = np.ones(p)
+        inverse_augmented = np.zeros((p + 1, p + 1))
+        inverse_augmented[0, 0] = 1.0 / p
+        inverse_augmented[1:, 1:] = inverse
+        active_groups = model._groups
+        mean_x = np.mean(X_dense, axis=0)
+        X_centered = X_dense - mean_x
+        centered_data_gram = X_centered.T @ X_centered
+        influence = inverse_augmented[1:, 1:] @ centered_data_gram
+        expected_edf1 = 2.0 * np.diag(influence) - np.diag(influence @ influence)
+        old_edf1 = 2.0 * np.diag(influence) - np.sum(influence * influence, axis=1)
+        assert not np.allclose(expected_edf1, old_edf1, rtol=1e-8, atol=1e-10)
+        grouped_design = DesignMatrix(
+            [DenseGroupMatrix(X_dense)],
+            n=p,
+            p=p,
+        )
+
+        def expose_edf1(_beta, _X, _covariance, edf1, _residual_df):
+            return 0.0, 1.0, float(edf1)
+
+        monkeypatch.setattr(wood_pvalue, "wood_test_smooth", expose_edf1)
+        rows = build_coef_rows(
+            groups=model._groups,
+            specs=model._specs,
+            interaction_specs=model._interaction_specs,
+            result=model.result,
+            X_a=grouped_design,
+            W=W,
+            XtWX_inv=inverse,
+            XtWX_inv_aug=inverse_augmented,
+            active_groups=active_groups,
+            known_scale=model._distribution.scale_known,
+            group_edf_map=None,
+            reml_lambdas=getattr(model, "_reml_lambdas", None),
+            lambda2=model.lambda2,
+            n_obs=p,
+        )
+        spline_row = next(row for row in rows if row.is_spline)
+
+        assert spline_row.ref_df == pytest.approx(float(np.sum(expected_edf1)))
+
+    def test_different_X_without_rank_info_uses_selected_evaluation_groups(self):
+        """Legacy fitted results must not silently pair evaluation W with the fit design."""
+        x_fit = np.linspace(-1.0, 1.0, 60)
+        X_fit = pd.DataFrame({"x": x_fit})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        model.fit(X_fit, 0.5 + 1.7 * x_fit)
+        model.result.rank_info = None
+
+        x_eval = np.linspace(3.0, 7.0, len(X_fit))
+        X_eval = pd.DataFrame({"x": x_eval})
+        metrics = ModelMetrics(model, X_eval, 0.5 + 1.7 * x_eval)
+        X_active, W, inverse, _, _ = metrics._active_info
+        X_dense = X_active.toarray() if hasattr(X_active, "toarray") else np.asarray(X_active)
+        expected = x_eval[:, None]
+
+        np.testing.assert_allclose(X_dense, expected, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            inverse,
+            np.linalg.inv(expected.T @ (W[:, None] * expected)),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_legacy_unpenalized_zero_coefficient_remains_selected(self):
+        """Legacy fits must not confuse a valid zero estimate with deselection."""
+        x = np.linspace(-1.0, 1.0, 100)
+        X = pd.DataFrame({"x": x})
+        y = 2.5 + 0.1 * np.cos(np.pi * x)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        model.fit(X, y)
+        assert model.result.beta[0] == pytest.approx(0.0, abs=1e-14)
+        model.result.rank_info = None
+
+        metrics = ModelMetrics(model, X, y, _mu=model._fit_mu)
+        design, _, _, _, active_groups = metrics._active_info
+
+        assert design.shape[1] == 1
+        assert [group.name for group in active_groups] == ["x"]
+        assert metrics.leverage.sum() > 0.9
+        summary_row = next(row for row in model.summary()._coef_rows if row.name == "x")
+        assert summary_row.se > 0.0
+        assert summary_row.edf > 0.9
+
+    def test_direct_metrics_without_X_uses_retained_fit_frame(self, fitted_poisson):
+        """The documented fit-frame fallback must pass the resolved frame to predict."""
+        model, X, y, w = fitted_poisson
+
+        metrics = ModelMetrics(model, y=y, sample_weight=w)
+
+        assert metrics._X is X
+        np.testing.assert_allclose(metrics._mu, model.predict(X), rtol=0.0, atol=0.0)
+
+    def test_evaluation_aliases_override_fit_time_estimability(self):
+        """Rank loss on evaluation rows must mark individual aliases non-estimable."""
+        rng = np.random.default_rng(20260716)
+        x1 = rng.normal(size=240)
+        x2 = rng.normal(size=240)
+        X_fit = pd.DataFrame({"x1": x1, "x2": x2})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        model.fit(X_fit, 0.5 + 0.8 * x1 - 0.3 * x2)
+
+        X_eval = pd.DataFrame({"x1": x1, "x2": x1})
+        metrics = model.metrics(X_eval, 0.5 + 0.5 * x1)
+        rows = {row.name: row for row in metrics._build_coef_rows()}
+
+        for name in ("x1", "x2"):
+            assert not rows[name].estimable
+            assert np.isnan(rows[name].se)
+        assert metrics.leverage.sum() == pytest.approx(1.0, rel=1e-10, abs=1e-10)
+
+    @pytest.mark.parametrize("alias_scale", [1.0, 1e4, 1e6, 1e8])
+    def test_evaluation_alias_rank_is_stable_across_column_scales(self, alias_scale):
+        """Moment-roundoff near the Gram cutoff must not revive an exact alias."""
+        x = np.linspace(-2.0, 2.0, 120)
+        X_fit = pd.DataFrame({"x1": x, "x2": np.cos(x)})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        model.fit(X_fit, 1.0 + 2.0 * x)
+
+        X_eval = pd.DataFrame({"x1": x, "x2": alias_scale * x})
+        metrics = model.metrics(X_eval, 1.0 + 2.0 * x)
+        rows = {row.name: row for row in metrics._build_coef_rows()}
+
+        for name in ("x1", "x2"):
+            assert not rows[name].estimable
+            assert np.isnan(rows[name].se)
+        assert metrics.leverage.sum() == pytest.approx(1.0, rel=1e-10, abs=1e-10)
+
+    def test_evaluation_missing_category_marks_level_nonestimable(self):
+        """Categorical rows propagate evaluation-rank loss into the estimable flag."""
+        categories = ["A", "B", "C"]
+        fit_levels = np.tile(categories, 60)
+        X_fit = pd.DataFrame({"category": pd.Categorical(fit_levels, categories=categories)})
+        y_fit = np.select(
+            [fit_levels == "B", fit_levels == "C"],
+            [1.5, 2.0],
+            default=0.5,
+        )
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"category": Categorical(base="first")},
+        )
+        model.fit(X_fit, y_fit)
+
+        eval_levels = np.tile(["A", "B"], 60)
+        X_eval = pd.DataFrame({"category": pd.Categorical(eval_levels, categories=categories)})
+        metrics = model.metrics(X_eval, np.where(eval_levels == "B", 1.5, 0.5))
+        row = next(row for row in metrics._build_coef_rows() if row.name == "category[C]")
+
+        assert np.isnan(row.se)
+        assert not row.estimable
+
+    def test_numeric_evaluation_summary_does_not_build_smooth_R_factor(self, monkeypatch):
+        """Parametric summaries must not eagerly pay for a Wood-test factorization."""
+        import superglm.inference.coef_tables as coef_tables
+        import superglm.inference.metrics as metrics_module
+
+        x = np.linspace(-1.0, 1.0, 120)
+        X_fit = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        model.fit(X_fit, 0.5 + 1.2 * x)
+        metrics = model.metrics(pd.DataFrame({"x": x + 2.0}), 0.5 + 1.2 * (x + 2.0))
+
+        def unexpected_factor(_gram):
+            pytest.fail("numeric summary built an unused smooth-test factor")
+
+        monkeypatch.setattr(metrics_module, "factor_from_gram", unexpected_factor)
+        monkeypatch.setattr(coef_tables, "factor_from_gram", unexpected_factor)
+
+        assert metrics._build_coef_rows()
+
+    def test_changed_weight_inference_skips_discarded_augmented_decomposition(self, monkeypatch):
+        """Reweighted inference decomposes only the raw and profiled systems it consumes."""
+        import superglm.inference.covariance as covariance_module
+        import superglm.inference.metrics as metrics_module
+
+        rng = np.random.default_rng(20260718)
+        X = pd.DataFrame({"x": rng.normal(size=180), "z": rng.normal(size=180)})
+        y = 0.4 + 0.7 * X["x"].to_numpy() - 0.2 * X["z"].to_numpy()
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric(), "z": Numeric()},
+        )
+        model.fit(X, y)
+        metrics = model.metrics(X, y, sample_weight=np.linspace(0.7, 1.3, len(X)))
+
+        covariance_calls = 0
+        metrics_calls = 0
+        original = covariance_module.decompose_gram
+
+        def counted_covariance_decomposition(matrix, *args, **kwargs):
+            nonlocal covariance_calls
+            covariance_calls += 1
+            return original(matrix, *args, **kwargs)
+
+        def counted_metrics_decomposition(matrix, *args, **kwargs):
+            nonlocal metrics_calls
+            metrics_calls += 1
+            return original(matrix, *args, **kwargs)
+
+        monkeypatch.setattr(
+            covariance_module,
+            "decompose_gram",
+            counted_covariance_decomposition,
+        )
+        monkeypatch.setattr(
+            covariance_module,
+            "_block_xtwx",
+            lambda *_args, **_kwargs: pytest.fail("rebuilt the grouped raw Gram"),
+        )
+        monkeypatch.setattr(metrics_module, "decompose_gram", counted_metrics_decomposition)
+
+        _ = metrics._active_info
+
+        assert covariance_calls == 0
+        assert metrics_calls == 2  # raw inverse + reusable profiled data rank
+
+    def test_numeric_evaluation_does_not_allocate_full_fitted_penalty(self, monkeypatch):
+        """Evaluation penalty assembly stays in compact active coordinates."""
+        import superglm.reml.penalty_algebra as penalty_algebra
+
+        rng = np.random.default_rng(20260719)
+        X_fit = pd.DataFrame({f"x{i}": rng.normal(size=100) for i in range(12)})
+        features = {name: Numeric() for name in X_fit}
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features=features,
+        )
+        model.fit(X_fit, 0.5 + 0.2 * X_fit["x0"].to_numpy())
+        X_eval = X_fit.copy()
+
+        monkeypatch.setattr(
+            penalty_algebra,
+            "build_penalty_matrix",
+            lambda *_args, **_kwargs: pytest.fail("allocated a full fitted-width penalty"),
+        )
+
+        metrics = model.metrics(X_eval, 0.5 + 0.2 * X_eval["x0"].to_numpy())
+        assert metrics.coefficient_se
+
+    def test_evaluation_skips_transforms_for_unselected_terms(self, monkeypatch):
+        """Sparse evaluation should transform only terms represented in active coordinates."""
+        rng = np.random.default_rng(20260717)
+        X_fit = pd.DataFrame({"x1": rng.normal(size=180), "x2": rng.normal(size=180)})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=100.0,
+            penalty_features=["x2"],
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        model.fit(X_fit, 1.0 + 0.7 * X_fit["x1"].to_numpy())
+        assert model.result.rank_info.selected_group_names == ("x1",)
+        monkeypatch.setattr(
+            model._specs["x2"],
+            "transform",
+            lambda _values: pytest.fail("unselected x2 transform was evaluated"),
+        )
+
+        X_eval = X_fit.copy()
+        metrics = model.metrics(X_eval, 1.0 + 0.7 * X_eval["x1"].to_numpy())
+
+        assert metrics.coefficient_se
+
+    def test_dense_weighted_moments_are_stable_under_large_translation(self):
+        """Legacy dense designs use anchor-centered accumulation before profiling."""
+        from superglm.inference._metrics_design import weighted_moments
+
+        x = 1e12 + np.linspace(-1.0, 1.0, 80)
+        weights = np.linspace(0.5, 1.5, len(x))
+        _, _, centered = weighted_moments(x[:, None], weights)
+        shifted = x - x[0]
+        expected = np.dot(weights, (shifted - np.average(shifted, weights=weights)) ** 2)
+
+        assert centered[0, 0] == pytest.approx(expected, rel=1e-12)
+
+    def test_evaluation_chunk_budget_accounts_for_live_row_buffers(self):
+        """Advertised row-buffer budget covers transform, projection, and algebra temporaries."""
+        from superglm.inference._metrics_design import (
+            _MAX_DESIGN_CHUNK_BYTES,
+            EvaluationDesign,
+        )
+
+        width = 4096
+        fake_model = SimpleNamespace(result=SimpleNamespace(beta=np.zeros(width)))
+        design = EvaluationDesign(fake_model, pd.DataFrame({"x": [0.0]}), np.arange(width))
+        one_buffer_bytes = design.chunk_rows * width * np.dtype(np.float64).itemsize
+
+        assert 5 * one_buffer_bytes <= _MAX_DESIGN_CHUNK_BYTES
+
+    def test_sparse_evaluation_chunk_size_uses_selected_term_width(self):
+        """A wide inactive model must not force tiny batches for one selected term."""
+        from superglm.inference._metrics_design import EvaluationDesign
+
+        width = 4096
+        prediction_plan = {
+            "features": [
+                {"beta_idx": np.array([0])},
+                {"beta_idx": np.arange(1, width)},
+            ],
+            "interactions": [],
+        }
+        fake_model = SimpleNamespace(
+            result=SimpleNamespace(beta=np.zeros(width)),
+            _prediction_plan=prediction_plan,
+        )
+
+        design = EvaluationDesign(fake_model, pd.DataFrame({"x": [0.0]}), np.array([0]))
+
+        assert design.chunk_rows == 8192
+
+    def test_evaluation_summary_omits_fit_only_categorical_level_counts(self):
+        """Evaluation summaries must not label training category counts as evaluation counts."""
+        category_fit = np.array(["A"] * 40 + ["B"] * 40)
+        X_fit = pd.DataFrame({"category": category_fit})
+        y_fit = np.where(category_fit == "B", 2.0, 0.5)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"category": Categorical(base="first")},
+        )
+        model.fit(X_fit, y_fit)
+
+        category_eval = np.array(["A"] * 10 + ["B"] * 70)
+        X_eval = pd.DataFrame({"category": category_eval})
+        metrics = model.metrics(X_eval, np.where(category_eval == "B", 2.0, 0.5))
+        category_row = next(row for row in metrics._build_coef_rows() if "category[" in row.name)
+
+        assert category_row.level_n_obs is None
+        assert category_row.level_exposure_share is None
+
+    def test_evaluation_summary_reuses_one_bounded_design_moment_pass(self, monkeypatch):
+        """Inverse, R, and EDF construction share one evaluation-design traversal."""
+        x_fit = np.linspace(-1.0, 1.0, 120)
+        X_fit = pd.DataFrame({"x": x_fit})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        model.fit(X_fit, 0.25 + 0.6 * x_fit)
+
+        x_eval = np.linspace(2.0, 4.0, len(X_fit))
+        X_eval = pd.DataFrame({"x": x_eval})
+        metrics = model.metrics(X_eval, 0.25 + 0.6 * x_eval)
+        spec = model._specs["x"]
+        original_transform = spec.transform
+        transformed_rows: list[int] = []
+
+        def counted_transform(values):
+            transformed_rows.append(len(values))
+            return original_transform(values)
+
+        monkeypatch.setattr(spec, "transform", counted_transform)
+
+        metrics.summary()
+
+        assert transformed_rows == [len(X_eval)]
+
+    def test_direct_metrics_without_X_uses_fitted_design(self, fitted_poisson):
+        """Simulation diagnostics may supply fitted means without repeating fit X."""
+        model, _, y, weights = fitted_poisson
+        metrics = ModelMetrics(model, y=y, sample_weight=weights, _mu=model._fit_mu)
+
+        X_active, _, _, _, _ = metrics._active_info
+
+        assert X_active.shape[0] == len(y)
 
 
 # ── Information criteria ──────────────────────────────────────────

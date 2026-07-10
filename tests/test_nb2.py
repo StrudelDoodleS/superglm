@@ -72,8 +72,9 @@ class TestNB2DevianceUnit:
         y = np.array([0.0, 0.0])
         mu = np.array([2.0, 5.0])
         d = nb.deviance_unit(y, mu)
-        expected = 2 * 5.0 * np.log(5.0 / (mu + 5.0))
+        expected = 2 * 5.0 * np.log((mu + 5.0) / 5.0)
         np.testing.assert_allclose(d, expected)
+        assert np.all(d >= 0.0)
 
     def test_total_deviance_positive(self):
         nb = NegativeBinomial(theta=3.0)

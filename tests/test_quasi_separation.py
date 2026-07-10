@@ -1,5 +1,7 @@
 """Tests for quasi-separation detection and numerical stability."""
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,6 +9,7 @@ import pytest
 from superglm import SuperGLM
 from superglm.distributions import Tweedie
 from superglm.features.categorical import Categorical
+from superglm.features.numeric import Numeric
 
 
 def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42):
@@ -58,6 +61,186 @@ class TestSEFiniteForRareLevel:
         assert np.isfinite(rare_row.z), "z-score should be finite"
         # SE should be large (indicating undetermined)
         assert rare_row.se > 1.0, "SE should be large for near-separated level"
+
+
+class TestSeparatedTailDiagnostics:
+    """Diagnostics should expose, not hide, separated-tail IRLS geometry."""
+
+    def test_first_direct_diagnostic_separates_working_and_updated_state(self):
+        rng = np.random.default_rng(321)
+        n = 200
+        x = rng.normal(size=n)
+        y = rng.gamma(shape=2.0, scale=np.exp(0.4 * x), size=n)
+        df = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        model.fit(df, y, max_iter=1, record_diagnostics=True)
+
+        first = model.iteration_diagnostics().iloc[0]
+        updated_eta = model._dm.matvec(model.result.beta) + model.result.intercept
+        assert first["working_eta_min_unclipped"] == pytest.approx(
+            first["working_eta_max_unclipped"]
+        )
+        assert not bool(first["working_eta_clipped"])
+        assert first["eta_min_unclipped"] == pytest.approx(float(updated_eta.min()))
+        assert first["eta_max_unclipped"] == pytest.approx(float(updated_eta.max()))
+        assert first["intercept"] == pytest.approx(model.result.intercept)
+        assert first["eta_min_unclipped"] != pytest.approx(first["working_eta_min_unclipped"])
+
+    def test_first_pirls_diagnostic_separates_working_and_updated_state(self):
+        rng = np.random.default_rng(654)
+        x = rng.normal(size=200)
+        y = rng.gamma(shape=2.0, scale=np.exp(0.3 * x), size=200)
+        df = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.01,
+            features={"x": Numeric()},
+        )
+
+        model.fit(df, y, max_iter=1, record_diagnostics=True)
+
+        first = model.iteration_diagnostics().iloc[0]
+        updated_eta = model._dm.matvec(model.result.beta) + model.result.intercept
+        assert first["working_eta_min_unclipped"] == pytest.approx(
+            first["working_eta_max_unclipped"]
+        )
+        assert first["eta_min_unclipped"] == pytest.approx(float(updated_eta.min()))
+        assert first["eta_max_unclipped"] == pytest.approx(float(updated_eta.max()))
+        assert first["intercept"] == pytest.approx(model.result.intercept)
+
+    def test_working_weight_ratio_is_not_artificially_capped(self):
+        rng = np.random.default_rng(123)
+        n = 1_000
+        n_rare = 5
+        cat = np.array(["base"] * (n - n_rare) + ["rare"] * n_rare)
+        y = rng.gamma(shape=2.0, scale=3.0, size=n)
+        y[cat == "rare"] = 0.0
+
+        idx = rng.permutation(n)
+        df = pd.DataFrame({"cat": cat[idx]})
+        y = y[idx]
+
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="first")},
+        )
+        with pytest.warns(UserWarning, match="coefficient-based convergence"):
+            model.fit(
+                df,
+                y,
+                convergence="coefficients",
+                max_iter=100,
+                tol=0.0,
+                record_diagnostics=True,
+            )
+
+        diagnostics = model.iteration_diagnostics()
+        assert diagnostics["W_ratio"].max() > 1e12
+        assert diagnostics["raw_W_ratio"].max() == pytest.approx(diagnostics["W_ratio"].max())
+        assert diagnostics["eta_min"].min() == pytest.approx(-80.0)
+        assert diagnostics["eta_min_unclipped"].min() < -80.0
+        assert diagnostics["eta_clipped"].any()
+
+    def test_direct_path_keeps_extreme_working_weight_ratio_out_of_warning_log(self, caplog):
+        rng = np.random.default_rng(123)
+        n = 1_000
+        n_rare = 5
+        cat = np.array(["base"] * (n - n_rare) + ["rare"] * n_rare)
+        y = rng.gamma(shape=2.0, scale=3.0, size=n)
+        y[cat == "rare"] = 0.0
+
+        idx = rng.permutation(n)
+        df = pd.DataFrame({"cat": cat[idx]})
+        y = y[idx]
+
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="first")},
+        )
+        with caplog.at_level(logging.DEBUG, logger="superglm.solvers.irls_direct"):
+            with pytest.warns(UserWarning, match="coefficient-based convergence"):
+                model.fit(
+                    df,
+                    y,
+                    convergence="coefficients",
+                    max_iter=100,
+                    tol=0.0,
+                )
+
+        ratio_records = [record for record in caplog.records if "extreme W ratio" in record.message]
+        assert ratio_records
+        assert all(record.levelno == logging.DEBUG for record in ratio_records)
+
+    def test_pirls_keeps_extreme_working_weight_ratio_out_of_warning_log(self, monkeypatch, caplog):
+        import superglm.solvers.pirls as pirls
+
+        monkeypatch.setattr(
+            pirls,
+            "_positive_working_weight_stats",
+            lambda _weights: (1e-20, 1.0, 1e20),
+        )
+        frame = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 40)})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.01,
+            features={"x": Numeric()},
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="superglm.solvers.pirls"):
+            model.fit(frame, np.linspace(0.0, 1.0, len(frame)), max_iter=1)
+
+        ratio_records = [record for record in caplog.records if "extreme W ratio" in record.message]
+        assert ratio_records
+        assert all(record.levelno == logging.DEBUG for record in ratio_records)
+
+
+class TestZeroWeightDiagnostics:
+    """Zero-frequency rows stay visible without creating false W-ratio alerts."""
+
+    @staticmethod
+    def _data():
+        x = np.linspace(-1.0, 1.0, 50)
+        y = 1.0 + 2.0 * x
+        weights = np.ones_like(x)
+        weights[0] = 0.0
+        return pd.DataFrame({"x": x}), y, weights
+
+    @pytest.mark.parametrize(
+        ("selection_penalty", "logger_name"),
+        [
+            (0.0, "superglm.solvers.irls_direct"),
+            (0.01, "superglm.solvers.pirls"),
+        ],
+    )
+    def test_zero_weight_row_does_not_inflate_ratio(self, selection_penalty, logger_name, caplog):
+        df, y, weights = self._data()
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=selection_penalty,
+            features={"x": Numeric()},
+        )
+
+        with caplog.at_level(logging.WARNING, logger=logger_name):
+            model.fit(
+                df,
+                y,
+                sample_weight=weights,
+                max_iter=1,
+                record_diagnostics=True,
+            )
+
+        first = model.iteration_diagnostics().iloc[0]
+        assert first["raw_W_min"] == 0.0
+        assert first["W_ratio"] == pytest.approx(1.0)
+        assert first["raw_W_ratio"] == pytest.approx(1.0)
+        assert not any("extreme W ratio" in record.message for record in caplog.records)
 
 
 class TestQuasiSeparatedMarker:
