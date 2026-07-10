@@ -72,8 +72,9 @@ class OrderedCategorical:
     kind : str or None
         Deprecated spline shortcut. Configure ``kind`` on ``basis=Spline(...)``.
     base : str
-        Reference level for step mode.  ``"most_exposed"`` (default),
-        ``"first"``, or a specific level name.  Ignored in spline mode.
+        Reporting reference level. ``"most_exposed"`` (default), ``"first"``,
+        or a specific level name. In spline mode this changes only the reported
+        relativities and reference-adjusted intercept, not the fitted smooth.
     n_knots : int or None
         Deprecated spline shortcut. Auto-clamped to ``n_levels - 1``.
     degree : int or None
@@ -463,6 +464,13 @@ class OrderedCategorical:
 
     # ── Reconstruct ────────────────────────────────────────────────
 
+    def _base_log_effect(self, beta: NDArray[np.floating]) -> float:
+        """Return the fitted term effect at the reporting reference level."""
+        if self.basis != "spline":
+            return 0.0
+        base_value = np.array([self._level_to_value[self._base_level]], dtype=np.float64)
+        return float(self._spline.score(base_value, beta)[0])
+
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
         """Convert fitted coefficients to interpretable output."""
         if self.basis == "spline":
@@ -483,7 +491,7 @@ class OrderedCategorical:
         level_log_rels = np.asarray(self._spline.score(level_values, beta), dtype=np.float64)
 
         # Shift so base level = 0 (relativity = 1)
-        base_shift = float(level_log_rels[self._ordered_levels.index(self._base_level)])
+        base_shift = self._base_log_effect(beta)
         level_log_rels = level_log_rels - base_shift
         raw["log_relativity"] = raw["log_relativity"] - base_shift
         raw["relativity"] = np.exp(raw["log_relativity"])
