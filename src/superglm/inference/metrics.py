@@ -227,6 +227,7 @@ def _coefficient_estimability(
 def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
     """Whether active summary rows contain a smooth term requiring Wood's test."""
     from superglm.features.interaction import SplineCategorical, TensorInteraction
+    from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.spline import _SplineBase
 
     active_names = {group.name for group in active_groups}
@@ -237,6 +238,8 @@ def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
             group.feature_name
         )
         if isinstance(spec, _SplineBase) and group.subgroup_type != "linear":
+            return True
+        if isinstance(spec, OrderedCategorical) and spec.basis == "spline":
             return True
         if isinstance(spec, SplineCategorical | TensorInteraction):
             return True

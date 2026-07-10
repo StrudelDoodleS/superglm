@@ -296,8 +296,16 @@ def feature_groups(model, name: str) -> list[GroupSlice]:
 def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
     from superglm.features.interaction import PolynomialCategorical, SplineCategorical
     from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.inference._ordered_reference import ordered_reference_intercept
 
-    rows = [_CoefRow(name="Intercept", coef=float(model.result.intercept))]
+    intercept = ordered_reference_intercept(
+        model.result.intercept,
+        model.result.beta,
+        model._feature_order,
+        model._specs,
+        model._groups,
+    )
+    rows = [_CoefRow(name="Intercept", coef=intercept)]
     group_edf = getattr(model, "_group_edf", None)
     reml_lambdas = getattr(model, "_reml_lambdas", None)
     selected_names = selected_group_name_set(
@@ -326,13 +334,32 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
             )
             raw = spec.reconstruct(beta_combined)
             if spec.basis == "spline":
-                for i, level in enumerate(raw["levels"]):
+                metadata = spline_group_enrichment(
+                    feature_groups[0].name,
+                    spec._spline,
+                    group_edf,
+                    reml_lambdas,
+                    model.lambda2,
+                )
+                metadata["edf"] = feature_edf
+                rows.append(
+                    _CoefRow(
+                        name=g.feature_name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=len(beta_combined),
+                        active=any(fg.name in selected_names for fg in feature_groups),
+                        group_norm=float(np.linalg.norm(beta_combined)),
+                        subgroup_type="ordered_spline",
+                        **metadata,
+                    )
+                )
+                for level in raw["levels"]:
                     rows.append(
                         _CoefRow(
                             name=f"{g.feature_name}[{level}]",
                             group=g.feature_name,
                             coef=float(raw["level_log_relativities"][level]),
-                            edf=feature_edf if i == 0 else None,
                         )
                     )
             else:

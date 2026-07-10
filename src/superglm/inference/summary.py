@@ -345,8 +345,19 @@ class ModelSummary:
             prev_group = row.group
 
             if row.is_spline:
-                has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
-                kind = "linear" if row.subgroup_type == "linear" else "spline"
+                has_test = (
+                    row.active
+                    and row.wald_chi2 is not None
+                    and np.isfinite(row.wald_chi2)
+                    and row.wald_p is not None
+                    and np.isfinite(row.wald_p)
+                )
+                if row.subgroup_type == "linear":
+                    kind = "linear"
+                elif row.subgroup_type == "ordered_spline":
+                    kind = "ordered spline"
+                else:
+                    kind = "spline"
                 param_label = f"{row.n_params} params"
                 # Build detail line: edf, lambda, curve SE, monotone
                 detail_parts = []
@@ -367,6 +378,7 @@ class ModelSummary:
                 detail_str = ", ".join(detail_parts)
 
                 if has_test:
+                    assert row.wald_p is not None
                     p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "<0.001"
                     stars = _sig_stars(row.wald_p)
                     if row.ref_df is not None:
@@ -413,22 +425,44 @@ class ModelSummary:
                             )
                         )
 
-            elif row.coef is not None and row.se is not None and row.se > 0:
+            elif (
+                row.coef is not None
+                and row.se is not None
+                and (
+                    row.se > 0
+                    or (row.p is None and row.ci_low is not None and row.ci_high is not None)
+                )
+            ):
                 stars = _sig_stars(row.p)
                 qs = "?" if row.quasi_separated else " "
-                if abs(row.z) >= 100:
+                if row.z is None or not np.isfinite(row.z):
+                    z_str = f"{'---':>8s}"
+                elif abs(row.z) >= 100:
                     z_str = f"{row.z:>8.1f}"
                 else:
                     z_str = f"{row.z:>8.3f}"
+                p_str = (
+                    f"{row.p:>8.3f}" if row.p is not None and np.isfinite(row.p) else f"{'---':>8s}"
+                )
+                ci_low_str = (
+                    f"{row.ci_low:>9.3f}"
+                    if row.ci_low is not None and np.isfinite(row.ci_low)
+                    else f"{'---':>9s}"
+                )
+                ci_high_str = (
+                    f"{row.ci_high:>9.3f}"
+                    if row.ci_high is not None and np.isfinite(row.ci_high)
+                    else f"{'---':>9s}"
+                )
                 lines.append(
                     _row(
                         f"{row.name:<{name_w}s}"
                         f"{row.coef:>10.4f}"
                         f"{row.se:>10.4f}"
                         f"{z_str}"
-                        f"{row.p:>8.3f}"
-                        f"{row.ci_low:>9.3f}"
-                        f"{row.ci_high:>9.3f}"
+                        f"{p_str}"
+                        f"{ci_low_str}"
+                        f"{ci_high_str}"
                         f" {stars:<3s}"
                         f" {qs}"
                     )
@@ -596,8 +630,19 @@ class ModelSummary:
             prev_group = row.group
 
             if row.is_spline:
-                has_test = row.active and row.wald_chi2 is not None and not np.isnan(row.wald_chi2)
-                kind = "linear" if row.subgroup_type == "linear" else "spline"
+                has_test = (
+                    row.active
+                    and row.wald_chi2 is not None
+                    and np.isfinite(row.wald_chi2)
+                    and row.wald_p is not None
+                    and np.isfinite(row.wald_p)
+                )
+                if row.subgroup_type == "linear":
+                    kind = "linear"
+                elif row.subgroup_type == "ordered_spline":
+                    kind = "ordered spline"
+                else:
+                    kind = "spline"
                 param_label = f"{row.n_params} params"
                 # Build detail suffix: edf, lambda, curve SE, monotone
                 detail_parts = []
@@ -623,6 +668,7 @@ class ModelSummary:
                 )
 
                 if has_test:
+                    assert row.wald_p is not None
                     p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "&lt;0.001"
                     stars = _sig_stars(row.wald_p)
                     if row.ref_df is not None:
@@ -704,18 +750,37 @@ class ModelSummary:
                         f"</details></td></tr>"
                     )
 
-            elif row.coef is not None and row.se is not None and row.se > 0:
+            elif (
+                row.coef is not None
+                and row.se is not None
+                and (
+                    row.se > 0
+                    or (row.p is None and row.ci_low is not None and row.ci_high is not None)
+                )
+            ):
                 stars = _sig_stars(row.p)
                 qs = "?" if row.quasi_separated else ""
+                z_text = f"{row.z:.3f}" if row.z is not None and np.isfinite(row.z) else "---"
+                p_text = f"{row.p:.3f}" if row.p is not None and np.isfinite(row.p) else "---"
+                ci_low_text = (
+                    f"{row.ci_low:.3f}"
+                    if row.ci_low is not None and np.isfinite(row.ci_low)
+                    else "---"
+                )
+                ci_high_text = (
+                    f"{row.ci_high:.3f}"
+                    if row.ci_high is not None and np.isfinite(row.ci_high)
+                    else "---"
+                )
                 parts.append(
                     f"<tr>"
                     f'<td style="{cell_l}">{row.name}</td>'
                     f'<td style="{cell}">{row.coef:.4f}</td>'
                     f'<td style="{cell}">{row.se:.4f}</td>'
-                    f'<td style="{cell}">{row.z:.3f}</td>'
-                    f'<td style="{cell}">{row.p:.3f}</td>'
-                    f'<td style="{cell}">{row.ci_low:.3f}</td>'
-                    f'<td style="{cell}">{row.ci_high:.3f}</td>'
+                    f'<td style="{cell}">{z_text}</td>'
+                    f'<td style="{cell}">{p_text}</td>'
+                    f'<td style="{cell}">{ci_low_text}</td>'
+                    f'<td style="{cell}">{ci_high_text}</td>'
                     f'<td style="{sig_cell}">{stars}</td>'
                     f'<td style="{sig_cell}">{qs}</td>'
                     f"</tr>"

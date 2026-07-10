@@ -241,6 +241,7 @@ def _compact_summary_row(row) -> dict[str, Any]:
     # Spline rows are group-level Wald tests, not coefficient rows. They get a
     # p-value/significance class but no coefficient SE cell.
     p_value = _finite_float(row.wald_p if row.is_spline else row.p)
+    stat = _finite_float(row.wald_chi2 if row.is_spline else row.z)
     return {
         "name": str(row.name),
         "group": str(row.group or ""),
@@ -248,8 +249,8 @@ def _compact_summary_row(row) -> dict[str, Any]:
         "coef": _finite_float(row.coef),
         "se": None if row.is_spline else _finite_float(row.se),
         "se_label": "curve" if row.is_spline else "",
-        "stat": _finite_float(row.wald_chi2 if row.is_spline else row.z),
-        "stat_label": "chi2" if row.is_spline else "z",
+        "stat": stat,
+        "stat_label": "chi2" if row.is_spline else ("z" if stat is not None else ""),
         "p_value": p_value,
         "sig_code": _summary_sig_code(p_value, bool(row.quasi_separated)),
         "sig_class": _summary_sig_class(p_value, bool(row.quasi_separated)),

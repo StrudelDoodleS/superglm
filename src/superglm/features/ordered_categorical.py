@@ -1,4 +1,4 @@
-"""OrderedCategorical feature: ordered categories with spline or step basis.
+"""OrderedCategorical feature: ordered categories with a spline basis.
 
 Actuarial pricing data frequently contains continuous variables that have been
 pre-binned into ordered categories (e.g. age bands "18-25", "26-35", ...).
@@ -6,7 +6,7 @@ This feature type respects the ordering with two modes:
 
 - **spline**: map categories to numeric values, build a spline on those values
 - **step**: one-hot encode with a first-difference penalty (D1'D1) so adjacent
-  categories are soft-fused
+  categories are soft-fused (deprecated)
 """
 
 from __future__ import annotations
@@ -23,6 +23,29 @@ from superglm.features.categorical import _grouping_labels, _validate_categorica
 from superglm.types import GroupInfo
 
 
+def _spline_kind_name(spline: Any) -> str:
+    """Return the public factory kind for a spline specification."""
+    from superglm.features.spline import (
+        BSplineSmooth,
+        CardinalCRSpline,
+        CubicRegressionSpline,
+        NaturalSpline,
+        PSpline,
+    )
+
+    kind_by_type = (
+        (PSpline, "ps"),
+        (BSplineSmooth, "bs"),
+        (NaturalSpline, "ns"),
+        (CubicRegressionSpline, "cr"),
+        (CardinalCRSpline, "cr_cardinal"),
+    )
+    for spline_type, kind in kind_by_type:
+        if isinstance(spline, spline_type):
+            return kind
+    return type(spline).__name__
+
+
 class OrderedCategorical:
     """Ordered categorical feature with spline or step basis.
 
@@ -31,7 +54,14 @@ class OrderedCategorical:
     numeric values and fits a smooth function through them, borrowing
     strength between adjacent levels.
 
-    Two modes:
+    The canonical API passes a :func:`Spline` specification as ``basis``::
+
+        OrderedCategorical(
+            order=["low", "medium", "high"],
+            basis=Spline(kind="ps", k=6),
+        )
+
+    Two modes are currently available:
 
     - **spline** (default): maps levels to numeric values (midpoints or
       linspace), builds a B-spline through them.  The spline smooths across
@@ -40,12 +70,9 @@ class OrderedCategorical:
       degrees of freedom will typically be much less than the number of
       levels.
 
-    - **step**: one-hot encodes with a first-difference penalty (D1'D1)
-      so adjacent categories are soft-fused.  Each level gets its own
-      coefficient, penalized toward its neighbours.
-
-    Monotone constraints are not yet supported directly; pass a
-    ``Spline(monotone=...)`` object as ``basis`` in a future release.
+    - **step** (deprecated): one-hot encodes with a first-difference penalty
+      (D1'D1) so adjacent categories are soft-fused. Use ``Spline(...)`` for
+      smoothing or :class:`Categorical` for independent level effects.
 
     Parameters
     ----------
@@ -56,60 +83,62 @@ class OrderedCategorical:
     order : list[str] or None
         Ordered list of category labels.  Numeric values are generated as
         ``linspace(0, 1, len(order))``.  Mutually exclusive with ``values``.
-    basis : {"spline", "step"} or Spline object
-        ``"spline"`` (default) maps categories to numeric values and
-        builds a default B-spline.  ``"step"`` one-hot encodes with a
-        first-difference penalty.  A ``Spline(...)`` object can be passed
-        directly for full control over kind, monotone constraints,
-        select, penalty, etc.::
+    basis : Spline object, {"spline", "step"}, or None
+        Pass a ``Spline(...)`` object for full control over kind, basis size,
+        constraints, selection, and penalty::
 
-            OrderedCategorical(order=[...], basis=Spline(monotone="increasing"))
+            OrderedCategorical(order=[...], basis=Spline(kind="cr", k=6))
 
-        When a Spline object is passed, the ``kind``, ``n_knots``,
-        ``degree``, ``select``, and ``penalty`` parameters are ignored.
-    kind : str
-        Spline type (ignored if ``basis`` is a Spline object).
-        ``"bs"`` (default), ``"cr"``, ``"ns"``, etc.
+        Omitting ``basis`` retains the historical default P-spline. The
+        string values ``"spline"`` and ``"step"`` are deprecated; step
+        smoothing will be removed in a future release.
+    kind : str or None
+        Deprecated spline shortcut. Configure ``kind`` on ``basis=Spline(...)``.
     base : str
-        Reference level for step mode.  ``"most_exposed"`` (default),
-        ``"first"``, or a specific level name.  Ignored in spline mode.
-    n_knots : int
-        Number of interior knots (ignored if ``basis`` is a Spline object).
-        Auto-clamped to ``n_levels - 1`` if too large.
-    degree : int
-        B-spline degree (ignored if ``basis`` is a Spline object).
-    select : bool
-        Enable double-penalty shrinkage (ignored if ``basis`` is a
-        Spline object).
-    penalty : str
-        Penalty type (ignored if ``basis`` is a Spline object).
+        Reporting reference level. ``"most_exposed"`` (default), ``"first"``,
+        or a specific level name. In spline mode this changes only the reported
+        relativities and reference-adjusted intercept, not the fitted smooth.
+    n_knots : int or None
+        Deprecated spline shortcut. Auto-clamped to ``n_levels - 1``.
+    degree : int or None
+        Deprecated spline shortcut for B-spline degree.
+    select : bool or None
+        Deprecated spline shortcut for double-penalty shrinkage.
+    penalty : str or None
+        Deprecated spline shortcut for penalty type.
 
     Examples
     --------
-    Using ordered level names (auto-spaced 0 to 1)::
+    Using ordered level names (auto-spaced 0 to 1) with an explicit smooth::
 
-        OrderedCategorical(order=["18-25", "26-35", "36-45", "46-55", "56+"])
+        OrderedCategorical(
+            order=["18-25", "26-35", "36-45", "46-55", "56+"],
+            basis=Spline(kind="ps", k=6),
+        )
 
     Using explicit midpoints::
 
-        OrderedCategorical(values={"18-25": 21.5, "26-35": 30.5, "36-45": 40.5})
+        OrderedCategorical(
+            values={"18-25": 21.5, "26-35": 30.5, "36-45": 40.5},
+            basis=Spline(kind="cr", k=4),
+        )
 
-    Step basis (one coefficient per level, soft-fused)::
+    Independent, unsmoothed level effects should use ``Categorical``::
 
-        OrderedCategorical(order=[...], basis="step")
+        Categorical(base="most_exposed")
     """
 
     def __init__(
         self,
         values: dict[str, float] | None = None,
         order: list[str] | None = None,
-        basis: str | Any = "spline",
-        kind: str = "ps",
+        basis: Any | None = None,
+        kind: str | None = None,
         base: str = "most_exposed",
-        n_knots: int = 5,
-        degree: int = 3,
-        select: bool = False,
-        penalty: str = "ssp",
+        n_knots: int | None = None,
+        degree: int | None = None,
+        select: bool | None = None,
+        penalty: str | None = None,
         grouping: Any = None,
     ):
         from superglm.features.spline import _SplineBase
@@ -119,25 +148,87 @@ class OrderedCategorical:
         if values is None and order is None:
             raise ValueError("Must specify either 'values' or 'order'.")
 
-        # Accept a Spline object as basis
-        if isinstance(basis, _SplineBase):
-            self._spline_obj = basis
-            self.basis = "spline"
-        elif basis in ("spline", "step"):
-            self._spline_obj = None
-            self.basis = basis
-        else:
-            raise ValueError(f"basis must be 'spline', 'step', or a Spline object, got {basis!r}")
+        basis_was_explicit = basis is not None
+        shortcut_values = {
+            "kind": kind,
+            "n_knots": n_knots,
+            "degree": degree,
+            "select": select,
+            "penalty": penalty,
+        }
+        used_shortcuts = [name for name, value in shortcut_values.items() if value is not None]
 
-        if self.basis == "step" and select:
+        resolved_basis = "spline" if basis is None else basis
+        resolved_kind = "ps" if kind is None else kind
+        resolved_n_knots = 5 if n_knots is None else n_knots
+        resolved_degree = 3 if degree is None else degree
+        resolved_select = False if select is None else select
+        resolved_penalty = "ssp" if penalty is None else penalty
+
+        # Accept a Spline object as basis.
+        if isinstance(resolved_basis, _SplineBase):
+            self._spline_obj = resolved_basis
+            self.basis = "spline"
+        elif resolved_basis in ("spline", "step"):
+            self._spline_obj = None
+            self.basis = resolved_basis
+        else:
+            raise ValueError(
+                f"basis must be 'spline', 'step', or a Spline object, got {resolved_basis!r}"
+            )
+
+        shortcut_list = ", ".join(f"`{name}`" for name in used_shortcuts)
+        shortcut_noun = "shortcut" if len(used_shortcuts) == 1 else "shortcuts"
+        shortcut_verb = "is" if len(used_shortcuts) == 1 else "are"
+        if self.basis == "step":
+            warnings.warn(
+                "OrderedCategorical step smoothing (`basis='step'`) is deprecated and "
+                "will be removed in a future release. Use `basis=Spline(...)` for "
+                "smoothing or `Categorical(...)` for independent level effects.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        elif self._spline_obj is not None and used_shortcuts:
+            warnings.warn(
+                f"OrderedCategorical spline {shortcut_noun} ({shortcut_list}) "
+                f"{shortcut_verb} ignored "
+                "because basis is a Spline object; configure the Spline object directly.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        legacy_spline_string = basis_was_explicit and resolved_basis == "spline"
+        if (
+            self.basis == "spline"
+            and self._spline_obj is None
+            and (legacy_spline_string or used_shortcuts)
+        ):
+            if legacy_spline_string and used_shortcuts:
+                deprecated_api = (
+                    f"`basis='spline'` and OrderedCategorical spline {shortcut_noun} "
+                    f"({shortcut_list}) are"
+                )
+            elif legacy_spline_string:
+                deprecated_api = "`basis='spline'` is"
+            else:
+                deprecated_api = (
+                    f"OrderedCategorical spline {shortcut_noun} ({shortcut_list}) {shortcut_verb}"
+                )
+            warnings.warn(
+                f"{deprecated_api} deprecated; configure the smooth with "
+                "`basis=Spline(...)` instead.",
+                FutureWarning,
+                stacklevel=2,
+            )
+
+        if self.basis == "step" and resolved_select:
             raise ValueError("select=True is not supported with basis='step'.")
 
-        self.kind = kind
+        self.kind = resolved_kind
         self.base = base
-        self.select = select
-        self.penalty = penalty
-        self.degree = degree
-        self.n_knots = n_knots
+        self.select = resolved_select
+        self.penalty = resolved_penalty
+        self.degree = resolved_degree
+        self.n_knots = resolved_n_knots
         self._ordered_levels: list[str] = []
 
         # Derive ordered levels and numeric values
@@ -189,6 +280,14 @@ class OrderedCategorical:
         self._spline = None
         if self.basis == "spline":
             self._init_spline()
+            if self._spline_obj is not None:
+                # The object API is authoritative; ignored legacy shortcuts must
+                # not leak contradictory metadata into summaries or editor clones.
+                self.kind = _spline_kind_name(self._spline)
+                self.select = self._spline.select
+                self.penalty = self._spline.penalty
+                self.degree = self._spline.degree
+                self.n_knots = self._spline.n_knots
 
     def __repr__(self) -> str:
         n = self._n_levels
@@ -396,6 +495,13 @@ class OrderedCategorical:
 
     # ── Reconstruct ────────────────────────────────────────────────
 
+    def _base_log_effect(self, beta: NDArray[np.floating]) -> float:
+        """Return the fitted term effect at the reporting reference level."""
+        if self.basis != "spline":
+            return 0.0
+        base_value = np.array([self._level_to_value[self._base_level]], dtype=np.float64)
+        return float(self._spline.score(base_value, beta)[0])
+
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
         """Convert fitted coefficients to interpretable output."""
         if self.basis == "spline":
@@ -416,7 +522,7 @@ class OrderedCategorical:
         level_log_rels = np.asarray(self._spline.score(level_values, beta), dtype=np.float64)
 
         # Shift so base level = 0 (relativity = 1)
-        base_shift = float(level_log_rels[self._ordered_levels.index(self._base_level)])
+        base_shift = self._base_log_effect(beta)
         level_log_rels = level_log_rels - base_shift
         raw["log_relativity"] = raw["log_relativity"] - base_shift
         raw["relativity"] = np.exp(raw["log_relativity"])
