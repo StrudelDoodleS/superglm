@@ -367,7 +367,13 @@ class _SplineBase:
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
         return _spline_runtime.reconstruct(self, beta, n_points=n_points)
 
-    def tensor_marginal_ingredients(self, x: NDArray) -> TensorMarginalInfo:
+    def tensor_marginal_ingredients(
+        self,
+        x: NDArray,
+        *,
+        support: NDArray | None = None,
+        counts: NDArray | None = None,
+    ) -> TensorMarginalInfo:
         """Compute marginal basis, penalty, and projection for tensor products.
 
         Must be called on an already-built spec (after ``build()`` or
@@ -379,7 +385,12 @@ class _SplineBase:
         marginal basis, penalty, and a projection from the raw B-spline
         space to the effective (centered) space.
         """
-        return _spline_build.tensor_marginal_info(self, x)
+        return _spline_build.tensor_marginal_info(
+            self,
+            x,
+            support=support,
+            counts=counts,
+        )
 
 
 class _BSplineBase(_SplineBase):

@@ -574,6 +574,34 @@ class TestLowUniqueCompression:
 
 
 class TestDiscretePredictParity:
+    def test_exact_spline_prediction_evaluates_repeated_values_once(self, monkeypatch):
+        values = np.repeat(np.linspace(0.0, 10.0, 20), 50)
+        rng = np.random.default_rng(601)
+        y = rng.poisson(np.exp(-0.5 + 0.1 * np.sin(values))).astype(float)
+        X = pd.DataFrame({"x": values})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins=256,
+            features={"x": Spline(n_knots=8, penalty="ssp")},
+        )
+        model.fit(X, y)
+
+        spec = model._specs["x"]
+        original = spec._basis_matrix
+
+        def bounded_basis(x):
+            if len(x) > 20:
+                raise AssertionError("exact spline scoring materialized repeated training rows")
+            return original(x)
+
+        monkeypatch.setattr(spec, "_basis_matrix", bounded_basis)
+
+        prediction = model.predict(X)
+        assert prediction.shape == (len(X),)
+        assert np.all(np.isfinite(prediction))
+
     def test_fast_discrete_predict_matches_exact_canonical_predict_for_main_effects(
         self, poisson_data
     ):
@@ -809,6 +837,90 @@ class TestDiscretizedTensorInteraction:
             model_disc.predict(X), model_exact.predict(X), rtol=1e-8, atol=1e-10
         )
 
+    def test_exact_tensor_prediction_evaluates_repeated_margins_once(self, monkeypatch):
+        """Exact tensor scoring should not rebuild marginal bases on repeated rows."""
+        ages = np.arange(18, 30, dtype=np.float64)
+        bms = np.arange(20, 28, dtype=np.float64)
+        grid = np.array(np.meshgrid(ages, bms)).reshape(2, -1).T
+        X = pd.DataFrame(
+            {
+                "age": np.repeat(grid[:, 0], 6),
+                "bm": np.repeat(grid[:, 1], 6),
+            }
+        )
+        rng = np.random.default_rng(322)
+        y = rng.poisson(0.5, len(X)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins=256,
+            features={
+                "age": Spline(n_knots=6, penalty="ssp"),
+                "bm": Spline(n_knots=5, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit(X, y)
+
+        spec = model._interaction_specs["age:bm"]
+        original = spec._centered_marginal_basis
+
+        def bounded_marginal_basis(values, info):
+            limit = len(ages) if info is spec._marginal1 else len(bms)
+            if len(values) > limit:
+                raise AssertionError("exact tensor scoring materialized repeated training rows")
+            return original(values, info)
+
+        monkeypatch.setattr(spec, "_centered_marginal_basis", bounded_marginal_basis)
+
+        prediction = model.predict(X)
+        assert prediction.shape == (len(X),)
+        assert np.all(np.isfinite(prediction))
+
+    def test_exact_tensor_prediction_batches_large_observed_support(self, monkeypatch):
+        import scipy.sparse as sp
+
+        from superglm.features import interaction as interaction_module
+        from superglm.features.interaction import TensorInteraction
+
+        support = np.arange(5, dtype=float)
+        x1 = np.repeat(support, len(support))
+        x2 = np.tile(support, len(support))
+        spec = TensorInteraction("x1", "x2")
+        spec._p1 = 10
+        spec._p2 = 10
+        spec._marginal1 = object()
+        spec._marginal2 = object()
+
+        def marginal_basis(values, _info):
+            values = np.asarray(values, dtype=float)
+            columns = np.arange(1.0, 11.0)
+            return sp.csr_matrix(np.sin(values[:, None] + columns[None, :]))
+
+        monkeypatch.setattr(spec, "_centered_marginal_basis", marginal_basis)
+        monkeypatch.setattr(interaction_module, "_MAX_TENSOR_SCORE_SUPPORT_CELLS", 100)
+        original_einsum = interaction_module.np.einsum
+        batch_sizes: list[int] = []
+
+        def bounded_einsum(signature, left, coefficients, right, **kwargs):
+            batch_sizes.append(len(left))
+            if len(left) > 3:
+                raise AssertionError("observed tensor support exceeded its batch memory bound")
+            return original_einsum(signature, left, coefficients, right, **kwargs)
+
+        monkeypatch.setattr(interaction_module.np, "einsum", bounded_einsum)
+        beta = np.linspace(-0.5, 0.75, 100)
+
+        actual = spec.score(x1, x2, beta)
+
+        B1 = marginal_basis(x1, spec._marginal1).toarray()
+        B2 = marginal_basis(x2, spec._marginal2).toarray()
+        expected = original_einsum("ij,jk,ik->i", B1, beta.reshape(10, 10), B2)
+        np.testing.assert_allclose(actual, expected, rtol=1e-13, atol=1e-13)
+        assert batch_sizes
+        assert max(batch_sizes) <= 3
+
     def test_decomposed_tensor_interaction_discrete_smoke(self, tensor_interaction_data):
         """Decomposed discrete tensors should fit without huge disc-disc histograms."""
         X, y = tensor_interaction_data
@@ -855,6 +967,40 @@ class TestDiscretizedTensorInteraction:
         assert hasattr(gm_inter, "idx1")
         assert hasattr(gm_inter, "idx2")
         assert hasattr(gm_inter, "tensor_id")
+
+    def test_discrete_tensor_retains_only_support_sized_marginal_bases(
+        self, tensor_interaction_data
+    ):
+        """Discrete tensor metadata must not retain full observation-row marginal bases."""
+        X, y = tensor_interaction_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins={"age": 32, "bm": 24},
+            features={
+                "age": Spline(n_knots=10, penalty="ssp"),
+                "bm": Spline(n_knots=8, penalty="ssp"),
+            },
+            interactions=[("age", "bm")],
+        )
+        model.fit(X, y)
+
+        tensor = model._dm.group_matrices[2]
+        spec = model._interaction_specs["age:bm"]
+        assert isinstance(tensor, DiscretizedTensorGroupMatrix)
+        assert spec._marginal1.basis.shape[0] == tensor.n_bins1
+        assert spec._marginal2.basis.shape[0] == tensor.n_bins2
+        np.testing.assert_allclose(
+            np.bincount(tensor.idx1, minlength=tensor.n_bins1) @ spec._marginal1.basis,
+            0.0,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            np.bincount(tensor.idx2, minlength=tensor.n_bins2) @ spec._marginal2.basis,
+            0.0,
+            atol=1e-10,
+        )
 
     def test_decomposed_tensor_shares_tensor_id(self, tensor_interaction_data):
         """Decomposed discrete tensor subgroups must share the same tensor_id."""
@@ -948,6 +1094,8 @@ class TestDiscretizedTensorInteraction:
         )
 
         assert rebuilt.group_matrices[tensor_idx] is tensor_gm
+        assert model._dm._centered_pattern_plan is not None
+        assert rebuilt._centered_pattern_plan is model._dm._centered_pattern_plan
 
     def test_discrete_tensor_reml_reports_rebuild_phase_profile(self, tensor_interaction_data):
         """Discrete REML profile should expose rebuild and tensor-summary phase timings."""
@@ -1275,3 +1423,77 @@ class TestDiscretizedTensorInteraction:
         assert result.B2_unique.ndim == 2
         assert result.idx1.shape == (n,)
         assert result.idx2.shape == (n,)
+
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_tensor_marginal_legacy_override_remains_compatible(self, discrete, monkeypatch):
+        from types import MethodType
+
+        from superglm.features.interaction import TensorInteraction
+        from superglm.features.spline import PSpline
+
+        x1 = np.linspace(0.0, 1.0, 80)
+        x2 = np.linspace(-1.0, 2.0, 80)
+        spec1 = PSpline(n_knots=6)
+        spec2 = PSpline(n_knots=5)
+        spec1.build(x1)
+        spec2.build(x2)
+        original = spec1.tensor_marginal_ingredients
+        calls: list[int] = []
+
+        def legacy_tensor_marginal(_self, values):
+            calls.append(len(values))
+            return original(values)
+
+        monkeypatch.setattr(
+            spec1,
+            "tensor_marginal_ingredients",
+            MethodType(legacy_tensor_marginal, spec1),
+        )
+        interaction = TensorInteraction("x1", "x2")
+
+        if discrete:
+            result = interaction.build_discrete(
+                x1,
+                x2,
+                {"x1": spec1, "x2": spec2},
+                (16, 12),
+            )
+            assert result.B1_unique.shape[0] == 16
+        else:
+            result = interaction.build(x1, x2, {"x1": spec1, "x2": spec2})
+            assert result.n_cols > 0
+        assert calls == [len(x1)]
+
+    def test_discrete_tensor_compacts_override_that_ignores_support_kwargs(self, monkeypatch):
+        from types import MethodType
+
+        from superglm.features.interaction import TensorInteraction
+        from superglm.features.spline import PSpline
+
+        x1 = np.linspace(0.0, 1.0, 80)
+        x2 = np.linspace(-1.0, 2.0, 80)
+        spec1 = PSpline(n_knots=6)
+        spec2 = PSpline(n_knots=5)
+        spec1.build(x1)
+        spec2.build(x2)
+        original = spec1.tensor_marginal_ingredients
+
+        def ignores_compact_kwargs(_self, values, **_kwargs):
+            return original(values)
+
+        monkeypatch.setattr(
+            spec1,
+            "tensor_marginal_ingredients",
+            MethodType(ignores_compact_kwargs, spec1),
+        )
+        interaction = TensorInteraction("x1", "x2")
+
+        result = interaction.build_discrete(
+            x1,
+            x2,
+            {"x1": spec1, "x2": spec2},
+            (16, 12),
+        )
+
+        assert result.B1_unique.shape[0] == 16
+        assert result.B2_unique.shape[0] == 12

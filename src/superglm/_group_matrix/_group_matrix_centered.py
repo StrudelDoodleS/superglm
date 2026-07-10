@@ -7,9 +7,14 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from ._group_matrix_kernels import _disc_disc_2d_hist, _fused_bincount_2
+from ._group_matrix_kernels import (
+    _disc_disc_2d_hist,
+    _fused_bincount_2,
+    _pattern_support_summaries,
+)
 
 _MAX_PACKED_HIST_CELLS = 5_000_000
+_MAX_PATTERN_SUMMARY_CELLS = 5_000_000
 
 
 @dataclass(frozen=True)
@@ -19,6 +24,377 @@ class _CenteredSupport:
     mean: NDArray
     mass: NDArray
     weighted_z: NDArray
+
+
+@dataclass(frozen=True)
+class _BlockSpan:
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class _PatternPlan:
+    unique_codes: NDArray
+    row_patterns: NDArray
+    sizes: NDArray
+    marginal_offsets: NDArray
+    pair_left: NDArray
+    pair_right: NDArray
+    pair_offsets: NDArray
+    pair_right_sizes: NDArray
+    widths: NDArray
+    starts: NDArray
+    tensor_group: int
+    tensor_grid_row: NDArray
+    tensor_grid_col: NDArray
+    own_margins: tuple[tuple[int, int], ...]
+
+
+class _TensorGridCache:
+    __slots__ = ("w_grid",)
+
+    def __init__(self, w_grid: NDArray) -> None:
+        self.w_grid = w_grid
+
+    def tensor_w_grid(self, _group, _W: NDArray) -> NDArray:
+        return self.w_grid
+
+
+def _readonly(values: NDArray, *, dtype=None) -> NDArray:
+    result = np.asarray(values, dtype=dtype)
+    result.setflags(write=False)
+    return result
+
+
+def _certify_raw_centering(
+    *,
+    raw_gram: NDArray,
+    xtw: NDArray,
+    raw_rhs: NDArray,
+    weighted_z: NDArray,
+    sum_w: float,
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    mean_x = xtw / sum_w
+    centered_gram = raw_gram - np.outer(xtw, mean_x)
+    centered_gram = 0.5 * (centered_gram + centered_gram.T)
+    centered_diagonal = np.diag(centered_gram)
+    if np.any(centered_diagonal < 0.0):
+        return None
+
+    centered_scale = np.sqrt(centered_diagonal / sum_w)
+    # Keep intercept profiling within the ordinary rounding envelope of a
+    # Gram calculation.  Allowing a larger mean than centered RMS amplifies
+    # raw-moment subtraction error beyond that envelope and can erase a
+    # near-collinear direction that the shared normal-equation rank policy
+    # would otherwise retain.
+    max_safe_mean_ratio = 1.0
+    well_scaled = np.all(
+        (np.abs(mean_x) <= max_safe_mean_ratio * centered_scale)
+        | ((mean_x == 0.0) & (centered_scale == 0.0))
+    )
+    if not well_scaled:
+        return None
+
+    sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
+    centered_rhs = raw_rhs - mean_x * sum_weighted_z
+    return mean_x, centered_gram, centered_rhs
+
+
+def _try_factored_tensor_centering(
+    *,
+    dm,
+    W: NDArray,
+    weighted_z: NDArray,
+    sum_w: float,
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """Retain factored tensor products when raw-moment centering is certified.
+
+    The specialized block assembler is substantially cheaper for tensor
+    products because it contracts the two marginal bases independently.  Raw
+    moment subtraction is used only when every solver column has enough
+    centered scale relative to its mean to keep cancellation below the shared
+    square-root-epsilon boundary.  Ill-scaled inputs fall through to the
+    anchor-centered support implementation below.
+    """
+    from ._group_matrix_algebra import _block_xtwx_rhs
+
+    widths = [gm.shape[1] for gm in dm.group_matrices]
+    starts = np.cumsum([0, *widths])
+    spans = [_BlockSpan(int(starts[i]), int(starts[i + 1])) for i in range(len(widths))]
+    raw_gram, xtw, raw_rhs = _block_xtwx_rhs(
+        dm.group_matrices,
+        spans,
+        W,
+        weighted_z,
+    )
+    return _certify_raw_centering(
+        raw_gram=raw_gram,
+        xtw=xtw,
+        raw_rhs=raw_rhs,
+        weighted_z=weighted_z,
+        sum_w=sum_w,
+    )
+
+
+def _build_pattern_plan(dm) -> _PatternPlan | None:
+    """Compress repeated combinations of discrete support codes once per fit."""
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+        DiscretizedTensorGroupMatrix,
+    )
+
+    groups = dm.group_matrices
+    tensor_groups = [
+        index for index, group in enumerate(groups) if type(group) is DiscretizedTensorGroupMatrix
+    ]
+    if len(tensor_groups) != 1:
+        return None
+    tensor_group = tensor_groups[0]
+    tensor = groups[tensor_group]
+
+    group_codes: list[NDArray] = []
+    sizes: list[int] = []
+    for group in groups:
+        if isinstance(group, CategoricalGroupMatrix):
+            group_codes.append(group.codes)
+            sizes.append(group.n_levels + 1)
+        elif type(group) in (DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix):
+            group_codes.append(group.bin_idx)
+            sizes.append(group.n_bins)
+        else:
+            return None
+
+    own_margins: list[tuple[int, int]] = []
+    for index, group in enumerate(groups):
+        if index == tensor_group or type(group) is not DiscretizedSSPGroupMatrix:
+            continue
+        same_first = group.n_bins == tensor.n_bins1 and np.array_equal(group.bin_idx, tensor.idx1)
+        same_second = group.n_bins == tensor.n_bins2 and np.array_equal(group.bin_idx, tensor.idx2)
+        if same_first != same_second:
+            own_margins.append((index, 1 if same_first else 2))
+
+    own_groups = {index for index, _margin in own_margins}
+    pairs: list[tuple[int, int]] = []
+    for left in range(len(groups)):
+        for right in range(left + 1, len(groups)):
+            if tensor_group in (left, right):
+                other = right if left == tensor_group else left
+                if other in own_groups:
+                    continue
+            pairs.append((left, right))
+
+    sizes_array = np.asarray(sizes, dtype=np.intp)
+    pair_left = np.asarray([left for left, _right in pairs], dtype=np.intp)
+    pair_right = np.asarray([right for _left, right in pairs], dtype=np.intp)
+    pair_right_sizes = sizes_array[pair_right]
+    pair_cells = sizes_array[pair_left] * pair_right_sizes
+    if pair_cells.size and (
+        np.any(pair_cells > _MAX_PACKED_HIST_CELLS)
+        or int(np.sum(pair_cells, dtype=np.int64)) > _MAX_PATTERN_SUMMARY_CELLS
+    ):
+        return None
+
+    mixed_key = np.zeros(dm.n, dtype=np.uint64)
+    radix_product = 1
+    max_uint64 = int(np.iinfo(np.uint64).max)
+    for codes, size in zip(group_codes, sizes, strict=True):
+        if size <= 0 or radix_product > max_uint64 // size:
+            return None
+        np.multiply(mixed_key, np.uint64(size), out=mixed_key)
+        np.add(mixed_key, codes, out=mixed_key, casting="unsafe")
+        radix_product *= size
+    unique_keys, row_patterns = np.unique(mixed_key, return_inverse=True)
+    if unique_keys.size > np.iinfo(np.int32).max:
+        return None
+    row_patterns = np.asarray(row_patterns, dtype=np.int32)
+    remaining = unique_keys.copy()
+    unique_codes = np.empty((len(unique_keys), len(sizes)), dtype=np.int32)
+    for group in range(len(sizes) - 1, -1, -1):
+        size = np.uint64(sizes[group])
+        unique_codes[:, group] = (remaining % size).astype(np.int32)
+        remaining //= size
+
+    first_observation = np.full(tensor.n_bins, tensor.shape[0], dtype=np.intp)
+    np.minimum.at(
+        first_observation,
+        tensor.bin_idx,
+        np.arange(tensor.shape[0], dtype=np.intp),
+    )
+    if np.any(first_observation == tensor.shape[0]):
+        return None
+    tensor_grid_row = tensor.idx1[first_observation]
+    tensor_grid_col = tensor.idx2[first_observation]
+    if not np.array_equal(tensor_grid_row[tensor.bin_idx], tensor.idx1) or not np.array_equal(
+        tensor_grid_col[tensor.bin_idx], tensor.idx2
+    ):
+        return None
+
+    widths = np.asarray([group.shape[1] for group in groups], dtype=np.intp)
+    marginal_offsets = np.concatenate(
+        [np.zeros(1, dtype=np.intp), np.cumsum(sizes_array, dtype=np.intp)]
+    )
+    pair_offsets = np.concatenate(
+        [np.zeros(1, dtype=np.intp), np.cumsum(pair_cells, dtype=np.intp)]
+    )
+    starts = np.concatenate([np.zeros(1, dtype=np.intp), np.cumsum(widths, dtype=np.intp)])
+    return _PatternPlan(
+        unique_codes=_readonly(np.ascontiguousarray(unique_codes), dtype=np.int32),
+        row_patterns=_readonly(np.ascontiguousarray(row_patterns), dtype=np.int32),
+        sizes=_readonly(sizes_array, dtype=np.intp),
+        marginal_offsets=_readonly(marginal_offsets, dtype=np.intp),
+        pair_left=_readonly(pair_left, dtype=np.intp),
+        pair_right=_readonly(pair_right, dtype=np.intp),
+        pair_offsets=_readonly(pair_offsets, dtype=np.intp),
+        pair_right_sizes=_readonly(pair_right_sizes, dtype=np.intp),
+        widths=_readonly(widths, dtype=np.intp),
+        starts=_readonly(starts, dtype=np.intp),
+        tensor_group=tensor_group,
+        tensor_grid_row=_readonly(tensor_grid_row, dtype=np.intp),
+        tensor_grid_col=_readonly(tensor_grid_col, dtype=np.intp),
+        own_margins=tuple(own_margins),
+    )
+
+
+def _pattern_plan(dm) -> _PatternPlan | None:
+    cached = dm._centered_pattern_plan
+    if cached is False:
+        return None
+    if cached is None:
+        cached = _build_pattern_plan(dm)
+        dm._centered_pattern_plan = cached if cached is not None else False
+    return cached
+
+
+def _solver_supports(dm) -> tuple[NDArray, ...]:
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+        DiscretizedTensorGroupMatrix,
+    )
+
+    cached = dm._centered_solver_supports
+    if cached is not None:
+        return cached
+    supports: list[NDArray] = []
+    for group in dm.group_matrices:
+        if type(group) is DiscretizedTensorGroupMatrix:
+            supports.append(group.B_unique)
+        elif type(group) is DiscretizedSSPGroupMatrix:
+            supports.append(np.ascontiguousarray(group.B_unique @ group.R_inv))
+        elif isinstance(group, CategoricalGroupMatrix):
+            values = np.zeros((group.n_levels + 1, group.n_levels), dtype=np.float64)
+            values[np.arange(group.n_levels), np.arange(group.n_levels)] = 1.0
+            supports.append(values)
+        else:  # pragma: no cover - guarded by pattern-plan construction
+            raise TypeError(type(group).__name__)
+    cached = tuple(supports)
+    dm._centered_solver_supports = cached
+    return cached
+
+
+def _try_pattern_tensor_centering(
+    *,
+    dm,
+    W: NDArray,
+    z_centered: NDArray,
+    weighted_z: NDArray,
+    sum_w: float,
+) -> tuple[bool, tuple[NDArray, NDArray, NDArray] | None]:
+    """Assemble all discrete summaries through compressed joint code patterns."""
+    from ._group_matrix_algebra import _cross_gram_tensor_own_margin
+
+    plan = _pattern_plan(dm)
+    if plan is None:
+        return False, None
+    marginal_w, marginal_wz, joint_w = _pattern_support_summaries(
+        plan.row_patterns,
+        plan.unique_codes,
+        W,
+        weighted_z,
+        plan.marginal_offsets,
+        plan.pair_left,
+        plan.pair_right,
+        plan.pair_offsets,
+        plan.pair_right_sizes,
+    )
+    supports = _solver_supports(dm)
+    groups = dm.group_matrices
+    tensor_group = plan.tensor_group
+    tensor = groups[tensor_group]
+    raw_gram = np.zeros((dm.p, dm.p), dtype=np.float64)
+    xtw = np.zeros(dm.p, dtype=np.float64)
+    raw_rhs = np.zeros(dm.p, dtype=np.float64)
+
+    for group_index, support in enumerate(supports):
+        if group_index == tensor_group:
+            continue
+        support_slice = slice(
+            plan.marginal_offsets[group_index], plan.marginal_offsets[group_index + 1]
+        )
+        coefficient_slice = slice(plan.starts[group_index], plan.starts[group_index + 1])
+        mass = marginal_w[support_slice]
+        weighted_response = marginal_wz[support_slice]
+        raw_gram[coefficient_slice, coefficient_slice] = support.T @ (mass[:, None] * support)
+        xtw[coefficient_slice] = support.T @ mass
+        raw_rhs[coefficient_slice] = support.T @ weighted_response
+
+    tensor_support_slice = slice(
+        plan.marginal_offsets[tensor_group], plan.marginal_offsets[tensor_group + 1]
+    )
+    tensor_mass = marginal_w[tensor_support_slice]
+    tensor_weighted_response = marginal_wz[tensor_support_slice]
+    w_grid = np.zeros((tensor.n_bins1, tensor.n_bins2), dtype=np.float64)
+    wz_grid = np.zeros_like(w_grid)
+    w_grid[plan.tensor_grid_row, plan.tensor_grid_col] = tensor_mass
+    wz_grid[plan.tensor_grid_row, plan.tensor_grid_col] = tensor_weighted_response
+    tensor_gram, tensor_xtw, tensor_rhs = tensor.gram_rmatvec_from_grids(w_grid, wz_grid)
+    tensor_slice = slice(plan.starts[tensor_group], plan.starts[tensor_group + 1])
+    raw_gram[tensor_slice, tensor_slice] = tensor_gram
+    xtw[tensor_slice] = tensor_xtw
+    raw_rhs[tensor_slice] = tensor_rhs
+
+    for pair in range(plan.pair_left.size):
+        left = int(plan.pair_left[pair])
+        right = int(plan.pair_right[pair])
+        histogram = joint_w[plan.pair_offsets[pair] : plan.pair_offsets[pair + 1]].reshape(
+            plan.sizes[left], plan.sizes[right]
+        )
+        if left == tensor_group:
+            cross = tensor.R_inv.T @ (tensor.B_unique.T @ histogram @ supports[right])
+        elif right == tensor_group:
+            cross = (supports[left].T @ histogram @ tensor.B_unique) @ tensor.R_inv
+        else:
+            cross = supports[left].T @ histogram @ supports[right]
+        left_slice = slice(plan.starts[left], plan.starts[left + 1])
+        right_slice = slice(plan.starts[right], plan.starts[right + 1])
+        raw_gram[left_slice, right_slice] = cross
+        raw_gram[right_slice, left_slice] = cross.T
+
+    grid_cache = _TensorGridCache(w_grid)
+    for own_group, _margin in plan.own_margins:
+        cross = _cross_gram_tensor_own_margin(
+            tensor,
+            groups[own_group],
+            W,
+            grid_cache,
+        )
+        if cross is None:  # pragma: no cover - plan construction certified this match
+            return True, None
+        own_slice = slice(plan.starts[own_group], plan.starts[own_group + 1])
+        raw_gram[own_slice, tensor_slice] = cross
+        raw_gram[tensor_slice, own_slice] = cross.T
+
+    return (
+        True,
+        _certify_raw_centering(
+            raw_gram=raw_gram,
+            xtw=xtw,
+            raw_rhs=raw_rhs,
+            weighted_z=weighted_z,
+            sum_w=sum_w,
+        ),
+    )
 
 
 def _anchor_center_support(
@@ -66,8 +442,34 @@ def packed_centered_gram_rhs(
     widths: list[int] = []
     weighted_z = W * z_centered
     sum_w = float(np.sum(W, dtype=np.float64))
+    eligible_types = (DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix)
+    if any(
+        type(gm) not in eligible_types and not isinstance(gm, CategoricalGroupMatrix)
+        for gm in dm.group_matrices
+    ):
+        return None
+    if any(type(gm) is DiscretizedTensorGroupMatrix for gm in dm.group_matrices):
+        pattern_attempted, patterned = _try_pattern_tensor_centering(
+            dm=dm,
+            W=W,
+            z_centered=z_centered,
+            weighted_z=weighted_z,
+            sum_w=sum_w,
+        )
+        if patterned is not None:
+            return patterned
+        if not pattern_attempted:
+            factored = _try_factored_tensor_centering(
+                dm=dm,
+                W=W,
+                weighted_z=weighted_z,
+                sum_w=sum_w,
+            )
+            if factored is not None:
+                return factored
+
     for gm in dm.group_matrices:
-        if type(gm) in (DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix):
+        if type(gm) in eligible_types:
             supports.append(
                 _anchor_center_support(
                     values=gm.B_unique,
@@ -90,8 +492,6 @@ def packed_centered_gram_rhs(
                     sum_w=sum_w,
                 )
             )
-        else:
-            return None
         widths.append(gm.shape[1])
 
     if any(

@@ -1,5 +1,7 @@
 """Runtime canonicalization regressions for spline-backed public terms."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -8,6 +10,60 @@ from superglm import Constraint, SuperGLM
 from superglm.distributions import clip_mu
 from superglm.features.spline import PSpline, Spline
 from superglm.links import stabilize_eta
+
+
+def test_runtime_feature_means_evaluate_repeated_values_once() -> None:
+    from superglm.model.runtime_canonicalize import _runtime_training_feature_column_means
+
+    values = np.repeat(np.array([-2.0, 1.5, 4.0]), [500, 300, 200])
+
+    class RecordingSpec:
+        def __init__(self) -> None:
+            self.call_sizes: list[int] = []
+
+        def transform(self, x):
+            x = np.asarray(x, dtype=float)
+            self.call_sizes.append(len(x))
+            if len(x) > 3:
+                raise AssertionError("repeated training values should be evaluated once")
+            return np.column_stack((x, x**2))
+
+    spec = RecordingSpec()
+    model = SimpleNamespace(_fit_X_ref=pd.DataFrame({"x": values}))
+    actual = _runtime_training_feature_column_means(model, "x", spec)
+
+    expected = np.mean(np.column_stack((values, values**2)), axis=0)
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-13)
+    assert spec.call_sizes == [3]
+
+
+def test_runtime_feature_means_chunk_high_cardinality_support() -> None:
+    from superglm.model.runtime_canonicalize import (
+        _RUNTIME_MEAN_CHUNK_SIZE,
+        _runtime_training_feature_column_means,
+    )
+
+    values = np.linspace(-3.0, 5.0, 2 * _RUNTIME_MEAN_CHUNK_SIZE + 17)
+
+    class BoundedSpec:
+        def __init__(self) -> None:
+            self.call_sizes: list[int] = []
+
+        def transform(self, x):
+            x = np.asarray(x, dtype=float)
+            self.call_sizes.append(len(x))
+            if len(x) > _RUNTIME_MEAN_CHUNK_SIZE:
+                raise AssertionError("runtime mean evaluation exceeded its memory bound")
+            return np.column_stack((np.ones_like(x), x, x**2))
+
+    spec = BoundedSpec()
+    model = SimpleNamespace(_fit_X_ref=pd.DataFrame({"x": values}))
+    actual = _runtime_training_feature_column_means(model, "x", spec)
+
+    expected = np.mean(np.column_stack((np.ones_like(values), values, values**2)), axis=0)
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-12)
+    assert max(spec.call_sizes) <= _RUNTIME_MEAN_CHUNK_SIZE
+    assert len(spec.call_sizes) == 3
 
 
 def _feature_beta(model: SuperGLM, feature_name: str) -> np.ndarray:

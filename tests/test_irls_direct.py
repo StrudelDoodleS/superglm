@@ -54,6 +54,151 @@ class _LevelTwoRecorder:
 
 # ── Basic solver tests ─────────────────────────────────────────
 class TestDirectSolverBasic:
+    def test_state_evaluation_accepts_in_place_custom_link(self):
+        """Custom link methods may mutate writable arrays supplied by the solver."""
+        from superglm.distributions import Poisson
+        from superglm.solvers.irls_state import _evaluate_irls_state
+
+        class InPlaceLogLink:
+            def link(self, mu):
+                return np.log(mu)
+
+            def inverse(self, eta):
+                eta[...] = np.exp(eta)
+                return eta
+
+            def deriv(self, mu):
+                return 1.0 / mu
+
+            def deriv_inverse(self, eta):
+                return np.exp(eta)
+
+        x = np.linspace(-1.0, 1.0, 12)
+        dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=len(x), p=1)
+        state = _evaluate_irls_state(
+            dm,
+            np.ones_like(x),
+            np.ones_like(x),
+            Poisson(),
+            InPlaceLogLink(),
+            np.zeros_like(x),
+            np.array([0.25]),
+            0.0,
+        )
+
+        assert np.all(np.isfinite(state.mu))
+        assert not state.eta.flags.writeable
+        assert not state.mu.flags.writeable
+
+    def test_can_skip_rank_metadata_for_intermediate_reml_fit(self, monkeypatch):
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        x = np.linspace(-1.0, 1.0, 40)
+        y = 1.0 + 0.5 * x
+        dm = DesignMatrix(
+            [DenseGroupMatrix(np.column_stack((x, x)))],
+            n=len(y),
+            p=2,
+        )
+        groups = [GroupSlice(name="x", start=0, end=2)]
+        common = {
+            "X": dm,
+            "y": y,
+            "weights": np.ones_like(y),
+            "family": Gaussian(),
+            "link": IdentityLink(),
+            "groups": groups,
+            "lambda2": 0.0,
+            "max_iter": 5,
+            "return_xtwx": True,
+            "S_override": 0.25 * np.eye(2),
+        }
+
+        retained, retained_inverse, retained_gram = fit_irls_direct(**common)
+        assert retained.rank_info is not None
+        assert retained.rank_info.data.rank == 1
+        assert retained.rank_info.augmented.rank == 2
+
+        monkeypatch.setattr(
+            np.linalg,
+            "eigh",
+            lambda _matrix: pytest.fail("intermediate fit should skip data-rank spectrum"),
+        )
+        intermediate, intermediate_inverse, intermediate_gram = fit_irls_direct(
+            **common,
+            compute_rank_info=False,
+        )
+
+        assert intermediate.rank_info is None
+        np.testing.assert_allclose(intermediate.beta, retained.beta)
+        assert intermediate.intercept == pytest.approx(retained.intercept)
+        assert intermediate.deviance == pytest.approx(retained.deviance)
+        assert intermediate.effective_df == pytest.approx(retained.effective_df)
+        assert intermediate.phi == pytest.approx(retained.phi)
+        assert intermediate.log_det_H == pytest.approx(retained.log_det_H)
+        assert intermediate.converged is retained.converged
+        assert intermediate.n_iter == retained.n_iter
+        np.testing.assert_allclose(intermediate_inverse, retained_inverse)
+        np.testing.assert_allclose(intermediate_gram, retained_gram)
+
+    def test_reml_working_system_avoids_rebuilding_one_step_crossproducts(self, monkeypatch):
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Poisson
+        from superglm.links import LogLink
+
+        x = np.linspace(-1.0, 1.0, 60)
+        y = np.array([0.0, 1.0, 0.0, 2.0, 1.0] * 12)
+        initial_mu = np.full_like(y, np.mean(y), dtype=float)
+        initial_deviance = float(np.sum(Poisson().deviance_unit(y, initial_mu)))
+
+        class CountingPoisson(Poisson):
+            def __init__(self):
+                self.deviance_calls = 0
+
+            def deviance_unit(self, y, mu):
+                self.deviance_calls += 1
+                return super().deviance_unit(y, mu)
+
+        family = CountingPoisson()
+        dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=len(y), p=1)
+        groups = [GroupSlice(name="x", start=0, end=1)]
+        original_build = irls_direct.build_centered_system
+        build_calls = 0
+
+        def counted_build(**kwargs):
+            nonlocal build_calls
+            build_calls += 1
+            return original_build(**kwargs)
+
+        monkeypatch.setattr(irls_direct, "build_centered_system", counted_build)
+
+        result, inverse, gram = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones_like(y),
+            family=family,
+            link=LogLink(),
+            groups=groups,
+            lambda2=0.25,
+            max_iter=1,
+            return_xtwx=True,
+            compute_rank_info=False,
+            _return_working_system=True,
+            _compute_fit_statistics=False,
+            _deviance_init=initial_deviance,
+        )
+
+        assert build_calls == 1
+        assert result.rank_info is None
+        assert result.effective_df == 0.0
+        assert result.phi == 1.0
+        assert family.deviance_calls == 1
+        assert np.all(np.isfinite(result.beta))
+        assert np.all(np.isfinite(inverse))
+        assert np.all(np.isfinite(gram))
+
     def test_skips_extrema_scans_when_diagnostics_disabled(self, monkeypatch):
         import superglm.solvers.irls_direct as irls_direct
         from superglm.distributions import Gaussian

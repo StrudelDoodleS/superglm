@@ -267,6 +267,69 @@ def decompose_gram(
             retained_values=_freeze(np.array([])),
         )
 
+    if not allow_indefinite:
+        try:
+            factor = scipy.linalg.cholesky(equilibrated, lower=True, check_finite=False)
+            matrix_norm = float(np.linalg.norm(equilibrated, ord=1))
+            trtri = scipy.linalg.get_lapack_funcs("trtri", (factor,))
+            inverse_factor, inverse_info = trtri(
+                factor,
+                lower=1,
+                unitdiag=0,
+                overwrite_c=0,
+            )
+            if inverse_info != 0:
+                raise np.linalg.LinAlgError("triangular inverse failed during rank certification")
+            inverse_factor_frobenius = float(np.linalg.norm(inverse_factor, ord="fro"))
+            min_eigenvalue_lower_bound = 1.0 / inverse_factor_frobenius**2
+            pocon = scipy.linalg.get_lapack_funcs("pocon", (factor,))
+            reciprocal_condition, info = pocon(factor, matrix_norm, uplo="L")
+            safely_full_rank = (
+                np.isfinite(min_eigenvalue_lower_bound)
+                and min_eigenvalue_lower_bound
+                > policy.certification_band * policy.gram_rcond * matrix_norm
+            )
+            if safely_full_rank:
+                probe = np.arange(1.0, len(active_columns) + 1.0)
+                solved = scipy.linalg.cho_solve((factor, True), probe, check_finite=False)
+                residual = np.linalg.norm(equilibrated @ solved - probe) / max(
+                    np.linalg.norm(probe), 1e-300
+                )
+                if residual <= residual_tol:
+                    log_pdet = 2.0 * float(np.sum(np.log(np.diag(factor)))) + 2.0 * float(
+                        np.sum(np.log(column_scale[active_columns]))
+                    )
+                    null = _null_basis(
+                        width,
+                        active_columns,
+                        column_scale[active_columns],
+                        np.zeros((len(active_columns), 0)),
+                    )
+                    return RankDecomposition(
+                        policy_version=policy.version,
+                        method="cholesky",
+                        column_scale=_freeze(column_scale),
+                        active_columns=_freeze(active_columns, dtype=int),
+                        rank=len(active_columns),
+                        pre_truncation_condition=float(
+                            np.sqrt(1.0 / reciprocal_condition)
+                            if info == 0
+                            and np.isfinite(reciprocal_condition)
+                            and reciprocal_condition > 0.0
+                            else np.sqrt(matrix_norm / min_eigenvalue_lower_bound)
+                        ),
+                        cutoff=policy.gram_rcond * matrix_norm,
+                        rank_truncated=len(active_columns) < width,
+                        used_svd_fallback=False,
+                        resolution_limited=False,
+                        log_pdet=log_pdet,
+                        cholesky_factor=_freeze(factor),
+                        parameter_null_basis=_freeze(null),
+                        structural_aliases=_freeze(structural_aliases, dtype=bool),
+                    )
+        except (np.linalg.LinAlgError, ValueError):
+            pass
+
     eigenvalues, eigenvectors = np.linalg.eigh(equilibrated)
     max_eigenvalue = max(float(eigenvalues[-1]), 0.0)
     max_abs_eigenvalue = float(np.max(np.abs(eigenvalues), initial=0.0))

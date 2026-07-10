@@ -282,6 +282,10 @@ def fit_irls_direct(
     scop_state_init: dict[int, dict] | None = None,
     debug_recorder=None,
     debug_context: dict[str, object] | None = None,
+    compute_rank_info: bool = True,
+    _return_working_system: bool = False,
+    _compute_fit_statistics: bool = True,
+    _deviance_init: float | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -323,6 +327,22 @@ def fit_irls_direct(
         If True, also return the final weighted Gram matrix X'WX. Used by the
         REML outer loop to avoid rebuilding X'WX in cheap iterations when W is
         held fixed.
+    compute_rank_info : bool
+        If False, skip data-subspace metadata used only by retained-fit
+        inference. Intermediate REML fits still compute the coefficient and
+        augmented decompositions needed for their objective and EDF.
+    _return_working_system : bool
+        Internal fREML performance-iteration mode. Return the centered system
+        used for the last coefficient update instead of rebuilding it at the
+        proposed coefficients. The authoritative final fit must leave this
+        False so exported inference remains tied to the retained model.
+    _compute_fit_statistics : bool
+        Internal optimization switch. If False, omit EDF and scale summaries
+        that the fREML outer loop does not consume. The authoritative final
+        fit must leave this True.
+    _deviance_init : float, optional
+        Previously evaluated deviance at ``beta_init``/``intercept_init``.
+        Used by private fREML steps to avoid repeating a full response scan.
     record_diagnostics : bool
         If True, record per-iteration W/mu/eta stats on the result.
     S_override : (p, p) ndarray, optional
@@ -384,6 +404,10 @@ def fit_irls_direct(
 
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
+    if (not _compute_fit_statistics and compute_rank_info) or (
+        _return_working_system and (compute_rank_info or has_constraints or _has_scop)
+    ):
+        raise ValueError("intermediate REML shortcuts require rank metadata to be disabled")
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
@@ -612,9 +636,20 @@ def fit_irls_direct(
     _t_deviance = 0.0
     _t_eta = 0.0
     _t_deviance_eval = 0.0
+    _last_working_centered: CenteredSystem | None = None
 
     # Freeze the fit-entry state so iteration-one trial safety has a baseline.
-    committed = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+    committed = _evaluate_irls_state(
+        dm,
+        y,
+        weights,
+        family,
+        link,
+        offset,
+        beta,
+        intercept,
+        deviance=_deviance_init,
+    )
     if _has_scop:
         scop_committed = _SCOPTrialState(
             irls=committed,
@@ -685,6 +720,7 @@ def fit_irls_direct(
             sqrtW = np.sqrt(W)
             z_off = z - offset
             centered = get_centered_system(W, z_off)
+            _last_working_centered = centered
             A_data = sqrtW[:, None] * (_X_full - centered.mean_x)
             A = np.vstack([A_data, _L_aug[1:, 1:]])
             rhs_qr = np.concatenate([sqrtW * (z_off - centered.mean_z), np.zeros(p)])
@@ -817,6 +853,7 @@ def fit_irls_direct(
 
             elif not has_constraints:
                 centered = get_centered_system(W, z_off)
+                _last_working_centered = centered
                 _t_gram += time.perf_counter() - _t0
                 _t0 = time.perf_counter()
                 iteration_rank = decompose_gram(centered.hessian)
@@ -1222,11 +1259,14 @@ def fit_irls_direct(
                         None if refresh.H_penalized is None else refresh.H_penalized.copy()
                     )
 
-    # Every exported matrix and rank claim is evaluated at the retained model.
-    V_export = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
-    dmu_deta_export = link.deriv_inverse(eta)
-    W = weights * dmu_deta_export**2 / V_export
-    z = eta + (y - mu) / dmu_deta_export
+    # Every public/exported matrix and rank claim is evaluated at the retained
+    # model. Private fREML performance iterations deliberately reuse the
+    # working system used for their one coefficient update.
+    if not _return_working_system:
+        V_export = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
+        dmu_deta_export = link.deriv_inverse(eta)
+        W = weights * dmu_deta_export**2 / V_export
+        z = eta + (y - mu) / dmu_deta_export
 
     # Accumulate phase timing into the profile dict if provided
     if profile is not None:
@@ -1244,8 +1284,13 @@ def fit_irls_direct(
 
     # Preserve the raw coefficient-space payload used by REML separately from
     # the centered inference system.
-    z_off = z - offset
-    centered_final = get_centered_system(W, z_off)
+    if _return_working_system:
+        if _last_working_centered is None:
+            raise RuntimeError("working centered system was not computed")
+        centered_final = _last_working_centered
+    else:
+        z_off = z - offset
+        centered_final = get_centered_system(W, z_off)
     XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
     sum_W = centered_final.sum_w
 
@@ -1271,36 +1316,45 @@ def fit_irls_direct(
     XtWX_S_inv_beta = coefficient_rank.pseudo_inverse()
     log_det_H = coefficient_rank.log_pdet
 
-    if _use_qr:
-        sqrtW = np.sqrt(W)
-        A_data_final = sqrtW[:, None] * (_X_full - centered_final.mean_x)
-        data_rank = decompose_factor(A_data_final)
-        augmented_rank = decompose_factor(np.vstack([A_data_final, _L_aug[1:, 1:]]))
+    if _compute_fit_statistics:
+        if _use_qr:
+            sqrtW = np.sqrt(W)
+            A_data_final = sqrtW[:, None] * (_X_full - centered_final.mean_x)
+            data_rank = decompose_factor(A_data_final) if compute_rank_info else None
+            augmented_rank = decompose_factor(np.vstack([A_data_final, _L_aug[1:, 1:]]))
+        else:
+            data_rank = decompose_gram(centered_final.data_gram) if compute_rank_info else None
+            augmented_rank = decompose_gram(centered_final.hessian)
+        feature_edf = np.diag(augmented_rank.pseudo_inverse() @ centered_final.data_gram).copy()
+        feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
+        p_eff = 1.0 + float(np.sum(feature_edf))
+        if compute_rank_info:
+            if data_rank is None:
+                raise RuntimeError("data-rank metadata was not computed")
+            group_edf = {g.name: float(np.sum(feature_edf[g.sl])) for g in groups}
+            selected_columns = np.arange(p, dtype=int)
+            selected_columns.setflags(write=False)
+            feature_edf.setflags(write=False)
+            rank_info = RankInfo(
+                policy_version=SHARED_RANK_POLICY.version,
+                coordinate_space="solver",
+                selected_columns=selected_columns,
+                selected_group_names=tuple(g.name for g in groups),
+                sum_w=centered_final.sum_w,
+                mean_x=centered_final.mean_x,
+                intercept_edf=1.0,
+                data=data_rank,
+                augmented=augmented_rank,
+                coefficient=coefficient_rank,
+                feature_edf=feature_edf,
+                group_edf=group_edf,
+                objective_loss=None,
+            )
+        else:
+            rank_info = None
     else:
-        data_rank = decompose_gram(centered_final.data_gram)
-        augmented_rank = decompose_gram(centered_final.hessian)
-    feature_edf = np.diag(augmented_rank.pseudo_inverse() @ centered_final.data_gram).copy()
-    feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
-    group_edf = {g.name: float(np.sum(feature_edf[g.sl])) for g in groups}
-    selected_columns = np.arange(p, dtype=int)
-    selected_columns.setflags(write=False)
-    feature_edf.setflags(write=False)
-    rank_info = RankInfo(
-        policy_version=SHARED_RANK_POLICY.version,
-        coordinate_space="solver",
-        selected_columns=selected_columns,
-        selected_group_names=tuple(g.name for g in groups),
-        sum_w=centered_final.sum_w,
-        mean_x=centered_final.mean_x,
-        intercept_edf=1.0,
-        data=data_rank,
-        augmented=augmented_rank,
-        coefficient=coefficient_rank,
-        feature_edf=feature_edf,
-        group_edf=group_edf,
-        objective_loss=None,
-    )
-    p_eff = rank_info.total_edf
+        p_eff = 0.0
+        rank_info = None
     if profile is not None:
         _t_finalize = time.perf_counter() - _t0
         profile["irls_finalize_s"] = profile.get("irls_finalize_s", 0.0) + _t_finalize
@@ -1309,10 +1363,13 @@ def fit_irls_direct(
     # SuperGLM's sample_weight follows the prior-weight convention, so the
     # residual d.f. correction is observation-count based (n - edf), while
     # the weights still scale the Pearson numerator.
-    V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
-    pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
-    df_resid = max(float(len(y)) - p_eff, 1)
-    phi = pearson_chi2 / df_resid
+    if _compute_fit_statistics:
+        V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
+        pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
+        df_resid = max(float(len(y)) - p_eff, 1)
+        phi = pearson_chi2 / df_resid
+    else:
+        phi = 1.0
 
     result = PIRLSResult(
         beta=beta,

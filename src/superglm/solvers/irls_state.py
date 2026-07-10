@@ -40,6 +40,13 @@ def _immutable_array(values: NDArray) -> NDArray:
     return result
 
 
+def _freeze_owned_array(values: NDArray) -> NDArray:
+    """Freeze an array produced inside state evaluation without copying it."""
+    result = np.asarray(values, dtype=float)
+    result.setflags(write=False)
+    return result
+
+
 def _evaluate_irls_state(
     dm: DesignMatrix,
     y: NDArray,
@@ -49,20 +56,29 @@ def _evaluate_irls_state(
     offset: NDArray,
     beta: NDArray,
     intercept: float,
+    *,
+    deviance: float | None = None,
 ) -> _IRLSState:
     """Evaluate and freeze all state derived from one coefficient vector."""
     retained_beta = _immutable_array(beta)
     eta_unclipped = dm.matvec(retained_beta) + intercept + offset
     eta = stabilize_eta(eta_unclipped, link)
     mu = clip_mu(link.inverse(eta), family)
-    deviance = float(np.sum(weights * family.deviance_unit(y, mu)))
+    retained_deviance = (
+        float(np.sum(weights * family.deviance_unit(y, mu)))
+        if deviance is None
+        else float(deviance)
+    )
+    eta_unclipped = _freeze_owned_array(eta_unclipped)
+    eta = _freeze_owned_array(eta)
+    mu = _freeze_owned_array(mu)
     return _IRLSState(
         beta=retained_beta,
         intercept=float(intercept),
-        eta_unclipped=_immutable_array(eta_unclipped),
-        eta=_immutable_array(eta),
-        mu=_immutable_array(mu),
-        deviance=deviance,
+        eta_unclipped=eta_unclipped,
+        eta=eta,
+        mu=mu,
+        deviance=retained_deviance,
     )
 
 

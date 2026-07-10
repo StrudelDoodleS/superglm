@@ -231,6 +231,7 @@ def optimize_discrete_reml_cached_w(
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
     warm_beta: NDArray | None = None
     warm_intercept: float | None = None
+    warm_deviance: float | None = None
     max_newton_step = 5.0
     max_halving = 25
     _eps = np.finfo(float).eps
@@ -292,6 +293,9 @@ def optimize_discrete_reml_cached_w(
         max_iter=max_pirls_iter,
         tol=pirls_tol,
         return_xtwx=True,
+        compute_rank_info=False,
+        _return_working_system=True,
+        _compute_fit_statistics=False,
         profile=profile,
         cache_out=cache,
         direct_solve=direct_solve,
@@ -314,6 +318,7 @@ def optimize_discrete_reml_cached_w(
     _n_pirls_steps += boot_result.n_iter
     warm_beta = boot_result.beta.copy()
     warm_intercept = float(boot_result.intercept)
+    warm_deviance = float(boot_result.deviance)
 
     # Bootstrap FP step for initial rho
     boot_phi = 1.0
@@ -428,6 +433,10 @@ def optimize_discrete_reml_cached_w(
             max_iter=1,
             tol=pirls_tol,
             return_xtwx=True,
+            compute_rank_info=False,
+            _return_working_system=True,
+            _compute_fit_statistics=False,
+            _deviance_init=warm_deviance,
             profile=profile,
             cache_out=cache,
             direct_solve=direct_solve,
@@ -437,6 +446,7 @@ def optimize_discrete_reml_cached_w(
         _n_pirls_steps += 1
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
+        warm_deviance = float(pirls_result.deviance)
 
         c_XtWz = cache["XtWz"]
         c_XtW1 = cache["XtW1"]
@@ -701,6 +711,7 @@ def optimize_discrete_reml_cached_w(
                 rho = rho_trial
                 warm_beta = beta_trial.copy()
                 warm_intercept = intercept_trial
+                warm_deviance = dev_trial
                 accepted = True
                 break
 
@@ -757,6 +768,7 @@ def optimize_discrete_reml_cached_w(
                 rho = rho_trial
                 warm_beta = beta_trial.copy()
                 warm_intercept = intercept_trial
+                warm_deviance = dev_trial
                 accepted = True
 
         _t_linesearch += _time.perf_counter() - _t0
@@ -852,6 +864,7 @@ def optimize_discrete_reml_cached_w(
         )
         _t_map_beta += _time.perf_counter() - _t0
         warm_intercept = float(pirls_result.intercept)
+        warm_deviance = float(pirls_result.deviance)
         _t0 = _time.perf_counter()
         penalties, penalty_caches, penalty_ranks = build_penalty_context(
             dm.group_matrices,

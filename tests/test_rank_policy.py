@@ -240,6 +240,170 @@ def test_packed_centering_avoids_materializing_tensor_rows(monkeypatch) -> None:
     )
 
 
+def test_well_scaled_tensor_centering_reuses_factored_block_algebra(monkeypatch) -> None:
+    from superglm._group_matrix import _group_matrix_centered as centered_algebra
+
+    rng = np.random.default_rng(150)
+    B1 = rng.normal(size=(5, 4))
+    B2 = rng.normal(size=(4, 3))
+    idx1 = rng.integers(0, len(B1), size=80, dtype=np.intp)
+    idx2 = rng.integers(0, len(B2), size=80, dtype=np.intp)
+    pair_codes = idx1 * len(B2) + idx2
+    observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+    B_joint = (
+        B1[observed_codes // len(B2), :, None] * B2[observed_codes % len(B2), None, :]
+    ).reshape(len(observed_codes), B1.shape[1] * B2.shape[1])
+    R_inv = rng.normal(size=(B_joint.shape[1], 7))
+    tensor = DiscretizedTensorGroupMatrix(
+        B1,
+        B2,
+        idx1,
+        idx2,
+        B_joint,
+        R_inv,
+        pair_idx.astype(np.intp),
+        tensor_id=150,
+    )
+    categorical = CategoricalGroupMatrix(
+        rng.integers(-1, 3, size=len(idx1), dtype=np.intp),
+        n_levels=3,
+    )
+    dm = DesignMatrix([tensor, categorical], n=len(idx1), p=10)
+    W = rng.uniform(0.25, 2.0, size=len(idx1))
+    z = rng.normal(size=len(idx1))
+    X = np.column_stack((tensor.toarray(), categorical.toarray()))
+    mean_x = np.average(X, axis=0, weights=W)
+    mean_z = float(np.average(z, weights=W))
+    X_centered = X - mean_x
+
+    monkeypatch.setattr(
+        centered_algebra,
+        "_anchor_center_support",
+        lambda **_kwargs: pytest.fail("well-scaled tensor should retain factored algebra"),
+    )
+    monkeypatch.setattr(
+        centered_algebra,
+        "_try_factored_tensor_centering",
+        lambda **_kwargs: pytest.fail("tensor path should use compressed support patterns"),
+    )
+
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=np.zeros((dm.p, dm.p)),
+    )
+
+    np.testing.assert_allclose(system.mean_x, mean_x, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(
+        system.data_gram,
+        X_centered.T @ (W[:, None] * X_centered),
+        rtol=1e-12,
+        atol=1e-11,
+    )
+    pattern_plan = dm._centered_pattern_plan
+    assert pattern_plan is not None
+    assert pattern_plan.row_patterns.dtype == np.int32
+    assert pattern_plan.unique_codes.shape[0] <= dm.n
+
+    second = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=np.zeros((dm.p, dm.p)),
+    )
+    assert dm._centered_pattern_plan is pattern_plan
+    np.testing.assert_allclose(second.data_gram, system.data_gram)
+    np.testing.assert_allclose(
+        system.rhs,
+        X_centered.T @ (W * (z - mean_z)),
+        rtol=1e-12,
+        atol=1e-11,
+    )
+
+
+def test_pattern_tensor_centering_preserves_resolvable_near_collinearity() -> None:
+    """Raw centering must not erase a direction retained by the shared rank policy."""
+    B1 = np.array([[1.0, -1.0], [1.0, 1.0]])
+    B2 = B1.copy()
+    idx1 = np.repeat(np.arange(2, dtype=np.intp), 2)
+    idx2 = np.tile(np.arange(2, dtype=np.intp), 2)
+    B_joint = (B1[idx1, :, None] * B2[idx2, None, :]).reshape(4, 4)
+    R_inv = np.array(
+        [
+            [1000.0, 1000.0],
+            [0.0, 3e-6],
+            [1.0, 1.0],
+            [0.0, 0.0],
+        ]
+    )
+    tensor = DiscretizedTensorGroupMatrix(
+        B1,
+        B2,
+        idx1,
+        idx2,
+        B_joint,
+        R_inv,
+        np.arange(4, dtype=np.intp),
+        tensor_id=151,
+    )
+    dm = DesignMatrix([tensor], n=4, p=2)
+    W = np.ones(4)
+    z = np.arange(4, dtype=float)
+    X = B_joint @ R_inv
+    X_centered = X - np.average(X, axis=0, weights=W)
+    expected = X_centered.T @ (W[:, None] * X_centered)
+
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=np.zeros((2, 2)),
+    )
+
+    assert dm._centered_pattern_plan is not None
+    assert decompose_gram(expected).rank == 2
+    np.testing.assert_allclose(system.data_gram, expected, rtol=1e-12, atol=1e-13)
+    assert decompose_gram(system.data_gram).rank == 2
+
+
+def test_unsafe_pattern_tensor_centering_skips_duplicate_raw_assembly(monkeypatch) -> None:
+    """A rejected pattern attempt should route directly to stable support centering."""
+    from superglm._group_matrix import _group_matrix_centered as centered_algebra
+
+    B1 = np.column_stack((1e12 + np.arange(3, dtype=float), np.ones(3)))
+    B2 = np.column_stack((1e12 + np.arange(2, dtype=float), np.ones(2)))
+    idx1 = np.repeat(np.arange(3, dtype=np.intp), 2)
+    idx2 = np.tile(np.arange(2, dtype=np.intp), 3)
+    B_joint = (B1[idx1, :, None] * B2[idx2, None, :]).reshape(6, 4)
+    tensor = DiscretizedTensorGroupMatrix(
+        B1,
+        B2,
+        idx1,
+        idx2,
+        B_joint,
+        np.eye(4),
+        np.arange(6, dtype=np.intp),
+        tensor_id=152,
+    )
+    dm = DesignMatrix([tensor], n=6, p=4)
+
+    monkeypatch.setattr(
+        centered_algebra,
+        "_try_factored_tensor_centering",
+        lambda **_kwargs: pytest.fail("unsafe pattern centering should skip duplicate raw work"),
+    )
+
+    system = build_centered_system(
+        dm=dm,
+        W=np.ones(6),
+        z_off=np.arange(6, dtype=float),
+        penalty=np.zeros((4, 4)),
+    )
+
+    assert np.all(np.isfinite(system.data_gram))
+
+
 def test_centered_system_reconstructs_raw_weighted_moments() -> None:
     rng = np.random.default_rng(147)
     X = rng.normal(size=(37, 4)) + np.array([0.0, 3.0, -7.0, 20.0])
@@ -334,6 +498,50 @@ def test_identity_uses_full_rank_cholesky_and_exact_operations() -> None:
     np.testing.assert_allclose(decomposition.solve(rhs), rhs)
     np.testing.assert_allclose(decomposition.pseudo_inverse(), np.eye(3))
     assert decomposition.log_pdet == pytest.approx(0.0)
+
+
+def test_well_conditioned_gram_does_not_require_spectral_certification(monkeypatch) -> None:
+    rng = np.random.default_rng(149)
+    factor = rng.normal(size=(12, 12))
+    matrix = factor.T @ factor + 2.0 * np.eye(12)
+    rhs = rng.normal(size=12)
+
+    monkeypatch.setattr(
+        np.linalg,
+        "eigh",
+        lambda _matrix: pytest.fail("well-conditioned Gram should stay on Cholesky"),
+    )
+
+    decomposition = decompose_gram(matrix)
+
+    assert decomposition.method == "cholesky"
+    assert decomposition.rank == len(matrix)
+    assert not decomposition.rank_truncated
+    np.testing.assert_allclose(decomposition.solve(rhs), np.linalg.solve(matrix, rhs))
+
+
+def test_condition_estimate_cannot_promote_boundary_rank(monkeypatch) -> None:
+    import superglm.solvers.rank as rank_module
+
+    eps = SHARED_RANK_POLICY.gram_rcond
+    matrix = np.array([[1.0, 1.0 - eps], [1.0 - eps, 1.0]])
+    original_get_lapack_funcs = rank_module.scipy.linalg.get_lapack_funcs
+
+    def falsely_optimistic_condition(name, arrays=()):
+        if name == "pocon":
+            return lambda *_args, **_kwargs: (1.0, 0)
+        return original_get_lapack_funcs(name, arrays)
+
+    monkeypatch.setattr(
+        rank_module.scipy.linalg,
+        "get_lapack_funcs",
+        falsely_optimistic_condition,
+    )
+
+    decomposition = decompose_gram(matrix)
+
+    assert decomposition.rank == 1
+    assert decomposition.rank_truncated
 
 
 def test_exact_duplicate_is_truncated_consistently() -> None:
