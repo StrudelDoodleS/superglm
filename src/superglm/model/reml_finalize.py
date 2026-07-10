@@ -75,6 +75,7 @@ def maybe_qp_passthrough_refit(
         max_iter=max_pirls_iter,
         tol=pirls_tol,
         convergence="deviance",
+        direct_solve=model._direct_solve,
         reml_penalties=reml_penalties,
     )
     return qp_refit
@@ -138,6 +139,7 @@ def finalize_reml_fit(
             max_iter=max_pirls_iter,
             tol=pirls_tol,
             convergence="deviance",
+            direct_solve=model._direct_solve,
             reml_penalties=reml_penalties,
         )
 

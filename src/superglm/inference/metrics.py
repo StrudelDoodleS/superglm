@@ -447,7 +447,15 @@ class ModelMetrics:
         lam2 = getattr(self._model, "_reml_lambdas", None) or self._model.lambda2
         S_full = self._build_S_from_penalties(lam2)
         X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
-            beta, W, self._dm.group_matrices, self._groups, lam2, S_override=S_full
+            beta,
+            W,
+            self._dm.group_matrices,
+            self._groups,
+            lam2,
+            S_override=S_full,
+            selected_group_names=(
+                set(rank_info.selected_group_names) if rank_info is not None else None
+            ),
         )
         XtWX_inv_aug = _public_augmented_covariance(self._model, XtWX_inv_aug, active_groups)
         return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups

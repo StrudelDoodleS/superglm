@@ -1150,10 +1150,10 @@ class TestMultiPenaltyPostFitInference:
         model._reml_penalties = saved_penalties
         model.__dict__.pop("_coef_covariance", None)
 
-        # Precondition: the two paths must produce different results
-        assert not np.allclose(cov_multi, cov_legacy, rtol=1e-6), (
-            "select=True multi-penalty and legacy S should produce different covariances"
-        )
+        # RankInfo freezes the actual fitted multi-penalty quotient. Mutating
+        # model configuration after fitting must not silently recompute a
+        # different covariance with legacy penalty algebra.
+        np.testing.assert_allclose(cov_multi, cov_legacy, rtol=1e-12)
         return cov_multi, cov_legacy
 
     @pytest.mark.slow
@@ -1182,7 +1182,7 @@ class TestMultiPenaltyPostFitInference:
         model._reml_penalties = saved
         model.__dict__.pop("_fit_active_info", None)
 
-        assert not np.allclose(inv_multi, inv_legacy, rtol=1e-6)
+        np.testing.assert_allclose(inv_multi, inv_legacy, rtol=1e-12)
 
 
 class TestREMLObjectiveFastPath:

@@ -17,6 +17,7 @@ from superglm.group_matrix import (
     SplineCategoricalGroupMatrix,
     _block_xtwx,
 )
+from superglm.solvers.rank import decompose_factor, decompose_gram
 from superglm.types import GroupSlice
 
 
@@ -33,6 +34,7 @@ def _penalised_xtwx_inv(
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
     S_override: NDArray | None = None,
+    selected_group_names: set[str] | None = None,
 ) -> tuple[NDArray, NDArray, NDArray, list[GroupSlice], list]:
     """Compute (X'WX + S)^{-1} via augmented QR + truncated SVD.
 
@@ -64,7 +66,11 @@ def _penalised_xtwx_inv(
     active_group_names: list[str] = []
     col = 0
     for gm, g in zip(group_matrices, groups):
-        if np.linalg.norm(beta[g.sl]) > 1e-12:
+        if (
+            g.name in selected_group_names
+            if selected_group_names is not None
+            else np.linalg.norm(beta[g.sl]) > 1e-12
+        ):
             arr = gm.toarray()
             active_cols.append(arr)
             active_gms.append(gm)
@@ -148,15 +154,7 @@ def _penalised_xtwx_inv(
 
     # Augmented QR: [sqrt(W)*X; sqrt(S)] → R'R = X'WX + S
     A = np.vstack([X_a * np.sqrt(W)[:, None], S_rows])
-    _, R = np.linalg.qr(A, mode="reduced")
-
-    # Truncated SVD for numerical stability.
-    # Regularize truncated directions so SEs are large-but-finite.
-    _, s_R, Vh_R = np.linalg.svd(R, full_matrices=False)
-    threshold = 1e-6 * s_R[0]
-    regularized = 1.0 / threshold**2
-    inv_s2 = np.where(s_R > threshold, 1.0 / s_R**2, regularized)
-    XtWX_S_inv = (Vh_R.T * inv_s2[None, :]) @ Vh_R
+    XtWX_S_inv = decompose_factor(A).pseudo_inverse()
 
     # Augmented (p+1)×(p+1) inverse including intercept row/column.
     # The augmented Fisher information is:
@@ -168,12 +166,7 @@ def _penalised_xtwx_inv(
     S_aug_rows = np.zeros((p_a + 1, p_a + 1))
     S_aug_rows[1:, 1:] = S_rows  # no penalty on intercept
     A_aug = np.vstack([X_aug * sqrtW[:, None], S_aug_rows])
-    _, R_aug = np.linalg.qr(A_aug, mode="reduced")
-    _, s_aug, Vh_aug = np.linalg.svd(R_aug, full_matrices=False)
-    threshold_aug = 1e-6 * s_aug[0]
-    regularized_aug = 1.0 / threshold_aug**2
-    inv_s2_aug = np.where(s_aug > threshold_aug, 1.0 / s_aug**2, regularized_aug)
-    XtWX_S_inv_aug = (Vh_aug.T * inv_s2_aug[None, :]) @ Vh_aug
+    XtWX_S_inv_aug = decompose_factor(A_aug).pseudo_inverse()
 
     return X_a, XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, active_gms
 
@@ -185,6 +178,7 @@ def _penalised_xtwx_inv_gram(
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
     S_override: NDArray | None = None,
+    selected_group_names: set[str] | None = None,
 ) -> tuple[NDArray, NDArray, list[GroupSlice], NDArray | None, NDArray | None]:
     """Fast (X'WX + S)^{-1} via per-group gram matrices.
 
@@ -211,7 +205,11 @@ def _penalised_xtwx_inv_gram(
     active_group_names: list[str] = []
     col = 0
     for gm, g in zip(group_matrices, groups):
-        if np.linalg.norm(beta[g.sl]) > 1e-12:
+        if (
+            g.name in selected_group_names
+            if selected_group_names is not None
+            else np.linalg.norm(beta[g.sl]) > 1e-12
+        ):
             active_gms.append(gm)
             active_group_names.append(g.name)
             p_g = gm.shape[1]
@@ -280,20 +278,8 @@ def _penalised_xtwx_inv_gram(
                 S_scop = ag.scop_reparameterization.penalty_matrix()
                 S[ag.sl, ag.sl] = lam_g * S_scop
 
-    # Invert (X'WX + S) via eigendecomposition.
-    # Match the dense QR/SVD path: there we truncate singular values at
-    # ``rtol * s_max``. Since ``eigvals(M) = s**2``, the equivalent cutoff
-    # on the eigenvalue scale is ``rtol**2 * eig_max``.
-    # Truncated directions get a large regularized inverse (1/threshold)
-    # so that SEs are finite-but-huge rather than zero — correctly
-    # signaling "undetermined" for near-separated coefficients.
     M = XtWX + S
-    eigvals, eigvecs = np.linalg.eigh(M)
-    threshold = (1e-6**2) * max(eigvals.max(), 1e-12)
-    regularized = 1.0 / threshold
-    with np.errstate(divide="ignore"):
-        inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, regularized)
-    XtWX_S_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
+    XtWX_S_inv = decompose_gram(M).pseudo_inverse()
 
     # Augmented (p+1)×(p+1) inverse including intercept row/column.
     # Build X'W1 via per-group rmatvec (avoids materializing dense X_a).
@@ -307,11 +293,6 @@ def _penalised_xtwx_inv_gram(
     M_aug[0, 1:] = XtW1
     M_aug[1:, 0] = XtW1
     M_aug[1:, 1:] = M  # XtWX + S
-    eigvals_aug, eigvecs_aug = np.linalg.eigh(M_aug)
-    threshold_aug = (1e-6**2) * max(eigvals_aug.max(), 1e-12)
-    regularized_aug = 1.0 / threshold_aug
-    with np.errstate(divide="ignore"):
-        inv_eigvals_aug = np.where(eigvals_aug > threshold_aug, 1.0 / eigvals_aug, regularized_aug)
-    XtWX_S_inv_aug = (eigvecs_aug * inv_eigvals_aug[None, :]) @ eigvecs_aug.T
+    XtWX_S_inv_aug = decompose_gram(M_aug).pseudo_inverse()
 
     return XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, XtWX, S
