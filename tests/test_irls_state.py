@@ -8,6 +8,7 @@ import pytest
 from superglm.distributions import Gaussian
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.links import IdentityLink
+from superglm.penalties.group_lasso import GroupLasso
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
     _immutable_array,
@@ -16,6 +17,8 @@ from superglm.solvers.irls_state import (
     _IRLSStepDecision,
     _select_irls_trial,
 )
+from superglm.solvers.pirls import fit_pirls
+from superglm.types import GroupSlice
 
 
 def _synthetic_state(deviance: float, *, beta: float = 0.0, eta: float = 0.0) -> _IRLSState:
@@ -165,3 +168,93 @@ def test_select_irls_trial_requires_positive_max_halving(max_halving: int) -> No
             evaluate_state=lambda alpha: _synthetic_state(alpha),
             max_halving=max_halving,
         )
+
+
+class _ControlledDevianceGaussian(Gaussian):
+    def __init__(self, deviance_for_mean):
+        self._deviance_for_mean = deviance_for_mean
+
+    def deviance_unit(self, y: np.ndarray, mu: np.ndarray) -> np.ndarray:
+        total = self._deviance_for_mean(float(mu[0]))
+        return np.full_like(y, total / len(y), dtype=float)
+
+
+def _fit_controlled_pirls(
+    deviance_for_mean,
+    *,
+    convergence: str = "deviance",
+):
+    n = 6
+    X = np.zeros((n, 1))
+    return fit_pirls(
+        X,
+        np.ones(n),
+        np.ones(n),
+        _ControlledDevianceGaussian(deviance_for_mean),
+        IdentityLink(),
+        [GroupSlice(name="x", start=0, end=1)],
+        GroupLasso(lambda1=0.01),
+        beta_init=np.zeros(1),
+        intercept_init=0.0,
+        max_iter_outer=1,
+        max_iter_inner=1,
+        tol=1e-12,
+        record_diagnostics=True,
+        convergence=convergence,
+    )
+
+
+def test_pirls_accepts_largest_safe_fixed_endpoint_half_step() -> None:
+    def deviance_for_mean(mu: float) -> float:
+        if np.isclose(mu, 0.0):
+            return 2.0
+        if np.isclose(mu, 1.0):
+            return 10.0
+        if np.isclose(mu, 0.5):
+            return 3.0
+        raise AssertionError(f"unexpected trial mean {mu}")
+
+    result = _fit_controlled_pirls(deviance_for_mean)
+
+    assert result.intercept == pytest.approx(0.5)
+    assert result.deviance == pytest.approx(3.0)
+    assert not result.converged
+    assert result.iteration_log is not None
+    assert result.iteration_log[0].step_halvings == 1
+    assert not result.iteration_log[0].step_rejected
+
+
+def test_pirls_nonfinite_full_trial_can_accept_safe_half_step() -> None:
+    def deviance_for_mean(mu: float) -> float:
+        if np.isclose(mu, 0.0):
+            return 2.0
+        if np.isclose(mu, 1.0):
+            return np.nan
+        if np.isclose(mu, 0.5):
+            return 3.0
+        raise AssertionError(f"unexpected trial mean {mu}")
+
+    result = _fit_controlled_pirls(deviance_for_mean)
+
+    assert result.intercept == pytest.approx(0.5)
+    assert result.deviance == pytest.approx(3.0)
+    assert result.iteration_log is not None
+    assert result.iteration_log[0].step_halvings == 1
+    assert not result.iteration_log[0].step_rejected
+
+
+@pytest.mark.parametrize("convergence", ["deviance", "coefficients"])
+def test_pirls_rejects_all_unsafe_trials_without_false_convergence(convergence: str) -> None:
+    def deviance_for_mean(mu: float) -> float:
+        return 2.0 if np.isclose(mu, 0.0) else 10.0
+
+    result = _fit_controlled_pirls(deviance_for_mean, convergence=convergence)
+
+    np.testing.assert_array_equal(result.beta, np.zeros(1))
+    assert result.intercept == 0.0
+    assert result.deviance == pytest.approx(2.0)
+    assert not result.converged
+    assert result.iteration_log is not None
+    assert len(result.iteration_log) == 1
+    assert result.iteration_log[0].step_halvings == 0
+    assert result.iteration_log[0].step_rejected

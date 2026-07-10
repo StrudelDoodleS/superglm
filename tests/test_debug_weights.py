@@ -45,3 +45,7 @@ def test_compare_irls_weights_ignores_zero_frequency_rows():
     assert set(report["source"]) == {"statsmodels", "superglm"}
     assert np.all(report["W_min"].to_numpy() == 0.0)
     np.testing.assert_allclose(report["W_ratio"].to_numpy(), 1.0)
+    superglm_row = report.loc[report["source"] == "superglm"].iloc[0]
+    assert superglm_row["step_halvings"] == 0
+    assert not bool(superglm_row["step_rejected"])
+    assert not bool(model.iteration_diagnostics().iloc[0]["step_rejected"])

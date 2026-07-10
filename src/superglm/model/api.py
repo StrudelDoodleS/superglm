@@ -508,6 +508,7 @@ class SuperGLM:
                     "working_eta_clipped": d.working_eta_clipped,
                     "intercept": d.intercept,
                     "step_halvings": d.step_halvings,
+                    "step_rejected": d.step_rejected,
                     "top_W_obs": list(d.top_w_indices),
                     "bottom_W_obs": list(d.bottom_w_indices),
                     "cond_estimate": d.cond_estimate,

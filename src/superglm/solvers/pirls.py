@@ -10,15 +10,16 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initial_mean
+from superglm.distributions import _VARIANCE_FLOOR, Distribution, initial_mean
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
     GroupMatrix,
     _block_xtwx,
 )
-from superglm.links import Link, stabilize_eta
+from superglm.links import Link
 from superglm.penalties.base import Penalty, penalty_targets_group
+from superglm.solvers.irls_state import _evaluate_irls_state, _IRLSState, _select_irls_trial
 from superglm.types import GroupSlice
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,7 @@ class IterationDiagnostics:
     working_eta_min_unclipped: float | None = None
     working_eta_max_unclipped: float | None = None
     working_eta_clipped: bool | None = None
+    step_rejected: bool = False
 
 
 @dataclass
@@ -158,12 +160,9 @@ def _fit_pirls_inner(
     total_inner_iters = 0
     total_groups_skipped = 0
 
-    # Compute initial deviance for step-halving baseline (catches divergence
-    # from iteration 1, e.g. NB2 deviance going negative under L1 penalty).
-    eta_init_unclipped = dm.matvec(beta) + intercept + offset
-    eta_init = stabilize_eta(eta_init_unclipped, link)
-    mu_init = clip_mu(link.inverse(eta_init), family)
-    dev_prev = float(np.sum(weights * family.deviance_unit(y, mu_init)))
+    # Freeze the fit-entry state so every trial is evaluated from fixed endpoints.
+    committed = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+    dev_prev = committed.deviance
     if not np.isfinite(dev_prev):
         dev_prev = np.inf
     converged = False
@@ -171,14 +170,15 @@ def _fit_pirls_inner(
     for outer in range(max_iter_outer):
         t_outer_start = time.perf_counter()
 
-        # Save previous solution for step halving
-        beta_prev = beta.copy()
-        intercept_prev = intercept
+        beta_prev = committed.beta
+        intercept_prev = committed.intercept
+        beta = committed.beta.copy()
+        intercept = committed.intercept
 
-        # Current predictions
-        eta_unclipped = dm.matvec(beta) + intercept + offset
-        eta = stabilize_eta(eta_unclipped, link)
-        mu = clip_mu(link.inverse(eta), family)
+        # Current predictions are the complete retained snapshot.
+        eta_unclipped = committed.eta_unclipped
+        eta = committed.eta
+        mu = committed.mu
 
         # Working weights and response (PIRLS)
         V = family.variance(mu)
@@ -262,47 +262,50 @@ def _fit_pirls_inner(
         total_inner_iters += inner_iters
         t_inner_total += time.perf_counter() - t_inner_start
 
-        # Deviance for outer convergence
-        eta_new_unclipped = dm.matvec(beta) + intercept + offset
-        eta_new = stabilize_eta(eta_new_unclipped, link)
-        mu_new = clip_mu(link.inverse(eta_new), family)
-        dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
+        proposal = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+        trial_cache: dict[float, _IRLSState] = {1.0: proposal}
 
-        # Step halving: triggered when deviance deteriorates. Covers:
-        # 1. dev > 2×prev: classic overshoot (non-canonical links)
-        # 2. dev < 0 < prev: sign flip signals divergence (NB2 with L1
-        #    can push mu → ∞ for y=0 obs, making deviance very negative)
-        # 3. non-finite: NaN/Inf from numerical breakdown
-        n_halvings = 0
-        need_halving = False
-        if np.isfinite(dev_prev):
-            if not np.isfinite(dev):
-                need_halving = True
-            elif dev > 2.0 * dev_prev:
-                need_halving = True
-            elif dev_prev >= 0 and dev < -abs(dev_prev):
-                need_halving = True
-        if need_halving:
-            for halving in range(max_halving):
-                beta = 0.5 * (beta + beta_prev)
-                intercept = 0.5 * (intercept + intercept_prev)
-                eta_h_unclipped = dm.matvec(beta) + intercept + offset
-                eta_h = stabilize_eta(eta_h_unclipped, link)
-                mu_h = clip_mu(link.inverse(eta_h), family)
-                dev_h = float(np.sum(weights * family.deviance_unit(y, mu_h)))
-                if not np.isfinite(dev_h) or dev_h >= dev:
-                    # No improvement — stop halving
-                    break
-                n_halvings += 1
-                dev = dev_h
-                logger.info(f"  PIRLS outer={outer + 1}: step halving {halving + 1}, dev={dev:.2e}")
-                if dev <= dev_prev:
-                    break
+        def evaluate_trial(alpha: float) -> _IRLSState:
+            beta_trial = committed.beta + alpha * (proposal.beta - committed.beta)
+            intercept_trial = committed.intercept + alpha * (
+                proposal.intercept - committed.intercept
+            )
+            candidate = _evaluate_irls_state(
+                dm,
+                y,
+                weights,
+                family,
+                link,
+                offset,
+                beta_trial,
+                intercept_trial,
+            )
+            trial_cache[alpha] = candidate
+            return candidate
 
-            eta_new_unclipped = dm.matvec(beta) + intercept + offset
-            eta_new = stabilize_eta(eta_new_unclipped, link)
-            mu_new = clip_mu(link.inverse(eta_new), family)
-            dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
+        decision = _select_irls_trial(
+            committed=committed,
+            proposal=proposal,
+            evaluate_state=evaluate_trial,
+            max_halving=max_halving,
+        )
+        retained = committed if decision.step_rejected else trial_cache[decision.alpha]
+        beta = retained.beta.copy()
+        intercept = retained.intercept
+        eta_new_unclipped = retained.eta_unclipped
+        eta_new = retained.eta
+        mu_new = retained.mu
+        dev = retained.deviance
+        n_halvings = decision.step_halvings
+        step_rejected = decision.step_rejected
+        if n_halvings:
+            logger.info(
+                "  PIRLS outer=%d: accepted step fraction %.5g after %d halvings, dev=%.2e",
+                outer + 1,
+                decision.alpha,
+                n_halvings,
+                dev,
+            )
 
         # Warn on extreme working weight range (helps diagnose bad data)
         positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(W)
@@ -353,6 +356,7 @@ def _fit_pirls_inner(
                     working_eta_min_unclipped=float(np.min(eta_unclipped)),
                     working_eta_max_unclipped=float(np.max(eta_unclipped)),
                     working_eta_clipped=working_eta_clipped,
+                    step_rejected=step_rejected,
                 )
             )
 
@@ -362,6 +366,13 @@ def _fit_pirls_inner(
             f"dev={dev:12.1f}  delta={abs(dev - dev_prev) / (abs(dev_prev) + 1):10.2e}  "
             f"time={t_outer_elapsed:.3f}s"
         )
+
+        if step_rejected:
+            logger.warning(
+                "PIRLS rejected all trial steps at outer=%d; restored committed state",
+                outer + 1,
+            )
+            break
 
         if not np.isfinite(dev):
             logger.warning(f"PIRLS non-finite deviance at outer={outer + 1}: dev={dev:.2e}")
@@ -380,6 +391,7 @@ def _fit_pirls_inner(
             if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
                 converged = True
                 break
+        committed = retained
         dev_prev = dev
 
     t_elapsed = time.perf_counter() - t_total
