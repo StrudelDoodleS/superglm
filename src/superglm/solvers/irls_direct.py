@@ -1162,7 +1162,10 @@ def fit_irls_direct(
         W = weights * dmu_deta_final**2 / V_final
         z = eta + (y - mu) / dmu_deta_final
 
-        if not step_rejected:
+        needs_initial_hessian = any(
+            state.get("H_scop_penalized") is None for state in _scop_state.values()
+        )
+        if not step_rejected or needs_initial_hessian:
             eta_unconstrained = np.full(n, intercept)
             for gi in _non_scop_groups_idx:
                 g = groups[gi]

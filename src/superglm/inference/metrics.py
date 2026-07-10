@@ -440,7 +440,17 @@ class ModelMetrics:
                 )
                 col += group.size
             X_a = np.hstack(active_arrays) if active_arrays else np.empty((len(W), 0))
-            inverse = rank_info.augmented.pseudo_inverse()
+            lam2 = getattr(self._model, "_reml_lambdas", None) or self._model.lambda2
+            S_full = self._build_S_from_penalties(lam2)
+            _, inverse, _, _, _ = _penalised_xtwx_inv(
+                beta,
+                W,
+                self._dm.group_matrices,
+                self._groups,
+                lam2,
+                S_override=S_full,
+                selected_group_names=selected_names,
+            )
             augmented = _rank_augmented_covariance(self._model, rank_info, active_groups)
             return X_a, W, inverse, augmented, active_groups
 

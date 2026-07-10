@@ -272,7 +272,11 @@ def decompose_gram(
     negative_tolerance = 100.0 * _EPS * max(max_abs_eigenvalue, 1.0)
     materially_indefinite = bool(eigenvalues[0] < -negative_tolerance)
     if not allow_indefinite and materially_indefinite:
-        raise ValueError("matrix is materially indefinite")
+        raise ValueError(
+            "matrix is materially indefinite "
+            f"(min equilibrated eigenvalue={eigenvalues[0]:.3e}, "
+            f"scale={max_abs_eigenvalue:.3e})"
+        )
     psd_semantics = not materially_indefinite
     if psd_semantics:
         eigenvalues = np.maximum(eigenvalues, 0.0)

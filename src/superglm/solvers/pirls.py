@@ -384,8 +384,12 @@ def _fit_pirls_inner(
 
         if step_rejected:
             logger.warning(
-                "PIRLS rejected all trial steps at outer=%d; restored committed state",
+                "PIRLS rejected all trial steps at outer=%d; restored committed state "
+                "(committed dev=%.6g, proposal dev=%.6g, trials=%s)",
                 outer + 1,
+                committed.deviance,
+                proposal.deviance,
+                {alpha: state.deviance for alpha, state in trial_cache.items()},
             )
             break
 

@@ -155,7 +155,17 @@ def fit_active_info(model):
     W = _solver_space_working_weights(model)
     if solver.rank_info is not None:
         X_active, active_groups = _rank_active_state(model, solver.rank_info, W)
-        inverse = solver.rank_info.augmented.pseudo_inverse()
+        lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
+        S_full = _build_S_from_penalties(model, lam2)
+        _, inverse, _, _, _ = _penalised_xtwx_inv(
+            solver.beta,
+            W,
+            model._dm.group_matrices,
+            model._groups,
+            lam2,
+            S_override=S_full,
+            selected_group_names=set(solver.rank_info.selected_group_names),
+        )
         augmented = _rank_augmented_covariance(model, solver.rank_info, active_groups)
         return X_active, W, inverse, augmented, active_groups
 
@@ -200,7 +210,18 @@ def fit_inference_info(model):
     if solver.rank_info is not None:
         rank_info = solver.rank_info
         X_active, active_groups = _rank_active_state(model, rank_info, W)
-        inverse = rank_info.augmented.pseudo_inverse()
+        retained_inverse = rank_info.augmented.pseudo_inverse()
+        lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
+        S_full = _build_S_from_penalties(model, lam2)
+        inverse, _, _, _, _ = _penalised_xtwx_inv_gram(
+            solver.beta,
+            W,
+            model._dm.group_matrices,
+            model._groups,
+            lam2,
+            S_override=S_full,
+            selected_group_names=set(rank_info.selected_group_names),
+        )
         augmented = _rank_augmented_covariance(model, rank_info, active_groups)
         if X_active.shape[1] == 0:
             return {
@@ -215,7 +236,7 @@ def fit_inference_info(model):
             }
         X_centered = X_active - rank_info.mean_x[rank_info.selected_columns]
         data_gram = X_centered.T @ (W[:, None] * X_centered)
-        F = inverse @ data_gram
+        F = retained_inverse @ data_gram
         edf = rank_info.feature_edf[rank_info.selected_columns].copy()
         edf1 = 2.0 * edf - np.sum(F * F, axis=1)
         eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
