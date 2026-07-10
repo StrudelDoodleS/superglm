@@ -5,9 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from superglm.distributions import Gaussian
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+from superglm.links import IdentityLink
 from superglm.solvers.centered_system import build_centered_system
+from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_factor, decompose_gram
+from superglm.types import GroupSlice
 
 
 def _dense_design_matrix(X: np.ndarray) -> DesignMatrix:
@@ -156,3 +160,42 @@ def test_zero_diagonal_column_is_inactive_and_nonestimable() -> None:
     assert decomposition.rank == 1
     np.testing.assert_allclose(decomposition.solve(np.array([4.0, 9.0])), [2.0, 0.0])
     assert not decomposition.is_estimable(np.array([0.0, 1.0]))
+
+
+def test_gram_and_qr_share_centered_alias_representation() -> None:
+    x = np.linspace(-2.0, 2.0, 60)
+    z = np.sin(x)
+    X = np.column_stack((np.full_like(x, 7.0), x, x, np.zeros_like(x), z))
+    y = 2.0 + 3.0 * x - 1.5 * z
+    groups = [
+        GroupSlice(name=name, start=index, end=index + 1)
+        for index, name in enumerate(("constant", "x", "duplicate", "zero", "z"))
+    ]
+    results = {}
+
+    for method in ("gram", "qr"):
+        result, _ = fit_irls_direct(
+            X,
+            y,
+            np.ones_like(y),
+            Gaussian(),
+            IdentityLink(),
+            groups,
+            lambda2=0.0,
+            direct_solve=method,
+            tol=1e-12,
+        )
+        results[method] = result
+        assert result.rank_info is not None
+        assert result.rank_info.data.rank == 2
+        assert result.rank_info.augmented.rank == 2
+        assert result.effective_df == pytest.approx(3.0)
+        assert result.beta[0] == 0.0
+        assert result.beta[2] == 0.0
+        assert result.beta[3] == 0.0
+        np.testing.assert_allclose(result.beta[[1, 4]], [3.0, -1.5], atol=1e-10)
+
+    gram_prediction = results["gram"].intercept + X @ results["gram"].beta
+    qr_prediction = results["qr"].intercept + X @ results["qr"].beta
+    np.testing.assert_allclose(gram_prediction, y, atol=1e-10)
+    np.testing.assert_allclose(qr_prediction, gram_prediction, atol=1e-10)

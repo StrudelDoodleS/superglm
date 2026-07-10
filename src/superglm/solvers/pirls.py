@@ -20,6 +20,7 @@ from superglm.group_matrix import (
 from superglm.links import Link
 from superglm.penalties.base import Penalty, penalty_targets_group
 from superglm.solvers.irls_state import _evaluate_irls_state, _IRLSState, _select_irls_trial
+from superglm.solvers.rank import RankInfo
 from superglm.types import GroupSlice
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ class IterationDiagnostics:
     working_eta_max_unclipped: float | None = None
     working_eta_clipped: bool | None = None
     step_rejected: bool = False
+    rank_truncated: bool | None = None
 
 
 @dataclass
@@ -89,6 +91,7 @@ class PIRLSResult:
     effective_df: float
     iteration_log: list[IterationDiagnostics] | None = None
     log_det_H: float | None = None  # log|X'WX + S| from _safe_decompose_H  # noqa: N815
+    rank_info: RankInfo | None = None
 
 
 def _compute_group_hessians(

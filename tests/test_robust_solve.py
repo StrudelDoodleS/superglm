@@ -14,6 +14,7 @@ from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.profiling.tweedie import generate_tweedie_cpg
 from superglm.solvers.irls_direct import _robust_solve, _safe_decompose_H
+from superglm.solvers.rank import decompose_gram
 
 
 class TestRobustSolve:
@@ -68,7 +69,7 @@ class TestRobustSolve:
         assert np.all(np.isfinite(x))
 
     def test_singular_system_pseudo_inverse(self):
-        """Exactly singular system should still return a solution via SVD."""
+        """Exactly singular systems use the deterministic retained representative."""
         n = 10
         rng = np.random.default_rng(99)
         U, _, _ = np.linalg.svd(rng.standard_normal((n, n)))
@@ -79,7 +80,7 @@ class TestRobustSolve:
 
         x, cond_est, used_svd = _robust_solve(M, rhs)
 
-        assert used_svd
+        assert not used_svd
         residual = M @ x - rhs
         assert np.linalg.norm(residual) < np.linalg.norm(rhs)
 
@@ -139,8 +140,8 @@ class TestSafeDecomposeH:
         assert np.all(np.isfinite(H_inv))
         assert np.isfinite(log_det)
 
-    def test_singular_H_svd_fallback(self):
-        """Rank-deficient H (Cholesky fails) should fall back to SVD."""
+    def test_singular_H_rank_revealing_cholesky(self):
+        """Rank-deficient H uses the shared rank-revealing representative."""
         n = 8
         rng = np.random.default_rng(77)
         A = rng.standard_normal((n, n - 2))
@@ -148,22 +149,23 @@ class TestSafeDecomposeH:
 
         H_inv, log_det, cholesky_ok = _safe_decompose_H(H)
 
-        assert not cholesky_ok
+        assert cholesky_ok
         assert np.isfinite(log_det)
         assert np.all(np.isfinite(H_inv))
 
-    def test_log_det_positive_eigenvalues_only(self):
-        """log_det should only sum over positive singular values."""
+    def test_log_det_uses_same_shared_decomposition_as_inverse(self):
+        """The compatibility wrapper must not recompute a second cutoff."""
         n = 6
         rng = np.random.default_rng(55)
         U, _, _ = np.linalg.svd(rng.standard_normal((n, n)))
         s = np.array([100.0, 10.0, 1.0, 0.1, 1e-15, 1e-16])
         H = (U * s) @ U.T
 
-        _, log_det, _ = _safe_decompose_H(H)
+        H_inv, log_det, _ = _safe_decompose_H(H)
+        decomposition = decompose_gram(H)
 
-        expected = np.sum(np.log([100.0, 10.0, 1.0, 0.1]))
-        np.testing.assert_allclose(log_det, expected, atol=1.0)
+        np.testing.assert_allclose(H_inv, decomposition.pseudo_inverse())
+        assert log_det == pytest.approx(decomposition.log_pdet)
 
 
 class TestQRSolverPath:

@@ -266,13 +266,9 @@ class TestDirectSolverBasic:
         A = rng.standard_normal((6, 6))
         H = A @ A.T + np.eye(6)
 
-        def fail_dpstrf(*args, **kwargs):
-            raise AssertionError("pivoted Cholesky should not be used for SPD fast path")
-
         def fail_svd(*args, **kwargs):
             raise AssertionError("SVD should not be used for SPD fast path")
 
-        monkeypatch.setattr(irls_direct.scipy.linalg.lapack, "dpstrf", fail_dpstrf)
         monkeypatch.setattr(irls_direct.np.linalg, "svd", fail_svd)
 
         H_inv, log_det, cholesky_ok = irls_direct._safe_decompose_H(H)
@@ -289,13 +285,9 @@ class TestDirectSolverBasic:
         M = A @ A.T + np.eye(6)
         rhs = rng.standard_normal(6)
 
-        def fail_dpstrf(*args, **kwargs):
-            raise AssertionError("pivoted Cholesky should not be used for SPD fast path")
-
         def fail_svd(*args, **kwargs):
             raise AssertionError("SVD should not be used for SPD fast path")
 
-        monkeypatch.setattr(irls_direct.scipy.linalg.lapack, "dpstrf", fail_dpstrf)
         monkeypatch.setattr(irls_direct.np.linalg, "svd", fail_svd)
 
         x, cond_est, used_svd = irls_direct._robust_solve(M, rhs)
@@ -323,15 +315,23 @@ class TestDirectSolverBasic:
         dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
         groups = [GroupSlice(name="x", start=0, end=2)]
 
-        original = irls_direct._block_xtwx_rhs
-        calls = 0
+        original_raw = irls_direct._block_xtwx_rhs
+        original_centered = irls_direct.build_centered_system
+        raw_calls = 0
+        centered_calls = 0
 
         def counting_block_xtwx_rhs(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            return original(*args, **kwargs)
+            nonlocal raw_calls
+            raw_calls += 1
+            return original_raw(*args, **kwargs)
+
+        def counting_centered_system(*args, **kwargs):
+            nonlocal centered_calls
+            centered_calls += 1
+            return original_centered(*args, **kwargs)
 
         monkeypatch.setattr(irls_direct, "_block_xtwx_rhs", counting_block_xtwx_rhs)
+        monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
 
         result, _ = irls_direct.fit_irls_direct(
             X=dm,
@@ -346,7 +346,8 @@ class TestDirectSolverBasic:
         )
 
         assert result.n_iter > 1
-        assert calls == 1
+        assert centered_calls == 1
+        assert raw_calls == 1
 
     def test_constant_weight_cache_preserves_solution(self, monkeypatch):
         """Reusing X'WX does not change the fitted coefficients."""
@@ -464,15 +465,23 @@ class TestDirectSolverBasic:
         dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
         groups = [GroupSlice(name="x", start=0, end=2)]
 
-        original = irls_direct._block_xtwx_rhs
-        calls = 0
+        original_raw = irls_direct._block_xtwx_rhs
+        original_centered = irls_direct.build_centered_system
+        raw_calls = 0
+        centered_calls = 0
 
         def counting_block_xtwx_rhs(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            return original(*args, **kwargs)
+            nonlocal raw_calls
+            raw_calls += 1
+            return original_raw(*args, **kwargs)
+
+        def counting_centered_system(*args, **kwargs):
+            nonlocal centered_calls
+            centered_calls += 1
+            return original_centered(*args, **kwargs)
 
         monkeypatch.setattr(irls_direct, "_block_xtwx_rhs", counting_block_xtwx_rhs)
+        monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
 
         result, _ = irls_direct.fit_irls_direct(
             X=dm,
@@ -487,7 +496,8 @@ class TestDirectSolverBasic:
         )
 
         assert result.n_iter > 1
-        assert calls == result.n_iter
+        assert centered_calls == result.n_iter + 1
+        assert raw_calls == 1
 
     def test_matches_bcd_ridge(self, poisson_data):
         """Direct solver with selection_penalty=0 should give similar deviance as BCD with tiny lambda1."""

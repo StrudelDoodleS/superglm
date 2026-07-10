@@ -199,6 +199,7 @@ def compare_irls_weights(
                     "converged": None,
                     "step_halvings": d.step_halvings,
                     "step_rejected": d.step_rejected,
+                    "rank_truncated": d.rank_truncated,
                     "top_W_obs": list(d.top_w_indices),
                     "bottom_W_obs": list(d.bottom_w_indices),
                     "cond_estimate": d.cond_estimate,
