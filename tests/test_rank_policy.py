@@ -80,6 +80,26 @@ def test_centered_rhs_is_stable_with_large_feature_and_response_means() -> None:
         assert not values.flags.writeable
 
 
+def test_centered_system_reconstructs_raw_weighted_moments() -> None:
+    rng = np.random.default_rng(147)
+    X = rng.normal(size=(37, 4)) + np.array([0.0, 3.0, -7.0, 20.0])
+    W = rng.uniform(0.2, 2.0, size=len(X))
+    z = rng.normal(size=len(X)) + 5.0
+
+    system = build_centered_system(
+        dm=_dense_design_matrix(X),
+        W=W,
+        z_off=z,
+        penalty=np.zeros((X.shape[1], X.shape[1])),
+    )
+    gram, xtw1, xtwz, sum_wz = system.raw_weighted_moments()
+
+    np.testing.assert_allclose(gram, X.T @ (W[:, None] * X), rtol=1e-13, atol=1e-12)
+    np.testing.assert_allclose(xtw1, X.T @ W, rtol=1e-13, atol=1e-12)
+    np.testing.assert_allclose(xtwz, X.T @ (W * z), rtol=1e-13, atol=1e-12)
+    assert sum_wz == pytest.approx(float(np.dot(W, z)))
+
+
 def test_centered_system_requires_positive_total_weight() -> None:
     with pytest.raises(ValueError, match="positive"):
         build_centered_system(

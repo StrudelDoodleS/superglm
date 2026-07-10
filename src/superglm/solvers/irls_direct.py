@@ -1233,16 +1233,9 @@ def fit_irls_direct(
     # Preserve the raw coefficient-space payload used by REML separately from
     # the centered inference system.
     z_off = z - offset
-    Wz = W * z_off
-    sum_W = float(np.sum(W))
-    XtWX, XtW1, XtWz = _block_xtwx_rhs(
-        gms,
-        groups,
-        W,
-        Wz,
-        tabmat_split=_tabmat_split,
-        profile=profile,
-    )
+    centered_final = get_centered_system(W, z_off)
+    XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
+    sum_W = centered_final.sum_w
 
     # Cache final-iteration RHS quantities for the cached-W fREML optimizer.
     # These allow re-solving the augmented system with a new penalty matrix S
@@ -1252,7 +1245,7 @@ def fit_irls_direct(
         cache_out["XtWz"] = XtWz
         cache_out["XtW1"] = XtW1
         cache_out["sum_W"] = sum_W
-        cache_out["sum_Wz"] = float(np.sum(Wz))
+        cache_out["sum_Wz"] = sum_Wz
 
     # Compute (X'WX + S)^{-1} directly (NOT from augmented system, which gives
     # the Schur complement that accounts for intercept estimation — wrong for REML).
@@ -1260,10 +1253,10 @@ def fit_irls_direct(
     _t0 = time.perf_counter()
     XtWX_beta = XtWX
     M_beta = XtWX_beta + S
-    H_inv, log_det_H, _ = _safe_decompose_H(M_beta)
-    XtWX_S_inv_beta = H_inv
+    coefficient_rank = decompose_gram(M_beta)
+    XtWX_S_inv_beta = coefficient_rank.pseudo_inverse()
+    log_det_H = coefficient_rank.log_pdet
 
-    centered_final = get_centered_system(W, z_off)
     if _use_qr:
         sqrtW = np.sqrt(W)
         A_data_final = sqrtW[:, None] * (_X_full - centered_final.mean_x)
@@ -1288,6 +1281,7 @@ def fit_irls_direct(
         intercept_edf=1.0,
         data=data_rank,
         augmented=augmented_rank,
+        coefficient=coefficient_rank,
         feature_edf=feature_edf,
         group_edf=group_edf,
         objective_loss=None,

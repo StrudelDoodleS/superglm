@@ -29,6 +29,14 @@ class CenteredSystem:
     penalty: NDArray
     hessian: NDArray
 
+    def raw_weighted_moments(self) -> tuple[NDArray, NDArray, NDArray, float]:
+        """Recover raw Gram/RHS moments from the stable centered system."""
+        xtw1 = self.sum_w * self.mean_x
+        sum_wz = self.sum_w * self.mean_z
+        gram = self.data_gram + self.sum_w * np.outer(self.mean_x, self.mean_x)
+        xtwz = self.rhs + self.mean_x * sum_wz
+        return gram, xtw1, xtwz, sum_wz
+
 
 def build_centered_system(
     *,

@@ -486,6 +486,8 @@ def _fit_pirls_inner(
     )
     data_rank = decompose_gram(centered.data_gram)
     augmented_rank = decompose_gram(centered.hessian)
+    raw_gram, _, _, _ = centered.raw_weighted_moments()
+    coefficient_rank = decompose_gram(raw_gram + selected_penalty)
     feature_edf = np.zeros(p)
     group_edf = {group.name: 0.0 for group in groups}
 
@@ -529,6 +531,7 @@ def _fit_pirls_inner(
         intercept_edf=1.0,
         data=data_rank,
         augmented=augmented_rank,
+        coefficient=coefficient_rank,
         feature_edf=feature_edf,
         group_edf=group_edf,
         objective_loss=None,

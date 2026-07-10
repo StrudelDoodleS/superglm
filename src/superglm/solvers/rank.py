@@ -139,6 +139,7 @@ class RankInfo:
     intercept_edf: float
     data: RankDecomposition
     augmented: RankDecomposition
+    coefficient: RankDecomposition
     feature_edf: NDArray
     group_edf: dict[str, float]
     objective_loss: float | None

@@ -347,7 +347,7 @@ class TestDirectSolverBasic:
 
         assert result.n_iter > 1
         assert centered_calls == 1
-        assert raw_calls == 1
+        assert raw_calls == 0
 
     def test_constant_weight_cache_preserves_solution(self, monkeypatch):
         """Reusing X'WX does not change the fitted coefficients."""
@@ -497,7 +497,7 @@ class TestDirectSolverBasic:
 
         assert result.n_iter > 1
         assert centered_calls == result.n_iter + 1
-        assert raw_calls == 1
+        assert raw_calls == 0
 
     def test_matches_bcd_ridge(self, poisson_data):
         """Direct solver with selection_penalty=0 should give similar deviance as BCD with tiny lambda1."""

@@ -155,17 +155,7 @@ def fit_active_info(model):
     W = _solver_space_working_weights(model)
     if solver.rank_info is not None:
         X_active, active_groups = _rank_active_state(model, solver.rank_info, W)
-        lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
-        S_full = _build_S_from_penalties(model, lam2)
-        _, inverse, _, _, _ = _penalised_xtwx_inv(
-            solver.beta,
-            W,
-            model._dm.group_matrices,
-            model._groups,
-            lam2,
-            S_override=S_full,
-            selected_group_names=set(solver.rank_info.selected_group_names),
-        )
+        inverse = solver.rank_info.coefficient.pseudo_inverse()
         augmented = _rank_augmented_covariance(model, solver.rank_info, active_groups)
         return X_active, W, inverse, augmented, active_groups
 
@@ -211,17 +201,7 @@ def fit_inference_info(model):
         rank_info = solver.rank_info
         X_active, active_groups = _rank_active_state(model, rank_info, W)
         retained_inverse = rank_info.augmented.pseudo_inverse()
-        lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
-        S_full = _build_S_from_penalties(model, lam2)
-        inverse, _, _, _, _ = _penalised_xtwx_inv_gram(
-            solver.beta,
-            W,
-            model._dm.group_matrices,
-            model._groups,
-            lam2,
-            S_override=S_full,
-            selected_group_names=set(rank_info.selected_group_names),
-        )
+        inverse = rank_info.coefficient.pseudo_inverse()
         augmented = _rank_augmented_covariance(model, rank_info, active_groups)
         if X_active.shape[1] == 0:
             return {
