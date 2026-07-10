@@ -9,7 +9,12 @@ import pytest
 from superglm import SuperGLM
 from superglm.distributions import Gaussian
 from superglm.features.numeric import Numeric
-from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+from superglm.group_matrix import (
+    CategoricalGroupMatrix,
+    DenseGroupMatrix,
+    DesignMatrix,
+    DiscretizedSSPGroupMatrix,
+)
 from superglm.links import IdentityLink
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.solvers.centered_system import build_centered_system, refresh_centered_rhs
@@ -78,6 +83,77 @@ def test_centered_rhs_is_stable_with_large_feature_and_response_means() -> None:
         system.hessian,
     ):
         assert not values.flags.writeable
+
+
+def test_packed_centering_avoids_materializing_discrete_and_categorical_rows(
+    monkeypatch,
+) -> None:
+    bin_idx = np.array([0, 0, 1, 2, 1, 0, 2, 2, 1, 0, 2, 1], dtype=np.intp)
+    B_unique = np.column_stack(
+        (
+            1e12 + np.array([0.0, 2.0, 5.0]),
+            -3e11 + np.array([0.0, -1.0, 4.0]),
+        )
+    )
+    R_inv = np.array([[1.0, 0.25], [0.0, 1.0]])
+    discrete = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
+    categorical = CategoricalGroupMatrix(
+        np.array([-1, 0, 1, 0, 1, -1, 0, 1, 0, -1, 1, 0]),
+        n_levels=2,
+    )
+    dm = DesignMatrix([discrete, categorical], n=len(bin_idx), p=4)
+    W = np.linspace(0.25, 2.0, len(bin_idx))
+    W[3] = 0.0
+    z = np.sin(np.arange(len(bin_idx), dtype=float))
+
+    def centered_rows(support: np.ndarray, codes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        mass = np.bincount(codes, weights=W, minlength=len(support))
+        anchor = int(np.argmax(mass))
+        differences = support - support[anchor]
+        mean_difference = mass @ differences / np.sum(W)
+        return differences[codes] - mean_difference, support[anchor] + mean_difference
+
+    discrete_centered_raw, discrete_mean_raw = centered_rows(B_unique, bin_idx)
+    discrete_centered = discrete_centered_raw @ R_inv
+    discrete_mean = discrete_mean_raw @ R_inv
+    categorical_support = np.vstack((np.eye(2), np.zeros((1, 2))))
+    categorical_centered, categorical_mean = centered_rows(
+        categorical_support,
+        categorical.codes,
+    )
+    X_centered = np.column_stack((discrete_centered, categorical_centered))
+    mean_x = np.concatenate((discrete_mean, categorical_mean))
+    mean_z = float(np.dot(W, z) / np.sum(W))
+    z_centered = z - mean_z
+    expected_gram = X_centered.T @ (W[:, None] * X_centered)
+    expected_rhs = X_centered.T @ (W * z_centered)
+
+    monkeypatch.setattr(
+        dm,
+        "row_subset",
+        lambda _rows: pytest.fail("packed centering must not materialize observation rows"),
+    )
+    monkeypatch.setattr(
+        DiscretizedSSPGroupMatrix,
+        "toarray",
+        lambda _self: pytest.fail("packed centering must not materialize discrete rows"),
+    )
+    monkeypatch.setattr(
+        CategoricalGroupMatrix,
+        "toarray",
+        lambda _self: pytest.fail("packed centering must not materialize categorical rows"),
+    )
+
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=np.zeros((4, 4)),
+    )
+
+    np.testing.assert_allclose(system.mean_x, mean_x, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(system.data_gram, expected_gram, rtol=1e-12, atol=1e-10)
+    np.testing.assert_allclose(system.rhs, expected_rhs, rtol=1e-12, atol=1e-10)
 
 
 def test_centered_system_reconstructs_raw_weighted_moments() -> None:

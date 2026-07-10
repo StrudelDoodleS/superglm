@@ -7,7 +7,11 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix._group_matrix_centered import centered_gram_rhs, centered_rhs
+from superglm._group_matrix._group_matrix_centered import (
+    centered_gram_rhs,
+    centered_rhs,
+    packed_centered_gram_rhs,
+)
 from superglm.group_matrix import DesignMatrix
 
 
@@ -97,14 +101,19 @@ def build_centered_system(
     sum_w = float(np.sum(W, dtype=np.float64))
     if not np.isfinite(sum_w) or sum_w <= 0.0:
         raise ValueError("working weights must have a positive finite sum")
-    mean_x = dm.rmatvec(W) / sum_w
     mean_z = float(np.dot(W, z_off) / sum_w)
-    data_gram, rhs = centered_gram_rhs(
-        dm=dm,
-        W=W,
-        mean_x=mean_x,
-        z_centered=z_off - mean_z,
-    )
+    z_centered = z_off - mean_z
+    packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
+    if packed is None:
+        mean_x = dm.rmatvec(W) / sum_w
+        data_gram, rhs = centered_gram_rhs(
+            dm=dm,
+            W=W,
+            mean_x=mean_x,
+            z_centered=z_centered,
+        )
+    else:
+        mean_x, data_gram, rhs = packed
     penalty_symmetric = 0.5 * (penalty + penalty.T)
     hessian = data_gram + penalty_symmetric
     # Both terms are mathematically PSD. Degenerate spline
