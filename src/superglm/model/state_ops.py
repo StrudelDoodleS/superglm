@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR
 from superglm.inference._term_covariance import compute_coef_covariance
+from superglm.types import GroupSlice
 
 
 def _build_S_from_penalties(model, lam2) -> NDArray | None:
@@ -79,8 +80,58 @@ def _public_augmented_covariance(model, XtWX_inv_aug: NDArray, active_groups) ->
     return transform @ XtWX_inv_aug @ transform.T
 
 
+def _rank_active_state(model, rank_info, W: NDArray):
+    """Materialize the explicitly selected fit state in rank-info order."""
+    selected_names = set(rank_info.selected_group_names)
+    active_groups: list[GroupSlice] = []
+    active_arrays: list[NDArray] = []
+    col = 0
+    for gm, group in zip(model._dm.group_matrices, model._groups, strict=True):
+        if group.name not in selected_names:
+            continue
+        active_arrays.append(gm.toarray())
+        active_groups.append(
+            GroupSlice(
+                name=group.name,
+                start=col,
+                end=col + group.size,
+                weight=group.weight,
+                penalized=group.penalized,
+                feature_name=group.feature_name,
+                subgroup_type=group.subgroup_type,
+                constraints=group.constraints,
+                monotone_engine=group.monotone_engine,
+                scop_reparameterization=group.scop_reparameterization,
+            )
+        )
+        col += group.size
+    X_active = np.hstack(active_arrays) if active_arrays else np.empty((len(W), 0))
+    if col != len(rank_info.selected_columns):
+        raise ValueError("rank metadata selected width does not match active groups")
+    return X_active, active_groups
+
+
+def _rank_augmented_covariance(model, rank_info, active_groups):
+    """Transform centered retained covariance to solver and public intercepts."""
+    p_active = len(rank_info.selected_columns)
+    centered = np.zeros((p_active + 1, p_active + 1))
+    if rank_info.sum_w > 0.0:
+        centered[0, 0] = 1.0 / rank_info.sum_w
+    centered[1:, 1:] = rank_info.augmented.pseudo_inverse()
+    transform = np.eye(p_active + 1)
+    transform[0, 1:] = -rank_info.mean_x[rank_info.selected_columns]
+    solver_covariance = transform @ centered @ transform.T
+    return _public_augmented_covariance(model, solver_covariance, active_groups)
+
+
 def coef_covariance(model):
     """Phi-scaled Bayesian covariance for active coefficients."""
+    solver = model._solver_pirls_result()
+    if solver.rank_info is not None:
+        W = _solver_space_working_weights(model)
+        _, active_groups = _rank_active_state(model, solver.rank_info, W)
+        covariance = solver.phi * solver.rank_info.augmented.pseudo_inverse()
+        return covariance, active_groups
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
     S_full = _build_S_from_penalties(model, lam2)
     return compute_coef_covariance(
@@ -102,6 +153,11 @@ def fit_active_info(model):
 
     solver = model._solver_pirls_result()
     W = _solver_space_working_weights(model)
+    if solver.rank_info is not None:
+        X_active, active_groups = _rank_active_state(model, solver.rank_info, W)
+        inverse = solver.rank_info.augmented.pseudo_inverse()
+        augmented = _rank_augmented_covariance(model, solver.rank_info, active_groups)
+        return X_active, W, inverse, augmented, active_groups
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
     S_full = _build_S_from_penalties(model, lam2)
@@ -141,6 +197,40 @@ def fit_inference_info(model):
 
     solver = model._solver_pirls_result()
     W = _solver_space_working_weights(model)
+    if solver.rank_info is not None:
+        rank_info = solver.rank_info
+        X_active, active_groups = _rank_active_state(model, rank_info, W)
+        inverse = rank_info.augmented.pseudo_inverse()
+        augmented = _rank_augmented_covariance(model, rank_info, active_groups)
+        if X_active.shape[1] == 0:
+            return {
+                "W": W,
+                "XtWX_inv": inverse,
+                "XtWX_inv_aug": augmented,
+                "active_groups": active_groups,
+                "R_a": np.empty((0, 0)),
+                "edf": np.array([]),
+                "edf1": np.array([]),
+                "group_edf_map": dict(rank_info.group_edf),
+            }
+        X_centered = X_active - rank_info.mean_x[rank_info.selected_columns]
+        data_gram = X_centered.T @ (W[:, None] * X_centered)
+        F = inverse @ data_gram
+        edf = rank_info.feature_edf[rank_info.selected_columns].copy()
+        edf1 = 2.0 * edf - np.sum(F * F, axis=1)
+        eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
+        eigvals = np.maximum(eigvals, 0.0)
+        R_a = (eigvecs * np.sqrt(eigvals)).T
+        return {
+            "W": W,
+            "XtWX_inv": inverse,
+            "XtWX_inv_aug": augmented,
+            "active_groups": active_groups,
+            "R_a": R_a,
+            "edf": edf,
+            "edf1": edf1,
+            "group_edf_map": dict(rank_info.group_edf),
+        }
 
     lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
     S_full = _build_S_from_penalties(model, lam2)

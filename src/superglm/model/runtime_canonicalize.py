@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -349,16 +349,10 @@ def _solver_to_public_state(
 
 def _build_public_result(solver: PIRLSResult, state: dict[str, Any]) -> PIRLSResult:
     """Build the public PIRLS result from the private solver fit."""
-    public_result = PIRLSResult(
+    public_result = replace(
+        solver,
         beta=np.asarray(solver.beta, dtype=np.float64).copy(),
         intercept=float(solver.intercept) + float(state["intercept_shift"]),
-        n_iter=solver.n_iter,
-        deviance=solver.deviance,
-        converged=solver.converged,
-        phi=solver.phi,
-        effective_df=solver.effective_df,
-        iteration_log=solver.iteration_log,
-        log_det_H=solver.log_det_H,
     )
     if hasattr(solver, "scop_states"):
         public_result.scop_states = solver.scop_states

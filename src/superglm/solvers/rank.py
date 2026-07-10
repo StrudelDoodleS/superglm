@@ -546,3 +546,10 @@ def decompose_factor(
         structural_aliases=_freeze(column_scale == 0.0, dtype=bool),
         retained_values=_freeze(retained_values),
     )
+
+
+def selected_group_name_set(result, groups: Sequence) -> set[str]:
+    """Return explicit solver selection, with a legacy coefficient fallback."""
+    if getattr(result, "rank_info", None) is not None:
+        return set(result.rank_info.selected_group_names)
+    return {group.name for group in groups if np.linalg.norm(result.beta[group.sl]) > 1e-12}

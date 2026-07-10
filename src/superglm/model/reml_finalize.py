@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time as _time
+from dataclasses import replace
 
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
@@ -11,7 +12,6 @@ from superglm.model.reml_state import update_reml_r_inv
 from superglm.reml.penalty_algebra import build_penalty_context, build_penalty_matrix
 from superglm.reml.result import _map_beta_between_bases
 from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.pirls import PIRLSResult
 
 
 def restore_qp_group_state(model, qp_saved_state) -> None:
@@ -163,15 +163,7 @@ def finalize_reml_fit(
         reml_penalties=reml_penalties,
     )
 
-    corrected = PIRLSResult(
-        beta=final_pirls.beta,
-        intercept=final_pirls.intercept,
-        n_iter=final_pirls.n_iter,
-        deviance=final_pirls.deviance,
-        converged=final_pirls.converged,
-        phi=phi_fixed,
-        effective_df=final_pirls.effective_df,
-    )
+    corrected = replace(final_pirls, phi=phi_fixed)
     model._result = corrected
     model._reml_result.pirls_result = corrected
 

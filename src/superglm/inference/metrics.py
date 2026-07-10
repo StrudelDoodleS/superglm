@@ -17,7 +17,11 @@ from superglm.inference.covariance import (  # noqa: F401
     _second_diff_penalty,
 )
 from superglm.inference.summary import ModelSummary, _CoefRow
-from superglm.model.state_ops import _public_augmented_covariance
+from superglm.model.state_ops import (
+    _public_augmented_covariance,
+    _rank_augmented_covariance,
+)
+from superglm.solvers.rank import selected_group_name_set
 from superglm.types import GroupSlice
 
 if TYPE_CHECKING:
@@ -220,8 +224,7 @@ class ModelMetrics:
 
     @cached_property
     def n_active_groups(self) -> int:
-        beta = self._result.beta
-        return sum(1 for g in self._groups if np.linalg.norm(beta[g.sl]) > 1e-12)
+        return len(selected_group_name_set(self._result, self._groups))
 
     @cached_property
     def eta(self) -> NDArray:
@@ -404,6 +407,43 @@ class ModelMetrics:
         dmu_deta = self._link.deriv_inverse(eta)
         W = self._weights * dmu_deta**2 / V
 
+        rank_info = getattr(self._result, "rank_info", None)
+        fit_weights = getattr(self._model, "_fit_weights", None)
+        uses_fitted_rank = bool(
+            rank_info is not None
+            and fit_weights is not None
+            and np.shape(fit_weights) == np.shape(self._weights)
+            and np.array_equal(fit_weights, self._weights)
+        )
+        if uses_fitted_rank:
+            selected_names = set(rank_info.selected_group_names)
+            active_arrays: list[NDArray] = []
+            active_groups: list[GroupSlice] = []
+            col = 0
+            for gm, group in zip(self._dm.group_matrices, self._groups, strict=True):
+                if group.name not in selected_names:
+                    continue
+                active_arrays.append(gm.toarray())
+                active_groups.append(
+                    GroupSlice(
+                        name=group.name,
+                        start=col,
+                        end=col + group.size,
+                        weight=group.weight,
+                        penalized=group.penalized,
+                        feature_name=group.feature_name,
+                        subgroup_type=group.subgroup_type,
+                        constraints=group.constraints,
+                        monotone_engine=group.monotone_engine,
+                        scop_reparameterization=group.scop_reparameterization,
+                    )
+                )
+                col += group.size
+            X_a = np.hstack(active_arrays) if active_arrays else np.empty((len(W), 0))
+            inverse = rank_info.augmented.pseudo_inverse()
+            augmented = _rank_augmented_covariance(self._model, rank_info, active_groups)
+            return X_a, W, inverse, augmented, active_groups
+
         lam2 = getattr(self._model, "_reml_lambdas", None) or self._model.lambda2
         S_full = self._build_S_from_penalties(lam2)
         X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
@@ -519,11 +559,11 @@ class ModelMetrics:
         """
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
         phi = self.phi
-        beta = self._result.beta
+        selected_names = selected_group_name_set(self._result, self._groups)
 
         result: dict[str, NDArray] = {}
         for g in self._groups:
-            if np.linalg.norm(beta[g.sl]) < 1e-12:
+            if g.name not in selected_names:
                 result[g.name] = np.zeros(g.size)
             else:
                 # Find corresponding active group
@@ -544,11 +584,11 @@ class ModelMetrics:
         Inactive groups get all-zero SEs.
         """
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
-        beta = self._result.beta
+        selected_names = selected_group_name_set(self._result, self._groups)
 
         result: dict[str, NDArray] = {}
         for g in self._groups:
-            if np.linalg.norm(beta[g.sl]) < 1e-12:
+            if g.name not in selected_names:
                 result[g.name] = np.zeros(g.size)
             else:
                 ag = next(ag for ag in active_groups if ag.name == g.name)
@@ -608,13 +648,12 @@ class ModelMetrics:
         from superglm.features.numeric import Numeric
         from superglm.features.spline import _SplineBase
 
-        beta = self._result.beta
         groups = self._model._feature_groups(name)
         spec = self._model._specs[name]
 
         # Inactive feature: return zeros (all subgroups zeroed)
-        beta_combined = np.concatenate([beta[g.sl] for g in groups])
-        if np.linalg.norm(beta_combined) < 1e-12:
+        selected_names = selected_group_name_set(self._result, self._groups)
+        if not any(group.name in selected_names for group in groups):
             if isinstance(spec, _SplineBase):
                 x_grid = np.linspace(spec._lo, spec._hi, n_points)
                 return {"x": x_grid, "se_log_relativity": np.zeros(n_points)}
@@ -700,10 +739,14 @@ class ModelMetrics:
             XtWX_inv_aug=XtWX_inv_aug,
             active_groups=active_groups,
             known_scale=self._known_scale,
-            # Pass None so build_coef_rows computes EDF from this
-            # ModelMetrics instance's own active info (which may use
-            # different weights/data than the fit).
-            group_edf_map=None,
+            group_edf_map=(
+                dict(self._result.rank_info.group_edf)
+                if getattr(self._result, "rank_info", None) is not None
+                and getattr(self._model, "_fit_weights", None) is not None
+                and np.shape(self._model._fit_weights) == np.shape(self._weights)
+                and np.array_equal(self._model._fit_weights, self._weights)
+                else None
+            ),
             reml_lambdas=getattr(self._model, "_reml_lambdas", None),
             lambda2=self._model.lambda2,
             n_obs=self.n_obs,

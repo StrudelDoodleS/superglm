@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
+from superglm import SuperGLM
 from superglm.distributions import Gaussian
+from superglm.features.numeric import Numeric
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.links import IdentityLink
 from superglm.penalties.group_lasso import GroupLasso
@@ -236,3 +239,28 @@ def test_pirls_selection_state_distinguishes_selected_zero_from_zeroed_group() -
     assert zeroed.rank_info.selected_group_names == ()
     assert zeroed.rank_info.selected_columns.size == 0
     assert zeroed.effective_df == pytest.approx(1.0)
+
+
+def test_alias_covariance_and_summary_suppress_nonestimable_coefficients() -> None:
+    x = np.linspace(-2.0, 2.0, 80)
+    frame = pd.DataFrame({"x": x, "duplicate": x})
+    y = 1.0 + 3.0 * x + 0.03 * np.sin(5.0 * x)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric(), "duplicate": Numeric()},
+    )
+    model.fit(frame, y)
+
+    rank_info = model._solver_pirls_result().rank_info
+    assert rank_info is not None
+    np.testing.assert_array_equal(rank_info.coefficient_estimable(), [False, False])
+    assert rank_info.is_estimable(np.array([1.0, 1.0]))
+    covariance, active_groups = model._coef_covariance
+    assert [group.name for group in active_groups] == ["x", "duplicate"]
+    assert np.linalg.matrix_rank(covariance) == 1
+    rows = {row.name: row for row in model.summary()._coef_rows}
+    for name in ("x", "duplicate"):
+        assert not rows[name].estimable
+        assert np.isnan(rows[name].se)
+        assert np.isnan(rows[name].p)

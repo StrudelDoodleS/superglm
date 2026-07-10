@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.inference.summary import _BasisDetailRow, _CoefRow, _compute_coef_stats
+from superglm.solvers.rank import selected_group_name_set
 from superglm.types import GroupSlice
 
 
@@ -69,6 +70,12 @@ def build_coef_rows(
     )
 
     beta = result.beta
+    selected_names = selected_group_name_set(result, groups)
+    coefficient_estimable = (
+        result.rank_info.coefficient_estimable()
+        if getattr(result, "rank_info", None) is not None
+        else np.ones(len(beta), dtype=bool)
+    )
 
     # ── Per-level diagnostics for categorical features ────────────
     # Compute observation count and exposure share per non-base level.
@@ -88,7 +95,7 @@ def build_coef_rows(
     # The augmented inverse has intercept at row/col 0; feature blocks start at 1.
     se_dict: dict[str, NDArray] = {}
     for g in groups:
-        if np.linalg.norm(beta[g.sl]) < 1e-12:
+        if g.name not in selected_names:
             se_dict[g.name] = np.zeros(g.size)
         else:
             ag = next((a for a in active_groups if a.name == g.name), None)
@@ -99,6 +106,9 @@ def build_coef_rows(
                 aug_sl = slice(1 + ag.start, 1 + ag.end)
                 var_diag = scale * np.diag(XtWX_inv_aug[aug_sl, aug_sl])
                 se_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
+        if g.name in selected_names:
+            se_dict[g.name] = se_dict[g.name].astype(float, copy=True)
+            se_dict[g.name][~coefficient_estimable[g.sl]] = np.nan
 
     # Intercept SE from augmented inverse [0, 0] element
     icpt_var = float(XtWX_inv_aug[0, 0])
@@ -196,7 +206,7 @@ def build_coef_rows(
         spec = specs.get(g.feature_name) or interaction_specs.get(g.feature_name)
         b_g = beta[g.sl]
         se_g = se_dict[g.name]
-        active = np.linalg.norm(b_g) > 1e-12
+        active = g.name in selected_names
 
         if isinstance(spec, OrderedCategorical):
             if g.feature_name in handled_ordered_features:
@@ -205,7 +215,7 @@ def build_coef_rows(
 
             feature_groups = [fg for fg in groups if fg.feature_name == g.feature_name]
             beta_combined = np.concatenate([beta[fg.sl] for fg in feature_groups])
-            feature_active = bool(np.linalg.norm(beta_combined) > 1e-12)
+            feature_active = any(fg.name in selected_names for fg in feature_groups)
             feature_edf = (
                 sum(_get_group_edf_map().get(fg.name, 0.0) for fg in feature_groups)
                 if feature_active
@@ -684,6 +694,7 @@ def build_coef_rows(
                     p=p,
                     ci_low=ci_lo,
                     ci_high=ci_hi,
+                    estimable=bool(coefficient_estimable[g.start]),
                 )
             )
 
@@ -701,6 +712,7 @@ def build_coef_rows(
                     p=p,
                     ci_low=ci_lo,
                     ci_high=ci_hi,
+                    estimable=bool(coefficient_estimable[g.start]),
                 )
             )
 
@@ -756,6 +768,12 @@ def build_basis_detail(
 
     beta = result.beta
     phi = result.phi
+    selected_names = selected_group_name_set(result, groups)
+    coefficient_estimable = (
+        result.rank_info.coefficient_estimable()
+        if getattr(result, "rank_info", None) is not None
+        else np.ones(len(beta), dtype=bool)
+    )
     detail: dict[str, list] = {}
 
     for g in groups:
@@ -766,7 +784,7 @@ def build_basis_detail(
         if not isinstance(spec, _SplineBase):
             continue
         b_g = beta[g.sl]
-        if np.linalg.norm(b_g) < 1e-12:
+        if g.name not in selected_names:
             continue
 
         ag = next((a for a in active_groups if a.name == g.name), None)
@@ -777,6 +795,7 @@ def build_basis_detail(
         aug_sl = slice(1 + ag.start, 1 + ag.end)
         var_diag = scale * np.diag(XtWX_inv_aug[aug_sl, aug_sl])
         se_arr = np.sqrt(np.maximum(var_diag, 0.0))
+        se_arr[~coefficient_estimable[g.sl]] = np.nan
 
         rows = []
         for i in range(g.size):

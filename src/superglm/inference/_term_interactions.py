@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from superglm.inference._term_types import InteractionInference
+from superglm.solvers.rank import selected_group_name_set
 
 if TYPE_CHECKING:
     from superglm.solvers.pirls import PIRLSResult
@@ -24,7 +25,8 @@ def _interaction_inference(
     ispec = interaction_specs[name]
     feature_groups = [g for g in groups if g.feature_name == name]
     beta_combined = np.concatenate([result.beta[g.sl] for g in feature_groups])
-    active = bool(np.linalg.norm(beta_combined) > 1e-12)
+    selected_names = selected_group_name_set(result, groups)
+    active = any(group.name in selected_names for group in feature_groups)
 
     raw = ispec.reconstruct(beta_combined)
 
