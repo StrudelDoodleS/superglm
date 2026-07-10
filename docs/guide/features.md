@@ -130,6 +130,19 @@ The legacy `basis="spline"` and spline shortcut arguments such as `kind=` and
 with `basis="step"` is also deprecated and will be removed. Use `Spline(...)`
 for smoothing or `Categorical(...)` for independent level effects.
 
+Inference follows the spline model, not a saturated categorical model. The
+summary reports one Wood-style whole-smooth p-value for the ordered term; its
+null hypothesis is that the smooth contributes no variation after centering.
+Per-level rows are base-relative effect estimates with standard errors and
+confidence intervals, but deliberately have no p-values or significance codes.
+Changing the reporting base therefore changes the displayed level contrasts,
+not the whole-smooth p-value.
+
+This interpretation depends on the numeric positions assigned to the levels.
+`order=[...]` uses equal spacing on `[0, 1]`; use `values={...}` when the real
+distances are unequal. If spacing and smoothness are not defensible assumptions,
+fit `Categorical(...)` and use a whole-term comparison instead.
+
 ## Numeric
 
 `Numeric()` is a simple passthrough for continuous variables that should enter

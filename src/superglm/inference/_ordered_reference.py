@@ -62,7 +62,7 @@ def ordered_reference_beta_contrast(
     propagating the full intercept/feature covariance into reporting standard
     errors without duplicating ordered-spline basis logic.
     """
-    contrast = np.zeros(n_coefficients, dtype=np.float64)
+    contrast: NDArray[np.float64] = np.zeros(n_coefficients, dtype=np.float64)
     for name, spec in _ordered_spline_specs(feature_order, specs):
         feature_groups = [group for group in groups if group.feature_name == name]
         if not feature_groups:

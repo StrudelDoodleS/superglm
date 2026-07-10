@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import warnings
 from typing import Any
 
 import numpy as np
@@ -11,6 +12,7 @@ from superglm.editor._types import EditableTerm
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.spline import Spline
 
 _SYMBOLIC_BASE_POLICIES = {"first", "most_exposed"}
 
@@ -339,25 +341,39 @@ def _ordered_spec_with_grouping(
     data,
 ) -> OrderedCategorical:
     values, native_base = _ordered_original_values(spec, grouping, data, base)
-    if spec._spline_obj is not None:
+    if spec.basis == "spline":
+        basis = (
+            copy.deepcopy(spec._spline_obj)
+            if spec._spline_obj is not None
+            else Spline(
+                kind=spec.kind,
+                n_knots=spec.n_knots,
+                degree=spec.degree,
+                select=spec.select,
+                penalty=spec.penalty,
+            )
+        )
         return OrderedCategorical(
             values=values,
-            basis=copy.deepcopy(spec._spline_obj),
+            basis=basis,
             base=native_base,
             grouping=grouping,
         )
 
-    return OrderedCategorical(
-        values=values,
-        basis=spec.basis,
-        kind=spec.kind,
-        base=native_base,
-        n_knots=spec.n_knots,
-        degree=spec.degree,
-        select=spec.select,
-        penalty=spec.penalty,
-        grouping=grouping,
-    )
+    # The user-facing constructor already warned when this legacy step spec was
+    # created. Do not repeat that warning from an internal editor compatibility clone.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"OrderedCategorical step smoothing .* is deprecated",
+            category=FutureWarning,
+        )
+        return OrderedCategorical(
+            values=values,
+            basis="step",
+            base=native_base,
+            grouping=grouping,
+        )
 
 
 def _ordered_original_values(

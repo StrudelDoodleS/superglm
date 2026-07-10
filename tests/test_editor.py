@@ -2732,7 +2732,12 @@ def test_ordered_categorical_spline_edited_summary_reports_level_rows():
     model = SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
-        features={"age_band": OrderedCategorical(order=levels, basis="spline", n_knots=3)},
+        features={
+            "age_band": OrderedCategorical(
+                order=levels,
+                basis=Spline(kind="ps", n_knots=3),
+            )
+        },
     )
     model.fit(X, y)
     session = EditorSession.from_model(model, terms=["age_band"])
@@ -2744,7 +2749,9 @@ def test_ordered_categorical_spline_edited_summary_reports_level_rows():
     row_names = [row.name for row in summary._coef_rows]
 
     assert all(f"age_band[{level}]" in row_names for level in levels)
-    assert "age_band" not in row_names
+    smooth_row = next(row for row in summary._coef_rows if row.name == "age_band")
+    assert smooth_row.is_spline
+    assert smooth_row.wald_p is None
     assert not any("[bs" in name or "[basis" in name for name in row_names)
 
 

@@ -126,3 +126,54 @@ def test_editor_clone_of_canonical_spline_does_not_warn_about_ignored_shortcuts(
     assert replacement.basis == "spline"
     assert replacement._spline_obj is not None
     assert replacement._spline.n_knots == spec._spline.n_knots
+
+
+def test_editor_clone_of_quiet_implicit_default_stays_quiet() -> None:
+    spec = OrderedCategorical(order=LEVELS)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        replacement = _ordered_spec_with_grouping(
+            spec,
+            grouping=None,
+            selected_levels=[],
+            base="first",
+            data=np.asarray(LEVELS, dtype=object),
+        )
+
+    assert replacement.basis == "spline"
+    assert replacement._spline_obj is not None
+    assert replacement._spline.n_knots == 5
+
+
+def test_editor_clone_of_deprecated_step_does_not_repeat_user_warning() -> None:
+    with pytest.warns(FutureWarning, match="step smoothing"):
+        spec = OrderedCategorical(order=LEVELS, basis="step")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        replacement = _ordered_spec_with_grouping(
+            spec,
+            grouping=None,
+            selected_levels=[],
+            base="first",
+            data=np.asarray(LEVELS, dtype=object),
+        )
+
+    assert replacement.basis == "step"
+
+
+@pytest.mark.parametrize(
+    ("levels", "basis"),
+    [
+        (["A", "B", "C", "D"], Spline(kind="ps", k=6)),
+        (["low", "medium", "high"], Spline(kind="ps", k=6)),
+        (["A", "B", "C"], Spline(kind="cr", k=4)),
+    ],
+)
+def test_documented_canonical_examples_do_not_warn_or_clamp(levels, basis) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        spec = OrderedCategorical(order=levels, basis=basis)
+
+    assert spec._spline.n_knots == basis.n_knots

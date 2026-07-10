@@ -204,7 +204,8 @@ fallback rather than the main monotone workflow.
 - `Spline(kind="ps")`, `Spline(kind="cr")`, and `Spline(kind="ns")` cover the
   main spline basis choices.
 - `OrderedCategorical(...)` smooths ordered factor levels without forcing a
-  plain one-hot representation.
+  plain one-hot representation and reports one whole-smooth test rather than
+  separate p-values at arbitrary level positions.
 - `collapse_levels(...)` lets you merge sparse categorical levels while still
   expanding back to original levels for inference and plotting.
 - `interactions=[(...)]` supports spline-categorical, numeric-categorical,
