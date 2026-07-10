@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 
 import numpy as np
 import scipy.linalg
@@ -27,7 +28,7 @@ import scipy.linalg.lapack
 from numpy.typing import NDArray
 
 import superglm.solvers.scop_exact_support as scop_exact_support
-from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initial_mean
+from superglm.distributions import _VARIANCE_FLOOR, Distribution, initial_mean
 from superglm.group_matrix import (
     DesignMatrix,
     DiscretizedSCOPGroupMatrix,
@@ -36,14 +37,20 @@ from superglm.group_matrix import (
     GroupMatrix,
     _block_xtwx_rhs,
 )
-from superglm.links import Link, stabilize_eta
+from superglm.links import Link
 from superglm.solvers.constrained_qp import solve_constrained_qp
-from superglm.solvers.irls_state import _evaluate_irls_state, _IRLSState, _select_irls_trial
+from superglm.solvers.irls_state import (
+    _evaluate_irls_state,
+    _immutable_array,
+    _IRLSState,
+    _select_irls_trial,
+)
 from superglm.solvers.pirls import (
     IterationDiagnostics,
     PIRLSResult,
     _positive_working_weight_stats,
 )
+from superglm.solvers.scop import SCOPSolverReparam
 from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -51,6 +58,81 @@ logger = logging.getLogger(__name__)
 
 _NORMAL_EQUATION_RCOND = 1e-10
 _QR_RCOND = float(np.sqrt(_NORMAL_EQUATION_RCOND))
+
+
+@dataclass(frozen=True)
+class _SCOPGroupSpec:
+    """Static definition of one SCOP group, separate from trial state."""
+
+    group_index: int
+    group: GroupSlice
+    reparam: SCOPSolverReparam
+    B_scop: NDArray
+    S_scop: NDArray
+    bin_idx: NDArray | None
+
+
+@dataclass(frozen=True)
+class _SCOPGroupState:
+    """Dynamic SCOP state committed atomically with an IRLS snapshot."""
+
+    group_index: int
+    beta_eff: NDArray
+    gamma_eff: NDArray
+    H_scop_penalized: NDArray | None
+    last_step_norm: float
+    last_fisher_fallback: bool
+
+
+@dataclass(frozen=True)
+class _SCOPTrialState:
+    """One complete mixed ordinary/SCOP trial."""
+
+    irls: _IRLSState
+    groups: tuple[_SCOPGroupState, ...]
+
+
+def _evaluate_scop_trial(
+    *,
+    committed: _SCOPTrialState,
+    proposed: _SCOPTrialState,
+    alpha: float,
+    specs: dict[int, _SCOPGroupSpec],
+    dm: DesignMatrix,
+    y: NDArray,
+    weights: NDArray,
+    family: Distribution,
+    link: Link,
+    offset: NDArray,
+) -> _SCOPTrialState:
+    """Evaluate a fixed-endpoint SCOP trial by interpolating latent state."""
+    beta_trial = committed.irls.beta + alpha * (proposed.irls.beta - committed.irls.beta)
+    intercept_trial = committed.irls.intercept + alpha * (
+        proposed.irls.intercept - committed.irls.intercept
+    )
+    trial_groups: list[_SCOPGroupState] = []
+    for committed_group, proposed_group in zip(committed.groups, proposed.groups, strict=True):
+        if committed_group.group_index != proposed_group.group_index:
+            raise ValueError("SCOP trial group ordering does not match")
+        spec = specs[committed_group.group_index]
+        beta_eff = committed_group.beta_eff + alpha * (
+            proposed_group.beta_eff - committed_group.beta_eff
+        )
+        gamma_eff = spec.reparam.forward(beta_eff)
+        beta_trial[spec.group.sl] = gamma_eff
+        trial_groups.append(
+            _SCOPGroupState(
+                group_index=committed_group.group_index,
+                beta_eff=_immutable_array(beta_eff),
+                gamma_eff=_immutable_array(gamma_eff),
+                H_scop_penalized=None,
+                last_step_norm=float(np.linalg.norm(beta_eff - committed_group.beta_eff)),
+                last_fisher_fallback=proposed_group.last_fisher_fallback,
+            )
+        )
+
+    irls = _evaluate_irls_state(dm, y, weights, family, link, offset, beta_trial, intercept_trial)
+    return _SCOPTrialState(irls=irls, groups=tuple(trial_groups))
 
 
 def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
@@ -553,6 +635,9 @@ def fit_irls_direct(
                         }
                 if cached_scop_state is not None:
                     for key in (
+                        "H_scop_penalized",
+                        "last_step_norm",
+                        "last_fisher_fallback",
                         "penalty_rank",
                         "penalty_log_det_omega_plus",
                         "penalty_eigvals_omega",
@@ -596,6 +681,58 @@ def fit_irls_direct(
             _reduced_gms.append(gms[gi])
             col_offset_r += sz
 
+        _scop_specs = {
+            gi: _SCOPGroupSpec(
+                group_index=gi,
+                group=groups[gi],
+                reparam=st["reparam"],
+                B_scop=st["B_scop"],
+                S_scop=st["S_scop"],
+                bin_idx=st["bin_idx"],
+            )
+            for gi, st in _scop_state.items()
+        }
+
+        # QP/warm initialization is part of the first committed state, not the
+        # first proposal. This gives iteration one a coherent latent baseline.
+        provisional = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+        V_init = np.maximum(family.variance(provisional.mu), _VARIANCE_FLOOR)
+        dmu_deta_init = link.deriv_inverse(provisional.eta)
+        W_init = weights * dmu_deta_init**2 / V_init
+        z_init = provisional.eta + (y - provisional.mu) / dmu_deta_init
+        z_off_init = z_init - offset
+        for gi, st in _scop_state.items():
+            if st["beta_scop"] is None:
+                g_i = groups[gi]
+                lam_scop = lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                bin_idx = st["bin_idx"]
+                if bin_idx is not None:
+                    n_bins = st["B_scop"].shape[0]
+                    W_agg = np.bincount(bin_idx, weights=W_init, minlength=n_bins)
+                    Wz_agg = np.bincount(
+                        bin_idx,
+                        weights=W_init * z_off_init,
+                        minlength=n_bins,
+                    )
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        z_bin = np.where(W_agg > 0, Wz_agg / W_agg, 0.0)
+                    st["beta_scop"] = st["reparam"].qp_initialize(
+                        st["B_scop"],
+                        z_bin,
+                        lambda_penalty=lam_scop,
+                        weights=W_agg,
+                    )
+                else:
+                    st["beta_scop"] = st["reparam"].qp_initialize(
+                        st["B_scop"],
+                        z_off_init,
+                        lambda_penalty=lam_scop,
+                        weights=W_init,
+                    )
+            gamma_eff = st["reparam"].forward(st["beta_scop"])
+            st["gamma_eff"] = gamma_eff.copy()
+            beta[groups[gi].sl] = gamma_eff
+
     # QR pre-computation: materialise full design matrix once
     # Constrained QP / SCOP requires Gram path — force it if constraints present
     _use_qr = direct_solve == "qr" and not has_constraints and not _has_scop
@@ -638,6 +775,25 @@ def fit_irls_direct(
 
     # Freeze the fit-entry state so iteration-one trial safety has a baseline.
     committed = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+    if _has_scop:
+        scop_committed = _SCOPTrialState(
+            irls=committed,
+            groups=tuple(
+                _SCOPGroupState(
+                    group_index=gi,
+                    beta_eff=_immutable_array(st["beta_scop"]),
+                    gamma_eff=_immutable_array(st["gamma_eff"]),
+                    H_scop_penalized=(
+                        None
+                        if st.get("H_scop_penalized") is None
+                        else _immutable_array(st["H_scop_penalized"])
+                    ),
+                    last_step_norm=float(st.get("last_step_norm", 0.0)),
+                    last_fisher_fallback=bool(st.get("last_fisher_fallback", False)),
+                )
+                for gi, st in sorted(_scop_state.items())
+            ),
+        )
     dev_prev = committed.deviance
     eta_unclipped = committed.eta_unclipped
     eta = committed.eta
@@ -716,34 +872,6 @@ def fit_irls_direct(
                 # Step 1: Compute SCOP contribution to eta from current state
                 eta_scop = np.zeros(n)
                 for gi, st in _scop_state.items():
-                    if st["beta_scop"] is None:
-                        # Initialize SCOP beta on first iteration
-                        g_i = groups[gi]
-                        _lam_scop = (
-                            lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
-                        )
-                        _bi = st["bin_idx"]
-                        if _bi is not None:
-                            # Discrete: aggregate to bin level for QP initialization
-                            _nb = st["B_scop"].shape[0]
-                            W_agg = np.bincount(_bi, weights=W, minlength=_nb)
-                            Wz_agg = np.bincount(_bi, weights=W * z_off, minlength=_nb)
-                            # Weighted-mean response at bin level
-                            with np.errstate(divide="ignore", invalid="ignore"):
-                                z_bin = np.where(W_agg > 0, Wz_agg / W_agg, 0.0)
-                            st["beta_scop"] = st["reparam"].qp_initialize(
-                                st["B_scop"],
-                                z_bin,
-                                lambda_penalty=_lam_scop,
-                                weights=W_agg,
-                            )
-                        else:
-                            st["beta_scop"] = st["reparam"].qp_initialize(
-                                st["B_scop"],
-                                z_off,
-                                lambda_penalty=_lam_scop,
-                                weights=W,
-                            )
                     gamma_eff = st["reparam"].forward(st["beta_scop"])
                     _eta_g = st["B_scop"] @ gamma_eff
                     if st["bin_idx"] is not None:
@@ -797,13 +925,9 @@ def fit_irls_direct(
 
                 # Step 6: Apply SCOP Newton step
                 if _scop_joint:
-                    # Snapshot all beta_scop_prev BEFORE solving
-                    for gi, st in _scop_state.items():
-                        st["beta_scop_prev"] = st["beta_scop"].copy()
-
                     # Joint Newton step for all SCOP groups simultaneously
                     _z_scop = z_off - eta_unconstrained
-                    joint_results = scop_joint_newton_step(
+                    scop_results = scop_joint_newton_step(
                         _scop_state,
                         W,
                         _z_scop,
@@ -816,13 +940,9 @@ def fit_irls_direct(
                             "pirls_iteration": it + 1,
                         },
                     )
-                    for gi, jresult in joint_results.items():
-                        _scop_state[gi]["beta_scop"] = jresult.beta_new
-                        _scop_state[gi]["H_scop_penalized"] = jresult.H_penalized
-                        _scop_state[gi]["last_step_norm"] = jresult.step_norm
-                        _scop_state[gi]["last_fisher_fallback"] = jresult.used_fisher_fallback
                 else:
                     # Sequential (existing code) — for parity comparison
+                    scop_results = {}
                     for gi, st in _scop_state.items():
                         z_scop = z_off - eta_unconstrained
                         # Remove contributions from other SCOP groups
@@ -834,7 +954,6 @@ def fit_irls_direct(
                                     eta2 = eta2[st2["bin_idx"]]
                                 z_scop = z_scop - eta2
 
-                        st["beta_scop_prev"] = st["beta_scop"].copy()
                         g_i = groups[gi]
                         _lam_scop = (
                             lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
@@ -855,14 +974,12 @@ def fit_irls_direct(
                                 "group_name": g_i.name,
                             },
                         )
-                        st["beta_scop"] = result.beta_new
-                        st["H_scop_penalized"] = result.H_penalized
+                        scop_results[gi] = result
 
                 # Step 7: Write gamma_eff (mapped coefficients) into full beta
                 for gi, st in _scop_state.items():
                     g = groups[gi]
-                    gamma_eff = st["reparam"].forward(st["beta_scop"])
-                    st["gamma_eff"] = gamma_eff
+                    gamma_eff = st["reparam"].forward(scop_results[gi].beta_new)
                     beta[g.sl] = gamma_eff
 
             else:
@@ -953,57 +1070,91 @@ def fit_irls_direct(
                 )
 
         if _has_scop:
-            # SCOP has additional latent state; its full transaction is handled
-            # separately. Preserve the existing state-aware halving until then.
             _t0 = time.perf_counter()
-            eta_unclipped = dm.matvec(beta) + intercept + offset
-            eta = stabilize_eta(eta_unclipped, link)
-            mu = clip_mu(link.inverse(eta), family)
-            eta_elapsed = time.perf_counter() - _t0
-            _t_eta += eta_elapsed
-            _t0 = time.perf_counter()
-            dev = float(np.sum(weights * family.deviance_unit(y, mu)))
-            deviance_eval_elapsed = time.perf_counter() - _t0
-            _t_deviance_eval += deviance_eval_elapsed
-            _t_deviance += eta_elapsed + deviance_eval_elapsed
-
-            n_halvings = 0
-            if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
-                for halving in range(max_halving):
-                    beta = 0.5 * (beta + beta_prev)
-                    intercept = 0.5 * (intercept + intercept_prev)
-                    eta_unclipped = dm.matvec(beta) + intercept + offset
-                    eta = stabilize_eta(eta_unclipped, link)
-                    mu = clip_mu(link.inverse(eta), family)
-                    dev_h = float(np.sum(weights * family.deviance_unit(y, mu)))
-                    if not np.isfinite(dev_h) or dev_h >= dev:
-                        break
-                    n_halvings += 1
-                    dev = dev_h
-                    logger.info(
-                        "  irls_direct iter=%d: step halving %d, dev=%.2e",
-                        it + 1,
-                        halving + 1,
-                        dev,
+            proposal_irls = _evaluate_irls_state(
+                dm, y, weights, family, link, offset, beta, intercept
+            )
+            proposal_scop = _SCOPTrialState(
+                irls=proposal_irls,
+                groups=tuple(
+                    _SCOPGroupState(
+                        group_index=gi,
+                        beta_eff=_immutable_array(scop_results[gi].beta_new),
+                        gamma_eff=_immutable_array(
+                            _scop_specs[gi].reparam.forward(scop_results[gi].beta_new)
+                        ),
+                        H_scop_penalized=(
+                            None
+                            if scop_results[gi].H_penalized is None
+                            else _immutable_array(scop_results[gi].H_penalized)
+                        ),
+                        last_step_norm=float(scop_results[gi].step_norm),
+                        last_fisher_fallback=bool(scop_results[gi].used_fisher_fallback),
                     )
-                    if dev <= dev_prev:
-                        break
-                if n_halvings > 0:
-                    frac = 0.5**n_halvings
-                    for gi, st in _scop_state.items():
-                        if st["beta_scop_prev"] is not None:
-                            st["beta_scop"] = (1 - frac) * st["beta_scop_prev"] + frac * st[
-                                "beta_scop"
-                            ]
-                        g = groups[gi]
-                        beta[g.sl] = st["reparam"].forward(st["beta_scop"])
+                    for gi in sorted(_scop_specs)
+                ),
+            )
+            scop_trial_cache: dict[float, _SCOPTrialState] = {1.0: proposal_scop}
 
-                eta_unclipped = dm.matvec(beta) + intercept + offset
-                eta = stabilize_eta(eta_unclipped, link)
-                mu = clip_mu(link.inverse(eta), family)
-                dev = float(np.sum(weights * family.deviance_unit(y, mu)))
-            retained = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
-            step_rejected = False
+            def evaluate_scop_trial(alpha: float) -> _IRLSState:
+                candidate = _evaluate_scop_trial(
+                    committed=scop_committed,
+                    proposed=proposal_scop,
+                    alpha=alpha,
+                    specs=_scop_specs,
+                    dm=dm,
+                    y=y,
+                    weights=weights,
+                    family=family,
+                    link=link,
+                    offset=offset,
+                )
+                scop_trial_cache[alpha] = candidate
+                return candidate.irls
+
+            decision = _select_irls_trial(
+                committed=scop_committed.irls,
+                proposal=proposal_scop.irls,
+                evaluate_state=evaluate_scop_trial,
+                max_halving=max_halving,
+            )
+            retained_scop = (
+                scop_committed if decision.step_rejected else scop_trial_cache[decision.alpha]
+            )
+            retained = retained_scop.irls
+            evaluation_elapsed = time.perf_counter() - _t0
+            _t_deviance += evaluation_elapsed
+            _t_deviance_eval += evaluation_elapsed
+            beta = retained.beta.copy()
+            intercept = retained.intercept
+            eta_unclipped = retained.eta_unclipped
+            eta = retained.eta
+            mu = retained.mu
+            dev = retained.deviance
+            n_halvings = decision.step_halvings
+            step_rejected = decision.step_rejected
+            committed_groups = {group.group_index: group for group in scop_committed.groups}
+            for group_state in retained_scop.groups:
+                st = _scop_state[group_state.group_index]
+                st["beta_scop_prev"] = committed_groups[group_state.group_index].beta_eff.copy()
+                st["beta_scop"] = group_state.beta_eff.copy()
+                st["gamma_eff"] = group_state.gamma_eff.copy()
+                st["H_scop_penalized"] = (
+                    None
+                    if group_state.H_scop_penalized is None
+                    else group_state.H_scop_penalized.copy()
+                )
+                st["last_step_norm"] = group_state.last_step_norm
+                st["last_fisher_fallback"] = group_state.last_fisher_fallback
+            if n_halvings:
+                logger.info(
+                    "  irls_direct SCOP iter=%d: accepted latent step fraction %.5g after "
+                    "%d halvings, dev=%.2e",
+                    it + 1,
+                    decision.alpha,
+                    n_halvings,
+                    dev,
+                )
         else:
             _t0 = time.perf_counter()
             proposal = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
@@ -1178,14 +1329,69 @@ def fit_irls_direct(
             )
             break
 
+        committed = retained
+        if _has_scop:
+            scop_committed = retained_scop
         if converged_this_iter:
             converged = True
             break
-        committed = retained
         dev_prev = dev
 
     t_elapsed = time.perf_counter() - t_start
     logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
+
+    if _has_scop:
+        # Final Gram and SCOP Hessian caches must describe the retained model,
+        # not the working state or a discarded full proposal.
+        V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
+        dmu_deta_final = link.deriv_inverse(eta)
+        W = weights * dmu_deta_final**2 / V_final
+        z = eta + (y - mu) / dmu_deta_final
+
+        if not step_rejected:
+            eta_unconstrained = np.full(n, intercept)
+            for gi in _non_scop_groups_idx:
+                g = groups[gi]
+                eta_unconstrained += gms[gi].matvec(beta[g.sl])
+            z_scop_final = z - offset - eta_unconstrained
+            if _scop_joint:
+                refresh_results = scop_joint_newton_step(
+                    _scop_state,
+                    W,
+                    z_scop_final,
+                    lambda2,
+                    groups,
+                    max_halving=10,
+                )
+                for gi, refresh in refresh_results.items():
+                    _scop_state[gi]["H_scop_penalized"] = (
+                        None if refresh.H_penalized is None else refresh.H_penalized.copy()
+                    )
+            else:
+                for gi, st in _scop_state.items():
+                    z_scop_group = z_scop_final.copy()
+                    for gi_other, st_other in _scop_state.items():
+                        if gi_other == gi:
+                            continue
+                        eta_other = st_other["B_scop"] @ st_other["gamma_eff"]
+                        if st_other["bin_idx"] is not None:
+                            eta_other = eta_other[st_other["bin_idx"]]
+                        z_scop_group -= eta_other
+                    g = groups[gi]
+                    lam_scop = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                    refresh = scop_newton_step(
+                        B_scop=st["B_scop"],
+                        W=W,
+                        z=z_scop_group,
+                        beta_scop=st["beta_scop"],
+                        reparam=st["reparam"],
+                        S_scop=st["S_scop"],
+                        lambda2=lam_scop,
+                        bin_idx=st["bin_idx"],
+                    )
+                    st["H_scop_penalized"] = (
+                        None if refresh.H_penalized is None else refresh.H_penalized.copy()
+                    )
 
     # Accumulate phase timing into the profile dict if provided
     if profile is not None:
