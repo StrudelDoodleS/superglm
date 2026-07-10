@@ -13,6 +13,8 @@ Seven interaction types covering all supported feature combinations:
 
 from __future__ import annotations
 
+import inspect
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -808,6 +810,11 @@ def _normalize_tensor_penalty(S: NDArray) -> NDArray:
     return S / max_eig
 
 
+_TENSOR_SCORE_CHUNK_SIZE = 8192
+_TENSOR_SCORE_SAMPLE_SIZE = 4096
+_MAX_TENSOR_SCORE_SUPPORT_CELLS = 2_000_000
+
+
 # ── TensorInteraction ─────────────────────────────────────────
 
 
@@ -864,7 +871,14 @@ class TensorInteraction:
         return (self.feat1_name, self.feat2_name)
 
     @staticmethod
-    def _marginal_from_spec(spec, x: NDArray, n_knots_override: int | None) -> TensorMarginalInfo:
+    def _marginal_from_spec(
+        spec,
+        x: NDArray,
+        n_knots_override: int | None,
+        *,
+        support: NDArray | None = None,
+        counts: NDArray | None = None,
+    ) -> TensorMarginalInfo:
         """Get marginal ingredients from a parent spec, optionally overriding n_knots.
 
         Enforces the mgcv te()/ti() contract on the original spec before
@@ -890,6 +904,37 @@ class TensorInteraction:
         # geometry than the older projected-B-spline CR path.
         from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
 
+        def marginal_ingredients(candidate) -> TensorMarginalInfo:
+            method = candidate.tensor_marginal_ingredients
+            if support is None:
+                return method(x)
+
+            def compact_legacy(legacy: TensorMarginalInfo) -> TensorMarginalInfo:
+                support_clipped = np.clip(
+                    np.asarray(support, dtype=np.float64), legacy.lo, legacy.hi
+                )
+                compact_basis = np.asarray(legacy.raw_basis_eval(support_clipped), dtype=np.float64)
+                compact_basis = compact_basis @ legacy.projection
+                return replace(legacy, basis=compact_basis)
+
+            try:
+                parameters = inspect.signature(method).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            accepts_keywords = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+            )
+            if accepts_keywords or {"support", "counts"} <= parameters.keys():
+                compact = method(x, support=support, counts=counts)
+                if np.asarray(compact.basis).shape[0] == len(support):
+                    return compact
+                return compact_legacy(compact)
+
+            # Compatibility for custom spline subclasses overriding the old
+            # one-argument method. Preserve their projection/penalty geometry,
+            # but retain only its evaluation on the discrete support.
+            return compact_legacy(method(x))
+
         if isinstance(spec, CubicRegressionSpline):
             knot_strategy = spec.knot_strategy
             if knot_strategy == "uniform" and spec._explicit_knots is None:
@@ -910,7 +955,7 @@ class TensorInteraction:
                 lambda_policy=None,
             )
             cardinal._place_knots(x)
-            info = cardinal.tensor_marginal_ingredients(x)
+            info = marginal_ingredients(cardinal)
             info.normalize_penalty = True
             return info
 
@@ -923,14 +968,12 @@ class TensorInteraction:
                 knot_alpha=spec.knot_alpha,
             )
             # CubicRegressionSpline/CardinalCRSpline hardcode degree=3
-            import inspect
-
             if "degree" in inspect.signature(type(spec).__init__).parameters:
                 kwargs["degree"] = spec.degree
             clone = type(spec)(**kwargs)
             clone._place_knots(x)
-            return clone.tensor_marginal_ingredients(x)
-        return spec.tensor_marginal_ingredients(x)
+            return marginal_ingredients(clone)
+        return marginal_ingredients(spec)
 
     def _centered_marginal_basis(self, x: NDArray, info: TensorMarginalInfo) -> sp.csr_matrix:
         x = np.asarray(x, dtype=np.float64).ravel()
@@ -943,6 +986,12 @@ class TensorInteraction:
         x1: NDArray,
         x2: NDArray,
         parent_specs: dict,
+        *,
+        discrete_supports: tuple[
+            tuple[NDArray, NDArray],
+            tuple[NDArray, NDArray],
+        ]
+        | None = None,
     ) -> tuple[TensorMarginalInfo, TensorMarginalInfo]:
         from superglm.features.spline import _SplineBase
 
@@ -960,8 +1009,24 @@ class TensorInteraction:
         nk2 = self._n_knots[1] if self._n_knots is not None else None
 
         # tensor_marginal_ingredients() raises TypeError for CardinalCRSpline
-        self._marginal1 = self._marginal_from_spec(spec1, x1, nk1)
-        self._marginal2 = self._marginal_from_spec(spec2, x2, nk2)
+        if discrete_supports is None:
+            support1 = counts1 = support2 = counts2 = None
+        else:
+            (support1, counts1), (support2, counts2) = discrete_supports
+        self._marginal1 = self._marginal_from_spec(
+            spec1,
+            x1,
+            nk1,
+            support=support1,
+            counts=counts1,
+        )
+        self._marginal2 = self._marginal_from_spec(
+            spec2,
+            x2,
+            nk2,
+            support=support2,
+            counts=counts2,
+        )
 
         self._p1 = self._marginal1.K_eff
         self._p2 = self._marginal2.K_eff
@@ -1075,14 +1140,20 @@ class TensorInteraction:
         sample_weight: NDArray | None = None,
     ) -> DiscreteTensorBuildResult:
         """Build a discretized tensor basis on observed joint support pairs."""
-        m1, m2 = self._prepare_marginal_infos(x1, x2, parent_specs)
-        S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty
-        S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
-
         support1, idx1 = _discretize_column(x1, int(n_bins[0]))
         support2, idx2 = _discretize_column(x2, int(n_bins[1]))
-        B1_unique = self._centered_marginal_basis(support1, m1).toarray()
-        B2_unique = self._centered_marginal_basis(support2, m2).toarray()
+        counts1 = np.bincount(idx1, minlength=len(support1))
+        counts2 = np.bincount(idx2, minlength=len(support2))
+        m1, m2 = self._prepare_marginal_infos(
+            x1,
+            x2,
+            parent_specs,
+            discrete_supports=((support1, counts1), (support2, counts2)),
+        )
+        S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty
+        S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
+        B1_unique = np.asarray(m1.basis, dtype=np.float64)
+        B2_unique = np.asarray(m2.basis, dtype=np.float64)
 
         # Encode joint support pairs into one integer to avoid the much slower
         # np.unique(..., axis=0) path on large observation arrays.
@@ -1126,20 +1197,67 @@ class TensorInteraction:
         """Score the tensor interaction without materialising the row-Kronecker block."""
         x1 = np.asarray(x1, dtype=np.float64).ravel()
         x2 = np.asarray(x2, dtype=np.float64).ravel()
-        B1 = self._centered_marginal_basis(x1, self._marginal1)
-        B2 = self._centered_marginal_basis(x2, self._marginal2)
+        if x1.shape != x2.shape:
+            raise ValueError("tensor interaction margins must have the same number of rows")
 
         beta_eff = np.asarray(beta, dtype=np.float64).ravel()
         if self._R_inv is not None:
             beta_eff = self._R_inv @ beta_eff
         C = beta_eff.reshape(self._p1, self._p2)
 
-        if self._p1 <= self._p2:
-            tmp = np.asarray(B1 @ C, dtype=np.float64)
-            return np.asarray(B2.multiply(tmp).sum(axis=1), dtype=np.float64).ravel()
+        if x1.size == 0:
+            return np.empty(0, dtype=np.float64)
 
-        tmp = np.asarray(B2 @ C.T, dtype=np.float64)
-        return np.asarray(B1.multiply(tmp).sum(axis=1), dtype=np.float64).ravel()
+        sample_step = max(1, len(x1) // _TENSOR_SCORE_SAMPLE_SIZE)
+        sample1 = x1[::sample_step][:_TENSOR_SCORE_SAMPLE_SIZE]
+        sample2 = x2[::sample_step][:_TENSOR_SCORE_SAMPLE_SIZE]
+        repeated_support = np.unique(sample1).size <= max(1, sample1.size // 2) and np.unique(
+            sample2
+        ).size <= max(1, sample2.size // 2)
+        if repeated_support:
+            support1, inverse1 = np.unique(x1, return_inverse=True)
+            support2, inverse2 = np.unique(x2, return_inverse=True)
+            support_cells = support1.size * self._p1 + support2.size * self._p2
+            if support_cells <= _MAX_TENSOR_SCORE_SUPPORT_CELLS:
+                B1_support = self._centered_marginal_basis(support1, self._marginal1).toarray()
+                B2_support = self._centered_marginal_basis(support2, self._marginal2).toarray()
+                pair_codes = inverse1.astype(np.int64) * len(support2) + inverse2
+                observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
+                cells_per_pair = self._p1 + self._p2 + min(self._p1, self._p2)
+                batch_size = max(1, _MAX_TENSOR_SCORE_SUPPORT_CELLS // cells_per_pair)
+                support_values = np.empty(len(observed_codes), dtype=np.float64)
+                for start in range(0, len(observed_codes), batch_size):
+                    stop = min(start + batch_size, len(observed_codes))
+                    batch_codes = observed_codes[start:stop]
+                    left = B1_support[batch_codes // len(support2)]
+                    right = B2_support[batch_codes % len(support2)]
+                    support_values[start:stop] = np.einsum(
+                        "ij,jk,ik->i",
+                        left,
+                        C,
+                        right,
+                        optimize=True,
+                    )
+                return np.asarray(support_values[pair_idx], dtype=np.float64)
+
+        result = np.empty(len(x1), dtype=np.float64)
+        for start in range(0, len(x1), _TENSOR_SCORE_CHUNK_SIZE):
+            stop = min(start + _TENSOR_SCORE_CHUNK_SIZE, len(x1))
+            B1 = self._centered_marginal_basis(x1[start:stop], self._marginal1)
+            B2 = self._centered_marginal_basis(x2[start:stop], self._marginal2)
+
+            if self._p1 <= self._p2:
+                tmp = np.asarray(B1 @ C, dtype=np.float64)
+                result[start:stop] = np.asarray(
+                    B2.multiply(tmp).sum(axis=1), dtype=np.float64
+                ).ravel()
+            else:
+                tmp = np.asarray(B2 @ C.T, dtype=np.float64)
+                result[start:stop] = np.asarray(
+                    B1.multiply(tmp).sum(axis=1), dtype=np.float64
+                ).ravel()
+
+        return result
 
     def reconstruct(self, beta: NDArray, n_points: int = 50) -> dict[str, Any]:
         # Map from SSP space to original space

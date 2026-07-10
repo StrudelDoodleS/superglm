@@ -63,6 +63,24 @@ def penalty_has_targets(penalty: object, groups: list[GroupSlice]) -> bool:
     return any(penalty_targets_group(penalty, g) for g in groups)
 
 
+def penalty_can_zero_groups(penalty: object) -> bool:
+    """Whether the fitted penalty can set a whole targeted group exactly to zero."""
+    lambda1 = getattr(penalty, "lambda1", None)
+    if lambda1 is None or lambda1 <= 0.0:
+        return False
+
+    # Pure L2 proximal updates shrink continuously and never perform selection.
+    # Unknown positive-lambda penalties retain the historical sparse default.
+    from superglm.penalties.group_elastic_net import GroupElasticNet
+    from superglm.penalties.ridge import Ridge
+
+    if isinstance(penalty, Ridge):
+        return False
+    if isinstance(penalty, GroupElasticNet):
+        return bool(penalty.alpha > 0.0)
+    return True
+
+
 @runtime_checkable
 class Penalty(Protocol):
     """Protocol for penalty functions.

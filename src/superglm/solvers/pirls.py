@@ -10,18 +10,46 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initial_mean
+from superglm.distributions import _VARIANCE_FLOOR, Distribution, initial_mean
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
     GroupMatrix,
-    _block_xtwx,
 )
-from superglm.links import Link, stabilize_eta
-from superglm.penalties.base import Penalty, penalty_targets_group
+from superglm.links import Link
+from superglm.penalties.base import Penalty, penalty_can_zero_groups, penalty_targets_group
+from superglm.solvers.centered_system import (
+    build_centered_system,
+    grouped_augmented_factor,
+    grouped_weighted_factor,
+)
+from superglm.solvers.irls_state import _evaluate_irls_state, _IRLSState, _select_irls_trial
+from superglm.solvers.rank import (
+    SHARED_RANK_POLICY,
+    RankInfo,
+    decompose_factor,
+    decompose_gram,
+    needs_factor_certification,
+)
 from superglm.types import GroupSlice
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_working_weight_stats(W: NDArray) -> tuple[float, float, float]:
+    """Return positive W minimum, maximum, and ratio, excluding zero-weight rows."""
+    positive = W[W > 0]
+    if positive.size == 0:
+        return float("nan"), float("nan"), float("inf")
+
+    positive_min = float(np.min(positive))
+    positive_max = float(np.max(positive))
+    if not np.isfinite(positive_max):
+        ratio = float("inf")
+    else:
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            ratio = float(np.divide(positive_max, positive_min))
+    return positive_min, positive_max, ratio
 
 
 @dataclass
@@ -45,6 +73,21 @@ class IterationDiagnostics:
     # Condition estimate and SVD fallback flag (direct solver only)
     cond_estimate: float | None = None
     used_svd_fallback: bool | None = None
+    raw_w_min: float | None = None
+    raw_w_max: float | None = None
+    raw_w_ratio: float | None = None
+    eta_min_unclipped: float | None = None
+    eta_max_unclipped: float | None = None
+    eta_clipped: bool | None = None
+    working_mu_min: float | None = None
+    working_mu_max: float | None = None
+    working_eta_min: float | None = None
+    working_eta_max: float | None = None
+    working_eta_min_unclipped: float | None = None
+    working_eta_max_unclipped: float | None = None
+    working_eta_clipped: bool | None = None
+    step_rejected: bool = False
+    rank_truncated: bool | None = None
 
 
 @dataclass
@@ -58,6 +101,7 @@ class PIRLSResult:
     effective_df: float
     iteration_log: list[IterationDiagnostics] | None = None
     log_det_H: float | None = None  # log|X'WX + S| from _safe_decompose_H  # noqa: N815
+    rank_info: RankInfo | None = None
 
 
 def _compute_group_hessians(
@@ -122,6 +166,7 @@ def _fit_pirls_inner(
 
     gms = dm.group_matrices
     n_groups = len(groups)
+    can_zero_groups = penalty_can_zero_groups(penalty)
 
     t_total = time.perf_counter()
     t_lipschitz_total = 0.0
@@ -129,11 +174,9 @@ def _fit_pirls_inner(
     total_inner_iters = 0
     total_groups_skipped = 0
 
-    # Compute initial deviance for step-halving baseline (catches divergence
-    # from iteration 1, e.g. NB2 deviance going negative under L1 penalty).
-    eta_init = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
-    mu_init = clip_mu(link.inverse(eta_init), family)
-    dev_prev = float(np.sum(weights * family.deviance_unit(y, mu_init)))
+    # Freeze the fit-entry state so every trial is evaluated from fixed endpoints.
+    committed = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+    dev_prev = committed.deviance
     if not np.isfinite(dev_prev):
         dev_prev = np.inf
     converged = False
@@ -141,26 +184,21 @@ def _fit_pirls_inner(
     for outer in range(max_iter_outer):
         t_outer_start = time.perf_counter()
 
-        # Save previous solution for step halving
-        beta_prev = beta.copy()
-        intercept_prev = intercept
+        beta_prev = committed.beta
+        intercept_prev = committed.intercept
+        beta = committed.beta.copy()
+        intercept = committed.intercept
 
-        # Current predictions
-        eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
-        mu = clip_mu(link.inverse(eta), family)
+        # Current predictions are the complete retained snapshot.
+        eta_unclipped = committed.eta_unclipped
+        eta = committed.eta
+        mu = committed.mu
 
         # Working weights and response (PIRLS)
         V = family.variance(mu)
         V = np.maximum(V, _VARIANCE_FLOOR)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
-        # Clamp W ratio to prevent ill-conditioned gram matrices when
-        # group lasso shrinks groups toward zero (mu → 0, W → 0 for some
-        # observations while others stay normal).  Floor at 1e-10 * max(W)
-        # matches R glm.fit's effective treatment of negligible-weight obs.
-        w_max = W.max()
-        if w_max > 0:
-            W = np.maximum(W, w_max * 1e-10)
         z = eta + (y - mu) / dmu_deta
 
         # Per-group Hessians and Lipschitz constants
@@ -238,47 +276,57 @@ def _fit_pirls_inner(
         total_inner_iters += inner_iters
         t_inner_total += time.perf_counter() - t_inner_start
 
-        # Deviance for outer convergence
-        eta_new = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
-        mu_new = clip_mu(link.inverse(eta_new), family)
-        dev = float(np.sum(weights * family.deviance_unit(y, mu_new)))
+        proposal = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+        trial_cache: dict[float, _IRLSState] = {1.0: proposal}
 
-        # Step halving: triggered when deviance deteriorates. Covers:
-        # 1. dev > 2×prev: classic overshoot (non-canonical links)
-        # 2. dev < 0 < prev: sign flip signals divergence (NB2 with L1
-        #    can push mu → ∞ for y=0 obs, making deviance very negative)
-        # 3. non-finite: NaN/Inf from numerical breakdown
-        n_halvings = 0
-        need_halving = False
-        if np.isfinite(dev_prev):
-            if not np.isfinite(dev):
-                need_halving = True
-            elif dev > 2.0 * dev_prev:
-                need_halving = True
-            elif dev_prev >= 0 and dev < -abs(dev_prev):
-                need_halving = True
-        if need_halving:
-            for halving in range(max_halving):
-                beta = 0.5 * (beta + beta_prev)
-                intercept = 0.5 * (intercept + intercept_prev)
-                eta_h = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
-                mu_h = clip_mu(link.inverse(eta_h), family)
-                dev_h = float(np.sum(weights * family.deviance_unit(y, mu_h)))
-                if not np.isfinite(dev_h) or dev_h >= dev:
-                    # No improvement — stop halving
-                    break
-                n_halvings += 1
-                dev = dev_h
-                logger.info(f"  PIRLS outer={outer + 1}: step halving {halving + 1}, dev={dev:.2e}")
-                if dev <= dev_prev:
-                    break
+        def evaluate_trial(alpha: float) -> _IRLSState:
+            beta_trial = committed.beta + alpha * (proposal.beta - committed.beta)
+            intercept_trial = committed.intercept + alpha * (
+                proposal.intercept - committed.intercept
+            )
+            candidate = _evaluate_irls_state(
+                dm,
+                y,
+                weights,
+                family,
+                link,
+                offset,
+                beta_trial,
+                intercept_trial,
+            )
+            trial_cache[alpha] = candidate
+            return candidate
+
+        decision = _select_irls_trial(
+            committed=committed,
+            proposal=proposal,
+            evaluate_state=evaluate_trial,
+            max_halving=max_halving,
+        )
+        retained = committed if decision.step_rejected else trial_cache[decision.alpha]
+        beta = retained.beta.copy()
+        intercept = retained.intercept
+        eta_new_unclipped = retained.eta_unclipped
+        eta_new = retained.eta
+        mu_new = retained.mu
+        dev = retained.deviance
+        n_halvings = decision.step_halvings
+        step_rejected = decision.step_rejected
+        if n_halvings:
+            logger.info(
+                "  PIRLS outer=%d: accepted step fraction %.5g after %d halvings, dev=%.2e",
+                outer + 1,
+                decision.alpha,
+                n_halvings,
+                dev,
+            )
 
         # Warn on extreme working weight range (helps diagnose bad data)
-        w_ratio = W.max() / max(W.min(), 1e-300)
+        positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(W)
         if w_ratio > 1e12:
-            logger.warning(
+            logger.debug(
                 f"PIRLS outer={outer + 1}: extreme W ratio {w_ratio:.1e} "
-                f"(W range [{W.min():.2e}, {W.max():.2e}])"
+                f"(positive W range [{positive_w_min:.2e}, {positive_w_max:.2e}])"
             )
 
         # Record per-iteration diagnostics
@@ -286,6 +334,14 @@ def _fit_pirls_inner(
             k = min(5, n)
             top_idx = np.argpartition(W, -k)[-k:]
             bot_idx = np.argpartition(W, k)[:k]
+            working_eta_clipped = bool(
+                float(np.min(eta_unclipped)) < float(np.min(eta))
+                or float(np.max(eta_unclipped)) > float(np.max(eta))
+            )
+            eta_clipped = bool(
+                float(np.min(eta_new_unclipped)) < float(np.min(eta_new))
+                or float(np.max(eta_new_unclipped)) > float(np.max(eta_new))
+            )
             iteration_log.append(
                 IterationDiagnostics(
                     iteration=outer + 1,
@@ -293,14 +349,28 @@ def _fit_pirls_inner(
                     w_min=float(W.min()),
                     w_max=float(W.max()),
                     w_ratio=w_ratio,
-                    mu_min=float(mu.min()),
-                    mu_max=float(mu.max()),
-                    eta_min=float(eta.min()),
-                    eta_max=float(eta.max()),
+                    mu_min=float(mu_new.min()),
+                    mu_max=float(mu_new.max()),
+                    eta_min=float(eta_new.min()),
+                    eta_max=float(eta_new.max()),
                     intercept=intercept,
                     step_halvings=n_halvings,
                     top_w_indices=top_idx[np.argsort(W[top_idx])[::-1]],
                     bottom_w_indices=bot_idx[np.argsort(W[bot_idx])],
+                    raw_w_min=float(W.min()),
+                    raw_w_max=float(W.max()),
+                    raw_w_ratio=w_ratio,
+                    eta_min_unclipped=float(np.min(eta_new_unclipped)),
+                    eta_max_unclipped=float(np.max(eta_new_unclipped)),
+                    eta_clipped=eta_clipped,
+                    working_mu_min=float(mu.min()),
+                    working_mu_max=float(mu.max()),
+                    working_eta_min=float(eta.min()),
+                    working_eta_max=float(eta.max()),
+                    working_eta_min_unclipped=float(np.min(eta_unclipped)),
+                    working_eta_max_unclipped=float(np.max(eta_unclipped)),
+                    working_eta_clipped=working_eta_clipped,
+                    step_rejected=step_rejected,
                 )
             )
 
@@ -310,6 +380,17 @@ def _fit_pirls_inner(
             f"dev={dev:12.1f}  delta={abs(dev - dev_prev) / (abs(dev_prev) + 1):10.2e}  "
             f"time={t_outer_elapsed:.3f}s"
         )
+
+        if step_rejected:
+            logger.warning(
+                "PIRLS rejected all trial steps at outer=%d; restored committed state "
+                "(committed dev=%.6g, proposal dev=%.6g, trials=%s)",
+                outer + 1,
+                committed.deviance,
+                proposal.deviance,
+                {alpha: state.deviance for alpha, state in trial_cache.items()},
+            )
+            break
 
         if not np.isfinite(dev):
             logger.warning(f"PIRLS non-finite deviance at outer={outer + 1}: dev={dev:.2e}")
@@ -328,6 +409,7 @@ def _fit_pirls_inner(
             if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
                 converged = True
                 break
+        committed = retained
         dev_prev = dev
 
     t_elapsed = time.perf_counter() - t_total
@@ -350,76 +432,151 @@ def _fit_pirls_inner(
         not isinstance(lambda2, dict) and lambda2 > 0
     )
 
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    # Selection is derived from the final retained coefficients.  A proposal
+    # may have been step-halved or rejected, so its proximal state is not an
+    # accepted source of rank and inference metadata.
+    group_selected = [
+        not can_zero_groups
+        or not penalty_targets_group(penalty, group)
+        or bool(np.any(beta[group.sl] != 0.0))
+        for group in groups
+    ]
+    selected_columns_list: list[int] = []
+    selected_groups: list[GroupSlice] = []
+    selected_gms: list[GroupMatrix] = []
+    selected_group_names: list[str] = []
+    selected_offset = 0
+    for is_selected, gm, group in zip(group_selected, gms, groups, strict=True):
+        if not is_selected:
+            continue
+        selected_columns_list.extend(range(group.start, group.end))
+        selected_group_names.append(group.name)
+        selected_gms.append(gm)
+        selected_groups.append(
+            GroupSlice(
+                name=group.name,
+                start=selected_offset,
+                end=selected_offset + group.size,
+                weight=group.weight,
+                penalized=group.penalized,
+                feature_name=group.feature_name,
+                subgroup_type=group.subgroup_type,
+            )
+        )
+        selected_offset += group.size
+
+    selected_columns = np.asarray(selected_columns_list, dtype=int)
+    selected_dm = DesignMatrix(selected_gms, n=n, p=len(selected_columns))
     if has_smoothing:
-        # Exact: 1 + trace((X'WX + S)^{-1} X'WX) using final PIRLS working weights.
-        from superglm.reml.penalty_algebra import build_penalty_matrix
-
-        active_groups_edf: list[GroupSlice] = []
-        active_gms: list[GroupMatrix] = []
-        col = 0
-        for gm, g in zip(gms, groups):
-            if np.linalg.norm(beta[g.sl]) > 1e-12:
-                p_g = gm.shape[1]
-                active_groups_edf.append(
-                    GroupSlice(
-                        name=g.name,
-                        start=col,
-                        end=col + p_g,
-                        weight=g.weight,
-                        penalized=g.penalized,
-                        feature_name=g.feature_name,
-                        subgroup_type=g.subgroup_type,
-                    )
-                )
-                active_gms.append(gm)
-                col += p_g
-
-        if active_gms:
-            p_a = col
-            XtWX = _block_xtwx(active_gms, active_groups_edf, W)
-            if S_override is not None:
-                # S_override is full (p x p) — slice to active columns
-                active_idx: list[int] = []
-                for ag in active_groups_edf:
-                    # Map active group back to original group for slicing
-                    orig_g = next(g for g in groups if g.name == ag.name)
-                    active_idx.extend(range(orig_g.start, orig_g.end))
-                active_idx = np.array(active_idx)
-                S = S_override[np.ix_(active_idx, active_idx)]
-            else:
-                S = build_penalty_matrix(active_gms, active_groups_edf, lambda2, p_a)
-            M = XtWX + S
-            eigvals, eigvecs = np.linalg.eigh(M)
-            # Keep the gram-path truncation aligned with the dense QR/SVD path:
-            # singular-value cutoff ``rtol * s_max`` corresponds to
-            # eigenvalue cutoff ``rtol**2 * eig_max``.
-            threshold = (1e-6**2) * max(eigvals.max(), 1e-12)
-            inv_eigvals = np.zeros_like(eigvals)
-            np.divide(1.0, eigvals, out=inv_eigvals, where=eigvals > threshold)
-            M_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
-            p_eff = 1.0 + float(np.trace(M_inv @ XtWX))
+        if S_override is not None:
+            selected_penalty = S_override[np.ix_(selected_columns, selected_columns)]
         else:
-            p_eff = 1.0
+            selected_penalty = build_penalty_matrix(
+                selected_gms,
+                selected_groups,
+                lambda2,
+                len(selected_columns),
+            )
     else:
-        # Breheny & Huang (2009) formula for group lasso (no smoothing).
-        # df_g = p_g - (p_g - 1) * lambda1 * w_g / ||beta_g||
-        p_eff = 1.0  # intercept
+        selected_penalty = np.zeros((len(selected_columns), len(selected_columns)))
+
+    V_final = np.maximum(family.variance(mu_new), _VARIANCE_FLOOR)
+    dmu_deta_final = link.deriv_inverse(eta_new)
+    W_final = weights * dmu_deta_final**2 / V_final
+    z_final = eta_new + (y - mu_new) / dmu_deta_final
+    centered = build_centered_system(
+        dm=selected_dm,
+        W=W_final,
+        z_off=z_final - offset,
+        penalty=selected_penalty,
+    )
+    data_rank = decompose_gram(centered.data_gram)
+    if needs_factor_certification(data_rank):
+        certified = decompose_factor(
+            grouped_weighted_factor(
+                selected_dm,
+                W_final,
+                center=centered.mean_x,
+            )
+        )
+        if certified.rank != data_rank.rank:
+            data_rank = certified
+    augmented_rank = data_rank if not np.any(selected_penalty) else decompose_gram(centered.hessian)
+    if needs_factor_certification(augmented_rank):
+        certified = decompose_factor(
+            grouped_augmented_factor(
+                selected_dm,
+                W_final,
+                selected_penalty,
+                center=centered.mean_x,
+            )
+        )
+        if certified.rank != augmented_rank.rank:
+            augmented_rank = certified
+    raw_gram, _, _, _ = centered.raw_weighted_moments()
+    coefficient_rank = decompose_gram(raw_gram + selected_penalty)
+    if needs_factor_certification(coefficient_rank):
+        certified = decompose_factor(
+            grouped_augmented_factor(selected_dm, W_final, selected_penalty)
+        )
+        if certified.rank != coefficient_rank.rank:
+            coefficient_rank = certified
+    feature_edf = np.zeros(p)
+    group_edf = {group.name: 0.0 for group in groups}
+
+    if has_smoothing:
+        selected_edf = np.diag(augmented_rank.pseudo_inverse() @ centered.data_gram).copy()
+        selected_edf[np.abs(selected_edf) < 100.0 * np.finfo(float).eps] = 0.0
+        feature_edf[selected_columns] = selected_edf
+        for selected_group, original_group in zip(
+            selected_groups,
+            (group for selected, group in zip(group_selected, groups, strict=True) if selected),
+            strict=True,
+        ):
+            group_edf[original_group.name] = float(np.sum(selected_edf[selected_group.sl]))
+    else:
+        # Preserve Breheny-Huang (2009) group-lasso EDF allocation.
         lam = penalty.lambda1 if penalty.lambda1 is not None else 0.0
-        for g in groups:
-            bg = beta[g.sl]
-            norm_g = np.linalg.norm(bg)
-            if norm_g > 1e-12:
-                if not penalty_targets_group(penalty, g):
-                    p_eff += g.size
-                else:
-                    shrink = min(1.0, lam * g.weight / norm_g)
-                    p_eff += g.size - (g.size - 1) * shrink
+        for is_selected, group in zip(group_selected, groups, strict=True):
+            if not is_selected:
+                continue
+            norm_g = float(np.linalg.norm(beta[group.sl]))
+            if not penalty_targets_group(penalty, group) or not can_zero_groups:
+                df_group = float(group.size)
+            else:
+                shrink = min(1.0, lam * group.weight / max(norm_g, 1e-300))
+                df_group = float(group.size - (group.size - 1) * shrink)
+            group_edf[group.name] = df_group
+            feature_edf[group.sl] = df_group / group.size
+
+    mean_x = np.zeros(p)
+    mean_x[selected_columns] = centered.mean_x
+    selected_columns.setflags(write=False)
+    mean_x.setflags(write=False)
+    feature_edf.setflags(write=False)
+    rank_info = RankInfo(
+        policy_version=SHARED_RANK_POLICY.version,
+        coordinate_space="solver",
+        selected_columns=selected_columns,
+        selected_group_names=tuple(selected_group_names),
+        sum_w=centered.sum_w,
+        mean_x=mean_x,
+        intercept_edf=1.0,
+        data=data_rank,
+        augmented=augmented_rank,
+        coefficient=coefficient_rank,
+        feature_edf=feature_edf,
+        group_edf=group_edf,
+        objective_loss=None,
+    )
+    p_eff = rank_info.total_edf
 
     # Pearson-based phi for estimated-scale families (Tweedie, Gamma, NB2).
     # SuperGLM's sample_weight follows the prior-weight convention, so the
     # residual d.f. correction is observation-count based (n - edf), while
     # the weights still scale the Pearson numerator.
-    V_final = np.maximum(family.variance(mu_new), _VARIANCE_FLOOR)
     pearson_chi2 = float(np.sum(weights * (y - mu_new) ** 2 / V_final))
     df_resid = max(float(len(y)) - p_eff, 1)
     phi = pearson_chi2 / df_resid
@@ -433,6 +590,7 @@ def _fit_pirls_inner(
         phi=phi,
         effective_df=p_eff,
         iteration_log=iteration_log if record_diagnostics else None,
+        rank_info=rank_info,
     )
 
 

@@ -1,6 +1,7 @@
 """Tests for _robust_solve(), _safe_decompose_H(), and QR solver path."""
 
 import logging
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -13,7 +14,9 @@ from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.profiling.tweedie import generate_tweedie_cpg
+from superglm.solvers import irls_direct as irls_direct_module
 from superglm.solvers.irls_direct import _robust_solve, _safe_decompose_H
+from superglm.solvers.rank import decompose_gram
 
 
 class TestRobustSolve:
@@ -68,7 +71,7 @@ class TestRobustSolve:
         assert np.all(np.isfinite(x))
 
     def test_singular_system_pseudo_inverse(self):
-        """Exactly singular system should still return a solution via SVD."""
+        """Exactly singular systems use the deterministic retained representative."""
         n = 10
         rng = np.random.default_rng(99)
         U, _, _ = np.linalg.svd(rng.standard_normal((n, n)))
@@ -79,7 +82,7 @@ class TestRobustSolve:
 
         x, cond_est, used_svd = _robust_solve(M, rhs)
 
-        assert used_svd
+        assert not used_svd
         residual = M @ x - rhs
         assert np.linalg.norm(residual) < np.linalg.norm(rhs)
 
@@ -139,8 +142,8 @@ class TestSafeDecomposeH:
         assert np.all(np.isfinite(H_inv))
         assert np.isfinite(log_det)
 
-    def test_singular_H_svd_fallback(self):
-        """Rank-deficient H (Cholesky fails) should fall back to SVD."""
+    def test_singular_H_rank_revealing_cholesky(self):
+        """Rank-deficient H uses the shared rank-revealing representative."""
         n = 8
         rng = np.random.default_rng(77)
         A = rng.standard_normal((n, n - 2))
@@ -148,22 +151,23 @@ class TestSafeDecomposeH:
 
         H_inv, log_det, cholesky_ok = _safe_decompose_H(H)
 
-        assert not cholesky_ok
+        assert cholesky_ok
         assert np.isfinite(log_det)
         assert np.all(np.isfinite(H_inv))
 
-    def test_log_det_positive_eigenvalues_only(self):
-        """log_det should only sum over positive singular values."""
+    def test_log_det_uses_same_shared_decomposition_as_inverse(self):
+        """The compatibility wrapper must not recompute a second cutoff."""
         n = 6
         rng = np.random.default_rng(55)
         U, _, _ = np.linalg.svd(rng.standard_normal((n, n)))
         s = np.array([100.0, 10.0, 1.0, 0.1, 1e-15, 1e-16])
         H = (U * s) @ U.T
 
-        _, log_det, _ = _safe_decompose_H(H)
+        H_inv, log_det, _ = _safe_decompose_H(H)
+        decomposition = decompose_gram(H)
 
-        expected = np.sum(np.log([100.0, 10.0, 1.0, 0.1]))
-        np.testing.assert_allclose(log_det, expected, atol=1.0)
+        np.testing.assert_allclose(H_inv, decomposition.pseudo_inverse())
+        assert log_det == pytest.approx(decomposition.log_pdet)
 
 
 class TestQRSolverPath:
@@ -218,12 +222,65 @@ class TestQRSolverPath:
         assert model._result.converged
         assert np.isfinite(model._result.deviance)
 
-    def test_auto_near_collinear_converges(self, caplog):
-        """'auto' mode handles near-collinear data without SVD fallback.
+    def test_qr_preserves_sparse_tail_direction(self):
+        """QR must not truncate a separated sparse-tail direction."""
+        rng = np.random.default_rng(123)
+        n = 1000
+        n_rare = 5
+        cat = np.array(["base"] * (n - n_rare) + ["rare"] * n_rare)
+        y = rng.gamma(shape=2.0, scale=3.0, size=n)
+        y[cat == "rare"] = 0.0
 
-        With pivoted Cholesky (Higham Ch. 10.3), near-collinear systems
-        that previously triggered repeated SVD fallbacks are now handled
-        directly by the rank-revealing decomposition.
+        idx = rng.permutation(n)
+        df = pd.DataFrame({"cat": cat[idx]})
+        y = y[idx]
+
+        common = dict(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="first")},
+        )
+        gram = SuperGLM(**common, direct_solve="gram")
+        qr = SuperGLM(**common, direct_solve="qr")
+
+        with pytest.warns(UserWarning, match="coefficient-based convergence"):
+            gram.fit(df, y, convergence="coefficients", max_iter=100, tol=0.0)
+        with pytest.warns(UserWarning, match="coefficient-based convergence"):
+            qr.fit(df, y, convergence="coefficients", max_iter=100, tol=0.0)
+
+        np.testing.assert_allclose(qr._result.deviance, gram._result.deviance, rtol=1e-8)
+        assert qr._result.beta[0] < -50.0
+
+    def test_qr_truncates_nearly_collinear_contrast(self):
+        rng = np.random.default_rng(7)
+        n = 500
+        x = rng.normal(size=n)
+        x2 = x + 1e-10 * rng.normal(size=n)
+        y = 1.0 + 3.0 * x + rng.normal(scale=0.1, size=n)
+        df = pd.DataFrame({"x1": x, "x2": x2})
+        common = dict(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x1": Numeric(), "x2": Numeric()},
+        )
+        gram = SuperGLM(**common, direct_solve="gram")
+        qr = SuperGLM(**common, direct_solve="qr")
+
+        gram.fit(df, y)
+        qr.fit(df, y)
+
+        assert np.max(np.abs(qr.result.beta)) < 10.0
+        np.testing.assert_allclose(qr.predict(df), gram.predict(df), atol=1e-6, rtol=1e-7)
+        np.testing.assert_allclose(qr.result.deviance, gram.result.deviance, rtol=1e-7)
+        assert qr.result.effective_df == pytest.approx(gram.result.effective_df)
+        assert qr.result.effective_df == pytest.approx(2.0)
+
+    def test_auto_near_collinear_converges(self, caplog, monkeypatch):
+        """'auto' mode does not report rank certification as a failed solve.
+
+        Small BLAS differences can make the Gram and bounded factor rank
+        decisions straddle the shared cutoff.  Force that platform-dependent
+        branch so the warning semantics are deterministic in every CI job.
         """
         rng = np.random.default_rng(42)
         n = 5000
@@ -253,11 +310,30 @@ class TestQRSolverPath:
             },
             direct_solve="auto",
         )
+
+        decompose_gram_original = irls_direct_module.decompose_gram
+
+        def force_factor_certification(*args, **kwargs):
+            decomposition = decompose_gram_original(*args, **kwargs)
+            if decomposition.rank == 0:
+                return decomposition
+            return replace(
+                decomposition,
+                rank=decomposition.rank - 1,
+                resolution_limited=True,
+            )
+
+        monkeypatch.setattr(irls_direct_module, "decompose_gram", force_factor_certification)
+        monkeypatch.setattr(
+            irls_direct_module,
+            "needs_factor_certification",
+            lambda _decomposition: True,
+        )
         with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
             model.fit(df, y)
         assert model._result.converged
-        # Pivoted Cholesky should handle this without repeated SVD fallbacks.
-        # Lock in the improvement: assert the warning is absent.
+        # Bounded factor certification is intentional, not a failed solve that
+        # should recommend switching the whole fit to the dense QR path.
         assert not any("consecutive SVD fallbacks" in r.message for r in caplog.records)
 
     def test_gram_no_warning(self, caplog):

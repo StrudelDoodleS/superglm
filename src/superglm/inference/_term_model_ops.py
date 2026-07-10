@@ -306,12 +306,14 @@ def refit_unpenalised(
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling refit_unpenalised().")
 
-    beta = model._result.beta
+    from superglm.solvers.rank import selected_group_name_set
+
+    selected_names = selected_group_name_set(model._result, model._groups)
 
     inactive = set()
     for name in model._feature_order:
         fgroups = [g for g in model._groups if g.feature_name == name]
-        if all(np.linalg.norm(beta[g.sl]) < 1e-12 for g in fgroups):
+        if all(group.name not in selected_names for group in fgroups):
             inactive.add(name)
 
     for iname in model._interaction_order:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -11,6 +11,8 @@ from numpy.typing import NDArray
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.solvers.pirls import PIRLSResult
+
+_RUNTIME_MEAN_CHUNK_SIZE = 8192
 
 
 @dataclass(frozen=True)
@@ -114,7 +116,25 @@ def _runtime_training_feature_column_means(
         raise RuntimeError("Training feature reference is required for runtime canonicalization")
 
     values = np.asarray(X_ref[feature_name], dtype=np.float64)
-    return np.asarray(np.mean(spec.transform(values), axis=0), dtype=np.float64)
+    support, counts = np.unique(values, return_counts=True)
+    total: NDArray[np.float64] | None = None
+    compensation: NDArray[np.float64] | None = None
+    for start in range(0, len(support), _RUNTIME_MEAN_CHUNK_SIZE):
+        stop = min(start + _RUNTIME_MEAN_CHUNK_SIZE, len(support))
+        transformed = np.asarray(spec.transform(support[start:stop]), dtype=np.float64)
+        chunk_total = np.asarray(counts[start:stop] @ transformed, dtype=np.float64)
+        if total is None:
+            total = np.zeros_like(chunk_total)
+            compensation = np.zeros_like(chunk_total)
+        assert compensation is not None
+        corrected = chunk_total - compensation
+        updated = total + corrected
+        compensation[...] = (updated - total) - corrected
+        total[...] = updated
+
+    if total is None:
+        return np.asarray(np.mean(spec.transform(values), axis=0), dtype=np.float64)
+    return total / float(len(values))
 
 
 def _replace_group_column_means(
@@ -349,16 +369,10 @@ def _solver_to_public_state(
 
 def _build_public_result(solver: PIRLSResult, state: dict[str, Any]) -> PIRLSResult:
     """Build the public PIRLS result from the private solver fit."""
-    public_result = PIRLSResult(
+    public_result = replace(
+        solver,
         beta=np.asarray(solver.beta, dtype=np.float64).copy(),
         intercept=float(solver.intercept) + float(state["intercept_shift"]),
-        n_iter=solver.n_iter,
-        deviance=solver.deviance,
-        converged=solver.converged,
-        phi=solver.phi,
-        effective_df=solver.effective_df,
-        iteration_log=solver.iteration_log,
-        log_det_H=solver.log_det_H,
     )
     if hasattr(solver, "scop_states"):
         public_result.scop_states = solver.scop_states

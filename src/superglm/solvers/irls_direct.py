@@ -20,14 +20,13 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 
 import numpy as np
-import scipy.linalg
-import scipy.linalg.lapack
 from numpy.typing import NDArray
 
 import superglm.solvers.scop_exact_support as scop_exact_support
-from superglm.distributions import _VARIANCE_FLOOR, Distribution, clip_mu, initial_mean
+from superglm.distributions import _VARIANCE_FLOOR, Distribution, initial_mean
 from superglm.group_matrix import (
     DesignMatrix,
     DiscretizedSCOPGroupMatrix,
@@ -36,13 +35,114 @@ from superglm.group_matrix import (
     GroupMatrix,
     _block_xtwx_rhs,
 )
-from superglm.links import Link, stabilize_eta
+from superglm.links import Link
+from superglm.solvers.centered_system import (
+    CenteredSystem,
+    build_centered_system,
+    grouped_augmented_factor,
+    grouped_weighted_factor,
+    refresh_centered_rhs,
+)
 from superglm.solvers.constrained_qp import solve_constrained_qp
-from superglm.solvers.pirls import IterationDiagnostics, PIRLSResult
+from superglm.solvers.irls_state import (
+    _evaluate_irls_state,
+    _immutable_array,
+    _IRLSState,
+    _select_irls_trial,
+)
+from superglm.solvers.pirls import (
+    IterationDiagnostics,
+    PIRLSResult,
+    _positive_working_weight_stats,
+)
+from superglm.solvers.rank import (
+    SHARED_RANK_POLICY,
+    RankInfo,
+    decompose_factor,
+    decompose_gram,
+    decompose_symmetric,
+    needs_factor_certification,
+)
+from superglm.solvers.scop import SCOPSolverReparam
 from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
 from superglm.types import GroupSlice, PenaltyComponent
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _SCOPGroupSpec:
+    """Static definition of one SCOP group, separate from trial state."""
+
+    group_index: int
+    group: GroupSlice
+    reparam: SCOPSolverReparam
+    B_scop: NDArray
+    S_scop: NDArray
+    bin_idx: NDArray | None
+
+
+@dataclass(frozen=True)
+class _SCOPGroupState:
+    """Dynamic SCOP state committed atomically with an IRLS snapshot."""
+
+    group_index: int
+    beta_eff: NDArray
+    gamma_eff: NDArray
+    H_scop_penalized: NDArray | None
+    last_step_norm: float
+    last_fisher_fallback: bool
+
+
+@dataclass(frozen=True)
+class _SCOPTrialState:
+    """One complete mixed ordinary/SCOP trial."""
+
+    irls: _IRLSState
+    groups: tuple[_SCOPGroupState, ...]
+
+
+def _evaluate_scop_trial(
+    *,
+    committed: _SCOPTrialState,
+    proposed: _SCOPTrialState,
+    alpha: float,
+    specs: dict[int, _SCOPGroupSpec],
+    dm: DesignMatrix,
+    y: NDArray,
+    weights: NDArray,
+    family: Distribution,
+    link: Link,
+    offset: NDArray,
+) -> _SCOPTrialState:
+    """Evaluate a fixed-endpoint SCOP trial by interpolating latent state."""
+    beta_trial = committed.irls.beta + alpha * (proposed.irls.beta - committed.irls.beta)
+    intercept_trial = committed.irls.intercept + alpha * (
+        proposed.irls.intercept - committed.irls.intercept
+    )
+    trial_groups: list[_SCOPGroupState] = []
+    for committed_group, proposed_group in zip(committed.groups, proposed.groups, strict=True):
+        if committed_group.group_index != proposed_group.group_index:
+            raise ValueError("SCOP trial group ordering does not match")
+        spec = specs[committed_group.group_index]
+        beta_eff = committed_group.beta_eff + alpha * (
+            proposed_group.beta_eff - committed_group.beta_eff
+        )
+        gamma_eff = spec.reparam.forward(beta_eff)
+        beta_trial[spec.group.sl] = gamma_eff
+        trial_groups.append(
+            _SCOPGroupState(
+                group_index=committed_group.group_index,
+                beta_eff=_immutable_array(beta_eff),
+                gamma_eff=_immutable_array(gamma_eff),
+                H_scop_penalized=None,
+                last_step_norm=float(np.linalg.norm(beta_eff - committed_group.beta_eff)),
+                last_fisher_fallback=proposed_group.last_fisher_fallback,
+            )
+        )
+
+    irls = _evaluate_irls_state(dm, y, weights, family, link, offset, beta_trial, intercept_trial)
+    return _SCOPTrialState(irls=irls, groups=tuple(trial_groups))
 
 
 def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
@@ -63,99 +163,17 @@ def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
 def _robust_solve(
     M: NDArray, rhs: NDArray, residual_tol: float = 1e-6
 ) -> tuple[NDArray, float, bool]:
-    """Solve ``M @ x = rhs`` with pivoted Cholesky, SVD fallback.
-
-    Uses a three-tier strategy (Higham, *Accuracy and Stability*, Ch. 10):
-
-    1. **Pivoted Cholesky** (``dpstrf``): rank-revealing, handles PSD
-       matrices.  If full-rank, solves via triangular back-substitution.
-       If rank-deficient, solves the minimum-norm system from the leading
-       *r* pivoted columns.
-    2. **Residual check**: verifies ``||Mx - rhs|| / ||rhs|| < residual_tol``
-       as a direct solve-quality signal.
-    3. **SVD fallback**: backward-stable for any condition number.
-
-    Parameters
-    ----------
-    M : (k, k) ndarray, symmetric positive (semi-)definite
-    rhs : (k,) ndarray
-    residual_tol : float
-        Maximum acceptable relative residual from the solve.
-
-    Returns
-    -------
-    x : (k,) ndarray
-    cond_est : float
-        Estimated condition number (from pivoted Cholesky diagonal or SVD).
-    used_svd : bool
-        True if the SVD path was taken.
-    """
-    k = M.shape[0]
-
-    # Fast path: ordinary SPD systems are the common case in REML/IRLS.
-    # Keep the rank-revealing path below as the safety net for semidefinite
-    # or numerically awkward systems.
-    try:
-        L = scipy.linalg.cholesky(M, lower=True, check_finite=False)
-        x = scipy.linalg.cho_solve((L, True), rhs, check_finite=False)
-        rhs_norm = np.linalg.norm(rhs)
-        rel_residual = np.linalg.norm(M @ x - rhs) / max(rhs_norm, 1e-300)
-        if rel_residual < residual_tol:
-            diag_L = np.abs(np.diag(L))
-            cond_est = float((diag_L.max() / max(diag_L.min(), 1e-300)) ** 2)
-            return x, cond_est, False
-    except (np.linalg.LinAlgError, ValueError):
-        pass
-
-    # === Primary path: Pivoted Cholesky (Higham Ch. 10.3) ===
-    try:
-        c, piv, rank, info = scipy.linalg.lapack.dpstrf(M, lower=0)
-        if info < 0:
-            raise np.linalg.LinAlgError("dpstrf: illegal argument")
-
-        piv0 = piv - 1  # 0-indexed
-        U = np.triu(c[:rank, :rank])  # rank x rank upper triangular
-
-        # Permute rhs to pivoted order
-        rhs_perm = rhs[piv0]
-
-        if rank == k:
-            # Full rank: solve U' U x_perm = rhs_perm
-            y = scipy.linalg.solve_triangular(U, rhs_perm, lower=False, trans="T")
-            x_perm = scipy.linalg.solve_triangular(U, y, lower=False)
-            # Unpermute
-            x = np.empty(k)
-            x[piv0] = x_perm
-        else:
-            # Rank-deficient: solve in the leading rank subspace
-            rhs_r = rhs_perm[:rank]
-            # U[:rank, :rank] is the factor: solve U' U x_r = rhs_r
-            y = scipy.linalg.solve_triangular(U, rhs_r, lower=False, trans="T")
-            x_r = scipy.linalg.solve_triangular(U, y, lower=False)
-            x_perm = np.zeros(k)
-            x_perm[:rank] = x_r
-            x = np.empty(k)
-            x[piv0] = x_perm
-
-        # Verify solution quality
-        rhs_norm = np.linalg.norm(rhs)
-        rel_residual = np.linalg.norm(M @ x - rhs) / max(rhs_norm, 1e-300)
-        if rel_residual < residual_tol:
-            diag_U = np.abs(np.diag(U))
-            cond_est = float((diag_U.max() / max(diag_U.min(), 1e-300)) ** 2)
-            return x, cond_est, False
-    except (np.linalg.LinAlgError, ValueError):
-        pass
-
-    # === Fallback: Truncated SVD (backward-stable for any condition) ===
-    U_svd, s, Vh = np.linalg.svd(M, full_matrices=False)
-    thresh = s[0] * 1e-10
-    mask = s > thresh
-    inv_s = np.zeros_like(s)
-    np.divide(1.0, s, out=inv_s, where=mask)
-    x = (Vh.T * inv_s) @ (U_svd.T @ rhs)
-    cond_est = float(s[0] / max(s[-1], 1e-300))
-    return x, cond_est, True
+    """Compatibility wrapper around the shared equilibrated rank policy."""
+    decomposition = decompose_gram(M, residual_tol=residual_tol)
+    used_spectral_fallback = decomposition.method not in {
+        "cholesky",
+        "pivoted_cholesky",
+    }
+    return (
+        decomposition.solve(rhs),
+        decomposition.pre_truncation_condition,
+        used_spectral_fallback,
+    )
 
 
 def _solve_profiled_intercept_from_h_inv(
@@ -235,121 +253,10 @@ def _invert_xtwx_plus_penalty(
 
 
 def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, float, bool]:
-    """Decompose H = X'WX + S, returning its inverse and log-determinant.
-
-    Uses a three-tier strategy (Higham, *Accuracy and Stability*, Ch. 10):
-
-    1. **Pivoted Cholesky** (``dpstrf``): rank-revealing, O(p³).  Detects
-       rank deficiency earlier and more cheaply than SVD.  For full-rank
-       systems the inverse is computed via triangular solves.  For
-       rank-deficient systems a truncated pseudo-inverse is formed from
-       the leading *r* pivoted columns.
-    2. **Residual spot-check**: after computing the inverse, verify
-       ``||H @ H_inv[:, 0] - e_0|| < residual_tol``.  This is a direct
-       solve-quality signal.  In practice, many rank-deficient cases
-       still fail this check and fall through to SVD — the pivoted
-       Cholesky win is earlier detection, not SVD elimination.
-    3. **SVD fallback**: backward-stable for any condition number.
-
-    Parameters
-    ----------
-    H : (p, p) ndarray
-        The matrix to invert (typically X'WX + S).
-    residual_tol : float
-        Maximum acceptable residual from the inverse spot-check.
-
-    Returns
-    -------
-    H_inv : (p, p) ndarray
-        The inverse (or pseudo-inverse) of H.
-    log_det_H : float
-        log|H| (full-rank) or log|H|₊ (rank-deficient, positive eigenvalues).
-    cholesky_ok : bool
-        True if the pivoted-Cholesky path succeeded with acceptable quality.
-    """
-    p = H.shape[0]
-
-    # Fast path for the usual full-rank SPD case.  If this fails or the
-    # spot-check is poor, fall through to the rank-revealing decomposition.
-    try:
-        L = scipy.linalg.cholesky(H, lower=True, check_finite=False)
-        H_inv = scipy.linalg.cho_solve((L, True), np.eye(p), check_finite=False)
-        e0 = np.zeros(p)
-        e0[0] = 1.0
-        residual = np.linalg.norm(H @ H_inv[:, 0] - e0)
-        if residual < residual_tol:
-            diag_L = np.abs(np.diag(L))
-            log_det_H = 2.0 * float(np.sum(np.log(diag_L)))
-            return H_inv, log_det_H, True
-    except (np.linalg.LinAlgError, ValueError):
-        pass
-
-    # === Primary path: Pivoted Cholesky (Higham Ch. 10.3) ===
-    # dpstrf computes P' U' U P = H (upper) with column pivoting,
-    # revealing the numerical rank.
-    try:
-        c, piv, rank, info = scipy.linalg.lapack.dpstrf(H, lower=0)
-        piv0 = piv[:rank] - 1  # 0-indexed pivot indices for the leading rank columns
-
-        if info < 0:
-            raise np.linalg.LinAlgError("dpstrf: illegal argument")
-
-        U = np.triu(c[:rank, :rank])  # rank x rank upper triangular factor
-
-        if rank == p:
-            # Full rank — invert via triangular solve on the permuted system.
-            # P' U' U P = H  =>  H_inv = P' (U' U)^{-1} P
-            U_inv = scipy.linalg.solve_triangular(U, np.eye(rank), lower=False)
-            H_inv_perm = U_inv @ U_inv.T
-
-            # Unpermute: H_inv[i, j] = H_inv_perm[inv_piv[i], inv_piv[j]]
-            inv_piv = np.argsort(piv0)
-            H_inv = H_inv_perm[np.ix_(inv_piv, inv_piv)]
-
-            # Spot-check: verify first column of the inverse (O(p²))
-            e0 = np.zeros(p)
-            e0[0] = 1.0
-            residual = np.linalg.norm(H @ H_inv[:, 0] - e0)
-            if residual < residual_tol:
-                diag_U = np.abs(np.diag(U))
-                log_det_H = 2.0 * float(np.sum(np.log(diag_U)))
-                return H_inv, log_det_H, True
-        else:
-            # Rank-deficient — truncated pseudo-inverse from leading r columns.
-            # Only the first `rank` pivoted columns contribute.
-            # U is rank x rank, factor of the rank x rank leading minor of P H P'.
-            # The remaining (p - rank) directions are in the null space.
-            U_inv = scipy.linalg.solve_triangular(U, np.eye(rank), lower=False)
-            # Pseudo-inverse in permuted space: zero out null-space directions
-            H_inv_perm = np.zeros((p, p))
-            H_inv_perm[:rank, :rank] = U_inv @ U_inv.T
-
-            inv_piv = np.argsort(piv - 1)  # full piv, 0-indexed
-            H_inv = H_inv_perm[np.ix_(inv_piv, inv_piv)]
-
-            # Spot-check
-            e0 = np.zeros(p)
-            e0[0] = 1.0
-            residual = np.linalg.norm(H @ H_inv[:, 0] - e0)
-            if residual < residual_tol:
-                diag_U = np.abs(np.diag(U))
-                log_det_H = 2.0 * float(np.sum(np.log(diag_U)))
-                return H_inv, log_det_H, True
-    except (np.linalg.LinAlgError, ValueError):
-        pass
-
-    # === Fallback: Truncated SVD (backward-stable for any condition) ===
-    U_svd, s, Vh = np.linalg.svd(H, full_matrices=False)
-    thresh = s[0] * 1e-10
-    mask = s > thresh
-    inv_s = np.zeros_like(s)
-    np.divide(1.0, s, out=inv_s, where=mask)
-    H_inv = (Vh.T * inv_s) @ Vh  # symmetric: Vh.T @ diag(inv_s) @ Vh
-
-    pos_s = s[s > thresh]
-    log_det_H = float(np.sum(np.log(pos_s))) if pos_s.size > 0 else 0.0
-
-    return H_inv, log_det_H, False
+    """Compatibility wrapper returning inverse, pseudo-logdet, and fast-path flag."""
+    decomposition = decompose_symmetric(H, residual_tol=residual_tol)
+    cholesky_ok = decomposition.method in {"cholesky", "pivoted_cholesky"}
+    return decomposition.pseudo_inverse(), decomposition.log_pdet, cholesky_ok
 
 
 def fit_irls_direct(
@@ -378,6 +285,10 @@ def fit_irls_direct(
     scop_state_init: dict[int, dict] | None = None,
     debug_recorder=None,
     debug_context: dict[str, object] | None = None,
+    compute_rank_info: bool = True,
+    _return_working_system: bool = False,
+    _compute_fit_statistics: bool = True,
+    _deviance_init: float | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -419,6 +330,22 @@ def fit_irls_direct(
         If True, also return the final weighted Gram matrix X'WX. Used by the
         REML outer loop to avoid rebuilding X'WX in cheap iterations when W is
         held fixed.
+    compute_rank_info : bool
+        If False, skip data-subspace metadata used only by retained-fit
+        inference. Intermediate REML fits still compute the coefficient and
+        augmented decompositions needed for their objective and EDF.
+    _return_working_system : bool
+        Internal fREML performance-iteration mode. Return the centered system
+        used for the last coefficient update instead of rebuilding it at the
+        proposed coefficients. The authoritative final fit must leave this
+        False so exported inference remains tied to the retained model.
+    _compute_fit_statistics : bool
+        Internal optimization switch. If False, omit EDF and scale summaries
+        that the fREML outer loop does not consume. The authoritative final
+        fit must leave this True.
+    _deviance_init : float, optional
+        Previously evaluated deviance at ``beta_init``/``intercept_init``.
+        Used by private fREML steps to avoid repeating a full response scan.
     record_diagnostics : bool
         If True, record per-iteration W/mu/eta stats on the result.
     S_override : (p, p) ndarray, optional
@@ -480,6 +407,10 @@ def fit_irls_direct(
 
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
+    if (not _compute_fit_statistics and compute_rank_info) or (
+        _return_working_system and (compute_rank_info or has_constraints or _has_scop)
+    ):
+        raise ValueError("intermediate REML shortcuts require rank metadata to be disabled")
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
@@ -545,6 +476,9 @@ def fit_irls_direct(
                         }
                 if cached_scop_state is not None:
                     for key in (
+                        "H_scop_penalized",
+                        "last_step_norm",
+                        "last_fisher_fallback",
                         "penalty_rank",
                         "penalty_log_det_omega_plus",
                         "penalty_eigvals_omega",
@@ -588,6 +522,58 @@ def fit_irls_direct(
             _reduced_gms.append(gms[gi])
             col_offset_r += sz
 
+        _scop_specs = {
+            gi: _SCOPGroupSpec(
+                group_index=gi,
+                group=groups[gi],
+                reparam=st["reparam"],
+                B_scop=st["B_scop"],
+                S_scop=st["S_scop"],
+                bin_idx=st["bin_idx"],
+            )
+            for gi, st in _scop_state.items()
+        }
+
+        # QP/warm initialization is part of the first committed state, not the
+        # first proposal. This gives iteration one a coherent latent baseline.
+        provisional = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+        V_init = np.maximum(family.variance(provisional.mu), _VARIANCE_FLOOR)
+        dmu_deta_init = link.deriv_inverse(provisional.eta)
+        W_init = weights * dmu_deta_init**2 / V_init
+        z_init = provisional.eta + (y - provisional.mu) / dmu_deta_init
+        z_off_init = z_init - offset
+        for gi, st in _scop_state.items():
+            if st["beta_scop"] is None:
+                g_i = groups[gi]
+                lam_scop = lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                bin_idx = st["bin_idx"]
+                if bin_idx is not None:
+                    n_bins = st["B_scop"].shape[0]
+                    W_agg = np.bincount(bin_idx, weights=W_init, minlength=n_bins)
+                    Wz_agg = np.bincount(
+                        bin_idx,
+                        weights=W_init * z_off_init,
+                        minlength=n_bins,
+                    )
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        z_bin = np.where(W_agg > 0, Wz_agg / W_agg, 0.0)
+                    st["beta_scop"] = st["reparam"].qp_initialize(
+                        st["B_scop"],
+                        z_bin,
+                        lambda_penalty=lam_scop,
+                        weights=W_agg,
+                    )
+                else:
+                    st["beta_scop"] = st["reparam"].qp_initialize(
+                        st["B_scop"],
+                        z_off_init,
+                        lambda_penalty=lam_scop,
+                        weights=W_init,
+                    )
+            gamma_eff = st["reparam"].forward(st["beta_scop"])
+            st["gamma_eff"] = gamma_eff.copy()
+            beta[groups[gi].sl] = gamma_eff
+
     # QR pre-computation: materialise full design matrix once
     # Constrained QP / SCOP requires Gram path — force it if constraints present
     _use_qr = direct_solve == "qr" and not has_constraints and not _has_scop
@@ -603,7 +589,6 @@ def fit_irls_direct(
                 "benefit.  Consider direct_solve='auto' for large-n discrete fits."
             )
         _X_full = np.hstack([gm.toarray() for gm in gms])  # (n, p)
-        _X_qr_aug = np.hstack([np.ones((n, 1)), _X_full])  # (n, p+1)
         _L_aug = _sqrt_penalty_augmented(S, p)  # (p+1, p+1)
 
     # tabmat acceleration: build SplitMatrix once for non-discrete paths.
@@ -612,14 +597,40 @@ def fit_irls_direct(
     _tabmat_split = dm.tabmat_split if not _use_qr else None
     _can_reuse_weighted_gram = _has_constant_irls_weights(family, link) and not _has_scop
     _constant_w_gram_cache: tuple[NDArray, NDArray, float] | None = None
+    _constant_centered_cache: CenteredSystem | None = None
+    _constant_centered_z: NDArray | None = None
+
+    def get_centered_system(W_current: NDArray, z_off_current: NDArray) -> CenteredSystem:
+        nonlocal _constant_centered_cache, _constant_centered_z
+        if (
+            _can_reuse_weighted_gram
+            and _constant_centered_cache is not None
+            and _constant_centered_z is not None
+        ):
+            if np.array_equal(z_off_current, _constant_centered_z):
+                return _constant_centered_cache
+            _constant_centered_cache = refresh_centered_rhs(
+                system=_constant_centered_cache,
+                dm=dm,
+                W=W_current,
+                z_off=z_off_current,
+            )
+            _constant_centered_z = z_off_current.copy()
+            return _constant_centered_cache
+        system = build_centered_system(
+            dm=dm,
+            W=W_current,
+            z_off=z_off_current,
+            penalty=S,
+        )
+        if _can_reuse_weighted_gram:
+            _constant_centered_cache = system
+            _constant_centered_z = z_off_current.copy()
+        return system
 
     t_start = time.perf_counter()
-    dev_prev = np.inf
     converged = False
     XtWX_beta = np.eye(p)  # will be overwritten
-    _precomputed_final_inverse: NDArray | None = None
-    _precomputed_log_det_H: float | None = None
-    _use_h_inverse_solve = max_iter == 1 and return_xtwx and not has_constraints and not _has_scop
 
     # Phase timing accumulators
     _t_working = 0.0
@@ -628,22 +639,62 @@ def fit_irls_direct(
     _t_deviance = 0.0
     _t_eta = 0.0
     _t_deviance_eval = 0.0
+    _last_working_centered: CenteredSystem | None = None
 
-    # Pre-compute initial eta/mu once — reused as the first iteration's
-    # working quantities, then updated at the end of each iteration.
-    # This eliminates one redundant matvec + link.inverse per iteration.
-    eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
-    mu = clip_mu(link.inverse(eta), family)
+    # Freeze the fit-entry state so iteration-one trial safety has a baseline.
+    committed = _evaluate_irls_state(
+        dm,
+        y,
+        weights,
+        family,
+        link,
+        offset,
+        beta,
+        intercept,
+        deviance=_deviance_init,
+    )
+    if _has_scop:
+        scop_committed = _SCOPTrialState(
+            irls=committed,
+            groups=tuple(
+                _SCOPGroupState(
+                    group_index=gi,
+                    beta_eff=_immutable_array(st["beta_scop"]),
+                    gamma_eff=_immutable_array(st["gamma_eff"]),
+                    H_scop_penalized=(
+                        None
+                        if st.get("H_scop_penalized") is None
+                        else _immutable_array(st["H_scop_penalized"])
+                    ),
+                    last_step_norm=float(st.get("last_step_norm", 0.0)),
+                    last_fisher_fallback=bool(st.get("last_fisher_fallback", False)),
+                )
+                for gi, st in sorted(_scop_state.items())
+            ),
+        )
+    dev_prev = committed.deviance
+    eta_unclipped = committed.eta_unclipped
+    eta = committed.eta
+    mu = committed.mu
     iteration_log: list[IterationDiagnostics] = [] if record_diagnostics else []
     base_debug_context = dict(debug_context or {})
+    # Level 2 fixes the row schema for the whole fit, so snapshot it at fit entry.
+    record_debug_rows = (
+        debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2
+    )
+    capture_extrema = record_diagnostics or record_debug_rows
 
     max_halving = 5  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
 
     for it in range(max_iter):
-        # Save previous solution for step halving
-        beta_prev = beta.copy()
-        intercept_prev = intercept
+        beta_prev = committed.beta
+        intercept_prev = committed.intercept
+        beta = committed.beta.copy()
+        intercept = committed.intercept
+        committed_active_set = None if prev_active_set is None else list(prev_active_set)
+        rank_truncated: bool | None = None
+        used_rank_certification = False
 
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
@@ -651,31 +702,38 @@ def fit_irls_direct(
         V = np.maximum(V, _VARIANCE_FLOOR)
         dmu_deta = link.deriv_inverse(eta)
         W = weights * dmu_deta**2 / V
-        w_max = W.max()
-        if w_max > 0:
-            W = np.maximum(W, w_max * 1e-10)
         z = eta + (y - mu) / dmu_deta
+        working_eta_unclipped = eta_unclipped
+        working_eta = eta
+        working_mu = mu
+        positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(W)
         _t_working += time.perf_counter() - _t0
 
+        if w_ratio > 1e12:
+            logger.debug(
+                "IRLS direct iter=%d: extreme W ratio %.1e (positive W range [%.2e, %.2e])",
+                it + 1,
+                w_ratio,
+                positive_w_min,
+                positive_w_max,
+            )
+
         if _use_qr:
-            # QR path: solve via QR on [sqrt(W)·X_aug; sqrt(S_aug)].
-            # No normal equations — backward-stable for any condition.
+            # Profile the intercept, then apply the shared factor-space rule.
             _t0 = time.perf_counter()
             sqrtW = np.sqrt(W)
             z_off = z - offset
-            A = np.vstack([sqrtW[:, None] * _X_qr_aug, _L_aug])
-            rhs_qr = np.concatenate([sqrtW * z_off, np.zeros(p + 1)])
-            Q, R = np.linalg.qr(A, mode="reduced")
-            # Truncated SVD on R for near-singular truncation
-            U_r, s_r, Vh_r = np.linalg.svd(R, full_matrices=False)
-            thresh = s_r[0] * 1e-10
-            inv_s = np.where(s_r > thresh, 1.0 / s_r, 0.0)
-            beta_aug = (Vh_r.T * inv_s) @ (U_r.T @ (Q.T @ rhs_qr))
-            _cond_est = float(s_r[0] / max(s_r[-1], 1e-300))
-            # Report whether SVD truncation actually dropped any directions
-            _used_svd = bool(np.any(s_r <= thresh))
-            intercept = float(beta_aug[0])
-            beta = beta_aug[1:]
+            centered = get_centered_system(W, z_off)
+            _last_working_centered = centered
+            A_data = sqrtW[:, None] * (_X_full - centered.mean_x)
+            A = np.vstack([A_data, _L_aug[1:, 1:]])
+            rhs_qr = np.concatenate([sqrtW * (z_off - centered.mean_z), np.zeros(p)])
+            iteration_rank = decompose_factor(A)
+            beta = iteration_rank.solve(A.T @ rhs_qr)
+            intercept = centered.mean_z - float(centered.mean_x @ beta)
+            _cond_est = iteration_rank.pre_truncation_condition
+            _used_svd = iteration_rank.used_svd_fallback
+            rank_truncated = iteration_rank.rank_truncated
             _t_solve += time.perf_counter() - _t0
         else:
             # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
@@ -687,34 +745,6 @@ def fit_irls_direct(
                 # Step 1: Compute SCOP contribution to eta from current state
                 eta_scop = np.zeros(n)
                 for gi, st in _scop_state.items():
-                    if st["beta_scop"] is None:
-                        # Initialize SCOP beta on first iteration
-                        g_i = groups[gi]
-                        _lam_scop = (
-                            lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
-                        )
-                        _bi = st["bin_idx"]
-                        if _bi is not None:
-                            # Discrete: aggregate to bin level for QP initialization
-                            _nb = st["B_scop"].shape[0]
-                            W_agg = np.bincount(_bi, weights=W, minlength=_nb)
-                            Wz_agg = np.bincount(_bi, weights=W * z_off, minlength=_nb)
-                            # Weighted-mean response at bin level
-                            with np.errstate(divide="ignore", invalid="ignore"):
-                                z_bin = np.where(W_agg > 0, Wz_agg / W_agg, 0.0)
-                            st["beta_scop"] = st["reparam"].qp_initialize(
-                                st["B_scop"],
-                                z_bin,
-                                lambda_penalty=_lam_scop,
-                                weights=W_agg,
-                            )
-                        else:
-                            st["beta_scop"] = st["reparam"].qp_initialize(
-                                st["B_scop"],
-                                z_off,
-                                lambda_penalty=_lam_scop,
-                                weights=W,
-                            )
                     gamma_eff = st["reparam"].forward(st["beta_scop"])
                     _eta_g = st["B_scop"] @ gamma_eff
                     if st["bin_idx"] is not None:
@@ -768,13 +798,9 @@ def fit_irls_direct(
 
                 # Step 6: Apply SCOP Newton step
                 if _scop_joint:
-                    # Snapshot all beta_scop_prev BEFORE solving
-                    for gi, st in _scop_state.items():
-                        st["beta_scop_prev"] = st["beta_scop"].copy()
-
                     # Joint Newton step for all SCOP groups simultaneously
                     _z_scop = z_off - eta_unconstrained
-                    joint_results = scop_joint_newton_step(
+                    scop_results = scop_joint_newton_step(
                         _scop_state,
                         W,
                         _z_scop,
@@ -787,13 +813,9 @@ def fit_irls_direct(
                             "pirls_iteration": it + 1,
                         },
                     )
-                    for gi, jresult in joint_results.items():
-                        _scop_state[gi]["beta_scop"] = jresult.beta_new
-                        _scop_state[gi]["H_scop_penalized"] = jresult.H_penalized
-                        _scop_state[gi]["last_step_norm"] = jresult.step_norm
-                        _scop_state[gi]["last_fisher_fallback"] = jresult.used_fisher_fallback
                 else:
                     # Sequential (existing code) — for parity comparison
+                    scop_results = {}
                     for gi, st in _scop_state.items():
                         z_scop = z_off - eta_unconstrained
                         # Remove contributions from other SCOP groups
@@ -805,7 +827,6 @@ def fit_irls_direct(
                                     eta2 = eta2[st2["bin_idx"]]
                                 z_scop = z_scop - eta2
 
-                        st["beta_scop_prev"] = st["beta_scop"].copy()
                         g_i = groups[gi]
                         _lam_scop = (
                             lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
@@ -826,16 +847,38 @@ def fit_irls_direct(
                                 "group_name": g_i.name,
                             },
                         )
-                        st["beta_scop"] = result.beta_new
-                        st["H_scop_penalized"] = result.H_penalized
+                        scop_results[gi] = result
 
                 # Step 7: Write gamma_eff (mapped coefficients) into full beta
                 for gi, st in _scop_state.items():
                     g = groups[gi]
-                    gamma_eff = st["reparam"].forward(st["beta_scop"])
-                    st["gamma_eff"] = gamma_eff
+                    gamma_eff = st["reparam"].forward(scop_results[gi].beta_new)
                     beta[g.sl] = gamma_eff
 
+            elif not has_constraints:
+                centered = get_centered_system(W, z_off)
+                _last_working_centered = centered
+                _t_gram += time.perf_counter() - _t0
+                _t0 = time.perf_counter()
+                iteration_rank = decompose_gram(centered.hessian)
+                if needs_factor_certification(iteration_rank):
+                    certified = decompose_factor(
+                        grouped_augmented_factor(
+                            dm,
+                            W,
+                            centered.penalty,
+                            center=centered.mean_x,
+                        )
+                    )
+                    if certified.rank != iteration_rank.rank:
+                        iteration_rank = certified
+                        used_rank_certification = True
+                beta = iteration_rank.solve(centered.rhs)
+                intercept = centered.mean_z - float(centered.mean_x @ beta)
+                _cond_est = iteration_rank.pre_truncation_condition
+                _used_svd = iteration_rank.used_svd_fallback
+                rank_truncated = iteration_rank.rank_truncated
+                _t_solve += time.perf_counter() - _t0
             else:
                 Wz = W * z_off
                 sum_W = float(np.sum(W))
@@ -869,49 +912,32 @@ def fit_irls_direct(
                 rhs[1:] = XtWz
                 _t_gram += time.perf_counter() - _t0
 
-                # Solve — constrained QP or Cholesky with SVD fallback
+                # Solve the constrained system in its existing coordinate space.
                 _t0 = time.perf_counter()
-                if has_constraints:
-                    # Profile out intercept (unconstrained):
-                    # intercept = (rhs[0] - XtW1 @ beta) / sum_W
-                    # Reduced system: H = XtWX + S, g_vec = XtWz - XtW1*(sum_Wz/sum_W)
-                    H = M_aug[1:, 1:]  # XtWX + S
-                    g_vec = rhs[1:] - rhs[0] * M_aug[0, 1:] / M_aug[0, 0]
+                # Profile out intercept (unconstrained):
+                # intercept = (rhs[0] - XtW1 @ beta) / sum_W
+                H = M_aug[1:, 1:]  # XtWX + S
+                g_vec = rhs[1:] - rhs[0] * M_aug[0, 1:] / M_aug[0, 0]
 
-                    qp_result = solve_constrained_qp(
-                        H,
-                        g_vec,
-                        A_all,
-                        b_all,
-                        active_set_init=prev_active_set,
-                    )
-                    beta = qp_result.beta
-                    intercept = float((rhs[0] - XtW1 @ beta) / sum_W)
-                    prev_active_set = qp_result.active_set
-                    _used_svd = False
-                    _cond_est = 0.0
-                elif _use_h_inverse_solve:
-                    H = M_aug[1:, 1:]
-                    H_inv, log_det_H, cholesky_ok = _safe_decompose_H(H)
-                    beta, intercept = _solve_profiled_intercept_from_h_inv(
-                        H_inv,
-                        XtWz,
-                        XtW1,
-                        sum_W,
-                        float(np.sum(Wz)),
-                    )
-                    _precomputed_final_inverse = H_inv
-                    _precomputed_log_det_H = log_det_H
-                    _used_svd = not cholesky_ok
-                    _cond_est = 0.0
-                else:
-                    beta_aug, _cond_est, _used_svd = _robust_solve(M_aug, rhs)
-                    intercept = float(beta_aug[0])
-                    beta = beta_aug[1:]
+                qp_result = solve_constrained_qp(
+                    H,
+                    g_vec,
+                    A_all,
+                    b_all,
+                    active_set_init=prev_active_set,
+                )
+                beta = qp_result.beta
+                intercept = float((rhs[0] - XtW1 @ beta) / sum_W)
+                prev_active_set = qp_result.active_set
+                _used_svd = False
+                _cond_est = 0.0
                 _t_solve += time.perf_counter() - _t0
 
-            # Warning for auto mode: suggest QR after repeated SVD fallbacks
-            if _used_svd:
+            # A bounded factor pass can intentionally replace an uncertain Gram
+            # rank.  Preserve that in iteration diagnostics, but do not report it
+            # as a failed solve or recommend switching the whole fit to dense QR.
+            warnable_svd_fallback = _used_svd and not used_rank_certification
+            if warnable_svd_fallback:
                 _consecutive_svd += 1
             else:
                 _consecutive_svd = 0
@@ -923,54 +949,159 @@ def fit_irls_direct(
                     _cond_est,
                 )
 
-        # Update eta/mu from new beta — reused as next iteration's working
-        # quantities (no redundant matvec at the start of the loop).
-        _t0 = time.perf_counter()
-        eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
-        mu = clip_mu(link.inverse(eta), family)
-        eta_elapsed = time.perf_counter() - _t0
-        _t_eta += eta_elapsed
-        _t0 = time.perf_counter()
-        dev = float(np.sum(weights * family.deviance_unit(y, mu)))
-        deviance_eval_elapsed = time.perf_counter() - _t0
-        _t_deviance_eval += deviance_eval_elapsed
-        _t_deviance += eta_elapsed + deviance_eval_elapsed
+        if _has_scop:
+            _t0 = time.perf_counter()
+            proposal_irls = _evaluate_irls_state(
+                dm, y, weights, family, link, offset, beta, intercept
+            )
+            proposal_scop = _SCOPTrialState(
+                irls=proposal_irls,
+                groups=tuple(
+                    _SCOPGroupState(
+                        group_index=gi,
+                        beta_eff=_immutable_array(scop_results[gi].beta_new),
+                        gamma_eff=_immutable_array(
+                            _scop_specs[gi].reparam.forward(scop_results[gi].beta_new)
+                        ),
+                        H_scop_penalized=(
+                            None
+                            if scop_results[gi].H_penalized is None
+                            else _immutable_array(scop_results[gi].H_penalized)
+                        ),
+                        last_step_norm=float(scop_results[gi].step_norm),
+                        last_fisher_fallback=bool(scop_results[gi].used_fisher_fallback),
+                    )
+                    for gi in sorted(_scop_specs)
+                ),
+            )
+            scop_trial_cache: dict[float, _SCOPTrialState] = {1.0: proposal_scop}
 
-        # Step halving: if deviance spiked dramatically (>2x), interpolate
-        # between previous and current solution.  Small deviance increases
-        # are normal in IRLS (especially non-canonical links) and don't
-        # warrant halving.  The SVD fallback in _robust_solve() is the
-        # primary defense against ill-conditioned overshoots.
-        n_halvings = 0
-        if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
-            for halving in range(max_halving):
-                beta = 0.5 * (beta + beta_prev)
-                intercept = 0.5 * (intercept + intercept_prev)
-                eta = stabilize_eta(dm.matvec(beta) + intercept + offset, link)
-                mu = clip_mu(link.inverse(eta), family)
-                dev_h = float(np.sum(weights * family.deviance_unit(y, mu)))
-                if not np.isfinite(dev_h) or dev_h >= dev:
-                    break
-                n_halvings += 1
-                dev = dev_h
-                logger.info(
-                    f"  irls_direct iter={it + 1}: step halving {halving + 1}, dev={dev:.2e}"
+            def evaluate_scop_trial(alpha: float) -> _IRLSState:
+                candidate = _evaluate_scop_trial(
+                    committed=scop_committed,
+                    proposed=proposal_scop,
+                    alpha=alpha,
+                    specs=_scop_specs,
+                    dm=dm,
+                    y=y,
+                    weights=weights,
+                    family=family,
+                    link=link,
+                    offset=offset,
                 )
-                if dev <= dev_prev:
-                    break
-            # Sync SCOP state after step halving: interpolate in working space
-            if _has_scop and n_halvings > 0:
-                frac = 0.5**n_halvings
-                for gi, st in _scop_state.items():
-                    if st["beta_scop_prev"] is not None:
-                        st["beta_scop"] = (1 - frac) * st["beta_scop_prev"] + frac * st["beta_scop"]
-                    # Re-write gamma_eff into beta for consistent eta
-                    g = groups[gi]
-                    beta[g.sl] = st["reparam"].forward(st["beta_scop"])
+                scop_trial_cache[alpha] = candidate
+                return candidate.irls
+
+            decision = _select_irls_trial(
+                committed=scop_committed.irls,
+                proposal=proposal_scop.irls,
+                evaluate_state=evaluate_scop_trial,
+                max_halving=max_halving,
+            )
+            retained_scop = (
+                scop_committed if decision.step_rejected else scop_trial_cache[decision.alpha]
+            )
+            retained = retained_scop.irls
+            evaluation_elapsed = time.perf_counter() - _t0
+            _t_deviance += evaluation_elapsed
+            _t_deviance_eval += evaluation_elapsed
+            beta = retained.beta.copy()
+            intercept = retained.intercept
+            eta_unclipped = retained.eta_unclipped
+            eta = retained.eta
+            mu = retained.mu
+            dev = retained.deviance
+            n_halvings = decision.step_halvings
+            step_rejected = decision.step_rejected
+            committed_groups = {group.group_index: group for group in scop_committed.groups}
+            for group_state in retained_scop.groups:
+                st = _scop_state[group_state.group_index]
+                st["beta_scop_prev"] = committed_groups[group_state.group_index].beta_eff.copy()
+                st["beta_scop"] = group_state.beta_eff.copy()
+                st["gamma_eff"] = group_state.gamma_eff.copy()
+                st["H_scop_penalized"] = (
+                    None
+                    if group_state.H_scop_penalized is None
+                    else group_state.H_scop_penalized.copy()
+                )
+                st["last_step_norm"] = group_state.last_step_norm
+                st["last_fisher_fallback"] = group_state.last_fisher_fallback
+            if n_halvings:
+                logger.info(
+                    "  irls_direct SCOP iter=%d: accepted latent step fraction %.5g after "
+                    "%d halvings, dev=%.2e",
+                    it + 1,
+                    decision.alpha,
+                    n_halvings,
+                    dev,
+                )
+        else:
+            _t0 = time.perf_counter()
+            proposal = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+            trial_cache: dict[float, _IRLSState] = {1.0: proposal}
+
+            def evaluate_trial(alpha: float) -> _IRLSState:
+                beta_trial = committed.beta + alpha * (proposal.beta - committed.beta)
+                intercept_trial = committed.intercept + alpha * (
+                    proposal.intercept - committed.intercept
+                )
+                candidate = _evaluate_irls_state(
+                    dm,
+                    y,
+                    weights,
+                    family,
+                    link,
+                    offset,
+                    beta_trial,
+                    intercept_trial,
+                )
+                trial_cache[alpha] = candidate
+                return candidate
+
+            decision = _select_irls_trial(
+                committed=committed,
+                proposal=proposal,
+                evaluate_state=evaluate_trial,
+                max_halving=max_halving,
+            )
+            retained = committed if decision.step_rejected else trial_cache[decision.alpha]
+            evaluation_elapsed = time.perf_counter() - _t0
+            _t_deviance += evaluation_elapsed
+            _t_deviance_eval += evaluation_elapsed
+            beta = retained.beta.copy()
+            intercept = retained.intercept
+            eta_unclipped = retained.eta_unclipped
+            eta = retained.eta
+            mu = retained.mu
+            dev = retained.deviance
+            n_halvings = decision.step_halvings
+            step_rejected = decision.step_rejected
+            if step_rejected:
+                prev_active_set = committed_active_set
+            elif n_halvings:
+                logger.info(
+                    "  irls_direct iter=%d: accepted step fraction %.5g after %d halvings, "
+                    "dev=%.2e",
+                    it + 1,
+                    decision.alpha,
+                    n_halvings,
+                    dev,
+                )
+
+        working_eta_clipped = False
+        eta_clipped = False
+        if capture_extrema:
+            working_eta_clipped = bool(
+                float(np.min(working_eta_unclipped)) < float(np.min(working_eta))
+                or float(np.max(working_eta_unclipped)) > float(np.max(working_eta))
+            )
+            eta_clipped = bool(
+                float(np.min(eta_unclipped)) < float(np.min(eta))
+                or float(np.max(eta_unclipped)) > float(np.max(eta))
+            )
 
         # Record per-iteration diagnostics
         if record_diagnostics:
-            w_ratio = W.max() / max(W.min(), 1e-300)
             k = min(5, n)
             top_idx = np.argpartition(W, -k)[-k:]
             bot_idx = np.argpartition(W, k)[:k]
@@ -991,6 +1122,21 @@ def fit_irls_direct(
                     bottom_w_indices=bot_idx[np.argsort(W[bot_idx])],
                     cond_estimate=_cond_est,
                     used_svd_fallback=_used_svd,
+                    raw_w_min=float(W.min()),
+                    raw_w_max=float(W.max()),
+                    raw_w_ratio=w_ratio,
+                    eta_min_unclipped=float(np.min(eta_unclipped)),
+                    eta_max_unclipped=float(np.max(eta_unclipped)),
+                    eta_clipped=eta_clipped,
+                    working_mu_min=float(working_mu.min()),
+                    working_mu_max=float(working_mu.max()),
+                    working_eta_min=float(working_eta.min()),
+                    working_eta_max=float(working_eta.max()),
+                    working_eta_min_unclipped=float(np.min(working_eta_unclipped)),
+                    working_eta_max_unclipped=float(np.max(working_eta_unclipped)),
+                    working_eta_clipped=working_eta_clipped,
+                    step_rejected=step_rejected,
+                    rank_truncated=rank_truncated,
                 )
             )
 
@@ -1016,8 +1162,10 @@ def fit_irls_direct(
             if np.isfinite(dev_prev):
                 dev_rel_change = abs(dev - dev_prev) / (abs(dev_prev) + 1.0)
             converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
+        if step_rejected:
+            converged_this_iter = False
 
-        if debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2:
+        if record_debug_rows:
             debug_recorder.append_jsonl(
                 "pirls",
                 {
@@ -1032,17 +1180,40 @@ def fit_irls_direct(
                     "converged": bool(converged_this_iter),
                     "w_min": float(W.min()),
                     "w_max": float(W.max()),
+                    "w_ratio": float(w_ratio),
                     "mu_min": float(mu.min()),
                     "mu_max": float(mu.max()),
+                    "eta_min_unclipped": float(np.min(eta_unclipped)),
+                    "eta_max_unclipped": float(np.max(eta_unclipped)),
+                    "eta_clipped": bool(eta_clipped),
                     "eta_min": float(eta.min()),
                     "eta_max": float(eta.max()),
+                    "working_mu_min": float(working_mu.min()),
+                    "working_mu_max": float(working_mu.max()),
+                    "working_eta_min_unclipped": float(np.min(working_eta_unclipped)),
+                    "working_eta_max_unclipped": float(np.max(working_eta_unclipped)),
+                    "working_eta_clipped": bool(working_eta_clipped),
+                    "working_eta_min": float(working_eta.min()),
+                    "working_eta_max": float(working_eta.max()),
                     "step_halvings": int(n_halvings),
+                    "step_rejected": bool(step_rejected),
+                    "rank_truncated": rank_truncated,
                     "cond_estimate": float(_cond_est),
                     "used_svd_fallback": bool(_used_svd),
                     "has_scop": bool(_has_scop),
                 },
             )
 
+        if step_rejected:
+            logger.warning(
+                "IRLS direct rejected all trial steps at iter=%d; restored committed state",
+                it + 1,
+            )
+            break
+
+        committed = retained
+        if _has_scop:
+            scop_committed = retained_scop
         if converged_this_iter:
             converged = True
             break
@@ -1050,6 +1221,71 @@ def fit_irls_direct(
 
     t_elapsed = time.perf_counter() - t_start
     logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
+
+    if _has_scop:
+        # Final Gram and SCOP Hessian caches must describe the retained model,
+        # not the working state or a discarded full proposal.
+        V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
+        dmu_deta_final = link.deriv_inverse(eta)
+        W = weights * dmu_deta_final**2 / V_final
+        z = eta + (y - mu) / dmu_deta_final
+
+        needs_initial_hessian = any(
+            state.get("H_scop_penalized") is None for state in _scop_state.values()
+        )
+        if not step_rejected or needs_initial_hessian:
+            eta_unconstrained = np.full(n, intercept)
+            for gi in _non_scop_groups_idx:
+                g = groups[gi]
+                eta_unconstrained += gms[gi].matvec(beta[g.sl])
+            z_scop_final = z - offset - eta_unconstrained
+            if _scop_joint:
+                refresh_results = scop_joint_newton_step(
+                    _scop_state,
+                    W,
+                    z_scop_final,
+                    lambda2,
+                    groups,
+                    max_halving=10,
+                )
+                for gi, refresh in refresh_results.items():
+                    _scop_state[gi]["H_scop_penalized"] = (
+                        None if refresh.H_penalized is None else refresh.H_penalized.copy()
+                    )
+            else:
+                for gi, st in _scop_state.items():
+                    z_scop_group = z_scop_final.copy()
+                    for gi_other, st_other in _scop_state.items():
+                        if gi_other == gi:
+                            continue
+                        eta_other = st_other["B_scop"] @ st_other["gamma_eff"]
+                        if st_other["bin_idx"] is not None:
+                            eta_other = eta_other[st_other["bin_idx"]]
+                        z_scop_group -= eta_other
+                    g = groups[gi]
+                    lam_scop = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                    refresh = scop_newton_step(
+                        B_scop=st["B_scop"],
+                        W=W,
+                        z=z_scop_group,
+                        beta_scop=st["beta_scop"],
+                        reparam=st["reparam"],
+                        S_scop=st["S_scop"],
+                        lambda2=lam_scop,
+                        bin_idx=st["bin_idx"],
+                    )
+                    st["H_scop_penalized"] = (
+                        None if refresh.H_penalized is None else refresh.H_penalized.copy()
+                    )
+
+    # Every public/exported matrix and rank claim is evaluated at the retained
+    # model. Private fREML performance iterations deliberately reuse the
+    # working system used for their one coefficient update.
+    if not _return_working_system:
+        V_export = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
+        dmu_deta_export = link.deriv_inverse(eta)
+        W = weights * dmu_deta_export**2 / V_export
+        z = eta + (y - mu) / dmu_deta_export
 
     # Accumulate phase timing into the profile dict if provided
     if profile is not None:
@@ -1065,20 +1301,17 @@ def fit_irls_direct(
         profile["irls_calls"] = profile.get("irls_calls", 0) + 1
         profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
 
-    # QR path: compute gram quantities once at convergence for REML/edf/cache.
-    if _use_qr or _has_scop:
-        # QR path and SCOP path need a full-system Gram for edf / caching.
+    # Preserve the raw coefficient-space payload used by REML separately from
+    # the centered inference system.
+    if _return_working_system:
+        if _last_working_centered is None:
+            raise RuntimeError("working centered system was not computed")
+        centered_final = _last_working_centered
+    else:
         z_off = z - offset
-        Wz = W * z_off
-        sum_W = float(np.sum(W))
-        XtWX, XtW1, XtWz = _block_xtwx_rhs(
-            gms,
-            groups,
-            W,
-            Wz,
-            tabmat_split=_tabmat_split,
-            profile=profile,
-        )
+        centered_final = get_centered_system(W, z_off)
+    XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
+    sum_W = centered_final.sum_w
 
     # Cache final-iteration RHS quantities for the cached-W fREML optimizer.
     # These allow re-solving the augmented system with a new penalty matrix S
@@ -1088,24 +1321,88 @@ def fit_irls_direct(
         cache_out["XtWz"] = XtWz
         cache_out["XtW1"] = XtW1
         cache_out["sum_W"] = sum_W
-        cache_out["sum_Wz"] = float(np.sum(Wz))
+        cache_out["sum_Wz"] = sum_Wz
 
-    # Compute (X'WX + S)^{-1} directly (NOT from augmented system, which gives
-    # the Schur complement that accounts for intercept estimation — wrong for REML).
-    # XtWX is already computed from the last iteration. Reuse S from above.
+    # Compute (X'WX + S)^{-1} directly (NOT the intercept-profiled inverse).
+    # Reconstruct it from the certified centered Hessian so PSD round-off
+    # corrections for degenerate spline penalties remain in force.
     _t0 = time.perf_counter()
     XtWX_beta = XtWX
-    if _precomputed_final_inverse is not None:
-        H_inv = _precomputed_final_inverse
-        log_det_H = float(_precomputed_log_det_H)
-    else:
-        M_beta = XtWX_beta + S
-        H_inv, log_det_H, _ = _safe_decompose_H(M_beta)
-    XtWX_S_inv_beta = H_inv
+    M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
+        centered_final.mean_x, centered_final.mean_x
+    )
+    coefficient_rank = decompose_gram(M_beta)
+    if needs_factor_certification(coefficient_rank):
+        certified = decompose_factor(grouped_augmented_factor(dm, W, centered_final.penalty))
+        if certified.rank != coefficient_rank.rank:
+            coefficient_rank = certified
+    XtWX_S_inv_beta = coefficient_rank.pseudo_inverse()
+    log_det_H = coefficient_rank.log_pdet
 
-    # Exact effective df: 1 (intercept) + trace((X'WX + S)^{-1} X'WX)
-    F = XtWX_S_inv_beta @ XtWX_beta
-    p_eff = 1.0 + float(np.trace(F))
+    if _compute_fit_statistics:
+        if _use_qr:
+            sqrtW = np.sqrt(W)
+            A_data_final = sqrtW[:, None] * (_X_full - centered_final.mean_x)
+            data_rank = decompose_factor(A_data_final) if compute_rank_info else None
+            augmented_rank = decompose_factor(np.vstack([A_data_final, _L_aug[1:, 1:]]))
+        else:
+            data_rank = decompose_gram(centered_final.data_gram) if compute_rank_info else None
+            if data_rank is not None and needs_factor_certification(data_rank):
+                certified = decompose_factor(
+                    grouped_weighted_factor(
+                        dm,
+                        W,
+                        center=centered_final.mean_x,
+                    )
+                )
+                if certified.rank != data_rank.rank:
+                    data_rank = certified
+            augmented_rank = (
+                data_rank
+                if data_rank is not None and not np.any(centered_final.penalty)
+                else decompose_gram(centered_final.hessian)
+            )
+            if needs_factor_certification(augmented_rank):
+                certified = decompose_factor(
+                    grouped_augmented_factor(
+                        dm,
+                        W,
+                        centered_final.penalty,
+                        center=centered_final.mean_x,
+                    )
+                )
+                if certified.rank != augmented_rank.rank:
+                    augmented_rank = certified
+        feature_edf = np.diag(augmented_rank.pseudo_inverse() @ centered_final.data_gram).copy()
+        feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
+        p_eff = 1.0 + float(np.sum(feature_edf))
+        if compute_rank_info:
+            if data_rank is None:
+                raise RuntimeError("data-rank metadata was not computed")
+            group_edf = {g.name: float(np.sum(feature_edf[g.sl])) for g in groups}
+            selected_columns = np.arange(p, dtype=int)
+            selected_columns.setflags(write=False)
+            feature_edf.setflags(write=False)
+            rank_info = RankInfo(
+                policy_version=SHARED_RANK_POLICY.version,
+                coordinate_space="solver",
+                selected_columns=selected_columns,
+                selected_group_names=tuple(g.name for g in groups),
+                sum_w=centered_final.sum_w,
+                mean_x=centered_final.mean_x,
+                intercept_edf=1.0,
+                data=data_rank,
+                augmented=augmented_rank,
+                coefficient=coefficient_rank,
+                feature_edf=feature_edf,
+                group_edf=group_edf,
+                objective_loss=None,
+            )
+        else:
+            rank_info = None
+    else:
+        p_eff = 0.0
+        rank_info = None
     if profile is not None:
         _t_finalize = time.perf_counter() - _t0
         profile["irls_finalize_s"] = profile.get("irls_finalize_s", 0.0) + _t_finalize
@@ -1114,10 +1411,13 @@ def fit_irls_direct(
     # SuperGLM's sample_weight follows the prior-weight convention, so the
     # residual d.f. correction is observation-count based (n - edf), while
     # the weights still scale the Pearson numerator.
-    V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
-    pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
-    df_resid = max(float(len(y)) - p_eff, 1)
-    phi = pearson_chi2 / df_resid
+    if _compute_fit_statistics:
+        V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
+        pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
+        df_resid = max(float(len(y)) - p_eff, 1)
+        phi = pearson_chi2 / df_resid
+    else:
+        phi = 1.0
 
     result = PIRLSResult(
         beta=beta,
@@ -1129,6 +1429,7 @@ def fit_irls_direct(
         effective_df=p_eff,
         iteration_log=iteration_log if record_diagnostics else None,
         log_det_H=log_det_H,
+        rank_info=rank_info,
     )
 
     # Collect converged SCOP state for EFS outer loop and fit results.

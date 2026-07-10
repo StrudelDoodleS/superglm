@@ -366,15 +366,21 @@ class TestMgcvStyleSmoothTestInput:
         aug_sl = slice(1 + ag.start, 1 + ag.end)
         V_b_j = XtWX_inv_aug[aug_sl, aug_sl]
         edf1_j = float(np.sum(edf1[ag.sl]))
+        X_a_dense = X_a.toarray() if hasattr(X_a, "toarray") else np.asarray(X_a)
+        X_a_centered = X_a_dense - np.average(X_a_dense, axis=0, weights=W)
 
-        np.testing.assert_allclose(R_a.T @ R_a, X_a.T @ (X_a * W[:, None]), atol=1e-8)
+        np.testing.assert_allclose(
+            R_a.T @ R_a,
+            X_a_centered.T @ (X_a_centered * W[:, None]),
+            atol=1e-8,
+        )
 
-        _, p_raw, _ = wood_test_smooth(beta_g, X_a[:, ag.sl], V_b_j, edf1_j, -1.0)
+        _, p_raw, _ = wood_test_smooth(beta_g, X_a_centered[:, ag.sl], V_b_j, edf1_j, -1.0)
         _, p_r, _ = wood_test_smooth(beta_g, R_a[:, ag.sl], V_b_j, edf1_j, -1.0)
 
         assert row.wald_p == pytest.approx(p_r)
-        # QR correctness already verified above (R_a.T @ R_a == X_a.T @ diag(W) @ X_a).
-        # Both methods (raw X_a vs QR factor R_a) should agree.
+        # Factor correctness is verified above after profiling the intercept.
+        # Both methods (centered X_a vs its square factor R_a) should agree.
         assert p_r == pytest.approx(p_raw, abs=0.3)
 
 
@@ -1150,10 +1156,10 @@ class TestMultiPenaltyPostFitInference:
         model._reml_penalties = saved_penalties
         model.__dict__.pop("_coef_covariance", None)
 
-        # Precondition: the two paths must produce different results
-        assert not np.allclose(cov_multi, cov_legacy, rtol=1e-6), (
-            "select=True multi-penalty and legacy S should produce different covariances"
-        )
+        # RankInfo freezes the actual fitted multi-penalty quotient. Mutating
+        # model configuration after fitting must not silently recompute a
+        # different covariance with legacy penalty algebra.
+        np.testing.assert_allclose(cov_multi, cov_legacy, rtol=1e-12)
         return cov_multi, cov_legacy
 
     @pytest.mark.slow
@@ -1182,7 +1188,7 @@ class TestMultiPenaltyPostFitInference:
         model._reml_penalties = saved
         model.__dict__.pop("_fit_active_info", None)
 
-        assert not np.allclose(inv_multi, inv_legacy, rtol=1e-6)
+        np.testing.assert_allclose(inv_multi, inv_legacy, rtol=1e-12)
 
 
 class TestREMLObjectiveFastPath:

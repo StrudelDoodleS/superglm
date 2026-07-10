@@ -24,6 +24,7 @@ from superglm.inference._term_types import (
     TermInference,
     _safe_exp,
 )
+from superglm.solvers.rank import selected_group_name_set
 
 if TYPE_CHECKING:
     from superglm.solvers.pirls import PIRLSResult
@@ -136,7 +137,8 @@ def term_inference(
 
     # Check active
     beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
-    active = bool(np.linalg.norm(beta_combined) > 1e-12)
+    selected_names = selected_group_name_set(result, groups)
+    active = any(group.name in selected_names for group in feature_groups)
 
     # Covariance (lazy, only if needed)
     Cov_active = active_groups_cov = None

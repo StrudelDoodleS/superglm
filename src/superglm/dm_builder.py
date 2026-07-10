@@ -1261,4 +1261,6 @@ def rebuild_design_matrix_with_lambdas(
             new_gms.append(new_gm)
         else:
             new_gms.append(gm)
-    return DesignMatrix(new_gms, dm.n, dm.p)
+    rebuilt = DesignMatrix(new_gms, dm.n, dm.p)
+    rebuilt._centered_pattern_plan = dm._centered_pattern_plan
+    return rebuilt

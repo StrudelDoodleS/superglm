@@ -108,6 +108,48 @@ def _fused_2d_bincount_2(idx1, idx2, W, Wz, n_bins1, n_bins2):
 
 
 @njit(cache=True)
+def _pattern_support_summaries(
+    row_patterns,
+    unique_codes,
+    W,
+    Wz,
+    marginal_offsets,
+    pair_left,
+    pair_right,
+    pair_offsets,
+    pair_right_sizes,
+):
+    """Aggregate all indexed-support marginals and pairs via unique row patterns."""
+    pattern_w = np.zeros(unique_codes.shape[0], dtype=np.float64)
+    pattern_wz = np.zeros(unique_codes.shape[0], dtype=np.float64)
+    for obs in range(row_patterns.size):
+        pattern = row_patterns[obs]
+        pattern_w[pattern] += W[obs]
+        pattern_wz[pattern] += Wz[obs]
+
+    marginal_w = np.zeros(marginal_offsets[-1], dtype=np.float64)
+    marginal_wz = np.zeros(marginal_offsets[-1], dtype=np.float64)
+    joint_w = np.zeros(pair_offsets[-1], dtype=np.float64)
+    for pattern in range(unique_codes.shape[0]):
+        w = pattern_w[pattern]
+        wz = pattern_wz[pattern]
+        for group in range(unique_codes.shape[1]):
+            cell = marginal_offsets[group] + unique_codes[pattern, group]
+            marginal_w[cell] += w
+            marginal_wz[cell] += wz
+        for pair in range(pair_left.size):
+            left = pair_left[pair]
+            right = pair_right[pair]
+            cell = (
+                pair_offsets[pair]
+                + unique_codes[pattern, left] * pair_right_sizes[pair]
+                + unique_codes[pattern, right]
+            )
+            joint_w[cell] += w
+    return marginal_w, marginal_wz, joint_w
+
+
+@njit(cache=True)
 def _cat_weighted_bincount(codes, bin_idx, W, n_bins, n_levels):
     """Scatter W into (n_bins, n_levels) by (bin_idx, codes) simultaneously."""
     result = np.zeros((n_bins, n_levels))
