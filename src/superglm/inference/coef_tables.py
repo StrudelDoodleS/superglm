@@ -67,6 +67,10 @@ def build_coef_rows(
     from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
     from superglm.group_matrix import CategoricalGroupMatrix
+    from superglm.inference._ordered_reference import (
+        ordered_reference_beta_contrast,
+        ordered_reference_intercept,
+    )
     from superglm.inference._term_covariance import feature_se_from_cov
     from superglm.inference._term_helpers import (
         _resolve_group_lambda,
@@ -122,19 +126,37 @@ def build_coef_rows(
             se_dict[g.name] = se_dict[g.name].astype(float, copy=True)
             se_dict[g.name][~coefficient_estimable[g.sl]] = np.nan
 
-    # Intercept SE from augmented inverse [0, 0] element
-    icpt_var = float(XtWX_inv_aug[0, 0])
-    if icpt_var > 0:
-        icpt_se = (
-            float(np.sqrt(icpt_var)) if known_scale else float(np.sqrt(max(phi, 0.0) * icpt_var))
+    # Ordered spline effects are displayed relative to their chosen base levels.
+    # Apply the same affine transformation to the intercept and its covariance.
+    feature_order = list(specs)
+    intercept = ordered_reference_intercept(
+        result.intercept,
+        beta,
+        feature_order,
+        specs,
+        groups,
+    )
+    full_reference_contrast = ordered_reference_beta_contrast(
+        len(beta),
+        feature_order,
+        specs,
+        groups,
+    )
+    augmented_reference_contrast = np.zeros(XtWX_inv_aug.shape[0], dtype=np.float64)
+    augmented_reference_contrast[0] = 1.0
+    original_groups = {group.name: group for group in groups}
+    for active_group in active_groups:
+        original_group = original_groups[active_group.name]
+        augmented_reference_contrast[1 + active_group.start : 1 + active_group.end] = (
+            full_reference_contrast[original_group.sl]
         )
-    else:
-        icpt_se = 0.0
+    icpt_var = float(augmented_reference_contrast @ XtWX_inv_aug @ augmented_reference_contrast)
+    scale = 1.0 if known_scale else max(phi, 0.0)
+    icpt_se = float(np.sqrt(max(scale * icpt_var, 0.0)))
 
     rows: list[_CoefRow] = []
 
     # Intercept row
-    intercept = result.intercept
     z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
     rows.append(
         _CoefRow(
@@ -255,22 +277,106 @@ def build_coef_rows(
             raw = spec.reconstruct(beta_combined)
 
             if spec.basis == "spline":
+                active_pairs = []
+                for feature_group in feature_groups:
+                    active_group = next(
+                        (ag for ag in active_groups if ag.name == feature_group.name),
+                        None,
+                    )
+                    if active_group is not None:
+                        active_pairs.append((feature_group, active_group))
+
+                stat = float("nan")
+                p_val = float("nan")
+                ref_df = float(sum(fg.size for fg in feature_groups))
+                curve_se_min = float("nan")
+                curve_se_max = float("nan")
+                beta_active = (
+                    np.concatenate([beta[fg.sl] for fg, _ in active_pairs])
+                    if active_pairs
+                    else np.empty(0, dtype=float)
+                )
+
+                if active_pairs:
+                    from superglm.stats.wood_pvalue import wood_test_smooth
+
+                    active_indices = np.concatenate(
+                        [np.arange(ag.start, ag.end) for _, ag in active_pairs]
+                    )
+                    augmented_indices = active_indices + 1
+                    V_b_j = scale * XtWX_inv_aug[np.ix_(augmented_indices, augmented_indices)]
+                    R_a = _get_R_factor()
+                    edf, edf1 = _get_influence_edf()
+                    edf1_j = float(np.sum(edf1[active_indices]))
+                    X_j = R_a[:, active_indices]
+                    res_df = -1.0 if known_scale else float(n_obs - np.sum(edf))
+
+                    try:
+                        stat, p_val, ref_df = wood_test_smooth(
+                            beta_active,
+                            X_j,
+                            V_b_j,
+                            edf1_j,
+                            res_df,
+                        )
+                    except Exception:
+                        pass
+                    curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
+
+                _, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(
+                    feature_groups[0].name,
+                    spec._spline,
+                )
+                rows.append(
+                    _CoefRow(
+                        name=g.feature_name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=len(beta_combined),
+                        active=feature_active,
+                        group_norm=float(np.linalg.norm(beta_active)),
+                        wald_chi2=stat if feature_active else None,
+                        wald_p=p_val if feature_active else None,
+                        ref_df=ref_df if feature_active else None,
+                        curve_se_min=curve_se_min,
+                        curve_se_max=curve_se_max,
+                        subgroup_type="ordered_spline",
+                        edf=feature_edf,
+                        smoothing_lambda=s_lam,
+                        spline_kind=s_kind,
+                        knot_strategy=s_knot_strat,
+                        boundary=s_bnd,
+                        monotone=getattr(spec._spline, "monotone", None),
+                        monotone_engine=g.monotone_engine,
+                        monotone_repaired=g.feature_name in _mono_repairs,
+                    )
+                )
+
                 levels = raw["levels"]
                 for i, level in enumerate(levels):
                     coef_val = float(raw["level_log_relativities"][level])
-                    se_val = float(se_levels[i]) if i < len(se_levels) else 0.0
-                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                    se_val: float | None = (
+                        float(se_levels[i]) if feature_active and i < len(se_levels) else None
+                    )
+                    level_ci_lo: float | None
+                    level_ci_hi: float | None
+                    if se_val is not None and np.isfinite(se_val) and se_val > 0.0:
+                        _, _, level_ci_lo, level_ci_hi = _compute_coef_stats(
+                            coef_val, se_val, alpha
+                        )
+                    elif se_val is not None and np.isfinite(se_val) and level == spec._base_level:
+                        level_ci_lo = level_ci_hi = coef_val
+                    else:
+                        se_val = None
+                        level_ci_lo = level_ci_hi = None
                     rows.append(
                         _CoefRow(
                             name=f"{g.feature_name}[{level}]",
                             group=g.feature_name,
                             coef=coef_val,
                             se=se_val,
-                            z=z,
-                            p=p,
-                            ci_low=ci_lo,
-                            ci_high=ci_hi,
-                            edf=feature_edf if i == 0 else None,
+                            ci_low=level_ci_lo,
+                            ci_high=level_ci_hi,
                         )
                     )
             else:
@@ -760,13 +866,19 @@ def build_coef_rows(
     parametric_ses = [
         r.se
         for r in rows
-        if r.se is not None and r.se > 0 and not r.is_spline and r.name != "Intercept"
+        if r.se is not None
+        and r.se > 0
+        and r.p is not None
+        and not r.is_spline
+        and r.name != "Intercept"
     ]
     if parametric_ses:
         median_se = float(np.median(parametric_ses))
         sep_threshold = max(median_se * 50, 10.0)
         for r in rows:
             if r.quasi_separated or r.is_spline or r.name == "Intercept":
+                continue
+            if r.p is None:
                 continue
             if r.level_n_obs is not None:
                 continue  # already handled by data-driven check

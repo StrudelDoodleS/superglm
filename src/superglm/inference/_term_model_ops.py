@@ -263,7 +263,7 @@ def drop1(
             edf_reduced = 1.0
         else:
             reduced = model._clone_without_features(drop_set)
-            reduced.fit(X, y, offset=offset)
+            reduced.fit(X, y, sample_weight=sample_weight, offset=offset)
             dev_reduced = reduced.result.deviance
             edf_reduced = reduced.result.effective_df
         delta_dev = dev_reduced - dev_full

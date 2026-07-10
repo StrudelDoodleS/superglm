@@ -204,7 +204,8 @@ fallback rather than the main monotone workflow.
 - `Spline(kind="ps")`, `Spline(kind="cr")`, and `Spline(kind="ns")` cover the
   main spline basis choices.
 - `OrderedCategorical(...)` smooths ordered factor levels without forcing a
-  plain one-hot representation.
+  plain one-hot representation and reports one whole-smooth test rather than
+  separate p-values at arbitrary level positions.
 - `collapse_levels(...)` lets you merge sparse categorical levels while still
   expanding back to original levels for inference and plotting.
 - `interactions=[(...)]` supports spline-categorical, numeric-categorical,
@@ -219,7 +220,10 @@ area_grouping = collapse_levels(train_df["Area"], groups={"Rural": ["E", "F"]})
 features = {
     "VehAge": Spline(kind="cr", k=10),
     "Area": Categorical(base="most_exposed", grouping=area_grouping),
-    "BonusClass": OrderedCategorical(order=["A", "B", "C", "D"], basis="spline"),
+    "BonusClass": OrderedCategorical(
+        order=["A", "B", "C", "D"],
+        basis=Spline(kind="ps", k=6),
+    ),
 }
 ```
 
