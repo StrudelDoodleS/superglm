@@ -38,6 +38,7 @@ from superglm.group_matrix import (
 )
 from superglm.links import Link, stabilize_eta
 from superglm.solvers.constrained_qp import solve_constrained_qp
+from superglm.solvers.irls_state import _evaluate_irls_state, _IRLSState, _select_irls_trial
 from superglm.solvers.pirls import (
     IterationDiagnostics,
     PIRLSResult,
@@ -621,7 +622,6 @@ def fit_irls_direct(
     _constant_w_gram_cache: tuple[NDArray, NDArray, float] | None = None
 
     t_start = time.perf_counter()
-    dev_prev = np.inf
     converged = False
     XtWX_beta = np.eye(p)  # will be overwritten
     _precomputed_final_inverse: NDArray | None = None
@@ -636,12 +636,12 @@ def fit_irls_direct(
     _t_eta = 0.0
     _t_deviance_eval = 0.0
 
-    # Pre-compute initial eta/mu once — reused as the first iteration's
-    # working quantities, then updated at the end of each iteration.
-    # This eliminates one redundant matvec + link.inverse per iteration.
-    eta_unclipped = dm.matvec(beta) + intercept + offset
-    eta = stabilize_eta(eta_unclipped, link)
-    mu = clip_mu(link.inverse(eta), family)
+    # Freeze the fit-entry state so iteration-one trial safety has a baseline.
+    committed = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+    dev_prev = committed.deviance
+    eta_unclipped = committed.eta_unclipped
+    eta = committed.eta
+    mu = committed.mu
     iteration_log: list[IterationDiagnostics] = [] if record_diagnostics else []
     base_debug_context = dict(debug_context or {})
     # Level 2 fixes the row schema for the whole fit, so snapshot it at fit entry.
@@ -654,9 +654,11 @@ def fit_irls_direct(
     _consecutive_svd = 0  # for auto-mode warning
 
     for it in range(max_iter):
-        # Save previous solution for step halving
-        beta_prev = beta.copy()
-        intercept_prev = intercept
+        beta_prev = committed.beta
+        intercept_prev = committed.intercept
+        beta = committed.beta.copy()
+        intercept = committed.intercept
+        committed_active_set = None if prev_active_set is None else list(prev_active_set)
 
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
@@ -950,57 +952,110 @@ def fit_irls_direct(
                     _cond_est,
                 )
 
-        # Update eta/mu from new beta — reused as next iteration's working
-        # quantities (no redundant matvec at the start of the loop).
-        _t0 = time.perf_counter()
-        eta_unclipped = dm.matvec(beta) + intercept + offset
-        eta = stabilize_eta(eta_unclipped, link)
-        mu = clip_mu(link.inverse(eta), family)
-        eta_elapsed = time.perf_counter() - _t0
-        _t_eta += eta_elapsed
-        _t0 = time.perf_counter()
-        dev = float(np.sum(weights * family.deviance_unit(y, mu)))
-        deviance_eval_elapsed = time.perf_counter() - _t0
-        _t_deviance_eval += deviance_eval_elapsed
-        _t_deviance += eta_elapsed + deviance_eval_elapsed
-
-        # Step halving: if deviance spiked dramatically (>2x), interpolate
-        # between previous and current solution.  Small deviance increases
-        # are normal in IRLS (especially non-canonical links) and don't
-        # warrant halving.  The SVD fallback in _robust_solve() is the
-        # primary defense against ill-conditioned overshoots.
-        n_halvings = 0
-        if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
-            for halving in range(max_halving):
-                beta = 0.5 * (beta + beta_prev)
-                intercept = 0.5 * (intercept + intercept_prev)
-                eta_unclipped = dm.matvec(beta) + intercept + offset
-                eta = stabilize_eta(eta_unclipped, link)
-                mu = clip_mu(link.inverse(eta), family)
-                dev_h = float(np.sum(weights * family.deviance_unit(y, mu)))
-                if not np.isfinite(dev_h) or dev_h >= dev:
-                    break
-                n_halvings += 1
-                dev = dev_h
-                logger.info(
-                    f"  irls_direct iter={it + 1}: step halving {halving + 1}, dev={dev:.2e}"
-                )
-                if dev <= dev_prev:
-                    break
-            # Sync SCOP state after step halving: interpolate in working space
-            if _has_scop and n_halvings > 0:
-                frac = 0.5**n_halvings
-                for gi, st in _scop_state.items():
-                    if st["beta_scop_prev"] is not None:
-                        st["beta_scop"] = (1 - frac) * st["beta_scop_prev"] + frac * st["beta_scop"]
-                    # Re-write gamma_eff into beta for consistent eta
-                    g = groups[gi]
-                    beta[g.sl] = st["reparam"].forward(st["beta_scop"])
-
+        if _has_scop:
+            # SCOP has additional latent state; its full transaction is handled
+            # separately. Preserve the existing state-aware halving until then.
+            _t0 = time.perf_counter()
             eta_unclipped = dm.matvec(beta) + intercept + offset
             eta = stabilize_eta(eta_unclipped, link)
             mu = clip_mu(link.inverse(eta), family)
+            eta_elapsed = time.perf_counter() - _t0
+            _t_eta += eta_elapsed
+            _t0 = time.perf_counter()
             dev = float(np.sum(weights * family.deviance_unit(y, mu)))
+            deviance_eval_elapsed = time.perf_counter() - _t0
+            _t_deviance_eval += deviance_eval_elapsed
+            _t_deviance += eta_elapsed + deviance_eval_elapsed
+
+            n_halvings = 0
+            if np.isfinite(dev) and dev > 2.0 * dev_prev and np.isfinite(dev_prev):
+                for halving in range(max_halving):
+                    beta = 0.5 * (beta + beta_prev)
+                    intercept = 0.5 * (intercept + intercept_prev)
+                    eta_unclipped = dm.matvec(beta) + intercept + offset
+                    eta = stabilize_eta(eta_unclipped, link)
+                    mu = clip_mu(link.inverse(eta), family)
+                    dev_h = float(np.sum(weights * family.deviance_unit(y, mu)))
+                    if not np.isfinite(dev_h) or dev_h >= dev:
+                        break
+                    n_halvings += 1
+                    dev = dev_h
+                    logger.info(
+                        "  irls_direct iter=%d: step halving %d, dev=%.2e",
+                        it + 1,
+                        halving + 1,
+                        dev,
+                    )
+                    if dev <= dev_prev:
+                        break
+                if n_halvings > 0:
+                    frac = 0.5**n_halvings
+                    for gi, st in _scop_state.items():
+                        if st["beta_scop_prev"] is not None:
+                            st["beta_scop"] = (1 - frac) * st["beta_scop_prev"] + frac * st[
+                                "beta_scop"
+                            ]
+                        g = groups[gi]
+                        beta[g.sl] = st["reparam"].forward(st["beta_scop"])
+
+                eta_unclipped = dm.matvec(beta) + intercept + offset
+                eta = stabilize_eta(eta_unclipped, link)
+                mu = clip_mu(link.inverse(eta), family)
+                dev = float(np.sum(weights * family.deviance_unit(y, mu)))
+            retained = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+            step_rejected = False
+        else:
+            _t0 = time.perf_counter()
+            proposal = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+            trial_cache: dict[float, _IRLSState] = {1.0: proposal}
+
+            def evaluate_trial(alpha: float) -> _IRLSState:
+                beta_trial = committed.beta + alpha * (proposal.beta - committed.beta)
+                intercept_trial = committed.intercept + alpha * (
+                    proposal.intercept - committed.intercept
+                )
+                candidate = _evaluate_irls_state(
+                    dm,
+                    y,
+                    weights,
+                    family,
+                    link,
+                    offset,
+                    beta_trial,
+                    intercept_trial,
+                )
+                trial_cache[alpha] = candidate
+                return candidate
+
+            decision = _select_irls_trial(
+                committed=committed,
+                proposal=proposal,
+                evaluate_state=evaluate_trial,
+                max_halving=max_halving,
+            )
+            retained = committed if decision.step_rejected else trial_cache[decision.alpha]
+            evaluation_elapsed = time.perf_counter() - _t0
+            _t_deviance += evaluation_elapsed
+            _t_deviance_eval += evaluation_elapsed
+            beta = retained.beta.copy()
+            intercept = retained.intercept
+            eta_unclipped = retained.eta_unclipped
+            eta = retained.eta
+            mu = retained.mu
+            dev = retained.deviance
+            n_halvings = decision.step_halvings
+            step_rejected = decision.step_rejected
+            if step_rejected:
+                prev_active_set = committed_active_set
+            elif n_halvings:
+                logger.info(
+                    "  irls_direct iter=%d: accepted step fraction %.5g after %d halvings, "
+                    "dev=%.2e",
+                    it + 1,
+                    decision.alpha,
+                    n_halvings,
+                    dev,
+                )
 
         working_eta_clipped = False
         eta_clipped = False
@@ -1049,6 +1104,7 @@ def fit_irls_direct(
                     working_eta_min_unclipped=float(np.min(working_eta_unclipped)),
                     working_eta_max_unclipped=float(np.max(working_eta_unclipped)),
                     working_eta_clipped=working_eta_clipped,
+                    step_rejected=step_rejected,
                 )
             )
 
@@ -1074,6 +1130,8 @@ def fit_irls_direct(
             if np.isfinite(dev_prev):
                 dev_rel_change = abs(dev - dev_prev) / (abs(dev_prev) + 1.0)
             converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
+        if step_rejected:
+            converged_this_iter = False
 
         if record_debug_rows:
             debug_recorder.append_jsonl(
@@ -1106,15 +1164,24 @@ def fit_irls_direct(
                     "working_eta_min": float(working_eta.min()),
                     "working_eta_max": float(working_eta.max()),
                     "step_halvings": int(n_halvings),
+                    "step_rejected": bool(step_rejected),
                     "cond_estimate": float(_cond_est),
                     "used_svd_fallback": bool(_used_svd),
                     "has_scop": bool(_has_scop),
                 },
             )
 
+        if step_rejected:
+            logger.warning(
+                "IRLS direct rejected all trial steps at iter=%d; restored committed state",
+                it + 1,
+            )
+            break
+
         if converged_this_iter:
             converged = True
             break
+        committed = retained
         dev_prev = dev
 
     t_elapsed = time.perf_counter() - t_start
