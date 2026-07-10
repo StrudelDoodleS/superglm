@@ -115,12 +115,20 @@ single grouped factor inside the model.
 ## OrderedCategorical
 
 Use `OrderedCategorical(...)` when a factor has a real order and you want a
-smooth or stepped effect across levels.
+smooth effect across levels. Level positions are equally spaced unless you
+provide an explicit `values={level: position}` mapping.
 
 ```python
-OrderedCategorical(order=["A", "B", "C", "D"], basis="spline")
-OrderedCategorical(order=["1", "2", "3", "4"], basis="step")
+OrderedCategorical(
+    order=["A", "B", "C", "D"],
+    basis=Spline(kind="ps", k=6),
+)
 ```
+
+The legacy `basis="spline"` and spline shortcut arguments such as `kind=` and
+`n_knots=` are deprecated; configure them on `basis=Spline(...)`. Step smoothing
+with `basis="step"` is also deprecated and will be removed. Use `Spline(...)`
+for smoothing or `Categorical(...)` for independent level effects.
 
 ## Numeric
 

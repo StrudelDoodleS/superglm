@@ -339,10 +339,17 @@ def _ordered_spec_with_grouping(
     data,
 ) -> OrderedCategorical:
     values, native_base = _ordered_original_values(spec, grouping, data, base)
-    basis = copy.deepcopy(spec._spline_obj) if spec._spline_obj is not None else spec.basis
+    if spec._spline_obj is not None:
+        return OrderedCategorical(
+            values=values,
+            basis=copy.deepcopy(spec._spline_obj),
+            base=native_base,
+            grouping=grouping,
+        )
+
     return OrderedCategorical(
         values=values,
-        basis=basis,
+        basis=spec.basis,
         kind=spec.kind,
         base=native_base,
         n_knots=spec.n_knots,

@@ -219,7 +219,10 @@ area_grouping = collapse_levels(train_df["Area"], groups={"Rural": ["E", "F"]})
 features = {
     "VehAge": Spline(kind="cr", k=10),
     "Area": Categorical(base="most_exposed", grouping=area_grouping),
-    "BonusClass": OrderedCategorical(order=["A", "B", "C", "D"], basis="spline"),
+    "BonusClass": OrderedCategorical(
+        order=["A", "B", "C", "D"],
+        basis=Spline(kind="ps", k=6),
+    ),
 }
 ```
 
