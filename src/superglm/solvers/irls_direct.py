@@ -1247,12 +1247,14 @@ def fit_irls_direct(
         cache_out["sum_W"] = sum_W
         cache_out["sum_Wz"] = sum_Wz
 
-    # Compute (X'WX + S)^{-1} directly (NOT from augmented system, which gives
-    # the Schur complement that accounts for intercept estimation — wrong for REML).
-    # XtWX is already computed from the last iteration. Reuse S from above.
+    # Compute (X'WX + S)^{-1} directly (NOT the intercept-profiled inverse).
+    # Reconstruct it from the certified centered Hessian so PSD round-off
+    # corrections for degenerate spline penalties remain in force.
     _t0 = time.perf_counter()
     XtWX_beta = XtWX
-    M_beta = XtWX_beta + S
+    M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
+        centered_final.mean_x, centered_final.mean_x
+    )
     coefficient_rank = decompose_gram(M_beta)
     XtWX_S_inv_beta = coefficient_rank.pseudo_inverse()
     log_det_H = coefficient_rank.log_pdet
