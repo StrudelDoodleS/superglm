@@ -1,6 +1,7 @@
 """Tests for _robust_solve(), _safe_decompose_H(), and QR solver path."""
 
 import logging
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,7 @@ from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.profiling.tweedie import generate_tweedie_cpg
+from superglm.solvers import irls_direct as irls_direct_module
 from superglm.solvers.irls_direct import _robust_solve, _safe_decompose_H
 from superglm.solvers.rank import decompose_gram
 
@@ -273,12 +275,12 @@ class TestQRSolverPath:
         assert qr.result.effective_df == pytest.approx(gram.result.effective_df)
         assert qr.result.effective_df == pytest.approx(2.0)
 
-    def test_auto_near_collinear_converges(self, caplog):
-        """'auto' mode handles near-collinear data without SVD fallback.
+    def test_auto_near_collinear_converges(self, caplog, monkeypatch):
+        """'auto' mode does not report rank certification as a failed solve.
 
-        With pivoted Cholesky (Higham Ch. 10.3), near-collinear systems
-        that previously triggered repeated SVD fallbacks are now handled
-        directly by the rank-revealing decomposition.
+        Small BLAS differences can make the Gram and bounded factor rank
+        decisions straddle the shared cutoff.  Force that platform-dependent
+        branch so the warning semantics are deterministic in every CI job.
         """
         rng = np.random.default_rng(42)
         n = 5000
@@ -308,11 +310,30 @@ class TestQRSolverPath:
             },
             direct_solve="auto",
         )
+
+        decompose_gram_original = irls_direct_module.decompose_gram
+
+        def force_factor_certification(*args, **kwargs):
+            decomposition = decompose_gram_original(*args, **kwargs)
+            if decomposition.rank == 0:
+                return decomposition
+            return replace(
+                decomposition,
+                rank=decomposition.rank - 1,
+                resolution_limited=True,
+            )
+
+        monkeypatch.setattr(irls_direct_module, "decompose_gram", force_factor_certification)
+        monkeypatch.setattr(
+            irls_direct_module,
+            "needs_factor_certification",
+            lambda _decomposition: True,
+        )
         with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
             model.fit(df, y)
         assert model._result.converged
-        # Pivoted Cholesky should handle this without repeated SVD fallbacks.
-        # Lock in the improvement: assert the warning is absent.
+        # Bounded factor certification is intentional, not a failed solve that
+        # should recommend switching the whole fit to the dense QR path.
         assert not any("consecutive SVD fallbacks" in r.message for r in caplog.records)
 
     def test_gram_no_warning(self, caplog):

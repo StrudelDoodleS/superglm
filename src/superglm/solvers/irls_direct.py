@@ -694,6 +694,7 @@ def fit_irls_direct(
         intercept = committed.intercept
         committed_active_set = None if prev_active_set is None else list(prev_active_set)
         rank_truncated: bool | None = None
+        used_rank_certification = False
 
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
@@ -871,6 +872,7 @@ def fit_irls_direct(
                     )
                     if certified.rank != iteration_rank.rank:
                         iteration_rank = certified
+                        used_rank_certification = True
                 beta = iteration_rank.solve(centered.rhs)
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
                 _cond_est = iteration_rank.pre_truncation_condition
@@ -931,8 +933,11 @@ def fit_irls_direct(
                 _cond_est = 0.0
                 _t_solve += time.perf_counter() - _t0
 
-            # Warning for auto mode: suggest QR after repeated SVD fallbacks
-            if _used_svd:
+            # A bounded factor pass can intentionally replace an uncertain Gram
+            # rank.  Preserve that in iteration diagnostics, but do not report it
+            # as a failed solve or recommend switching the whole fit to dense QR.
+            warnable_svd_fallback = _used_svd and not used_rank_certification
+            if warnable_svd_fallback:
                 _consecutive_svd += 1
             else:
                 _consecutive_svd = 0
