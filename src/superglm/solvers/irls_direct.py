@@ -36,7 +36,11 @@ from superglm.group_matrix import (
     _block_xtwx_rhs,
 )
 from superglm.links import Link
-from superglm.solvers.centered_system import CenteredSystem, build_centered_system
+from superglm.solvers.centered_system import (
+    CenteredSystem,
+    build_centered_system,
+    refresh_centered_rhs,
+)
 from superglm.solvers.constrained_qp import solve_constrained_qp
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
@@ -575,8 +579,16 @@ def fit_irls_direct(
             _can_reuse_weighted_gram
             and _constant_centered_cache is not None
             and _constant_centered_z is not None
-            and np.array_equal(z_off_current, _constant_centered_z)
         ):
+            if np.array_equal(z_off_current, _constant_centered_z):
+                return _constant_centered_cache
+            _constant_centered_cache = refresh_centered_rhs(
+                system=_constant_centered_cache,
+                dm=dm,
+                W=W_current,
+                z_off=z_off_current,
+            )
+            _constant_centered_z = z_off_current.copy()
             return _constant_centered_cache
         system = build_centered_system(
             dm=dm,

@@ -59,3 +59,37 @@ def centered_gram_rhs(
 
     gram = 0.5 * (gram + gram.T)
     return gram, rhs
+
+
+def centered_rhs(
+    *,
+    dm,
+    W: NDArray,
+    mean_x: NDArray,
+    z_centered: NDArray,
+    chunk_size: int = 8192,
+) -> NDArray:
+    """Return ``(X - mean_x)' W z_centered`` without rebuilding the Gram."""
+    n, p = dm.shape
+    W = np.asarray(W, dtype=float)
+    mean_x = np.asarray(mean_x, dtype=float)
+    z_centered = np.asarray(z_centered, dtype=float)
+    if W.shape != (n,) or z_centered.shape != (n,):
+        raise ValueError("W and z_centered must match the design row count")
+    if mean_x.shape != (p,):
+        raise ValueError("mean_x must match the design column count")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    if p == 0:
+        return np.zeros(0, dtype=float)
+
+    rhs = np.zeros(p, dtype=float)
+    compensation = np.zeros_like(rhs)
+    for start in range(0, n, chunk_size):
+        stop = min(start + chunk_size, n)
+        rows = np.arange(start, stop)
+        block = np.asarray(dm.row_subset(rows).toarray(), dtype=float)
+        block -= mean_x
+        rhs_block = block.T @ (W[start:stop] * z_centered[start:stop])
+        _compensated_add(rhs, compensation, rhs_block)
+    return rhs

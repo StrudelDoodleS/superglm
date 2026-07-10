@@ -12,7 +12,7 @@ from superglm.features.numeric import Numeric
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.links import IdentityLink
 from superglm.penalties.group_lasso import GroupLasso
-from superglm.solvers.centered_system import build_centered_system
+from superglm.solvers.centered_system import build_centered_system, refresh_centered_rhs
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_factor, decompose_gram
@@ -98,6 +98,50 @@ def test_centered_system_reconstructs_raw_weighted_moments() -> None:
     np.testing.assert_allclose(xtw1, X.T @ W, rtol=1e-13, atol=1e-12)
     np.testing.assert_allclose(xtwz, X.T @ (W * z), rtol=1e-13, atol=1e-12)
     assert sum_wz == pytest.approx(float(np.dot(W, z)))
+
+
+def test_well_scaled_rhs_refresh_uses_grouped_matvec(monkeypatch) -> None:
+    rng = np.random.default_rng(148)
+    X = rng.normal(size=(80, 4))
+    W = rng.uniform(0.5, 1.5, size=len(X))
+    first_z = rng.normal(size=len(X))
+    next_z = rng.normal(size=len(X))
+    dm = _dense_design_matrix(X)
+    system = build_centered_system(dm=dm, W=W, z_off=first_z, penalty=np.eye(4))
+    expected = build_centered_system(
+        dm=_dense_design_matrix(X),
+        W=W,
+        z_off=next_z,
+        penalty=np.eye(4),
+    )
+
+    monkeypatch.setattr(
+        dm,
+        "row_subset",
+        lambda _rows: pytest.fail("well-scaled RHS refresh should use grouped rmatvec"),
+    )
+    refreshed = refresh_centered_rhs(system=system, dm=dm, W=W, z_off=next_z)
+
+    np.testing.assert_allclose(refreshed.rhs, expected.rhs, rtol=1e-12, atol=1e-12)
+
+
+def test_large_offset_rhs_refresh_retains_stable_centering() -> None:
+    delta = np.arange(40, dtype=float) - 19.5
+    X = np.column_stack((1e12 + delta, -3e11 + 2.0 * delta))
+    W = np.linspace(0.5, 2.0, len(X))
+    first_z = np.sin(delta)
+    next_z = 8e12 - 4.0 * delta
+    dm = _dense_design_matrix(X)
+    system = build_centered_system(dm=dm, W=W, z_off=first_z, penalty=np.eye(2))
+    refreshed = refresh_centered_rhs(system=system, dm=dm, W=W, z_off=next_z)
+    expected = build_centered_system(
+        dm=_dense_design_matrix(X),
+        W=W,
+        z_off=next_z,
+        penalty=np.eye(2),
+    )
+
+    np.testing.assert_allclose(refreshed.rhs, expected.rhs, rtol=1e-12, atol=1e-12)
 
 
 def test_centered_system_requires_positive_total_weight() -> None:

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
+from superglm._group_matrix._group_matrix_centered import centered_gram_rhs, centered_rhs
 from superglm.group_matrix import DesignMatrix
 
 
@@ -36,6 +36,43 @@ class CenteredSystem:
         gram = self.data_gram + self.sum_w * np.outer(self.mean_x, self.mean_x)
         xtwz = self.rhs + self.mean_x * sum_wz
         return gram, xtw1, xtwz, sum_wz
+
+
+def refresh_centered_rhs(
+    *,
+    system: CenteredSystem,
+    dm: DesignMatrix,
+    W: NDArray,
+    z_off: NDArray,
+) -> CenteredSystem:
+    """Reuse an invariant centered Gram while refreshing its working RHS."""
+    mean_z = float(np.dot(W, z_off) / system.sum_w)
+    z_centered = z_off - mean_z
+    centered_scale = np.sqrt(np.maximum(np.diag(system.data_gram), 0.0) / system.sum_w)
+    max_fast_ratio = np.finfo(float).eps ** -0.25
+    well_scaled = np.all(
+        (np.abs(system.mean_x) <= max_fast_ratio * centered_scale)
+        | ((system.mean_x == 0.0) & (centered_scale == 0.0))
+    )
+    if well_scaled:
+        weighted_z = W * z_centered
+        rhs = dm.rmatvec(weighted_z) - system.mean_x * float(np.sum(weighted_z))
+    else:
+        rhs = centered_rhs(
+            dm=dm,
+            W=W,
+            mean_x=system.mean_x,
+            z_centered=z_centered,
+        )
+    return CenteredSystem(
+        sum_w=system.sum_w,
+        mean_x=system.mean_x,
+        mean_z=mean_z,
+        data_gram=system.data_gram,
+        rhs=_freeze(rhs),
+        penalty=system.penalty,
+        hessian=system.hessian,
+    )
 
 
 def build_centered_system(

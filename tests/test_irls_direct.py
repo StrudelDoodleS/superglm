@@ -398,6 +398,44 @@ class TestDirectSolverBasic:
         assert cached.intercept == pytest.approx(uncached.intercept, abs=1e-12)
         assert cached.deviance == pytest.approx(uncached.deviance, abs=1e-12)
 
+    def test_gamma_log_reuses_centered_gram_when_working_response_changes(self, monkeypatch):
+        """Constant Gamma-log weights must not rebuild the invariant Gram."""
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gamma
+        from superglm.links import LogLink
+
+        rng = np.random.default_rng(458)
+        n = 120
+        X_raw = rng.normal(size=(n, 3))
+        y = rng.gamma(shape=2.0, scale=np.exp(0.2 + X_raw @ np.array([0.1, -0.2, 0.3])) / 2.0)
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=3)
+        groups = [GroupSlice(name="x", start=0, end=3)]
+
+        original_centered = irls_direct.build_centered_system
+        centered_calls = 0
+
+        def counting_centered_system(*args, **kwargs):
+            nonlocal centered_calls
+            centered_calls += 1
+            return original_centered(*args, **kwargs)
+
+        monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
+
+        result, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=groups,
+            lambda2=0.1,
+            max_iter=4,
+            tol=0.0,
+        )
+
+        assert result.n_iter == 4
+        assert centered_calls == 1
+
     def test_qp_constraints_are_assembled_once_across_iterations(self, monkeypatch):
         """QP constraint blocks are fixed for a fit and should not be rebuilt per IRLS step."""
         import superglm.solvers.irls_direct as irls_direct
