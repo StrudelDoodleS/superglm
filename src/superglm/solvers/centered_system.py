@@ -65,12 +65,15 @@ def build_centered_system(
     # Both terms are mathematically PSD. Degenerate spline
     # reparameterizations can introduce visible negative round-off, so project
     # only this declared-PSD system back onto its valid cone before rank work.
-    hessian_eigenvalues, hessian_eigenvectors = np.linalg.eigh(hessian)
-    if hessian_eigenvalues.size and hessian_eigenvalues[0] < 0.0:
-        hessian = (
-            hessian_eigenvectors * np.maximum(hessian_eigenvalues, 0.0)[None, :]
-        ) @ hessian_eigenvectors.T
-        hessian = 0.5 * (hessian + hessian.T)
+    try:
+        np.linalg.cholesky(hessian)
+    except np.linalg.LinAlgError:
+        hessian_eigenvalues, hessian_eigenvectors = np.linalg.eigh(hessian)
+        if hessian_eigenvalues.size and hessian_eigenvalues[0] < 0.0:
+            hessian = (
+                hessian_eigenvectors * np.maximum(hessian_eigenvalues, 0.0)[None, :]
+            ) @ hessian_eigenvectors.T
+            hessian = 0.5 * (hessian + hessian.T)
     return CenteredSystem(
         sum_w=sum_w,
         mean_x=_freeze(mean_x),
