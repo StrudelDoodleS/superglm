@@ -8,28 +8,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR
-from superglm.inference._term_covariance import compute_coef_covariance
+from superglm.group_matrix import DesignMatrix
+from superglm.solvers.rank import (
+    decompose_factor,
+    decompose_gram,
+    diagonal_of_square,
+    needs_factor_certification,
+    selected_group_name_set,
+)
 from superglm.types import GroupSlice
-
-
-def _build_S_from_penalties(model, lam2) -> NDArray | None:
-    """Build full penalty matrix from model._reml_penalties if available.
-
-    Returns None if model has no stored reml_penalties (non-REML fit or
-    single-penalty where the legacy path is equivalent).
-    """
-    penalties = getattr(model, "_reml_penalties", None)
-    if penalties is None:
-        return None
-    from superglm.reml.penalty_algebra import build_penalty_matrix
-
-    return build_penalty_matrix(
-        model._dm.group_matrices,
-        model._groups,
-        lam2,
-        model._dm.p,
-        reml_penalties=penalties,
-    )
 
 
 def _solver_space_working_weights(model) -> NDArray:
@@ -75,21 +62,31 @@ def _public_augmented_covariance(model, XtWX_inv_aug: NDArray, active_groups) ->
     if not np.any(intercept_shift):
         return XtWX_inv_aug
 
-    transform = np.eye(XtWX_inv_aug.shape[0], dtype=np.float64)
-    transform[0, 1:] = intercept_shift
-    return transform @ XtWX_inv_aug @ transform.T
+    feature_covariance = XtWX_inv_aug[1:, 1:]
+    original_cross = XtWX_inv_aug[0, 1:].copy()
+    shifted_cross = original_cross + intercept_shift @ feature_covariance
+    result = np.array(XtWX_inv_aug, dtype=np.float64, copy=True)
+    result[0, 0] = (
+        XtWX_inv_aug[0, 0]
+        + 2.0 * float(intercept_shift @ original_cross)
+        + float(intercept_shift @ feature_covariance @ intercept_shift)
+    )
+    result[0, 1:] = shifted_cross
+    result[1:, 0] = shifted_cross
+    return result
 
 
-def _rank_active_state(model, rank_info, W: NDArray):
-    """Materialize the explicitly selected fit state in rank-info order."""
-    selected_names = set(rank_info.selected_group_names)
+def _grouped_active_state(model, selected_names: set[str]):
+    """Return a compact grouped design and its original selected columns."""
     active_groups: list[GroupSlice] = []
-    active_arrays: list[NDArray] = []
+    active_matrices = []
+    rebuilt_columns: list[int] = []
     col = 0
     for gm, group in zip(model._dm.group_matrices, model._groups, strict=True):
         if group.name not in selected_names:
             continue
-        active_arrays.append(gm.toarray())
+        active_matrices.append(gm)
+        rebuilt_columns.extend(range(group.start, group.end))
         active_groups.append(
             GroupSlice(
                 name=group.name,
@@ -105,22 +102,171 @@ def _rank_active_state(model, rank_info, W: NDArray):
             )
         )
         col += group.size
-    X_active = np.hstack(active_arrays) if active_arrays else np.empty((len(W), 0))
-    if col != len(rank_info.selected_columns):
-        raise ValueError("rank metadata selected width does not match active groups")
-    return X_active, active_groups
+    return (
+        DesignMatrix(active_matrices, n=model._dm.n, p=col),
+        active_groups,
+        np.asarray(rebuilt_columns, dtype=np.intp),
+    )
+
+
+def _rank_active_state(model, rank_info):
+    """Return the explicitly selected grouped design in rank-info order."""
+    design, active_groups, rebuilt_columns = _grouped_active_state(
+        model,
+        set(rank_info.selected_group_names),
+    )
+    if not np.array_equal(
+        rebuilt_columns,
+        np.asarray(rank_info.selected_columns, dtype=np.intp),
+    ):
+        raise ValueError("rank metadata selected columns do not match active groups")
+    return design, active_groups
+
+
+def _legacy_active_state(model, solver, W: NDArray):
+    """Rebuild old fit inference with grouped, centered coefficient algebra."""
+    from superglm.inference.covariance import _active_penalty_matrix
+    from superglm.solvers.centered_system import (
+        build_centered_system,
+        grouped_augmented_factor,
+        grouped_weighted_factor,
+    )
+
+    selected_names = selected_group_name_set(
+        solver,
+        model._groups,
+        penalty=model.penalty,
+    )
+    design, active_groups, _ = _grouped_active_state(model, selected_names)
+    lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
+    penalty = _active_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        active_groups,
+        lam2,
+        reml_penalties=getattr(model, "_reml_penalties", None),
+    )
+    if design.p == 0:
+        sum_w = float(np.sum(W))
+        augmented = np.array([[1.0 / sum_w]]) if sum_w > 0.0 else np.array([[0.0]])
+        data_rank = decompose_gram(np.empty((0, 0)))
+        return (
+            design,
+            active_groups,
+            np.empty((0, 0)),
+            _public_augmented_covariance(model, augmented, active_groups),
+            np.empty((0, 0)),
+            np.empty((0, 0)),
+            data_rank,
+        )
+
+    centered = build_centered_system(
+        dm=design,
+        W=W,
+        z_off=np.zeros(design.n),
+        penalty=penalty,
+    )
+    raw_gram, xtw1, _, _ = centered.raw_weighted_moments()
+    coefficient_rank = decompose_gram(raw_gram + penalty)
+    data_rank = decompose_gram(centered.data_gram)
+    if needs_factor_certification(data_rank):
+        certified = decompose_factor(grouped_weighted_factor(design, W, center=centered.mean_x))
+        if certified.rank != data_rank.rank:
+            data_rank = certified
+    if needs_factor_certification(coefficient_rank):
+        certified = decompose_factor(grouped_augmented_factor(design, W, penalty))
+        if certified.rank != coefficient_rank.rank:
+            coefficient_rank = certified
+    if not np.any(penalty):
+        profile_rank = data_rank
+    else:
+        profile_rank = decompose_gram(centered.data_gram + penalty)
+        if needs_factor_certification(profile_rank):
+            certified = decompose_factor(
+                grouped_augmented_factor(
+                    design,
+                    W,
+                    penalty,
+                    center=centered.mean_x,
+                )
+            )
+            if certified.rank != profile_rank.rank:
+                profile_rank = certified
+    coefficient_inverse = coefficient_rank.pseudo_inverse()
+    profile_inverse = profile_rank.pseudo_inverse()
+    mean_x = xtw1 / centered.sum_w
+    intercept_cross = -(profile_inverse @ mean_x)
+    augmented = np.empty((design.p + 1, design.p + 1), dtype=np.float64)
+    augmented[0, 0] = 1.0 / centered.sum_w + float(mean_x @ profile_inverse @ mean_x)
+    augmented[0, 1:] = intercept_cross
+    augmented[1:, 0] = intercept_cross
+    augmented[1:, 1:] = profile_inverse
+    augmented = _public_augmented_covariance(model, augmented, active_groups)
+    return (
+        design,
+        active_groups,
+        coefficient_inverse,
+        augmented,
+        centered.data_gram,
+        profile_inverse,
+        data_rank,
+    )
+
+
+def _rank_centered_data_gram(X_active: DesignMatrix, W: NDArray) -> NDArray:
+    """Build the selected centered Gram without a full observation-row matrix."""
+    from superglm.solvers.centered_system import build_centered_system
+
+    p_active = X_active.p
+    if p_active == 0:
+        return np.empty((0, 0))
+    return build_centered_system(
+        dm=X_active,
+        W=W,
+        z_off=np.zeros(len(W)),
+        penalty=np.zeros((p_active, p_active)),
+    ).data_gram
+
+
+def _rank_edf1(rank_info, data_gram: NDArray, edf: NDArray) -> NDArray:
+    """Alternative EDF in the decomposition's retained coefficient space."""
+    import scipy.linalg
+
+    decomposition = rank_info.augmented
+    if decomposition.rank == 0:
+        return np.zeros_like(edf)
+
+    if decomposition.cholesky_factor is not None:
+        active = decomposition.active_columns
+        scale = decomposition.column_scale[active]
+        retained_gram = data_gram[np.ix_(active, active)] / np.outer(scale, scale)
+        retained_inverse = scipy.linalg.cho_solve(
+            (decomposition.cholesky_factor, True),
+            np.eye(decomposition.rank),
+            check_finite=False,
+        )
+        retained_F = retained_inverse @ retained_gram
+        edf1 = 2.0 * edf
+        edf1[active] -= diagonal_of_square(retained_F)
+        return edf1
+
+    F = decomposition.pseudo_inverse() @ data_gram
+    return 2.0 * edf - diagonal_of_square(F)
 
 
 def _rank_augmented_covariance(model, rank_info, active_groups):
     """Transform centered retained covariance to solver and public intercepts."""
     p_active = len(rank_info.selected_columns)
-    centered = np.zeros((p_active + 1, p_active + 1))
-    if rank_info.sum_w > 0.0:
-        centered[0, 0] = 1.0 / rank_info.sum_w
-    centered[1:, 1:] = rank_info.augmented.pseudo_inverse()
-    transform = np.eye(p_active + 1)
-    transform[0, 1:] = -rank_info.mean_x[rank_info.selected_columns]
-    solver_covariance = transform @ centered @ transform.T
+    feature_covariance = rank_info.augmented.pseudo_inverse()
+    mean_x = rank_info.mean_x[rank_info.selected_columns]
+    intercept_cross = -(feature_covariance @ mean_x)
+    solver_covariance = np.empty((p_active + 1, p_active + 1), dtype=np.float64)
+    solver_covariance[0, 0] = (1.0 / rank_info.sum_w if rank_info.sum_w > 0.0 else 0.0) + float(
+        mean_x @ feature_covariance @ mean_x
+    )
+    solver_covariance[0, 1:] = intercept_cross
+    solver_covariance[1:, 0] = intercept_cross
+    solver_covariance[1:, 1:] = feature_covariance
     return _public_augmented_covariance(model, solver_covariance, active_groups)
 
 
@@ -128,49 +274,30 @@ def coef_covariance(model):
     """Phi-scaled Bayesian covariance for active coefficients."""
     solver = model._solver_pirls_result()
     if solver.rank_info is not None:
-        W = _solver_space_working_weights(model)
-        _, active_groups = _rank_active_state(model, solver.rank_info, W)
+        _, active_groups = _rank_active_state(model, solver.rank_info)
         covariance = solver.phi * solver.rank_info.augmented.pseudo_inverse()
         return covariance, active_groups
-    lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
-    S_full = _build_S_from_penalties(model, lam2)
-    return compute_coef_covariance(
-        model._dm,
-        model._distribution,
-        model._link,
-        model._groups,
-        model._solver_pirls_result(),
-        model._fit_weights,
-        model._fit_offset,
-        lam2,
-        S_override=S_full,
-    )
+    W = _solver_space_working_weights(model)
+    _, active_groups, _, _, _, profile_inverse, _ = _legacy_active_state(model, solver, W)
+    return solver.phi * profile_inverse, active_groups
 
 
 def fit_active_info(model):
-    """Active design columns, weights, and (X'WX+S)^{-1} from fit state."""
-    from superglm.inference.covariance import _penalised_xtwx_inv
-
+    """Grouped active design, weights, and (X'WX+S)^{-1} from fit state."""
     solver = model._solver_pirls_result()
     W = _solver_space_working_weights(model)
     if solver.rank_info is not None:
-        X_active, active_groups = _rank_active_state(model, solver.rank_info, W)
+        X_active, active_groups = _rank_active_state(model, solver.rank_info)
         inverse = solver.rank_info.coefficient.pseudo_inverse()
         augmented = _rank_augmented_covariance(model, solver.rank_info, active_groups)
         return X_active, W, inverse, augmented, active_groups
 
-    lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
-    S_full = _build_S_from_penalties(model, lam2)
-    X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
-        solver.beta,
+    X_active, active_groups, inverse, augmented, _, _, _ = _legacy_active_state(
+        model,
+        solver,
         W,
-        model._dm.group_matrices,
-        model._groups,
-        lam2,
-        S_override=S_full,
     )
-    XtWX_inv_aug = _public_augmented_covariance(model, XtWX_inv_aug, active_groups)
-    return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
+    return X_active, W, inverse, augmented, active_groups
 
 
 def fit_inference_info(model):
@@ -191,16 +318,11 @@ def fit_inference_info(model):
         edf1 : Wood's alternative EDF vector
         group_edf_map : per-group summed EDF dict
     """
-    import scipy.linalg
-
-    from superglm.inference.covariance import _penalised_xtwx_inv_gram
-
     solver = model._solver_pirls_result()
     W = _solver_space_working_weights(model)
     if solver.rank_info is not None:
         rank_info = solver.rank_info
-        X_active, active_groups = _rank_active_state(model, rank_info, W)
-        retained_inverse = rank_info.augmented.pseudo_inverse()
+        X_active, active_groups = _rank_active_state(model, rank_info)
         inverse = rank_info.coefficient.pseudo_inverse()
         augmented = _rank_augmented_covariance(model, rank_info, active_groups)
         if X_active.shape[1] == 0:
@@ -213,12 +335,11 @@ def fit_inference_info(model):
                 "edf": np.array([]),
                 "edf1": np.array([]),
                 "group_edf_map": dict(rank_info.group_edf),
+                "coefficient_estimable": rank_info.coefficient_estimable(),
             }
-        X_centered = X_active - rank_info.mean_x[rank_info.selected_columns]
-        data_gram = X_centered.T @ (W[:, None] * X_centered)
-        F = retained_inverse @ data_gram
+        data_gram = _rank_centered_data_gram(X_active, W)
         edf = rank_info.feature_edf[rank_info.selected_columns].copy()
-        edf1 = 2.0 * edf - np.sum(F * F, axis=1)
+        edf1 = _rank_edf1(rank_info, data_gram, edf)
         eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
         eigvals = np.maximum(eigvals, 0.0)
         R_a = (eigvecs * np.sqrt(eigvals)).T
@@ -231,66 +352,54 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": dict(rank_info.group_edf),
+            "coefficient_estimable": rank_info.coefficient_estimable(),
         }
 
-    lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
-    S_full = _build_S_from_penalties(model, lam2)
-
-    # Gram path: per-group gram + cross-gram blocks, then invert.
-    # O(n·p_g² per block + p³) — avoids the full n×p QR.
-    # Returns XtWX and S directly so we don't need to recover them
-    # from the (possibly truncated) pseudo-inverse.
-    XtWX_inv, XtWX_inv_aug, active_groups, XtWX, S = _penalised_xtwx_inv_gram(
-        solver.beta,
-        W,
-        model._dm.group_matrices,
-        model._groups,
-        lam2,
-        S_override=S_full,
+    X_active, active_groups, inverse, augmented, data_gram, profile_inverse, data_rank = (
+        _legacy_active_state(model, solver, W)
     )
-    XtWX_inv_aug = _public_augmented_covariance(model, XtWX_inv_aug, active_groups)
-
-    p_a = XtWX_inv.shape[0]
-    if p_a == 0:
+    if X_active.p == 0:
         return {
             "W": W,
-            "XtWX_inv": XtWX_inv,
-            "XtWX_inv_aug": XtWX_inv_aug,
+            "XtWX_inv": inverse,
+            "XtWX_inv_aug": augmented,
             "active_groups": active_groups,
             "R_a": np.empty((0, 0)),
             "edf": np.array([]),
             "edf1": np.array([]),
             "group_edf_map": {},
+            "coefficient_estimable": np.zeros(len(solver.beta), dtype=bool),
         }
 
-    # EDF: F = (X'WX+S)^{-1} X'WX — use XtWX directly from the gram path,
-    # which is correct even when XtWX_inv is a truncated pseudo-inverse.
-    F = XtWX_inv @ XtWX
+    F = profile_inverse @ data_gram
     edf = np.diag(F)
-    edf1 = 2.0 * edf - np.sum(F * F, axis=1)
+    edf1 = 2.0 * edf - diagonal_of_square(F)
 
-    # R factor via Cholesky of X'WX (O(p³) instead of O(n·p²) QR)
-    try:
-        R_a = scipy.linalg.cholesky(XtWX, lower=False, check_finite=False)
-    except np.linalg.LinAlgError:
-        # Near-singular: eigendecompose and build pseudo-R
-        eigvals, eigvecs = np.linalg.eigh(XtWX)
-        eigvals = np.maximum(eigvals, 0.0)
-        R_a = (eigvecs * np.sqrt(eigvals)).T  # p×p, R'R = XtWX
+    eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
+    eigvals = np.maximum(eigvals, 0.0)
+    R_a = (eigvecs * np.sqrt(eigvals)).T
 
     group_edf_map: dict[str, float] = {}
     for ag in active_groups:
         group_edf_map[ag.name] = float(np.sum(edf[ag.sl]))
+    coefficient_estimable = np.zeros(len(solver.beta), dtype=bool)
+    active_estimable = data_rank.coefficient_estimable()
+    original_by_name = {group.name: group for group in model._groups}
+    for active_group in active_groups:
+        coefficient_estimable[original_by_name[active_group.name].sl] = active_estimable[
+            active_group.sl
+        ]
 
     return {
         "W": W,
-        "XtWX_inv": XtWX_inv,
-        "XtWX_inv_aug": XtWX_inv_aug,
+        "XtWX_inv": inverse,
+        "XtWX_inv_aug": augmented,
         "active_groups": active_groups,
         "R_a": R_a,
         "edf": edf,
         "edf1": edf1,
         "group_edf_map": group_edf_map,
+        "coefficient_estimable": coefficient_estimable,
     }
 
 

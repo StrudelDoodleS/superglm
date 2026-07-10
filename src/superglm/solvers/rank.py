@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -30,6 +30,54 @@ SHARED_RANK_POLICY = RankPolicy(
     warning_condition=float(1.0 / np.sqrt(_EPS)),
     severe_condition=float(1.0 / _EPS),
 )
+
+
+def diagonal_of_square(matrix: NDArray) -> NDArray:
+    """Return ``diag(matrix @ matrix)`` with an O(p²) contraction."""
+    matrix = np.asarray(matrix, dtype=float)
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+        raise ValueError("matrix must be square")
+    return np.einsum("ij,ji->i", matrix, matrix, optimize=True)
+
+
+def streamed_weighted_factor(
+    chunks: Iterable[tuple[int, int, NDArray]],
+    weights: NDArray,
+    *,
+    center: NDArray | None = None,
+) -> NDArray:
+    """Build a compact QR factor from bounded weighted row chunks."""
+    weights = np.asarray(weights, dtype=float)
+    factor: NDArray | None = None
+    width = 0 if center is None else len(center)
+    for start, stop, values in chunks:
+        block = np.asarray(values, dtype=float)
+        width = block.shape[1]
+        if center is not None:
+            block = block - center
+        block = np.sqrt(weights[start:stop])[:, None] * block
+        stacked = block if factor is None else np.vstack((factor, block))
+        factor = np.linalg.qr(stacked, mode="r")
+    return np.empty((0, width)) if factor is None else np.asarray(factor)
+
+
+def needs_factor_certification(
+    decomposition: RankDecomposition,
+    *,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+) -> bool:
+    """Whether a nominally full Gram rank lies inside its uncertified band."""
+    certification_condition = policy.warning_condition / np.sqrt(policy.certification_band)
+    return bool(
+        decomposition.width > 0
+        and (
+            (
+                decomposition.rank == decomposition.width
+                and decomposition.pre_truncation_condition >= certification_condition
+            )
+            or (decomposition.rank < decomposition.width and decomposition.resolution_limited)
+        )
+    )
 
 
 def _freeze(values: NDArray, *, dtype=float) -> NDArray:
@@ -118,12 +166,56 @@ class RankDecomposition:
         contrast = np.asarray(contrast, dtype=float)
         if contrast.shape != (self.width,):
             raise ValueError("contrast width does not match decomposition")
+        scaled_columns = self.column_scale > 0.0
+        contrast_norm = float(np.linalg.norm(contrast))
+        structural_tolerance = SHARED_RANK_POLICY.factor_rcond * max(
+            contrast_norm,
+            np.finfo(float).tiny,
+        )
+        if np.linalg.norm(contrast[~scaled_columns]) > structural_tolerance:
+            return False
         null = self.null_basis()
         if null.shape[1] == 0:
             return True
-        projection = contrast @ null
-        tolerance = SHARED_RANK_POLICY.factor_rcond * max(1.0, float(np.linalg.norm(contrast)))
+
+        # Test orthogonality in the equilibrated dual coordinates used by the
+        # rank decision.  Comparing ``contrast @ parameter_null_basis`` against
+        # an unscaled absolute tolerance makes exact aliases appear estimable
+        # when one design column is multiplied by a large constant.
+        scaled_contrast = contrast[scaled_columns] / self.column_scale[scaled_columns]
+        equilibrated_null = null[scaled_columns, :] * self.column_scale[scaled_columns, None]
+        null_norms = np.linalg.norm(equilibrated_null, axis=0)
+        retained_null = null_norms > np.finfo(float).eps
+        if not np.any(retained_null):
+            return True
+        normalized_null = equilibrated_null[:, retained_null] / null_norms[retained_null]
+        projection = scaled_contrast @ normalized_null
+        tolerance = SHARED_RANK_POLICY.factor_rcond * max(
+            float(np.linalg.norm(scaled_contrast)),
+            np.finfo(float).tiny,
+        )
         return bool(np.linalg.norm(projection) <= tolerance)
+
+    def coefficient_estimable(self) -> NDArray:
+        """Return all unit-coordinate estimability decisions in one projection."""
+        scaled_columns = self.column_scale > 0.0
+        result = np.zeros(self.width, dtype=bool)
+        null = self.null_basis()
+        if null.shape[1] == 0:
+            result[scaled_columns] = True
+            return result
+
+        equilibrated_null = null[scaled_columns, :] * self.column_scale[scaled_columns, None]
+        null_norms = np.linalg.norm(equilibrated_null, axis=0)
+        retained_null = null_norms > np.finfo(float).eps
+        if not np.any(retained_null):
+            result[scaled_columns] = True
+            return result
+        normalized_null = equilibrated_null[:, retained_null] / null_norms[retained_null]
+        result[scaled_columns] = (
+            np.linalg.norm(normalized_null, axis=1) <= SHARED_RANK_POLICY.factor_rcond
+        )
+        return result
 
 
 @dataclass(frozen=True)
@@ -177,10 +269,7 @@ class RankInfo:
 
     def coefficient_estimable(self) -> NDArray:
         result = np.zeros(len(self.mean_x), dtype=bool)
-        for column in self.selected_columns:
-            contrast = np.zeros(len(self.mean_x))
-            contrast[column] = 1.0
-            result[column] = self.is_estimable(contrast)
+        result[self.selected_columns] = self.data.coefficient_estimable()
         return result
 
 
@@ -233,6 +322,56 @@ def _null_basis(
         inactive_basis[inactive, np.arange(inactive.size)] = 1.0
         pieces.append(inactive_basis)
     return np.column_stack(pieces) if pieces else np.zeros((width, 0))
+
+
+def _scaled_subspace_logdet(coordinates: NDArray) -> float:
+    """Return ``log(det(coordinates.T @ coordinates))`` across extreme row scales."""
+    width = coordinates.shape[1]
+    if width == 0:
+        return 0.0
+
+    # Ordinary QR/SVD only provides absolute accuracy.  DGEJSV's 'F' mode
+    # applies full row and column pivoting so diagonal scaling cannot erase a
+    # genuine retained direction.  Ask for the unrestricted singular-value
+    # range because rank has already been decided in equilibrated coordinates.
+    singular_values, _, _, scaling, _, info = scipy.linalg.lapack.dgejsv(
+        np.asfortranarray(coordinates),
+        joba=2,  # 'F': full-pivoting, high-relative-accuracy preprocessing
+        jobu=3,  # 'N': singular values only
+        jobv=3,  # 'N': singular values only
+        jobr=0,  # 'N': do not truncate the requested singular-value range
+    )
+    if info != 0:
+        raise np.linalg.LinAlgError(f"high-accuracy retained SVD failed with info={info}")
+    if np.any(singular_values <= 0.0) or np.any(scaling[:2] <= 0.0):
+        raise ValueError("retained coordinate basis is not full rank")
+    log_scale = float(np.log(scaling[0]) - np.log(scaling[1]))
+    return 2.0 * (float(np.sum(np.log(singular_values))) + width * log_scale)
+
+
+def _retained_log_pdet(
+    active_scale: NDArray,
+    retained_vectors: NDArray,
+    discarded_vectors: NDArray,
+    retained_values: NDArray,
+) -> float:
+    """Return the retained pseudo-logdet without forming a coordinate Gram."""
+    if retained_values.size == 0:
+        return 0.0
+
+    # V (retained) and N (discarded) form an orthogonal basis.  Jacobi's
+    # complementary-minor identity gives
+    #
+    # det(V.T D^2 V) = det(D)^2 det(N.T D^-2 N).
+    #
+    # Evaluate whichever side has fewer columns; this is both cheaper and more
+    # accurate for the common one-alias case.
+    if retained_vectors.shape[1] <= discarded_vectors.shape[1]:
+        coordinate_logdet = _scaled_subspace_logdet(active_scale[:, None] * retained_vectors)
+    else:
+        coordinate_logdet = 2.0 * float(np.sum(np.log(active_scale)))
+        coordinate_logdet += _scaled_subspace_logdet(discarded_vectors / active_scale[:, None])
+    return coordinate_logdet + float(np.sum(np.log(np.abs(retained_values))))
 
 
 def decompose_gram(
@@ -406,6 +545,16 @@ def decompose_gram(
         np.any((np.abs(eigenvalues) > 0.0) & ~retained_mask)
         or (fallback_factor is not None and decompose_factor(fallback_factor).rank > rank)
     )
+    log_pdet = (
+        2.0 * float(np.sum(np.log(active_scale))) + float(np.sum(np.log(np.abs(retained_values))))
+        if rank == width
+        else _retained_log_pdet(
+            active_scale,
+            retained_vectors,
+            discarded_vectors,
+            retained_values,
+        )
+    )
     if psd_semantics and 0 < rank < len(active_columns):
         # Choose the earliest original-coordinate representative whose
         # principal system has the certified rank. This gives exact aliases a
@@ -434,9 +583,6 @@ def decompose_gram(
                 )
                 representative_aliases = np.ones(width, dtype=bool)
                 representative_aliases[representative_columns] = False
-                representative_logdet = 2.0 * float(
-                    np.sum(np.log(np.diag(representative_factor)))
-                ) + 2.0 * float(np.sum(np.log(column_scale[representative_columns])))
                 return RankDecomposition(
                     policy_version=policy.version,
                     method="pivoted_cholesky",
@@ -448,7 +594,7 @@ def decompose_gram(
                     rank_truncated=True,
                     used_svd_fallback=False,
                     resolution_limited=resolution_limited,
-                    log_pdet=representative_logdet,
+                    log_pdet=log_pdet,
                     cholesky_factor=_freeze(representative_factor),
                     pivots=_freeze(representative_columns, dtype=int),
                     solution_basis=_freeze(representative_basis),
@@ -459,14 +605,6 @@ def decompose_gram(
                 )
             except (np.linalg.LinAlgError, ValueError):
                 pass
-    if rank:
-        retained_coordinates = active_scale[:, None] * retained_vectors
-        sign, coordinate_logdet = np.linalg.slogdet(retained_coordinates.T @ retained_coordinates)
-        if sign <= 0:
-            raise ValueError("retained Gram pseudo-determinant is not positive")
-        log_pdet = float(coordinate_logdet + np.sum(np.log(np.abs(retained_values))))
-    else:
-        log_pdet = 0.0
     return RankDecomposition(
         policy_version=policy.version,
         method="gram_eigh",
@@ -530,6 +668,16 @@ def decompose_factor(
     estimable_basis[active_columns, :] = retained_vectors * active_scale[:, None]
     null = _null_basis(width, active_columns, active_scale, discarded_vectors)
     retained_values = singular_values[retained_mask] ** 2
+    log_pdet = (
+        2.0 * float(np.sum(np.log(active_scale))) + float(np.sum(np.log(np.abs(retained_values))))
+        if rank == width
+        else _retained_log_pdet(
+            active_scale,
+            retained_vectors,
+            discarded_vectors,
+            retained_values,
+        )
+    )
     condition = (
         float(singular_values[0] / singular_values[-1])
         if singular_values[-1] > 0.0
@@ -561,9 +709,6 @@ def decompose_factor(
                 )
                 representative_aliases = np.ones(width, dtype=bool)
                 representative_aliases[representative_columns] = False
-                representative_logdet = 2.0 * float(
-                    np.sum(np.log(np.diag(representative_factor)))
-                ) + 2.0 * float(np.sum(np.log(column_scale[representative_columns])))
                 return RankDecomposition(
                     policy_version=policy.version,
                     method="qr_svd",
@@ -575,7 +720,7 @@ def decompose_factor(
                     rank_truncated=True,
                     used_svd_fallback=True,
                     resolution_limited=bool(np.any((singular_values > 0.0) & ~retained_mask)),
-                    log_pdet=representative_logdet,
+                    log_pdet=log_pdet,
                     cholesky_factor=_freeze(representative_factor),
                     pivots=_freeze(representative_columns, dtype=int),
                     solution_basis=_freeze(representative_basis),
@@ -586,16 +731,6 @@ def decompose_factor(
                 )
             except (np.linalg.LinAlgError, ValueError):
                 pass
-    if rank:
-        retained_factor = (
-            active_scale[:, None] * retained_vectors * singular_values[retained_mask][None, :]
-        )
-        sign, log_pdet = np.linalg.slogdet(retained_factor.T @ retained_factor)
-        if sign <= 0:
-            raise ValueError("retained factor pseudo-determinant is not positive")
-        log_pdet = float(log_pdet)
-    else:
-        log_pdet = 0.0
     return RankDecomposition(
         policy_version=policy.version,
         method="qr_svd",
@@ -616,8 +751,24 @@ def decompose_factor(
     )
 
 
-def selected_group_name_set(result, groups: Sequence) -> set[str]:
-    """Return explicit solver selection, with a legacy coefficient fallback."""
+def selected_group_name_set(result, groups: Sequence, *, penalty=None) -> set[str]:
+    """Return explicit solver selection, with a legacy coefficient fallback.
+
+    Legacy results predate explicit rank/selection metadata.  When the fitted
+    penalty is available, preserve every group that was not subject to a
+    positive nonsmooth penalty; a valid zero estimate is not deselection.
+    """
     if getattr(result, "rank_info", None) is not None:
         return set(result.rank_info.selected_group_names)
+    if penalty is not None:
+        from superglm.penalties.base import penalty_can_zero_groups, penalty_targets_group
+
+        can_zero_groups = penalty_can_zero_groups(penalty)
+        return {
+            group.name
+            for group in groups
+            if not can_zero_groups
+            or not penalty_targets_group(penalty, group)
+            or np.linalg.norm(result.beta[group.sl]) > 1e-12
+        }
     return {group.name for group in groups if np.linalg.norm(result.beta[group.sl]) > 1e-12}

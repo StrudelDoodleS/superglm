@@ -20,7 +20,7 @@ def diagnostics(model) -> dict[str, Any]:
     res = model.result
     group_edf = model._group_edf
     reml_lam = getattr(model, "_reml_lambdas", None)
-    selected_names = selected_group_name_set(res, model._groups)
+    selected_names = selected_group_name_set(res, model._groups, penalty=model.penalty)
 
     out = {}
     for g in model._groups:
@@ -83,7 +83,7 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
     bic = -2 * ll + np.log(n) * edf
     denom = n - edf - 1.0
     aicc = aic + 2 * edf * (edf + 1) / denom if denom > 0 else np.inf
-    selected_names = selected_group_name_set(res, model._groups)
+    selected_names = selected_group_name_set(res, model._groups, penalty=model.penalty)
     n_active = len(selected_names)
     p_total = len(model._groups)
 
@@ -241,6 +241,8 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         precomputed_R_a=inf["R_a"],
         precomputed_edf=inf["edf"],
         precomputed_edf1=inf["edf1"],
+        coefficient_estimable_override=inf.get("coefficient_estimable"),
+        selected_group_names=selected_names,
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,
     )
@@ -275,6 +277,8 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         active_groups=active_groups,
         known_scale=known_scale,
         alpha=alpha,
+        coefficient_estimable_override=inf.get("coefficient_estimable"),
+        selected_group_names=selected_names,
     )
 
     summary_obj = ModelSummary(
@@ -296,7 +300,11 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
     rows = [_CoefRow(name="Intercept", coef=float(model.result.intercept))]
     group_edf = getattr(model, "_group_edf", None)
     reml_lambdas = getattr(model, "_reml_lambdas", None)
-    selected_names = selected_group_name_set(model.result, model._groups)
+    selected_names = selected_group_name_set(
+        model.result,
+        model._groups,
+        penalty=model.penalty,
+    )
     handled_ordered_features: set[str] = set()
 
     for g in model._groups:

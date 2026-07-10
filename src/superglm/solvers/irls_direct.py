@@ -39,6 +39,8 @@ from superglm.links import Link
 from superglm.solvers.centered_system import (
     CenteredSystem,
     build_centered_system,
+    grouped_augmented_factor,
+    grouped_weighted_factor,
     refresh_centered_rhs,
 )
 from superglm.solvers.constrained_qp import solve_constrained_qp
@@ -59,6 +61,7 @@ from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram,
     decompose_symmetric,
+    needs_factor_certification,
 )
 from superglm.solvers.scop import SCOPSolverReparam
 from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
@@ -857,6 +860,17 @@ def fit_irls_direct(
                 _t_gram += time.perf_counter() - _t0
                 _t0 = time.perf_counter()
                 iteration_rank = decompose_gram(centered.hessian)
+                if needs_factor_certification(iteration_rank):
+                    certified = decompose_factor(
+                        grouped_augmented_factor(
+                            dm,
+                            W,
+                            centered.penalty,
+                            center=centered.mean_x,
+                        )
+                    )
+                    if certified.rank != iteration_rank.rank:
+                        iteration_rank = certified
                 beta = iteration_rank.solve(centered.rhs)
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
                 _cond_est = iteration_rank.pre_truncation_condition
@@ -1313,6 +1327,10 @@ def fit_irls_direct(
         centered_final.mean_x, centered_final.mean_x
     )
     coefficient_rank = decompose_gram(M_beta)
+    if needs_factor_certification(coefficient_rank):
+        certified = decompose_factor(grouped_augmented_factor(dm, W, centered_final.penalty))
+        if certified.rank != coefficient_rank.rank:
+            coefficient_rank = certified
     XtWX_S_inv_beta = coefficient_rank.pseudo_inverse()
     log_det_H = coefficient_rank.log_pdet
 
@@ -1324,7 +1342,32 @@ def fit_irls_direct(
             augmented_rank = decompose_factor(np.vstack([A_data_final, _L_aug[1:, 1:]]))
         else:
             data_rank = decompose_gram(centered_final.data_gram) if compute_rank_info else None
-            augmented_rank = decompose_gram(centered_final.hessian)
+            if data_rank is not None and needs_factor_certification(data_rank):
+                certified = decompose_factor(
+                    grouped_weighted_factor(
+                        dm,
+                        W,
+                        center=centered_final.mean_x,
+                    )
+                )
+                if certified.rank != data_rank.rank:
+                    data_rank = certified
+            augmented_rank = (
+                data_rank
+                if data_rank is not None and not np.any(centered_final.penalty)
+                else decompose_gram(centered_final.hessian)
+            )
+            if needs_factor_certification(augmented_rank):
+                certified = decompose_factor(
+                    grouped_augmented_factor(
+                        dm,
+                        W,
+                        centered_final.penalty,
+                        center=centered_final.mean_x,
+                    )
+                )
+                if certified.rank != augmented_rank.rank:
+                    augmented_rank = certified
         feature_edf = np.diag(augmented_rank.pseudo_inverse() @ centered_final.data_gram).copy()
         feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
         p_eff = 1.0 + float(np.sum(feature_edf))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -13,6 +14,9 @@ from superglm._group_matrix._group_matrix_centered import (
     packed_centered_gram_rhs,
 )
 from superglm.group_matrix import DesignMatrix
+
+_FACTOR_CHUNK_BYTES = 16 * 1024 * 1024
+_FACTOR_CHUNK_ROWS = 8192
 
 
 def _freeze(values: NDArray) -> NDArray:
@@ -40,6 +44,50 @@ class CenteredSystem:
         gram = self.data_gram + self.sum_w * np.outer(self.mean_x, self.mean_x)
         xtwz = self.rhs + self.mean_x * sum_wz
         return gram, xtw1, xtwz, sum_wz
+
+
+def iter_grouped_design_chunks(dm: DesignMatrix) -> Iterator[tuple[int, int, NDArray]]:
+    """Yield bounded dense rows only for rare factor-rank certification."""
+    bytes_per_row = 3 * np.dtype(np.float64).itemsize * max(dm.p, 1)
+    chunk_rows = max(1, min(_FACTOR_CHUNK_ROWS, _FACTOR_CHUNK_BYTES // bytes_per_row))
+    for start in range(0, dm.n, chunk_rows):
+        stop = min(start + chunk_rows, dm.n)
+        rows = np.arange(start, stop, dtype=np.intp)
+        yield start, stop, np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+
+
+def grouped_weighted_factor(
+    dm: DesignMatrix,
+    W: NDArray,
+    *,
+    center: NDArray | None = None,
+) -> NDArray:
+    """Return a streaming weighted QR factor without retaining all design rows."""
+    from superglm.solvers.rank import streamed_weighted_factor
+
+    return streamed_weighted_factor(iter_grouped_design_chunks(dm), W, center=center)
+
+
+def penalty_factor(penalty: NDArray) -> NDArray:
+    """Return a square factor whose cross-product is a PSD penalty matrix."""
+    if penalty.shape == (0, 0) or not np.any(penalty):
+        return np.empty((0, penalty.shape[0]))
+    eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (penalty + penalty.T))
+    positive = eigenvalues > 0.0
+    return np.sqrt(eigenvalues[positive])[:, None] * eigenvectors[:, positive].T
+
+
+def grouped_augmented_factor(
+    dm: DesignMatrix,
+    W: NDArray,
+    penalty: NDArray,
+    *,
+    center: NDArray | None = None,
+) -> NDArray:
+    """Return the bounded weighted-design factor augmented by ``sqrt(S)``."""
+    data_factor = grouped_weighted_factor(dm, W, center=center)
+    smooth_factor = penalty_factor(penalty)
+    return data_factor if smooth_factor.shape[0] == 0 else np.vstack((data_factor, smooth_factor))
 
 
 def refresh_centered_rhs(

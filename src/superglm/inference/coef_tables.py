@@ -7,8 +7,9 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.inference._metrics_design import MetricsDesign, factor_from_gram, weighted_moments
 from superglm.inference.summary import _BasisDetailRow, _CoefRow, _compute_coef_stats
-from superglm.solvers.rank import selected_group_name_set
+from superglm.solvers.rank import diagonal_of_square, selected_group_name_set
 from superglm.types import GroupSlice
 
 
@@ -18,7 +19,7 @@ def build_coef_rows(
     specs: dict,
     interaction_specs: dict,
     result: Any,
-    X_a: NDArray,
+    X_a: NDArray | MetricsDesign,
     W: NDArray,
     XtWX_inv: NDArray,
     XtWX_inv_aug: NDArray,
@@ -34,6 +35,9 @@ def build_coef_rows(
     precomputed_R_a: NDArray | None = None,
     precomputed_edf: NDArray | None = None,
     precomputed_edf1: NDArray | None = None,
+    precomputed_design_moments: tuple[NDArray, NDArray, NDArray] | None = None,
+    coefficient_estimable_override: NDArray | None = None,
+    selected_group_names: set[str] | None = None,
     group_matrices: list | None = None,
     sample_weights: NDArray | None = None,
 ) -> list[_CoefRow]:
@@ -70,11 +74,19 @@ def build_coef_rows(
     )
 
     beta = result.beta
-    selected_names = selected_group_name_set(result, groups)
+    selected_names = (
+        selected_group_name_set(result, groups)
+        if selected_group_names is None
+        else set(selected_group_names)
+    )
     coefficient_estimable = (
-        result.rank_info.coefficient_estimable()
-        if getattr(result, "rank_info", None) is not None
-        else np.ones(len(beta), dtype=bool)
+        np.asarray(coefficient_estimable_override, dtype=bool)
+        if coefficient_estimable_override is not None
+        else (
+            result.rank_info.coefficient_estimable()
+            if getattr(result, "rank_info", None) is not None
+            else np.ones(len(beta), dtype=bool)
+        )
     )
 
     # ── Per-level diagnostics for categorical features ────────────
@@ -140,8 +152,15 @@ def build_coef_rows(
     # When precomputed values are provided, use them directly.
     _R_factor = precomputed_R_a
     _influence_edf = None
+    _design_moments = precomputed_design_moments
     if precomputed_edf is not None and precomputed_edf1 is not None:
         _influence_edf = (precomputed_edf, precomputed_edf1)
+
+    def _get_design_moments():
+        nonlocal _design_moments
+        if _design_moments is None:
+            _design_moments = weighted_moments(X_a, W)
+        return _design_moments
 
     def _get_R_factor():
         nonlocal _R_factor
@@ -149,7 +168,7 @@ def build_coef_rows(
             if X_a.shape[1] == 0:
                 _R_factor = np.empty((0, 0))
             else:
-                _, _R_factor = np.linalg.qr(X_a * np.sqrt(W)[:, None], mode="reduced")
+                _R_factor = factor_from_gram(_get_design_moments()[2])
         return _R_factor
 
     def _get_influence_edf():
@@ -158,10 +177,10 @@ def build_coef_rows(
             if X_a.shape[1] == 0:
                 _influence_edf = (np.array([]), np.array([]))
             else:
-                XtWX = X_a.T @ (X_a * W[:, None])
-                F = XtWX_inv @ XtWX
+                data_gram = _get_design_moments()[2]
+                F = XtWX_inv_aug[1:, 1:] @ data_gram
                 edf = np.diag(F)
-                edf1 = 2.0 * edf - np.sum(F * F, axis=1)
+                edf1 = 2.0 * edf - diagonal_of_square(F)
                 _influence_edf = (edf, edf1)
         return _influence_edf
 
@@ -716,6 +735,14 @@ def build_coef_rows(
                 )
             )
 
+    # Every coefficient-style branch consumes the same masked SE arrays, but
+    # not every feature-specific row constructor sets ``estimable`` directly.
+    # Keep the public flag consistent with the rank mask for categoricals,
+    # polynomials, and interaction coefficient rows as well as numerics.
+    for row in rows:
+        if row.se is not None and np.isnan(row.se):
+            row.estimable = False
+
     # ── Quasi-separation detection ──────────────────────────────
     # Primary: data-driven — flag categorical levels with too few obs.
     # Fallback: SE-based — for non-categorical features or when
@@ -758,6 +785,8 @@ def build_basis_detail(
     active_groups,
     known_scale,
     alpha=0.05,
+    coefficient_estimable_override=None,
+    selected_group_names=None,
 ):
     """Build per-coefficient detail for active 1-D spline groups.
 
@@ -768,11 +797,19 @@ def build_basis_detail(
 
     beta = result.beta
     phi = result.phi
-    selected_names = selected_group_name_set(result, groups)
+    selected_names = (
+        selected_group_name_set(result, groups)
+        if selected_group_names is None
+        else set(selected_group_names)
+    )
     coefficient_estimable = (
-        result.rank_info.coefficient_estimable()
-        if getattr(result, "rank_info", None) is not None
-        else np.ones(len(beta), dtype=bool)
+        np.asarray(coefficient_estimable_override, dtype=bool)
+        if coefficient_estimable_override is not None
+        else (
+            result.rank_info.coefficient_estimable()
+            if getattr(result, "rank_info", None) is not None
+            else np.ones(len(beta), dtype=bool)
+        )
     )
     detail: dict[str, list] = {}
 

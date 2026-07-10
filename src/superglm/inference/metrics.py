@@ -10,18 +10,35 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import gammaln
 
+from superglm.inference._metrics_design import (
+    EvaluationDesign,
+    MetricsDesign,
+    factor_from_gram,
+    iter_dense_chunks,
+    quadratic_form_diagonal,
+    weighted_moments,
+)
 from superglm.inference.coef_tables import build_basis_detail, build_coef_rows  # noqa: F401
 from superglm.inference.covariance import (  # noqa: F401
-    _penalised_xtwx_inv,
-    _penalised_xtwx_inv_gram,
+    _active_penalty_matrix,
     _second_diff_penalty,
 )
 from superglm.inference.summary import ModelSummary, _CoefRow
 from superglm.model.state_ops import (
     _public_augmented_covariance,
+    _rank_active_state,
     _rank_augmented_covariance,
+    _solver_space_working_weights,
 )
-from superglm.solvers.rank import selected_group_name_set
+from superglm.solvers.centered_system import penalty_factor
+from superglm.solvers.rank import (
+    decompose_factor,
+    decompose_gram,
+    diagonal_of_square,
+    needs_factor_certification,
+    selected_group_name_set,
+    streamed_weighted_factor,
+)
 from superglm.types import GroupSlice
 
 if TYPE_CHECKING:
@@ -43,6 +60,187 @@ def _active_feature_columns(
             )
         ]
     )
+
+
+def _selected_group_state(
+    result,
+    groups: list[GroupSlice],
+    *,
+    penalty=None,
+) -> tuple[NDArray, list[GroupSlice]]:
+    """Return selected original columns and compact active-group slices."""
+    selected_names = selected_group_name_set(result, groups, penalty=penalty)
+    selected_columns: list[int] = []
+    active_groups: list[GroupSlice] = []
+    column = 0
+    for group in groups:
+        if group.name not in selected_names:
+            continue
+        selected_columns.extend(range(group.start, group.end))
+        active_groups.append(
+            GroupSlice(
+                name=group.name,
+                start=column,
+                end=column + group.size,
+                weight=group.weight,
+                penalized=group.penalized,
+                feature_name=group.feature_name,
+                subgroup_type=group.subgroup_type,
+                constraints=group.constraints,
+                monotone_engine=group.monotone_engine,
+                scop_reparameterization=group.scop_reparameterization,
+            )
+        )
+        column += group.size
+    selected_columns_array = np.asarray(selected_columns, dtype=np.intp)
+    rank_info = getattr(result, "rank_info", None)
+    if rank_info is not None and not np.array_equal(
+        selected_columns_array,
+        np.asarray(rank_info.selected_columns, dtype=np.intp),
+    ):
+        raise ValueError("rank metadata selected columns do not match active groups")
+    return selected_columns_array, active_groups
+
+
+def _grouped_active_design(model, active_groups: list[GroupSlice]):
+    """Return the fitted grouped design restricted to compact active groups."""
+    from superglm.group_matrix import DesignMatrix
+
+    active_names = {group.name for group in active_groups}
+    matrices = [
+        matrix
+        for matrix, group in zip(model._dm.group_matrices, model._groups, strict=True)
+        if group.name in active_names
+    ]
+    return DesignMatrix(matrices, n=model._dm.n, p=sum(group.size for group in active_groups))
+
+
+def _profiled_augmented_covariance(
+    data_gram: NDArray,
+    penalty: NDArray,
+    xtw1: NDArray,
+    sum_w: float,
+    *,
+    profile_rank=None,
+) -> NDArray:
+    """Invert after profiling the intercept, then map back to raw coordinates."""
+    profiled_inverse = (
+        profile_rank.pseudo_inverse()
+        if profile_rank is not None
+        else decompose_gram(data_gram + penalty).pseudo_inverse()
+    )
+    mean_x = xtw1 / sum_w
+    intercept_cross = -(profiled_inverse @ mean_x)
+    augmented = np.empty((len(xtw1) + 1, len(xtw1) + 1), dtype=np.float64)
+    augmented[0, 0] = 1.0 / sum_w + float(mean_x @ profiled_inverse @ mean_x)
+    augmented[0, 1:] = intercept_cross
+    augmented[1:, 0] = intercept_cross
+    augmented[1:, 1:] = profiled_inverse
+    return augmented
+
+
+def _certified_data_rank(
+    design: MetricsDesign,
+    W: NDArray,
+    data_gram: NDArray,
+    xtw1: NDArray,
+):
+    """Use a bounded factor pass only when a Gram full-rank result is uncertified."""
+    decomposition = decompose_gram(data_gram)
+    if not needs_factor_certification(decomposition):
+        return decomposition
+    factor = streamed_weighted_factor(
+        iter_dense_chunks(design),
+        W,
+        center=xtw1 / float(np.sum(W)),
+    )
+    factor_decomposition = decompose_factor(factor)
+    return (
+        factor_decomposition if factor_decomposition.rank != decomposition.rank else decomposition
+    )
+
+
+def _certified_coefficient_rank(
+    design: MetricsDesign,
+    W: NDArray,
+    raw_gram: NDArray,
+    penalty: NDArray,
+):
+    """Certify an unpenalized raw Gram only inside its ambiguous full-rank band."""
+    decomposition = decompose_gram(raw_gram + penalty)
+    if not needs_factor_certification(decomposition):
+        return decomposition
+    factor = streamed_weighted_factor(iter_dense_chunks(design), W)
+    smooth_factor = penalty_factor(penalty)
+    if smooth_factor.shape[0]:
+        factor = np.vstack((factor, smooth_factor))
+    factor_decomposition = decompose_factor(factor)
+    return (
+        factor_decomposition if factor_decomposition.rank != decomposition.rank else decomposition
+    )
+
+
+def _certified_profile_rank(
+    design: MetricsDesign,
+    W: NDArray,
+    data_gram: NDArray,
+    xtw1: NDArray,
+    penalty: NDArray,
+    data_rank,
+):
+    """Return the certified centered Hessian decomposition for covariance."""
+    if not np.any(penalty):
+        return data_rank
+    decomposition = decompose_gram(data_gram + penalty)
+    if not needs_factor_certification(decomposition):
+        return decomposition
+    factor = streamed_weighted_factor(
+        iter_dense_chunks(design),
+        W,
+        center=xtw1 / float(np.sum(W)),
+    )
+    smooth_factor = penalty_factor(penalty)
+    if smooth_factor.shape[0]:
+        factor = np.vstack((factor, smooth_factor))
+    factor_decomposition = decompose_factor(factor)
+    return (
+        factor_decomposition if factor_decomposition.rank != decomposition.rank else decomposition
+    )
+
+
+def _coefficient_estimability(
+    data_rank,
+    groups: list[GroupSlice],
+    active_groups: list[GroupSlice],
+    width: int,
+) -> NDArray:
+    """Map active-data rank estimability back to full fitted coordinates."""
+    estimable = np.zeros(width, dtype=bool)
+    original_by_name = {group.name: group for group in groups}
+    active_estimable = data_rank.coefficient_estimable()
+    for active_group in active_groups:
+        original = original_by_name[active_group.name]
+        estimable[original.sl] = active_estimable[active_group.sl]
+    return estimable
+
+
+def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
+    """Whether active summary rows contain a smooth term requiring Wood's test."""
+    from superglm.features.interaction import SplineCategorical, TensorInteraction
+    from superglm.features.spline import _SplineBase
+
+    active_names = {group.name for group in active_groups}
+    for group in model._groups:
+        if group.name not in active_names:
+            continue
+        spec = model._specs.get(group.feature_name) or model._interaction_specs.get(
+            group.feature_name
+        )
+        if isinstance(spec, _SplineBase) and group.subgroup_type != "linear":
+            return True
+        if isinstance(spec, SplineCategorical | TensorInteraction):
+            return True
+    return False
 
 
 class ModelMetrics:
@@ -80,6 +278,9 @@ class ModelMetrics:
         self._groups = model._groups
         self._dm = model._dm
         self._result = model.result
+        fit_X = getattr(model, "_fit_X_ref", None)
+        self._X = fit_X if X is None else X
+        self._uses_fit_rows = X is None or X is fit_X
 
         self._y = np.asarray(y, dtype=np.float64)
         n = len(self._y)
@@ -87,11 +288,25 @@ class ModelMetrics:
             np.ones(n) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
         )
         self._offset = np.zeros(n) if offset is None else np.asarray(offset, dtype=np.float64)
+        fit_offset = getattr(model, "_fit_offset", None)
+        fit_offset_array = np.zeros(n) if fit_offset is None else np.asarray(fit_offset)
+        self._uses_fit_design = bool(
+            self._uses_fit_rows
+            and self._offset.shape == fit_offset_array.shape
+            and np.array_equal(self._offset, fit_offset_array)
+        )
+        fit_weights = getattr(model, "_fit_weights", None)
+        self._fit_geometry_matches = bool(
+            self._uses_fit_design
+            and fit_weights is not None
+            and np.shape(fit_weights) == np.shape(self._weights)
+            and np.array_equal(np.asarray(fit_weights), self._weights)
+        )
 
         if _mu is not None:
             self._mu = _mu
         else:
-            self._mu = model.predict(X, offset=offset)
+            self._mu = model.predict(self._X, offset=offset)
         if _null_mu is not None:
             self.__dict__["_null_mu"] = _null_mu
         if _fit_stats is not None:
@@ -115,6 +330,37 @@ class ModelMetrics:
             self._dm.p,
             reml_penalties=penalties,
         )
+
+    @cached_property
+    def _fit_working_weights(self) -> NDArray:
+        """Working weights represented by the retained fitted-rank state."""
+        return _solver_space_working_weights(self._model)
+
+    def _working_weights_match_fit(self, working_weights: NDArray) -> bool:
+        """Whether fitted rank/covariance factors are valid for this evaluation."""
+        rank_info = getattr(self._result, "rank_info", None)
+        return bool(
+            rank_info is not None
+            and self._fit_geometry_matches
+            and np.shape(getattr(self._model, "_fit_weights", None)) == np.shape(working_weights)
+        )
+
+    @cached_property
+    def _working_eta_mu(self) -> tuple[NDArray, NDArray]:
+        """Unclipped-link eta and guarded mu for this diagnostic evaluation."""
+        from superglm.distributions import clip_mu
+        from superglm.links import stabilize_eta
+
+        if self._uses_fit_design:
+            solver = self._model._solver_pirls_result()
+            eta = self._dm.matvec(solver.beta) + solver.intercept + self._offset
+            eta = stabilize_eta(eta, self._link)
+        else:
+            from superglm.model import base
+
+            eta = base.predict_eta_exact(self._model, self._X, offset=self._offset)
+        mu = clip_mu(self._link.inverse(eta), self._family)
+        return eta, mu
 
     # ── Scalar properties ─────────────────────────────────────────
 
@@ -224,7 +470,13 @@ class ModelMetrics:
 
     @cached_property
     def n_active_groups(self) -> int:
-        return len(selected_group_name_set(self._result, self._groups))
+        return len(
+            selected_group_name_set(
+                self._result,
+                self._groups,
+                penalty=self._model.penalty,
+            )
+        )
 
     @cached_property
     def eta(self) -> NDArray:
@@ -390,94 +642,155 @@ class ModelMetrics:
     # ── Influence diagnostics (lazy) ──────────────────────────────
 
     @cached_property
-    def _active_info(self) -> tuple[NDArray, NDArray, NDArray, NDArray, list[GroupSlice]]:
+    def _active_info(
+        self,
+    ) -> tuple[MetricsDesign, NDArray, NDArray, NDArray, list[GroupSlice]]:
         """Shared computation for leverage and SEs.
 
         Returns (X_a, W, XtWX_inv, XtWX_inv_aug, active_groups) where:
-        - X_a: (n, p_active) active design columns
+        - X_a: grouped/chunked active design (legacy fits may return a dense array)
         - W: (n,) working weights
         - XtWX_inv: (p_active, p_active) = (X'WX + S)^{-1}, unscaled by phi
         - XtWX_inv_aug: (p_active+1, p_active+1) augmented inverse incl. intercept
         - active_groups: list of GroupSlice for active groups (re-indexed to X_a columns)
         """
         beta = self._result.beta
-        mu = self._mu
-        V = self._family.variance(mu)
-        eta = self._link.link(mu)
-        dmu_deta = self._link.deriv_inverse(eta)
-        W = self._weights * dmu_deta**2 / V
-
         rank_info = getattr(self._result, "rank_info", None)
-        fit_weights = getattr(self._model, "_fit_weights", None)
-        uses_fitted_rank = bool(
-            rank_info is not None
-            and fit_weights is not None
-            and np.shape(fit_weights) == np.shape(self._weights)
-            and np.array_equal(fit_weights, self._weights)
-        )
-        if uses_fitted_rank:
-            selected_names = set(rank_info.selected_group_names)
-            active_arrays: list[NDArray] = []
-            active_groups: list[GroupSlice] = []
-            col = 0
-            for gm, group in zip(self._dm.group_matrices, self._groups, strict=True):
-                if group.name not in selected_names:
-                    continue
-                active_arrays.append(gm.toarray())
-                active_groups.append(
-                    GroupSlice(
-                        name=group.name,
-                        start=col,
-                        end=col + group.size,
-                        weight=group.weight,
-                        penalized=group.penalized,
-                        feature_name=group.feature_name,
-                        subgroup_type=group.subgroup_type,
-                        constraints=group.constraints,
-                        monotone_engine=group.monotone_engine,
-                        scop_reparameterization=group.scop_reparameterization,
-                    )
-                )
-                col += group.size
-            X_a = np.hstack(active_arrays) if active_arrays else np.empty((len(W), 0))
-            inverse = rank_info.coefficient.pseudo_inverse()
-            augmented = _rank_augmented_covariance(self._model, rank_info, active_groups)
+        if self._fit_geometry_matches:
+            W = self._fit_working_weights
+        else:
+            eta, mu = self._working_eta_mu
+            V = self._family.variance(mu)
+            dmu_deta = self._link.deriv_inverse(eta)
+            from superglm.distributions import _VARIANCE_FLOOR
+
+            W = self._weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
+
+        uses_fitted_rank = self._working_weights_match_fit(W)
+        if not self._uses_fit_design:
+            selected_columns, active_groups = _selected_group_state(
+                self._result,
+                self._groups,
+                penalty=self._model.penalty,
+            )
+            X_a = EvaluationDesign(self._model, self._X, selected_columns)
+            lam2 = getattr(self._model, "_reml_lambdas", None) or self._model.lambda2
+            S_active = _active_penalty_matrix(
+                self._model._dm.group_matrices,
+                self._groups,
+                active_groups,
+                lam2,
+                reml_penalties=getattr(self._model, "_reml_penalties", None),
+            )
+            XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
+            self.__dict__["_active_centered_data_gram"] = centered_data_gram
+            data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1)
+            self.__dict__["_coefficient_estimable"] = _coefficient_estimability(
+                data_rank,
+                self._groups,
+                active_groups,
+                len(beta),
+            )
+            inverse = _certified_coefficient_rank(X_a, W, XtWX, S_active).pseudo_inverse()
+            profile_rank = _certified_profile_rank(
+                X_a,
+                W,
+                centered_data_gram,
+                XtW1,
+                S_active,
+                data_rank,
+            )
+
+            augmented = _profiled_augmented_covariance(
+                centered_data_gram,
+                S_active,
+                XtW1,
+                float(np.sum(W)),
+                profile_rank=profile_rank,
+            )
             return X_a, W, inverse, augmented, active_groups
 
+        if uses_fitted_rank:
+            X_a, active_groups = _rank_active_state(self._model, rank_info)
+            inverse = rank_info.coefficient.pseudo_inverse()
+            augmented = _rank_augmented_covariance(self._model, rank_info, active_groups)
+            self.__dict__["_coefficient_estimable"] = rank_info.coefficient_estimable()
+            return X_a, W, inverse, augmented, active_groups
+
+        _, active_groups = _selected_group_state(
+            self._result,
+            self._groups,
+            penalty=self._model.penalty,
+        )
+        X_a = _grouped_active_design(self._model, active_groups)
         lam2 = getattr(self._model, "_reml_lambdas", None) or self._model.lambda2
-        S_full = self._build_S_from_penalties(lam2)
-        X_a, XtWX_inv, XtWX_inv_aug, active_groups, _ = _penalised_xtwx_inv(
-            beta,
-            W,
+        S_active = _active_penalty_matrix(
             self._dm.group_matrices,
             self._groups,
+            active_groups,
             lam2,
-            S_override=S_full,
-            selected_group_names=(
-                set(rank_info.selected_group_names) if rank_info is not None else None
-            ),
+            reml_penalties=getattr(self._model, "_reml_penalties", None),
         )
-        XtWX_inv_aug = _public_augmented_covariance(self._model, XtWX_inv_aug, active_groups)
-        return X_a, W, XtWX_inv, XtWX_inv_aug, active_groups
+        XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
+        inverse = _certified_coefficient_rank(X_a, W, XtWX, S_active).pseudo_inverse()
+        self.__dict__["_active_centered_data_gram"] = centered_data_gram
+        data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1)
+        self.__dict__["_coefficient_estimable"] = _coefficient_estimability(
+            data_rank,
+            self._groups,
+            active_groups,
+            len(beta),
+        )
+        profile_rank = _certified_profile_rank(
+            X_a,
+            W,
+            centered_data_gram,
+            XtW1,
+            S_active,
+            data_rank,
+        )
+        augmented = _profiled_augmented_covariance(
+            centered_data_gram,
+            S_active,
+            XtW1,
+            float(np.sum(W)),
+            profile_rank=profile_rank,
+        )
+        augmented = _public_augmented_covariance(self._model, augmented, active_groups)
+        return X_a, W, inverse, augmented, active_groups
+
+    @cached_property
+    def _active_design_moments(self) -> tuple[NDArray, NDArray, NDArray]:
+        """Raw and centered moments shared by R and influence calculations."""
+        X_a, W, _, _, _ = self._active_info
+        return weighted_moments(X_a, W)
+
+    @cached_property
+    def _active_centered_data_gram(self) -> NDArray:
+        """Centered Gram retained without pinning a duplicate raw p-by-p matrix."""
+        X_a, W, _, _, _ = self._active_info
+        return weighted_moments(X_a, W)[2]
 
     @cached_property
     def _active_R_factor(self) -> NDArray:
         """Upper-triangular factor used by Wood-style smooth tests.
 
         The smooth-term test operates on the relevant columns of the
-        weighted design QR factor rather than the raw ``n x p_g`` design
-        block. For a fitted active design ``X_a`` with working weights
-        ``W``, the factor ``R`` satisfies
-        ``R.T @ R = X_a.T @ diag(W) @ X_a``. The Wood
-        test should therefore operate on columns of this weighted QR factor,
-        not on the raw design and not on an augmented ``[X; sqrt(S)]`` system.
+        weighted, intercept-profiled design factor rather than the raw
+        ``n x p_g`` design block. For active design ``X_a`` and working
+        weights ``W``, ``R.T @ R`` is the centered data Gram after profiling
+        the intercept. The Wood test therefore operates on columns of this
+        factor, not on the raw design or an augmented ``[X; sqrt(S)]`` system.
         """
-        X_a, W, _, _, active_groups = self._active_info
+        X_a, W, _, _, _ = self._active_info
         if X_a.shape[1] == 0:
             return np.empty((0, 0))
 
-        _, R = np.linalg.qr(X_a * np.sqrt(W)[:, None], mode="reduced")
-        return R
+        if self._working_weights_match_fit(W):
+            return self._model._fit_inference_info["R_a"]
+
+        data_gram = self._active_centered_data_gram
+        return factor_from_gram(data_gram)
 
     @cached_property
     def _influence_edf(self) -> tuple[NDArray, NDArray]:
@@ -486,15 +799,20 @@ class ModelMetrics:
         edf = diag(F) where F = (X'WX + S)^{-1} X'WX
         edf1 = 2*edf - diag(F @ F)  (Wood's alternative EDF)
         """
-        X_a, W, XtWX_inv, _, _ = self._active_info
+        X_a, W, _, _, _ = self._active_info
 
         if X_a.shape[1] == 0:
             return np.array([]), np.array([])
 
-        XtWX = X_a.T @ (X_a * W[:, None])
-        F = XtWX_inv @ XtWX
+        if self._working_weights_match_fit(W):
+            inference = self._model._fit_inference_info
+            return inference["edf"], inference["edf1"]
+
+        data_gram = self._active_centered_data_gram
+        profile_inverse = self._active_info[3][1:, 1:]
+        F = profile_inverse @ data_gram
         edf = np.diag(F)
-        edf1 = 2.0 * edf - np.sum(F * F, axis=1)
+        edf1 = 2.0 * edf - diagonal_of_square(F)
         return edf, edf1
 
     @property
@@ -513,8 +831,11 @@ class ModelMetrics:
             return np.zeros(self.n_obs)
 
         # h_i = W_i * x_i' XtWX_inv x_i = W * rowsum((X_a @ XtWX_inv) * X_a)
-        Q = X_a @ XtWX_inv
-        h = W * np.sum(Q * X_a, axis=1)
+        if hasattr(X_a, "row_subset") or isinstance(X_a, EvaluationDesign):
+            h = W * quadratic_form_diagonal(X_a, XtWX_inv)
+        else:
+            Q = X_a @ XtWX_inv
+            h = W * np.sum(Q * X_a, axis=1)
         return np.clip(h, 0.0, 1.0)
 
     @property
@@ -552,6 +873,18 @@ class ModelMetrics:
     # ── Coefficient standard errors ──────────────────────────────
 
     @cached_property
+    def _current_coefficient_estimable(self) -> NDArray:
+        """Coefficient estimability under this diagnostic design and weights."""
+        _ = self._active_info
+        cached = self.__dict__.get("_coefficient_estimable")
+        if cached is not None:
+            return cached
+        rank_info = getattr(self._result, "rank_info", None)
+        if rank_info is not None:
+            return rank_info.coefficient_estimable()
+        return np.ones(len(self._result.beta), dtype=bool)
+
+    @cached_property
     def coefficient_se(self) -> dict[str, NDArray]:
         """Per-group coefficient standard errors (phi-scaled).
 
@@ -567,7 +900,11 @@ class ModelMetrics:
         """
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
         phi = self.phi
-        selected_names = selected_group_name_set(self._result, self._groups)
+        selected_names = selected_group_name_set(
+            self._result,
+            self._groups,
+            penalty=self._model.penalty,
+        )
 
         result: dict[str, NDArray] = {}
         for g in self._groups:
@@ -578,7 +915,9 @@ class ModelMetrics:
                 ag = next(ag for ag in active_groups if ag.name == g.name)
                 aug_sl = slice(1 + ag.start, 1 + ag.end)
                 var_diag = phi * np.diag(XtWX_inv_aug[aug_sl, aug_sl])
-                result[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
+                values = np.sqrt(np.maximum(var_diag, 0.0))
+                values[~self._current_coefficient_estimable[g.sl]] = np.nan
+                result[g.name] = values
         return result
 
     @cached_property
@@ -592,7 +931,11 @@ class ModelMetrics:
         Inactive groups get all-zero SEs.
         """
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
-        selected_names = selected_group_name_set(self._result, self._groups)
+        selected_names = selected_group_name_set(
+            self._result,
+            self._groups,
+            penalty=self._model.penalty,
+        )
 
         result: dict[str, NDArray] = {}
         for g in self._groups:
@@ -602,7 +945,9 @@ class ModelMetrics:
                 ag = next(ag for ag in active_groups if ag.name == g.name)
                 aug_sl = slice(1 + ag.start, 1 + ag.end)
                 var_diag = np.diag(XtWX_inv_aug[aug_sl, aug_sl])
-                result[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
+                values = np.sqrt(np.maximum(var_diag, 0.0))
+                values[~self._current_coefficient_estimable[g.sl]] = np.nan
+                result[g.name] = values
         return result
 
     @cached_property
@@ -660,7 +1005,11 @@ class ModelMetrics:
         spec = self._model._specs[name]
 
         # Inactive feature: return zeros (all subgroups zeroed)
-        selected_names = selected_group_name_set(self._result, self._groups)
+        selected_names = selected_group_name_set(
+            self._result,
+            self._groups,
+            penalty=self._model.penalty,
+        )
         if not any(group.name in selected_names for group in groups):
             if isinstance(spec, _SplineBase):
                 x_grid = np.linspace(spec._lo, spec._hi, n_points)
@@ -736,6 +1085,20 @@ class ModelMetrics:
     def _build_coef_rows(self, alpha: float = 0.05) -> list[_CoefRow]:
         """Build coefficient table rows for the summary."""
         X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = self._active_info
+        R_a = None
+        edf = None
+        edf1 = None
+        if _requires_wood_inference(self._model, active_groups):
+            R_a = self._active_R_factor
+            edf, edf1 = self._influence_edf
+        uses_fitted_rank = self._working_weights_match_fit(W)
+        selected_names = {group.name for group in active_groups}
+        centered_data_gram = self.__dict__.get("_active_centered_data_gram")
+        precomputed_moments = (
+            (np.empty((0, 0)), np.empty(0), centered_data_gram)
+            if centered_data_gram is not None
+            else None
+        )
         return build_coef_rows(
             groups=self._groups,
             specs=self._model._specs,
@@ -747,19 +1110,20 @@ class ModelMetrics:
             XtWX_inv_aug=XtWX_inv_aug,
             active_groups=active_groups,
             known_scale=self._known_scale,
-            group_edf_map=(
-                dict(self._result.rank_info.group_edf)
-                if getattr(self._result, "rank_info", None) is not None
-                and getattr(self._model, "_fit_weights", None) is not None
-                and np.shape(self._model._fit_weights) == np.shape(self._weights)
-                and np.array_equal(self._model._fit_weights, self._weights)
-                else None
-            ),
+            group_edf_map=(dict(self._result.rank_info.group_edf) if uses_fitted_rank else None),
             reml_lambdas=getattr(self._model, "_reml_lambdas", None),
             lambda2=self._model.lambda2,
             n_obs=self.n_obs,
             alpha=alpha,
-            group_matrices=self._dm.group_matrices if self._dm is not None else None,
+            precomputed_R_a=R_a,
+            precomputed_edf=edf,
+            precomputed_edf1=edf1,
+            precomputed_design_moments=precomputed_moments,
+            coefficient_estimable_override=self._current_coefficient_estimable,
+            selected_group_names=selected_names,
+            group_matrices=(
+                self._dm.group_matrices if self._uses_fit_design and self._dm is not None else None
+            ),
             sample_weights=self._weights,
         )
 
@@ -862,6 +1226,8 @@ class ModelMetrics:
             active_groups=active_groups,
             known_scale=self._known_scale,
             alpha=alpha,
+            coefficient_estimable_override=self._current_coefficient_estimable,
+            selected_group_names={group.name for group in active_groups},
         )
 
         return ModelSummary(

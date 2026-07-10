@@ -17,10 +17,20 @@ from superglm.group_matrix import (
     GroupMatrix,
 )
 from superglm.links import Link
-from superglm.penalties.base import Penalty, penalty_targets_group
-from superglm.solvers.centered_system import build_centered_system
+from superglm.penalties.base import Penalty, penalty_can_zero_groups, penalty_targets_group
+from superglm.solvers.centered_system import (
+    build_centered_system,
+    grouped_augmented_factor,
+    grouped_weighted_factor,
+)
 from superglm.solvers.irls_state import _evaluate_irls_state, _IRLSState, _select_irls_trial
-from superglm.solvers.rank import SHARED_RANK_POLICY, RankInfo, decompose_gram
+from superglm.solvers.rank import (
+    SHARED_RANK_POLICY,
+    RankInfo,
+    decompose_factor,
+    decompose_gram,
+    needs_factor_certification,
+)
 from superglm.types import GroupSlice
 
 logger = logging.getLogger(__name__)
@@ -156,13 +166,7 @@ def _fit_pirls_inner(
 
     gms = dm.group_matrices
     n_groups = len(groups)
-    has_nonsmooth_penalty = bool(penalty.lambda1 is not None and penalty.lambda1 > 0.0)
-    group_selected = [
-        not has_nonsmooth_penalty
-        or not penalty_targets_group(penalty, group)
-        or bool(np.any(beta[group.sl] != 0.0))
-        for group in groups
-    ]
+    can_zero_groups = penalty_can_zero_groups(penalty)
 
     t_total = time.perf_counter()
     t_lipschitz_total = 0.0
@@ -248,11 +252,6 @@ def _fit_pirls_inner(
                 if np.any(d != 0):
                     r -= gm.matvec(d)
                     beta[g.sl] = bg_new
-                group_selected[gi] = (
-                    not has_nonsmooth_penalty
-                    or not penalty_targets_group(penalty, g)
-                    or bool(np.any(bg_new != 0.0))
-                )
 
                 # Active set: check KKT for zeroed groups after the update
                 if active_set:
@@ -435,6 +434,15 @@ def _fit_pirls_inner(
 
     from superglm.reml.penalty_algebra import build_penalty_matrix
 
+    # Selection is derived from the final retained coefficients.  A proposal
+    # may have been step-halved or rejected, so its proximal state is not an
+    # accepted source of rank and inference metadata.
+    group_selected = [
+        not can_zero_groups
+        or not penalty_targets_group(penalty, group)
+        or bool(np.any(beta[group.sl] != 0.0))
+        for group in groups
+    ]
     selected_columns_list: list[int] = []
     selected_groups: list[GroupSlice] = []
     selected_gms: list[GroupMatrix] = []
@@ -485,9 +493,36 @@ def _fit_pirls_inner(
         penalty=selected_penalty,
     )
     data_rank = decompose_gram(centered.data_gram)
-    augmented_rank = decompose_gram(centered.hessian)
+    if needs_factor_certification(data_rank):
+        certified = decompose_factor(
+            grouped_weighted_factor(
+                selected_dm,
+                W_final,
+                center=centered.mean_x,
+            )
+        )
+        if certified.rank != data_rank.rank:
+            data_rank = certified
+    augmented_rank = data_rank if not np.any(selected_penalty) else decompose_gram(centered.hessian)
+    if needs_factor_certification(augmented_rank):
+        certified = decompose_factor(
+            grouped_augmented_factor(
+                selected_dm,
+                W_final,
+                selected_penalty,
+                center=centered.mean_x,
+            )
+        )
+        if certified.rank != augmented_rank.rank:
+            augmented_rank = certified
     raw_gram, _, _, _ = centered.raw_weighted_moments()
     coefficient_rank = decompose_gram(raw_gram + selected_penalty)
+    if needs_factor_certification(coefficient_rank):
+        certified = decompose_factor(
+            grouped_augmented_factor(selected_dm, W_final, selected_penalty)
+        )
+        if certified.rank != coefficient_rank.rank:
+            coefficient_rank = certified
     feature_edf = np.zeros(p)
     group_edf = {group.name: 0.0 for group in groups}
 
@@ -508,7 +543,7 @@ def _fit_pirls_inner(
             if not is_selected:
                 continue
             norm_g = float(np.linalg.norm(beta[group.sl]))
-            if not penalty_targets_group(penalty, group) or not has_nonsmooth_penalty:
+            if not penalty_targets_group(penalty, group) or not can_zero_groups:
                 df_group = float(group.size)
             else:
                 shrink = min(1.0, lam * group.weight / max(norm_g, 1e-300))

@@ -261,6 +261,37 @@ def test_pirls_rejects_all_unsafe_trials_without_false_convergence(convergence: 
     assert result.iteration_log[0].step_rejected
 
 
+def test_pirls_rejected_proposal_does_not_select_restored_zero_group() -> None:
+    x = np.linspace(-1.0, 1.0, 6)[:, None]
+
+    def deviance_for_mean(mu: float) -> float:
+        return 2.0 if np.isclose(mu, 0.0) else 10.0
+
+    result = fit_pirls(
+        x,
+        x[:, 0],
+        np.ones(len(x)),
+        _ControlledDevianceGaussian(deviance_for_mean),
+        IdentityLink(),
+        [GroupSlice(name="x", start=0, end=1)],
+        GroupLasso(lambda1=0.01),
+        beta_init=np.zeros(1),
+        intercept_init=0.0,
+        max_iter_outer=1,
+        max_iter_inner=1,
+        tol=1e-12,
+        record_diagnostics=True,
+    )
+
+    np.testing.assert_array_equal(result.beta, np.zeros(1))
+    assert result.iteration_log is not None
+    assert result.iteration_log[0].step_rejected
+    assert result.rank_info is not None
+    assert result.rank_info.selected_group_names == ()
+    assert result.rank_info.selected_columns.size == 0
+    assert result.effective_df == pytest.approx(1.0)
+
+
 def _fit_controlled_direct(
     deviance_for_mean,
     *,
