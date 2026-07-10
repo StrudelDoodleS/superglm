@@ -38,6 +38,8 @@ def centered_gram_rhs(
         raise ValueError("mean_x must match the design column count")
     if chunk_size < 1:
         raise ValueError("chunk_size must be positive")
+    if p == 0:
+        return np.zeros((0, 0), dtype=float), np.zeros(0, dtype=float)
 
     gram = np.zeros((p, p), dtype=float)
     gram_compensation = np.zeros_like(gram)

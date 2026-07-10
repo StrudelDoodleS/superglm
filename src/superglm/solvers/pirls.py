@@ -15,12 +15,12 @@ from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
     GroupMatrix,
-    _block_xtwx,
 )
 from superglm.links import Link
 from superglm.penalties.base import Penalty, penalty_targets_group
+from superglm.solvers.centered_system import build_centered_system
 from superglm.solvers.irls_state import _evaluate_irls_state, _IRLSState, _select_irls_trial
-from superglm.solvers.rank import RankInfo
+from superglm.solvers.rank import SHARED_RANK_POLICY, RankInfo, decompose_gram
 from superglm.types import GroupSlice
 
 logger = logging.getLogger(__name__)
@@ -156,6 +156,13 @@ def _fit_pirls_inner(
 
     gms = dm.group_matrices
     n_groups = len(groups)
+    has_nonsmooth_penalty = bool(penalty.lambda1 is not None and penalty.lambda1 > 0.0)
+    group_selected = [
+        not has_nonsmooth_penalty
+        or not penalty_targets_group(penalty, group)
+        or bool(np.any(beta[group.sl] != 0.0))
+        for group in groups
+    ]
 
     t_total = time.perf_counter()
     t_lipschitz_total = 0.0
@@ -241,6 +248,11 @@ def _fit_pirls_inner(
                 if np.any(d != 0):
                     r -= gm.matvec(d)
                     beta[g.sl] = bg_new
+                group_selected[gi] = (
+                    not has_nonsmooth_penalty
+                    or not penalty_targets_group(penalty, g)
+                    or bool(np.any(bg_new != 0.0))
+                )
 
                 # Active set: check KKT for zeroed groups after the update
                 if active_set:
@@ -417,76 +429,112 @@ def _fit_pirls_inner(
         not isinstance(lambda2, dict) and lambda2 > 0
     )
 
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    selected_columns_list: list[int] = []
+    selected_groups: list[GroupSlice] = []
+    selected_gms: list[GroupMatrix] = []
+    selected_group_names: list[str] = []
+    selected_offset = 0
+    for is_selected, gm, group in zip(group_selected, gms, groups, strict=True):
+        if not is_selected:
+            continue
+        selected_columns_list.extend(range(group.start, group.end))
+        selected_group_names.append(group.name)
+        selected_gms.append(gm)
+        selected_groups.append(
+            GroupSlice(
+                name=group.name,
+                start=selected_offset,
+                end=selected_offset + group.size,
+                weight=group.weight,
+                penalized=group.penalized,
+                feature_name=group.feature_name,
+                subgroup_type=group.subgroup_type,
+            )
+        )
+        selected_offset += group.size
+
+    selected_columns = np.asarray(selected_columns_list, dtype=int)
+    selected_dm = DesignMatrix(selected_gms, n=n, p=len(selected_columns))
     if has_smoothing:
-        # Exact: 1 + trace((X'WX + S)^{-1} X'WX) using final PIRLS working weights.
-        from superglm.reml.penalty_algebra import build_penalty_matrix
-
-        active_groups_edf: list[GroupSlice] = []
-        active_gms: list[GroupMatrix] = []
-        col = 0
-        for gm, g in zip(gms, groups):
-            if np.linalg.norm(beta[g.sl]) > 1e-12:
-                p_g = gm.shape[1]
-                active_groups_edf.append(
-                    GroupSlice(
-                        name=g.name,
-                        start=col,
-                        end=col + p_g,
-                        weight=g.weight,
-                        penalized=g.penalized,
-                        feature_name=g.feature_name,
-                        subgroup_type=g.subgroup_type,
-                    )
-                )
-                active_gms.append(gm)
-                col += p_g
-
-        if active_gms:
-            p_a = col
-            XtWX = _block_xtwx(active_gms, active_groups_edf, W)
-            if S_override is not None:
-                # S_override is full (p x p) — slice to active columns
-                active_idx: list[int] = []
-                for ag in active_groups_edf:
-                    # Map active group back to original group for slicing
-                    orig_g = next(g for g in groups if g.name == ag.name)
-                    active_idx.extend(range(orig_g.start, orig_g.end))
-                active_idx = np.array(active_idx)
-                S = S_override[np.ix_(active_idx, active_idx)]
-            else:
-                S = build_penalty_matrix(active_gms, active_groups_edf, lambda2, p_a)
-            M = XtWX + S
-            eigvals, eigvecs = np.linalg.eigh(M)
-            # Keep the gram-path truncation aligned with the dense QR/SVD path:
-            # singular-value cutoff ``rtol * s_max`` corresponds to
-            # eigenvalue cutoff ``rtol**2 * eig_max``.
-            threshold = (1e-6**2) * max(eigvals.max(), 1e-12)
-            inv_eigvals = np.zeros_like(eigvals)
-            np.divide(1.0, eigvals, out=inv_eigvals, where=eigvals > threshold)
-            M_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
-            p_eff = 1.0 + float(np.trace(M_inv @ XtWX))
+        if S_override is not None:
+            selected_penalty = S_override[np.ix_(selected_columns, selected_columns)]
         else:
-            p_eff = 1.0
+            selected_penalty = build_penalty_matrix(
+                selected_gms,
+                selected_groups,
+                lambda2,
+                len(selected_columns),
+            )
     else:
-        # Breheny & Huang (2009) formula for group lasso (no smoothing).
-        # df_g = p_g - (p_g - 1) * lambda1 * w_g / ||beta_g||
-        p_eff = 1.0  # intercept
+        selected_penalty = np.zeros((len(selected_columns), len(selected_columns)))
+
+    V_final = np.maximum(family.variance(mu_new), _VARIANCE_FLOOR)
+    dmu_deta_final = link.deriv_inverse(eta_new)
+    W_final = weights * dmu_deta_final**2 / V_final
+    z_final = eta_new + (y - mu_new) / dmu_deta_final
+    centered = build_centered_system(
+        dm=selected_dm,
+        W=W_final,
+        z_off=z_final - offset,
+        penalty=selected_penalty,
+    )
+    data_rank = decompose_gram(centered.data_gram)
+    augmented_rank = decompose_gram(centered.hessian)
+    feature_edf = np.zeros(p)
+    group_edf = {group.name: 0.0 for group in groups}
+
+    if has_smoothing:
+        selected_edf = np.diag(augmented_rank.pseudo_inverse() @ centered.data_gram).copy()
+        selected_edf[np.abs(selected_edf) < 100.0 * np.finfo(float).eps] = 0.0
+        feature_edf[selected_columns] = selected_edf
+        for selected_group, original_group in zip(
+            selected_groups,
+            (group for selected, group in zip(group_selected, groups, strict=True) if selected),
+            strict=True,
+        ):
+            group_edf[original_group.name] = float(np.sum(selected_edf[selected_group.sl]))
+    else:
+        # Preserve Breheny-Huang (2009) group-lasso EDF allocation.
         lam = penalty.lambda1 if penalty.lambda1 is not None else 0.0
-        for g in groups:
-            bg = beta[g.sl]
-            norm_g = np.linalg.norm(bg)
-            if norm_g > 1e-12:
-                if not penalty_targets_group(penalty, g):
-                    p_eff += g.size
-                else:
-                    shrink = min(1.0, lam * g.weight / norm_g)
-                    p_eff += g.size - (g.size - 1) * shrink
+        for is_selected, group in zip(group_selected, groups, strict=True):
+            if not is_selected:
+                continue
+            norm_g = float(np.linalg.norm(beta[group.sl]))
+            if not penalty_targets_group(penalty, group) or not has_nonsmooth_penalty:
+                df_group = float(group.size)
+            else:
+                shrink = min(1.0, lam * group.weight / max(norm_g, 1e-300))
+                df_group = float(group.size - (group.size - 1) * shrink)
+            group_edf[group.name] = df_group
+            feature_edf[group.sl] = df_group / group.size
+
+    mean_x = np.zeros(p)
+    mean_x[selected_columns] = centered.mean_x
+    selected_columns.setflags(write=False)
+    mean_x.setflags(write=False)
+    feature_edf.setflags(write=False)
+    rank_info = RankInfo(
+        policy_version=SHARED_RANK_POLICY.version,
+        coordinate_space="solver",
+        selected_columns=selected_columns,
+        selected_group_names=tuple(selected_group_names),
+        sum_w=centered.sum_w,
+        mean_x=mean_x,
+        intercept_edf=1.0,
+        data=data_rank,
+        augmented=augmented_rank,
+        feature_edf=feature_edf,
+        group_edf=group_edf,
+        objective_loss=None,
+    )
+    p_eff = rank_info.total_edf
 
     # Pearson-based phi for estimated-scale families (Tweedie, Gamma, NB2).
     # SuperGLM's sample_weight follows the prior-weight convention, so the
     # residual d.f. correction is observation-count based (n - edf), while
     # the weights still scale the Pearson numerator.
-    V_final = np.maximum(family.variance(mu_new), _VARIANCE_FLOOR)
     pearson_chi2 = float(np.sum(weights * (y - mu_new) ** 2 / V_final))
     df_resid = max(float(len(y)) - p_eff, 1)
     phi = pearson_chi2 / df_resid
@@ -500,6 +548,7 @@ def _fit_pirls_inner(
         phi=phi,
         effective_df=p_eff,
         iteration_log=iteration_log if record_diagnostics else None,
+        rank_info=rank_info,
     )
 
 

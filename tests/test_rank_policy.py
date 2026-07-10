@@ -8,8 +8,10 @@ import pytest
 from superglm.distributions import Gaussian
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.links import IdentityLink
+from superglm.penalties.group_lasso import GroupLasso
 from superglm.solvers.centered_system import build_centered_system
 from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.pirls import fit_pirls
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_factor, decompose_gram
 from superglm.types import GroupSlice
 
@@ -199,3 +201,38 @@ def test_gram_and_qr_share_centered_alias_representation() -> None:
     qr_prediction = results["qr"].intercept + X @ results["qr"].beta
     np.testing.assert_allclose(gram_prediction, y, atol=1e-10)
     np.testing.assert_allclose(qr_prediction, gram_prediction, atol=1e-10)
+
+
+def test_pirls_selection_state_distinguishes_selected_zero_from_zeroed_group() -> None:
+    x = np.linspace(-1.0, 1.0, 40)[:, None]
+    group = [GroupSlice(name="x", start=0, end=1)]
+
+    selected = fit_pirls(
+        x,
+        np.full(len(x), 2.0),
+        np.ones(len(x)),
+        Gaussian(),
+        IdentityLink(),
+        group,
+        GroupLasso(lambda1=0.0),
+        tol=1e-12,
+    )
+    zeroed = fit_pirls(
+        x,
+        2.0 + x[:, 0],
+        np.ones(len(x)),
+        Gaussian(),
+        IdentityLink(),
+        group,
+        GroupLasso(lambda1=1e6),
+        tol=1e-12,
+    )
+
+    assert selected.beta[0] == pytest.approx(0.0, abs=1e-14)
+    assert selected.rank_info is not None
+    assert selected.rank_info.selected_group_names == ("x",)
+    np.testing.assert_array_equal(selected.rank_info.selected_columns, [0])
+    assert zeroed.rank_info is not None
+    assert zeroed.rank_info.selected_group_names == ()
+    assert zeroed.rank_info.selected_columns.size == 0
+    assert zeroed.effective_df == pytest.approx(1.0)
