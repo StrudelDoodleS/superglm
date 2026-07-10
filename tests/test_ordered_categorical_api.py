@@ -5,9 +5,10 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from superglm import OrderedCategorical, Spline
+from superglm import OrderedCategorical, Spline, SuperGLM
 from superglm.editor.collapse import _ordered_spec_with_grouping
 from superglm.features.spline import PSpline
 
@@ -96,6 +97,46 @@ def test_legacy_shortcuts_with_spline_object_warn_once_that_they_are_ignored() -
     assert spec._spline.degree == basis.degree
     assert spec._spline.select is basis.select
     assert spec._spline.penalty == basis.penalty
+    assert spec.degree == basis.degree
+    assert spec.select is basis.select
+    assert spec.penalty == basis.penalty
+    assert spec.n_knots == basis.n_knots
+
+
+def test_spline_object_wrapper_metadata_matches_canonical_basis() -> None:
+    basis = Spline(kind="cr", k=6, penalty="none", select=True)
+    spec = OrderedCategorical(order=LEVELS, basis=basis)
+
+    assert spec.kind == "cr"
+    assert spec.select is basis.select
+    assert spec.penalty == basis.penalty
+    assert spec.degree == basis.degree
+    assert spec.n_knots == basis.n_knots
+
+
+@pytest.mark.parametrize(
+    ("basis_select", "ignored_select"),
+    [(True, False), (False, True)],
+)
+def test_summary_selection_label_uses_canonical_basis_metadata(
+    basis_select, ignored_select
+) -> None:
+    with pytest.warns(FutureWarning, match="ignored"):
+        spec = OrderedCategorical(
+            order=LEVELS,
+            basis=Spline(kind="ps", k=7, select=basis_select),
+            select=ignored_select,
+        )
+    X = pd.DataFrame({"band": np.tile(LEVELS, 25)})
+    y = np.tile(np.linspace(-0.3, 0.4, len(LEVELS)), 25)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"band": spec},
+    )
+    model.fit(X, y)
+
+    assert ("SEL" in model.summary()._info["penalty"]) is basis_select
 
 
 def test_step_basis_warns_once_with_migration_choices_and_still_works() -> None:

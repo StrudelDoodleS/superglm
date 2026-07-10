@@ -23,6 +23,29 @@ from superglm.features.categorical import _grouping_labels, _validate_categorica
 from superglm.types import GroupInfo
 
 
+def _spline_kind_name(spline: Any) -> str:
+    """Return the public factory kind for a spline specification."""
+    from superglm.features.spline import (
+        BSplineSmooth,
+        CardinalCRSpline,
+        CubicRegressionSpline,
+        NaturalSpline,
+        PSpline,
+    )
+
+    kind_by_type = (
+        (PSpline, "ps"),
+        (BSplineSmooth, "bs"),
+        (NaturalSpline, "ns"),
+        (CubicRegressionSpline, "cr"),
+        (CardinalCRSpline, "cr_cardinal"),
+    )
+    for spline_type, kind in kind_by_type:
+        if isinstance(spline, spline_type):
+            return kind
+    return type(spline).__name__
+
+
 class OrderedCategorical:
     """Ordered categorical feature with spline or step basis.
 
@@ -257,6 +280,14 @@ class OrderedCategorical:
         self._spline = None
         if self.basis == "spline":
             self._init_spline()
+            if self._spline_obj is not None:
+                # The object API is authoritative; ignored legacy shortcuts must
+                # not leak contradictory metadata into summaries or editor clones.
+                self.kind = _spline_kind_name(self._spline)
+                self.select = self._spline.select
+                self.penalty = self._spline.penalty
+                self.degree = self._spline.degree
+                self.n_knots = self._spline.n_knots
 
     def __repr__(self) -> str:
         n = self._n_levels
