@@ -161,7 +161,8 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
     gamma = state["reparam"].forward(state["beta_eff"])
     np.testing.assert_allclose(state["gamma_eff"], gamma)
     np.testing.assert_allclose(result.beta[state["group_sl"]], gamma)
-    assert state["H_scop_penalized"] is None
+    assert state["H_scop_penalized"] is not None
+    assert np.all(np.isfinite(state["H_scop_penalized"]))
     assert state["last_step_norm"] == 0.0
     assert not state["last_fisher_fallback"]
     offset_arr = np.zeros_like(y) if offset is None else offset
