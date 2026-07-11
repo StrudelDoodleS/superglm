@@ -4228,13 +4228,13 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "Move" in shell
         assert "Handles" in shell
         assert "Select all" in shell
-        assert "Undo collapse" in shell
-        assert "Linearise" in shell
-        assert "Level left" in shell
-        assert "Level right" in shell
-        assert "Ungroup selected levels" in shell
-        assert "Snap highest" in shell
-        assert "Snap lowest" in shell
+        assert "Restore collapse" in shell
+        assert "Straighten selection" in shell
+        assert "Level from left" in shell
+        assert "Level from right" in shell
+        assert "Ungroup and refit" in shell
+        assert "Snap to highest" in shell
+        assert "Snap to lowest" in shell
         assert "Home" in shell
         assert "CI" in shell
         assert "chart-shell" in shell
@@ -4246,7 +4246,7 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert 'id="uncollapseLevels" class="selection-item"' in shell
         assert ">Undo collapse</button>" not in shell
         assert "snapshot.last_collapse.term === selectedTerm()" in js
-        assert 'aria-label="Smooth"' in shell
+        assert 'aria-label="Smooth selection"' in shell
         assert 'aria-label="Level selected values"' in shell
         assert 'aria-label="Snap selected values"' in shell
         assert ">Smooth</button>" not in shell

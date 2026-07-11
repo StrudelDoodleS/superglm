@@ -1,1 +1,26 @@
 /* chart.css: chart surface, SVG axis, selection palette, and shared popover. */
+
+.ui-popover {
+  position: fixed;
+  z-index: 80;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--text);
+  color: var(--surface);
+  box-shadow: 0 8px 24px var(--shadow);
+  pointer-events: none;
+}
+
+.ui-popover strong,
+.ui-popover span {
+  display: block;
+}
+
+.ui-popover span {
+  margin-top: 2px;
+  color: #eaeef2;
+  font-size: 12px;
+}

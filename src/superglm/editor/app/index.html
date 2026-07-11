@@ -89,70 +89,70 @@
       <div class="chart-shell">
         <svg id="chart" viewBox="0 0 940 520" role="img" aria-label="SuperGLM editable effect"></svg>
         <div id="selectionMenu" class="selection-menu" aria-label="Selection actions" hidden>
-        <button class="selection-item" data-op="shift_up" type="button"
-          title="Increase selected values 5%" aria-label="Increase selected values 5%">
+        <button class="selection-item" data-op="shift_up" data-help-operation="shift_up"
+          type="button" aria-label="Increase selection">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 20V5"></path><path d="m7 10 5-5 5 5"></path>
             <path d="M6 20h12"></path><path d="M18 14h4"></path><path d="M20 12v4"></path>
           </svg>
         </button>
-        <button class="selection-item" data-op="shift_down" type="button"
-          title="Decrease selected values 5%" aria-label="Decrease selected values 5%">
+        <button class="selection-item" data-op="shift_down" data-help-operation="shift_down"
+          type="button" aria-label="Decrease selection">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 4v15"></path><path d="m7 14 5 5 5-5"></path>
             <path d="M6 4h12"></path><path d="M18 11h4"></path>
           </svg>
         </button>
         <div class="selection-separator" aria-hidden="true"></div>
-        <button class="selection-item" data-op="smooth" type="button"
-          title="Smooth" aria-label="Smooth">
+        <button class="selection-item" data-op="smooth" data-help-operation="smooth"
+          type="button" aria-label="Smooth selection">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M3 14c2.5-6 5.5-6 8 0s5.5 6 10 0"></path>
           </svg>
         </button>
-        <button class="selection-item" data-op="linearise" type="button"
-          title="Linearise" aria-label="Linearise">
+        <button class="selection-item" data-op="linearise" data-help-operation="linearise"
+          type="button" aria-label="Straighten selection">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 18 20 6"></path><path d="M5 17h3v3"></path><path d="M16 4h3v3"></path>
           </svg>
         </button>
         <div class="selection-separator" aria-hidden="true"></div>
-        <button class="selection-item" data-op="increasing" type="button"
-          title="Increasing" aria-label="Increasing">
+        <button class="selection-item" data-op="increasing" data-help-operation="increasing"
+          type="button" aria-label="Make increasing">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 17h4l3-5 3 2 5-7"></path><path d="M15 7h4v4"></path>
           </svg>
         </button>
-        <button class="selection-item" data-op="decreasing" type="button"
-          title="Decreasing" aria-label="Decreasing">
+        <button class="selection-item" data-op="decreasing" data-help-operation="decreasing"
+          type="button" aria-label="Make decreasing">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 7h4l3 5 3-2 5 7"></path><path d="M15 17h4v-4"></path>
           </svg>
         </button>
         <div class="selection-separator" aria-hidden="true"></div>
         <div class="selection-menu-node">
-          <button class="selection-item" type="button" title="Level selected values"
-            aria-label="Level selected values" aria-haspopup="true">
+          <button class="selection-item" type="button" aria-label="Level selected values"
+            aria-haspopup="true">
             <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M4 9h16"></path><path d="M4 15h16"></path>
               <path d="M7 6v6"></path><path d="M17 12v6"></path>
             </svg>
           </button>
           <div class="selection-submenu" role="menu" aria-label="Level options">
-            <button class="selection-item" data-op="level_left" type="button" role="menuitem"
-              title="Level left" aria-label="Level left">
+            <button class="selection-item" data-op="level_left" data-help-operation="level_left"
+              type="button" role="menuitem" aria-label="Level from left">
               <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M5 7v10"></path><path d="M5 12h14"></path><path d="M9 9h10"></path><path d="M9 15h10"></path>
               </svg>
             </button>
-            <button class="selection-item" data-op="average" type="button" role="menuitem"
-              title="Average" aria-label="Average">
+            <button class="selection-item" data-op="average" data-help-operation="average"
+              type="button" role="menuitem" aria-label="Average selection">
               <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M4 8h16"></path><path d="M4 16h16"></path><path d="M7 12h10"></path>
               </svg>
             </button>
-            <button class="selection-item" data-op="level_right" type="button" role="menuitem"
-              title="Level right" aria-label="Level right">
+            <button class="selection-item" data-op="level_right" data-help-operation="level_right"
+              type="button" role="menuitem" aria-label="Level from right">
               <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M19 7v10"></path><path d="M5 12h14"></path><path d="M5 9h10"></path><path d="M5 15h10"></path>
               </svg>
@@ -160,22 +160,24 @@
           </div>
         </div>
         <div class="selection-menu-node">
-          <button class="selection-item" type="button" title="Snap selected values"
-            aria-label="Snap selected values" aria-haspopup="true">
+          <button class="selection-item" type="button" aria-label="Snap selected values"
+            aria-haspopup="true">
             <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M5 6h14"></path><path d="M5 18h14"></path>
               <path d="m8 10 4-4 4 4"></path><path d="m8 14 4 4 4-4"></path>
             </svg>
           </button>
           <div class="selection-submenu" role="menu" aria-label="Snap options">
-            <button class="selection-item" data-op="snap_highest" type="button" role="menuitem"
-              title="Snap highest" aria-label="Snap highest">
+            <button class="selection-item" data-op="snap_highest"
+              data-help-operation="snap_highest" type="button" role="menuitem"
+              aria-label="Snap to highest">
               <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M5 6h14"></path><path d="M12 18V7"></path><path d="m8 11 4-4 4 4"></path>
               </svg>
             </button>
-            <button class="selection-item" data-op="snap_lowest" type="button" role="menuitem"
-              title="Snap lowest" aria-label="Snap lowest">
+            <button class="selection-item" data-op="snap_lowest"
+              data-help-operation="snap_lowest" type="button" role="menuitem"
+              aria-label="Snap to lowest">
               <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M5 18h14"></path><path d="M12 6v11"></path><path d="m8 13 4 4 4-4"></path>
               </svg>
@@ -183,24 +185,24 @@
           </div>
         </div>
         <div class="selection-separator" aria-hidden="true"></div>
-        <button id="collapseLevels" class="selection-item" type="button"
-          title="Collapse selected levels and refit" aria-label="Collapse selected levels and refit" hidden>
+        <button id="collapseLevels" class="selection-item"
+          data-help-operation="collapse_levels" type="button" aria-label="Collapse and refit" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M6 7h5"></path><path d="M13 7h5"></path>
             <path d="M6 17h12"></path><path d="M11 7v4"></path><path d="M13 7v4"></path>
             <path d="M10 13h4"></path><path d="M12 13v4"></path>
           </svg>
         </button>
-        <button id="ungroupLevels" class="selection-item" type="button"
-          title="Ungroup selected levels" aria-label="Ungroup selected levels" hidden>
+        <button id="ungroupLevels" class="selection-item"
+          data-help-operation="ungroup_levels" type="button" aria-label="Ungroup and refit" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M6 7h12"></path><path d="M6 17h5"></path><path d="M13 17h5"></path>
             <path d="M12 8v8"></path><path d="m9 11 3-3 3 3"></path>
             <path d="m9 13 3 3 3-3"></path>
           </svg>
         </button>
-        <button id="uncollapseLevels" class="selection-item" type="button"
-          title="Undo collapse" aria-label="Undo collapse" hidden>
+        <button id="uncollapseLevels" class="selection-item"
+          data-help-operation="uncollapse_levels" type="button" aria-label="Restore collapse" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M7 7h10"></path><path d="M7 17h10"></path>
             <path d="M10 7v10"></path><path d="M14 7v10"></path>
@@ -334,6 +336,11 @@
     </div>
     <div id="saveStatus" class="save-status" aria-live="polite"></div>
   </dialog>
+
+<div id="uiPopover" class="ui-popover" role="tooltip" hidden>
+  <strong data-popover-heading></strong>
+  <span data-popover-description></span>
+</div>
 
 <script type="module" src="/assets/main.js"></script>
 </body>

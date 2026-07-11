@@ -27,6 +27,7 @@ import {
   runUngroupRefit
 } from "./summary.js";
 import { bindInteractions } from "./interactions.js";
+import { bindPopovers } from "./views/popover.js";
 
 const appTabs = Array.from(document.querySelectorAll(".app-tab"));
 const appShell = document.querySelector(".app-shell");
@@ -102,6 +103,9 @@ const summaryPane = document.getElementById("summaryPane");
 const historyPane = document.getElementById("historyPane");
 const historyFrame = document.getElementById("historyFrame");
 const statusNode = document.getElementById("status");
+const uiPopover = document.getElementById("uiPopover");
+if (!uiPopover) throw new Error("Editor popover element is missing");
+bindPopovers({ root: document, popover: uiPopover });
 
 let buildProgress = null;
 let buildFrame = null;
