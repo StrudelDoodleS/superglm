@@ -11,7 +11,12 @@ import {
   selectGroupDisplayMode,
   selectRenderableTerm
 } from "./state/selectors.js";
-import { createEditorStore, createInitialEditorState } from "./state/store.js";
+import {
+  createEditorStore,
+  createInitialEditorState,
+  patchView as patchViewState,
+  setPreviewTerm as setPreviewTermState
+} from "./state/store.js";
 import {
   refreshSummary,
   runDistributionProfile,
@@ -28,6 +33,10 @@ const appShell = document.querySelector(".app-shell");
 const appBusyOverlay = document.getElementById("appBusyOverlay");
 const appBusyTitle = document.getElementById("appBusyTitle");
 const appBusyDetail = document.getElementById("appBusyDetail");
+const appAlert = document.getElementById("appAlert");
+const appAlertMessage = document.getElementById("appAlertMessage");
+const appAlertRetry = document.getElementById("appAlertRetry");
+const appAlertDismiss = document.getElementById("appAlertDismiss");
 const editorView = document.getElementById("editorView");
 const reportPanel = document.getElementById("reportPanel");
 const reportTitle = document.getElementById("reportTitle");
@@ -99,6 +108,7 @@ let buildFrame = null;
 let renderedTerm = "";
 let appBusyTimer = null;
 let appBusyStarted = 0;
+let retainedRecovery = null;
 
 const store = createEditorStore(createInitialEditorState());
 const actions = createEditorActions({
@@ -160,6 +170,29 @@ function currentTerm() {
 
 function currentSelection() {
   return new Set(selectCurrentSelection(store.getState()));
+}
+
+function interactionMode() {
+  return store.getState().view.mode;
+}
+
+function setInteractionPreview(term, payload) {
+  store.update((state) => setPreviewTermState(state, term, payload));
+}
+
+function setZoom(term, range) {
+  store.update((state) => patchViewState(state, {
+    zoomByTerm: { ...state.view.zoomByTerm, [term]: range }
+  }));
+}
+
+function clearZoom(term) {
+  store.update((state) => {
+    if (!(term in state.view.zoomByTerm)) return state;
+    const zoomByTerm = { ...state.view.zoomByTerm };
+    delete zoomByTerm[term];
+    return patchViewState(state, { zoomByTerm });
+  });
 }
 
 function activeGroupDisplayMode() {
@@ -532,16 +565,32 @@ function render() {
     activeGroupDisplayMode() === "collapsed" && term.group_display && term.group_display.available
       ? " · original line is grouped by exposure-weighted averaging"
       : "";
-  const recovery = editorState.request.recovery;
-  statusNode.style.color = recovery ? "#b42318" : "";
-  statusNode.textContent = recovery
-    ? recovery.message
-    : `${selected} · ${term.term_type || term.kind}${edf} · ${selection.size} of ${term.n_points} selected · average edit relativity ${rel}x · selected exposure ${selectedShare}${collapsedOriginalNote}`;
+  statusNode.style.color = "";
+  statusNode.textContent = `${selected} · ${term.term_type || term.kind}${edf} · ${selection.size} of ${term.n_points} selected · average edit relativity ${rel}x · selected exposure ${selectedShare}${collapsedOriginalNote}`;
   if (updateHandleCount(term)) return;
   updateGroupDisplayControl(term);
   updateCollapseAction(term, selection);
   updateResetOrderAction(term);
   drawChart(term, selection, chartContext);
+}
+
+function renderRecovery({ recovery, mutationStatus }) {
+  if (!appAlert || !appAlertMessage || !appAlertRetry || !appAlertDismiss) return;
+  if (recovery) retainedRecovery = recovery;
+  const retrying = mutationStatus === "running" && retainedRecovery !== null;
+  if (!recovery && !retrying) {
+    retainedRecovery = null;
+    appAlert.hidden = true;
+    appAlertMessage.textContent = "";
+    appAlertRetry.disabled = false;
+    appAlertDismiss.disabled = false;
+    return;
+  }
+  const visibleRecovery = recovery || retainedRecovery;
+  appAlertMessage.textContent = visibleRecovery ? visibleRecovery.message : "Editor request failed.";
+  appAlertRetry.disabled = retrying;
+  appAlertDismiss.disabled = retrying;
+  appAlert.hidden = false;
 }
 
 function renderMetricsEvidence(evidence) {
@@ -787,18 +836,15 @@ svg.addEventListener(
 
 const interactions = bindInteractions({
   svg,
-  modeSelect,
-  get zoomState() {
-    return store.getState().view.zoomByTerm;
-  },
+  mode: interactionMode,
   selectedTerm,
   currentTerm,
   currentSelection,
-  getState: () => store.getState().remote.snapshot,
-  hasState: () => store.getState().remote.snapshot !== null,
-  render,
+  setPreviewTerm: setInteractionPreview,
+  setZoom,
+  clearZoom,
+  actions,
   drawChart: (term, selection) => drawChart(term, selection, chartContext),
-  postJSON: executeStateMutation
 });
 
 for (const tab of appTabs) {
@@ -880,6 +926,14 @@ ciToggle.addEventListener("click", () => {
 });
 
 resetZoom.addEventListener("click", interactions.resetZoomView);
+if (appAlertRetry) {
+  appAlertRetry.addEventListener("click", () => {
+    void actions.retryMutation();
+  });
+}
+if (appAlertDismiss) {
+  appAlertDismiss.addEventListener("click", () => actions.dismissRecovery());
+}
 if (saveModel) {
   saveModel.addEventListener("click", openSaveDialog);
 }
@@ -954,6 +1008,16 @@ if (uncollapseLevels) {
 }
 
 store.subscribe((state) => state, () => render());
+store.subscribe(
+  (state) => ({
+    recovery: state.request.recovery,
+    mutationStatus: state.request.mutation.status
+  }),
+  renderRecovery,
+  (next, previous) => (
+    next.recovery === previous.recovery && next.mutationStatus === previous.mutationStatus
+  )
+);
 
 loadState().then(async () => {
   await refreshMetricsView();

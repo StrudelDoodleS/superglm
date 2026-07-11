@@ -30,8 +30,40 @@ body {
   min-width: 0;
   height: 100%;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   margin: 0 auto;
+}
+.app-alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 2px solid #b42318;
+  border-radius: 5px;
+  background: #fff1f0;
+  color: #7a271a;
+}
+.app-alert[hidden] {
+  display: none;
+}
+.app-alert span {
+  flex: 1 1 280px;
+  font-weight: 600;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.app-alert button {
+  flex: 0 0 auto;
+  border-color: #b42318;
+  background: #fff;
+  color: #7a271a;
+  font-weight: 600;
+}
+.app-alert button:focus-visible {
+  outline: 3px solid #0969da;
+  outline-offset: 2px;
 }
 .app-busy-overlay {
   position: absolute;

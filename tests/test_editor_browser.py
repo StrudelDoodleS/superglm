@@ -104,6 +104,116 @@ def test_editor_browser_suppresses_duplicate_action_while_pending(
 
 
 @pytest.mark.browser
+def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_drag(
+    browser_editor_widget, monkeypatch
+):
+    original_drag = browser_editor_widget._drag
+    original_state = browser_editor_widget._state
+    drag_requests = []
+    fail_recovery_state = False
+
+    def fail_first_drag(term, indices, delta=0.0, values=None):
+        nonlocal fail_recovery_state
+        drag_requests.append(
+            {
+                "term": term,
+                "indices": list(indices),
+                "delta": delta,
+                "values": None if values is None else list(values),
+            }
+        )
+        if len(drag_requests) == 1:
+            fail_recovery_state = True
+            raise RuntimeError("drag failed once")
+        return original_drag(term, indices, delta, values)
+
+    def fail_first_recovery_state():
+        nonlocal fail_recovery_state
+        if fail_recovery_state:
+            fail_recovery_state = False
+            raise RuntimeError("state recovery failed once")
+        return original_state()
+
+    monkeypatch.setattr(browser_editor_widget, "_drag", fail_first_drag)
+    monkeypatch.setattr(browser_editor_widget, "_state", fail_first_recovery_state)
+
+    def drag_selected_point(page, delta_y):
+        point = page.locator("#chart circle.point.selected[data-index]").first
+        point.wait_for()
+        box = point.bounding_box()
+        assert box is not None
+        x = box["x"] + box["width"] / 2
+        y = box["y"] + box["height"] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + delta_y, steps=5)
+        page.mouse.up()
+
+    with sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1180, "height": 720})
+            page.goto(browser_editor_widget.app_url)
+            page.locator("#chart path.edited").first.wait_for()
+
+            page.locator("#mode").select_option("select")
+            page.locator("#chart circle.point[data-index]").last.click()
+            page.locator("#chart circle.point.selected[data-index]").first.wait_for()
+            page.locator("#mode").select_option("move")
+
+            edited_path = page.locator("#chart path.edited").first
+            confirmed_path = edited_path.get_attribute("d")
+            confirmed_revision = browser_editor_widget.session.model_revision
+            assert confirmed_path is not None
+
+            with page.expect_response(
+                lambda response: response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/drag")
+            ) as failed_drag:
+                drag_selected_point(page, -36)
+            assert failed_drag.value.status == 500
+            page.wait_for_function(
+                """() => {
+                    const alert = document.querySelector('#appAlert');
+                    const status = document.querySelector('#status');
+                    return (alert && !alert.hidden) ||
+                        (status && status.textContent.includes('internal editor error'));
+                }"""
+            )
+
+            assert edited_path.get_attribute("d") == confirmed_path
+            assert browser_editor_widget.session.model_revision == confirmed_revision
+            assert len(drag_requests) == 1
+            assert drag_requests[0]["indices"]
+            assert drag_requests[0]["values"]
+
+            alert = page.locator("#appAlert")
+            assert alert.is_visible()
+            assert "internal editor error" in page.locator("#appAlertMessage").inner_text()
+            page.locator("#appAlertDismiss").click()
+            alert.wait_for(state="hidden")
+
+            with page.expect_response(
+                lambda response: response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/drag")
+            ) as successful_drag:
+                drag_selected_point(page, 28)
+            assert successful_drag.value.status == 200
+            page.wait_for_function(
+                """confirmedPath =>
+                    document.querySelector('#chart path.edited')?.getAttribute('d') !== confirmedPath
+                """,
+                arg=confirmed_path,
+            )
+
+            assert len(drag_requests) == 2
+            assert browser_editor_widget.session.model_revision == confirmed_revision + 1
+            assert edited_path.get_attribute("d") != confirmed_path
+        finally:
+            browser.close()
+
+
+@pytest.mark.browser
 def test_editor_browser_failed_term_switch_keeps_authoritative_term(
     browser_editor_widget, monkeypatch
 ):
@@ -132,7 +242,11 @@ def test_editor_browser_failed_term_switch_keeps_authoritative_term(
 
             page.locator("#term").select_option("region")
             page.wait_for_function(
-                "document.querySelector('#status')?.textContent.includes('region unavailable')"
+                """() => !document.querySelector('#appAlert')?.hidden &&
+                    document.querySelector('#appAlertMessage')?.textContent.includes(
+                        'region unavailable'
+                    )
+                """
             )
 
             assert page.locator("#term").input_value() == "age"
@@ -179,7 +293,11 @@ def test_editor_browser_lost_term_response_uses_recovered_authoritative_term(
 
             page.locator("#term").select_option("region")
             page.wait_for_function(
-                "document.querySelector('#status')?.textContent.includes('response lost')"
+                """() => !document.querySelector('#appAlert')?.hidden &&
+                    document.querySelector('#appAlertMessage')?.textContent.includes(
+                        'response lost'
+                    )
+                """
             )
 
             assert page.locator("#term").input_value() == "region"

@@ -8,6 +8,11 @@
 </head>
 <body>
   <div class="app-shell">
+  <div id="appAlert" class="app-alert" role="alert" hidden>
+    <span id="appAlertMessage"></span>
+    <button id="appAlertRetry" type="button">Retry</button>
+    <button id="appAlertDismiss" type="button">Dismiss</button>
+  </div>
   <div id="appBusyOverlay" class="app-busy-overlay" hidden aria-live="polite">
     <div class="app-busy-card">
       <div class="busy-spinner" aria-hidden="true"></div>

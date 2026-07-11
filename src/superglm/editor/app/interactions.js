@@ -1,7 +1,6 @@
 export function bindInteractions(context) {
-  // One active interaction at a time. During drags we mutate the local payload
-  // for immediate visual feedback, then POST the final values so Python can
-  // commit history, metrics, and summary invalidation.
+  // One active interaction at a time. Drag previews are private payload clones;
+  // only the action controller may replace the confirmed remote snapshot.
   const interaction = {
     dragStart: null,
     brush: null,
@@ -12,10 +11,12 @@ export function bindInteractions(context) {
     orderDrag: null,
     pendingClickIndex: null
   };
-  const { svg, modeSelect } = context;
+  const { svg } = context;
+  const wheelOptions = { passive: false };
 
-  svg.addEventListener("pointerdown", async (event) => {
-    if (!context.hasState()) return;
+  async function onPointerDown(event) {
+    const activeTerm = context.currentTerm();
+    if (!activeTerm) return;
     if ((event.shiftKey || event.button === 1) && beginPan(context, interaction, event)) {
       event.preventDefault();
       interaction.pendingClickIndex = null;
@@ -30,32 +31,34 @@ export function bindInteractions(context) {
     }
     const index = event.target && event.target.dataset ? event.target.dataset.index : undefined;
     const controlIndex = event.target && event.target.dataset ? event.target.dataset.controlIndex : undefined;
-    if (modeSelect.value === "handles") {
+    const mode = context.mode();
+    if (mode === "handles") {
       interaction.pendingClickIndex = null;
       interaction.dragStart = null;
       clearBoxZoom(interaction);
       clearOrderDropPreview(interaction);
       interaction.orderDrag = null;
       if (controlIndex === undefined) return;
-      const term = context.currentTerm();
-      if (!term.controls) return;
+      const preview = structuredClone(activeTerm);
+      if (!preview.controls) return;
       const i = Number(controlIndex);
       interaction.controlDrag = {
+        term: context.selectedTerm(),
+        preview,
         index: i,
-        startValue: term.controls.y[i],
-        value: term.controls.y[i],
-        baseY: term.y.slice(),
-        basis: term.controls.basis ? term.controls.basis[i] : null
+        startValue: preview.controls.y[i],
+        value: preview.controls.y[i],
+        baseY: preview.y.slice(),
+        basis: preview.controls.basis ? preview.controls.basis[i] : null
       };
       svg.setPointerCapture(event.pointerId);
       return;
     }
-    if (modeSelect.value === "move" && index !== undefined) {
+    if (mode === "move" && index !== undefined) {
       interaction.pendingClickIndex = null;
       clearBoxZoom(interaction);
       clearOrderDropPreview(interaction);
       interaction.orderDrag = null;
-      const term = context.currentTerm();
       const selection = context.currentSelection();
       const displayIndex = Number(index);
       const sourceForPoint = sourceIndicesForDisplayIndex(context, displayIndex);
@@ -63,22 +66,25 @@ export function bindInteractions(context) {
       const indices = selectionTouchesPoint
         ? Array.from(selection).sort((a, b) => a - b)
         : sourceForPoint;
+      const preview = structuredClone(activeTerm);
       interaction.pointDrag = {
+        term: context.selectedTerm(),
+        preview,
+        selection: selectionTouchesPoint ? selection : new Set(sourceForPoint),
         displayIndex,
         sourceForPoint,
-        startValue: displayedTermValue(term, displayIndex, context),
+        startValue: displayedTermValue(preview, displayIndex, context),
         indices,
-        values: indices.map((j) => term.y[j]),
+        values: indices.map((j) => preview.y[j]),
         delta: 0
       };
       if (!selectionTouchesPoint) {
-        context.getState().selection[context.selectedTerm()] = sourceForPoint;
-        context.render();
+        context.drawChart(preview, interaction.pointDrag.selection);
       }
       svg.setPointerCapture(event.pointerId);
       return;
     }
-    if (modeSelect.value === "zoom") {
+    if (mode === "zoom") {
       interaction.pendingClickIndex = null;
       interaction.dragStart = null;
       clearOrderDropPreview(interaction);
@@ -87,7 +93,7 @@ export function bindInteractions(context) {
       svg.setPointerCapture(event.pointerId);
       return;
     }
-    if (modeSelect.value !== "select") {
+    if (mode !== "select") {
       interaction.pendingClickIndex = null;
       clearBoxZoom(interaction);
       clearOrderDropPreview(interaction);
@@ -104,7 +110,11 @@ export function bindInteractions(context) {
       interaction.orderDrag = null;
       const source = sourceIndicesForDisplayIndex(context, Number(index));
       const indices = toggleSourceSelection(context.currentSelection(), source);
-      await context.postJSON("/select", { term: context.selectedTerm(), indices });
+      await context.actions.executeStateMutation({
+        name: "select",
+        path: "/select",
+        payload: { term: context.selectedTerm(), indices }
+      });
       return;
     }
     if (index !== undefined && beginOrderDrag(context, interaction, event, Number(index))) {
@@ -127,38 +137,41 @@ export function bindInteractions(context) {
     });
     svg.appendChild(interaction.brush);
     svg.setPointerCapture(event.pointerId);
-  });
+  }
 
-  svg.addEventListener("pointermove", (event) => {
+  function onPointerMove(event) {
     if (interaction.panDrag) {
       panZoomView(context, interaction, svgPoint(context, event));
       return;
     }
     if (interaction.controlDrag) {
-      const term = context.currentTerm();
+      const drag = interaction.controlDrag;
+      const term = drag.preview;
       const value = yFromPoint(context, svgPoint(context, event));
-      interaction.controlDrag.value = value;
+      drag.value = value;
       if (term.controls && term.controls.y) {
-        term.controls.y[interaction.controlDrag.index] = value;
+        term.controls.y[drag.index] = value;
       }
       if (term.controls && term.controls.log_effect) {
         const logValue = Math.log(Math.max(value, 1e-12));
-        term.controls.log_effect[interaction.controlDrag.index] = logValue;
+        term.controls.log_effect[drag.index] = logValue;
         if (term.controls.build_log_effect && term.controls.basis_index) {
-          const buildIndex = term.controls.basis_index[interaction.controlDrag.index];
+          const buildIndex = term.controls.basis_index[drag.index];
           term.controls.build_log_effect[buildIndex] = logValue;
         }
       }
-      previewControlCurve(term, interaction.controlDrag, value);
-      context.drawChart(term, context.currentSelection());
+      previewControlCurve(term, drag, value);
+      context.setPreviewTerm(drag.term, term);
       return;
     }
     if (interaction.pointDrag) {
-      const term = context.currentTerm();
+      const drag = interaction.pointDrag;
+      const term = drag.preview;
       const value = yFromPoint(context, svgPoint(context, event));
-      interaction.pointDrag.delta = value - interaction.pointDrag.startValue;
-      updateDraggedSourceValues(term, interaction.pointDrag, context);
-      context.drawChart(term, context.currentSelection());
+      drag.delta = value - drag.startValue;
+      updateDraggedSourceValues(term, drag, context);
+      context.setPreviewTerm(drag.term, term);
+      context.drawChart(term, drag.selection);
       return;
     }
     if (interaction.orderDrag) {
@@ -175,40 +188,42 @@ export function bindInteractions(context) {
     interaction.brush.setAttribute("y", Math.min(interaction.dragStart.y, point.y));
     interaction.brush.setAttribute("width", Math.abs(point.x - interaction.dragStart.x));
     interaction.brush.setAttribute("height", Math.abs(point.y - interaction.dragStart.y));
-  });
+  }
 
-  svg.addEventListener("pointerup", async (event) => {
+  async function onPointerUp(event) {
     if (interaction.panDrag) {
       interaction.panDrag = null;
       return;
     }
     if (interaction.controlDrag) {
-      const term = context.currentTerm();
+      const drag = interaction.controlDrag;
+      const term = drag.preview;
       const payload = {
-        term: context.selectedTerm(),
-        handle_index: interaction.controlDrag.index,
-        value: interaction.controlDrag.value,
+        term: drag.term,
+        handle_index: drag.index,
+        value: drag.value,
         handle_count: term.controls ? term.controls.count : undefined
       };
       interaction.controlDrag = null;
-      await context.postJSON("/control", payload, { refreshMetrics: true, refreshSummary: true });
+      await context.actions.executeStateMutation({ name: "control", path: "/control", payload });
       return;
     }
     if (interaction.pointDrag) {
-      const term = context.currentTerm();
-      const displayValue = displayedTermValue(term, interaction.pointDrag.displayIndex, context);
+      const drag = interaction.pointDrag;
+      const term = drag.preview;
+      const displayValue = displayedTermValue(term, drag.displayIndex, context);
       const payload = {
-        term: context.selectedTerm(),
-        indices: interaction.pointDrag.indices,
+        term: drag.term,
+        indices: drag.indices,
         values: valuesForSourceIndices(
           term,
-          interaction.pointDrag.indices,
-          interaction.pointDrag.sourceForPoint,
+          drag.indices,
+          drag.sourceForPoint,
           displayValue
         )
       };
       interaction.pointDrag = null;
-      await context.postJSON("/drag", payload, { refreshMetrics: true, refreshSummary: true });
+      await context.actions.executeStateMutation({ name: "drag", path: "/drag", payload });
       return;
     }
     if (interaction.orderDrag) {
@@ -217,11 +232,11 @@ export function bindInteractions(context) {
       clearOrderDropPreview(interaction);
       interaction.orderDrag = null;
       if (drag.active && drag.targetIndex !== null) {
-        await context.postJSON(
-          "/reorder_levels",
-          { term: context.selectedTerm(), target_index: drag.targetIndex },
-          { refreshMetrics: false, refreshSummary: false }
-        );
+        await context.actions.executeStateMutation({
+          name: "reorder_levels",
+          path: "/reorder_levels",
+          payload: { term: context.selectedTerm(), target_index: drag.targetIndex }
+        });
       }
       return;
     }
@@ -245,38 +260,60 @@ export function bindInteractions(context) {
     interaction.pendingClickIndex = null;
     if (displayIndices === null) return;
     const indices = sourceIndicesForDisplayIndices(context, displayIndices);
-    await context.postJSON("/select", { term: context.selectedTerm(), indices });
-  });
+    await context.actions.executeStateMutation({
+      name: "select",
+      path: "/select",
+      payload: { term: context.selectedTerm(), indices }
+    });
+  }
 
-  svg.addEventListener("wheel", (event) => {
-    if (!context.hasState() || !svg._scale) return;
+  function onWheel(event) {
+    if (!context.currentTerm() || !svg._scale) return;
     event.preventDefault();
     const factor = event.deltaY < 0 ? 0.82 : 1.22;
     zoomAround(context, svgPoint(context, event), factor);
-  }, { passive: false });
+  }
 
-  document.addEventListener("keydown", async (event) => {
-    if (!context.hasState() || isEditableTarget(event.target)) return;
+  async function onKeyDown(event) {
+    if (!context.currentTerm() || isEditableTarget(event.target)) return;
     const primary = event.ctrlKey || event.metaKey;
     if (!primary || event.altKey) return;
     const key = event.key.toLowerCase();
     if (key === "z" && !event.shiftKey) {
       event.preventDefault();
-      await context.postJSON("/op", { operation: "undo" }, {
-        refreshMetrics: true,
-        refreshSummary: true
+      await context.actions.executeStateMutation({
+        name: "undo",
+        path: "/op",
+        payload: { operation: "undo" }
       });
     } else if (key === "y" || (key === "z" && event.shiftKey)) {
       event.preventDefault();
-      await context.postJSON("/op", { operation: "redo" }, {
-        refreshMetrics: true,
-        refreshSummary: true
+      await context.actions.executeStateMutation({
+        name: "redo",
+        path: "/op",
+        payload: { operation: "redo" }
       });
     }
-  });
+  }
+
+  svg.addEventListener("pointerdown", onPointerDown);
+  svg.addEventListener("pointermove", onPointerMove);
+  svg.addEventListener("pointerup", onPointerUp);
+  svg.addEventListener("wheel", onWheel, wheelOptions);
+  document.addEventListener("keydown", onKeyDown);
 
   return {
-    resetZoomView: () => resetZoomView(context)
+    resetZoomView: () => context.clearZoom(context.selectedTerm()),
+    destroy() {
+      svg.removeEventListener("pointerdown", onPointerDown);
+      svg.removeEventListener("pointermove", onPointerMove);
+      svg.removeEventListener("pointerup", onPointerUp);
+      svg.removeEventListener("wheel", onWheel, wheelOptions);
+      document.removeEventListener("keydown", onKeyDown);
+      if (interaction.brush) interaction.brush.remove();
+      clearBoxZoom(interaction);
+      clearOrderDropPreview(interaction);
+    }
   };
 }
 
@@ -575,7 +612,7 @@ function zoomAround(context, point, factor) {
   if (factor > 1 &&
       xRange >= scale.baseXMax - scale.baseXMin &&
       yRange >= scale.baseYMax - scale.baseYMin) {
-    resetZoomView(context);
+    context.clearZoom(context.selectedTerm());
     return;
   }
   xMin = Math.max(scale.baseXMin, xMin);
@@ -583,8 +620,7 @@ function zoomAround(context, point, factor) {
   yMin = Math.max(scale.baseYMin, yMin);
   yMax = Math.min(scale.baseYMax, yMax);
   if (xMax <= xMin || yMax <= yMin) return;
-  context.zoomState[context.selectedTerm()] = { xMin, xMax, yMin, yMax };
-  context.render();
+  context.setZoom(context.selectedTerm(), { xMin, xMax, yMin, yMax });
 }
 
 function applyBoxZoom(context, start, end) {
@@ -602,8 +638,7 @@ function applyBoxZoom(context, start, end) {
   const yMin = Math.max(scale.baseYMin, Math.min(lo.y, hi.y));
   const yMax = Math.min(scale.baseYMax, Math.max(lo.y, hi.y));
   if (xMax <= xMin || yMax <= yMin) return;
-  context.zoomState[context.selectedTerm()] = { xMin, xMax, yMin, yMax };
-  context.render();
+  context.setZoom(context.selectedTerm(), { xMin, xMax, yMin, yMax });
 }
 
 function beginPan(context, interaction, event) {
@@ -640,8 +675,7 @@ function panZoomView(context, interaction, point) {
   let yMax = panDrag.yMax + dy;
   [xMin, xMax] = clampPanRange(xMin, xMax, panDrag.baseXMin, panDrag.baseXMax);
   [yMin, yMax] = clampPanRange(yMin, yMax, panDrag.baseYMin, panDrag.baseYMax);
-  context.zoomState[context.selectedTerm()] = { xMin, xMax, yMin, yMax };
-  context.render();
+  context.setZoom(context.selectedTerm(), { xMin, xMax, yMin, yMax });
 }
 
 function clampPanRange(min, max, baseMin, baseMax) {
@@ -657,11 +691,6 @@ function clampPanRange(min, max, baseMin, baseMax) {
     max = baseMax;
   }
   return [min, max];
-}
-
-function resetZoomView(context) {
-  delete context.zoomState[context.selectedTerm()];
-  context.render();
 }
 
 function previewControlCurve(term, drag, value) {

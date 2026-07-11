@@ -176,6 +176,8 @@ test("a running mutation suppresses duplicate submissions", async () => {
 
 test("failed mutation preserves confirmed state, clears preview, and records retry", async () => {
   const confirmed = snapshot(2);
+  const confirmedY = confirmed.terms.age.y;
+  const confirmedYValues = confirmedY.slice();
   let state = createInitialEditorState(confirmed);
   state = setPreviewTerm(state, "age", { ...termPayload(), y: [1.8] });
   const store = createEditorStore(state);
@@ -193,6 +195,8 @@ test("failed mutation preserves confirmed state, clears preview, and records ret
   assert.equal(result.ok, false);
   assert.equal(result.error.message, "network down");
   assert.strictEqual(store.getState().remote.snapshot, confirmed);
+  assert.strictEqual(store.getState().remote.snapshot?.terms.age.y, confirmedY);
+  assert.deepEqual(store.getState().remote.snapshot?.terms.age.y, confirmedYValues);
   assert.equal(store.getState().view.preview, null);
   assert.deepEqual(store.getState().request.mutation, {
     status: "error", operation: "drag", error: "network down"
