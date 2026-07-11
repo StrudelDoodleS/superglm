@@ -142,6 +142,15 @@ def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_pag
         assert overlay.is_hidden()
         assert reference_ci.evaluate("node => document.activeElement === node")
 
+        page.evaluate("window.__superglmTest.setAppBusy(true, 'Testing fallback', 'Waiting')")
+        assert announcement.evaluate("node => document.activeElement === node")
+        reference_ci.evaluate("node => { node.hidden = true; }")
+        page.evaluate("window.__superglmTest.setAppBusy(false)")
+
+        assert page.evaluate("document.activeElement?.id") in {"term", "inspectorToggle"}
+        for selector in ["#appBar", ".context-bar", "#editorView", "#reportPanel"]:
+            assert page.locator(selector).get_attribute("inert") is None
+
 
 def test_text_selection_is_scoped_and_reduced_motion_stops_spinner(open_editor_page):
     with open_editor_page() as (page, _session):

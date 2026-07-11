@@ -576,9 +576,7 @@ function setAppBusy(active, title = "Working...", detail = "") {
   if (!active) {
     const opener = appBusyOpener;
     appBusyOpener = null;
-    if (stopping && opener && opener.isConnected && typeof opener.focus === "function") {
-      opener.focus();
-    }
+    if (stopping) restoreFocusAfterBusy(opener);
     return;
   }
   const message = detail || "Refitting model";
@@ -596,6 +594,14 @@ function setAppBusy(active, title = "Working...", detail = "") {
   };
   update();
   appBusyTimer = window.setInterval(update, 250);
+}
+
+function restoreFocusAfterBusy(opener) {
+  for (const candidate of [opener, termSelect, inspectorToggle]) {
+    if (!candidate || !candidate.isConnected || typeof candidate.focus !== "function") continue;
+    candidate.focus({ preventScroll: true });
+    if (document.activeElement === candidate) return;
+  }
 }
 
 if (new URLSearchParams(window.location.search).get("test") === "1") {
