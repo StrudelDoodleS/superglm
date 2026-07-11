@@ -6,6 +6,16 @@
 /** @typedef {'idle'|'updating'|'current'|'stale'|'error'} EvidenceStatus */
 /** @typedef {'metrics'|'summary'|'report'} EvidencePanel */
 /**
+ * @typedef {Object} SummaryPayload
+ * @property {boolean} available
+ * @property {string} [source]
+ * @property {string} [label]
+ * @property {string} [note]
+ * @property {string} [error]
+ * @property {string} [html]
+ * @property {Record<string, unknown>} [compact]
+ */
+/**
  * @typedef {Object} EditorHistory
  * @property {Array<Record<string, unknown>>} active
  * @property {Array<Record<string, unknown>>} redo
@@ -47,6 +57,31 @@
  * @property {EditorHistory} history
  */
 /**
+ * @typedef {Object} StructuralTransitionTiming
+ * @property {string} operation
+ * @property {number} fit_ms
+ * @property {number} summary_ms
+ * @property {number} state_ms
+ * @property {number} server_total_ms
+ */
+/**
+ * @typedef {Object} StructuralTransitionEnvelope
+ * @property {EditorSnapshot} state
+ * @property {SummaryPayload} summary
+ * @property {StructuralTransitionTiming} timing
+ */
+/**
+ * @typedef {Object} MutationDescriptor
+ * @property {string} name
+ * @property {string} path
+ * @property {Record<string, unknown>} payload
+ */
+/**
+ * @typedef {MutationDescriptor & {
+ *   waitForSecondary?:(revision:number)=>void|Promise<void>
+ * }} StructuralMutationDescriptor
+ */
+/**
  * @typedef {Object} EvidenceState
  * @property {EvidenceStatus} status
  * @property {number|null} revision
@@ -77,7 +112,7 @@
 /**
  * @typedef {Object} RecoveryRequestState
  * @property {string} message
- * @property {{name:string, path:string, payload:Record<string, unknown>}|null} retry
+ * @property {MutationDescriptor|StructuralMutationDescriptor|null} retry
  */
 /**
  * @typedef {Object} EditorRequestState
@@ -88,12 +123,16 @@
  */
 /**
  * @typedef {Object} EditorState
- * @property {{snapshot:EditorSnapshot|null}} remote
+ * @property {{snapshot:EditorSnapshot|null, summary:SummaryPayload|null}} remote
  * @property {EditorViewState} view
  * @property {EditorRequestState} request
  */
 /** @typedef {{panel:EvidencePanel, revision:number, sequence:number}} EvidenceToken */
 /** @typedef {{ok:true, snapshot:EditorSnapshot}|{ok:false, skipped?:boolean, error:Error}} ActionResult */
+/**
+ * @typedef {{ok:true, envelope:StructuralTransitionEnvelope}|
+ * {ok:false, skipped?:boolean, error:Error}} StructuralActionResult
+ */
 
 export const EVIDENCE_PANELS = Object.freeze(
   /** @type {const} */ (["metrics", "summary", "report"])

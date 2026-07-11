@@ -4530,9 +4530,33 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     summary_js = (root / "summary.js").read_text()
     css = (root / "styles.css").read_text()
 
+    refit_start = main_js.index("async function runStructuralRefit")
+    refit_end = main_js.index("\nfunction setAppBusy", refit_start)
+    refit_source = main_js[refit_start:refit_end]
+    busy_start = main_js.index("function renderMutationBusy")
+    busy_end = main_js.index("\nfunction renderInteractionPreview", busy_start)
+    busy_source = main_js[busy_start:busy_end]
+    bindings_start = main_js.index("if (collapseLevels) {", refit_end)
+    bindings_end = main_js.index("\nloadState().then", bindings_start)
+    bindings_source = main_js[bindings_start:bindings_end]
+    collapse_start = summary_js.index("export function collapseTransition")
+    collapse_end = summary_js.index("export function ungroupTransition", collapse_start)
+    collapse_source = summary_js[collapse_start:collapse_end]
+
     assert 'id="appBusyOverlay"' in html
     assert "setAppBusy" in main_js
-    assert "runStructuralRefit" in main_js
+    assert "actions.executeStructuralMutation" in refit_source
+    assert "waitForSecondary" in refit_source
+    assert refit_source.index("await refreshMetricsView()") < refit_source.index(
+        "await refreshActiveReport()"
+    )
+    assert "actions.initialize()" not in refit_source
+    assert '"/state"' not in refit_source
+    assert "setAppBusy" not in refit_source
+    assert "refreshSummaryView" not in refit_source
+    assert "result.envelope" in refit_source
+    assert 'mutation.status === "running"' in busy_source
+    assert "setAppBusy(active" in busy_source
     assert "client_request_ms" in main_js
     assert "client_recovery_ms" in main_js
     assert "client_total_ms" in main_js
@@ -4541,10 +4565,19 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert 'id="advancedTiming"' in html
     assert "advancedTiming.textContent" in main_js
     assert 'summaryNote.textContent = payload.note || ""' in main_js
-    assert "runCollapseRefit(summaryNodes(), selectedTerm())" in main_js
-    assert "runCollapseRefit(summaryNodes(), selectedTerm(), refreshMetricsView)" not in main_js
-    assert "runCollapseRefit(nodes, termName)" in summary_js
-    assert "runCollapseRefit(nodes, termName, refreshMetrics)" not in summary_js
+    assert "collapseTransition" in main_js[:refit_start]
+    assert "ungroupTransition" in main_js[:refit_start]
+    assert "uncollapseTransition" in main_js[:refit_start]
+    assert "runStructuralRefit(collapseTransition(selectedTerm()))" in bindings_source
+    assert "runStructuralRefit(ungroupTransition(selectedTerm()))" in bindings_source
+    assert "runStructuralRefit(uncollapseTransition())" in bindings_source
+    assert "(state) => state.remote.snapshot" in bindings_source
+    assert "(state) => state.remote.summary" in bindings_source
+    assert "renderSummary" in bindings_source
+    assert "state.request.mutation" in bindings_source
+    assert 'path: "/collapse_levels"' in collapse_source
+    assert 'payload: { term, method: "auto" }' in collapse_source
+    assert "requestJSON" not in collapse_source
     assert "app-busy-overlay" in css
     assert "app-shell.is-busy" in css
     assert "busy-spinner" in css

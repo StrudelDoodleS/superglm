@@ -4,6 +4,7 @@ import test from "node:test";
 import * as actionsModule from "../../src/superglm/editor/app/state/actions.js";
 import {
   commitRemote,
+  commitStructuralTransition,
   createEditorStore,
   createInitialEditorState,
   patchView as patchViewState,
@@ -42,6 +43,20 @@ function snapshot(revision) {
   };
 }
 
+function transitionEnvelope(revision = 7, source = "in_force") {
+  return {
+    state: snapshot(revision),
+    summary: { available: true, source },
+    timing: {
+      operation: "collapse_levels",
+      fit_ms: 6,
+      summary_ms: 2,
+      state_ms: 1,
+      server_total_ms: 12
+    }
+  };
+}
+
 /**
  * @template T
  * @returns {{promise:Promise<T>, resolve:(value:T)=>void, reject:(reason:unknown)=>void}}
@@ -61,6 +76,45 @@ function deferred() {
     reject: (reason) => rejectPromise(reason)
   };
 }
+
+test("nextPaint resolves only after two animation frames", async (t) => {
+  const original = globalThis.requestAnimationFrame;
+  /** @type {FrameRequestCallback[]} */
+  const frames = [];
+  /** @type {typeof requestAnimationFrame} */
+  const requestFrame = (callback) => {
+    frames.push(callback);
+    return frames.length;
+  };
+  Object.defineProperty(globalThis, "requestAnimationFrame", {
+    configurable: true,
+    writable: true,
+    value: requestFrame
+  });
+  t.after(() => {
+    Object.defineProperty(globalThis, "requestAnimationFrame", {
+      configurable: true,
+      writable: true,
+      value: original
+    });
+  });
+  let settled = false;
+  const pending = actionsModule.nextPaint().then(() => { settled = true; });
+
+  assert.equal(frames.length, 1);
+  const first = frames.shift();
+  assert.ok(first);
+  first(0);
+  await Promise.resolve();
+  assert.equal(frames.length, 1);
+  assert.equal(settled, false);
+
+  const second = frames.shift();
+  assert.ok(second);
+  second(16);
+  await pending;
+  assert.equal(settled, true);
+});
 
 test("initialize commits the authoritative snapshot and view patches stay local", async () => {
   const store = createEditorStore(createInitialEditorState());
@@ -147,7 +201,7 @@ test("same-revision mutation clears preview without scheduling evidence", async 
   assert.deepEqual(scheduled, []);
 });
 
-test("a running mutation suppresses duplicate submissions", async () => {
+test("a running mutation suppresses ordinary and structural duplicate submissions", async () => {
   const pendingResponse = deferred();
   const store = createEditorStore(createInitialEditorState(snapshot(0)));
   let calls = 0;
@@ -164,15 +218,239 @@ test("a running mutation suppresses duplicate submissions", async () => {
 
   const first = actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
   const second = await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
+  const structural = await actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "age", method: "auto" }
+  });
 
   assert.equal(second.ok, false);
   assert.equal(second.skipped, true);
   assert.ok(second.error instanceof Error);
+  assert.equal(structural.ok, false);
+  assert.equal(structural.skipped, true);
+  assert.ok(structural.error instanceof Error);
   assert.equal(calls, 1);
 
   pendingResponse.resolve(snapshot(1));
   assert.equal((await first).ok, true);
 });
+
+test("structural mutation commits once before paint and awaits secondary evidence before idle", async () => {
+  const envelope = transitionEnvelope();
+  const secondary = deferred();
+  const secondaryStarted = deferred();
+  const store = createEditorStore(createInitialEditorState(snapshot(2)));
+  /** @type {string[]} */
+  const events = [];
+  let postCalls = 0;
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async (path, payload) => {
+        postCalls += 1;
+        events.push("post");
+        assert.equal(path, "/collapse_levels");
+        assert.deepEqual(payload, { term: "age", method: "auto" });
+        return envelope;
+      },
+      getState: async () => { throw new Error("success must not recover through /state"); }
+    },
+    waitForPaint: async () => {
+      events.push("paint");
+      assert.equal(store.getState().request.mutation.status, "running");
+    }
+  });
+  store.subscribe((state) => state.remote, () => { events.push("commit"); });
+  store.subscribe((state) => state.request.mutation.status, (status) => {
+    if (status === "idle") events.push("idle");
+  });
+
+  const pending = actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "age", method: "auto" },
+    waitForSecondary: async (revision) => {
+      events.push(`secondary:${revision}`);
+      secondaryStarted.resolve(undefined);
+      await secondary.promise;
+    }
+  });
+  await secondaryStarted.promise;
+
+  assert.equal(store.getState().request.mutation.status, "running");
+  assert.deepEqual(events, ["post", "commit", "paint", "secondary:7"]);
+
+  secondary.resolve(undefined);
+  const result = await pending;
+
+  assert.deepEqual(result, { ok: true, envelope });
+  assert.equal(postCalls, 1);
+  assert.strictEqual(store.getState().remote.snapshot, envelope.state);
+  assert.strictEqual(store.getState().remote.summary, envelope.summary);
+  assert.deepEqual(events, ["post", "commit", "paint", "secondary:7", "idle"]);
+});
+
+test("malformed structural response restores the confirmed pair and retry stays structural", async () => {
+  const confirmedEnvelope = transitionEnvelope(2, "selected");
+  const confirmedState = commitStructuralTransition(
+    createInitialEditorState(snapshot(1)),
+    confirmedEnvelope
+  );
+  const confirmedRemote = confirmedState.remote;
+  const store = createEditorStore(confirmedState);
+  const validEnvelope = transitionEnvelope();
+  const responses = [
+    { state: snapshot(7), timing: validEnvelope.timing },
+    validEnvelope
+  ];
+  let postCalls = 0;
+  /** @type {number[]} */
+  const secondaryRevisions = [];
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => {
+        postCalls += 1;
+        return responses.shift();
+      },
+      getState: async () => { throw new Error("offline"); }
+    },
+    waitForPaint: async () => {}
+  });
+  const descriptor = {
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "age", method: "auto" },
+    waitForSecondary: (/** @type {number} */ revision) => { secondaryRevisions.push(revision); }
+  };
+
+  const failed = await actions.executeStructuralMutation(descriptor);
+
+  assert.equal(failed.ok, false);
+  if (failed.ok) assert.fail("malformed envelope unexpectedly succeeded");
+  assert.match(failed.error.message, /malformed/i);
+  assert.strictEqual(store.getState().remote, confirmedRemote);
+  assert.equal(store.getState().request.mutation.status, "error");
+
+  const retried = await actions.retryMutation();
+
+  assert.deepEqual(retried, { ok: true, envelope: validEnvelope });
+  assert.equal(postCalls, 2);
+  assert.deepEqual(secondaryRevisions, [7]);
+});
+
+test("structural response validates the state object before committing", async () => {
+  const confirmed = snapshot(2);
+  const store = createEditorStore(createInitialEditorState(confirmed));
+  const envelope = transitionEnvelope();
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => ({ summary: envelope.summary, timing: envelope.timing }),
+      getState: async () => { throw new Error("offline"); }
+    },
+    waitForPaint: async () => {}
+  });
+
+  const result = await actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "age", method: "auto" }
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) assert.fail("missing state unexpectedly succeeded");
+  assert.match(result.error.message, /malformed/i);
+  assert.strictEqual(store.getState().remote.snapshot, confirmed);
+});
+
+test("structural response rejects malformed snapshot and timing contracts", async () => {
+  const valid = transitionEnvelope();
+  const malformedEnvelopes = [
+    {
+      ...valid,
+      state: { ...valid.state, terms: [] }
+    },
+    {
+      ...valid,
+      timing: { ...valid.timing, state_ms: Number.POSITIVE_INFINITY }
+    }
+  ];
+
+  for (const malformed of malformedEnvelopes) {
+    const confirmed = snapshot(2);
+    const store = createEditorStore(createInitialEditorState(confirmed));
+    const actions = createEditorActions({
+      store,
+      client: {
+        postJSON: async () => malformed,
+        getState: async () => { throw new Error("offline"); }
+      },
+      waitForPaint: async () => {}
+    });
+
+    const result = await actions.executeStructuralMutation({
+      name: "collapse levels",
+      path: "/collapse_levels",
+      payload: { term: "age", method: "auto" }
+    });
+
+    assert.equal(result.ok, false);
+    if (result.ok) assert.fail("malformed contract unexpectedly succeeded");
+    assert.match(result.error.message, /malformed/i);
+    assert.strictEqual(store.getState().remote.snapshot, confirmed);
+  }
+});
+
+for (const failurePoint of ["post", "paint", "secondary"]) {
+  test(`structural ${failurePoint} failure restores the confirmed snapshot and summary`, async () => {
+    const confirmedEnvelope = transitionEnvelope(2, "selected");
+    const confirmedState = commitStructuralTransition(
+      createInitialEditorState(snapshot(1)),
+      confirmedEnvelope
+    );
+    const confirmedRemote = confirmedState.remote;
+    const store = createEditorStore(confirmedState);
+    let recoveryCalls = 0;
+    const actions = createEditorActions({
+      store,
+      client: {
+        postJSON: async () => {
+          if (failurePoint === "post") throw new Error("post failed");
+          return transitionEnvelope();
+        },
+        getState: async () => {
+          recoveryCalls += 1;
+          throw new Error("offline");
+        }
+      },
+      waitForPaint: async () => {
+        if (failurePoint === "paint") throw new Error("paint failed");
+      }
+    });
+
+    const result = await actions.executeStructuralMutation({
+      name: "collapse levels",
+      path: "/collapse_levels",
+      payload: { term: "age", method: "auto" },
+      waitForSecondary: async () => {
+        if (failurePoint === "secondary") throw new Error("secondary failed");
+      }
+    });
+
+    assert.equal(result.ok, false);
+    if (result.ok) assert.fail(`${failurePoint} failure unexpectedly succeeded`);
+    assert.equal(result.error.message, `${failurePoint} failed`);
+    assert.equal(recoveryCalls, 1);
+    assert.strictEqual(store.getState().remote, confirmedRemote);
+    assert.deepEqual(store.getState().request.mutation, {
+      status: "error",
+      operation: "collapse levels",
+      error: `${failurePoint} failed`
+    });
+  });
+}
 
 test("failed mutation preserves confirmed state, clears preview, and records retry", async () => {
   const confirmed = snapshot(2);
@@ -494,17 +772,18 @@ test("dismiss and missing retries are deterministic", async () => {
   });
 });
 
-test("action module exposes only the controller factory and exact methods", () => {
+test("action module exposes only the controller factory, paint helper, and exact methods", () => {
   const store = createEditorStore(createInitialEditorState(snapshot(0)));
   const actions = createEditorActions({
     store,
     client: { postJSON: async () => snapshot(0), getState: async () => snapshot(0) }
   });
 
-  assert.deepEqual(Object.keys(actionsModule), ["createEditorActions"]);
+  assert.deepEqual(Object.keys(actionsModule).sort(), ["createEditorActions", "nextPaint"]);
   assert.deepEqual(Object.keys(actions).sort(), [
     "dismissRecovery",
     "executeStateMutation",
+    "executeStructuralMutation",
     "initialize",
     "patchView",
     "refreshEvidence",

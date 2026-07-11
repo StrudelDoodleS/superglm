@@ -4,12 +4,13 @@ import { selectActiveTermName } from "./selectors.js";
 
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
+/** @typedef {import('../api/contracts.js').StructuralTransitionEnvelope} StructuralTransitionEnvelope */
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 
 /** @param {EditorSnapshot|null} snapshot @returns {EditorState} */
 export function createInitialEditorState(snapshot = null) {
   return {
-    remote: { snapshot },
+    remote: { snapshot, summary: null },
     view: {
       activeTerm: snapshot?.selected_term || "",
       activeView: "editor",
@@ -116,11 +117,20 @@ export function commitRemote(state, snapshot) {
   /** @type {EditorState} */
   const candidate = {
     ...state,
-    remote: { snapshot },
+    remote: { snapshot, summary: state.remote.summary },
     view: { ...state.view, preview: null }
   };
   return {
     ...candidate,
     view: { ...candidate.view, activeTerm: selectActiveTermName(candidate) }
+  };
+}
+
+/** @param {EditorState} state @param {StructuralTransitionEnvelope} envelope */
+export function commitStructuralTransition(state, envelope) {
+  const committed = commitRemote(state, envelope.state);
+  return {
+    ...committed,
+    remote: { snapshot: envelope.state, summary: envelope.summary }
   };
 }

@@ -4,8 +4,11 @@ import test from "node:test";
 import * as selectors from "../../src/superglm/editor/app/state/selectors.js";
 import * as storeModule from "../../src/superglm/editor/app/state/store.js";
 
+/** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EditorState} EditorState */
+
 const {
   commitRemote,
+  commitStructuralTransition,
   createEditorStore,
   createInitialEditorState,
   patchView,
@@ -41,6 +44,73 @@ function snapshot(revision = 0) {
     history: { active: [], redo: [] }
   };
 }
+
+function transitionEnvelope() {
+  return {
+    state: snapshot(7),
+    summary: { available: true, source: "in_force" },
+    timing: {
+      operation: "collapse_levels",
+      fit_ms: 6,
+      summary_ms: 2,
+      state_ms: 1,
+      server_total_ms: 12
+    }
+  };
+}
+
+test("initial remote state has no summary and ordinary commits preserve the confirmed summary", () => {
+  const initial = createInitialEditorState(snapshot(1));
+  assert.deepEqual(initial.remote, { snapshot: initial.remote.snapshot, summary: null });
+
+  const envelope = transitionEnvelope();
+  const structural = commitStructuralTransition(initial, envelope);
+  const store = createEditorStore(structural);
+  let summaryNotifications = 0;
+  store.subscribe((state) => state.remote.summary, () => { summaryNotifications += 1; });
+  store.update((state) => commitRemote(state, snapshot(8)));
+  const ordinary = store.getState();
+
+  assert.strictEqual(ordinary.remote.summary, envelope.summary);
+  assert.equal(summaryNotifications, 0);
+});
+
+test("structural transition commits snapshot and summary atomically without ending the mutation", () => {
+  const envelope = transitionEnvelope();
+  let initial = patchView(createInitialEditorState(snapshot(1)), { activeTerm: "removed" });
+  initial = {
+    ...initial,
+    request: {
+      ...initial.request,
+      mutation: { status: "running", operation: "collapse", error: null }
+    }
+  };
+  const store = createEditorStore(initial);
+  /** @type {EditorState['remote'][]} */
+  const commits = [];
+  /** @type {Array<EditorState['remote']['snapshot']>} */
+  const snapshots = [];
+  /** @type {Array<EditorState['remote']['summary']>} */
+  const summaries = [];
+  store.subscribe((state) => state.remote, (remote) => commits.push(remote));
+  store.subscribe((state) => state.remote.snapshot, (snapshot) => snapshots.push(snapshot));
+  store.subscribe((state) => state.remote.summary, (summary) => summaries.push(summary));
+
+  store.update((state) => commitStructuralTransition(state, envelope));
+
+  const committed = store.getState();
+  assert.equal(commits.length, 1);
+  assert.equal(snapshots.length, 1);
+  assert.equal(summaries.length, 1);
+  assert.deepEqual(commits[0], { snapshot: envelope.state, summary: envelope.summary });
+  assert.strictEqual(snapshots[0], envelope.state);
+  assert.strictEqual(summaries[0], envelope.summary);
+  assert.strictEqual(committed.remote.snapshot, envelope.state);
+  assert.strictEqual(committed.remote.summary, envelope.summary);
+  assert.equal(committed.view.activeTerm, "age");
+  assert.equal(committed.request.mutation.status, "running");
+  assert.equal(committed.request.mutation.operation, "collapse");
+});
 
 test("store keeps confirmed remote data separate from a chart preview", () => {
   const initial = createInitialEditorState(snapshot());
@@ -304,6 +374,7 @@ test("selectors expose confirmed state defaults and per-term display overrides",
 test("state modules expose only their requested public symbols", () => {
   assert.deepEqual(Object.keys(storeModule).sort(), [
     "commitRemote",
+    "commitStructuralTransition",
     "createEditorStore",
     "createInitialEditorState",
     "patchView",

@@ -1,12 +1,20 @@
 // @ts-check
 
-import { commitRemote, patchView as patchViewState } from "./store.js";
+import {
+  commitRemote,
+  commitStructuralTransition,
+  patchView as patchViewState
+} from "./store.js";
 import { selectModelRevision } from "./selectors.js";
 
 /** @typedef {import('../api/contracts.js').ActionResult} ActionResult */
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
+/** @typedef {import('../api/contracts.js').MutationDescriptor} MutationDescriptor */
+/** @typedef {import('../api/contracts.js').StructuralActionResult} StructuralActionResult */
+/** @typedef {import('../api/contracts.js').StructuralMutationDescriptor} StructuralMutationDescriptor */
+/** @typedef {import('../api/contracts.js').StructuralTransitionEnvelope} StructuralTransitionEnvelope */
 /**
  * @typedef {Object} EditorStore
  * @property {()=>EditorState} getState
@@ -18,17 +26,19 @@ import { selectModelRevision } from "./selectors.js";
  * @property {()=>Promise<unknown>} getState
  */
 /**
- * @typedef {Object} MutationDescriptor
- * @property {string} name
- * @property {string} path
- * @property {Record<string, unknown>} payload
- */
-/**
  * @typedef {Object} EditorActionOptions
  * @property {EditorStore} store
  * @property {ActionClient} client
  * @property {(revision:number)=>void|Promise<void>} [scheduleEvidence]
+ * @property {()=>void|Promise<void>} [waitForPaint]
  */
+
+/** @returns {Promise<void>} */
+export function nextPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+}
 
 /** @param {unknown} value @returns {Error} */
 function normalizeError(value) {
@@ -50,7 +60,7 @@ function snapshotPayload(payload) {
   return structuredClone(payload);
 }
 
-/** @param {string} message @returns {ActionResult} */
+/** @param {string} message @returns {{ok:false, skipped:true, error:Error}} */
 function skippedMutation(message) {
   return {
     ok: false,
@@ -59,8 +69,105 @@ function skippedMutation(message) {
   };
 }
 
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** @param {unknown} value @returns {value is number} */
+function isNonnegativeFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/** @param {unknown} value @returns {boolean} */
+function isEditorSnapshot(value) {
+  if (!isRecord(value) || !Number.isInteger(value.model_revision)) return false;
+  if (typeof value.selected_term !== "string") return false;
+  if (!isRecord(value.terms) || !isRecord(value.selection)) return false;
+  if (typeof value.can_uncollapse_levels !== "boolean") return false;
+  if (value.last_collapse !== null && !isRecord(value.last_collapse)) return false;
+  return isRecord(value.history) &&
+    Array.isArray(value.history.active) &&
+    Array.isArray(value.history.redo);
+}
+
+/** @param {unknown} value @returns {boolean} */
+function isStructuralTiming(value) {
+  return isRecord(value) &&
+    typeof value.operation === "string" &&
+    isNonnegativeFiniteNumber(value.fit_ms) &&
+    isNonnegativeFiniteNumber(value.summary_ms) &&
+    isNonnegativeFiniteNumber(value.state_ms) &&
+    isNonnegativeFiniteNumber(value.server_total_ms);
+}
+
+/** @param {unknown} value @returns {StructuralTransitionEnvelope} */
+function structuralEnvelope(value) {
+  if (
+    !isRecord(value) ||
+    !isEditorSnapshot(value.state) ||
+    !isRecord(value.summary) ||
+    typeof value.summary.available !== "boolean" ||
+    !isStructuralTiming(value.timing)
+  ) {
+    throw new Error("Structural transition response is malformed.");
+  }
+  return /** @type {StructuralTransitionEnvelope} */ (value);
+}
+
 /** @param {EditorActionOptions} options */
-export function createEditorActions({ store, client, scheduleEvidence = () => {} }) {
+export function createEditorActions({
+  store,
+  client,
+  scheduleEvidence = () => {},
+  waitForPaint = nextPaint
+}) {
+  /**
+   * Restores the last confirmed remote pair after a failed mutation, while retaining the existing
+   * authoritative-state recovery request and retry behavior.
+   *
+   * @param {unknown} error
+   * @param {MutationDescriptor|StructuralMutationDescriptor} descriptor
+   * @param {EditorState['remote']} confirmed
+   * @returns {Promise<{ok:false, error:Error}>}
+   */
+  async function recoverMutation(error, descriptor, confirmed) {
+    const normalizedError = normalizeError(error);
+    /** @type {EditorSnapshot|null} */
+    let recovered = null;
+    try {
+      recovered = /** @type {EditorSnapshot} */ (await client.getState());
+    } catch {
+      // The exact last-confirmed remote pair remains authoritative while offline.
+    }
+    const isStructural = "waitForSecondary" in descriptor;
+    store.update((state) => {
+      const currentRemote = isStructural || state.remote === confirmed ? confirmed : state.remote;
+      const restoredBase = {
+        ...state,
+        remote: currentRemote,
+        view: { ...state.view, preview: null }
+      };
+      const restored = recovered ? commitRemote(restoredBase, recovered) : restoredBase;
+      return {
+        ...restored,
+        request: {
+          ...restored.request,
+          mutation: {
+            status: "error",
+            operation: descriptor.name,
+            error: normalizedError.message
+          },
+          recovery: {
+            message: normalizedError.message,
+            retry: descriptor
+          }
+        }
+      };
+    });
+    return { ok: false, error: normalizedError };
+  }
+
   /** @returns {Promise<EditorSnapshot>} */
   async function initialize() {
     const snapshot = /** @type {EditorSnapshot} */ (await client.getState());
@@ -74,9 +181,9 @@ export function createEditorActions({ store, client, scheduleEvidence = () => {}
       return skippedMutation("An editor mutation is already running.");
     }
 
-    const confirmed = store.getState().remote.snapshot;
-    const previousRevision = confirmed?.model_revision ?? -1;
-    const requestPayload = snapshotPayload(payload);
+    const confirmed = store.getState().remote;
+    const previousRevision = confirmed.snapshot?.model_revision ?? -1;
+    const descriptor = { name, path, payload: snapshotPayload(payload) };
     store.update((state) => ({
       ...state,
       request: {
@@ -89,36 +196,11 @@ export function createEditorActions({ store, client, scheduleEvidence = () => {}
     /** @type {EditorSnapshot} */
     let snapshot;
     try {
-      snapshot = /** @type {EditorSnapshot} */ (await client.postJSON(path, requestPayload));
+      snapshot = /** @type {EditorSnapshot} */ (
+        await client.postJSON(path, descriptor.payload)
+      );
     } catch (value) {
-      const error = normalizeError(value);
-      /** @type {EditorSnapshot|null} */
-      let recovered = null;
-      try {
-        recovered = /** @type {EditorSnapshot} */ (await client.getState());
-      } catch {
-        // The exact last-confirmed snapshot remains authoritative while offline.
-      }
-      store.update((state) => {
-        const restored = recovered
-          ? commitRemote(state, recovered)
-          : {
-              ...state,
-              view: { ...state.view, preview: null }
-            };
-        return {
-          ...restored,
-          request: {
-            ...restored.request,
-            mutation: { status: "error", operation: name, error: error.message },
-            recovery: {
-              message: error.message,
-              retry: { name, path, payload: requestPayload }
-            }
-          }
-        };
-      });
-      return { ok: false, error };
+      return recoverMutation(value, descriptor, confirmed);
     }
 
     store.update((state) => {
@@ -140,6 +222,57 @@ export function createEditorActions({ store, client, scheduleEvidence = () => {}
       }
     }
     return { ok: true, snapshot };
+  }
+
+  /**
+   * @param {StructuralMutationDescriptor} descriptor
+   * @returns {Promise<StructuralActionResult>}
+   */
+  async function executeStructuralMutation({
+    name,
+    path,
+    payload,
+    waitForSecondary = async () => {}
+  }) {
+    if (store.getState().request.mutation.status === "running") {
+      return skippedMutation("An editor mutation is already running.");
+    }
+
+    const confirmed = store.getState().remote;
+    const descriptor = {
+      name,
+      path,
+      payload: snapshotPayload(payload),
+      waitForSecondary
+    };
+    store.update((state) => ({
+      ...state,
+      request: {
+        ...state.request,
+        mutation: { status: "running", operation: name, error: null },
+        recovery: null
+      }
+    }));
+
+    /** @type {StructuralTransitionEnvelope} */
+    let envelope;
+    try {
+      envelope = structuralEnvelope(await client.postJSON(path, descriptor.payload));
+      store.update((state) => commitStructuralTransition(state, envelope));
+      await waitForPaint();
+      await waitForSecondary(envelope.state.model_revision);
+    } catch (value) {
+      return recoverMutation(value, descriptor, confirmed);
+    }
+    store.update((state) => ({
+      ...state,
+      request: {
+        ...state.request,
+        mutation: { status: "idle", operation: null, error: null },
+        recovery: null
+      }
+    }));
+    return { ok: true, envelope };
   }
 
   /**
@@ -257,12 +390,15 @@ export function createEditorActions({ store, client, scheduleEvidence = () => {}
     }
   }
 
-  /** @returns {Promise<ActionResult>} */
+  /** @returns {Promise<ActionResult|StructuralActionResult>} */
   function retryMutation() {
     const retry = store.getState().request.recovery?.retry;
-    return retry
-      ? executeStateMutation(retry)
-      : Promise.resolve(skippedMutation("No failed editor mutation is available to retry."));
+    if (!retry) {
+      return Promise.resolve(skippedMutation("No failed editor mutation is available to retry."));
+    }
+    return "waitForSecondary" in retry
+      ? executeStructuralMutation(retry)
+      : executeStateMutation(retry);
   }
 
   /** @param {EvidencePanel} panel @returns {Promise<boolean>} */
@@ -293,6 +429,7 @@ export function createEditorActions({ store, client, scheduleEvidence = () => {}
   return {
     initialize,
     executeStateMutation,
+    executeStructuralMutation,
     refreshEvidence,
     retryMutation,
     retryEvidence,

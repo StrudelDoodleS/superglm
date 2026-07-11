@@ -17,13 +17,14 @@ import {
   setPreviewTerm as setPreviewTermState
 } from "./state/store.js";
 import {
+  collapseTransition,
   refreshSummary,
+  renderSummary,
   runDistributionProfile,
   showDistributionProfileDialog,
-  runCollapseRefit,
   runOffsetRefit,
-  runUncollapseRefit,
-  runUngroupRefit
+  uncollapseTransition,
+  ungroupTransition
 } from "./summary.js";
 import { bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar } from "./views/app_bar.js";
@@ -530,24 +531,24 @@ async function refreshActiveReport() {
   await actions.refreshEvidence("report", "/report", { report: activeView });
 }
 
-async function runStructuralRefit(label, action) {
+async function runStructuralRefit(descriptor) {
   const operationStart = performance.now();
-  setAppBusy(true, label, "Starting...");
-  try {
-    const requestStart = performance.now();
-    const payload = await action();
-    const requestEnd = performance.now();
-    if (!payload) return null;
-    await actions.initialize();
-    await refreshMetricsView();
-    await refreshActiveReport();
-    const completed = performance.now();
-    const timing = debugTiming(payload, operationStart, requestStart, requestEnd, completed);
-    showTimingStatus(payload, timing);
-    return payload;
-  } finally {
-    setAppBusy(false);
-  }
+  const requestStart = performance.now();
+  let requestEnd = requestStart;
+  const result = await actions.executeStructuralMutation({
+    ...descriptor,
+    waitForSecondary: async () => {
+      requestEnd = performance.now();
+      await refreshMetricsView();
+      await refreshActiveReport();
+    }
+  });
+  if (!result.ok) return null;
+  const completed = performance.now();
+  const envelope = result.envelope;
+  const timing = debugTiming(envelope, operationStart, requestStart, requestEnd, completed);
+  showTimingStatus(envelope.summary, timing);
+  return envelope;
 }
 
 function setAppBusy(active, title = "Working...", detail = "") {
@@ -729,19 +730,19 @@ function render() {
   );
 }
 
-function sameStateOutsidePreview(next, previous) {
-  const nextView = next.view;
-  const previousView = previous.view;
-  return next.remote === previous.remote &&
-    next.request.mutation === previous.request.mutation &&
-    next.request.recovery === previous.request.recovery &&
-    nextView.activeTerm === previousView.activeTerm &&
-    nextView.activeView === previousView.activeView &&
-    nextView.mode === previousView.mode &&
-    nextView.showCi === previousView.showCi &&
-    nextView.showContrib === previousView.showContrib &&
-    nextView.zoomByTerm === previousView.zoomByTerm &&
-    nextView.groupModeByTerm === previousView.groupModeByTerm;
+function sameViewOutsidePreview(next, previous) {
+  return next.activeTerm === previous.activeTerm &&
+    next.activeView === previous.activeView &&
+    next.mode === previous.mode &&
+    next.showCi === previous.showCi &&
+    next.showContrib === previous.showContrib &&
+    next.zoomByTerm === previous.zoomByTerm &&
+    next.groupModeByTerm === previous.groupModeByTerm;
+}
+
+function renderMutationBusy(mutation) {
+  const active = mutation.status === "running";
+  setAppBusy(active, mutation.operation || "Working...", "Starting...");
 }
 
 function renderInteractionPreview(preview) {
@@ -1128,35 +1129,36 @@ if (collapseLevels) {
   collapseLevels.addEventListener("click", async () => {
     stopContributionBuild();
     summarySource.value = "selected";
-    await runStructuralRefit(
-      "Refitting collapsed levels",
-      () => runCollapseRefit(summaryNodes(), selectedTerm())
-    );
+    await runStructuralRefit(collapseTransition(selectedTerm()));
   });
 }
 if (ungroupLevels) {
   ungroupLevels.addEventListener("click", async () => {
     stopContributionBuild();
     summarySource.value = "selected";
-    await runStructuralRefit(
-      "Refitting ungrouped levels",
-      () => runUngroupRefit(summaryNodes(), selectedTerm())
-    );
+    await runStructuralRefit(ungroupTransition(selectedTerm()));
   });
 }
 if (uncollapseLevels) {
   uncollapseLevels.addEventListener("click", async () => {
     stopContributionBuild();
-    await runStructuralRefit(
-      "Restoring previous collapsed-level model",
-      () => runUncollapseRefit(summaryNodes())
-    );
+    await runStructuralRefit(uncollapseTransition());
   });
 }
 
-store.subscribe((state) => state, () => render(), sameStateOutsidePreview);
+store.subscribe((state) => state.remote.snapshot, () => render());
+store.subscribe(
+  (state) => state.remote.summary,
+  (summary) => {
+    if (!summary) return;
+    summarySource.value = "selected";
+    renderSummary(summary, summaryNodes());
+  }
+);
+store.subscribe((state) => state.view, () => render(), sameViewOutsidePreview);
 store.subscribe((state) => state.view.preview, renderInteractionPreview);
 store.subscribe((state) => state.request.recovery, renderRecovery);
+store.subscribe((state) => state.request.mutation, renderMutationBusy);
 store.subscribe((state) => state.request.evidence.metrics, renderMetricsEvidence);
 store.subscribe(
   (state) => state.request.evidence.report,

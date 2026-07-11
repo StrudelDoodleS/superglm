@@ -131,76 +131,31 @@ function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-export async function runCollapseRefit(nodes, termName) {
-  const { summarySource, summaryStatus, summaryFrame, collapseLevels } = nodes;
-  summaryStatus.textContent = "Refitting collapsed levels...";
-  summaryFrame.setAttribute("aria-busy", "true");
-  if (collapseLevels) collapseLevels.disabled = true;
-  try {
-    const payload = await requestJSON("/collapse_levels", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ term: termName, method: "auto" })
-    });
-    summarySource.value = "selected";
-    renderSummary(payload, nodes);
-    return payload;
-  } catch (error) {
-    summaryStatus.textContent = error.message;
-    return null;
-  } finally {
-    summaryFrame.setAttribute("aria-busy", "false");
-    if (collapseLevels) collapseLevels.disabled = false;
-  }
+export function collapseTransition(term) {
+  return {
+    name: "Refitting collapsed levels",
+    path: "/collapse_levels",
+    payload: { term, method: "auto" }
+  };
 }
 
-export async function runUngroupRefit(nodes, termName) {
-  const { summarySource, summaryStatus, summaryFrame, ungroupLevels } = nodes;
-  summaryStatus.textContent = "Refitting ungrouped levels...";
-  summaryFrame.setAttribute("aria-busy", "true");
-  if (ungroupLevels) ungroupLevels.disabled = true;
-  try {
-    const payload = await requestJSON("/ungroup_levels", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ term: termName, method: "auto" })
-    });
-    summarySource.value = "selected";
-    renderSummary(payload, nodes);
-    return payload;
-  } catch (error) {
-    summaryStatus.textContent = error.message;
-    return null;
-  } finally {
-    summaryFrame.setAttribute("aria-busy", "false");
-    if (ungroupLevels) ungroupLevels.disabled = false;
-  }
+export function ungroupTransition(term) {
+  return {
+    name: "Refitting ungrouped levels",
+    path: "/ungroup_levels",
+    payload: { term, method: "auto" }
+  };
 }
 
-export async function runUncollapseRefit(nodes) {
-  const { summarySource, summaryStatus, summaryFrame, uncollapseLevels } = nodes;
-  summaryStatus.textContent = "Restoring previous collapsed-level model...";
-  summaryFrame.setAttribute("aria-busy", "true");
-  if (uncollapseLevels) uncollapseLevels.disabled = true;
-  try {
-    const payload = await requestJSON("/uncollapse_levels", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({})
-    });
-    summarySource.value = "selected";
-    renderSummary(payload, nodes);
-    return payload;
-  } catch (error) {
-    summaryStatus.textContent = error.message;
-    return null;
-  } finally {
-    summaryFrame.setAttribute("aria-busy", "false");
-    if (uncollapseLevels) uncollapseLevels.disabled = false;
-  }
+export function uncollapseTransition() {
+  return {
+    name: "Restoring previous collapsed-level model",
+    path: "/uncollapse_levels",
+    payload: {}
+  };
 }
 
-function renderSummary(payload, nodes) {
+export function renderSummary(payload, nodes) {
   const { summaryStatus, summaryNote, summaryFrame } = nodes;
   updateDistributionProfileActions(payload, nodes);
   if (!payload.available) {
