@@ -75,6 +75,10 @@ export class PopoverDelay {
 export function bindPopovers({ root, popover }) {
   /** @type {HTMLElement | null} */
   let target = null;
+  /** @type {HTMLElement | null} */
+  let hoveredTarget = null;
+  /** @type {HTMLElement | null} */
+  let focusedTarget = null;
 
   /** @param {string} selector @returns {HTMLElement} */
   function requirePopoverPart(selector) {
@@ -98,13 +102,14 @@ export function bindPopovers({ root, popover }) {
   function candidate(node) {
     if (!(node instanceof Element)) return null;
     const closest = node.closest(
-      "[data-tool], [data-help-operation], [data-popover-title]",
+      "[data-tool], [data-help-operation], [data-help-control], [data-popover-title]",
     );
     return closest instanceof HTMLElement ? closest : null;
   }
 
-  /** @param {HTMLElement | null} next @param {boolean} immediate */
-  function setTarget(next, immediate) {
+  /** @param {boolean} immediate */
+  function syncTarget(immediate) {
+    const next = focusedTarget || hoveredTarget;
     if (next !== target) {
       delay.pointerLeave();
       if (target) target.removeAttribute("aria-describedby");
@@ -113,7 +118,9 @@ export function bindPopovers({ root, popover }) {
 
     if (!target || !helpForElement(target)) {
       delay.pointerLeave();
-    } else if (immediate) {
+    } else if (delay.visible) {
+      return;
+    } else if (immediate || focusedTarget === target) {
       delay.focus();
     } else {
       delay.pointerEnter();
@@ -156,37 +163,49 @@ export function bindPopovers({ root, popover }) {
   /** @param {Event} event */
   function onPointerOver(event) {
     const next = candidate(event.target);
-    if (next && next !== target) setTarget(next, false);
+    if (!next || next === hoveredTarget) return;
+    hoveredTarget = next;
+    syncTarget(false);
   }
 
   /** @param {Event} event */
   function onPointerOut(event) {
-    if (!target) return;
+    if (!hoveredTarget) return;
     const related = event instanceof PointerEvent ? event.relatedTarget : null;
-    if (related instanceof Node && target.contains(related)) return;
-    delay.pointerLeave();
-    target = null;
+    if (related instanceof Node && hoveredTarget.contains(related)) return;
+    hoveredTarget = null;
+    syncTarget(false);
   }
 
   /** @param {Event} event */
   function onFocusIn(event) {
     const next = candidate(event.target);
-    if (next) setTarget(next, true);
+    if (!next) return;
+    focusedTarget = next;
+    syncTarget(true);
   }
 
   /** @param {Event} event */
   function onFocusOut(event) {
-    if (!target) return;
+    if (!focusedTarget) return;
     const related = event instanceof FocusEvent ? event.relatedTarget : null;
-    if (related instanceof Node && target.contains(related)) return;
+    if (related instanceof Node && focusedTarget.contains(related)) return;
+    focusedTarget = null;
+    syncTarget(false);
+  }
+
+  function dismiss() {
     delay.pointerLeave();
+    if (target) target.removeAttribute("aria-describedby");
     target = null;
+    hoveredTarget = null;
+    focusedTarget = null;
   }
 
   /** @param {Event} event */
   function onKeyDown(event) {
     if (!(event instanceof KeyboardEvent) || event.key !== "Escape") return;
-    delay.escape();
+    dismiss();
   }
 
   root.addEventListener("pointerover", onPointerOver);
@@ -196,10 +215,10 @@ export function bindPopovers({ root, popover }) {
   root.addEventListener("keydown", onKeyDown);
 
   return Object.freeze({
-    close: () => delay.escape(),
+    close: dismiss,
     isOpen: () => !popover.hidden,
     destroy: () => {
-      delay.escape();
+      dismiss();
       root.removeEventListener("pointerover", onPointerOver);
       root.removeEventListener("pointerout", onPointerOut);
       root.removeEventListener("focusin", onFocusIn);

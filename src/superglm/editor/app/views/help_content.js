@@ -97,6 +97,18 @@ export const OPERATION_HELP = Object.freeze({
   }),
 });
 
+/** @type {Readonly<Record<string, Readonly<HelpEntry>>>} */
+export const CONTROL_HELP = Object.freeze({
+  level: Object.freeze({
+    title: "Level selected values",
+    body: "Choose a reference value or average for the selected relativities.",
+  }),
+  snap: Object.freeze({
+    title: "Snap selected values",
+    body: "Set selected relativities to their highest or lowest selected value.",
+  }),
+});
+
 /**
  * @typedef {object} HelpSection
  * @property {string} title
@@ -151,6 +163,9 @@ export function helpForElement(element) {
 
   const operation = element.dataset.helpOperation || element.dataset.op;
   if (operation && OPERATION_HELP[operation]) return OPERATION_HELP[operation];
+
+  const control = element.dataset.helpControl;
+  if (control && CONTROL_HELP[control]) return CONTROL_HELP[control];
 
   const title = element.dataset.popoverTitle;
   if (!title) return null;
