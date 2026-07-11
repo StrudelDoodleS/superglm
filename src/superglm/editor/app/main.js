@@ -29,6 +29,7 @@ import { bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar } from "./views/app_bar.js";
 import { renderContextBar } from "./views/context_bar.js";
 import { bindPopovers } from "./views/popover.js";
+import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
 const appBar = document.getElementById("appBar");
 const undoAction = document.getElementById("undoAction");
@@ -51,7 +52,8 @@ const selectionMenu = document.getElementById("selectionMenu");
 const termSelect = document.getElementById("term");
 const termKind = document.getElementById("termKind");
 const termEdf = document.getElementById("termEdf");
-const modeSelect = document.getElementById("mode");
+const inspectorToggle = document.getElementById("inspectorToggle");
+const toolRail = document.getElementById("toolRail");
 const groupDisplayWrap = document.getElementById("groupDisplayWrap");
 const groupDisplayMode = document.getElementById("groupDisplayMode");
 const handleCountWrap = document.getElementById("handleCountWrap");
@@ -155,10 +157,7 @@ bindAppBar({
 const chartContext = {
   svg,
   selectionMenu,
-  modeSelect,
-  get zoomState() {
-    return store.getState().view.zoomByTerm;
-  },
+  zoomState: () => store.getState().view.zoomByTerm,
   selectedTerm,
   visualMode,
   showCi: () => store.getState().view.showCi,
@@ -166,6 +165,22 @@ const chartContext = {
   buildProgress: () => buildProgress,
   groupDisplayMode: () => activeGroupDisplayMode()
 };
+
+let openHelp = () => inspectorToggle.click();
+
+bindToolRail({
+  root: toolRail,
+  onMode: (mode) => {
+    const view = store.getState().view;
+    const showContrib = mode === "zoom"
+      ? view.showContrib
+      : mode === "handles" && canShowContributions(currentTerm());
+    if (view.mode === mode && view.showContrib === showContrib) return;
+    stopContributionBuild();
+    actions.patchView({ mode, showContrib });
+  },
+  onHelp: () => openHelp()
+});
 
 async function loadState() {
   await actions.initialize();
@@ -565,7 +580,6 @@ function render() {
   renderMetricsEvidence(editorState.request.evidence.metrics);
   renderReportEvidence(editorState.request.evidence.report, view.activeView);
   renderHistory(snapshot.history, historyFrame);
-  modeSelect.value = view.mode;
   ciToggle.style.background = view.showCi ? "#dbeafe" : "#f6f8fa";
   ciToggle.setAttribute("aria-pressed", String(view.showCi));
   const terms = snapshot.terms || {};
@@ -589,9 +603,15 @@ function render() {
     renderedTerm = selected;
     if (applyTermDefaults(term)) return;
   }
-  const selection = currentSelection();
+  const selection = view.preview && view.preview.term === selected
+    ? new Set(view.preview.selection)
+    : currentSelection();
   statusNode.style.color = "";
   if (updateHandleCount(term)) return;
+  renderToolRail(toolRail, {
+    mode: view.mode,
+    handlesAvailable: Boolean(term.controls)
+  });
   updateGroupDisplayControl(term);
   updateCollapseAction(term, selection);
   updateResetOrderAction(term);
@@ -618,7 +638,8 @@ function sameStateOutsidePreview(next, previous) {
   const nextView = next.view;
   const previousView = previous.view;
   return next.remote === previous.remote &&
-    next.request === previous.request &&
+    next.request.mutation === previous.request.mutation &&
+    next.request.recovery === previous.request.recovery &&
     nextView.activeTerm === previousView.activeTerm &&
     nextView.activeView === previousView.activeView &&
     nextView.mode === previousView.mode &&
@@ -805,12 +826,11 @@ function applyTermDefaults(term) {
       [selectedTerm()]: term.group_display.default_mode || "expanded"
     };
   }
-  if (canShowContributions(term)) {
-    if (view.mode !== "handles") patch.mode = "handles";
-    if (!view.showContrib) patch.showContrib = true;
-  } else {
+  if (!term.controls) {
     if (view.mode === "handles") patch.mode = "select";
     if (view.showContrib) patch.showContrib = false;
+  } else if (!canShowContributions(term) && view.showContrib) {
+    patch.showContrib = false;
   }
   if (!Object.keys(patch).length) return false;
   actions.patchView(patch);
@@ -919,7 +939,6 @@ const interactions = bindInteractions({
   setZoom,
   clearZoom,
   actions,
-  drawChart: (term, selection) => drawChart(term, selection, chartContext),
 });
 
 termSelect.addEventListener("change", async () => {
@@ -934,18 +953,6 @@ termSelect.addEventListener("change", async () => {
   if (authoritativeTerm && snapshot.terms[authoritativeTerm]) {
     actions.patchView({ activeTerm: authoritativeTerm });
   }
-});
-
-modeSelect.addEventListener("change", () => {
-  stopContributionBuild();
-  const mode = modeSelect.value;
-  const view = store.getState().view;
-  actions.patchView({
-    mode,
-    showContrib: mode === "zoom"
-      ? view.showContrib
-      : mode === "handles" && canShowContributions(currentTerm())
-  });
 });
 
 if (groupDisplayMode) {
@@ -1079,6 +1086,11 @@ if (uncollapseLevels) {
 store.subscribe((state) => state, () => render(), sameStateOutsidePreview);
 store.subscribe((state) => state.view.preview, renderInteractionPreview);
 store.subscribe((state) => state.request.recovery, renderRecovery);
+store.subscribe((state) => state.request.evidence.metrics, renderMetricsEvidence);
+store.subscribe(
+  (state) => state.request.evidence.report,
+  (evidence) => renderReportEvidence(evidence, store.getState().view.activeView)
+);
 
 loadState().then(async () => {
   await refreshMetricsView();

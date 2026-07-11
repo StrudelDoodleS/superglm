@@ -24,8 +24,8 @@ export function drawChart(term, selection, context) {
   // Full redraw renderer. The Python state payload is authoritative; this
   // module only turns the current payload into SVG plus scale metadata used by
   // interactions.js.
-  const { svg, modeSelect, zoomState } = context;
-  const visualMode = context.visualMode ? context.visualMode() : modeSelect.value;
+  const { svg } = context;
+  const visualMode = context.visualMode();
   svg.innerHTML = "";
   const width = 940, height = 520;
   const margin = { left: 76, right: 76, top: 48, bottom: 72 };
@@ -78,7 +78,7 @@ export function drawChart(term, selection, context) {
   const yPad = Math.max((yMaxRaw - yMinRaw) * 0.12, 0.05);
   const baseYMin = yMinRaw - yPad;
   const baseYMax = yMaxRaw + yPad;
-  const zoom = zoomState[context.selectedTerm()];
+  const zoom = context.zoomState()[context.selectedTerm()];
   const xMin = zoom ? zoom.xMin : baseXMin;
   const xMax = zoom ? zoom.xMax : baseXMax;
   const yMin = zoom ? zoom.yMin : baseYMin;

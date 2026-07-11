@@ -1,1 +1,8 @@
 /* panels.css: inspector, help, advanced controls, metrics, and reports. */
+
+/* Keep the plot stationary while notebook-width metric cards settle into two rows. */
+@media (max-width: 1250px) {
+  .metric-grid {
+    min-height: 152px;
+  }
+}

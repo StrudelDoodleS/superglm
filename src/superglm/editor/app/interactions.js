@@ -79,7 +79,11 @@ export function bindInteractions(context) {
         delta: 0
       };
       if (!selectionTouchesPoint) {
-        context.drawChart(preview, interaction.pointDrag.selection);
+        context.setPreviewTerm(
+          interaction.pointDrag.term,
+          preview,
+          Array.from(interaction.pointDrag.selection),
+        );
       }
       svg.setPointerCapture(event.pointerId);
       return;

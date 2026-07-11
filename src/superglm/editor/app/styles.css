@@ -128,7 +128,6 @@ select, button {
   font: inherit;
 }
 select { min-width: 150px; background: #fff; }
-#mode { min-width: 92px; }
 .handle-count,
 .build-duration,
 .group-display-toggle {

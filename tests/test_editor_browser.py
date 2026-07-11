@@ -11,6 +11,12 @@ from superglm import Categorical, Spline, SuperGLM
 from superglm.editor import EditorSession
 
 
+def select_chart_tool(page, name: str) -> None:
+    page.get_by_role("radiogroup", name="Chart tools").get_by_role(
+        "radio", name=name, exact=True
+    ).click()
+
+
 @pytest.fixture
 def browser_editor_widget():
     rng = np.random.default_rng(20260711)
@@ -96,7 +102,7 @@ def test_editor_browser_suppresses_duplicate_action_while_pending(
             page.goto(browser_editor_widget.app_url)
             edited_path = page.locator("#chart path.edited").first
             edited_path.wait_for()
-            page.locator("#mode").select_option("select")
+            select_chart_tool(page, "Select")
             page.locator('button[data-op="select_all"]').click()
             page.locator("#selectionMenu").wait_for(state="visible")
             original_path = edited_path.get_attribute("d")
@@ -171,10 +177,10 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
             page.goto(browser_editor_widget.app_url)
             page.locator("#chart path.edited").first.wait_for()
 
-            page.locator("#mode").select_option("select")
+            select_chart_tool(page, "Select")
             page.locator("#chart circle.point[data-index]").last.click()
             page.locator("#chart circle.point.selected[data-index]").first.wait_for()
-            page.locator("#mode").select_option("move")
+            select_chart_tool(page, "Move")
 
             edited_path = page.locator("#chart path.edited").first
             confirmed_path = edited_path.get_attribute("d")
@@ -319,9 +325,9 @@ def test_editor_browser_cancelled_drag_restores_confirmed_preview_without_post(
             page = browser.new_page(viewport={"width": 1180, "height": 720})
             page.goto(browser_editor_widget.app_url)
             page.locator("#chart path.edited").first.wait_for()
-            page.locator("#mode").select_option("select")
+            select_chart_tool(page, "Select")
             page.locator("#chart circle.point[data-index]").last.click()
-            page.locator("#mode").select_option("move")
+            select_chart_tool(page, "Move")
 
             edited_path = page.locator("#chart path.edited").first
             confirmed_path = edited_path.get_attribute("d")
@@ -363,7 +369,7 @@ def test_editor_browser_cancel_before_first_move_restores_confirmed_selection(
             page = browser.new_page(viewport={"width": 1180, "height": 720})
             page.goto(browser_editor_widget.app_url)
             page.locator("#chart path.edited").first.wait_for()
-            page.locator("#mode").select_option("move")
+            select_chart_tool(page, "Move")
             point = page.locator("#chart circle.point[data-index]").last
             point.wait_for()
             assert page.locator("#chart circle.point.selected[data-index]").count() == 0
@@ -500,15 +506,24 @@ def test_editor_browser_zoom_preserves_handle_visuals(browser_editor_widget):
         try:
             page = browser.new_page(viewport={"width": 1180, "height": 720})
             page.goto(browser_editor_widget.app_url)
+            select_chart_tool(page, "Handles")
             handles = page.locator("#chart .control-handle")
             handles.first.wait_for()
             initial_handle_count = handles.count()
             initial_contribution_count = page.locator("#chart .basis-contribution").count()
-            assert page.locator("#mode").input_value() == "handles"
+            handles_tool = page.get_by_role("radiogroup", name="Chart tools").get_by_role(
+                "radio", name="Handles", exact=True
+            )
+            assert handles_tool.get_attribute("aria-checked") == "true"
 
-            page.locator("#mode").select_option("zoom")
+            select_chart_tool(page, "Zoom")
 
-            assert page.locator("#mode").input_value() == "zoom"
+            assert (
+                page.get_by_role("radiogroup", name="Chart tools")
+                .get_by_role("radio", name="Zoom", exact=True)
+                .get_attribute("aria-checked")
+                == "true"
+            )
             assert handles.count() == initial_handle_count
             if initial_contribution_count:
                 assert (

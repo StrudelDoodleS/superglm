@@ -4209,6 +4209,7 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
             "views/popover.js",
             "views/app_bar.js",
             "views/context_bar.js",
+            "views/tool_rail.js",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -4228,7 +4229,8 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "Run CV" not in shell
         assert 'id="modelSource"' not in shell
         assert 'value="original"' not in shell
-        assert "Mode" in shell
+        assert 'role="radiogroup" aria-label="Chart tools"' in shell
+        assert 'id="mode"' not in shell
         assert "Move" in shell
         assert "Handles" in shell
         assert "Select all" in shell
@@ -4333,7 +4335,8 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "function visualMode()" in js
         assert 'view.mode === "zoom" && view.showContrib ? "handles" : view.mode' in js
         assert "visualMode" in js
-        assert "modeSelect.value = view.mode" in js
+        assert "renderToolRail" in js
+        assert "modeSelect" not in js
         assert "requestAnimationFrame" in js
         assert "buildDurationMs" in js
         assert "advanceContributionBuild" in js
@@ -4375,7 +4378,8 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "Fold Loss" in js
         assert "Run CV" not in js
         assert "modelSource" not in js
-        assert '<option value="zoom">Zoom</option>' in shell
+        assert 'aria-label="Zoom"' in shell
+        assert 'data-tool="zoom"' in shell
         assert "zoomBox" in js
         assert "beginBoxZoom" in js
         assert "applyBoxZoom" in js
