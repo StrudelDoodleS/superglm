@@ -136,12 +136,20 @@ jobs:
                   )
 
               required_suffixes = {
+                  "superglm/editor/app/index.html",
+                  "superglm/editor/app/main.js",
                   "superglm/editor/app/api/client.js",
                   "superglm/editor/app/api/contracts.js",
                   "superglm/editor/app/chart/geometry.js",
                   "superglm/editor/app/state/store.js",
                   "superglm/editor/app/state/selectors.js",
                   "superglm/editor/app/state/actions.js",
+                  "superglm/editor/app/styles/tokens.css",
+                  "superglm/editor/app/styles/shell.css",
+                  "superglm/editor/app/styles/chart.css",
+                  "superglm/editor/app/styles/panels.css",
+                  "superglm/editor/app/views/help_content.js",
+                  "superglm/editor/app/views/popover.js",
               }
               required = {f"{source_prefix}{suffix}" for suffix in required_suffixes}
               missing = required.difference(names)

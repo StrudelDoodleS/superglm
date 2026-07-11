@@ -115,6 +115,35 @@ def test_ci_workflows_define_read_only_top_level_permissions():
         assert "security-events: write" not in header
 
 
+def test_ci_browser_suites_run_in_separate_pytest_processes():
+    legacy = "uv run pytest tests/test_editor_browser.py -m browser --run-browser -q"
+    workspace = "uv run pytest tests/editor/ -m browser --run-browser -q"
+
+    for path in (".github/workflows/ci.yml", ".github/workflows/dev-ci.yml"):
+        workflow = _read(path)
+        assert legacy in workflow, path
+        assert workspace in workflow, path
+        assert "pytest tests/test_editor_browser.py tests/editor/" not in workflow, path
+        assert "pytest tests/editor/ tests/test_editor_browser.py" not in workflow, path
+
+
+def test_security_archive_check_requires_modular_editor_assets():
+    workflow = _read(".github/workflows/security.yml")
+    required_assets = (
+        "superglm/editor/app/index.html",
+        "superglm/editor/app/main.js",
+        "superglm/editor/app/styles/tokens.css",
+        "superglm/editor/app/styles/shell.css",
+        "superglm/editor/app/styles/chart.css",
+        "superglm/editor/app/styles/panels.css",
+        "superglm/editor/app/views/help_content.js",
+        "superglm/editor/app/views/popover.js",
+    )
+
+    for asset in required_assets:
+        assert f'"{asset}"' in workflow
+
+
 def test_docs_workflow_scopes_write_permission_to_deploy_job():
     workflow = _read(".github/workflows/docs.yml")
     header = _workflow_header(workflow)

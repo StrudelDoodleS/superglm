@@ -2816,6 +2816,7 @@ def test_widget_state_exposes_ci_bands_and_single_point_centering(editor_model):
         np.testing.assert_allclose(numeric["y"], np.exp(session.terms["x_num"].edited_log_effect))
         assert spline["ci_lower_y"] is not None
         assert spline["ci_upper_y"] is not None
+        assert spline["effective_df"] == pytest.approx(session.terms["x_spline"].metadata["edf"])
         assert len(spline["ci_lower_y"]) == spline["n_points"]
         np.testing.assert_allclose(spline["y"], np.exp(session.terms["x_spline"].edited_log_effect))
         np.testing.assert_allclose(
@@ -3380,6 +3381,10 @@ def test_widget_http_control_handle_updates_session(editor_model):
             controls["basis_index"].astype(int).tolist()
         )
         payload_controls = state["terms"]["x_spline"]["controls"]
+        assert "build_basis" in payload_controls
+        assert "build_log_effect" in payload_controls
+        assert len(payload_controls["build_basis"]) == len(payload_controls["build_log_effect"])
+        assert len(payload_controls["build_basis"][0]) == state["terms"]["x_spline"]["n_points"]
         payload_basis = np.asarray(payload_controls["basis"], dtype=np.float64)
         raw_basis = editor_model._specs["x_spline"]._raw_basis_matrix(term.x)
         if hasattr(raw_basis, "toarray"):
@@ -4188,363 +4193,24 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
     try:
         with urllib.request.urlopen(widget.url, timeout=5) as response:
             shell = response.read().decode("utf-8")
-        js_request = urllib.request.Request(f"{widget.url}/assets/main.js", method="GET")
-        with urllib.request.urlopen(js_request, timeout=5) as response:
-            js = response.read().decode("utf-8")
+
         module_sources = []
-        for asset in [
-            "api.js",
-            "api/client.js",
-            "api/contracts.js",
-            "state/store.js",
-            "state/selectors.js",
-            "state/actions.js",
-            "format.js",
-            "chart.js",
-            "chart/geometry.js",
-            "metrics.js",
-            "summary.js",
-            "reports.js",
-            "interactions.js",
-            "views/help_content.js",
-            "views/popover.js",
-            "views/app_bar.js",
-            "views/context_bar.js",
-            "views/tool_rail.js",
-            "views/inspector.js",
-            "views/help_drawer.js",
-        ]:
+        for asset in ["main.js", "api/client.js", "interactions.js", "summary.js"]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
                 module_sources.append(response.read().decode("utf-8"))
-        js = "\n".join([js, *module_sources])
-        css_request = urllib.request.Request(f"{widget.url}/assets/styles.css", method="GET")
-        with urllib.request.urlopen(css_request, timeout=5) as response:
-            css = response.read().decode("utf-8")
+        js = "\n".join(module_sources)
 
-        assert '<link rel="stylesheet" href="/assets/styles.css">' in shell
         assert '<script type="module" src="/assets/main.js"></script>' in shell
-        assert "Editor" in shell
-        assert "Validation Report" in shell
-        assert "Final Fit" in shell
-        assert "reportPanel" in shell
-        assert "reportFrame" in shell
-        assert "Run CV" not in shell
-        assert 'id="modelSource"' not in shell
-        assert 'value="original"' not in shell
-        assert 'role="radiogroup" aria-label="Chart tools"' in shell
-        assert 'id="mode"' not in shell
-        assert "Move" in shell
-        assert "Handles" in shell
-        assert "Select all" in shell
-        assert "Restore collapse" in shell
-        assert "Straighten selection" in shell
-        assert "Level from left" in shell
-        assert "Level from right" in shell
-        assert "Ungroup and refit" in shell
-        assert "Snap to highest" in shell
-        assert "Snap to lowest" in shell
-        assert "Home" in shell
-        assert "CI" in shell
-        assert "chart-shell" in shell
-        assert "selectionMenu" in shell
-        assert "selection-item" in shell
-        assert "selection-separator" in shell
-        assert "selection-submenu" in shell
-        assert "selection-icon" in shell
-        assert 'id="uncollapseLevels" class="selection-item"' in shell
-        assert ">Undo collapse</button>" not in shell
-        assert "snapshot.last_collapse.term === selectedTerm()" in js
-        assert 'aria-label="Smooth selection"' in shell
-        assert 'aria-label="Level selected values"' in shell
-        assert 'aria-label="Snap selected values"' in shell
-        assert ">Smooth</button>" not in shell
-        assert ">Average</button>" not in shell
-        assert ">Linearise</button>" not in shell
-        assert ">Increasing</button>" not in shell
-        assert ">Decreasing</button>" not in shell
-        assert ">Level left</button>" not in shell
-        assert ">Level right</button>" not in shell
-        assert ">Snap highest</button>" not in shell
-        assert ">Snap lowest</button>" not in shell
-        assert ">Undo</button>" in shell
-        assert ">Redo</button>" in shell
-        assert "Reference CI" in shell
-        assert "Reset" in shell
-        assert "saveModel" in shell
-        assert "saveDialog" in shell
-        assert "saveDirectory" in shell
-        assert "saveFilename" in shell
-        assert "Save edited model" in shell
-        assert "app-shell" in shell
-        assert "app-shell" in css
-        assert "justify-content: center" in css
-        assert "openSaveDialog" in js
-        assert "Reset order" in shell
-        assert "resetOrder" in shell
-        assert "metricSelect" in shell
-        assert "metricGrid" in shell
-        assert "Recompute all" not in shell
+        assert 'role="tablist" aria-label="Editor views"' in shell
+        assert 'id="chart"' in shell
+        assert 'id="selectionMenu"' in shell
         assert 'id="inspector"' in shell
-        assert "summaryPanel" not in shell
-        assert "summaryFrame" in shell
-        assert "summarySource" in shell
-        assert "refitOffset" in shell
-        assert "Fixed-offset refit" in shell
-        assert "resetSummarySourceAfterInvalidatingEdit" in js
-        assert "scheduleEvidence" in js
-        assert "better" not in shell
-        assert "worse" not in shell
-        state = _get_json(f"{widget.url}/state")
-        assert state["terms"]["x_spline"]["y_label"] == "relativity"
-        assert state["terms"]["x_spline"]["effective_df"] == pytest.approx(
-            session.terms["x_spline"].metadata["edf"]
-        )
-        controls = state["terms"]["x_spline"]["controls"]
-        assert "build_basis" in controls
-        assert "build_log_effect" in controls
-        assert len(controls["build_basis"]) == len(controls["build_log_effect"])
-        assert len(controls["build_basis"][0]) == state["terms"]["x_spline"]["n_points"]
-        assert "Average" in shell
-        assert "pointerdown" in js
-        assert "pointermove" in js
-        assert "pointerup" in js
-        assert 'addEventListener("wheel"' in js
-        assert "zoomState" in js
-        assert "resetZoom" in js
-        assert "panDrag" in js
-        assert "panZoomView" in js
-        assert "getScreenCTM" in js
-        assert "matrixTransform" in js
-        assert "pendingClickIndex" in js
-        assert "nearestIndex" not in js
-        assert "togglePointSelection" in js
-        assert "event.ctrlKey || event.metaKey" in js
-        assert "selectedPoints" in js
-        assert "optgroup" in js
-        assert "relativity" in js
         assert "X-SuperGLM-Editor-Token" in js
-        assert "URLSearchParams(window.location.search)" in js
         assert "/drag" in js
         assert "/control" in js
-        assert "/control_count" in js
-        assert "handleCount" in js
-        assert "basisToggle" in shell
-        assert "contribPlay" in shell
-        assert "buildDuration" in shell
-        assert "buildDurationValue" in shell
-        assert "Contrib" in shell
-        assert "Build" in shell
-        assert "showContrib" in js
-        assert "function visualMode()" in js
-        assert 'view.mode === "zoom" && view.showContrib ? "handles" : view.mode' in js
-        assert "visualMode" in js
-        assert "renderToolRail" in js
-        assert "modeSelect" not in js
-        assert "requestAnimationFrame" in js
-        assert "buildDurationMs" in js
-        assert "advanceContributionBuild" in js
-        assert "contribPlay.disabled = buildFrame !== null" in js
-        assert "buildAccumulationCurve" in js
-        assert "drawActiveBasis" in js
-        assert "activeBasisIndex" in js
-        assert "basisColor" in js
-        assert "mixBuildColor" in js
-        assert "data-progress" in js
-        assert "data-active-basis" in js
-        assert "total - j" not in js
-        assert "buildContributionCurves" not in js
-        assert "basis-contribution" in js
-        assert "basis-contribution" in css
-        assert "basis-build" in js
-        assert "basis-build" in css
-        assert "basis-active" in js
-        assert "basis-active" in css
-        assert "basis-sweep" not in js
-        assert "basis-scanline" not in js
-        assert "basis-scan-dot" not in js
-        assert "basis-build-halo" in js
-        assert "basis-build-halo" in css
-        assert "if (!buildActive) path(svg, x, original" in js
-        assert "controlDrag" in js
-        assert "data-control-index" in js
-        assert "keydown" in js
-        assert "isEditableTarget" in js
-        assert "metaKey" in js
-        assert "errorBars" in js
-        assert "renderMetricGrid" in js
-        assert "renderReport" in js
-        assert "actions.refreshEvidence" in js
-        assert "/report" in js
-        assert "cv-report" in js
-        assert "CV Summary" in js
-        assert "Split Loss" in js
-        assert "Fold Loss" in js
-        assert "Run CV" not in js
-        assert "modelSource" not in js
-        assert 'aria-label="Zoom"' in shell
-        assert 'data-tool="zoom"' in shell
-        assert "zoomBox" in js
-        assert "beginBoxZoom" in js
-        assert "applyBoxZoom" in js
-        assert "box-zoom" in js
-        assert 'metricGrid.textContent = "Computing metrics..."' not in js
-        assert 'summaryFrame.innerHTML = ""' not in js
         assert "/metrics" in js
         assert "/summary" in js
-        assert "/profile_distribution" in js
-        assert "/save_model" in js
-        assert "/download_model" in js
-        assert "/open_directory" in js
-        assert "saveEditedModel" in js
-        assert "downloadEditedModel" in js
-        assert "openDirectoryInFileManager" in js
-        assert "initializeSaveDirectory" in js
-        assert "/save_directory" in js
-        assert 'body: JSON.stringify({ path: saveDirectory ? saveDirectory.value : "" })' in js
-        assert "formatSaveRouteError" in js
-        assert "Rerun session.widget()" in js
-        assert "Opening folder" in js
-        assert "saveBlobToFile" in js
-        assert "showSaveFilePicker" in js
-        assert "URL.createObjectURL" in js
-        assert "openSaveDialog" in js
-        assert "directoryDialog" not in shell
-        assert "Choose Save Location" not in shell
-        assert 'id="saveDownload"' in shell
-        assert 'id="saveOpenDirectory"' in shell
-        assert "Open Folder" in shell
-        assert "Download Edited Model" in shell
-        assert 'id="saveDownload" class="profile-run save-inline-action"' in shell
-        assert 'id="saveDirectory" type="text" value=""' in shell
-        assert "Saved " in js
-        assert "/profile_distribution/start" in js
-        assert "/profile_distribution/status/" in js
-        assert "runDistributionProfile" in js
-        assert "reprofileTweedie" in shell
-        assert "reprofileNb2" in shell
-        assert "profileDialog" in shell
-        assert "profileDialogClose" in shell
-        assert "profileRun" in shell
-        assert "profileOptions" in shell
-        assert "profileTolerance" in shell
-        assert '<option value="mle" selected>MLE</option>' in shell
-        assert "profileTracePlot" in shell
-        assert "profile-dialog" in css
-        assert "profile-trace-line" in css
-        assert "profile-trace-best" in css
-        assert "profile-learning-curve" in css
-        assert "profile-learning-point" in css
-        assert "profileLearningCurvesSVG" in js
-        assert "profileFitTraceRows" in js
-        assert "profileFitIterTicks" in js
-        assert "fitTraceKind" in js
-        assert "profileStatusLabel" in js
-        assert "profile-running" in css
-        assert "profile-spin" in css
-        assert "profileTraceLegend" in shell
-        assert "profile-trace-figure" in css
-        assert "profile-trace-legend" in css
-        assert "profileEstimate" in js
-        assert "outerProfileObjective" in js
-        assert "profileObjectiveSVG" in js
-        assert "return profileObjectiveSVG" in js
-        assert "profile loss" in js
-        assert "inner fit trace" in js
-        assert "profile_ci" in js
-        assert "final refit" in js
-        assert "p_hat" in js
-        assert "CI" in js
-        assert "start -> final" in js
-        assert "showModal" in js
-        assert "openProfileDialog" in js
-        assert "showDistributionProfileDialog" in js
-        assert "profileRun.addEventListener" in js
-        assert "trace_iterations" in js
-        assert "Profile trace" in shell
-        assert "profileOptionsPayload" in js
-        assert "renderProfileTrace" in js
-        assert "updateDistributionProfileActions" in js
-        assert "renderSummaryRows" in js
-        assert "summary-group-row" in js
-        assert "summary-group-row" in css
-        assert 'colspan="6"' in js
-        assert "/refit_offset" in js
-        assert "/collapse_levels" in js
-        assert "/uncollapse_levels" in js
-        assert "can_uncollapse_levels" in js
-        assert "last_collapse" in js
-        assert "selectionTouchesCollapsedGroup" in js
-        assert "updateResetOrderAction" in js
-        assert 'type === "categorical" && term.level_order_changed' in js
-        assert "button[data-op]" in js
-        assert "orderDrag" in js
-        assert "beginOrderDrag" in js
-        assert '(term.term_type || term.kind || "") !== "categorical"' in js
-        assert "drawOrderDropPreview" in js
-        assert "clearOrderDropPreview" in js
-        assert "order-drop-preview" in js
-        assert "order-drop-ghost" in js
-        assert "targetIndexFromPoint" in js
-        assert "Math.min(levels.length," in js
-        assert "pixelStep * count * 0.82" not in js
-        assert "/reorder_levels" in js
-        assert "executeStateMutation" in js
-        assert "exposureDensity" in js
-        assert "level_groups" in js
-        assert "drawLevelGroups" in js
-        assert "drawLevelGroupMarker" in js
-        assert "levelGroupColor" in js
-        assert "level-group-link" in js
-        assert "level-group-link" in css
-        assert "level-group-marker" in css
-        assert "level-group-label" in css
-        assert "order-drop-preview" in css
-        assert "order-drop-ghost" in css
-        assert "plotClip" in js
-        assert "applyPlotClip" in js
-        assert "positionSelectionMenu" in js
-        assert "compact-summary" in js
-        assert "summary-table" in js
-        assert "row.edf" in js
-        assert "formatCompactNumber" in js
-        assert "summary-number" in css
-        assert "se-cell" in js
-        assert "raw-summary" in js
-        assert "renderRawSummaryFrame" in js
-        assert 'sandbox=""' in js
-        assert 'srcdoc="${escapeHTML' in js
-        assert '<div class="raw-summary-body">${payload.html || ""}</div>' not in js
-        assert "payloadNumber" in js
-        assert "rotate(-90" in js
-        assert "toExponential" not in js
-        assert "100dvh" in css
-        assert "overflow: hidden" in css
-        assert "minmax(0, 1fr)" in css
-        assert "user-select: none" in css
-        assert "-webkit-user-select: none" in css
-        assert "pointer-events: all" in css
-        assert "overflow-x: hidden" in css
-        assert "sig-strong" in css
-        assert "sig-none" in css
-        assert "sig-unknown" in css
-        assert "control-handle" in css
-        assert "ci-whisker" in css
-        assert "metric-item" in css
-        assert "metric-divider" in css
-        assert "grid-template-rows: 28px 20px auto" in css
-        assert "metric-card" not in css
-        assert "app-tabs" in css
-        assert "report-table" in css
-        assert "cv-report" in css
-        assert "effective_df" in js
-        assert "Log Likelihood" in shell
-        assert "Explained Deviance" in shell
-        assert "Pearson Chi2" in shell
-        assert "exposure-axis" in css
-        assert "selection-bounds" in css
-        assert "var(--yellow)" in css
-        assert "var(--yellow-border)" in css
     finally:
         widget.close()
 

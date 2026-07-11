@@ -208,6 +208,75 @@ def test_application_bar_exposes_views_undo_redo_and_save(open_editor_page):
         page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
 
 
+def test_analyst_can_discover_edit_undo_redo_help_and_save(open_editor_page):
+    with open_editor_page() as (page, _session):
+        select_chart_tool(page, "Select")
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/select")
+            )
+        ):
+            page.locator("#chart .point").nth(2).click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+
+        increase = page.get_by_role("button", name="Increase selection", exact=True)
+        increase.focus()
+        tooltip = page.get_by_role("tooltip")
+        tooltip.wait_for(state="visible")
+        assert tooltip.locator("[data-popover-heading]").inner_text() == "Increase selection"
+        assert tooltip.locator("[data-popover-description]").inner_text() == (
+            "Increase selected relativities by 5%."
+        )
+
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/op")
+            )
+        ) as edit_response:
+            increase.click()
+        assert edit_response.value.request.post_data_json == {"operation": "shift_up"}
+
+        undo = page.get_by_role("button", name="Undo edit")
+        page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
+        assert undo.is_enabled()
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/op")
+            )
+        ) as undo_response:
+            undo.click()
+        assert undo_response.value.request.post_data_json == {"operation": "undo"}
+
+        redo = page.get_by_role("button", name="Redo edit")
+        page.wait_for_function("() => !document.querySelector('#redoAction').disabled")
+        assert redo.is_enabled()
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/op")
+            )
+        ) as redo_response:
+            redo.click()
+        assert redo_response.value.request.post_data_json == {"operation": "redo"}
+
+        page.get_by_role("button", name="Help", exact=True).click()
+        assert page.get_by_role("tabpanel", name="Help").is_visible()
+
+        save = page.get_by_role("button", name="Save edited model")
+        assert save.is_visible()
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/save_directory")
+            )
+        ):
+            save.click()
+        page.get_by_role("dialog", name="Save Edited Model").wait_for(state="visible")
+
+
 def test_context_bar_reports_term_kind_and_edf(open_editor_page):
     with open_editor_page(selected_term="curve") as (page, _session):
         context = page.get_by_role("region", name="Term context")

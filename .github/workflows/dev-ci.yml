@@ -51,8 +51,11 @@ jobs:
       - name: Install Chromium
         run: uv run playwright install --with-deps chromium
 
-      - name: Browser tests
-        run: uv run pytest tests/test_editor_browser.py tests/editor/ -m browser --run-browser -q
+      - name: Legacy browser tests
+        run: uv run pytest tests/test_editor_browser.py -m browser --run-browser -q
+
+      - name: Workspace browser tests
+        run: uv run pytest tests/editor/ -m browser --run-browser -q
 
       - name: Docs build check
         run: uv sync --group docs --extra plotting && uv run mkdocs build --strict
