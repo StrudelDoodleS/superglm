@@ -5,9 +5,266 @@ import threading
 import weakref
 from dataclasses import FrozenInstanceError
 
+import numpy as np
+import pandas as pd
 import pytest
 
+from superglm import Spline, SuperGLM
+from superglm.editor import EditorSession
+from superglm.editor.evaluation import default_metrics_dataset
 from superglm.editor.evidence import EvidenceCoordinator, EvidenceKey, EvidenceOutcome
+
+
+@pytest.fixture
+def evidence_widget():
+    rng = np.random.default_rng(20260805)
+    n = 180
+    X = pd.DataFrame({"x_spline": np.linspace(0.0, 10.0, n)})
+    y = 0.4 + 0.2 * np.sin(X["x_spline"].to_numpy()) + rng.normal(0.0, 0.03, n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"x_spline": Spline(n_knots=7)},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(
+        model,
+        terms=["x_spline"],
+        train_data=(X, y, None, None),
+    )
+    session.select_indices("x_spline", [10, 11, 12])
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    try:
+        yield widget
+    finally:
+        widget.close()
+
+
+def _assert_selection_completes_while_blocked(widget, evidence_thread):
+    selected = threading.Event()
+    errors: list[BaseException] = []
+
+    def select():
+        try:
+            widget._select("x_spline", [20, 21])
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            selected.set()
+
+    selection_thread = threading.Thread(target=select)
+    selection_thread.start()
+    assert selected.wait(timeout=0.1)
+    selection_thread.join(timeout=1)
+    assert errors == []
+    assert evidence_thread.is_alive()
+
+
+def test_materialization_does_not_hold_widget_lock(evidence_widget, monkeypatch):
+    import superglm.editor.apply as apply_module
+
+    widget = evidence_widget
+    dataset = default_metrics_dataset(widget.session)
+    assert dataset is not None
+    started = threading.Event()
+    release = threading.Event()
+    captured: dict[str, object] = {}
+    errors: list[BaseException] = []
+    original = apply_module.apply_edits_to_model_copy_with_data
+
+    def blocked(model, terms, **kwargs):
+        captured.update(kwargs)
+        started.set()
+        release.wait(timeout=5)
+        return original(model, terms, **kwargs)
+
+    def request_metrics():
+        try:
+            widget._metrics("deviance", "in_force")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    monkeypatch.setattr(apply_module, "apply_edits_to_model_copy_with_data", blocked)
+    evidence_thread = threading.Thread(target=request_metrics)
+    evidence_thread.start()
+    try:
+        assert started.wait(timeout=5)
+        _assert_selection_completes_while_blocked(widget, evidence_thread)
+    finally:
+        release.set()
+        evidence_thread.join(timeout=5)
+
+    assert errors == []
+    assert captured["X"] is dataset.X
+    assert captured["y"] is dataset.y
+    assert captured["sample_weight"] is dataset.sample_weight
+    assert captured["offset"] is dataset.offset
+
+
+def test_scoring_does_not_hold_widget_lock(evidence_widget, monkeypatch):
+    import superglm.editor.metrics as metrics_module
+
+    widget = evidence_widget
+    widget._summary("in_force")
+    dataset = default_metrics_dataset(widget.session)
+    assert dataset is not None
+    started = threading.Event()
+    release = threading.Event()
+    captured_datasets = []
+    errors: list[BaseException] = []
+    original = metrics_module.compute_dataset_metrics
+
+    def blocked(model, captured_dataset):
+        captured_datasets.append(captured_dataset)
+        started.set()
+        release.wait(timeout=5)
+        return original(model, captured_dataset)
+
+    def request_metrics():
+        try:
+            widget._metrics("deviance", "in_force")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    monkeypatch.setattr(metrics_module, "compute_dataset_metrics", blocked)
+    evidence_thread = threading.Thread(target=request_metrics)
+    evidence_thread.start()
+    try:
+        assert started.wait(timeout=5)
+        _assert_selection_completes_while_blocked(widget, evidence_thread)
+    finally:
+        release.set()
+        evidence_thread.join(timeout=5)
+
+    assert errors == []
+    assert captured_datasets
+    captured_dataset = captured_datasets[0]
+    assert captured_dataset is dataset
+    assert captured_dataset.X is dataset.X
+    assert captured_dataset.y is dataset.y
+    assert captured_dataset.sample_weight is dataset.sample_weight
+    assert captured_dataset.offset is dataset.offset
+
+
+def test_summary_does_not_hold_widget_lock(evidence_widget, monkeypatch):
+    widget = evidence_widget
+    model, _revision = widget._current_model_for_evidence()
+    assert model is not None
+    started = threading.Event()
+    release = threading.Event()
+    errors: list[BaseException] = []
+    original = model.summary
+
+    def blocked(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    def request_summary():
+        try:
+            widget._summary("in_force")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    monkeypatch.setattr(model, "summary", blocked)
+    evidence_thread = threading.Thread(target=request_summary)
+    evidence_thread.start()
+    try:
+        assert started.wait(timeout=5)
+        _assert_selection_completes_while_blocked(widget, evidence_thread)
+    finally:
+        release.set()
+        evidence_thread.join(timeout=5)
+
+    assert errors == []
+
+
+def test_download_serialization_does_not_hold_widget_lock(evidence_widget, monkeypatch):
+    import joblib
+
+    widget = evidence_widget
+    model, _revision = widget._current_model_for_evidence()
+    assert model is not None
+    started = threading.Event()
+    release = threading.Event()
+    errors: list[BaseException] = []
+    original = joblib.dump
+
+    def blocked(value, target):
+        started.set()
+        release.wait(timeout=5)
+        return original(value, target)
+
+    def request_download():
+        try:
+            widget._download_model("edited.joblib")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    monkeypatch.setattr(joblib, "dump", blocked)
+    evidence_thread = threading.Thread(target=request_download)
+    evidence_thread.start()
+    try:
+        assert started.wait(timeout=5)
+        _assert_selection_completes_while_blocked(widget, evidence_thread)
+    finally:
+        release.set()
+        evidence_thread.join(timeout=5)
+
+    assert errors == []
+
+
+def test_report_is_superseded_when_revision_changes_during_summary(
+    evidence_widget,
+    monkeypatch,
+):
+    widget = evidence_widget
+    model, revision = widget._current_model_for_evidence()
+    assert model is not None
+    started = threading.Event()
+    release = threading.Event()
+    payloads = []
+    errors: list[BaseException] = []
+    original = model.summary
+
+    def blocked(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    def request_report():
+        try:
+            payloads.append(
+                widget._report(
+                    "final",
+                    model_revision=revision,
+                    request_sequence=17,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    monkeypatch.setattr(model, "summary", blocked)
+    evidence_thread = threading.Thread(target=request_report)
+    evidence_thread.start()
+    try:
+        assert started.wait(timeout=5)
+        widget._operate("shift_up", "x_spline")
+        assert evidence_thread.is_alive()
+    finally:
+        release.set()
+        evidence_thread.join(timeout=5)
+
+    assert errors == []
+    assert payloads == [
+        {
+            "status": "superseded",
+            "model_revision": revision,
+            "request_sequence": 17,
+        }
+    ]
 
 
 def test_evidence_records_are_immutable():

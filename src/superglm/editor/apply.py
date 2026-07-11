@@ -103,6 +103,23 @@ def apply_edits_to_model_copy_with_data(
     return edited_model
 
 
+def materialize_edit_request(request):
+    """Construct an edited model from an immutable session snapshot."""
+    kwargs = {}
+    if request.dataset is not None:
+        kwargs = {
+            "X": request.dataset.X,
+            "y": request.dataset.y,
+            "sample_weight": request.dataset.sample_weight,
+            "offset": request.dataset.offset,
+        }
+    return apply_edits_to_model_copy_with_data(
+        request.base_model,
+        request.terms,
+        **kwargs,
+    )
+
+
 def _apply_term_edit(model, term: EditableTerm) -> None:
     spec = model._specs[term.name]
     groups = _feature_groups(model, term.name)

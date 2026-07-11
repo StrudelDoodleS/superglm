@@ -18,6 +18,7 @@ from superglm.editor.collapse import (
 from superglm.editor.controls import control_curve_after_move
 from superglm.editor.controls import control_points as _control_points
 from superglm.editor.evaluation import coerce_evaluation_data, default_metrics_dataset
+from superglm.editor.evaluation_cache import EditMaterializationRequest
 from superglm.editor.level_order import (
     level_order_for_direction,
     level_order_for_labels,
@@ -562,33 +563,47 @@ class EditorSession:
             offset=offset,
         )
 
-    def materialized_model(self):
-        """Return the one private edited model for the current edit epoch."""
+    def capture_materialization_request(self) -> EditMaterializationRequest | None:
+        """Capture only plot-scale edits and immutable evaluation references."""
         if not self.edited_terms():
-            return self.model
-        if (
-            self._materialized_edit_model is not None
-            and self._materialized_edit_epoch == self._edit_epoch
-        ):
-            return self._materialized_edit_model
-
-        dataset = default_metrics_dataset(self)
-        kwargs = {}
-        if dataset is not None:
-            kwargs = {
-                "X": dataset.X,
-                "y": dataset.y,
-                "sample_weight": dataset.sample_weight,
-                "offset": dataset.offset,
-            }
-        edited_model = apply.apply_edits_to_model_copy_with_data(
-            self.model,
-            self.terms,
-            **kwargs,
+            return None
+        return EditMaterializationRequest(
+            model_revision=self.model_revision,
+            edit_epoch=self.edit_epoch,
+            base_model=self.model,
+            terms={name: term.copy() for name, term in self.terms.items()},
+            dataset=default_metrics_dataset(self),
         )
-        self._materialized_edit_model = edited_model
-        self._materialized_edit_epoch = self._edit_epoch
-        return edited_model
+
+    def cached_materialized_model(
+        self,
+        edit_epoch: int,
+        *,
+        model_revision: int | None = None,
+        base_model=None,
+    ):
+        """Return the cached model only for matching live session identity."""
+        if int(edit_epoch) != self.edit_epoch:
+            return None
+        if model_revision is not None and int(model_revision) != self.model_revision:
+            return None
+        if base_model is not None and base_model is not self.model:
+            return None
+        if self._materialized_edit_epoch != int(edit_epoch):
+            return None
+        return self._materialized_edit_model
+
+    def publish_materialized_model(self, request: EditMaterializationRequest, model) -> bool:
+        """Publish a private model only if its entire snapshot is still current."""
+        if (
+            request.model_revision != self.model_revision
+            or request.edit_epoch != self.edit_epoch
+            or request.base_model is not self.model
+        ):
+            return False
+        self._materialized_edit_model = model
+        self._materialized_edit_epoch = request.edit_epoch
+        return True
 
     def save_model(self, path: str | Path) -> Path:
         return persistence.save_model(self, path)

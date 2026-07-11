@@ -122,16 +122,34 @@ def create_editor_app(widget: Any) -> FastAPI:
             lambda: widget._metrics(
                 str(payload.get("metric", "deviance")),
                 None if "source" not in payload else str(payload["source"]),
-            )
+                dataset=None if "dataset" not in payload else str(payload["dataset"]),
+                model_revision=_optional_int(payload.get("model_revision")),
+                request_sequence=_optional_int(payload.get("request_sequence")),
+            ),
+            response_metadata=_evidence_metadata(payload),
         )
 
     @app.post("/summary")
     def summary(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(lambda: widget._summary(str(payload.get("source", "original"))))
+        return _guarded_json(
+            lambda: widget._summary(
+                str(payload.get("source", "original")),
+                model_revision=_optional_int(payload.get("model_revision")),
+                request_sequence=_optional_int(payload.get("request_sequence")),
+            ),
+            response_metadata=_evidence_metadata(payload),
+        )
 
     @app.post("/report")
     def report(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(lambda: widget._report(str(payload.get("report", "validation"))))
+        return _guarded_json(
+            lambda: widget._report(
+                str(payload.get("report", "validation")),
+                model_revision=_optional_int(payload.get("model_revision")),
+                request_sequence=_optional_int(payload.get("request_sequence")),
+            ),
+            response_metadata=_evidence_metadata(payload),
+        )
 
     @app.post("/save_model")
     def save_model(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
@@ -355,14 +373,36 @@ def _request_token(request: Request) -> str:
     )
 
 
-def _guarded_json(factory: Callable[[], dict[str, Any]]) -> Response:
+def _guarded_json(
+    factory: Callable[[], dict[str, Any]],
+    *,
+    response_metadata: dict[str, Any] | None = None,
+) -> Response:
+    metadata = {} if response_metadata is None else dict(response_metadata)
     try:
         return _json_response(factory())
     except _CLIENT_ERROR_TYPES as exc:
-        return _json_response({"error": _client_error_message(exc)}, status_code=400)
+        return _json_response(
+            {**metadata, "error": _client_error_message(exc)},
+            status_code=400,
+        )
     except Exception:  # pragma: no cover - surfaced to browser/tests as JSON
         _LOGGER.exception("Unhandled SuperGLM editor request error.")
-        return _json_response({"error": "internal editor error"}, status_code=500)
+        return _json_response(
+            {**metadata, "error": "internal editor error"},
+            status_code=500,
+        )
+
+
+def _optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
+def _evidence_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model_revision": payload.get("model_revision"),
+        "request_sequence": payload.get("request_sequence"),
+    }
 
 
 def _client_error_message(exc: BaseException) -> str:

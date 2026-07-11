@@ -17,12 +17,16 @@ from typing import Any
 import numpy as np
 
 from superglm.editor import metrics as metrics_module
+from superglm.editor import persistence
+from superglm.editor.apply import materialize_edit_request
 from superglm.editor.evaluation import evaluation_datasets, named_metrics_dataset
 from superglm.editor.evaluation_cache import (
+    DatasetMetricRequest,
     EvaluationCache,
     EvaluationKey,
     model_metric_signature,
 )
+from superglm.editor.evidence import EvidenceCoordinator, EvidenceKey
 from superglm.editor.io import jsonable
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
@@ -65,6 +69,7 @@ class EditorWidget:
         self._lock = threading.RLock()
         self._closed = False
         self._evaluation_cache = EvaluationCache()
+        self._evidence = EvidenceCoordinator(f"editor-{id(self):x}")
         # A local iframe avoids Jupyter widget-extension dependencies while
         # still letting Python own the authoritative edit state.
         self._server = EditorAppServer(self)
@@ -93,6 +98,7 @@ class EditorWidget:
             return
         self._closed = True
         _LIVE_WIDGETS.discard(self)
+        self._evidence.close()
         self._server.close()
 
     def _state(self) -> dict[str, Any]:
@@ -240,88 +246,256 @@ class EditorWidget:
         value = float(np.average(np.exp(editable.edited_log_effect[idx]), weights=weights))
         self.session.set_values(term, idx, np.full(idx.size, np.log(max(value, 1e-12))))
 
-    def _metrics(self, metric: str, source: str | None = None) -> dict[str, Any]:
+    def _current_model_for_evidence(self):
+        """Resolve one current model without materializing under the widget lock."""
         with self._lock:
-            selected_source = "in_force" if source in (None, "selected") else source
             revision = self.session.model_revision
+            if not self.session.edited_terms():
+                return self.session.model, revision
+            epoch = self.session.edit_epoch
+            base_model = self.session.model
+            cached = self.session.cached_materialized_model(
+                epoch,
+                model_revision=revision,
+                base_model=base_model,
+            )
+            if cached is not None:
+                return cached, revision
+            request = self.session.capture_materialization_request()
+            assert request is not None
+
+        key = EvidenceKey(request.model_revision, "materialize", "current")
+        outcome = self._evidence.submit(
+            key,
+            lambda request=request: {"model": materialize_edit_request(request)},
+        ).result()
+        if outcome.status == "superseded" or outcome.payload is None:
+            return None, request.model_revision
+        model = outcome.payload["model"]
+
+        with self._lock:
+            if not self.session.publish_materialized_model(request, model):
+                return None, request.model_revision
+            return model, request.model_revision
+
+    def _metrics(
+        self,
+        metric: str,
+        source: str | None = None,
+        *,
+        dataset: str | None = None,
+        model_revision: int | None = None,
+        request_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        selected_source = "in_force" if source in (None, "selected") else source
+        with self._lock:
+            current_revision = self.session.model_revision
+            if model_revision is not None and int(model_revision) != current_revision:
+                return _superseded_payload(int(model_revision), request_sequence)
             reference_model = getattr(self.session, "reference_model", self.session.model)
-            dataset = named_metrics_dataset(self.session, None)
-            if reference_model is None or dataset is None:
+
+        if selected_source == "original":
+            selected_model = reference_model
+            revision = current_revision
+        else:
+            selected_model, revision = self._current_model_for_evidence()
+        if selected_model is None:
+            return _superseded_payload(revision, request_sequence)
+
+        with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, request_sequence)
+            reference_model = getattr(self.session, "reference_model", self.session.model)
+            eval_dataset = named_metrics_dataset(self.session, dataset)
+            if reference_model is None or eval_dataset is None:
                 return metrics_payload(
                     self.session,
                     metric,
                     source=selected_source,
+                    dataset=dataset,
                     model_revision=revision,
+                    request_sequence=request_sequence,
                 )
-            selected_model = (
-                reference_model
-                if selected_source == "original"
-                else self.session.materialized_model()
-            )
-            original_metrics = self._cached_dataset_metrics(
-                "original", reference_model, dataset, revision
-            )
-            edited_metrics = self._cached_dataset_metrics(
-                "current", selected_model, dataset, revision
-            )
-            return metric_comparison_payload(
-                metric,
-                dataset,
-                original_metrics,
-                edited_metrics,
-                model_revision=revision,
-            )
 
-    def _summary(self, source: str) -> dict[str, Any]:
+        original_metrics = self._dataset_metrics_for_evidence(
+            "original", reference_model, eval_dataset, revision
+        )
+        if original_metrics is None:
+            return _superseded_payload(revision, request_sequence)
+        edited_metrics = self._dataset_metrics_for_evidence(
+            "current", selected_model, eval_dataset, revision
+        )
+        if edited_metrics is None:
+            return _superseded_payload(revision, request_sequence)
+        payload = metric_comparison_payload(
+            metric,
+            eval_dataset,
+            original_metrics,
+            edited_metrics,
+            model_revision=revision,
+            request_sequence=request_sequence,
+        )
         with self._lock:
-            if source == "selected":
-                source = "in_force"
-            return summary_payload(self, source)
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, request_sequence)
+        return payload
 
-    def _report(self, report: str = "validation") -> dict[str, Any]:
-        with self._lock:
-            revision = self.session.model_revision
-            datasets = evaluation_datasets(self.session)
-            reference_model = getattr(self.session, "reference_model", self.session.model)
-            if reference_model is None:
-                return report_payload(self, report, model_revision=revision)
-            edited_model = self.session.materialized_model()
-            metric_pairs = {
-                dataset.name: (
-                    self._cached_dataset_metrics("original", reference_model, dataset, revision),
-                    self._cached_dataset_metrics("current", edited_model, dataset, revision),
-                )
-                for dataset in datasets
-            }
-            splits = split_metrics_payload(datasets, metric_pairs)
-            return report_payload(
-                self,
-                report,
-                splits=splits,
-                model_revision=revision,
-            )
-
-    def _cached_dataset_metrics(
+    def _dataset_metrics_for_evidence(
         self,
         role: str,
         model,
         dataset,
         revision: int,
-    ) -> dict[str, float]:
-        self._evaluation_cache.advance_current_revision(revision)
-        key = EvaluationKey(
-            role=role,
-            model_revision=0 if role == "original" else revision,
-            dataset_epoch=0,
-            split=dataset.name,
-            metric_signature=model_metric_signature(model),
+    ) -> dict[str, float] | None:
+        with self._lock:
+            if revision != self.session.model_revision:
+                return None
+            self._evaluation_cache.advance_current_revision(revision)
+            key = EvaluationKey(
+                role=role,
+                model_revision=0 if role == "original" else revision,
+                dataset_epoch=0,
+                split=dataset.name,
+                metric_signature=model_metric_signature(model),
+            )
+            cached = self._evaluation_cache.get(key)
+            if cached is not None:
+                return cached
+            request = DatasetMetricRequest(key=key, model=model, dataset=dataset)
+
+        evidence_key = EvidenceKey(
+            revision,
+            "score",
+            f"{role}:{dataset.name}:{request.key.metric_signature!r}",
         )
-        cached = self._evaluation_cache.get(key)
-        if cached is not None:
-            return cached
-        values = metrics_module.compute_dataset_metrics(model, dataset)
-        self._evaluation_cache.put(key, values)
-        return values
+        outcome = self._evidence.submit(
+            evidence_key,
+            lambda request=request: {
+                "metrics": metrics_module.compute_dataset_metrics(
+                    request.model,
+                    request.dataset,
+                )
+            },
+        ).result()
+        if outcome.status == "superseded" or outcome.payload is None:
+            return None
+        values = outcome.payload["metrics"]
+        with self._lock:
+            if revision != self.session.model_revision:
+                return None
+            self._evaluation_cache.advance_current_revision(revision)
+            self._evaluation_cache.put(request.key, values)
+            return dict(values)
+
+    def _summary(
+        self,
+        source: str,
+        *,
+        model_revision: int | None = None,
+        request_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        if source == "selected":
+            source = "in_force"
+        if source in {"edited", "collapse"}:
+            source = "in_force"
+        source = source if source in {"original", "in_force", "refit"} else "in_force"
+
+        with self._lock:
+            current_revision = self.session.model_revision
+            if model_revision is not None and int(model_revision) != current_revision:
+                return _superseded_payload(int(model_revision), request_sequence)
+
+        if source == "in_force":
+            model, revision = self._current_model_for_evidence()
+            if model is None:
+                return _superseded_payload(revision, request_sequence)
+            with self._lock:
+                if revision != self.session.model_revision:
+                    return _superseded_payload(revision, request_sequence)
+                collapse_info = None if self._in_force_info is None else dict(self._in_force_info)
+            kwargs = {"collapse_info_override": collapse_info}
+        else:
+            with self._lock:
+                revision = self.session.model_revision
+                if source == "original":
+                    model = self.session.reference_model
+                    kwargs = {}
+                else:
+                    model = self._offset_refit_model
+                    kwargs = {
+                        "offset_terms_override": list(self._offset_refit_terms),
+                        "offset_labels_override": list(self._offset_refit_labels),
+                    }
+
+        payload = summary_payload(
+            self,
+            source,
+            model_override=model,
+            **kwargs,
+        )
+        with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, request_sequence)
+        payload["model_revision"] = revision
+        payload["request_sequence"] = request_sequence
+        return payload
+
+    def _report(
+        self,
+        report: str = "validation",
+        *,
+        model_revision: int | None = None,
+        request_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            current_revision = self.session.model_revision
+            if model_revision is not None and int(model_revision) != current_revision:
+                return _superseded_payload(int(model_revision), request_sequence)
+        edited_model, revision = self._current_model_for_evidence()
+        if edited_model is None:
+            return _superseded_payload(revision, request_sequence)
+
+        with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, request_sequence)
+            datasets = tuple(evaluation_datasets(self.session))
+            reference_model = getattr(self.session, "reference_model", self.session.model)
+            collapse_info = None if self._in_force_info is None else dict(self._in_force_info)
+            if reference_model is None:
+                return report_payload(
+                    self,
+                    report,
+                    model_revision=revision,
+                    request_sequence=request_sequence,
+                )
+
+        metric_pairs: dict[str, tuple[dict[str, float], dict[str, float]]] = {}
+        for eval_dataset in datasets:
+            original = self._dataset_metrics_for_evidence(
+                "original", reference_model, eval_dataset, revision
+            )
+            if original is None:
+                return _superseded_payload(revision, request_sequence)
+            edited = self._dataset_metrics_for_evidence(
+                "current", edited_model, eval_dataset, revision
+            )
+            if edited is None:
+                return _superseded_payload(revision, request_sequence)
+            metric_pairs[eval_dataset.name] = (original, edited)
+        splits = split_metrics_payload(datasets, metric_pairs)
+        payload = report_payload(
+            self,
+            report,
+            splits=splits,
+            model_revision=revision,
+            request_sequence=request_sequence,
+            model_override=edited_model,
+            collapse_info_override=collapse_info,
+        )
+        with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, request_sequence)
+        return payload
 
     def _save_model(
         self,
@@ -330,7 +504,12 @@ class EditorWidget:
         filename: str | None = None,
         path: str | None = None,
     ) -> dict[str, Any]:
+        model, revision = self._current_model_for_evidence()
+        if model is None:
+            return _superseded_payload(revision, None)
         with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, None)
             if path:
                 target = Path(path).expanduser()
             else:
@@ -338,29 +517,34 @@ class EditorWidget:
                 if Path(name).name != name:
                     raise ValueError("filename must not contain directory separators")
                 target = Path(directory or ".").expanduser() / name
-            saved = self.session.save_model(target)
-            saved_path = saved.resolve()
-            return {
-                "path": str(saved_path),
-                "directory": str(saved_path.parent),
-                "filename": saved_path.name,
-                "message": f"Saved edited model to {saved_path}",
-            }
+        saved = persistence.save_model(self.session, target, model_override=model)
+        saved_path = saved.resolve()
+        return {
+            "path": str(saved_path),
+            "directory": str(saved_path.parent),
+            "filename": saved_path.name,
+            "message": f"Saved edited model to {saved_path}",
+        }
 
     def _download_model(self, filename: str | None = None) -> tuple[bytes, str]:
         import io
 
         import joblib
 
+        model, revision = self._current_model_for_evidence()
+        if model is None:
+            raise RuntimeError("Edited model request was superseded.")
         with self._lock:
+            if revision != self.session.model_revision:
+                raise RuntimeError("Edited model request was superseded.")
             name = filename or "superglm_edited_model.joblib"
             if Path(name).name != name:
                 raise ValueError("filename must not contain directory separators")
             if not Path(name).suffix:
                 name = f"{name}.joblib"
-            buffer = io.BytesIO()
-            joblib.dump(edited_model_for_export(self.session), buffer)
-            return buffer.getvalue(), name
+        buffer = io.BytesIO()
+        joblib.dump(edited_model_for_export(self.session, model_override=model), buffer)
+        return buffer.getvalue(), name
 
     def _open_directory(self, path: str | None = None) -> dict[str, str]:
         opened = open_directory_path(path)
@@ -678,6 +862,17 @@ class EditorWidget:
         self._offset_refit_model = None
         self._offset_refit_terms = []
         self._offset_refit_labels = []
+
+
+def _superseded_payload(
+    model_revision: int,
+    request_sequence: int | None,
+) -> dict[str, Any]:
+    return {
+        "status": "superseded",
+        "model_revision": int(model_revision),
+        "request_sequence": request_sequence,
+    }
 
 
 def _close_live_widgets() -> None:

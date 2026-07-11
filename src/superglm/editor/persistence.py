@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from superglm.editor.apply import materialize_edit_request
 from superglm.editor.io import (
     jsonable,
     record_from_payload,
@@ -16,7 +17,7 @@ from superglm.editor.io import (
 )
 
 
-def save_model(session, path: str | Path) -> Path:
+def save_model(session, path: str | Path, *, model_override=None) -> Path:
     """Write the edited model copy as a joblib artifact."""
     import joblib
 
@@ -24,13 +25,18 @@ def save_model(session, path: str | Path) -> Path:
     if not target.suffix:
         target = target.with_suffix(".joblib")
     target.parent.mkdir(exist_ok=True, parents=True)
-    joblib.dump(edited_model_for_export(session), target)
+    joblib.dump(edited_model_for_export(session, model_override=model_override), target)
     return target
 
 
-def edited_model_for_export(session):
+def edited_model_for_export(session, *, model_override=None):
     """Return an edited model copy scored on the editor's default split when available."""
-    return session.materialized_model()
+    if model_override is not None:
+        return model_override
+    request = session.capture_materialization_request()
+    if request is None:
+        return session.model
+    return materialize_edit_request(request)
 
 
 def save_session(session, path: str | Path) -> None:

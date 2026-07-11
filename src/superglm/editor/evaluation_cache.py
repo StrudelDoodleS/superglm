@@ -8,6 +8,9 @@ from typing import Any, Literal
 
 import numpy as np
 
+from superglm.editor._types import EditableTerm
+from superglm.editor.evaluation import EvaluationDataset
+
 
 @dataclass(frozen=True)
 class EvaluationKey:
@@ -18,6 +21,26 @@ class EvaluationKey:
     dataset_epoch: int
     split: str
     metric_signature: tuple[Any, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EditMaterializationRequest:
+    """Immutable plot-scale snapshot needed to construct one edited model."""
+
+    model_revision: int
+    edit_epoch: int
+    base_model: Any
+    terms: dict[str, EditableTerm]
+    dataset: EvaluationDataset | None
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetMetricRequest:
+    """Immutable model/dataset references for one scalar metric calculation."""
+
+    key: EvaluationKey
+    model: Any
+    dataset: EvaluationDataset
 
 
 def model_metric_signature(model) -> tuple[Any, ...]:
@@ -81,4 +104,10 @@ class EvaluationCache:
             )
 
 
-__all__ = ["EvaluationCache", "EvaluationKey", "model_metric_signature"]
+__all__ = [
+    "DatasetMetricRequest",
+    "EditMaterializationRequest",
+    "EvaluationCache",
+    "EvaluationKey",
+    "model_metric_signature",
+]

@@ -727,49 +727,120 @@ def test_materialized_model_reuses_one_copy_per_real_edit_epoch(
         counted_apply,
     )
 
-    assert session.materialized_model() is editor_model
-    assert applied_epochs == []
+    widget = session.widget()
+    try:
+        assert widget._current_model_for_evidence()[0] is editor_model
+        assert applied_epochs == []
 
-    session.select_x("x_spline", 2.0, 5.0)
-    session.shift("x_spline", 0.35)
-    first = session.materialized_model()
-    assert session.materialized_model() is first
-    assert applied_epochs == [1]
+        session.select_x("x_spline", 2.0, 5.0)
+        session.shift("x_spline", 0.35)
+        first = widget._current_model_for_evidence()[0]
+        assert widget._current_model_for_evidence()[0] is first
+        assert applied_epochs == [1]
 
-    session.shift("x_spline", 0.10)
-    second = session.materialized_model()
-    assert second is not first
-    assert applied_epochs == [1, 2]
+        session.shift("x_spline", 0.10)
+        second = widget._current_model_for_evidence()[0]
+        assert second is not first
+        assert applied_epochs == [1, 2]
 
-    session.undo()
-    after_undo = session.materialized_model()
-    assert after_undo is not second
-    assert applied_epochs == [1, 2, 3]
+        session.undo()
+        after_undo = widget._current_model_for_evidence()[0]
+        assert after_undo is not second
+        assert applied_epochs == [1, 2, 3]
 
-    session.redo()
-    after_redo = session.materialized_model()
-    assert after_redo is not after_undo
-    assert applied_epochs == [1, 2, 3, 4]
+        session.redo()
+        after_redo = widget._current_model_for_evidence()[0]
+        assert after_redo is not after_undo
+        assert applied_epochs == [1, 2, 3, 4]
 
-    session.reset("x_spline")
-    assert session.materialized_model() is editor_model
-    assert applied_epochs == [1, 2, 3, 4]
+        session.reset("x_spline")
+        assert widget._current_model_for_evidence()[0] is editor_model
+        assert applied_epochs == [1, 2, 3, 4]
+    finally:
+        widget.close()
 
 
 def test_materialized_model_is_invalidated_by_structural_replacement(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     session.select_indices("x_spline", [4])
     session.shift("x_spline", 0.2)
-    cached = session.materialized_model()
+    widget = session.widget()
+    cached = widget._current_model_for_evidence()[0]
 
     replacement = editor_model._clone_without_features(set())
     replacement.fit(editor_model._fit_X_ref, editor_model._fit_y_ref)
     session.replace_in_force_model(replacement)
 
-    assert session._materialized_edit_model is None
-    assert session._materialized_edit_epoch is None
-    assert session.materialized_model() is replacement
-    assert session.materialized_model() is not cached
+    try:
+        assert session._materialized_edit_model is None
+        assert session._materialized_edit_epoch is None
+        assert widget._current_model_for_evidence()[0] is replacement
+        assert widget._current_model_for_evidence()[0] is not cached
+    finally:
+        widget.close()
+
+
+def test_materialization_request_copies_terms_and_rejects_stale_publish(
+    editor_model,
+    editor_frame,
+):
+    from superglm.editor.apply import materialize_edit_request
+    from superglm.editor.evaluation import default_metrics_dataset
+
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        validation_data=(X.iloc[300:380], y[300:380], None),
+    )
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    dataset = default_metrics_dataset(session)
+    request = session.capture_materialization_request()
+
+    assert request is not None
+    assert request.base_model is session.model
+    assert request.dataset is dataset
+    assert request.dataset.X is dataset.X
+    assert request.dataset.y is dataset.y
+    captured_term = request.terms["x_spline"]
+    live_term = session.terms["x_spline"]
+    assert captured_term is not live_term
+    assert not np.shares_memory(captured_term.edited_log_effect, live_term.edited_log_effect)
+
+    stale_model = materialize_edit_request(request)
+    session.shift("x_spline", 0.1)
+    assert session.publish_materialized_model(request, stale_model) is False
+    assert session.cached_materialized_model(request.edit_epoch) is None
+
+    current_request = session.capture_materialization_request()
+    assert current_request is not None
+    current_model = materialize_edit_request(current_request)
+    assert session.publish_materialized_model(current_request, current_model) is True
+    assert (
+        session.cached_materialized_model(
+            current_request.edit_epoch,
+            model_revision=current_request.model_revision,
+            base_model=current_request.base_model,
+        )
+        is current_model
+    )
+    assert (
+        session.cached_materialized_model(
+            current_request.edit_epoch,
+            model_revision=current_request.model_revision + 1,
+            base_model=current_request.base_model,
+        )
+        is None
+    )
+    assert (
+        session.cached_materialized_model(
+            current_request.edit_epoch,
+            model_revision=current_request.model_revision,
+            base_model=object(),
+        )
+        is None
+    )
 
 
 def test_to_model_stays_fresh_and_does_not_return_the_materialized_copy(editor_model):
@@ -777,16 +848,20 @@ def test_to_model_stays_fresh_and_does_not_return_the_materialized_copy(editor_m
     session.select_indices("x_spline", [4, 5, 6])
     session.shift("x_spline", 0.2)
 
-    materialized = session.materialized_model()
-    first = session.to_model()
-    second = session.to_model()
+    widget = session.widget()
+    try:
+        materialized = widget._current_model_for_evidence()[0]
+        first = session.to_model()
+        second = session.to_model()
 
-    assert first is not second
-    assert first is not materialized
-    assert second is not materialized
-    assert session.materialized_model() is materialized
-    np.testing.assert_allclose(first.result.beta, materialized.result.beta)
-    np.testing.assert_allclose(second.result.beta, materialized.result.beta)
+        assert first is not second
+        assert first is not materialized
+        assert second is not materialized
+        assert widget._current_model_for_evidence()[0] is materialized
+        np.testing.assert_allclose(first.result.beta, materialized.result.beta)
+        np.testing.assert_allclose(second.result.beta, materialized.result.beta)
+    finally:
+        widget.close()
 
 
 def test_to_model_without_edits_keeps_transient_state_private(editor_model):
@@ -900,7 +975,11 @@ def test_materialized_model_shares_only_row_scale_fit_inputs():
     session = EditorSession.from_model(model, terms=["x"])
     session.select_indices("x", [0])
     session.shift("x", 0.2)
-    edited = session.materialized_model()
+    widget = session.widget()
+    try:
+        edited = widget._current_model_for_evidence()[0]
+    finally:
+        widget.close()
 
     for name in (
         "_dm",
@@ -944,30 +1023,52 @@ def test_materialized_model_shares_only_row_scale_fit_inputs():
     assert model.result.deviance == source_deviance
 
 
-def test_summary_and_export_reuse_materialized_model(editor_model, tmp_path, monkeypatch):
-    from superglm.editor.persistence import edited_model_for_export
-    from superglm.editor.summaries import _in_force_summary_model
+def test_widget_evidence_and_export_reuse_materialized_model(
+    editor_model,
+    tmp_path,
+    monkeypatch,
+):
+    import superglm.editor.apply as apply_module
 
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     session.select_indices("x_spline", [4, 5, 6])
     session.shift("x_spline", 0.2)
-    materialized = session.materialized_model()
-
-    assert _in_force_summary_model(session) is materialized
-    assert edited_model_for_export(session) is materialized
-
+    widget = session.widget()
+    materialized_calls = 0
     dumped: list[object] = []
+    original_apply = apply_module.apply_edits_to_model_copy_with_data
+
+    def counted_apply(*args, **kwargs):
+        nonlocal materialized_calls
+        materialized_calls += 1
+        return original_apply(*args, **kwargs)
 
     def capture_dump(model, target):
         dumped.append(model)
-        Path(target).touch()
+        if isinstance(target, Path | str):
+            Path(target).touch()
 
+    monkeypatch.setattr(apply_module, "apply_edits_to_model_copy_with_data", counted_apply)
     monkeypatch.setattr("joblib.dump", capture_dump)
-    path = session.save_model(tmp_path / "edited-model.joblib")
+    try:
+        summary = widget._summary("in_force")
+        metrics = widget._metrics("deviance", "in_force")
+        report = widget._report("final")
+        saved = widget._save_model(path=str(tmp_path / "edited-model.joblib"))
+        downloaded, filename = widget._download_model("edited-model.joblib")
+    finally:
+        widget.close()
 
-    assert path.exists()
-    assert dumped == [materialized]
-    assert session.materialized_model() is materialized
+    materialized = session._materialized_edit_model
+    assert materialized_calls == 1
+    assert materialized is not None
+    assert summary["available"] is True
+    assert metrics["available"] is True
+    assert report["summary"]["available"] is True
+    assert Path(saved["path"]).exists()
+    assert filename == "edited-model.joblib"
+    assert downloaded == b""
+    assert dumped == [materialized, materialized]
 
 
 def test_to_model_refreshes_fit_statistics_after_manual_edit(editor_model):
@@ -3937,6 +4038,87 @@ def test_widget_http_metrics_recomputes_fit_metric_for_edited_copy(editor_model)
         assert "metrics" in changed
         assert "aic" in changed["metrics"]["edited"]
         assert "effective_df" in changed["metrics"]["edited"]
+    finally:
+        widget.close()
+
+
+def test_http_evidence_echoes_revision_sequence_and_supersedes_stale_requests(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        revision = session.model_revision
+        requests = (
+            ("metrics", {"metric": "deviance"}),
+            ("report", {"report": "validation"}),
+            ("summary", {"source": "original"}),
+        )
+        for sequence, (path, request_payload) in enumerate(requests, start=10):
+            payload = _post_json(
+                f"{widget.url}/{path}",
+                {
+                    **request_payload,
+                    "model_revision": revision,
+                    "request_sequence": sequence,
+                },
+            )
+            assert payload["model_revision"] == revision
+            assert payload["request_sequence"] == sequence
+
+        _post_json(f"{widget.url}/select", {"term": "x_spline", "indices": [20, 21]})
+        _post_json(f"{widget.url}/op", {"operation": "shift_up"})
+        stale = _post_json(
+            f"{widget.url}/metrics",
+            {
+                "metric": "deviance",
+                "model_revision": revision,
+                "request_sequence": 99,
+            },
+        )
+
+        assert stale == {
+            "status": "superseded",
+            "model_revision": revision,
+            "request_sequence": 99,
+        }
+    finally:
+        widget.close()
+
+
+def test_http_evidence_failure_echoes_revision_and_sequence(editor_model, monkeypatch):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+
+    def fail(*_args, **_kwargs):
+        raise ValueError("metric failure")
+
+    monkeypatch.setattr(widget, "_metrics", fail)
+    try:
+        data = json.dumps(
+            {
+                "metric": "deviance",
+                "model_revision": session.model_revision,
+                "request_sequence": 123,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{widget.url}/metrics",
+            data=data,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                **_editor_token_header(f"{widget.url}/metrics"),
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(request, timeout=5)
+        payload = json.loads(exc_info.value.read().decode("utf-8"))
+
+        assert exc_info.value.code == 400
+        assert payload == {
+            "model_revision": session.model_revision,
+            "request_sequence": 123,
+            "error": "metric failure",
+        }
     finally:
         widget.close()
 
