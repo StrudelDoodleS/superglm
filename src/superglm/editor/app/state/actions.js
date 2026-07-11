@@ -128,10 +128,10 @@ const STRUCTURAL_REFRESH_INCOMPLETE =
   "The model change completed, but browser refresh was incomplete.";
 const EVIDENCE_DEBOUNCE_MS = 150;
 
-/** @param {()=>void|Promise<void>} onRequestSettled @returns {Promise<void>} */
-async function notifyRequestSettled(onRequestSettled) {
+/** @param {()=>void|Promise<void>} hook @returns {Promise<void>} */
+async function notifyTimingHook(hook) {
   try {
-    await onRequestSettled();
+    await hook();
   } catch {
     // Timing hooks cannot change the mutation outcome.
   }
@@ -289,7 +289,9 @@ export function createEditorActions({
     name,
     path,
     payload,
-    onRequestSettled = () => {}
+    onRequestSettled = () => {},
+    onPrimaryCommitted = () => {},
+    onPaintSettled = () => {}
   }) {
     if (store.getState().request.mutation.status === "running") {
       return skippedMutation("An editor mutation is already running.");
@@ -312,10 +314,10 @@ export function createEditorActions({
     try {
       response = await client.postJSON(path, requestPayload);
     } catch (value) {
-      await notifyRequestSettled(onRequestSettled);
+      await notifyTimingHook(onRequestSettled);
       return recoverMutation(value, name, null);
     }
-    await notifyRequestSettled(onRequestSettled);
+    await notifyTimingHook(onRequestSettled);
     try {
       envelope = structuralEnvelope(response);
     } catch (value) {
@@ -330,12 +332,14 @@ export function createEditorActions({
       finishStructuralMutation({ message: STRUCTURAL_REFRESH_INCOMPLETE, retry: null });
       return { ok: true, envelope };
     }
+    await notifyTimingHook(onPrimaryCommitted);
     try {
       await waitForPaint();
     } catch {
       finishStructuralMutation({ message: STRUCTURAL_REFRESH_INCOMPLETE, retry: null });
       return { ok: true, envelope };
     }
+    await notifyTimingHook(onPaintSettled);
     finishStructuralMutation(null);
     try {
       void Promise.resolve(scheduleVisibleEvidence(envelope.state.model_revision, {

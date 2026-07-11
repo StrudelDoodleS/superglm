@@ -4180,6 +4180,28 @@ def test_live_metrics_and_report_share_validation_scalars(
     assert report["model_revision"] == session.model_revision
 
 
+def test_original_metric_request_does_not_poison_current_revision_cache(editor_model):
+    from superglm.editor.evaluation import default_metrics_dataset
+    from superglm.editor.metrics import compute_dataset_metrics
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.35)
+    dataset = default_metrics_dataset(session)
+    assert dataset is not None
+    expected_edited = compute_dataset_metrics(session.to_model(), dataset)["deviance"]
+    widget = session.widget()
+    try:
+        original = widget._metrics("deviance", "original")
+        in_force = widget._metrics("deviance", "in_force")
+    finally:
+        widget.close()
+
+    assert original["edited"] == pytest.approx(original["original"])
+    assert in_force["edited"] == pytest.approx(expected_edited)
+    assert in_force["edited"] != pytest.approx(in_force["original"])
+
+
 def test_metric_comparison_payload_assembles_cached_scalars(editor_model, editor_frame):
     from superglm.editor.evaluation import EvaluationDataset
     from superglm.editor.metrics import metric_comparison_payload
@@ -5064,6 +5086,7 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     html = (root / "index.html").read_text()
     main_js = (root / "main.js").read_text()
     actions_js = (root / "state/actions.js").read_text()
+    timing_js = (root / "state/timing.js").read_text()
     summary_js = (root / "summary.js").read_text()
     css = (root / "styles.css").read_text()
 
@@ -5117,9 +5140,24 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "!visibleRecovery.retry" in recovery_source
     assert "!recovery.retry" in recovery_source
     assert "appAlertDismiss.disabled = retryInProgress" in recovery_source
-    assert "client_request_ms" in main_js
-    assert "client_recovery_ms" in main_js
-    assert "client_total_ms" in main_js
+    assert "clientTransitionTiming" in main_js
+    for field in (
+        "client_request_ms",
+        "client_commit_ms",
+        "client_paint_ms",
+        "client_primary_ms",
+        "client_total_ms",
+    ):
+        assert field in timing_js
+    assert "client_recovery_ms" not in main_js
+    assert "client_recovery_ms" not in timing_js
+    assert "onPrimaryCommitted" in refit_source
+    assert "onPaintSettled" in refit_source
+    assert "createEvidenceTimingTracker" in main_js
+    assert 'evidenceTiming.observe("metrics"' in main_js
+    assert 'evidenceTiming.observe("summary"' in main_js
+    assert 'evidenceTiming.observe("report"' in main_js
+    assert "formatEvidenceTimingDetails" in main_js
     assert "formatTimingDetails" in main_js
     assert "Refit completed in" in main_js
     assert 'id="advancedTiming"' in html
@@ -5271,6 +5309,7 @@ def test_widget_serves_editor_app_assets(editor_model):
             "state/store.js",
             "state/selectors.js",
             "state/actions.js",
+            "state/timing.js",
             "format.js",
             "chart.js",
             "chart/geometry.js",

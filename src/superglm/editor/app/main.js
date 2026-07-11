@@ -18,6 +18,10 @@ import {
   setPreviewTerm as setPreviewTermState
 } from "./state/store.js";
 import {
+  clientTransitionTiming,
+  createEvidenceTimingTracker
+} from "./state/timing.js";
+import {
   collapseTransition,
   renderSummary,
   runDistributionProfile,
@@ -140,12 +144,17 @@ let appBusyActive = false;
 let appBusyOpener = null;
 let retryInProgress = false;
 let retryRecovery = null;
+let latestTransitionTiming = null;
+let latestTimingNote = "";
 
 const store = createEditorStore(createInitialEditorState());
 const actions = createEditorActions({
   store,
   client: editorClient,
   scheduleVisibleEvidence
+});
+const evidenceTiming = createEvidenceTimingTracker({
+  onComplete: () => renderAdvancedTiming()
 });
 
 const undo = () => actions.executeStateMutation({
@@ -594,17 +603,28 @@ async function runStructuralRefit(descriptor) {
   }
   const operationStart = performance.now();
   const requestStart = performance.now();
-  let requestEnd = requestStart;
+  const milestones = {
+    operationStart,
+    requestStart,
+    requestEnd: requestStart,
+    commitEnd: requestStart,
+    paintEnd: requestStart
+  };
   const result = await actions.executeStructuralMutation({
     ...descriptor,
     onRequestSettled: () => {
-      requestEnd = performance.now();
+      milestones.requestEnd = performance.now();
+    },
+    onPrimaryCommitted: () => {
+      milestones.commitEnd = performance.now();
+    },
+    onPaintSettled: () => {
+      milestones.paintEnd = performance.now();
     }
   });
   if (!result.ok) return null;
-  const completed = performance.now();
   const envelope = result.envelope;
-  const timing = debugTiming(envelope, operationStart, requestStart, requestEnd, completed);
+  const timing = clientTransitionTiming(envelope, milestones);
   showTimingStatus(envelope.summary, timing);
   return envelope;
 }
@@ -667,26 +687,27 @@ if (new URLSearchParams(window.location.search).get("test") === "1") {
   window.__superglmTest = Object.freeze({ setAppBusy });
 }
 
-function debugTiming(payload, operationStart, requestStart, requestEnd, completed) {
-  const server = payload && payload.timing ? payload.timing : {};
-  return {
-    ...server,
-    client_request_ms: Math.max(0, requestEnd - requestStart),
-    client_recovery_ms: Math.max(0, completed - requestEnd),
-    client_total_ms: Math.max(0, completed - operationStart)
-  };
-}
-
 function showTimingStatus(payload, timing) {
   if (!timing) return;
+  latestTransitionTiming = timing;
+  latestTimingNote = payload.note || "";
   if (summaryStatus) {
     summaryStatus.textContent = `Refit completed in ${formatMilliseconds(timing.client_total_ms)}`;
   }
-  const details = formatTimingDetails(timing);
-  if (advancedTiming) {
-    advancedTiming.textContent = payload.note ? `${payload.note} · ${details}` : details;
-  }
+  renderAdvancedTiming();
   if (summaryNote) summaryNote.textContent = payload.note || "";
+}
+
+function renderAdvancedTiming() {
+  if (!advancedTiming) return;
+  const sections = [];
+  if (latestTransitionTiming) sections.push(formatTimingDetails(latestTransitionTiming));
+  const evidenceDetails = formatEvidenceTimingDetails(evidenceTiming.durations());
+  if (evidenceDetails) sections.push(evidenceDetails);
+  const details = sections.filter(Boolean).join(" · ");
+  advancedTiming.textContent = latestTimingNote && details
+    ? `${latestTimingNote} · ${details}`
+    : latestTimingNote || details;
 }
 
 function formatTimingDetails(timing) {
@@ -700,10 +721,23 @@ function formatTimingDetails(timing) {
   if (Number.isFinite(Number(timing.summary_ms))) {
     parts.push(`summary ${formatMilliseconds(timing.summary_ms)}`);
   }
-  if (Number.isFinite(Number(timing.client_recovery_ms))) {
-    parts.push(`browser recovery ${formatMilliseconds(timing.client_recovery_ms)}`);
+  if (Number.isFinite(Number(timing.client_request_ms))) {
+    parts.push(`request ${formatMilliseconds(timing.client_request_ms)}`);
+  }
+  if (Number.isFinite(Number(timing.client_commit_ms))) {
+    parts.push(`DOM commit ${formatMilliseconds(timing.client_commit_ms)}`);
+  }
+  if (Number.isFinite(Number(timing.client_paint_ms))) {
+    parts.push(`paint ${formatMilliseconds(timing.client_paint_ms)}`);
   }
   return parts.length ? `Timing: ${parts.join(", ")}` : "";
+}
+
+function formatEvidenceTimingDetails(durations) {
+  const parts = Object.entries(durations).map(
+    ([panel, duration]) => `${panel} ${formatMilliseconds(duration)}`
+  );
+  return parts.length ? `Evidence: ${parts.join(", ")}` : "";
 }
 
 function formatMilliseconds(value) {
@@ -1290,16 +1324,28 @@ store.subscribe(
 );
 store.subscribe(
   (state) => state.request.evidence.summary,
-  renderSummaryEvidence
+  (evidence, previous) => {
+    renderSummaryEvidence(evidence);
+    evidenceTiming.observe("summary", evidence, previous);
+  }
 );
 store.subscribe((state) => state.view, () => render(), sameViewOutsidePreview);
 store.subscribe((state) => state.view.preview, renderInteractionPreview);
 store.subscribe((state) => state.request.recovery, renderRecovery);
 store.subscribe((state) => state.request.mutation, renderMutationBusy);
-store.subscribe((state) => state.request.evidence.metrics, renderMetricsEvidence);
+store.subscribe(
+  (state) => state.request.evidence.metrics,
+  (evidence, previous) => {
+    renderMetricsEvidence(evidence);
+    evidenceTiming.observe("metrics", evidence, previous);
+  }
+);
 store.subscribe(
   (state) => state.request.evidence.report,
-  (evidence) => renderReportEvidence(evidence, store.getState().view.activeView)
+  (evidence, previous) => {
+    renderReportEvidence(evidence, store.getState().view.activeView);
+    evidenceTiming.observe("report", evidence, previous);
+  }
 );
 
 loadState().then(async () => {

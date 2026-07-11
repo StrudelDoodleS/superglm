@@ -322,11 +322,14 @@ class EditorWidget:
         )
         if original_metrics is None:
             return _superseded_payload(revision, request_sequence)
-        edited_metrics = self._dataset_metrics_for_evidence(
-            "current", selected_model, eval_dataset, revision
-        )
-        if edited_metrics is None:
-            return _superseded_payload(revision, request_sequence)
+        if selected_source == "original":
+            edited_metrics = original_metrics
+        else:
+            edited_metrics = self._dataset_metrics_for_evidence(
+                "current", selected_model, eval_dataset, revision
+            )
+            if edited_metrics is None:
+                return _superseded_payload(revision, request_sequence)
         payload = metric_comparison_payload(
             metric,
             eval_dataset,

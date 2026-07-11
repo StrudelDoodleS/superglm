@@ -142,9 +142,24 @@ export function commitRemote(state, snapshot) {
 /** @param {EditorState} state @param {StructuralTransitionEnvelope} envelope */
 export function commitStructuralTransition(state, envelope) {
   const committed = commitRemote(state, envelope.state);
+  const summary = committed.request.evidence.summary;
   return {
     ...committed,
-    remote: { snapshot: envelope.state, summary: envelope.summary }
+    remote: { snapshot: envelope.state, summary: envelope.summary },
+    request: {
+      ...committed.request,
+      evidence: {
+        ...committed.request.evidence,
+        summary: {
+          ...summary,
+          status: /** @type {const} */ ("current"),
+          revision: envelope.state.model_revision,
+          payload: envelope.summary,
+          error: null,
+          retry: null
+        }
+      }
+    }
   };
 }
 

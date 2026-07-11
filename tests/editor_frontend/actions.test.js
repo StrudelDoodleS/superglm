@@ -277,7 +277,15 @@ test("structural mutation commits, paints, becomes idle, then schedules immediat
     name: "collapse levels",
     path: "/collapse_levels",
     payload: { term: "age", method: "auto" },
-    onRequestSettled: () => { events.push("request-settled"); }
+    onRequestSettled: () => { events.push("request-settled"); },
+    onPrimaryCommitted: () => {
+      events.push("primary-committed");
+      assert.equal(store.getState().request.mutation.status, "running");
+    },
+    onPaintSettled: () => {
+      events.push("paint-settled");
+      assert.equal(store.getState().request.mutation.status, "running");
+    }
   });
   const result = await pending;
 
@@ -286,7 +294,14 @@ test("structural mutation commits, paints, becomes idle, then schedules immediat
   assert.strictEqual(store.getState().remote.snapshot, envelope.state);
   assert.strictEqual(store.getState().remote.summary, envelope.summary);
   assert.deepEqual(events, [
-    "post", "request-settled", "commit", "paint", "idle", "evidence:7:true:true"
+    "post",
+    "request-settled",
+    "commit",
+    "primary-committed",
+    "paint",
+    "paint-settled",
+    "idle",
+    "evidence:7:true:true"
   ]);
 });
 

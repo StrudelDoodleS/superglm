@@ -7,10 +7,13 @@ import * as storeModule from "../../src/superglm/editor/app/state/store.js";
 /** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EditorState} EditorState */
 
 const {
+  beginEvidence,
   commitRemote,
   commitStructuralTransition,
+  completeEvidence,
   createEditorStore,
   createInitialEditorState,
+  failEvidence,
   patchView,
   setPreviewTerm
 } = storeModule;
@@ -110,6 +113,41 @@ test("structural transition commits snapshot and summary atomically without endi
   assert.equal(committed.view.activeTerm, "age");
   assert.equal(committed.request.mutation.status, "running");
   assert.equal(committed.request.mutation.operation, "collapse");
+});
+
+test("structural summary becomes the confirmed payload retained by a later failed refresh", () => {
+  const oldSummary = { available: true, label: "Before structural refit" };
+  const oldRetry = { path: "/summary", payload: { source: "in_force" } };
+  let state = createInitialEditorState(snapshot(0));
+  state = beginEvidence(state, "summary", 0, 1, oldRetry);
+  state = completeEvidence(state, "summary", 0, 1, oldSummary);
+
+  const envelope = transitionEnvelope();
+  state = commitStructuralTransition(state, envelope);
+
+  assert.deepEqual(state.request.evidence.summary, {
+    status: "current",
+    revision: 7,
+    sequence: 1,
+    payload: envelope.summary,
+    error: null,
+    retry: null
+  });
+
+  state = commitRemote(state, snapshot(8));
+  state = beginEvidence(
+    state,
+    "summary",
+    8,
+    2,
+    { path: "/summary", payload: { source: "in_force" } }
+  );
+  assert.strictEqual(state.request.evidence.summary.payload, envelope.summary);
+
+  state = failEvidence(state, "summary", 8, 2, "offline");
+  assert.equal(state.request.evidence.summary.status, "stale");
+  assert.strictEqual(state.request.evidence.summary.payload, envelope.summary);
+  assert.equal(state.request.evidence.summary.error, "offline");
 });
 
 test("store keeps confirmed remote data separate from a chart preview", () => {

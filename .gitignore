@@ -52,6 +52,7 @@ REML_IMPLEMENTATION_PLAN.md
 # Benchmarks, experiments, R comparisons, and throwaway scripts live here.
 scratch/
 docs/notebooks/spline_diagnostics/
+.superglm-debug/
 
 # Superpowers skill artifacts
 docs/superpowers/

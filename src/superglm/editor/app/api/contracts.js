@@ -76,7 +76,13 @@
  * @property {string} path
  * @property {Record<string, unknown>} payload
  */
-/** @typedef {MutationDescriptor & {onRequestSettled?:()=>void|Promise<void>}} StructuralMutationDescriptor */
+/**
+ * @typedef {MutationDescriptor & {
+ *   onRequestSettled?:()=>void|Promise<void>,
+ *   onPrimaryCommitted?:()=>void|Promise<void>,
+ *   onPaintSettled?:()=>void|Promise<void>
+ * }} StructuralMutationDescriptor
+ */
 /**
  * @typedef {Object} EvidenceState
  * @property {EvidenceStatus} status
