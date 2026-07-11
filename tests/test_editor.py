@@ -4205,6 +4205,10 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
             "summary.js",
             "reports.js",
             "interactions.js",
+            "views/help_content.js",
+            "views/popover.js",
+            "views/app_bar.js",
+            "views/context_bar.js",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -4218,7 +4222,7 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert '<script type="module" src="/assets/main.js"></script>' in shell
         assert "Editor" in shell
         assert "Validation Report" in shell
-        assert "Final Fit Report" in shell
+        assert "Final Fit" in shell
         assert "reportPanel" in shell
         assert "reportFrame" in shell
         assert "Run CV" not in shell
@@ -4258,9 +4262,9 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert ">Level right</button>" not in shell
         assert ">Snap highest</button>" not in shell
         assert ">Snap lowest</button>" not in shell
-        assert ">Undo</button>" not in shell
-        assert ">Redo</button>" not in shell
-        assert "Ref CI" in shell
+        assert ">Undo</button>" in shell
+        assert ">Redo</button>" in shell
+        assert "Reference CI" in shell
         assert "Reset" in shell
         assert "saveModel" in shell
         assert "saveDialog" in shell

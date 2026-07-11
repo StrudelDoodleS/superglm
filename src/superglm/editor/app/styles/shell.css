@@ -1,1 +1,61 @@
 /* shell.css: app bar, context bar, workspace grid, tool rail, and responsive shell. */
+
+.app-bar,
+.context-bar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.app-bar {
+  grid-area: tabs;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-tabs,
+.app-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.app-bar .app-tabs {
+  margin-bottom: 0;
+  border-bottom: 0;
+}
+
+.context-bar {
+  min-height: 40px;
+  flex-wrap: wrap;
+  padding: var(--space-1) 0 var(--space-2);
+}
+
+.chart-action-bar {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.context-term select {
+  min-width: 180px;
+}
+
+.context-chip {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-subtle);
+}
+
+#status {
+  min-width: 220px;
+  margin-left: auto;
+  color: var(--muted);
+  text-align: right;
+}

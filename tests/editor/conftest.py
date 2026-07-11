@@ -91,9 +91,7 @@ def open_editor_page(chromium_browser, editor_browser_model):
             page.goto(f"{widget.app_url}&test=1", wait_until="domcontentloaded")
             page.locator("#chart path.edited").first.wait_for()
             page.wait_for_function(
-                """term => document.querySelector('#status')?.textContent?.startsWith(
-                    `${term} ·`
-                )""",
+                "term => document.querySelector('#status')?.dataset.term === term",
                 arg="curve",
             )
             if selected_term != "curve":
@@ -105,9 +103,7 @@ def open_editor_page(chromium_browser, editor_browser_model):
                 ):
                     page.select_option("#term", selected_term)
                 page.wait_for_function(
-                    """term => document.querySelector('#status')?.textContent?.startsWith(
-                        `${term} ·`
-                    )""",
+                    "term => document.querySelector('#status')?.dataset.term === term",
                     arg=selected_term,
                 )
                 page.locator("#chart path.edited").first.wait_for()

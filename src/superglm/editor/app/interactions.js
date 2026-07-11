@@ -273,28 +273,6 @@ export function bindInteractions(context) {
     zoomAround(context, svgPoint(context, event), factor);
   }
 
-  async function onKeyDown(event) {
-    if (!context.currentTerm() || isEditableTarget(event.target)) return;
-    const primary = event.ctrlKey || event.metaKey;
-    if (!primary || event.altKey) return;
-    const key = event.key.toLowerCase();
-    if (key === "z" && !event.shiftKey) {
-      event.preventDefault();
-      await context.actions.executeStateMutation({
-        name: "undo",
-        path: "/op",
-        payload: { operation: "undo" }
-      });
-    } else if (key === "y" || (key === "z" && event.shiftKey)) {
-      event.preventDefault();
-      await context.actions.executeStateMutation({
-        name: "redo",
-        path: "/op",
-        payload: { operation: "redo" }
-      });
-    }
-  }
-
   function onPointerCancel() {
     cancelActiveInteraction(context, interaction);
   }
@@ -311,7 +289,6 @@ export function bindInteractions(context) {
   svg.addEventListener("pointercancel", onPointerCancel);
   svg.addEventListener("lostpointercapture", onLostPointerCapture);
   svg.addEventListener("wheel", onWheel, wheelOptions);
-  document.addEventListener("keydown", onKeyDown);
 
   return {
     resetZoomView: () => context.clearZoom(context.selectedTerm()),
@@ -322,7 +299,6 @@ export function bindInteractions(context) {
       svg.removeEventListener("pointercancel", onPointerCancel);
       svg.removeEventListener("lostpointercapture", onLostPointerCapture);
       svg.removeEventListener("wheel", onWheel, wheelOptions);
-      document.removeEventListener("keydown", onKeyDown);
       cancelActiveInteraction(context, interaction);
     }
   };
@@ -756,12 +732,6 @@ function indicesInBox(context, a, b) {
     if (px >= x0 && px <= x1 && py >= y0 && py <= y1) indices.push(i);
   }
   return indices;
-}
-
-function isEditableTarget(target) {
-  if (!target) return false;
-  const tag = target.tagName ? target.tagName.toLowerCase() : "";
-  return target.isContentEditable || tag === "input" || tag === "select" || tag === "textarea";
 }
 
 function svgRect(attrs) {

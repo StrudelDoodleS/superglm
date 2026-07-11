@@ -17,6 +17,11 @@
  * @property {Record<string, unknown>|null} collapsed
  */
 /**
+ * @typedef {Object} ImpactPayload
+ * @property {number} [weighted_mean_relativity]
+ * @property {number} [selected_weight_share]
+ */
+/**
  * @typedef {Object} TermPayload
  * @property {string} kind
  * @property {string} term_type
@@ -28,7 +33,8 @@
  * @property {number} n_points
  * @property {Record<string, unknown>|null} controls
  * @property {GroupDisplayPayload|null} group_display
- * @property {Record<string, unknown>} impact
+ * @property {ImpactPayload} impact
+ * @property {number|null} [effective_df]
  */
 /**
  * @typedef {Object} EditorSnapshot

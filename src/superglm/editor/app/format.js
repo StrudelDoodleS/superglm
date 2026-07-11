@@ -1,3 +1,6 @@
+// @ts-check
+
+/** @param {number} value */
 export function fmt(value) {
   if (!Number.isFinite(value)) return "";
   const abs = Math.abs(value);
@@ -15,16 +18,19 @@ export function fmt(value) {
   });
 }
 
+/** @param {number} value */
 export function fmtSigned(value) {
   const formatted = fmt(value);
   if (!formatted || Math.abs(value) < 1e-15) return "0";
   return value > 0 ? `+${formatted}` : formatted;
 }
 
+/** @param {number} value */
 export function fmtPercent(value) {
   return `${fmt(100 * value)}%`;
 }
 
+/** @param {unknown} value */
 export function escapeHTML(value) {
   return String(value)
     .replaceAll("&", "&amp;")

@@ -26,54 +26,26 @@
       </div>
     </div>
   </div>
-  <div class="app-tabs" role="tablist" aria-label="Editor views">
-    <button class="app-tab active" type="button" data-view="editor" role="tab" aria-selected="true">
-      Editor
-    </button>
-    <button class="app-tab" type="button" data-view="validation" role="tab" aria-selected="false">
-      Validation Report
-    </button>
-    <button class="app-tab" type="button" data-view="final" role="tab" aria-selected="false">
-      Final Fit Report
-    </button>
-  </div>
-  <div id="editorView" class="app-view">
-  <div class="toolbar">
-    <div class="toolbar-section">
-      <label>Term <select id="term"></select></label>
-      <label>Mode <select id="mode"><option value="select">Select</option><option value="zoom">Zoom</option><option value="move">Move</option><option value="handles">Handles</option></select></label>
-      <label id="groupDisplayWrap" class="toolbar-field group-display-toggle">
-        <span>Groups</span>
-        <select id="groupDisplayMode">
-          <option value="expanded">Expanded</option>
-          <option value="collapsed">Collapsed</option>
-        </select>
-      </label>
-      <label id="handleCountWrap" class="handle-count" hidden>
-        <span>Handles</span>
-        <input id="handleCount" type="range" min="3" max="12" value="12">
-        <output id="handleCountValue">12</output>
-      </label>
-      <button id="basisToggle" type="button" hidden title="Show spline basis contributions">
-        Contrib
-      </button>
-      <button id="contribPlay" type="button" hidden title="Animate basis contributions into the spline">
-        Build
-      </button>
-      <label id="buildDurationWrap" class="build-duration" hidden title="Debug: tune Build animation duration">
-        <span>Build</span>
-        <input id="buildDuration" type="range" min="4000" max="30000" step="500" value="10000">
-        <output id="buildDurationValue">10s</output>
-      </label>
+  <header id="appBar" class="app-bar">
+    <div class="app-tabs" role="tablist" aria-label="Editor views">
+      <button id="editorTab" class="app-tab active" type="button" data-view="editor"
+        role="tab" aria-selected="true" aria-controls="editorView">Editor</button>
+      <button id="validationTab" class="app-tab" type="button" data-view="validation"
+        role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Validation</button>
+      <button id="finalTab" class="app-tab" type="button" data-view="final"
+        role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Final Fit</button>
     </div>
-    <div class="toolbar-section">
-      <button data-op="select_all">Select all</button>
-      <button id="resetZoom" type="button">Home</button>
-      <button id="ciToggle" type="button">Ref CI</button>
-      <button id="resetOrder" type="button" data-op="reset_order" hidden>Reset order</button>
-      <button data-op="reset">Reset</button>
-      <button id="saveModel" class="icon-button" type="button"
-        title="Save edited model" aria-label="Save edited model">
+    <div class="app-actions" aria-label="Edit actions">
+      <button id="undoAction" type="button" aria-label="Undo edit"
+        aria-keyshortcuts="Control+Z Meta+Z" data-popover-title="Undo"
+        data-popover-body="Undo the most recent edit. Ctrl/Cmd+Z." disabled>Undo</button>
+      <button id="redoAction" type="button" aria-label="Redo edit"
+        aria-keyshortcuts="Control+Y Control+Shift+Z Meta+Shift+Z"
+        data-popover-title="Redo"
+        data-popover-body="Restore the most recently undone edit." disabled>Redo</button>
+      <button id="saveModel" class="icon-button" type="button" aria-label="Save edited model"
+        data-popover-title="Save"
+        data-popover-body="Save or download the Python-confirmed edited model.">
         <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M5 4h12l2 2v14H5z"></path>
           <path d="M8 4v6h8V4"></path>
@@ -82,8 +54,43 @@
         </svg>
       </button>
     </div>
+  </header>
+  <div id="editorView" class="app-view">
+  <div class="context-bar" role="region" aria-label="Term context">
+    <label class="context-term">Term <select id="term"></select></label>
+    <span id="termKind" class="context-chip"></span>
+    <span id="termEdf" class="context-chip"></span>
+    <label id="groupDisplayWrap" class="toolbar-field group-display-toggle">
+      <span>Groups</span>
+      <select id="groupDisplayMode">
+        <option value="expanded">Expanded</option>
+        <option value="collapsed">Collapsed</option>
+      </select>
+    </label>
+    <button id="ciToggle" type="button" aria-pressed="false">Reference CI</button>
+    <button id="inspectorToggle" type="button" aria-expanded="true"
+      aria-controls="inspector">Inspector</button>
+    <span id="status" role="status" aria-live="polite"></span>
   </div>
-  <div id="status"></div>
+  <div id="chartActionBar" class="chart-action-bar">
+    <label>Mode <select id="mode"><option value="select">Select</option><option value="zoom">Zoom</option><option value="move">Move</option><option value="handles">Handles</option></select></label>
+    <label id="handleCountWrap" class="handle-count" hidden>
+      <span>Handles</span>
+      <input id="handleCount" type="range" min="3" max="12" value="12">
+      <output id="handleCountValue">12</output>
+    </label>
+    <button id="basisToggle" type="button" hidden title="Show spline basis contributions">Contrib</button>
+    <button id="contribPlay" type="button" hidden title="Animate basis contributions into the spline">Build</button>
+    <label id="buildDurationWrap" class="build-duration" hidden title="Debug: tune Build animation duration">
+      <span>Build</span>
+      <input id="buildDuration" type="range" min="4000" max="30000" step="500" value="10000">
+      <output id="buildDurationValue">10s</output>
+    </label>
+    <button type="button" data-op="select_all">Select all</button>
+    <button id="resetZoom" type="button">Home</button>
+    <button id="resetOrder" type="button" data-op="reset_order" hidden>Reset order</button>
+    <button type="button" data-op="reset">Reset</button>
+  </div>
   <div class="main">
     <div class="plot-column">
       <div class="chart-shell">

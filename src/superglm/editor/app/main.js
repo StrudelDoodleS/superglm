@@ -1,6 +1,5 @@
 import { editorClient } from "./api/client.js";
 import { drawChart, groupedTerms } from "./chart.js";
-import { fmt, fmtPercent } from "./format.js";
 import { renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
@@ -27,9 +26,13 @@ import {
   runUngroupRefit
 } from "./summary.js";
 import { bindInteractions } from "./interactions.js";
+import { bindAppBar, renderAppBar } from "./views/app_bar.js";
+import { renderContextBar } from "./views/context_bar.js";
 import { bindPopovers } from "./views/popover.js";
 
-const appTabs = Array.from(document.querySelectorAll(".app-tab"));
+const appBar = document.getElementById("appBar");
+const undoAction = document.getElementById("undoAction");
+const redoAction = document.getElementById("redoAction");
 const appShell = document.querySelector(".app-shell");
 const appBusyOverlay = document.getElementById("appBusyOverlay");
 const appBusyTitle = document.getElementById("appBusyTitle");
@@ -46,6 +49,8 @@ const reportFrame = document.getElementById("reportFrame");
 const svg = document.getElementById("chart");
 const selectionMenu = document.getElementById("selectionMenu");
 const termSelect = document.getElementById("term");
+const termKind = document.getElementById("termKind");
+const termEdf = document.getElementById("termEdf");
 const modeSelect = document.getElementById("mode");
 const groupDisplayWrap = document.getElementById("groupDisplayWrap");
 const groupDisplayMode = document.getElementById("groupDisplayMode");
@@ -125,6 +130,26 @@ const actions = createEditorActions({
     void refreshSummaryView();
     void refreshActiveReport();
   }
+});
+
+const undo = () => actions.executeStateMutation({
+  name: "undo",
+  path: "/op",
+  payload: { operation: "undo" }
+});
+const redo = () => actions.executeStateMutation({
+  name: "redo",
+  path: "/op",
+  payload: { operation: "redo" }
+});
+
+bindAppBar({
+  root: appBar,
+  undoButton: undoAction,
+  redoButton: redoAction,
+  onView: showView,
+  onUndo: undo,
+  onRedo: redo
 });
 
 const chartContext = {
@@ -528,11 +553,6 @@ async function showView(view) {
 function renderAppView(activeView) {
   editorView.hidden = activeView !== "editor";
   reportPanel.hidden = activeView === "editor";
-  for (const tab of appTabs) {
-    const active = tab.dataset.view === activeView;
-    tab.classList.toggle("active", active);
-    tab.setAttribute("aria-selected", active ? "true" : "false");
-  }
 }
 
 function render() {
@@ -547,6 +567,7 @@ function render() {
   renderHistory(snapshot.history, historyFrame);
   modeSelect.value = view.mode;
   ciToggle.style.background = view.showCi ? "#dbeafe" : "#f6f8fa";
+  ciToggle.setAttribute("aria-pressed", String(view.showCi));
   const terms = snapshot.terms || {};
   const selected = selectedTerm();
   termSelect.innerHTML = "";
@@ -569,23 +590,28 @@ function render() {
     if (applyTermDefaults(term)) return;
   }
   const selection = currentSelection();
-  const impact = term.impact || {};
-  const rel = fmt(impact.weighted_mean_relativity || 1);
-  const selectedShare = fmtPercent(impact.selected_weight_share || 0);
-  const edf = term.effective_df === null || term.effective_df === undefined
-    ? ""
-    : ` · EDF ${fmt(term.effective_df)}`;
-  const collapsedOriginalNote =
-    activeGroupDisplayMode() === "collapsed" && term.group_display && term.group_display.available
-      ? " · original line is grouped by exposure-weighted averaging"
-      : "";
   statusNode.style.color = "";
-  statusNode.textContent = `${selected} · ${term.term_type || term.kind}${edf} · ${selection.size} of ${term.n_points} selected · average edit relativity ${rel}x · selected exposure ${selectedShare}${collapsedOriginalNote}`;
   if (updateHandleCount(term)) return;
   updateGroupDisplayControl(term);
   updateCollapseAction(term, selection);
   updateResetOrderAction(term);
   drawChart(term, selection, chartContext);
+  const collapsedOriginalNote =
+    activeGroupDisplayMode() === "collapsed" && term.group_display && term.group_display.available
+      ? "original line is grouped by exposure-weighted averaging"
+      : "";
+  renderAppBar({
+    root: appBar,
+    activeView: view.activeView,
+    undoButton: undoAction,
+    redoButton: redoAction,
+    canUndo: Boolean(snapshot.history.active.length),
+    canRedo: Boolean(snapshot.history.redo.length)
+  });
+  renderContextBar(
+    { kindNode: termKind, edfNode: termEdf, statusNode },
+    { name: selected, term, selectionSize: selection.size, note: collapsedOriginalNote }
+  );
 }
 
 function sameStateOutsidePreview(next, previous) {
@@ -895,12 +921,6 @@ const interactions = bindInteractions({
   actions,
   drawChart: (term, selection) => drawChart(term, selection, chartContext),
 });
-
-for (const tab of appTabs) {
-  tab.addEventListener("click", () => {
-    showView(tab.dataset.view || "editor");
-  });
-}
 
 termSelect.addEventListener("change", async () => {
   const term = termSelect.value;
