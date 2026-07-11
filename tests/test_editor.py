@@ -4689,7 +4689,11 @@ def test_widget_serves_editor_app_assets(editor_model):
     try:
         with urllib.request.urlopen(widget.url, timeout=5) as response:
             shell = response.read().decode("utf-8")
+        assert '<link rel="stylesheet" href="/assets/styles/tokens.css">' in shell
         assert '<link rel="stylesheet" href="/assets/styles.css">' in shell
+        assert '<link rel="stylesheet" href="/assets/styles/shell.css">' in shell
+        assert '<link rel="stylesheet" href="/assets/styles/chart.css">' in shell
+        assert '<link rel="stylesheet" href="/assets/styles/panels.css">' in shell
         assert '<script type="module" src="/assets/main.js"></script>' in shell
         assert "<style>" not in shell
         assert "<script>\nconst svg" not in shell
@@ -4727,6 +4731,17 @@ def test_widget_serves_editor_app_assets(editor_model):
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
                 assert response.headers["Content-Type"].startswith("application/javascript")
+                assert response.read()
+
+        for asset in [
+            "styles/tokens.css",
+            "styles/shell.css",
+            "styles/chart.css",
+            "styles/panels.css",
+        ]:
+            request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
+            with urllib.request.urlopen(request, timeout=5) as response:
+                assert response.headers["Content-Type"].startswith("text/css")
                 assert response.read()
 
         assert 'from "./chart.js"' in js
