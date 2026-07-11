@@ -170,7 +170,7 @@ const chartContext = {
 
 let openHelp = () => inspectorToggle.click();
 
-const narrowQuery = window.matchMedia("(max-width: 999px)");
+const narrowQuery = window.matchMedia("(max-width: 1047px)");
 renderHelpDrawer(helpPane);
 const inspector = bindInspector({
   root: inspectorNode,
@@ -202,7 +202,14 @@ function renderInspectorView() {
 
 /** @param {MediaQueryList|MediaQueryListEvent} [event] */
 function syncViewport(event = narrowQuery) {
-  actions.patchView({ inspectorOpen: !event.matches });
+  const focusIsInsideClosingInspector =
+    event.matches && inspectorNode.contains(document.activeElement);
+  if (focusIsInsideClosingInspector) {
+    inspector.close({ restoreFocus: false });
+    inspectorToggle.focus();
+  } else {
+    actions.patchView({ inspectorOpen: !event.matches });
+  }
   renderInspectorView();
 }
 

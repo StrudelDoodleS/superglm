@@ -86,7 +86,7 @@
   line-height: 1.45;
 }
 
-@media (min-width: 1000px) {
+@media (min-width: 1048px) {
   .editor-workspace:has(> .inspector[data-open="false"]) {
     grid-template-columns: var(--tool-rail-width) minmax(0, 1fr);
   }
@@ -96,7 +96,7 @@
   }
 }
 
-@media (max-width: 999px) {
+@media (max-width: 1047px) {
   .inspector-scrim {
     position: fixed;
     inset: 0;

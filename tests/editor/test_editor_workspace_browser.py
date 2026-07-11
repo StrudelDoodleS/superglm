@@ -393,7 +393,7 @@ def test_open_narrow_drawer_clears_its_scrim_when_resized_wide(open_editor_page)
         assert not scrim.is_hidden()
 
         page.set_viewport_size({"width": 1100, "height": 720})
-        page.wait_for_function("() => !matchMedia('(max-width: 999px)').matches")
+        page.wait_for_function("() => !matchMedia('(max-width: 1047px)').matches")
         page.wait_for_function("() => document.querySelector('#inspectorScrim')?.hidden")
         assert scrim.is_hidden()
         scrim.evaluate("node => { node.hidden = false; }")
@@ -402,18 +402,62 @@ def test_open_narrow_drawer_clears_its_scrim_when_resized_wide(open_editor_page)
         assert reference_ci.get_attribute("aria-pressed") == "true"
 
 
+def test_resize_to_narrow_restores_focus_from_inspector_to_toggle(open_editor_page):
+    with open_editor_page(viewport={"width": 1100, "height": 720}) as (page, _session):
+        inspector = page.locator("#inspector")
+        summary_tab = inspector.get_by_role("tab", name="Summary")
+        toggle = page.get_by_role("button", name="Inspector", exact=True)
+
+        summary_tab.focus()
+        assert summary_tab.evaluate("node => document.activeElement === node")
+        page.set_viewport_size({"width": 900, "height": 720})
+        page.wait_for_function(
+            "() => document.querySelector('#inspector')?.dataset.open === 'false'"
+        )
+
+        assert toggle.evaluate("node => document.activeElement === node")
+
+
+@pytest.mark.parametrize(
+    ("width", "expected_open"),
+    [(1047, "false"), (1048, "true")],
+)
+def test_workspace_breakpoint_preserves_chart_width_without_overflow(
+    open_editor_page, width, expected_open
+):
+    with open_editor_page(viewport={"width": width, "height": 720}) as (page, _session):
+        chart = page.locator("#chart").bounding_box()
+
+        assert chart is not None
+        assert page.locator("#inspector").get_attribute("data-open") == expected_open
+        assert chart["width"] >= 600
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+
 def test_short_window_scrolls_without_chart_metric_overlap(open_editor_page):
     with open_editor_page(viewport={"width": 1180, "height": 540}) as (page, _session):
+        page.wait_for_function(
+            """() => {
+                const frame = document.querySelector('#summaryFrame');
+                return frame?.getAttribute('aria-busy') === 'false'
+                    && frame.textContent.trim().length > 0;
+            }"""
+        )
         chart = page.locator("#chart").bounding_box()
         metrics = page.locator(".metrics-strip").bounding_box()
+        workspace = page.locator(".editor-workspace").bounding_box()
 
         assert chart is not None
         assert metrics is not None
+        assert workspace is not None
         assert chart["height"] >= 360
+        assert metrics["height"] < 250
+        assert workspace["height"] < 650
         assert metrics["y"] >= chart["y"] + chart["height"]
         assert not boxes_overlap(chart, metrics)
         scroll_height = page.evaluate("document.documentElement.scrollHeight")
         assert scroll_height > page.evaluate("window.innerHeight")
+        assert scroll_height < 900
         assert metrics["y"] + metrics["height"] <= scroll_height
 
         page.locator(".metrics-strip").scroll_into_view_if_needed()

@@ -166,7 +166,7 @@ body {
   stroke-linejoin: round;
 }
 
-@media (max-width: 999px) {
+@media (max-width: 1047px) {
   .editor-workspace {
     grid-template-columns: var(--tool-rail-width) minmax(0, 1fr);
   }
@@ -178,18 +178,24 @@ body {
     min-height: 0;
   }
 
-  .editor-workspace,
-  .plot-column {
-    min-height: max-content;
+  .editor-workspace {
+    align-items: start;
   }
 
   .plot-column {
+    min-height: 0;
+    align-self: start;
+    align-content: start;
     grid-template-rows: 360px auto;
   }
 }
 
-@media (min-width: 1000px) and (max-height: 620px) {
+@media (min-width: 1048px) and (max-height: 620px) {
   .inspector {
-    min-height: 430px;
+    /* Match the 360px chart, 8px gap, and 170px reserved two-row metrics. */
+    height: calc(360px + 8px + 170px);
+    min-height: 0;
+    align-self: start;
+    overflow: hidden;
   }
 }
