@@ -394,7 +394,10 @@ def test_open_narrow_drawer_clears_its_scrim_when_resized_wide(open_editor_page)
 
         page.set_viewport_size({"width": 1100, "height": 720})
         page.wait_for_function("() => !matchMedia('(max-width: 999px)').matches")
+        page.wait_for_function("() => document.querySelector('#inspectorScrim')?.hidden")
         assert scrim.is_hidden()
+        scrim.evaluate("node => { node.hidden = false; }")
+        assert scrim.evaluate("node => getComputedStyle(node).display === 'none'")
         reference_ci.click()
         assert reference_ci.get_attribute("aria-pressed") == "true"
 
