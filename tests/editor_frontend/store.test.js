@@ -1,0 +1,318 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import * as selectors from "../../src/superglm/editor/app/state/selectors.js";
+import * as storeModule from "../../src/superglm/editor/app/state/store.js";
+
+const {
+  commitRemote,
+  createEditorStore,
+  createInitialEditorState,
+  patchView,
+  setPreviewTerm
+} = storeModule;
+const {
+  selectActiveTermName,
+  selectCurrentSelection,
+  selectCurrentTerm,
+  selectEvidence,
+  selectGroupDisplayMode,
+  selectModelRevision,
+  selectMutation,
+  selectRenderableTerm,
+  selectSnapshot
+} = selectors;
+
+/** @returns {import('../../src/superglm/editor/app/api/contracts.js').EditorSnapshot} */
+function snapshot(revision = 0) {
+  return {
+    model_revision: revision,
+    selected_term: "age",
+    terms: {
+      age: {
+        kind: "spline", term_type: "spline", x: [1], y: [1], original_y: [1],
+        previous_y: null, levels: null, n_points: 1, controls: null,
+        group_display: null, impact: {}
+      }
+    },
+    selection: { age: [0] },
+    can_uncollapse_levels: false,
+    last_collapse: null,
+    history: { active: [], redo: [] }
+  };
+}
+
+test("store keeps confirmed remote data separate from a chart preview", () => {
+  const initial = createInitialEditorState(snapshot());
+  const preview = { ...snapshot().terms.age, y: [1.4] };
+  const next = setPreviewTerm(initial, "age", preview);
+  assert.deepEqual(next.remote.snapshot?.terms.age.y, [1]);
+  assert.deepEqual(selectRenderableTerm(next)?.y, [1.4]);
+});
+
+test("remote commit clears preview and preserves valid view state", () => {
+  let state = createInitialEditorState(snapshot());
+  state = patchView(state, { mode: "move", showCi: true });
+  state = setPreviewTerm(state, "age", { ...snapshot().terms.age, y: [1.4] });
+  state = commitRemote(state, snapshot(1));
+  assert.equal(state.view.mode, "move");
+  assert.equal(state.view.showCi, true);
+  assert.equal(state.view.preview, null);
+  assert.equal(selectActiveTermName(state), "age");
+  assert.deepEqual(selectCurrentSelection(state), [0]);
+});
+
+test("selector subscriptions ignore unrelated state changes", () => {
+  const store = createEditorStore(createInitialEditorState(snapshot()));
+  let calls = 0;
+  store.subscribe(selectActiveTermName, () => { calls += 1; });
+  store.update((state) => patchView(state, { showCi: true }));
+  assert.equal(calls, 0);
+  store.update((state) => patchView(state, { activeTerm: "missing" }));
+  assert.equal(calls, 0);
+});
+
+test("missing selections use one stable immutable empty value", () => {
+  const missingSelection = snapshot();
+  missingSelection.selection = {};
+  const store = createEditorStore(createInitialEditorState(missingSelection));
+  const first = selectCurrentSelection(store.getState());
+  let calls = 0;
+  store.subscribe(selectCurrentSelection, () => { calls += 1; });
+
+  assert.strictEqual(selectCurrentSelection(store.getState()), first);
+  assert.equal(Object.isFrozen(first), true);
+
+  store.update((state) => patchView(state, { showCi: true }));
+
+  assert.equal(calls, 0);
+  assert.strictEqual(selectCurrentSelection(store.getState()), first);
+});
+
+test("initial evidence panel states are independent objects", () => {
+  const state = createInitialEditorState(snapshot());
+  const { metrics, summary, report } = state.request.evidence;
+  assert.notStrictEqual(metrics, summary);
+  assert.notStrictEqual(metrics, report);
+  assert.notStrictEqual(summary, report);
+});
+
+test("view patches are immutable and leave prior state untouched", () => {
+  const prior = createInitialEditorState(snapshot());
+  const next = patchView(prior, { showContrib: true, inspectorPane: "help" });
+
+  assert.notStrictEqual(next, prior);
+  assert.notStrictEqual(next.view, prior.view);
+  assert.strictEqual(next.remote, prior.remote);
+  assert.strictEqual(next.request, prior.request);
+  assert.equal(prior.view.showContrib, false);
+  assert.equal(prior.view.inspectorPane, "summary");
+  assert.equal(next.view.showContrib, true);
+  assert.equal(next.view.inspectorPane, "help");
+});
+
+test("a no-op store update does not run selectors or notify listeners", () => {
+  const initial = createInitialEditorState(snapshot());
+  const store = createEditorStore(initial);
+  let selectorCalls = 0;
+  let calls = 0;
+  store.subscribe((state) => {
+    selectorCalls += 1;
+    return state;
+  }, () => { calls += 1; });
+
+  assert.equal(selectorCalls, 1);
+
+  store.update((state) => state);
+
+  assert.strictEqual(store.getState(), initial);
+  assert.equal(selectorCalls, 1);
+  assert.equal(calls, 0);
+});
+
+test("subscriptions notify only for selected changes and stop after unsubscribe", () => {
+  const store = createEditorStore(createInitialEditorState(snapshot()));
+  /** @type {Array<[boolean, boolean]>} */
+  const notifications = [];
+  const unsubscribe = store.subscribe(
+    (state) => state.view.showCi,
+    (value, previous) => notifications.push([value, previous])
+  );
+
+  store.update((state) => patchView(state, { showContrib: true }));
+  store.update((state) => patchView(state, { showCi: true }));
+  store.update((state) => patchView(state, { inspectorOpen: false }));
+  unsubscribe();
+  store.update((state) => patchView(state, { showCi: false }));
+
+  assert.deepEqual(notifications, [[true, false]]);
+});
+
+test("nested updates refresh selector caches before notifying remaining subscribers", () => {
+  const store = createEditorStore(createInitialEditorState(snapshot()));
+  /** @type {string[]} */
+  const notifications = [];
+  store.subscribe(
+    (state) => state.view.showCi,
+    (value, previous) => {
+      notifications.push(`trigger:${previous}->${value}`);
+      if (value) {
+        store.update((state) => patchView(state, { showContrib: true }));
+      }
+    }
+  );
+  store.subscribe(
+    (state) => `${state.view.showCi}:${state.view.showContrib}`,
+    (value, previous) => notifications.push(`peer:${previous}->${value}`)
+  );
+
+  store.update((state) => patchView(state, { showCi: true }));
+
+  assert.equal(store.getState().view.showContrib, true);
+  assert.deepEqual(notifications, [
+    "trigger:false->true",
+    "peer:false:false->true:true"
+  ]);
+});
+
+test("subscription changes during notification take effect immediately", () => {
+  const store = createEditorStore(createInitialEditorState(snapshot()));
+  let controllerArmed = true;
+  let removedCalls = 0;
+  let addedCalls = 0;
+  let unsubscribeRemoved = () => {};
+
+  store.subscribe(
+    (state) => state.view.showCi,
+    () => {
+      if (!controllerArmed) return;
+      controllerArmed = false;
+      unsubscribeRemoved();
+      store.subscribe(
+        (state) => state.view.showCi,
+        () => { addedCalls += 1; }
+      );
+    }
+  );
+  unsubscribeRemoved = store.subscribe(
+    (state) => state.view.showCi,
+    () => { removedCalls += 1; }
+  );
+
+  store.update((state) => patchView(state, { showCi: true }));
+
+  assert.equal(removedCalls, 0);
+  assert.equal(addedCalls, 0);
+
+  store.update((state) => patchView(state, { showCi: false }));
+  assert.equal(removedCalls, 0);
+  assert.equal(addedCalls, 1);
+});
+
+test("remote commit falls back to the selected term when the active term disappears", () => {
+  const initial = patchView(createInitialEditorState(snapshot()), { activeTerm: "missing" });
+  const nextSnapshot = {
+    ...snapshot(2),
+    selected_term: "weight",
+    terms: {
+      weight: { ...snapshot().terms.age, y: [2] },
+      height: { ...snapshot().terms.age, y: [3] }
+    },
+    selection: { weight: [2], height: [3] }
+  };
+
+  const next = commitRemote(initial, nextSnapshot);
+
+  assert.equal(next.view.activeTerm, "weight");
+  assert.equal(selectCurrentTerm(next)?.y[0], 2);
+});
+
+test("remote commit falls back to the first term when selected term is empty", () => {
+  const initial = patchView(createInitialEditorState(snapshot()), { activeTerm: "missing" });
+  const nextSnapshot = {
+    ...snapshot(3),
+    selected_term: "",
+    terms: {
+      height: { ...snapshot().terms.age, y: [3] },
+      weight: { ...snapshot().terms.age, y: [2] }
+    },
+    selection: { height: [3], weight: [2] }
+  };
+
+  assert.equal(commitRemote(initial, nextSnapshot).view.activeTerm, "height");
+});
+
+test("term resolution ignores a stale selected term", () => {
+  const staleSelection = snapshot(4);
+  staleSelection.selected_term = "removed";
+  const initial = createInitialEditorState(staleSelection);
+
+  assert.equal(initial.view.activeTerm, "removed");
+  assert.equal(selectActiveTermName(initial), "age");
+});
+
+test("remote commit ignores a stale selected term when the active term disappeared", () => {
+  const initial = patchView(createInitialEditorState(snapshot()), { activeTerm: "missing" });
+  const nextSnapshot = {
+    ...snapshot(5),
+    selected_term: "removed",
+    terms: {
+      height: { ...snapshot().terms.age, y: [3] },
+      weight: { ...snapshot().terms.age, y: [2] }
+    },
+    selection: { height: [3], weight: [2] }
+  };
+
+  assert.equal(commitRemote(initial, nextSnapshot).view.activeTerm, "height");
+});
+
+test("selectors expose confirmed state defaults and per-term display overrides", () => {
+  const confirmed = snapshot(7);
+  confirmed.terms.age.group_display = {
+    available: true,
+    default_mode: "collapsed",
+    collapsed: null
+  };
+  let state = createInitialEditorState(confirmed);
+
+  assert.strictEqual(selectSnapshot(state), confirmed);
+  assert.equal(selectModelRevision(state), 7);
+  assert.equal(selectActiveTermName(state), "age");
+  assert.strictEqual(selectCurrentTerm(state), confirmed.terms.age);
+  assert.deepEqual(selectCurrentSelection(state), [0]);
+  assert.equal(selectGroupDisplayMode(state), "collapsed");
+  assert.strictEqual(selectMutation(state), state.request.mutation);
+  assert.strictEqual(selectEvidence("metrics")(state), state.request.evidence.metrics);
+
+  state = patchView(state, { groupModeByTerm: { age: "expanded" } });
+  assert.equal(selectGroupDisplayMode(state), "expanded");
+
+  const empty = createInitialEditorState();
+  assert.equal(selectModelRevision(empty), -1);
+  assert.equal(selectActiveTermName(empty), "");
+  assert.equal(selectCurrentTerm(empty), null);
+  assert.deepEqual(selectCurrentSelection(empty), []);
+  assert.equal(selectRenderableTerm(empty), null);
+  assert.equal(selectGroupDisplayMode(empty), "expanded");
+});
+
+test("state modules expose only their requested public symbols", () => {
+  assert.deepEqual(Object.keys(storeModule).sort(), [
+    "commitRemote",
+    "createEditorStore",
+    "createInitialEditorState",
+    "patchView",
+    "setPreviewTerm"
+  ]);
+  assert.deepEqual(Object.keys(selectors).sort(), [
+    "selectActiveTermName",
+    "selectCurrentSelection",
+    "selectCurrentTerm",
+    "selectEvidence",
+    "selectGroupDisplayMode",
+    "selectModelRevision",
+    "selectMutation",
+    "selectRenderableTerm",
+    "selectSnapshot"
+  ]);
+});
