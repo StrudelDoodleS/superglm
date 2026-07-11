@@ -115,6 +115,15 @@ jobs:
                   raise SystemExit(f"Unexpected entries in {archive}: {bad[:20]}")
 
 
+          editor_root = Path("src/superglm/editor/app")
+          required_suffixes = {
+              f"superglm/editor/app/{path.relative_to(editor_root).as_posix()}"
+              for path in editor_root.rglob("*")
+              if path.is_file()
+              and (path.name == "index.html" or path.suffix in {".js", ".css"})
+          }
+
+
           def require_editor_assets(names, archive):
               archive_name = Path(archive).name
               if archive_name.endswith(".whl"):
@@ -135,22 +144,6 @@ jobs:
                       f"Unsupported package archive for editor asset check: {archive}"
                   )
 
-              required_suffixes = {
-                  "superglm/editor/app/index.html",
-                  "superglm/editor/app/main.js",
-                  "superglm/editor/app/api/client.js",
-                  "superglm/editor/app/api/contracts.js",
-                  "superglm/editor/app/chart/geometry.js",
-                  "superglm/editor/app/state/store.js",
-                  "superglm/editor/app/state/selectors.js",
-                  "superglm/editor/app/state/actions.js",
-                  "superglm/editor/app/styles/tokens.css",
-                  "superglm/editor/app/styles/shell.css",
-                  "superglm/editor/app/styles/chart.css",
-                  "superglm/editor/app/styles/panels.css",
-                  "superglm/editor/app/views/help_content.js",
-                  "superglm/editor/app/views/popover.js",
-              }
               required = {f"{source_prefix}{suffix}" for suffix in required_suffixes}
               missing = required.difference(names)
               if missing:

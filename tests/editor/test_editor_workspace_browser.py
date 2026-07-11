@@ -216,8 +216,9 @@ def test_analyst_can_discover_edit_undo_redo_help_and_save(open_editor_page):
                 response.request.method == "POST"
                 and response.url.split("?", maxsplit=1)[0].endswith("/select")
             )
-        ):
+        ) as selection_response:
             page.locator("#chart .point").nth(2).click()
+        assert selection_response.value.status == 200
         page.locator("#selectionMenu").wait_for(state="visible")
 
         increase = page.get_by_role("button", name="Increase selection", exact=True)
@@ -236,6 +237,7 @@ def test_analyst_can_discover_edit_undo_redo_help_and_save(open_editor_page):
             )
         ) as edit_response:
             increase.click()
+        assert edit_response.value.status == 200
         assert edit_response.value.request.post_data_json == {"operation": "shift_up"}
 
         undo = page.get_by_role("button", name="Undo edit")
@@ -248,6 +250,7 @@ def test_analyst_can_discover_edit_undo_redo_help_and_save(open_editor_page):
             )
         ) as undo_response:
             undo.click()
+        assert undo_response.value.status == 200
         assert undo_response.value.request.post_data_json == {"operation": "undo"}
 
         redo = page.get_by_role("button", name="Redo edit")
@@ -260,7 +263,14 @@ def test_analyst_can_discover_edit_undo_redo_help_and_save(open_editor_page):
             )
         ) as redo_response:
             redo.click()
+        assert redo_response.value.status == 200
         assert redo_response.value.request.post_data_json == {"operation": "redo"}
+        page.wait_for_function(
+            """() => !document.querySelector('#undoAction').disabled
+                && document.querySelector('#redoAction').disabled"""
+        )
+        assert undo.is_enabled()
+        assert redo.is_disabled()
 
         page.get_by_role("button", name="Help", exact=True).click()
         assert page.get_by_role("tabpanel", name="Help").is_visible()
@@ -272,9 +282,56 @@ def test_analyst_can_discover_edit_undo_redo_help_and_save(open_editor_page):
                 response.request.method == "POST"
                 and response.url.split("?", maxsplit=1)[0].endswith("/save_directory")
             )
-        ):
+        ) as save_directory_response:
             save.click()
+        assert save_directory_response.value.status == 200
         page.get_by_role("dialog", name="Save Edited Model").wait_for(state="visible")
+
+
+def test_raw_summary_html_is_isolated_in_a_sandboxed_iframe(open_editor_page):
+    malicious_html = (
+        "<div id='sandbox-payload'>Injected summary payload</div>"
+        "<script>parent.document.documentElement.dataset.summarySandboxEscape='executed'</script>"
+    )
+    payload = {
+        "available": True,
+        "label": "Security summary",
+        "note": "",
+        "html": malicious_html,
+        "compact": {
+            "model": {"family": "Gaussian", "link": "Identity", "method": "PIRLS"},
+            "rows": [],
+        },
+    }
+
+    with open_editor_page() as (page, _session):
+        page.route(
+            "**/summary",
+            lambda route: route.fulfill(status=200, json=payload),
+        )
+        page.evaluate("delete document.documentElement.dataset.summarySandboxEscape")
+
+        with page.expect_response(
+            lambda response: response.url.split("?", maxsplit=1)[0].endswith("/summary")
+        ) as summary_response:
+            page.locator("#summarySource").evaluate(
+                """node => {
+                    node.value = 'selected';
+                    node.dispatchEvent(new Event('change', { bubbles: true }));
+                }"""
+            )
+        assert summary_response.value.status == 200
+        page.wait_for_function(
+            """() => document.querySelector('.raw-summary-frame')
+                ?.getAttribute('srcdoc')?.includes('summarySandboxEscape')"""
+        )
+
+        frame = page.locator(".raw-summary-frame")
+        assert frame.get_attribute("sandbox") == ""
+        assert frame.get_attribute("referrerpolicy") == "no-referrer"
+        assert malicious_html in frame.get_attribute("srcdoc")
+        page.wait_for_timeout(250)
+        assert page.evaluate("document.documentElement.dataset.summarySandboxEscape") is None
 
 
 def test_context_bar_reports_term_kind_and_edf(open_editor_page):
