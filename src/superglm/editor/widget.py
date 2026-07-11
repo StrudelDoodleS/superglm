@@ -108,23 +108,26 @@ class EditorWidget:
                 "history": history_payload(self.session),
             }
 
+    def _select_term(self, term: str) -> None:
+        if term not in self.session.terms:
+            raise KeyError(f"Unknown editable term: {term!r}")
+        self.selected_term = term
+
     def _set_term(self, term: str) -> dict[str, Any]:
         with self._lock:
-            if term not in self.session.terms:
-                raise KeyError(f"Unknown editable term: {term!r}")
-            self.selected_term = term
+            self._select_term(term)
             return self._state()
 
     def _select(self, term: str, indices: list[int]) -> dict[str, Any]:
         with self._lock:
-            self._set_term(term)
+            self._select_term(term)
             self.session.select_indices(term, indices)
             return self._state()
 
     def _operate(self, operation: str, term: str | None = None) -> dict[str, Any]:
         with self._lock:
             if term is not None:
-                self._set_term(term)
+                self._select_term(term)
             target = self.selected_term
             if operation == "shift_up":
                 self.session.shift(target, float(np.log(1.05)))
@@ -175,7 +178,7 @@ class EditorWidget:
         values: list[float] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
-            self._set_term(term)
+            self._select_term(term)
             self.session.select_indices(term, indices)
             if values is None:
                 self.session.shift(term, float(delta))
@@ -193,7 +196,7 @@ class EditorWidget:
         handle_count: int | None = None,
     ) -> dict[str, Any]:
         with self._lock:
-            self._set_term(term)
+            self._select_term(term)
             if handle_count is not None:
                 controls = self.session.control_points(term, n_handles=int(handle_count))
                 self.control_counts[term] = int(controls["x"].size)
@@ -208,7 +211,7 @@ class EditorWidget:
 
     def _set_control_count(self, term: str, count: int) -> dict[str, Any]:
         with self._lock:
-            self._set_term(term)
+            self._select_term(term)
             controls = self.session.control_points(term, n_handles=int(count))
             self.control_counts[term] = int(controls["x"].size)
             return self._state()
@@ -455,11 +458,37 @@ class EditorWidget:
             job["finished_at"] = time.time()
             self._profile_condition.notify_all()
 
+    def _structural_transition(
+        self,
+        operation: str,
+        *,
+        operation_start: float,
+        fit_start: float,
+        fit_end: float,
+    ) -> dict[str, Any]:
+        summary_start = time.perf_counter()
+        summary = summary_payload(self, "in_force")
+        summary_end = time.perf_counter()
+        state_start = time.perf_counter()
+        state = self._state()
+        state_end = time.perf_counter()
+        return {
+            "state": state,
+            "summary": summary,
+            "timing": {
+                "operation": operation,
+                "fit_ms": _elapsed_ms(fit_start, fit_end),
+                "summary_ms": _elapsed_ms(summary_start, summary_end),
+                "state_ms": _elapsed_ms(state_start, state_end),
+                "server_total_ms": _elapsed_ms(operation_start, state_end),
+            },
+        }
+
     def _collapse_levels(self, term: str | None = None, method: str = "auto") -> dict[str, Any]:
         with self._lock:
             operation_start = time.perf_counter()
             if term is not None:
-                self._set_term(term)
+                self._select_term(term)
             target = self.selected_term
             selected_indices = self.session.selection(target).astype(int).tolist()
             selected_levels = self._selected_level_labels(target)
@@ -473,24 +502,18 @@ class EditorWidget:
             self._in_force_info = dict(self._collapsed_refit_info)
             self._invalidate_refit()
             self._restore_selection(target, selected_levels, selected_indices)
-            summary_start = time.perf_counter()
-            payload = summary_payload(self, "in_force")
-            summary_end = time.perf_counter()
-            payload["timing"] = _timing_payload(
+            return self._structural_transition(
                 "collapse_levels",
-                operation_start,
-                fit_start,
-                fit_end,
-                summary_start,
-                summary_end,
+                operation_start=operation_start,
+                fit_start=fit_start,
+                fit_end=fit_end,
             )
-            return payload
 
     def _ungroup_levels(self, term: str | None = None, method: str = "auto") -> dict[str, Any]:
         with self._lock:
             operation_start = time.perf_counter()
             if term is not None:
-                self._set_term(term)
+                self._select_term(term)
             target = self.selected_term
             selected_indices = self.session.selection(target).astype(int).tolist()
             selected_levels = self._selected_level_labels(target)
@@ -504,23 +527,17 @@ class EditorWidget:
             self._in_force_info = dict(self._collapsed_refit_info)
             self._invalidate_refit()
             self._restore_selection(target, selected_levels, selected_indices)
-            summary_start = time.perf_counter()
-            payload = summary_payload(self, "in_force")
-            summary_end = time.perf_counter()
-            payload["timing"] = _timing_payload(
+            return self._structural_transition(
                 "ungroup_levels",
-                operation_start,
-                fit_start,
-                fit_end,
-                summary_start,
-                summary_end,
+                operation_start=operation_start,
+                fit_start=fit_start,
+                fit_end=fit_end,
             )
-            return payload
 
     def _reorder_levels(self, term: str | None = None, target_index: int = 0) -> dict[str, Any]:
         with self._lock:
             if term is not None:
-                self._set_term(term)
+                self._select_term(term)
             self.session.reorder_levels(self.selected_term, target_index=int(target_index))
             return self._state()
 
@@ -541,18 +558,12 @@ class EditorWidget:
             self._invalidate_refit()
             if self.selected_term not in self.session.terms:
                 self.selected_term = next(iter(self.session.terms), "")
-            summary_start = time.perf_counter()
-            payload = summary_payload(self, "in_force")
-            summary_end = time.perf_counter()
-            payload["timing"] = _timing_payload(
+            return self._structural_transition(
                 "uncollapse_levels",
-                operation_start,
-                fit_start,
-                fit_end,
-                summary_start,
-                summary_end,
+                operation_start=operation_start,
+                fit_start=fit_start,
+                fit_end=fit_end,
             )
-            return payload
 
     def _selected_level_labels(self, term: str) -> list[str]:
         editable = self.session.terms.get(term)
@@ -663,24 +674,6 @@ def _normalise_profile_estimate(estimate: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("objective_label", "loss")
     payload.setdefault("lower_is_better", True)
     return jsonable(payload)
-
-
-def _timing_payload(
-    operation: str,
-    operation_start: float,
-    fit_start: float,
-    fit_end: float,
-    summary_start: float,
-    summary_end: float,
-) -> dict[str, Any]:
-    return jsonable(
-        {
-            "operation": operation,
-            "fit_ms": _elapsed_ms(fit_start, fit_end),
-            "summary_ms": _elapsed_ms(summary_start, summary_end),
-            "server_total_ms": _elapsed_ms(operation_start, summary_end),
-        }
-    )
 
 
 def _elapsed_ms(start: float, end: float) -> float:

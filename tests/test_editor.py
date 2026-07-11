@@ -2841,6 +2841,29 @@ def test_widget_state_exposes_semantic_model_revision(editor_model):
         widget.close()
 
 
+def test_widget_composite_selection_serializes_state_once(editor_model, monkeypatch):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    state_calls = 0
+    original_state = widget._state
+
+    def counted_state():
+        nonlocal state_calls
+        state_calls += 1
+        return original_state()
+
+    try:
+        monkeypatch.setattr(widget, "_state", counted_state)
+
+        payload = widget._select("x_spline", [3, 4])
+
+        assert state_calls == 1
+        assert payload["selected_term"] == "x_spline"
+        assert payload["selection"]["x_spline"] == [3, 4]
+    finally:
+        widget.close()
+
+
 def test_widget_state_exposes_density_for_continuous_and_bars_for_levels(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline", "region"])
     widget = session.widget()
@@ -3211,23 +3234,48 @@ def test_widget_http_collapse_levels_refit_updates_summary_source(editor_model):
             {"term": "region", "method": "fit"},
         )
 
-        assert payload["available"] is True
-        assert payload["source"] == "in_force"
-        assert payload["label"] == "In-force edit model"
+        assert set(payload) == {"state", "summary", "timing"}
+        assert payload["summary"]["available"] is True
+        assert payload["summary"]["source"] == "in_force"
+        assert payload["summary"]["label"] == "In-force edit model"
+        assert payload["state"]["model_revision"] == session.model_revision == 1
+        assert payload["state"]["terms"]["region"]["y"][1] == pytest.approx(
+            payload["state"]["terms"]["region"]["y"][2]
+        )
+        assert payload["timing"]["fit_ms"] >= 0.0
+        assert payload["timing"]["summary_ms"] >= 0.0
+        assert payload["timing"]["state_ms"] >= 0.0
         assert widget.session.model is not editor_model
         grouping = widget.session.model.features["region"]._grouping
         assert grouping.original_to_group["B"] == "B+C"
         assert grouping.original_to_group["C"] == "B+C"
+        assert "model_source" not in payload["state"]
+        assert "model_sources" not in payload["state"]
+        assert "Current editable model" in payload["summary"]["note"]
+    finally:
+        widget.close()
 
-        state = _get_json(f"{widget.url}/state")
-        assert "model_source" not in state
-        assert "model_sources" not in state
-        assert state["terms"]["region"]["y"][1] == pytest.approx(state["terms"]["region"]["y"][2])
 
-        summary = _post_json(f"{widget.url}/summary", {"source": "in_force"})
-        assert summary["available"] is True
-        assert summary["source"] == "in_force"
-        assert "Current editable model" in summary["note"]
+def test_widget_http_ungroup_levels_returns_transition_envelope(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    try:
+        _post_json(f"{widget.url}/select", {"term": "region", "indices": [1, 2]})
+        _post_json(f"{widget.url}/collapse_levels", {"term": "region", "method": "fit"})
+
+        payload = _post_json(
+            f"{widget.url}/ungroup_levels",
+            {"term": "region", "method": "fit"},
+        )
+
+        assert set(payload) == {"state", "summary", "timing"}
+        assert payload["summary"]["available"] is True
+        assert payload["summary"]["source"] == "in_force"
+        assert payload["state"]["model_revision"] == session.model_revision == 2
+        assert payload["timing"]["operation"] == "ungroup_levels"
+        assert payload["timing"]["fit_ms"] >= 0.0
+        assert payload["timing"]["summary_ms"] >= 0.0
+        assert payload["timing"]["state_ms"] >= 0.0
     finally:
         widget.close()
 
@@ -3268,7 +3316,7 @@ def test_widget_collapse_restores_selection_by_level_when_indices_are_stale(
 
         payload = widget._collapse_levels("region", method="fit")
 
-        assert payload["available"] is True
+        assert payload["summary"]["available"] is True
         assert session.selection("region").tolist() == [1]
     finally:
         widget.close()
@@ -3279,7 +3327,7 @@ def test_widget_collapse_levels_reports_refit_timing(editor_model, monkeypatch):
 
     session = EditorSession.from_model(editor_model, terms=["region"])
     widget = session.widget()
-    clock = iter([10.00, 10.01, 10.06, 10.07, 10.09])
+    clock = iter([10.00, 10.01, 10.06, 10.07, 10.09, 10.10, 10.13])
     try:
         monkeypatch.setattr(widget_module.time, "perf_counter", lambda: next(clock))
         monkeypatch.setattr(
@@ -3298,7 +3346,8 @@ def test_widget_collapse_levels_reports_refit_timing(editor_model, monkeypatch):
         assert payload["timing"]["operation"] == "collapse_levels"
         assert payload["timing"]["fit_ms"] == pytest.approx(50.0)
         assert payload["timing"]["summary_ms"] == pytest.approx(20.0)
-        assert payload["timing"]["server_total_ms"] == pytest.approx(90.0)
+        assert payload["timing"]["state_ms"] == pytest.approx(30.0)
+        assert payload["timing"]["server_total_ms"] == pytest.approx(130.0)
     finally:
         widget.close()
 
@@ -3308,22 +3357,30 @@ def test_widget_http_uncollapse_levels_restores_previous_model(editor_model):
     widget = session.widget()
     try:
         _post_json(f"{widget.url}/select", {"term": "region", "indices": [1, 2]})
-        _post_json(f"{widget.url}/collapse_levels", {"term": "region", "method": "fit"})
-        collapsed_state = _get_json(f"{widget.url}/state")
+        collapse_payload = _post_json(
+            f"{widget.url}/collapse_levels", {"term": "region", "method": "fit"}
+        )
+        collapsed_state = collapse_payload["state"]
         assert collapsed_state["can_uncollapse_levels"] is True
         assert widget.session.model is not editor_model
         assert widget.session.model.features["region"]._grouping.original_to_group["B"] == "B+C"
 
         payload = _post_json(f"{widget.url}/uncollapse_levels", {})
 
-        assert payload["available"] is True
-        assert payload["source"] == "in_force"
+        assert set(payload) == {"state", "summary", "timing"}
+        assert payload["summary"]["available"] is True
+        assert payload["summary"]["source"] == "in_force"
+        assert payload["state"]["model_revision"] == session.model_revision == 2
         assert widget.session.model is editor_model
         assert getattr(widget.session.model.features["region"], "_grouping", None) is None
-        state = _get_json(f"{widget.url}/state")
+        state = payload["state"]
         assert state["can_uncollapse_levels"] is False
         assert state["last_collapse"] is None
         assert state["terms"]["region"]["y"][1] != pytest.approx(state["terms"]["region"]["y"][2])
+        assert payload["timing"]["operation"] == "uncollapse_levels"
+        assert payload["timing"]["fit_ms"] >= 0.0
+        assert payload["timing"]["summary_ms"] >= 0.0
+        assert payload["timing"]["state_ms"] >= 0.0
     finally:
         widget.close()
 
