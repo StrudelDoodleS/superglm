@@ -41,7 +41,9 @@ export function bindAppBar({ root, undoButton, redoButton, onView, onUndo, onRed
 
   /** @param {KeyboardEvent} event */
   function onDocumentKeyDown(event) {
-    if (isEditableTarget(event.target) || event.altKey) return;
+    if (isEditableTarget(event.target) || event.altKey || document.querySelector("dialog[open]")) {
+      return;
+    }
     const primary = event.ctrlKey || event.metaKey;
     if (!primary) return;
     const key = event.key.toLowerCase();

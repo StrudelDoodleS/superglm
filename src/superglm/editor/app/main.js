@@ -539,18 +539,23 @@ async function refreshActiveReport() {
 }
 
 async function runStructuralRefit(descriptor) {
-  const state = store.getState();
-  if (appBusyActive || state.request.mutation.status !== "idle") {
-    return { ok: false, skipped: true };
-  }
-  const snapshot = selectSnapshot(store.getState());
-  if (!snapshot) return { ok: false, skipped: true };
-  const impact = structuralImpact(snapshot, descriptor);
-  if (impact.requiresConfirmation && !(await structuralConfirm.confirm(impact))) {
-    return { ok: false, skipped: true };
-  }
-  if (appBusyActive || store.getState().request.mutation.status !== "idle") {
-    return { ok: false, skipped: true };
+  while (true) {
+    const state = store.getState();
+    if (appBusyActive || state.request.mutation.status !== "idle") {
+      return { ok: false, skipped: true };
+    }
+    const snapshot = selectSnapshot(store.getState());
+    if (!snapshot) return { ok: false, skipped: true };
+    const impact = structuralImpact(snapshot, descriptor);
+    if (impact.requiresConfirmation && !(await structuralConfirm.confirm(impact))) {
+      return { ok: false, skipped: true };
+    }
+
+    const confirmedState = store.getState();
+    if (appBusyActive || confirmedState.request.mutation.status !== "idle") {
+      return { ok: false, skipped: true };
+    }
+    if (selectSnapshot(confirmedState) === snapshot) break;
   }
 
   stopContributionBuild();

@@ -28,7 +28,7 @@ const OPERATION_TITLES = Object.freeze({
  * @returns {StructuralImpact}
  */
 export function structuralImpact(snapshot, operation) {
-  const historyCount = snapshot.history.active.length;
+  const historyCount = snapshot.history.active.length + snapshot.history.redo.length;
   if (historyCount === 0) return { requiresConfirmation: false };
 
   const selectedTerm = snapshot.selected_term;
@@ -36,11 +36,14 @@ export function structuralImpact(snapshot, operation) {
   const selectedLabels = (snapshot.selection[selectedTerm] || [])
     .map((index) => levels[index])
     .filter((label) => typeof label === "string");
-  const operationTitle = OPERATION_TITLES[operation.name] || sentenceCase(operation.name);
+  const operationTitle = Object.prototype.hasOwnProperty.call(OPERATION_TITLES, operation.name)
+    ? OPERATION_TITLES[operation.name]
+    : sentenceCase(operation.name);
   const historyNoun = historyCount === 1 ? "entry" : "entries";
+  const labelCopy = selectedLabels.length > 0 ? ` ${selectedLabels.join(", ")}` : "";
   const question = operation.name === "restore collapsed levels"
     ? `Restore the previous collapse in ${selectedTerm}?`
-    : `${operationTitle} ${selectedLabels.join(", ")} in ${selectedTerm}?`;
+    : `${operationTitle}${labelCopy} in ${selectedTerm}?`;
 
   return {
     requiresConfirmation: true,
