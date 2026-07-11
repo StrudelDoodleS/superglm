@@ -410,10 +410,13 @@ test("selectors expose confirmed state defaults and per-term display overrides",
 
 test("state modules expose only their requested public symbols", () => {
   assert.deepEqual(Object.keys(storeModule).sort(), [
+    "beginEvidence",
     "commitRemote",
     "commitStructuralTransition",
+    "completeEvidence",
     "createEditorStore",
     "createInitialEditorState",
+    "failEvidence",
     "patchView",
     "setPreviewTerm"
   ]);

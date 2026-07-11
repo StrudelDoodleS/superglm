@@ -269,7 +269,12 @@
           <option value="pearson_chi2">Pearson Chi2</option>
           <option value="effective_df">Total EDF</option>
         </select>
-        <div id="metricGrid" class="metric-grid">Computing metrics...</div>
+        <div id="metricGrid" class="metric-grid" aria-busy="true"
+          data-freshness="idle">Computing metrics...</div>
+        <div class="evidence-status-row">
+          <div id="metricFreshness" class="evidence-freshness" aria-live="polite">Loading metrics...</div>
+          <button id="metricRetry" class="evidence-retry" type="button" hidden>Retry</button>
+        </div>
       </div>
     </div>
     <aside id="inspector" class="inspector" aria-label="Model inspector" data-open="true">
@@ -302,9 +307,13 @@
           <button id="reprofileTweedie" type="button" hidden>Re-profile p</button>
           <button id="reprofileNb2" type="button" hidden>Re-estimate theta</button>
         </div>
-        <div id="summaryStatus">Loading summary...</div>
+        <div class="evidence-status-row">
+          <div id="summaryStatus" class="evidence-freshness" aria-live="polite">Loading summary...</div>
+          <button id="summaryRetry" class="evidence-retry" type="button" hidden>Retry</button>
+        </div>
         <div id="summaryNote" class="summary-note"></div>
-        <div id="summaryFrame" class="summary-frame"></div>
+        <div id="summaryFrame" class="summary-frame" aria-busy="true"
+          data-freshness="idle"></div>
       </div>
       <div id="historyPane" class="sidepanel-pane" role="tabpanel"
         aria-labelledby="historyTab" data-inspector-pane="history" hidden>
@@ -333,9 +342,14 @@
       <div>
         <h2 id="reportTitle">Validation Report</h2>
         <p id="reportStatus">Loading report...</p>
+        <div class="evidence-status-row">
+          <div id="reportFreshness" class="evidence-freshness" aria-live="polite">Loading report...</div>
+          <button id="reportRetry" class="evidence-retry" type="button" hidden>Retry</button>
+        </div>
       </div>
     </div>
-    <div id="reportFrame" class="report-frame"></div>
+    <div id="reportFrame" class="report-frame" aria-busy="true"
+      data-freshness="idle"></div>
   </section>
   </div>
 

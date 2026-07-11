@@ -87,6 +87,41 @@
   line-height: 1.45;
 }
 
+.evidence-status-row {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.evidence-freshness {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.evidence-freshness[data-freshness="updating"] {
+  color: var(--blue);
+}
+
+.evidence-freshness[data-freshness="stale"],
+.evidence-freshness[data-freshness="error"] {
+  color: var(--danger);
+}
+
+.evidence-retry {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.metrics-strip > .evidence-status-row {
+  margin-top: 4px;
+  padding: 0 8px;
+}
+
 @media (min-width: 1048px) {
   .editor-workspace:has(> .inspector[data-open="false"]) {
     grid-template-columns: var(--tool-rail-width) minmax(0, 1fr);

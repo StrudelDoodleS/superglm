@@ -3,10 +3,13 @@ import test from "node:test";
 
 import * as actionsModule from "../../src/superglm/editor/app/state/actions.js";
 import {
+  beginEvidence,
   commitRemote,
   commitStructuralTransition,
+  completeEvidence,
   createEditorStore,
   createInitialEditorState,
+  failEvidence,
   patchView as patchViewState,
   setPreviewTerm
 } from "../../src/superglm/editor/app/state/store.js";
@@ -142,7 +145,7 @@ test("successful mutation commits once and schedules only a new revision", async
   const actions = createEditorActions({
     store,
     client: { postJSON: async () => snapshot(1), getState: async () => snapshot(1) },
-    scheduleEvidence: (revision) => { scheduled.push(revision); }
+    scheduleVisibleEvidence: (revision) => { scheduled.push(revision); }
   });
 
   const result = await actions.executeStateMutation({
@@ -165,7 +168,7 @@ test("an asynchronous scheduling error cannot turn a confirmed mutation into a f
   const actions = createEditorActions({
     store,
     client: { postJSON: async () => snapshot(1), getState: async () => snapshot(1) },
-    scheduleEvidence: async () => { throw new Error("scheduler bug"); }
+    scheduleVisibleEvidence: async () => { throw new Error("scheduler bug"); }
   });
 
   const result = await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
@@ -188,7 +191,7 @@ test("same-revision mutation clears preview without scheduling evidence", async 
   const actions = createEditorActions({
     store,
     client: { postJSON: async () => returned, getState: async () => returned },
-    scheduleEvidence: (revision) => { scheduled.push(revision); }
+    scheduleVisibleEvidence: (revision) => { scheduled.push(revision); }
   });
 
   const result = await actions.executeStateMutation({
@@ -238,10 +241,8 @@ test("a running mutation suppresses ordinary and structural duplicate submission
   assert.equal((await first).ok, true);
 });
 
-test("structural mutation commits once before paint and awaits secondary evidence before idle", async () => {
+test("structural mutation commits, paints, becomes idle, then schedules immediate evidence", async () => {
   const envelope = transitionEnvelope();
-  const secondary = deferred();
-  const secondaryStarted = deferred();
   const store = createEditorStore(createInitialEditorState(snapshot(2)));
   /** @type {string[]} */
   const events = [];
@@ -261,6 +262,10 @@ test("structural mutation commits once before paint and awaits secondary evidenc
     waitForPaint: async () => {
       events.push("paint");
       assert.equal(store.getState().request.mutation.status, "running");
+    },
+    scheduleVisibleEvidence: (revision, options) => {
+      events.push(`evidence:${revision}:${options?.immediate}:${options?.summaryCommitted}`);
+      assert.equal(store.getState().request.mutation.status, "idle");
     }
   });
   store.subscribe((state) => state.remote, () => { events.push("commit"); });
@@ -272,21 +277,8 @@ test("structural mutation commits once before paint and awaits secondary evidenc
     name: "collapse levels",
     path: "/collapse_levels",
     payload: { term: "age", method: "auto" },
-    onRequestSettled: () => { events.push("request-settled"); },
-    waitForSecondary: async (revision) => {
-      events.push(`secondary:${revision}`);
-      secondaryStarted.resolve(undefined);
-      await secondary.promise;
-    }
+    onRequestSettled: () => { events.push("request-settled"); }
   });
-  await secondaryStarted.promise;
-
-  assert.equal(store.getState().request.mutation.status, "running");
-  assert.deepEqual(events, [
-    "post", "request-settled", "commit", "paint", "secondary:7"
-  ]);
-
-  secondary.resolve(undefined);
   const result = await pending;
 
   assert.deepEqual(result, { ok: true, envelope });
@@ -294,7 +286,7 @@ test("structural mutation commits once before paint and awaits secondary evidenc
   assert.strictEqual(store.getState().remote.snapshot, envelope.state);
   assert.strictEqual(store.getState().remote.summary, envelope.summary);
   assert.deepEqual(events, [
-    "post", "request-settled", "commit", "paint", "secondary:7", "idle"
+    "post", "request-settled", "commit", "paint", "idle", "evidence:7:true:true"
   ]);
 });
 
@@ -578,98 +570,75 @@ test("structural response rejects malformed snapshot and timing contracts", asyn
   }
 });
 
-for (const failurePoint of ["paint", "secondary"]) {
-  test(`structural ${failurePoint} failure keeps authoritative success without recovery`, async () => {
-    const confirmedEnvelope = transitionEnvelope(2, "selected");
-    const confirmedState = commitStructuralTransition(
-      createInitialEditorState(snapshot(1)),
-      confirmedEnvelope
-    );
-    const confirmedRemote = confirmedState.remote;
-    const store = createEditorStore(confirmedState);
-    const envelope = transitionEnvelope();
-    let postCalls = 0;
-    let recoveryCalls = 0;
-    const actions = createEditorActions({
-      store,
-      client: {
-        postJSON: async () => {
-          postCalls += 1;
-          return envelope;
-        },
-        getState: async () => {
-          recoveryCalls += 1;
-          return snapshot(99);
-        }
-      },
-      waitForPaint: async () => {
-        if (failurePoint === "paint") throw new Error("paint failed");
-      }
-    });
-
-    const result = await actions.executeStructuralMutation({
-      name: "collapse levels",
-      path: "/collapse_levels",
-      payload: { term: "age", method: "auto" },
-      waitForSecondary: async () => {
-        if (failurePoint === "secondary") throw new Error("secondary failed");
-      }
-    });
-
-    assert.deepEqual(result, { ok: true, envelope });
-    assert.equal(postCalls, 1);
-    assert.equal(recoveryCalls, 0);
-    assert.strictEqual(store.getState().remote.snapshot, envelope.state);
-    assert.strictEqual(store.getState().remote.summary, envelope.summary);
-    assert.notStrictEqual(store.getState().remote, confirmedRemote);
-    assert.deepEqual(store.getState().request.mutation, {
-      status: "idle", operation: null, error: null
-    });
-    assert.equal(store.getState().request.recovery?.retry, null);
-    assert.match(store.getState().request.recovery?.message || "", /change completed/i);
-    assert.match(store.getState().request.recovery?.message || "", /refresh.*incomplete/i);
-  });
-}
-
-test("secondary failure preserves a newer authoritative remote pair", async () => {
-  const secondaryStarted = deferred();
-  const secondary = deferred();
-  const store = createEditorStore(createInitialEditorState(snapshot(2)));
+test("structural paint failure keeps authoritative success without recovery", async () => {
+  const confirmedEnvelope = transitionEnvelope(2, "selected");
+  const confirmedState = commitStructuralTransition(
+    createInitialEditorState(snapshot(1)),
+    confirmedEnvelope
+  );
+  const confirmedRemote = confirmedState.remote;
+  const store = createEditorStore(confirmedState);
   const envelope = transitionEnvelope();
+  let postCalls = 0;
   let recoveryCalls = 0;
   const actions = createEditorActions({
     store,
     client: {
-      postJSON: async () => envelope,
+      postJSON: async () => {
+        postCalls += 1;
+        return envelope;
+      },
       getState: async () => {
         recoveryCalls += 1;
         return snapshot(99);
       }
     },
-    waitForPaint: async () => {}
+    waitForPaint: async () => { throw new Error("paint failed"); }
   });
 
-  const pending = actions.executeStructuralMutation({
+  const result = await actions.executeStructuralMutation({
     name: "collapse levels",
     path: "/collapse_levels",
-    payload: { term: "age", method: "auto" },
-    waitForSecondary: async () => {
-      secondaryStarted.resolve(undefined);
-      await secondary.promise;
-    }
+    payload: { term: "age", method: "auto" }
   });
-  await secondaryStarted.promise;
-  const newerEnvelope = transitionEnvelope(8, "newer");
-  store.update((state) => commitStructuralTransition(state, newerEnvelope));
-  const newerRemote = store.getState().remote;
-  secondary.reject(new Error("secondary failed"));
-
-  const result = await pending;
 
   assert.deepEqual(result, { ok: true, envelope });
+  assert.equal(postCalls, 1);
   assert.equal(recoveryCalls, 0);
-  assert.strictEqual(store.getState().remote, newerRemote);
+  assert.strictEqual(store.getState().remote.snapshot, envelope.state);
+  assert.strictEqual(store.getState().remote.summary, envelope.summary);
+  assert.notStrictEqual(store.getState().remote, confirmedRemote);
+  assert.deepEqual(store.getState().request.mutation, {
+    status: "idle", operation: null, error: null
+  });
   assert.equal(store.getState().request.recovery?.retry, null);
+  assert.match(store.getState().request.recovery?.message || "", /change completed/i);
+  assert.match(store.getState().request.recovery?.message || "", /refresh.*incomplete/i);
+});
+
+test("structural evidence scheduling failure cannot change authoritative success", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(2)));
+  const envelope = transitionEnvelope();
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => envelope,
+      getState: async () => { throw new Error("success must not recover"); }
+    },
+    waitForPaint: async () => {},
+    scheduleVisibleEvidence: () => { throw new Error("scheduler failed"); }
+  });
+
+  const result = await actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "age", method: "auto" }
+  });
+
+  assert.deepEqual(result, { ok: true, envelope });
+  assert.strictEqual(store.getState().remote.snapshot, envelope.state);
+  assert.equal(store.getState().request.mutation.status, "idle");
+  assert.equal(store.getState().request.recovery, null);
 });
 
 test("ambiguous structural failure reconciles by current revision and never retries", async () => {
@@ -936,6 +905,116 @@ test("failed recovery never rewinds a newer authoritative commit", async () => {
   assert.equal(store.getState().request.recovery?.message, "response lost");
 });
 
+test("evidence reducers retain confirmed payloads and reject stale completions", () => {
+  const previousPayload = { value: "confirmed" };
+  let state = createInitialEditorState(snapshot(5));
+  state = {
+    ...state,
+    request: {
+      ...state.request,
+      evidence: {
+        ...state.request.evidence,
+        metrics: {
+          ...state.request.evidence.metrics,
+          status: "current",
+          revision: 4,
+          sequence: 3,
+          payload: previousPayload
+        }
+      }
+    }
+  };
+
+  const retry = { path: "/metrics", payload: { metric: "deviance" } };
+  const updating = beginEvidence(state, "metrics", 5, 4, retry);
+  assert.equal(updating.request.evidence.metrics.status, "updating");
+  assert.strictEqual(updating.request.evidence.metrics.payload, previousPayload);
+  assert.strictEqual(updating.request.evidence.metrics.retry, retry);
+
+  assert.strictEqual(
+    completeEvidence(updating, "metrics", 4, 4, { value: "old revision" }),
+    updating
+  );
+  assert.strictEqual(
+    completeEvidence(updating, "metrics", 5, 3, { value: "old sequence" }),
+    updating
+  );
+
+  const failed = failEvidence(updating, "metrics", 5, 4, new Error("offline"));
+  assert.equal(failed.request.evidence.metrics.status, "stale");
+  assert.strictEqual(failed.request.evidence.metrics.payload, previousPayload);
+  assert.equal(failed.request.evidence.metrics.error, "Error: offline");
+
+  const complete = completeEvidence(updating, "metrics", 5, 4, { value: "fresh" });
+  assert.equal(complete.request.evidence.metrics.status, "current");
+  assert.deepEqual(complete.request.evidence.metrics.payload, { value: "fresh" });
+  assert.equal(complete.request.evidence.metrics.retry, null);
+});
+
+test("evidence failure without a confirmed payload becomes an error", () => {
+  const state = beginEvidence(
+    createInitialEditorState(snapshot(2)),
+    "summary",
+    2,
+    1,
+    { path: "/summary", payload: {} }
+  );
+
+  const failed = failEvidence(state, "summary", 2, 1, "summary unavailable");
+
+  assert.equal(failed.request.evidence.summary.status, "error");
+  assert.equal(failed.request.evidence.summary.payload, null);
+  assert.equal(failed.request.evidence.summary.error, "summary unavailable");
+});
+
+test("per-panel debounce runs only the latest scheduled revision", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(1)));
+  /** @type {Map<number, {callback:()=>void, delay:number}>} */
+  const timers = new Map();
+  let nextTimer = 1;
+  /** @type {Array<Record<string, unknown>>} */
+  const requests = [];
+  const current = deferred();
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async (_path, payload) => {
+        requests.push(payload);
+        return {
+          available: true,
+          model_revision: payload.model_revision,
+          request_sequence: payload.request_sequence
+        };
+      },
+      getState: async () => snapshot(1)
+    },
+    setTimer: (callback, delay) => {
+      const id = nextTimer;
+      nextTimer += 1;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimer: (id) => { timers.delete(id); }
+  });
+  store.subscribe(
+    (state) => state.request.evidence.metrics.status,
+    (status) => { if (status === "current") current.resolve(undefined); }
+  );
+
+  actions.schedulePanelEvidence("metrics", "/metrics", { marker: 1 });
+  store.update((state) => commitRemote(state, snapshot(2)));
+  actions.schedulePanelEvidence("metrics", "/metrics", { marker: 2 });
+  store.update((state) => commitRemote(state, snapshot(3)));
+  actions.schedulePanelEvidence("metrics", "/metrics", { marker: 3 });
+
+  assert.equal(timers.size, 1);
+  const timer = [...timers.values()][0];
+  assert.equal(timer.delay, 150);
+  timer.callback();
+  await current.promise;
+  assert.deepEqual(requests, [{ marker: 3, model_revision: 3, request_sequence: 1 }]);
+});
+
 test("late evidence cannot replace a newer revision", async () => {
   const pendingEvidence = deferred();
   const store = createEditorStore(createInitialEditorState(snapshot(3)));
@@ -950,7 +1029,7 @@ test("late evidence cannot replace a newer revision", async () => {
 
   assert.equal(await pending, false);
   assert.equal(store.getState().request.evidence.metrics.payload, null);
-  assert.equal(store.getState().request.evidence.metrics.status, "stale");
+  assert.equal(store.getState().request.evidence.metrics.status, "updating");
   assert.equal(store.getState().request.evidence.metrics.revision, 3);
 });
 
@@ -973,11 +1052,13 @@ test("only the latest same-revision evidence response is accepted", async () => 
 
   const first = actions.refreshEvidence("metrics", "/metrics", { request: 1 });
   const second = actions.refreshEvidence("metrics", "/metrics", { request: 2 });
-  secondResponse.resolve({ value: "latest" });
+  secondResponse.resolve({ value: "latest", model_revision: 3, request_sequence: 2 });
   assert.equal(await second, true);
-  firstResponse.resolve({ value: "old" });
+  firstResponse.resolve({ value: "old", model_revision: 3, request_sequence: 1 });
   assert.equal(await first, false);
-  assert.deepEqual(store.getState().request.evidence.metrics.payload, { value: "latest" });
+  assert.deepEqual(store.getState().request.evidence.metrics.payload, {
+    value: "latest", model_revision: 3, request_sequence: 2
+  });
 });
 
 test("evidence errors retain payload and can retry from their descriptor", async () => {
@@ -996,17 +1077,21 @@ test("evidence errors retain payload and can retry from their descriptor", async
   const actions = createEditorActions({
     store,
     client: {
-      postJSON: async () => {
+      postJSON: async (_path, payload) => {
         calls += 1;
         if (calls === 1) throw new Error("metrics offline");
-        return { value: "new" };
+        return {
+          value: "new",
+          model_revision: payload.model_revision,
+          request_sequence: payload.request_sequence
+        };
       },
       getState: async () => snapshot(5)
     }
   });
 
   assert.equal(await actions.refreshEvidence("metrics", "/metrics", { split: "train" }), false);
-  assert.equal(store.getState().request.evidence.metrics.status, "error");
+  assert.equal(store.getState().request.evidence.metrics.status, "stale");
   assert.deepEqual(store.getState().request.evidence.metrics.payload, { value: "old" });
   assert.equal(store.getState().request.evidence.metrics.error, "metrics offline");
   assert.deepEqual(store.getState().request.evidence.metrics.retry, {
@@ -1015,7 +1100,9 @@ test("evidence errors retain payload and can retry from their descriptor", async
 
   assert.equal(await actions.retryEvidence("metrics"), true);
   assert.equal(store.getState().request.evidence.metrics.status, "current");
-  assert.deepEqual(store.getState().request.evidence.metrics.payload, { value: "new" });
+  assert.deepEqual(store.getState().request.evidence.metrics.payload, {
+    value: "new", model_revision: 5, request_sequence: 2
+  });
   assert.equal(store.getState().request.evidence.metrics.retry, null);
 });
 
@@ -1042,7 +1129,12 @@ test("evidence retry descriptors snapshot caller-owned payloads", async () => {
   pendingResponse.reject(new Error("metrics offline"));
   await pending;
 
-  assert.deepEqual(requests[0], { split: "train", options: { weighted: true } });
+  assert.deepEqual(requests[0], {
+    split: "train",
+    options: { weighted: true },
+    model_revision: 5,
+    request_sequence: 1
+  });
   assert.deepEqual(store.getState().request.evidence.metrics.retry?.payload, {
     split: "train", options: { weighted: true }
   });
@@ -1062,7 +1154,7 @@ test("stale evidence failures do not overwrite the newer revision", async () => 
 
   assert.equal(await pending, false);
   assert.equal(store.getState().request.evidence.summary.error, null);
-  assert.equal(store.getState().request.evidence.summary.status, "stale");
+  assert.equal(store.getState().request.evidence.summary.status, "updating");
   assert.equal(store.getState().request.evidence.summary.revision, 6);
 });
 
@@ -1168,6 +1260,7 @@ test("action module exposes only the controller factory, paint helper, and exact
     "patchView",
     "refreshEvidence",
     "retryEvidence",
-    "retryMutation"
+    "retryMutation",
+    "schedulePanelEvidence"
   ]);
 });

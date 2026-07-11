@@ -1,8 +1,11 @@
 // @ts-check
 
 import {
+  beginEvidence,
   commitRemote,
   commitStructuralTransition,
+  completeEvidence,
+  failEvidence,
   patchView as patchViewState
 } from "./store.js";
 import { selectModelRevision } from "./selectors.js";
@@ -31,8 +34,10 @@ import { selectModelRevision } from "./selectors.js";
  * @typedef {Object} EditorActionOptions
  * @property {EditorStore} store
  * @property {ActionClient} client
- * @property {(revision:number)=>void|Promise<void>} [scheduleEvidence]
+ * @property {(revision:number, options?:{immediate?:boolean, summaryCommitted?:boolean})=>void|Promise<void>} [scheduleVisibleEvidence]
  * @property {()=>void|Promise<void>} [waitForPaint]
+ * @property {(callback:()=>void, delay:number)=>any} [setTimer]
+ * @property {(timer:any)=>void} [clearTimer]
  */
 
 /** @returns {Promise<void>} */
@@ -121,6 +126,7 @@ const STRUCTURAL_OUTCOME_UNCERTAIN =
   "The model change outcome is uncertain. The operation was not retried.";
 const STRUCTURAL_REFRESH_INCOMPLETE =
   "The model change completed, but browser refresh was incomplete.";
+const EVIDENCE_DEBOUNCE_MS = 150;
 
 /** @param {()=>void|Promise<void>} onRequestSettled @returns {Promise<void>} */
 async function notifyRequestSettled(onRequestSettled) {
@@ -144,9 +150,12 @@ function reconciledSummaryPayload() {
 export function createEditorActions({
   store,
   client,
-  scheduleEvidence = () => {},
-  waitForPaint = nextPaint
+  scheduleVisibleEvidence = () => {},
+  waitForPaint = nextPaint,
+  setTimer = globalThis.setTimeout.bind(globalThis),
+  clearTimer = globalThis.clearTimeout.bind(globalThis)
 }) {
+  const evidenceTimers = new Map();
   /** @param {RecoveryRequestState|null} recovery */
   function finishStructuralMutation(recovery) {
     try {
@@ -264,7 +273,7 @@ export function createEditorActions({
     });
     if (snapshot.model_revision !== previousRevision) {
       try {
-        void Promise.resolve(scheduleEvidence(snapshot.model_revision)).catch(() => {});
+        void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision)).catch(() => {});
       } catch {
         // Evidence refresh is independent of the already-confirmed mutation.
       }
@@ -280,8 +289,7 @@ export function createEditorActions({
     name,
     path,
     payload,
-    onRequestSettled = () => {},
-    waitForSecondary = async () => {}
+    onRequestSettled = () => {}
   }) {
     if (store.getState().request.mutation.status === "running") {
       return skippedMutation("An editor mutation is already running.");
@@ -324,12 +332,19 @@ export function createEditorActions({
     }
     try {
       await waitForPaint();
-      await waitForSecondary(envelope.state.model_revision);
     } catch {
       finishStructuralMutation({ message: STRUCTURAL_REFRESH_INCOMPLETE, retry: null });
       return { ok: true, envelope };
     }
     finishStructuralMutation(null);
+    try {
+      void Promise.resolve(scheduleVisibleEvidence(envelope.state.model_revision, {
+        immediate: true,
+        summaryCommitted: true
+      })).catch(() => {});
+    } catch {
+      // Evidence refresh cannot change an authoritative structural success.
+    }
     return { ok: true, envelope };
   }
 
@@ -349,103 +364,74 @@ export function createEditorActions({
     store.update((state) => {
       revision = selectModelRevision(state);
       sequence = state.request.nextSequence;
-      const current = state.request.evidence[panel];
+      const begun = beginEvidence(
+        state,
+        panel,
+        revision,
+        sequence,
+        { path, payload: requestPayload }
+      );
       return {
-        ...state,
+        ...begun,
         request: {
-          ...state.request,
-          nextSequence: sequence + 1,
-          evidence: {
-            ...state.request.evidence,
-            [panel]: {
-              ...current,
-              status: "updating",
-              revision,
-              sequence,
-              error: null,
-              retry: { path, payload: requestPayload }
-            }
-          }
+          ...begun.request,
+          nextSequence: sequence + 1
         }
       };
     });
+    const requestBody = {
+      ...requestPayload,
+      model_revision: revision,
+      request_sequence: sequence
+    };
 
     try {
-      const response = await client.postJSON(path, requestPayload);
+      const response = await client.postJSON(path, requestBody);
+      if (
+        !isRecord(response) ||
+        response.status === "superseded" ||
+        Number(response.model_revision) !== revision ||
+        Number(response.request_sequence) !== sequence
+      ) {
+        return false;
+      }
       let accepted = false;
       store.update((state) => {
-        const current = state.request.evidence[panel];
-        if (current.sequence !== sequence) {
-          return state;
-        }
-        if (selectModelRevision(state) !== revision) {
-          return {
-            ...state,
-            request: {
-              ...state.request,
-              evidence: {
-                ...state.request.evidence,
-                [panel]: { ...current, status: "stale" }
-              }
-            }
-          };
-        }
-        accepted = true;
-        return {
-          ...state,
-          request: {
-            ...state.request,
-            evidence: {
-              ...state.request.evidence,
-              [panel]: {
-                ...current,
-                status: "current",
-                payload: response,
-                error: null,
-                retry: null
-              }
-            }
-          }
-        };
+        const completed = completeEvidence(state, panel, revision, sequence, response);
+        accepted = completed !== state;
+        return completed;
       });
       return accepted;
     } catch (value) {
       const error = normalizeError(value);
-      store.update((state) => {
-        const current = state.request.evidence[panel];
-        if (current.sequence !== sequence) {
-          return state;
-        }
-        if (selectModelRevision(state) !== revision) {
-          return {
-            ...state,
-            request: {
-              ...state.request,
-              evidence: {
-                ...state.request.evidence,
-                [panel]: { ...current, status: "stale" }
-              }
-            }
-          };
-        }
-        return {
-          ...state,
-          request: {
-            ...state.request,
-            evidence: {
-              ...state.request.evidence,
-              [panel]: {
-                ...current,
-                status: "error",
-                error: error.message,
-                retry: { path, payload: requestPayload }
-              }
-            }
-          }
-        };
-      });
+      store.update((state) => failEvidence(state, panel, revision, sequence, error.message));
       return false;
     }
+  }
+
+  /**
+   * Debounce cacheable evidence independently for each panel.
+   *
+   * @param {EvidencePanel} panel
+   * @param {string} path
+   * @param {Record<string, unknown>} payload
+   * @param {{immediate?:boolean}} [options]
+   */
+  function schedulePanelEvidence(panel, path, payload, { immediate = false } = {}) {
+    const requestPayload = snapshotPayload(payload);
+    if (evidenceTimers.has(panel)) {
+      clearTimer(evidenceTimers.get(panel));
+      evidenceTimers.delete(panel);
+    }
+    const invoke = () => {
+      evidenceTimers.delete(panel);
+      void refreshEvidence(panel, path, requestPayload);
+    };
+    if (immediate) {
+      invoke();
+      return;
+    }
+    evidenceTimers.set(panel, setTimer(invoke, EVIDENCE_DEBOUNCE_MS));
   }
 
   /** @returns {Promise<ActionResult>} */
@@ -487,6 +473,7 @@ export function createEditorActions({
     executeStateMutation,
     executeStructuralMutation,
     refreshEvidence,
+    schedulePanelEvidence,
     retryMutation,
     retryEvidence,
     dismissRecovery,

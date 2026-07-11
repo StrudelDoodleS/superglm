@@ -19,7 +19,6 @@ import {
 } from "./state/store.js";
 import {
   collapseTransition,
-  refreshSummary,
   renderSummary,
   runDistributionProfile,
   showDistributionProfileDialog,
@@ -54,6 +53,8 @@ const editorView = document.getElementById("editorView");
 const reportPanel = document.getElementById("reportPanel");
 const reportTitle = document.getElementById("reportTitle");
 const reportStatus = document.getElementById("reportStatus");
+const reportFreshness = document.getElementById("reportFreshness");
+const reportRetry = document.getElementById("reportRetry");
 const reportFrame = document.getElementById("reportFrame");
 const svg = document.getElementById("chart");
 const selectionMenu = document.getElementById("selectionMenu");
@@ -93,6 +94,8 @@ const uncollapseLevels = document.getElementById("uncollapseLevels");
 const structuralConfirmDialog = document.getElementById("structuralConfirmDialog");
 const metricSelect = document.getElementById("metricSelect");
 const metricGrid = document.getElementById("metricGrid");
+const metricFreshness = document.getElementById("metricFreshness");
+const metricRetry = document.getElementById("metricRetry");
 const summarySource = document.getElementById("summarySource");
 const refitOffset = document.getElementById("refitOffset");
 const reprofileTweedie = document.getElementById("reprofileTweedie");
@@ -114,6 +117,7 @@ const profileTraceLegend = document.getElementById("profileTraceLegend");
 const profileTracePlot = document.getElementById("profileTracePlot");
 const profileTraceTable = document.getElementById("profileTraceTable");
 const summaryStatus = document.getElementById("summaryStatus");
+const summaryRetry = document.getElementById("summaryRetry");
 const summaryNote = document.getElementById("summaryNote");
 const summaryFrame = document.getElementById("summaryFrame");
 const advancedTiming = document.getElementById("advancedTiming");
@@ -141,12 +145,7 @@ const store = createEditorStore(createInitialEditorState());
 const actions = createEditorActions({
   store,
   client: editorClient,
-  scheduleEvidence: () => {
-    resetSummarySourceAfterInvalidatingEdit();
-    void refreshMetricsView();
-    void refreshSummaryView();
-    void refreshActiveReport();
-  }
+  scheduleVisibleEvidence
 });
 
 const undo = () => actions.executeStateMutation({
@@ -529,13 +528,44 @@ async function refreshMetricsView() {
 }
 
 async function refreshSummaryView() {
-  await refreshSummary(summaryNodes());
+  await actions.refreshEvidence("summary", "/summary", {
+    source: summarySource.value
+  });
 }
 
 async function refreshActiveReport() {
   const activeView = store.getState().view.activeView;
   if (activeView === "editor") return;
   await actions.refreshEvidence("report", "/report", { report: activeView });
+}
+
+function scheduleVisibleEvidence(revision, { immediate = false, summaryCommitted = false } = {}) {
+  const state = store.getState();
+  if (state.remote.snapshot?.model_revision !== revision) return;
+  resetSummarySourceAfterInvalidatingEdit();
+  if (state.view.activeView !== "editor") {
+    actions.schedulePanelEvidence(
+      "report",
+      "/report",
+      { report: state.view.activeView },
+      { immediate }
+    );
+    return;
+  }
+  actions.schedulePanelEvidence(
+    "metrics",
+    "/metrics",
+    { metric: "deviance", source: "in_force" },
+    { immediate }
+  );
+  if (!summaryCommitted && state.view.inspectorOpen && state.view.inspectorPane === "summary") {
+    actions.schedulePanelEvidence(
+      "summary",
+      "/summary",
+      { source: summarySource.value },
+      { immediate }
+    );
+  }
 }
 
 async function runStructuralRefit(descriptor) {
@@ -569,10 +599,6 @@ async function runStructuralRefit(descriptor) {
     ...descriptor,
     onRequestSettled: () => {
       requestEnd = performance.now();
-    },
-    waitForSecondary: async () => {
-      await refreshMetricsView();
-      await refreshActiveReport();
     }
   });
   if (!result.ok) return null;
@@ -819,19 +845,25 @@ async function retryFailedMutation() {
 function renderMetricsEvidence(evidence) {
   const busy = evidence.status === "updating";
   metricGrid.setAttribute("aria-busy", busy ? "true" : "false");
-  metricGrid.title = "";
+  metricGrid.dataset.freshness = evidence.status;
   renderMetricGrid(evidence.payload, { metricGrid, metricSelect });
-  if (evidence.status !== "error") return;
-  if (evidence.payload === null) {
+  if ((evidence.status === "error" || evidence.status === "stale") && evidence.payload === null) {
     metricGrid.textContent = evidence.error || "Metric unavailable.";
-  } else {
-    metricGrid.title = evidence.error || "Metric unavailable.";
   }
+  renderEvidenceFreshness(evidence, {
+    statusNode: metricFreshness,
+    retryButton: metricRetry,
+    loading: "Loading metrics...",
+    updating: "Updating metrics...",
+    stale: "Metrics may be stale.",
+    error: "Metrics unavailable."
+  });
 }
 
 function renderReportEvidence(evidence, activeView) {
   const busy = evidence.status === "updating";
   reportFrame.setAttribute("aria-busy", busy ? "true" : "false");
+  reportFrame.dataset.freshness = evidence.status;
   if (activeView === "editor") return;
   const payloadMatchesView = evidence.payload !== null && evidence.payload.report === activeView;
   if (payloadMatchesView) {
@@ -840,10 +872,66 @@ function renderReportEvidence(evidence, activeView) {
     reportTitle.textContent = activeView === "final" ? "Final Fit Report" : "Validation Report";
     reportFrame.innerHTML = "";
   }
-  if (evidence.status === "error") {
-    reportStatus.textContent = evidence.error || "Report unavailable.";
-  } else if (!payloadMatchesView || busy || evidence.status === "idle") {
+  if (!payloadMatchesView && evidence.status !== "error" && evidence.status !== "stale") {
     reportStatus.textContent = "Loading report...";
+  }
+  renderEvidenceFreshness(evidence, {
+    statusNode: reportFreshness,
+    retryButton: reportRetry,
+    loading: "Loading report...",
+    updating: "Updating report...",
+    stale: "Report may be stale.",
+    error: "Report unavailable."
+  });
+}
+
+function renderSummaryEvidence(evidence) {
+  const state = store.getState();
+  const revision = state.remote.snapshot?.model_revision;
+  const evidenceMatchesRevision = evidence.revision === revision;
+  const payload = evidenceMatchesRevision && evidence.payload !== null
+    ? evidence.payload
+    : state.remote.summary;
+  const effectiveEvidence = evidenceMatchesRevision
+    ? evidence
+    : { ...evidence, status: "current", error: null };
+  summaryFrame.setAttribute(
+    "aria-busy",
+    effectiveEvidence.status === "updating" ? "true" : "false"
+  );
+  summaryFrame.dataset.freshness = effectiveEvidence.status;
+  if (payload !== null) {
+    renderSummary(payload, summaryNodes());
+  } else if (effectiveEvidence.status === "error" || effectiveEvidence.status === "stale") {
+    summaryStatus.textContent = effectiveEvidence.error || "Summary unavailable.";
+  }
+  const summaryLabel = summaryStatus.textContent || "Summary";
+  renderEvidenceFreshness(effectiveEvidence, {
+    statusNode: summaryStatus,
+    retryButton: summaryRetry,
+    loading: "Loading summary...",
+    updating: `${summaryLabel} · Updating...`,
+    stale: `${summaryLabel} · Summary may be stale.`,
+    error: "Summary unavailable."
+  });
+}
+
+function renderEvidenceFreshness(evidence, options) {
+  const { statusNode, retryButton, loading, updating, stale, error } = options;
+  const retryable = evidence.status === "stale" || evidence.status === "error";
+  if (retryButton) retryButton.hidden = !retryable;
+  if (!statusNode) return;
+  statusNode.dataset.freshness = evidence.status;
+  if (evidence.status === "idle" && evidence.payload === null) {
+    statusNode.textContent = loading;
+  } else if (evidence.status === "updating") {
+    statusNode.textContent = updating;
+  } else if (evidence.status === "stale") {
+    statusNode.textContent = evidence.error || stale;
+  } else if (evidence.status === "error") {
+    statusNode.textContent = evidence.error || error;
+  } else if (statusNode !== summaryStatus) {
+    statusNode.textContent = "";
   }
 }
 
@@ -1122,6 +1210,15 @@ if (appAlertRetry) {
 if (appAlertDismiss) {
   appAlertDismiss.addEventListener("click", () => actions.dismissRecovery());
 }
+if (metricRetry) {
+  metricRetry.addEventListener("click", () => { void actions.retryEvidence("metrics"); });
+}
+if (summaryRetry) {
+  summaryRetry.addEventListener("click", () => { void actions.retryEvidence("summary"); });
+}
+if (reportRetry) {
+  reportRetry.addEventListener("click", () => { void actions.retryEvidence("report"); });
+}
 if (saveModel) {
   saveModel.addEventListener("click", openSaveDialog);
 }
@@ -1175,14 +1272,25 @@ if (uncollapseLevels) {
   });
 }
 
-store.subscribe((state) => state.remote.snapshot, () => render());
+store.subscribe((state) => state.remote.snapshot, (snapshot) => {
+  if (snapshot) {
+    svg.dataset.modelRevision = String(snapshot.model_revision);
+    summaryFrame.dataset.modelRevision = String(snapshot.model_revision);
+  }
+  render();
+});
 store.subscribe(
   (state) => state.remote.summary,
   (summary) => {
-    if (!summary) return;
-    summarySource.value = "selected";
-    renderSummary(summary, summaryNodes());
+    if (summary) {
+      summarySource.value = "selected";
+    }
+    renderSummaryEvidence(store.getState().request.evidence.summary);
   }
+);
+store.subscribe(
+  (state) => state.request.evidence.summary,
+  renderSummaryEvidence
 );
 store.subscribe((state) => state.view, () => render(), sameViewOutsidePreview);
 store.subscribe((state) => state.view.preview, renderInteractionPreview);

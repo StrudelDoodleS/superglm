@@ -4,6 +4,7 @@ import { selectActiveTermName } from "./selectors.js";
 
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
+/** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
 /** @typedef {import('../api/contracts.js').StructuralTransitionEnvelope} StructuralTransitionEnvelope */
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 
@@ -145,4 +146,78 @@ export function commitStructuralTransition(state, envelope) {
     ...committed,
     remote: { snapshot: envelope.state, summary: envelope.summary }
   };
+}
+
+/**
+ * @param {EditorState} state
+ * @param {EvidencePanel} panel
+ * @param {EditorState['request']['evidence'][EvidencePanel]} evidence
+ */
+function replaceEvidence(state, panel, evidence) {
+  return {
+    ...state,
+    request: {
+      ...state.request,
+      evidence: { ...state.request.evidence, [panel]: evidence }
+    }
+  };
+}
+
+/**
+ * @param {EditorState} state
+ * @param {EvidencePanel} panel
+ * @param {number} revision
+ * @param {number} sequence
+ * @param {{path:string, payload:Record<string, unknown>}} retry
+ */
+export function beginEvidence(state, panel, revision, sequence, retry) {
+  const previous = state.request.evidence[panel];
+  return replaceEvidence(state, panel, {
+    ...previous,
+    status: "updating",
+    revision,
+    sequence,
+    error: null,
+    retry
+  });
+}
+
+/**
+ * @param {EditorState} state
+ * @param {EvidencePanel} panel
+ * @param {number} revision
+ * @param {number} sequence
+ * @param {unknown} payload
+ */
+export function completeEvidence(state, panel, revision, sequence, payload) {
+  const current = state.request.evidence[panel];
+  if (revision !== state.remote.snapshot?.model_revision || sequence !== current.sequence) {
+    return state;
+  }
+  return replaceEvidence(state, panel, {
+    ...current,
+    status: "current",
+    payload,
+    error: null,
+    retry: null
+  });
+}
+
+/**
+ * @param {EditorState} state
+ * @param {EvidencePanel} panel
+ * @param {number} revision
+ * @param {number} sequence
+ * @param {unknown} error
+ */
+export function failEvidence(state, panel, revision, sequence, error) {
+  const current = state.request.evidence[panel];
+  if (revision !== state.remote.snapshot?.model_revision || sequence !== current.sequence) {
+    return state;
+  }
+  return replaceEvidence(state, panel, {
+    ...current,
+    status: current.payload === null ? "error" : "stale",
+    error: String(error)
+  });
 }
