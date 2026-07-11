@@ -707,6 +707,207 @@ def test_to_model_returns_copy_and_leaves_source_unchanged(editor_model):
     assert not np.allclose(edited.result.beta, original_beta)
 
 
+def test_materialized_model_reuses_one_copy_per_real_edit_epoch(
+    editor_model,
+    monkeypatch,
+):
+    from superglm.editor import session as session_module
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    real_apply = session_module.apply.apply_edits_to_model_copy_with_data
+    applied_epochs: list[int] = []
+
+    def counted_apply(*args, **kwargs):
+        applied_epochs.append(session.edit_epoch)
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(
+        session_module.apply,
+        "apply_edits_to_model_copy_with_data",
+        counted_apply,
+    )
+
+    assert session.materialized_model() is editor_model
+    assert applied_epochs == []
+
+    session.select_x("x_spline", 2.0, 5.0)
+    session.shift("x_spline", 0.35)
+    first = session.materialized_model()
+    assert session.materialized_model() is first
+    assert applied_epochs == [1]
+
+    session.shift("x_spline", 0.10)
+    second = session.materialized_model()
+    assert second is not first
+    assert applied_epochs == [1, 2]
+
+    session.undo()
+    after_undo = session.materialized_model()
+    assert after_undo is not second
+    assert applied_epochs == [1, 2, 3]
+
+    session.redo()
+    after_redo = session.materialized_model()
+    assert after_redo is not after_undo
+    assert applied_epochs == [1, 2, 3, 4]
+
+    session.reset("x_spline")
+    assert session.materialized_model() is editor_model
+    assert applied_epochs == [1, 2, 3, 4]
+
+
+def test_materialized_model_is_invalidated_by_structural_replacement(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4])
+    session.shift("x_spline", 0.2)
+    cached = session.materialized_model()
+
+    replacement = editor_model._clone_without_features(set())
+    replacement.fit(editor_model._fit_X_ref, editor_model._fit_y_ref)
+    session.replace_in_force_model(replacement)
+
+    assert session._materialized_edit_model is None
+    assert session._materialized_edit_epoch is None
+    assert session.materialized_model() is replacement
+    assert session.materialized_model() is not cached
+
+
+def test_to_model_stays_fresh_and_does_not_return_the_materialized_copy(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+
+    materialized = session.materialized_model()
+    first = session.to_model()
+    second = session.to_model()
+
+    assert first is not second
+    assert first is not materialized
+    assert second is not materialized
+    assert session.materialized_model() is materialized
+    np.testing.assert_allclose(first.result.beta, materialized.result.beta)
+    np.testing.assert_allclose(second.result.beta, materialized.result.beta)
+
+
+def test_materialized_model_shares_only_row_scale_fit_inputs():
+    rng = np.random.default_rng(20260804)
+    n = 120
+    X = pd.DataFrame({"x": rng.normal(size=n), "z": rng.normal(size=n)})
+    sample_weight = rng.uniform(0.5, 2.0, size=n)
+    offset = rng.normal(0.0, 0.03, size=n)
+    y = (
+        0.4
+        + 0.3 * X["x"].to_numpy()
+        - 0.2 * X["z"].to_numpy()
+        + 0.1 * X["x"].to_numpy() * X["z"].to_numpy()
+        + offset
+        + rng.normal(0.0, 0.04, size=n)
+    )
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.1,
+        features={"x": Numeric(), "z": Numeric()},
+        interactions=[("x", "z")],
+    )
+    model.fit(X, y, sample_weight=sample_weight, offset=offset)
+    model.summary()
+    model.metrics(
+        model._fit_X_ref,
+        model._fit_y_ref,
+        sample_weight=model._fit_sample_weight_ref,
+        offset=model._fit_offset_ref,
+    )
+    source_objects = {
+        name: getattr(model, name)
+        for name in (
+            "_fit_mu",
+            "_fit_null_mu",
+            "_fit_stats",
+            "_fit_metrics_cache",
+            "_prediction_plan",
+            "_runtime_canonical_state",
+            "_fast_prediction_state",
+            "_summary_cache",
+        )
+    }
+    source_mu = model._fit_mu.copy()
+    source_null_mu = model._fit_null_mu.copy()
+    source_beta = model.result.beta.copy()
+    source_deviance = model.result.deviance
+
+    session = EditorSession.from_model(model, terms=["x"])
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+    edited = session.materialized_model()
+
+    for name in (
+        "_dm",
+        "_fit_X_ref",
+        "_fit_y_ref",
+        "_fit_sample_weight_ref",
+        "_fit_offset_ref",
+        "_fit_weights",
+        "_fit_offset",
+    ):
+        assert getattr(edited, name) is getattr(model, name)
+
+    assert edited._result is not model._result
+    assert edited._solver_result is not model._solver_result
+    assert not np.shares_memory(edited._result.beta, model._result.beta)
+    assert not np.shares_memory(edited._solver_result.beta, model._solver_result.beta)
+    assert edited._specs is not model._specs
+    assert all(edited._specs[name] is not spec for name, spec in model._specs.items())
+    assert edited._interaction_specs is not model._interaction_specs
+    assert all(
+        edited._interaction_specs[name] is not spec
+        for name, spec in model._interaction_specs.items()
+    )
+    assert edited.penalty is not model.penalty
+    assert edited._runtime_canonical_state is not model._runtime_canonical_state
+    assert edited._fast_prediction_state is not model._fast_prediction_state
+
+    assert edited._fit_mu is not model._fit_mu
+    assert edited._fit_null_mu is not model._fit_null_mu
+    assert not np.shares_memory(edited._fit_mu, model._fit_mu)
+    assert not np.shares_memory(edited._fit_null_mu, model._fit_null_mu)
+    assert edited._fit_stats is not model._fit_stats
+    assert edited._prediction_plan is not model._prediction_plan
+    assert edited._fit_metrics_cache is None
+    assert edited._summary_cache is None
+
+    assert all(getattr(model, name) is value for name, value in source_objects.items())
+    np.testing.assert_array_equal(model._fit_mu, source_mu)
+    np.testing.assert_array_equal(model._fit_null_mu, source_null_mu)
+    np.testing.assert_array_equal(model.result.beta, source_beta)
+    assert model.result.deviance == source_deviance
+
+
+def test_summary_and_export_reuse_materialized_model(editor_model, tmp_path, monkeypatch):
+    from superglm.editor.persistence import edited_model_for_export
+    from superglm.editor.summaries import _in_force_summary_model
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    materialized = session.materialized_model()
+
+    assert _in_force_summary_model(session) is materialized
+    assert edited_model_for_export(session) is materialized
+
+    dumped: list[object] = []
+
+    def capture_dump(model, target):
+        dumped.append(model)
+        Path(target).touch()
+
+    monkeypatch.setattr("joblib.dump", capture_dump)
+    path = session.save_model(tmp_path / "edited-model.joblib")
+
+    assert path.exists()
+    assert dumped == [materialized]
+    assert session.materialized_model() is materialized
+
+
 def test_to_model_refreshes_fit_statistics_after_manual_edit(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     original_deviance = editor_model.result.deviance

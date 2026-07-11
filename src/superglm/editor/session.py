@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.editor import persistence
+from superglm.editor import apply, persistence
 from superglm.editor._types import EditableTerm, EditRecord
 from superglm.editor.collapse import (
     clone_with_replaced_feature,
@@ -17,7 +17,7 @@ from superglm.editor.collapse import (
 )
 from superglm.editor.controls import control_curve_after_move
 from superglm.editor.controls import control_points as _control_points
-from superglm.editor.evaluation import coerce_evaluation_data
+from superglm.editor.evaluation import coerce_evaluation_data, default_metrics_dataset
 from superglm.editor.level_order import (
     level_order_for_direction,
     level_order_for_labels,
@@ -540,8 +540,6 @@ class EditorSession:
         copy are refreshed against that data. Otherwise the fitted model's
         retained fit data is used when available.
         """
-        from superglm.editor.apply import apply_edits_to_model_copy_with_data
-
         if (
             X is None
             and y is None
@@ -555,7 +553,7 @@ class EditorSession:
                 y = train.y
                 sample_weight = train.sample_weight
                 offset = train.offset
-        return apply_edits_to_model_copy_with_data(
+        return apply.apply_edits_to_model_copy_with_data(
             self.model,
             self.terms,
             X=X,
@@ -563,6 +561,34 @@ class EditorSession:
             sample_weight=sample_weight,
             offset=offset,
         )
+
+    def materialized_model(self):
+        """Return the one private edited model for the current edit epoch."""
+        if not self.edited_terms():
+            return self.model
+        if (
+            self._materialized_edit_model is not None
+            and self._materialized_edit_epoch == self._edit_epoch
+        ):
+            return self._materialized_edit_model
+
+        dataset = default_metrics_dataset(self)
+        kwargs = {}
+        if dataset is not None:
+            kwargs = {
+                "X": dataset.X,
+                "y": dataset.y,
+                "sample_weight": dataset.sample_weight,
+                "offset": dataset.offset,
+            }
+        edited_model = apply.apply_edits_to_model_copy_with_data(
+            self.model,
+            self.terms,
+            **kwargs,
+        )
+        self._materialized_edit_model = edited_model
+        self._materialized_edit_epoch = self._edit_epoch
+        return edited_model
 
     def save_model(self, path: str | Path) -> Path:
         return persistence.save_model(self, path)
