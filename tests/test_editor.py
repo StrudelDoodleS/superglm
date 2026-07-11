@@ -3280,6 +3280,154 @@ def test_widget_http_ungroup_levels_returns_transition_envelope(editor_model):
         widget.close()
 
 
+def _structural_alias_fixture(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    session.select_levels("region", ["B", "C"])
+    widget._collapse_levels("region", method="fit")
+    current_info = {
+        "term": "region",
+        "method": "fit",
+        "details": {"groups": [{"label": "B+C", "levels": ["B", "C"]}]},
+    }
+    collapsed_info = {
+        "term": "region",
+        "method": "fit",
+        "details": {"groups": [{"label": "B+C", "levels": ["B", "C"]}]},
+    }
+    widget._in_force_info = current_info
+    widget._collapsed_refit_info = collapsed_info
+    widget._collapse_info_history.append(dict(current_info))
+    envelope = widget._structural_transition(
+        "collapse_levels",
+        operation_start=0.0,
+        fit_start=0.0,
+        fit_end=0.0,
+    )
+    return session, widget, envelope, current_info, collapsed_info
+
+
+def test_structural_transition_envelope_mutation_cannot_change_live_state(editor_model):
+    session, widget, envelope, current_info, collapsed_info = _structural_alias_fixture(
+        editor_model
+    )
+    expected_levels = list(session.terms["region"].levels)
+    expected_current = json.loads(json.dumps(current_info))
+    expected_collapsed = json.loads(json.dumps(collapsed_info))
+    try:
+        envelope["state"]["terms"]["region"]["levels"][0] = "envelope-level"
+        envelope["summary"]["collapse"]["term"] = "envelope-term"
+        envelope["summary"]["collapse"]["details"]["groups"][0]["levels"][0] = (
+            "envelope-summary-nested"
+        )
+        envelope["state"]["last_collapse"]["term"] = "envelope-last-term"
+        envelope["state"]["last_collapse"]["details"]["groups"][0]["levels"][0] = (
+            "envelope-last-nested"
+        )
+
+        assert session.terms["region"].levels == expected_levels
+        assert widget._in_force_info == expected_current
+        assert widget._collapsed_refit_info == expected_collapsed
+        assert widget._collapse_info_history[-1] == expected_current
+
+        widget._uncollapse_levels()
+        assert widget._in_force_info == expected_current
+    finally:
+        widget.close()
+
+
+def test_live_state_mutation_cannot_change_structural_transition_envelope(editor_model):
+    session, widget, envelope, current_info, collapsed_info = _structural_alias_fixture(
+        editor_model
+    )
+    expected_levels = list(envelope["state"]["terms"]["region"]["levels"])
+    expected_summary = json.loads(json.dumps(envelope["summary"]["collapse"]))
+    expected_last_collapse = json.loads(json.dumps(envelope["state"]["last_collapse"]))
+    try:
+        session.terms["region"].levels[0] = "live-level"
+        current_info["term"] = "live-term"
+        current_info["details"]["groups"][0]["levels"][0] = "live-summary-nested"
+        collapsed_info["term"] = "live-last-term"
+        collapsed_info["details"]["groups"][0]["levels"][0] = "live-last-nested"
+        widget._collapse_info_history[-1]["details"]["groups"][0]["levels"][1] = (
+            "live-history-nested"
+        )
+
+        assert envelope["state"]["terms"]["region"]["levels"] == expected_levels
+        assert envelope["summary"]["collapse"] == expected_summary
+        assert envelope["state"]["last_collapse"] == expected_last_collapse
+    finally:
+        widget.close()
+
+
+def test_structural_transition_holds_widget_lock_through_snapshot_detachment(
+    editor_model,
+    monkeypatch,
+):
+    import superglm.editor.widget as widget_module
+
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    detachment_entered = threading.Event()
+    release_detachment = threading.Event()
+    mutation_done = threading.Event()
+    transition_errors = []
+    mutation_errors = []
+    original_jsonable = widget_module.jsonable
+    detachment_calls = 0
+
+    def blocking_jsonable(value):
+        nonlocal detachment_calls
+        detachment_calls += 1
+        if detachment_calls == 2:
+            detachment_entered.set()
+            if not release_detachment.wait(timeout=2):
+                raise TimeoutError("snapshot detachment was not released")
+        return original_jsonable(value)
+
+    def run_transition():
+        try:
+            widget._structural_transition(
+                "collapse_levels",
+                operation_start=0.0,
+                fit_start=0.0,
+                fit_end=0.0,
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            transition_errors.append(exc)
+
+    def run_mutation():
+        try:
+            widget._select("region", [0])
+        except BaseException as exc:  # pragma: no cover - asserted below
+            mutation_errors.append(exc)
+        finally:
+            mutation_done.set()
+
+    transition_thread = threading.Thread(target=run_transition)
+    mutation_thread = threading.Thread(target=run_mutation)
+    try:
+        monkeypatch.setattr(widget_module, "jsonable", blocking_jsonable)
+        transition_thread.start()
+        assert detachment_entered.wait(timeout=2), "transition never began JSON-safe detachment"
+
+        mutation_thread.start()
+        assert not mutation_done.wait(timeout=0.1), "mutation escaped the transition lock"
+    finally:
+        release_detachment.set()
+        transition_thread.join(timeout=2)
+        if mutation_thread.ident is not None:
+            mutation_thread.join(timeout=2)
+        widget.close()
+
+    assert not transition_thread.is_alive()
+    assert not mutation_thread.is_alive()
+    assert transition_errors == []
+    assert mutation_errors == []
+    assert mutation_done.is_set()
+    assert detachment_calls == 2
+
+
 def test_widget_collapse_restores_selection_by_level_when_indices_are_stale(
     editor_model,
     monkeypatch,

@@ -466,23 +466,24 @@ class EditorWidget:
         fit_start: float,
         fit_end: float,
     ) -> dict[str, Any]:
-        summary_start = time.perf_counter()
-        summary = summary_payload(self, "in_force")
-        summary_end = time.perf_counter()
-        state_start = time.perf_counter()
-        state = self._state()
-        state_end = time.perf_counter()
-        return {
-            "state": state,
-            "summary": summary,
-            "timing": {
-                "operation": operation,
-                "fit_ms": _elapsed_ms(fit_start, fit_end),
-                "summary_ms": _elapsed_ms(summary_start, summary_end),
-                "state_ms": _elapsed_ms(state_start, state_end),
-                "server_total_ms": _elapsed_ms(operation_start, state_end),
-            },
-        }
+        with self._lock:
+            summary_start = time.perf_counter()
+            summary = jsonable(summary_payload(self, "in_force"))
+            summary_end = time.perf_counter()
+            state_start = time.perf_counter()
+            state = jsonable(self._state())
+            state_end = time.perf_counter()
+            return {
+                "state": state,
+                "summary": summary,
+                "timing": {
+                    "operation": operation,
+                    "fit_ms": _elapsed_ms(fit_start, fit_end),
+                    "summary_ms": _elapsed_ms(summary_start, summary_end),
+                    "state_ms": _elapsed_ms(state_start, state_end),
+                    "server_total_ms": _elapsed_ms(operation_start, state_end),
+                },
+            }
 
     def _collapse_levels(self, term: str | None = None, method: str = "auto") -> dict[str, Any]:
         with self._lock:
