@@ -6,8 +6,6 @@ body {
   align-items: stretch;
   padding: 12px;
   overflow: auto;
-  user-select: none;
-  -webkit-user-select: none;
 }
 
 .app-shell {
@@ -23,6 +21,40 @@ body {
     "view";
   grid-template-rows: auto auto minmax(0, 1fr);
   margin: 0 auto;
+}
+
+.app-alert {
+  grid-area: alert;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  padding: var(--space-2) 10px;
+  border: 2px solid var(--danger);
+  border-radius: var(--radius-md);
+  background: var(--danger-surface);
+  color: var(--danger-text);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.app-alert span {
+  flex: 1 1 280px;
+  font-weight: 600;
+}
+
+.app-alert button {
+  flex: 0 0 auto;
+  border-color: var(--danger);
+  background: var(--surface);
+  color: var(--danger-text);
+  font-weight: 600;
+}
+
+.app-alert button:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
 }
 
 #editorView {

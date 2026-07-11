@@ -38,7 +38,7 @@ def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page
         menu = page.locator("#selectionMenu")
         menu.wait_for(state="visible")
 
-        trigger = menu.locator('button[data-op="shift_up"]')
+        trigger = menu.locator('button[data-op="linearise"]')
         popover = page.locator("#uiPopover")
         trigger.hover()
         popover.wait_for(state="visible")
@@ -54,6 +54,10 @@ def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page
 
         trigger.focus()
         popover.wait_for(state="visible")
+        assert popover.locator("[data-popover-heading]").inner_text() == "Straighten selection"
+        assert popover.locator("[data-popover-description]").inner_text() == (
+            "Interpolate the selected relativities between their first and last points."
+        )
         page.keyboard.press("Escape")
         popover.wait_for(state="hidden")
         assert trigger.get_attribute("aria-describedby") is None
@@ -68,6 +72,58 @@ def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page
             assert popover.locator("[data-popover-heading]").inner_text() == heading
             page.mouse.move(4, 4)
             popover.wait_for(state="hidden")
+
+
+def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_page):
+    with open_editor_page() as (page, _session):
+        page.evaluate("window.__superglmTest.setAppBusy(true, 'Testing busy state', 'Waiting')")
+
+        for selector in ["#appBar", ".context-bar", "#editorView", "#reportPanel"]:
+            assert page.locator(selector).get_attribute("inert") == ""
+        assert page.locator(".app-shell").get_attribute("aria-busy") == "true"
+        overlay = page.locator("#appBusyOverlay")
+        assert overlay.get_attribute("aria-live") == "polite"
+        assert overlay.is_visible()
+        assert page.locator("#appAlert").get_attribute("role") == "alert"
+        assert page.locator("#appAlert").get_attribute("aria-live") == "assertive"
+
+        page.evaluate("window.__superglmTest.setAppBusy(false)")
+
+        for selector in ["#appBar", ".context-bar", "#editorView", "#reportPanel"]:
+            assert page.locator(selector).get_attribute("inert") is None
+        assert page.locator(".app-shell").get_attribute("aria-busy") == "false"
+        assert overlay.is_hidden()
+
+
+def test_text_selection_is_scoped_and_reduced_motion_stops_spinner(open_editor_page):
+    with open_editor_page() as (page, _session):
+        page.get_by_role("button", name="Help", exact=True).click()
+        help_panel = page.get_by_role("tabpanel", name="Help")
+        assert help_panel.is_visible()
+
+        for selector in ["#helpPane", "#status", "#reportFrame", "#appAlert"]:
+            user_select = page.locator(selector).evaluate(
+                "node => getComputedStyle(node).userSelect"
+            )
+            assert user_select in {"auto", "text"}
+        for selector in ["#chart", "#toolRail", "#selectionMenu"]:
+            assert (
+                page.locator(selector).evaluate("node => getComputedStyle(node).userSelect")
+                == "none"
+            )
+
+        page.emulate_media(reduced_motion="reduce")
+        motion = page.locator(".busy-spinner").evaluate(
+            """node => {
+                const style = getComputedStyle(node);
+                const value = style.animationDuration.split(',')[0].trim();
+                const seconds = value.endsWith('ms')
+                    ? Number.parseFloat(value) / 1000
+                    : Number.parseFloat(value);
+                return { name: style.animationName, seconds };
+            }"""
+        )
+        assert motion["name"] == "none" or motion["seconds"] <= 0.000001
 
 
 def test_application_bar_exposes_views_undo_redo_and_save(open_editor_page):

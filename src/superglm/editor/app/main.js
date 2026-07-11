@@ -44,6 +44,7 @@ const appAlert = document.getElementById("appAlert");
 const appAlertMessage = document.getElementById("appAlertMessage");
 const appAlertRetry = document.getElementById("appAlertRetry");
 const appAlertDismiss = document.getElementById("appAlertDismiss");
+const contextBar = document.querySelector(".context-bar");
 const editorView = document.getElementById("editorView");
 const reportPanel = document.getElementById("reportPanel");
 const reportTitle = document.getElementById("reportTitle");
@@ -551,8 +552,11 @@ function setAppBusy(active, title = "Working...", detail = "") {
     clearInterval(appBusyTimer);
     appBusyTimer = null;
   }
+  for (const region of [appBar, contextBar, editorView, reportPanel]) {
+    if (region) region.toggleAttribute("inert", active);
+  }
   appShell.classList.toggle("is-busy", active);
-  appShell.setAttribute("aria-busy", active ? "true" : "false");
+  appShell.setAttribute("aria-busy", String(active));
   appBusyOverlay.hidden = !active;
   if (!active) return;
   appBusyStarted = performance.now();
@@ -565,6 +569,10 @@ function setAppBusy(active, title = "Working...", detail = "") {
   };
   update();
   appBusyTimer = window.setInterval(update, 250);
+}
+
+if (new URLSearchParams(window.location.search).get("test") === "1") {
+  window.__superglmTest = Object.freeze({ setAppBusy });
 }
 
 function debugTiming(payload, operationStart, requestStart, requestEnd, completed) {

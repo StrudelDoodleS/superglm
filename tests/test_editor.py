@@ -4543,8 +4543,8 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "Pearson Chi2" in shell
         assert "exposure-axis" in css
         assert "selection-bounds" in css
-        assert "#F4D35E" in css
-        assert "#D8A10F" in css
+        assert "var(--yellow)" in css
+        assert "var(--yellow-border)" in css
     finally:
         widget.close()
 

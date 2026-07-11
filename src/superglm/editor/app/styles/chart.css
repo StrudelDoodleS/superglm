@@ -1,5 +1,13 @@
 /* chart.css: chart surface, SVG axis, selection palette, and shared popover. */
 
+.chart-shell,
+#chart,
+.tool-rail,
+.selection-menu {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .ui-popover {
   position: fixed;
   z-index: 80;

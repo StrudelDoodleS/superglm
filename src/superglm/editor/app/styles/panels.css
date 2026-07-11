@@ -46,7 +46,8 @@
 .help-pane,
 .advanced-timing,
 .summary-frame,
-.history-frame {
+.history-frame,
+.report-frame {
   user-select: text;
   -webkit-user-select: text;
 }
