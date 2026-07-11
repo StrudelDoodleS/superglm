@@ -3370,6 +3370,7 @@ def test_structural_transition_holds_widget_lock_through_snapshot_detachment(
     widget = session.widget()
     detachment_entered = threading.Event()
     release_detachment = threading.Event()
+    mutation_attempted = threading.Event()
     mutation_done = threading.Event()
     transition_errors = []
     mutation_errors = []
@@ -3398,6 +3399,7 @@ def test_structural_transition_holds_widget_lock_through_snapshot_detachment(
 
     def run_mutation():
         try:
+            mutation_attempted.set()
             widget._select("region", [0])
         except BaseException as exc:  # pragma: no cover - asserted below
             mutation_errors.append(exc)
@@ -3412,6 +3414,7 @@ def test_structural_transition_holds_widget_lock_through_snapshot_detachment(
         assert detachment_entered.wait(timeout=2), "transition never began JSON-safe detachment"
 
         mutation_thread.start()
+        assert mutation_attempted.wait(timeout=2), "competing mutation was never attempted"
         assert not mutation_done.wait(timeout=0.1), "mutation escaped the transition lock"
     finally:
         release_detachment.set()
