@@ -114,10 +114,9 @@ export function bindInteractions(context) {
       interaction.orderDrag = null;
       const source = sourceIndicesForDisplayIndex(context, Number(index));
       const indices = toggleSourceSelection(context.currentSelection(), source);
-      await context.actions.executeStateMutation({
-        name: "select",
-        path: "/select",
-        payload: { term: context.selectedTerm(), indices }
+      await context.actions.executeSelectionMutation({
+        term: context.selectedTerm(),
+        indices
       });
       return;
     }
@@ -263,10 +262,9 @@ export function bindInteractions(context) {
     interaction.pendingClickIndex = null;
     if (displayIndices === null) return;
     const indices = sourceIndicesForDisplayIndices(context, displayIndices);
-    await context.actions.executeStateMutation({
-      name: "select",
-      path: "/select",
-      payload: { term: context.selectedTerm(), indices }
+    await context.actions.executeSelectionMutation({
+      term: context.selectedTerm(),
+      indices
     });
   }
 

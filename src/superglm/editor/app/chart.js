@@ -218,6 +218,7 @@ export function drawChart(term, selection, context) {
     else drawLevelGroups(svg, view, sx, sy);
   }
   const visiblePoints = visiblePointIndices(view, displaySelected);
+  const basePoints = new Set(basePointIndices(view));
   const selectedPoints = [];
   const unselectedPoints = [];
   if (!handlesMode) {
@@ -225,8 +226,12 @@ export function drawChart(term, selection, context) {
       if (displaySelected.has(i)) selectedPoints.push(i);
       else unselectedPoints.push(i);
     }
-    for (const i of unselectedPoints) drawPoint(svg, view, x, y, sx, sy, i, false);
-    for (const i of selectedPoints) drawPoint(svg, view, x, y, sx, sy, i, true);
+    for (const i of unselectedPoints) {
+      drawPoint(svg, view, x, y, sx, sy, i, false, !basePoints.has(i));
+    }
+    for (const i of selectedPoints) {
+      drawPoint(svg, view, x, y, sx, sy, i, true, !basePoints.has(i));
+    }
   } else {
     drawControlHandles(svg, term, sx, sy, margin, innerH);
   }
@@ -240,7 +245,72 @@ export function drawChart(term, selection, context) {
     displayToSourceIndices: view.displayToSourceIndices,
     displayIsCollapsed: view.displayIsCollapsed
   };
+  svg._selectionView = { term, view, handlesMode };
   positionSelectionMenu(svg, context.selectionMenu, handlesMode ? null : selectedBounds);
+}
+
+export function updateChartSelection(term, selection, context) {
+  const { svg } = context;
+  const scale = svg._scale;
+  const selectionView = svg._selectionView;
+  if (!scale || !selectionView || selectionView.term !== term) return;
+
+  const { view, handlesMode } = selectionView;
+  const displaySelected = displaySelection(view, selection);
+  const basePoints = new Set(basePointIndices(view));
+  const existingPoints = new Map();
+  for (const point of svg.querySelectorAll("circle.point[data-index]")) {
+    const index = Number(point.dataset.index);
+    if (!Number.isInteger(index)) continue;
+    const supplemental = point.dataset.selectionSupplemental === "true" ||
+      !basePoints.has(index);
+    if (supplemental) point.dataset.selectionSupplemental = "true";
+    if (supplemental && !displaySelected.has(index)) {
+      point.remove();
+      continue;
+    }
+    const selected = displaySelected.has(index);
+    point.classList.toggle("selected", selected);
+    point.setAttribute("r", selected ? "4.6" : "3.4");
+    existingPoints.set(index, point);
+  }
+
+  if (!handlesMode) {
+    for (const index of displaySelected) {
+      if (
+        existingPoints.has(index) ||
+        index < 0 ||
+        index >= view.y.length
+      ) continue;
+      const point = drawPoint(
+        svg,
+        view,
+        view.x,
+        view.y,
+        scale.sx,
+        scale.sy,
+        index,
+        true,
+        true
+      );
+      point.setAttribute("clip-path", "url(#plotInteractionClip)");
+    }
+  }
+
+  const bounds = handlesMode
+    ? null
+    : selectionBounds(
+        view.x,
+        view.y,
+        displaySelected,
+        scale.sx,
+        scale.sy,
+        scale.margin,
+        scale.innerW,
+        scale.innerH
+      );
+  updateSelectionBounds(svg, bounds);
+  positionSelectionMenu(svg, context.selectionMenu, bounds);
 }
 
 function resolveDisplayTerm(term, mode) {
@@ -341,7 +411,7 @@ function applyPlotClip(svg) {
 function visiblePointIndices(term, selection) {
   // Large continuous grids draw a representative point subset for performance,
   // but selected points are always forced visible.
-  const base = term.handle_indices || term.x.map((_, i) => i);
+  const base = basePointIndices(term);
   const out = new Set(base);
   if (selection.size <= base.length) {
     for (const i of selection) out.add(i);
@@ -349,12 +419,18 @@ function visiblePointIndices(term, selection) {
   return Array.from(out).sort((a, b) => a - b);
 }
 
-function drawPoint(svg, term, x, y, sx, sy, i, selected) {
-  const circle = el("circle", {
+function basePointIndices(term) {
+  return term.handle_indices || term.x.map((_, i) => i);
+}
+
+function drawPoint(svg, term, x, y, sx, sy, i, selected, supplemental = false) {
+  const attrs = {
     cx: sx(x[i]), cy: sy(y[i]), r: selected ? 4.6 : 3.4,
     class: selected ? "point selected" : "point",
     "data-index": i
-  });
+  };
+  if (supplemental) attrs["data-selection-supplemental"] = "true";
+  const circle = el("circle", attrs);
   circle.addEventListener("pointerenter", () => {
     showPointTooltip(svg, circle, pointTooltipLines(term, i));
   });
@@ -363,6 +439,7 @@ function drawPoint(svg, term, x, y, sx, sy, i, selected) {
   });
   circle.addEventListener("pointerleave", () => hidePointTooltip(svg));
   svg.appendChild(circle);
+  return circle;
 }
 
 function pointTooltipLines(term, i) {
@@ -704,6 +781,24 @@ function drawSelectionBounds(svg, bounds) {
       ry: 4,
       class: className
     }));
+  }
+}
+
+function updateSelectionBounds(svg, bounds) {
+  for (const className of ["selection-bounds-halo", "selection-bounds"]) {
+    let node = svg.querySelector(`.${className}`);
+    if (!bounds) {
+      if (node) node.remove();
+      continue;
+    }
+    if (!node) {
+      node = el("rect", { rx: 4, ry: 4, class: className });
+      svg.appendChild(node);
+    }
+    node.setAttribute("x", bounds.x);
+    node.setAttribute("y", bounds.y);
+    node.setAttribute("width", bounds.width);
+    node.setAttribute("height", bounds.height);
   }
 }
 

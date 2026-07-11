@@ -12,6 +12,41 @@ def select_chart_tool(page, name: str) -> None:
     ).click()
 
 
+def remember_selection_dom(page) -> None:
+    page.evaluate(
+        """() => {
+            window.__selectionDom = {
+                editedPath: document.querySelector('#chart path.edited'),
+                firstPoint: document.querySelector('#chart circle.point[data-index]'),
+                firstAxis: document.querySelector('#chart line.axis'),
+                xAxisTitle: document.querySelector('#chart .x-axis-title'),
+                termOption: document.querySelector('#term option[value="curve"]'),
+            };
+        }"""
+    )
+
+
+def selection_dom_is_unchanged(page) -> bool:
+    return page.evaluate(
+        """() => {
+            const before = window.__selectionDom;
+            return before.editedPath === document.querySelector('#chart path.edited')
+                && before.firstPoint === document.querySelector(
+                    '#chart circle.point[data-index]'
+                )
+                && before.firstAxis === document.querySelector('#chart line.axis')
+                && before.xAxisTitle === document.querySelector('#chart .x-axis-title')
+                && before.termOption === document.querySelector(
+                    '#term option[value="curve"]'
+                );
+        }"""
+    )
+
+
+def is_select_request(request) -> bool:
+    return request.method == "POST" and request.url.split("?", maxsplit=1)[0].endswith("/select")
+
+
 def test_real_editor_boots_and_draws_svg(open_editor_page):
     with open_editor_page() as (page, _session):
         edited_path = page.locator("#chart path.edited").first
@@ -29,6 +64,138 @@ def test_real_editor_boots_and_draws_svg(open_editor_page):
         assert geometry["namespace"] == "http://www.w3.org/2000/svg"
         assert geometry["command"] == "M"
         assert geometry["length"] > 0
+
+
+def test_selection_noop_empty_box_preserves_chart_without_posting(open_editor_page):
+    with open_editor_page() as (page, session):
+        select_chart_tool(page, "Select")
+        initial_revision = session.model_revision
+        select_requests = []
+        page.on(
+            "request",
+            lambda request: select_requests.append(request) if is_select_request(request) else None,
+        )
+        remember_selection_dom(page)
+        drag = page.evaluate(
+            """() => {
+                const svg = document.querySelector('#chart');
+                const scale = svg._scale;
+                const clientPoint = (x, y) => {
+                    const point = svg.createSVGPoint();
+                    point.x = x;
+                    point.y = y;
+                    const client = point.matrixTransform(svg.getScreenCTM());
+                    return { x: client.x, y: client.y };
+                };
+                window.__selectionMutations = [];
+                window.__selectionObserver = new MutationObserver(records => {
+                    for (const record of records) {
+                        if (record.type === 'attributes') {
+                            window.__selectionMutations.push({
+                                type: 'attribute',
+                                className: record.target.getAttribute('class'),
+                                attribute: record.attributeName,
+                            });
+                            continue;
+                        }
+                        for (const node of record.addedNodes) {
+                            if (node.nodeType === Node.ELEMENT_NODE) {
+                                window.__selectionMutations.push({
+                                    type: 'added',
+                                    className: node.getAttribute('class'),
+                                });
+                            }
+                        }
+                        for (const node of record.removedNodes) {
+                            if (node.nodeType === Node.ELEMENT_NODE) {
+                                window.__selectionMutations.push({
+                                    type: 'removed',
+                                    className: node.getAttribute('class'),
+                                });
+                            }
+                        }
+                    }
+                });
+                window.__selectionObserver.observe(svg, {
+                    attributes: true,
+                    childList: true,
+                    subtree: true,
+                });
+                return {
+                    start: clientPoint(scale.margin.left + 4, scale.margin.top + 4),
+                    end: clientPoint(scale.margin.left + 20, scale.margin.top + 20),
+                };
+            }"""
+        )
+
+        page.mouse.move(drag["start"]["x"], drag["start"]["y"])
+        page.mouse.down()
+        page.mouse.move(drag["end"]["x"], drag["end"]["y"], steps=3)
+        page.mouse.up()
+        page.evaluate(
+            """() => new Promise(resolve => requestAnimationFrame(
+                () => requestAnimationFrame(resolve)
+            ))"""
+        )
+        mutations = page.evaluate(
+            """() => {
+                window.__selectionObserver.disconnect();
+                return window.__selectionMutations;
+            }"""
+        )
+
+        assert session.selection("curve").tolist() == []
+        assert session.model_revision == initial_revision
+        assert select_requests == []
+        assert selection_dom_is_unchanged(page)
+        assert {mutation["type"] for mutation in mutations} >= {"added", "removed"}
+        assert {mutation["className"] for mutation in mutations} == {"brush"}
+
+
+def test_selection_incremental_feedback_precedes_delayed_backend_success(open_editor_page):
+    with open_editor_page() as (page, session):
+        select_chart_tool(page, "Select")
+        initial_revision = session.model_revision
+        select_requests = []
+        held_routes = []
+        page.on(
+            "request",
+            lambda request: select_requests.append(request) if is_select_request(request) else None,
+        )
+        page.route("**/select", lambda route: held_routes.append(route))
+        remember_selection_dom(page)
+        point = page.locator("#chart circle.point[data-index]").first
+        selected_index = int(point.get_attribute("data-index"))
+
+        with page.expect_request(is_select_request):
+            point.click()
+
+        assert len(held_routes) == 1
+        assert session.selection("curve").tolist() == []
+        page.wait_for_function(
+            """index => {
+                const point = document.querySelector(
+                    `#chart circle.point[data-index="${index}"]`
+                );
+                return point?.classList.contains('selected')
+                    && point.getAttribute('r') === '4.6'
+                    && document.querySelector('#status')?.textContent.startsWith('1 of ');
+            }""",
+            arg=selected_index,
+        )
+        assert selection_dom_is_unchanged(page)
+
+        with page.expect_response(
+            lambda response: is_select_request(response.request)
+        ) as response_info:
+            held_routes[0].continue_()
+
+        assert response_info.value.status == 200
+        page.wait_for_function("() => document.querySelector('#appBusyOverlay')?.hidden")
+        assert session.selection("curve").tolist() == [selected_index]
+        assert session.model_revision == initial_revision
+        assert len(select_requests) == 1
+        assert selection_dom_is_unchanged(page)
 
 
 def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page):

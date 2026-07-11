@@ -1,5 +1,5 @@
 import { editorClient } from "./api/client.js";
-import { drawChart, groupedTerms } from "./chart.js";
+import { drawChart, groupedTerms, updateChartSelection } from "./chart.js";
 import { renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
@@ -802,10 +802,7 @@ function render() {
   updateCollapseAction(term, selection);
   updateResetOrderAction(term);
   drawChart(term, selection, chartContext);
-  const collapsedOriginalNote =
-    activeGroupDisplayMode() === "collapsed" && term.group_display && term.group_display.available
-      ? "original line is grouped by exposure-weighted averaging"
-      : "";
+  const collapsedOriginalNote = selectionContextNote(term);
   renderAppBar({
     root: appBar,
     activeView: view.activeView,
@@ -818,6 +815,70 @@ function render() {
     { kindNode: termKind, edfNode: termEdf, statusNode },
     { name: selected, term, selectionSize: selection.size, note: collapsedOriginalNote }
   );
+}
+
+function selectionContextNote(term) {
+  return activeGroupDisplayMode() === "collapsed" &&
+    term.group_display &&
+    term.group_display.available
+    ? "original line is grouped by exposure-weighted averaging"
+    : "";
+}
+
+function renderSelectionState({ termName, indices }) {
+  if (termName !== selectedTerm()) return;
+  const term = currentTerm();
+  if (!term) return;
+  const selection = new Set(indices);
+  updateChartSelection(term, selection, chartContext);
+  updateCollapseAction(term, selection);
+  renderContextBar(
+    { kindNode: termKind, edfNode: termEdf, statusNode },
+    {
+      name: termName,
+      term,
+      selectionSize: selection.size,
+      note: selectionContextNote(term)
+    }
+  );
+}
+
+function selectSelectionState(state) {
+  return {
+    termName: selectActiveTermName(state),
+    indices: selectCurrentSelection(state)
+  };
+}
+
+function sameSelectionState(next, previous) {
+  if (next.termName !== previous.termName || next.indices.length !== previous.indices.length) {
+    return false;
+  }
+  return next.indices.every((value, index) => value === previous.indices[index]);
+}
+
+function selectChartBearingState(state) {
+  const snapshot = selectSnapshot(state);
+  if (!snapshot) return null;
+  return {
+    snapshot,
+    modelRevision: snapshot.model_revision,
+    selectedTerm: snapshot.selected_term,
+    terms: snapshot.terms,
+    history: snapshot.history,
+    canUncollapseLevels: snapshot.can_uncollapse_levels,
+    lastCollapse: snapshot.last_collapse
+  };
+}
+
+function sameChartBearingState(next, previous) {
+  if (next === null || previous === null) return next === previous;
+  return next.modelRevision === previous.modelRevision &&
+    next.selectedTerm === previous.selectedTerm &&
+    next.terms === previous.terms &&
+    next.history === previous.history &&
+    next.canUncollapseLevels === previous.canUncollapseLevels &&
+    next.lastCollapse === previous.lastCollapse;
 }
 
 function sameViewOutsidePreview(next, previous) {
@@ -1321,13 +1382,13 @@ if (uncollapseLevels) {
   });
 }
 
-store.subscribe((state) => state.remote.snapshot, (snapshot) => {
-  if (snapshot) {
-    svg.dataset.modelRevision = String(snapshot.model_revision);
-    summaryFrame.dataset.modelRevision = String(snapshot.model_revision);
+store.subscribe(selectChartBearingState, (chartState) => {
+  if (chartState) {
+    svg.dataset.modelRevision = String(chartState.modelRevision);
+    summaryFrame.dataset.modelRevision = String(chartState.modelRevision);
   }
   render();
-});
+}, sameChartBearingState);
 store.subscribe(
   (state) => state.remote.summary,
   (summary) => {
@@ -1350,6 +1411,7 @@ store.subscribe(
   renderInteractionState,
   sameInteractionState,
 );
+store.subscribe(selectSelectionState, renderSelectionState, sameSelectionState);
 store.subscribe((state) => state.request.recovery, renderRecovery);
 store.subscribe((state) => state.request.mutation, renderMutationBusy);
 store.subscribe(
