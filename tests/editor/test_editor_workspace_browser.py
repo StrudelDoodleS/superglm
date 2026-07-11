@@ -95,3 +95,7 @@ def test_context_bar_reports_term_kind_and_edf(open_editor_page):
         assert context.get_by_label("Term").input_value() == "curve"
         assert "spline" in context.locator("#termKind").inner_text().lower()
         assert "EDF" in context.locator("#termEdf").inner_text()
+        inspector_toggle = context.get_by_role("button", name="Inspector")
+        controlled_id = inspector_toggle.get_attribute("aria-controls")
+        assert controlled_id
+        assert page.locator(f"#{controlled_id}").count() == 1
