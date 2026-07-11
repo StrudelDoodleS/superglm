@@ -83,6 +83,42 @@ def test_long_labels_truncate_only_on_screen_and_keep_exact_model_strings(open_e
         assert page.locator("#chart").get_attribute("data-axis-measurement-count") == "10"
 
 
+def test_identical_categorical_redraw_reuses_text_measurements(open_editor_page):
+    with open_editor_page(viewport={"width": 1048, "height": 720}) as (page, _session):
+        page.evaluate(
+            """() => {
+                const original = SVGTextElement.prototype.getComputedTextLength;
+                window.__axisMeasurementCalls = 0;
+                SVGTextElement.prototype.getComputedTextLength = function () {
+                    window.__axisMeasurementCalls += 1;
+                    return original.call(this);
+                };
+            }"""
+        )
+
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/term")
+            )
+        ):
+            page.select_option("#term", "long_category")
+        page.wait_for_function(
+            "term => document.querySelector('#status')?.dataset.term === term",
+            arg="long_category",
+        )
+        page.locator("#chart .x-tick-label").first.wait_for()
+
+        initial_calls = page.evaluate("window.__axisMeasurementCalls")
+        assert initial_calls > 0
+
+        page.get_by_role("button", name="Reference CI").click()
+        page.wait_for_function(
+            "() => document.querySelector('#ciToggle')?.getAttribute('aria-pressed') === 'true'"
+        )
+        assert page.evaluate("window.__axisMeasurementCalls") == initial_calls
+
+
 def test_zoom_between_categories_does_not_draw_an_out_of_domain_tick(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, _session):
         zoom = page.locator("#chart").evaluate(

@@ -5,6 +5,30 @@ import {
   splitLabelGraphemes
 } from "./chart/geometry.js";
 
+const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
+const CATEGORICAL_FONT_PROPERTIES = Object.freeze([
+  "font-family",
+  "font-size",
+  "font-size-adjust",
+  "font-style",
+  "font-weight",
+  "font-stretch",
+  "font-variant",
+  "font-feature-settings",
+  "font-variation-settings",
+  "font-kerning",
+  "font-optical-sizing",
+  "font-synthesis",
+  "letter-spacing",
+  "word-spacing",
+  "line-height",
+  "text-transform",
+  "text-rendering",
+  "direction",
+  "writing-mode"
+]);
+const categoricalMeasurementCaches = new WeakMap();
+
 export function groupedTerms(terms) {
   const order = ["spline", "ordered categorical", "categorical", "polynomial", "numeric"];
   const groups = new Map();
@@ -747,8 +771,17 @@ function measureCategoricalLabels(svg, labels) {
   svg.appendChild(layer);
   try {
     const probe = text(layer, 0, 0, "", "tick-label", "start");
-    const ellipsisWidth = measureText(probe, "…");
+    const cache = categoricalMeasurementCache(svg, probe);
+    if (cache.ellipsisWidth === null) {
+      cache.ellipsisWidth = measureText(probe, "…");
+    }
     return labels.map((label) => {
+      const cached = cache.labels.get(label);
+      if (cached) {
+        cache.labels.delete(label);
+        cache.labels.set(label, cached);
+        return cached;
+      }
       const graphemes = splitLabelGraphemes(label);
       const prefixWidths = [];
       let prefix = "";
@@ -758,15 +791,44 @@ function measureCategoricalLabels(svg, labels) {
       }
       probe.textContent = label;
       const box = probe.getBBox();
-      return {
+      const measurement = Object.freeze({
         fullWidth: prefixWidths.at(-1) || 0,
-        prefixWidths,
-        ellipsisWidth,
+        prefixWidths: Object.freeze(prefixWidths),
+        ellipsisWidth: cache.ellipsisWidth,
         height: Math.max(1, box.height)
-      };
+      });
+      cache.labels.set(label, measurement);
+      evictOldCategoricalMeasurements(cache.labels);
+      return measurement;
     });
   } finally {
     layer.remove();
+  }
+}
+
+function categoricalMeasurementCache(svg, probe) {
+  const fontSignature = categoricalFontSignature(probe);
+  const current = categoricalMeasurementCaches.get(svg);
+  if (current && current.fontSignature === fontSignature) return current;
+  const cache = {
+    fontSignature,
+    ellipsisWidth: null,
+    labels: new Map()
+  };
+  categoricalMeasurementCaches.set(svg, cache);
+  return cache;
+}
+
+function categoricalFontSignature(probe) {
+  const style = window.getComputedStyle(probe);
+  return JSON.stringify(CATEGORICAL_FONT_PROPERTIES.map(
+    (property) => [property, style.getPropertyValue(property)]
+  ));
+}
+
+function evictOldCategoricalMeasurements(cache) {
+  while (cache.size > CATEGORICAL_MEASUREMENT_CACHE_LIMIT) {
+    cache.delete(cache.keys().next().value);
   }
 }
 
