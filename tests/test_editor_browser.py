@@ -44,6 +44,22 @@ def test_editor_browser_loads_authoritative_state(browser_editor_widget):
         page.locator("#chart .edited").first.wait_for()
         assert page.locator("#term").input_value() == "age"
         assert page.locator("#status").get_attribute("style") in (None, "")
+        layout = page.evaluate(
+            """() => {
+                const shell = document.querySelector('.app-shell').getBoundingClientRect();
+                const view = document.querySelector('#editorView').getBoundingClientRect();
+                const style = getComputedStyle(document.querySelector('#editorView'));
+                return {
+                    shellBottom: shell.bottom,
+                    viewBottom: view.bottom,
+                    viewHeight: view.height,
+                    viewGridRow: style.gridRowStart,
+                };
+            }"""
+        )
+        assert layout["viewGridRow"] == "view"
+        assert abs(layout["viewBottom"] - layout["shellBottom"]) < 1
+        assert layout["viewHeight"] > 400
         browser.close()
 
 
@@ -146,7 +162,7 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
         y = box["y"] + box["height"] / 2
         page.mouse.move(x, y)
         page.mouse.down()
-        page.mouse.move(x, y + delta_y, steps=5)
+        page.mouse.move(x, y + delta_y)
 
     with sync_playwright() as runtime:
         browser = runtime.chromium.launch(headless=True)
@@ -164,14 +180,52 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
             confirmed_path = edited_path.get_attribute("d")
             confirmed_revision = browser_editor_widget.session.model_revision
             assert confirmed_path is not None
+            normal_layout = page.evaluate(
+                """() => {
+                    const shell = document.querySelector('.app-shell').getBoundingClientRect();
+                    const view = document.querySelector('#editorView').getBoundingClientRect();
+                    return {
+                        shellBottom: shell.bottom,
+                        viewBottom: view.bottom,
+                        viewHeight: view.height,
+                    };
+                }"""
+            )
+            assert abs(normal_layout["viewBottom"] - normal_layout["shellBottom"]) < 1
 
+            page.evaluate(
+                """() => {
+                    const stats = { editedPathAdds: 0, termMutations: 0 };
+                    window.__previewRenderStats = stats;
+                    new MutationObserver((records) => {
+                        for (const record of records) {
+                            for (const node of record.addedNodes) {
+                                if (!(node instanceof Element)) continue;
+                                if (node.matches('path.edited')) stats.editedPathAdds += 1;
+                                stats.editedPathAdds += node.querySelectorAll('path.edited').length;
+                            }
+                        }
+                    }).observe(document.querySelector('#chart'), { childList: true, subtree: true });
+                    new MutationObserver((records) => {
+                        for (const record of records) {
+                            stats.termMutations +=
+                                record.addedNodes.length + record.removedNodes.length;
+                        }
+                    }).observe(document.querySelector('#term'), { childList: true, subtree: true });
+                }"""
+            )
             begin_selected_point_drag(page, -36)
+            page.wait_for_function("() => window.__previewRenderStats.editedPathAdds > 0")
             preview_path = edited_path.get_attribute("d")
             assert preview_path is not None
             assert preview_path != confirmed_path
+            preview_stats = page.evaluate("() => window.__previewRenderStats")
+            assert preview_stats == {"editedPathAdds": 1, "termMutations": 0}
             with page.expect_response(
-                lambda response: response.request.method == "POST"
-                and response.url.split("?", maxsplit=1)[0].endswith("/drag")
+                lambda response: (
+                    response.request.method == "POST"
+                    and response.url.split("?", maxsplit=1)[0].endswith("/drag")
+                )
             ) as failed_drag:
                 page.mouse.up()
             assert failed_drag.value.status == 500
@@ -193,13 +247,41 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
             alert = page.locator("#appAlert")
             assert alert.is_visible()
             assert "internal editor error" in page.locator("#appAlertMessage").inner_text()
+            alert_layout = page.evaluate(
+                """() => {
+                    const shell = document.querySelector('.app-shell').getBoundingClientRect();
+                    const view = document.querySelector('#editorView').getBoundingClientRect();
+                    return {
+                        shellBottom: shell.bottom,
+                        viewBottom: view.bottom,
+                        viewHeight: view.height,
+                    };
+                }"""
+            )
+            assert abs(alert_layout["viewBottom"] - alert_layout["shellBottom"]) < 1
+            assert alert_layout["viewHeight"] < normal_layout["viewHeight"]
             page.locator("#appAlertDismiss").click()
             alert.wait_for(state="hidden")
+            dismissed_layout = page.evaluate(
+                """() => {
+                    const shell = document.querySelector('.app-shell').getBoundingClientRect();
+                    const view = document.querySelector('#editorView').getBoundingClientRect();
+                    return {
+                        shellBottom: shell.bottom,
+                        viewBottom: view.bottom,
+                        viewHeight: view.height,
+                    };
+                }"""
+            )
+            assert abs(dismissed_layout["viewBottom"] - dismissed_layout["shellBottom"]) < 1
+            assert abs(dismissed_layout["viewHeight"] - normal_layout["viewHeight"]) < 1
 
             begin_selected_point_drag(page, 28)
             with page.expect_response(
-                lambda response: response.request.method == "POST"
-                and response.url.split("?", maxsplit=1)[0].endswith("/drag")
+                lambda response: (
+                    response.request.method == "POST"
+                    and response.url.split("?", maxsplit=1)[0].endswith("/drag")
+                )
             ) as successful_drag:
                 page.mouse.up()
             assert successful_drag.value.status == 200
@@ -218,12 +300,68 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
 
 
 @pytest.mark.browser
+@pytest.mark.parametrize("cancel_event", ["pointercancel", "lostpointercapture"])
+def test_editor_browser_cancelled_drag_restores_confirmed_preview_without_post(
+    browser_editor_widget, monkeypatch, cancel_event
+):
+    original_drag = browser_editor_widget._drag
+    drag_requests = []
+
+    def record_drag(term, indices, delta=0.0, values=None):
+        drag_requests.append((term, list(indices)))
+        return original_drag(term, indices, delta, values)
+
+    monkeypatch.setattr(browser_editor_widget, "_drag", record_drag)
+
+    with sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1180, "height": 720})
+            page.goto(browser_editor_widget.app_url)
+            page.locator("#chart path.edited").first.wait_for()
+            page.locator("#mode").select_option("select")
+            page.locator("#chart circle.point[data-index]").last.click()
+            page.locator("#mode").select_option("move")
+
+            edited_path = page.locator("#chart path.edited").first
+            confirmed_path = edited_path.get_attribute("d")
+            confirmed_revision = browser_editor_widget.session.model_revision
+            point = page.locator("#chart circle.point.selected[data-index]").first
+            box = point.bounding_box()
+            assert box is not None
+            x = box["x"] + box["width"] / 2
+            y = box["y"] + box["height"] / 2
+            page.mouse.move(x, y)
+            page.mouse.down()
+            page.mouse.move(x, y - 30)
+            assert edited_path.get_attribute("d") != confirmed_path
+
+            page.locator("#chart").dispatch_event(
+                cancel_event,
+                {"pointerId": 1, "pointerType": "mouse", "isPrimary": True, "button": 0},
+            )
+            page.wait_for_function(
+                "confirmed => document.querySelector('#chart path.edited')?.getAttribute('d') === confirmed",
+                arg=confirmed_path,
+            )
+            page.mouse.up()
+            page.wait_for_timeout(100)
+
+            assert drag_requests == []
+            assert browser_editor_widget.session.model_revision == confirmed_revision
+        finally:
+            browser.close()
+
+
+@pytest.mark.browser
 def test_editor_browser_failed_term_switch_keeps_authoritative_term(
     browser_editor_widget, monkeypatch
 ):
     original_set_term = browser_editor_widget._set_term
     original_operate = browser_editor_widget._operate
     operation_terms = []
+    operation_started = threading.Event()
+    release_operation = threading.Event()
 
     def reject_region(term):
         if term == "region":
@@ -232,6 +370,10 @@ def test_editor_browser_failed_term_switch_keeps_authoritative_term(
 
     def record_operation_term(operation, term=None):
         operation_terms.append(browser_editor_widget.selected_term)
+        if operation == "select_all":
+            operation_started.set()
+            if not release_operation.wait(timeout=5):
+                raise RuntimeError("Timed out waiting to release select_all")
         return original_operate(operation, term)
 
     monkeypatch.setattr(browser_editor_widget, "_set_term", reject_region)
@@ -258,12 +400,16 @@ def test_editor_browser_failed_term_switch_keeps_authoritative_term(
 
             age_points = browser_editor_widget.terms["age"]["n_points"]
             page.locator('button[data-op="select_all"]').click()
+            assert operation_started.wait(timeout=2)
+            assert page.locator("#appAlert").is_hidden()
+            release_operation.set()
             page.wait_for_function(
                 "expected => document.querySelector('#status')?.textContent.includes(expected)",
                 arg=f"{age_points} of {age_points} selected",
             )
             assert operation_terms == ["age"]
         finally:
+            release_operation.set()
             browser.close()
 
 

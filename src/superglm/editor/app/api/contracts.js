@@ -60,7 +60,7 @@
  * @property {Record<string, string>} groupModeByTerm
  * @property {'summary'|'history'|'advanced'|'help'} inspectorPane
  * @property {boolean} inspectorOpen
- * @property {{term:string, payload:TermPayload}|null} preview
+ * @property {{term:string, payload:TermPayload, selection:number[]}|null} preview
  */
 /**
  * @typedef {Object} MutationRequestState

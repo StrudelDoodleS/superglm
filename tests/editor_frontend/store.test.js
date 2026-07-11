@@ -45,9 +45,14 @@ function snapshot(revision = 0) {
 test("store keeps confirmed remote data separate from a chart preview", () => {
   const initial = createInitialEditorState(snapshot());
   const preview = { ...snapshot().terms.age, y: [1.4] };
-  const next = setPreviewTerm(initial, "age", preview);
+  const next = setPreviewTerm(initial, "age", preview, [4, 2]);
   assert.deepEqual(next.remote.snapshot?.terms.age.y, [1]);
   assert.deepEqual(selectRenderableTerm(next)?.y, [1.4]);
+  assert.deepEqual(next.view.preview, {
+    term: "age",
+    payload: preview,
+    selection: [4, 2]
+  });
 });
 
 test("remote commit clears preview and preserves valid view state", () => {

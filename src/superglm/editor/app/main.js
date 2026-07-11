@@ -108,7 +108,8 @@ let buildFrame = null;
 let renderedTerm = "";
 let appBusyTimer = null;
 let appBusyStarted = 0;
-let retainedRecovery = null;
+let retryInProgress = false;
+let retryRecovery = null;
 
 const store = createEditorStore(createInitialEditorState());
 const actions = createEditorActions({
@@ -176,8 +177,20 @@ function interactionMode() {
   return store.getState().view.mode;
 }
 
-function setInteractionPreview(term, payload) {
-  store.update((state) => setPreviewTermState(state, term, payload));
+function setInteractionPreview(term, payload, selection) {
+  store.update((state) => setPreviewTermState(state, term, payload, selection));
+}
+
+function clearInteractionPreview() {
+  let cleared = false;
+  store.update((state) => {
+    if (state.view.preview === null) return state;
+    cleared = true;
+    return patchViewState(state, { preview: null });
+  });
+  if (!cleared) return;
+  const term = currentTerm();
+  if (term) drawChart(term, currentSelection(), chartContext);
 }
 
 function setZoom(term, range) {
@@ -574,23 +587,57 @@ function render() {
   drawChart(term, selection, chartContext);
 }
 
-function renderRecovery({ recovery, mutationStatus }) {
+function sameStateOutsidePreview(next, previous) {
+  const nextView = next.view;
+  const previousView = previous.view;
+  return next.remote === previous.remote &&
+    next.request === previous.request &&
+    nextView.activeTerm === previousView.activeTerm &&
+    nextView.activeView === previousView.activeView &&
+    nextView.mode === previousView.mode &&
+    nextView.showCi === previousView.showCi &&
+    nextView.showContrib === previousView.showContrib &&
+    nextView.zoomByTerm === previousView.zoomByTerm &&
+    nextView.groupModeByTerm === previousView.groupModeByTerm &&
+    nextView.inspectorPane === previousView.inspectorPane &&
+    nextView.inspectorOpen === previousView.inspectorOpen;
+}
+
+function renderInteractionPreview(preview) {
+  if (!preview || preview.term !== selectedTerm()) return;
+  drawChart(preview.payload, new Set(preview.selection), chartContext);
+}
+
+function renderRecovery(recovery) {
   if (!appAlert || !appAlertMessage || !appAlertRetry || !appAlertDismiss) return;
-  if (recovery) retainedRecovery = recovery;
-  const retrying = mutationStatus === "running" && retainedRecovery !== null;
-  if (!recovery && !retrying) {
-    retainedRecovery = null;
+  const visibleRecovery = recovery || (retryInProgress ? retryRecovery : null);
+  if (!visibleRecovery) {
     appAlert.hidden = true;
     appAlertMessage.textContent = "";
     appAlertRetry.disabled = false;
     appAlertDismiss.disabled = false;
     return;
   }
-  const visibleRecovery = recovery || retainedRecovery;
-  appAlertMessage.textContent = visibleRecovery ? visibleRecovery.message : "Editor request failed.";
-  appAlertRetry.disabled = retrying;
-  appAlertDismiss.disabled = retrying;
+  appAlertMessage.textContent = visibleRecovery.message;
+  appAlertRetry.disabled = retryInProgress;
+  appAlertDismiss.disabled = retryInProgress;
   appAlert.hidden = false;
+}
+
+async function retryFailedMutation() {
+  if (retryInProgress) return;
+  const recovery = store.getState().request.recovery;
+  if (!recovery) return;
+  retryRecovery = recovery;
+  retryInProgress = true;
+  renderRecovery(null);
+  try {
+    await actions.retryMutation();
+  } finally {
+    retryInProgress = false;
+    retryRecovery = null;
+    renderRecovery(store.getState().request.recovery);
+  }
 }
 
 function renderMetricsEvidence(evidence) {
@@ -841,6 +888,7 @@ const interactions = bindInteractions({
   currentTerm,
   currentSelection,
   setPreviewTerm: setInteractionPreview,
+  clearPreviewTerm: clearInteractionPreview,
   setZoom,
   clearZoom,
   actions,
@@ -928,7 +976,7 @@ ciToggle.addEventListener("click", () => {
 resetZoom.addEventListener("click", interactions.resetZoomView);
 if (appAlertRetry) {
   appAlertRetry.addEventListener("click", () => {
-    void actions.retryMutation();
+    void retryFailedMutation();
   });
 }
 if (appAlertDismiss) {
@@ -1007,17 +1055,9 @@ if (uncollapseLevels) {
   });
 }
 
-store.subscribe((state) => state, () => render());
-store.subscribe(
-  (state) => ({
-    recovery: state.request.recovery,
-    mutationStatus: state.request.mutation.status
-  }),
-  renderRecovery,
-  (next, previous) => (
-    next.recovery === previous.recovery && next.mutationStatus === previous.mutationStatus
-  )
-);
+store.subscribe((state) => state, () => render(), sameStateOutsidePreview);
+store.subscribe((state) => state.view.preview, renderInteractionPreview);
+store.subscribe((state) => state.request.recovery, renderRecovery);
 
 loadState().then(async () => {
   await refreshMetricsView();

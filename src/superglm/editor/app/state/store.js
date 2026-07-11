@@ -101,9 +101,14 @@ export function patchView(state, patch) {
   return { ...state, view: { ...state.view, ...patch } };
 }
 
-/** @param {EditorState} state @param {string} term @param {TermPayload} payload */
-export function setPreviewTerm(state, term, payload) {
-  return patchView(state, { preview: { term, payload } });
+/**
+ * @param {EditorState} state
+ * @param {string} term
+ * @param {TermPayload} payload
+ * @param {number[]} [selection]
+ */
+export function setPreviewTerm(state, term, payload, selection = []) {
+  return patchView(state, { preview: { term, payload, selection: selection.slice() } });
 }
 
 /** @param {EditorState} state @param {EditorSnapshot} snapshot */

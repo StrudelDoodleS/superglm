@@ -30,10 +30,15 @@ body {
   min-width: 0;
   height: 100%;
   display: grid;
+  grid-template-areas:
+    "alert"
+    "tabs"
+    "view";
   grid-template-rows: auto auto minmax(0, 1fr);
   margin: 0 auto;
 }
 .app-alert {
+  grid-area: alert;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -188,6 +193,7 @@ button:active { background: #e6edf3; }
   stroke-linejoin: round;
 }
 .app-tabs {
+  grid-area: tabs;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -210,6 +216,7 @@ button:active { background: #e6edf3; }
   transform: translateY(1px);
 }
 .app-view {
+  grid-area: view;
   min-height: 0;
 }
 #editorView {

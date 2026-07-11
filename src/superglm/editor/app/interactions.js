@@ -161,7 +161,7 @@ export function bindInteractions(context) {
         }
       }
       previewControlCurve(term, drag, value);
-      context.setPreviewTerm(drag.term, term);
+      context.setPreviewTerm(drag.term, term, Array.from(context.currentSelection()));
       return;
     }
     if (interaction.pointDrag) {
@@ -170,8 +170,7 @@ export function bindInteractions(context) {
       const value = yFromPoint(context, svgPoint(context, event));
       drag.delta = value - drag.startValue;
       updateDraggedSourceValues(term, drag, context);
-      context.setPreviewTerm(drag.term, term);
-      context.drawChart(term, drag.selection);
+      context.setPreviewTerm(drag.term, term, Array.from(drag.selection));
       return;
     }
     if (interaction.orderDrag) {
@@ -296,9 +295,21 @@ export function bindInteractions(context) {
     }
   }
 
+  function onPointerCancel() {
+    cancelActiveInteraction(context, interaction);
+  }
+
+  function onLostPointerCapture() {
+    if (hasActiveInteraction(interaction)) {
+      cancelActiveInteraction(context, interaction);
+    }
+  }
+
   svg.addEventListener("pointerdown", onPointerDown);
   svg.addEventListener("pointermove", onPointerMove);
   svg.addEventListener("pointerup", onPointerUp);
+  svg.addEventListener("pointercancel", onPointerCancel);
+  svg.addEventListener("lostpointercapture", onLostPointerCapture);
   svg.addEventListener("wheel", onWheel, wheelOptions);
   document.addEventListener("keydown", onKeyDown);
 
@@ -308,13 +319,41 @@ export function bindInteractions(context) {
       svg.removeEventListener("pointerdown", onPointerDown);
       svg.removeEventListener("pointermove", onPointerMove);
       svg.removeEventListener("pointerup", onPointerUp);
+      svg.removeEventListener("pointercancel", onPointerCancel);
+      svg.removeEventListener("lostpointercapture", onLostPointerCapture);
       svg.removeEventListener("wheel", onWheel, wheelOptions);
       document.removeEventListener("keydown", onKeyDown);
-      if (interaction.brush) interaction.brush.remove();
-      clearBoxZoom(interaction);
-      clearOrderDropPreview(interaction);
+      cancelActiveInteraction(context, interaction);
     }
   };
+}
+
+function hasActiveInteraction(interaction) {
+  return Boolean(
+    interaction.dragStart ||
+    interaction.brush ||
+    interaction.pointDrag ||
+    interaction.controlDrag ||
+    interaction.panDrag ||
+    interaction.zoomBox ||
+    interaction.orderDrag ||
+    interaction.pendingClickIndex !== null
+  );
+}
+
+function cancelActiveInteraction(context, interaction) {
+  const hadPreview = Boolean(interaction.pointDrag || interaction.controlDrag);
+  if (interaction.brush) interaction.brush.remove();
+  clearBoxZoom(interaction);
+  clearOrderDropPreview(interaction);
+  interaction.dragStart = null;
+  interaction.brush = null;
+  interaction.pointDrag = null;
+  interaction.controlDrag = null;
+  interaction.panDrag = null;
+  interaction.orderDrag = null;
+  interaction.pendingClickIndex = null;
+  if (hadPreview) context.clearPreviewTerm();
 }
 
 function isModifierLevelSelection(event, term) {
