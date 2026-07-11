@@ -28,6 +28,8 @@ import {
 import { bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar } from "./views/app_bar.js";
 import { renderContextBar } from "./views/context_bar.js";
+import { renderHelpDrawer } from "./views/help_drawer.js";
+import { bindInspector, renderInspector } from "./views/inspector.js";
 import { bindPopovers } from "./views/popover.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
@@ -53,6 +55,11 @@ const termSelect = document.getElementById("term");
 const termKind = document.getElementById("termKind");
 const termEdf = document.getElementById("termEdf");
 const inspectorToggle = document.getElementById("inspectorToggle");
+const inspectorNode = document.getElementById("inspector");
+const inspectorClose = document.getElementById("inspectorClose");
+const inspectorScrim = document.getElementById("inspectorScrim");
+const helpPane = document.getElementById("helpPane");
+const helpAction = document.getElementById("helpAction");
 const toolRail = document.getElementById("toolRail");
 const groupDisplayWrap = document.getElementById("groupDisplayWrap");
 const groupDisplayMode = document.getElementById("groupDisplayMode");
@@ -61,7 +68,6 @@ const handleCount = document.getElementById("handleCount");
 const handleCountValue = document.getElementById("handleCountValue");
 const basisToggle = document.getElementById("basisToggle");
 const contribPlay = document.getElementById("contribPlay");
-const buildDurationWrap = document.getElementById("buildDurationWrap");
 const buildDuration = document.getElementById("buildDuration");
 const buildDurationValue = document.getElementById("buildDurationValue");
 const resetZoom = document.getElementById("resetZoom");
@@ -104,10 +110,7 @@ const profileTraceTable = document.getElementById("profileTraceTable");
 const summaryStatus = document.getElementById("summaryStatus");
 const summaryNote = document.getElementById("summaryNote");
 const summaryFrame = document.getElementById("summaryFrame");
-const summaryTab = document.getElementById("summaryTab");
-const historyTab = document.getElementById("historyTab");
-const summaryPane = document.getElementById("summaryPane");
-const historyPane = document.getElementById("historyPane");
+const advancedTiming = document.getElementById("advancedTiming");
 const historyFrame = document.getElementById("historyFrame");
 const statusNode = document.getElementById("status");
 const uiPopover = document.getElementById("uiPopover");
@@ -167,6 +170,45 @@ const chartContext = {
 };
 
 let openHelp = () => inspectorToggle.click();
+
+const narrowQuery = window.matchMedia("(max-width: 999px)");
+renderHelpDrawer(helpPane);
+const inspector = bindInspector({
+  root: inspectorNode,
+  toggle: inspectorToggle,
+  closeButton: inspectorClose,
+  scrim: inspectorScrim,
+  onPanelChange: (panel) => {
+    actions.patchView({ inspectorPane: panel });
+    const snapshot = store.getState().remote.snapshot;
+    if (panel === "history" && snapshot) renderHistory(snapshot.history, historyFrame);
+  },
+  onOpenChange: (open) => actions.patchView({ inspectorOpen: open }),
+  isOpen: () => store.getState().view.inspectorOpen,
+  isNarrow: () => narrowQuery.matches,
+});
+openHelp = () => inspector.open("help", helpAction);
+
+store.subscribe(
+  (state) => ({ pane: state.view.inspectorPane, open: state.view.inspectorOpen }),
+  ({ pane, open }) => renderInspector({
+    root: inspectorNode,
+    toggle: inspectorToggle,
+    scrim: inspectorScrim,
+    panel: pane,
+    open,
+    narrow: narrowQuery.matches,
+  }),
+  (left, right) => left.pane === right.pane && left.open === right.open,
+);
+renderInspector({
+  root: inspectorNode,
+  toggle: inspectorToggle,
+  scrim: inspectorScrim,
+  panel: store.getState().view.inspectorPane,
+  open: store.getState().view.inspectorOpen,
+  narrow: narrowQuery.matches,
+});
 
 bindToolRail({
   root: toolRail,
@@ -529,10 +571,11 @@ function showTimingStatus(payload, timing) {
   if (summaryStatus) {
     summaryStatus.textContent = `Refit completed in ${formatMilliseconds(timing.client_total_ms)}`;
   }
-  if (summaryNote) {
-    const details = formatTimingDetails(timing);
-    summaryNote.textContent = payload.note ? `${payload.note} · ${details}` : details;
+  const details = formatTimingDetails(timing);
+  if (advancedTiming) {
+    advancedTiming.textContent = payload.note ? `${payload.note} · ${details}` : details;
   }
+  if (summaryNote) summaryNote.textContent = payload.note || "";
 }
 
 function formatTimingDetails(timing) {
@@ -576,7 +619,6 @@ function render() {
   if (!snapshot) return;
   const view = editorState.view;
   renderAppView(view.activeView);
-  showSidepanelPane(view.inspectorPane);
   renderMetricsEvidence(editorState.request.evidence.metrics);
   renderReportEvidence(editorState.request.evidence.report, view.activeView);
   renderHistory(snapshot.history, historyFrame);
@@ -647,9 +689,7 @@ function sameStateOutsidePreview(next, previous) {
     nextView.showCi === previousView.showCi &&
     nextView.showContrib === previousView.showContrib &&
     nextView.zoomByTerm === previousView.zoomByTerm &&
-    nextView.groupModeByTerm === previousView.groupModeByTerm &&
-    nextView.inspectorPane === previousView.inspectorPane &&
-    nextView.inspectorOpen === previousView.inspectorOpen;
+    nextView.groupModeByTerm === previousView.groupModeByTerm;
 }
 
 function renderInteractionPreview(preview) {
@@ -720,20 +760,6 @@ function renderReportEvidence(evidence, activeView) {
   }
 }
 
-function showSidepanelPane(view) {
-  const showHistory = view === "history";
-  if (summaryPane) summaryPane.hidden = showHistory;
-  if (historyPane) historyPane.hidden = !showHistory;
-  if (summaryTab) {
-    summaryTab.classList.toggle("active", !showHistory);
-    summaryTab.setAttribute("aria-selected", showHistory ? "false" : "true");
-  }
-  if (historyTab) {
-    historyTab.classList.toggle("active", showHistory);
-    historyTab.setAttribute("aria-selected", showHistory ? "true" : "false");
-  }
-}
-
 function updateGroupDisplayControl(term) {
   if (!groupDisplayWrap || !groupDisplayMode) return;
   const available = Boolean(term && term.group_display && term.group_display.available);
@@ -791,7 +817,6 @@ function updateHandleCount(term) {
   const canShowContrib = active && Array.isArray(controls.basis) && controls.basis.length > 0;
   basisToggle.hidden = !canShowContrib;
   contribPlay.hidden = !canShowContrib;
-  buildDurationWrap.hidden = !canShowContrib;
   contribPlay.disabled = buildFrame !== null;
   updateBuildDurationLabel();
   basisToggle.style.background = view.showContrib && canShowContrib ? "#dbeafe" : "#f6f8fa";
@@ -1021,12 +1046,6 @@ if (saveDownload) {
 }
 if (saveOpenDirectory) {
   saveOpenDirectory.addEventListener("click", openDirectoryInFileManager);
-}
-if (summaryTab) {
-  summaryTab.addEventListener("click", () => actions.patchView({ inspectorPane: "summary" }));
-}
-if (historyTab) {
-  historyTab.addEventListener("click", () => actions.patchView({ inspectorPane: "history" }));
 }
 summarySource.addEventListener("change", refreshSummaryView);
 refitOffset.addEventListener("click", async () => {

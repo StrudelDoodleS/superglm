@@ -4210,6 +4210,8 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
             "views/app_bar.js",
             "views/context_bar.js",
             "views/tool_rail.js",
+            "views/inspector.js",
+            "views/help_drawer.js",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -4282,7 +4284,8 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "metricSelect" in shell
         assert "metricGrid" in shell
         assert "Recompute all" not in shell
-        assert "summaryPanel" in shell
+        assert 'id="inspector"' in shell
+        assert "summaryPanel" not in shell
         assert "summaryFrame" in shell
         assert "summarySource" in shell
         assert "refitOffset" in shell
@@ -4655,6 +4658,9 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "client_total_ms" in main_js
     assert "formatTimingDetails" in main_js
     assert "Refit completed in" in main_js
+    assert 'id="advancedTiming"' in html
+    assert "advancedTiming.textContent" in main_js
+    assert 'summaryNote.textContent = payload.note || ""' in main_js
     assert "runCollapseRefit(summaryNodes(), selectedTerm())" in main_js
     assert "runCollapseRefit(summaryNodes(), selectedTerm(), refreshMetricsView)" not in main_js
     assert "runCollapseRefit(nodes, termName)" in summary_js
@@ -4664,18 +4670,24 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "busy-spinner" in css
 
 
-def test_editor_right_panel_has_history_tab():
+def test_editor_inspector_has_summary_history_advanced_and_help_tabs():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     html = (root / "index.html").read_text()
     main_js = (root / "main.js").read_text()
-    css = (root / "styles.css").read_text()
+    css = (root / "styles/panels.css").read_text()
     history_js_path = root / "history.js"
 
-    assert "Model summary" in html
-    assert "Edit history" in html
+    assert 'aria-label="Model inspector"' in html
+    assert ">Summary</button>" in html
+    assert ">History</button>" in html
+    assert ">Advanced</button>" in html
+    assert ">Help</button>" in html
     assert "historyFrame" in html
+    assert "advancedTiming" in html
+    assert html.count('id="buildDurationWrap"') == 1
     assert 'from "./history.js"' in main_js
-    assert ".sidepanel-pane[hidden]" in css
+    assert ".inspector" in css
+    assert ".help-pane" in css
     assert history_js_path.exists()
 
 
@@ -4735,6 +4747,8 @@ def test_widget_serves_editor_app_assets(editor_model):
             "summary.js",
             "reports.js",
             "interactions.js",
+            "views/inspector.js",
+            "views/help_drawer.js",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:

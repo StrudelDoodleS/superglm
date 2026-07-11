@@ -339,18 +339,6 @@ button:active { background: #e6edf3; }
   width: 34px;
   height: 32px;
 }
-.sidepanel {
-  width: 390px;
-  min-width: 340px;
-  min-height: 0;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 10px;
-  color: #24292f;
-}
 .sidepanel-tabs {
   display: flex;
   gap: 2px;

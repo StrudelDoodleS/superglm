@@ -233,3 +233,88 @@ def test_existing_svg_selection_operation_posts_linearise_unchanged(open_editor_
         assert response.status == 200
         assert response.request.post_data_json == {"operation": "linearise"}
         assert session.history[-1].operation == "linear_interpolate"
+
+
+def test_inspector_uses_one_slot_for_summary_history_advanced_and_help(open_editor_page):
+    with open_editor_page() as (page, _session):
+        inspector = page.get_by_role("complementary", name="Model inspector")
+
+        assert inspector.count() == 1
+        assert inspector.get_by_role("tab").all_inner_texts() == [
+            "Summary",
+            "History",
+            "Advanced",
+            "Help",
+        ]
+
+        inspector.get_by_role("tab", name="Advanced").click()
+        advanced = inspector.get_by_role("tabpanel", name="Advanced")
+        assert advanced.is_visible()
+        assert advanced.get_by_label("Build animation duration").is_visible()
+        assert page.locator("#buildDurationWrap").count() == 1
+
+        page.get_by_role("button", name="Help", exact=True).click()
+        help_panel = inspector.get_by_role("tabpanel", name="Help")
+        assert help_panel.is_visible()
+        assert "Straighten selection" in help_panel.inner_text()
+
+
+def test_inspector_tabs_use_roving_focus_and_arrow_key_selection(open_editor_page):
+    with open_editor_page() as (page, _session):
+        inspector = page.get_by_role("complementary", name="Model inspector")
+        summary = inspector.get_by_role("tab", name="Summary")
+        history = inspector.get_by_role("tab", name="History")
+        help_tab = inspector.get_by_role("tab", name="Help")
+
+        summary.focus()
+        page.keyboard.press("ArrowRight")
+        assert history.get_attribute("aria-selected") == "true"
+        assert history.get_attribute("tabindex") == "0"
+        assert history.evaluate("node => document.activeElement === node")
+        assert summary.get_attribute("tabindex") == "-1"
+
+        page.keyboard.press("End")
+        assert help_tab.get_attribute("aria-selected") == "true"
+        assert help_tab.evaluate("node => document.activeElement === node")
+
+        page.keyboard.press("Home")
+        assert summary.get_attribute("aria-selected") == "true"
+        page.keyboard.press("ArrowLeft")
+        assert help_tab.get_attribute("aria-selected") == "true"
+        assert help_tab.evaluate("node => document.activeElement === node")
+
+
+def test_inspector_toggle_close_scrim_and_escape_restore_the_opener(open_editor_page):
+    with open_editor_page(viewport={"width": 900, "height": 720}) as (page, _session):
+        inspector = page.locator("#inspector")
+        toggle = page.get_by_role("button", name="Inspector", exact=True)
+        close = inspector.get_by_role("button", name="Close inspector")
+        help_action = page.get_by_role("button", name="Help", exact=True)
+        scrim = page.locator("#inspectorScrim")
+
+        close.click()
+        assert inspector.get_attribute("data-open") == "false"
+        assert toggle.get_attribute("aria-expanded") == "false"
+        assert toggle.evaluate("node => document.activeElement === node")
+
+        toggle.click()
+        assert inspector.get_attribute("data-open") == "true"
+        toggle.click()
+        assert inspector.get_attribute("data-open") == "false"
+
+        toggle.click()
+        close.click()
+        assert inspector.get_attribute("data-open") == "false"
+        assert toggle.evaluate("node => document.activeElement === node")
+
+        help_action.click()
+        assert inspector.get_attribute("data-open") == "true"
+        assert not scrim.is_hidden()
+        scrim.click(position={"x": 1, "y": 1})
+        assert inspector.get_attribute("data-open") == "false"
+        assert help_action.evaluate("node => document.activeElement === node")
+
+        help_action.click()
+        page.keyboard.press("Escape")
+        assert inspector.get_attribute("data-open") == "false"
+        assert help_action.evaluate("node => document.activeElement === node")

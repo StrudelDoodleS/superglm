@@ -6,3 +6,131 @@
     min-height: 152px;
   }
 }
+
+.inspector {
+  width: var(--inspector-width);
+  min-width: 320px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px;
+  background: var(--surface);
+}
+
+.inspector-head {
+  display: flex;
+  align-items: start;
+  gap: 6px;
+}
+
+.inspector .sidepanel-tabs {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-x: auto;
+}
+
+.sidepanel-tab.active {
+  border-bottom-color: var(--orange);
+}
+
+.inspector-close {
+  display: none;
+}
+
+.inspector-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 19;
+  width: auto;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: rgba(31, 35, 40, 0.28);
+}
+
+.inspector-scrim:hover,
+.inspector-scrim:active {
+  background: rgba(31, 35, 40, 0.28);
+}
+
+.help-pane,
+.advanced-timing,
+.summary-frame,
+.history-frame {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.help-pane {
+  overflow: auto;
+}
+
+.help-section h3 {
+  margin: 12px 0 5px;
+  font-size: 13px;
+}
+
+.help-section dl {
+  margin: 0;
+}
+
+.help-section dt {
+  margin-top: 7px;
+  font-weight: 600;
+}
+
+.help-section dd {
+  margin: 1px 0 0;
+  color: var(--muted);
+}
+
+#advancedPane h2 {
+  margin: 2px 0 12px;
+  font-size: 14px;
+}
+
+.advanced-timing {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+@media (min-width: 1000px) {
+  .editor-workspace:has(> .inspector[data-open="false"]) {
+    grid-template-columns: var(--tool-rail-width) minmax(0, 1fr);
+  }
+
+  .inspector[data-open="false"] {
+    display: none;
+  }
+}
+
+@media (max-width: 999px) {
+  #inspectorToggle {
+    position: relative;
+    z-index: 21;
+  }
+
+  .inspector {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    bottom: 12px;
+    z-index: 20;
+    width: min(var(--inspector-width), calc(100vw - 24px));
+    min-width: 0;
+    box-shadow: 0 12px 34px var(--shadow);
+  }
+
+  .inspector[data-open="false"] {
+    display: none;
+  }
+
+  .inspector-close {
+    display: inline-flex;
+  }
+}
