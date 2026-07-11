@@ -143,3 +143,23 @@ test("tool rail owns exclusive semantics, shortcuts, roving focus, and cleanup",
   assert.deepEqual(modes, ["move", "zoom", "select"]);
   assert.equal(helpCount, 1);
 });
+
+test("unavailable Handles falls back to the sole enabled Select radio", () => {
+  const buttons = ["select", "move", "zoom", "handles", "help"].map(
+    (tool) => new FakeButton(tool),
+  );
+  const root = new FakeEventHub(buttons);
+
+  renderToolRail(root, { mode: "handles", handlesAvailable: false });
+
+  assert.equal(buttons[0].disabled, false);
+  assert.equal(buttons[0].getAttribute("aria-checked"), "true");
+  assert.equal(buttons[0].tabIndex, 0);
+  assert.equal(buttons[3].disabled, true);
+  assert.equal(buttons[3].getAttribute("aria-checked"), "false");
+  assert.equal(buttons[3].tabIndex, -1);
+  assert.deepEqual(
+    buttons.slice(0, 4).filter((button) => !button.disabled && button.tabIndex === 0),
+    [buttons[0]],
+  );
+});

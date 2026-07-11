@@ -601,8 +601,9 @@ function render() {
   if (!term) return;
   if (selected !== renderedTerm) {
     renderedTerm = selected;
-    if (applyTermDefaults(term)) return;
+    stopContributionBuild();
   }
+  if (applyTermDefaults(term)) return;
   const selection = view.preview && view.preview.term === selected
     ? new Set(view.preview.selection)
     : currentSelection();
@@ -813,7 +814,6 @@ function updateHandleCount(term) {
 }
 
 function applyTermDefaults(term) {
-  stopContributionBuild();
   const view = store.getState().view;
   const patch = {};
   if (

@@ -115,10 +115,11 @@ export function bindToolRail({ root, onMode, onHelp, shortcutRoot = document }) 
  * @param {{mode:ToolMode, handlesAvailable:boolean}} state
  */
 export function renderToolRail(root, { mode, handlesAvailable }) {
+  const effectiveMode = mode === "handles" && !handlesAvailable ? "select" : mode;
   for (const element of root.querySelectorAll('[role="radio"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
     if (element.dataset.tool === "handles") element.disabled = !handlesAvailable;
-    const active = element.dataset.tool === mode;
+    const active = element.dataset.tool === effectiveMode;
     element.setAttribute("aria-checked", String(active));
     element.tabIndex = active ? 0 : -1;
     element.classList.toggle("active", active);

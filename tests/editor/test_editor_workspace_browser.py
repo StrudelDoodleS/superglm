@@ -167,6 +167,47 @@ def test_handles_tool_is_disabled_only_when_the_term_has_no_controls(open_editor
         )
 
 
+def test_same_term_control_loss_falls_back_to_select_before_drawing(open_editor_page):
+    with open_editor_page() as (page, _session):
+        rail = page.get_by_role("radiogroup", name="Chart tools")
+        select = rail.get_by_role("radio", name="Select", exact=True)
+        handles = rail.get_by_role("radio", name="Handles", exact=True)
+        select_chart_tool(page, "Handles")
+        assert handles.get_attribute("aria-checked") == "true"
+
+        def remove_controls(route):
+            response = route.fetch()
+            payload = response.json()
+            payload["terms"]["curve"]["controls"] = None
+            route.fulfill(response=response, json=payload)
+
+        page.route("**/op", remove_controls)
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/op")
+            )
+        ):
+            page.locator('button[data-op="reset"]').click()
+
+        actual = {
+            "select_checked": select.get_attribute("aria-checked"),
+            "select_tabindex": select.get_attribute("tabindex"),
+            "handles_disabled": handles.is_disabled(),
+            "handles_checked": handles.get_attribute("aria-checked"),
+            "handles_tabindex": handles.get_attribute("tabindex"),
+            "control_count": page.locator("#chart .control-handle").count(),
+        }
+        assert actual == {
+            "select_checked": "true",
+            "select_tabindex": "0",
+            "handles_disabled": True,
+            "handles_checked": "false",
+            "handles_tabindex": "-1",
+            "control_count": 0,
+        }
+
+
 def test_existing_svg_selection_operation_posts_linearise_unchanged(open_editor_page):
     with open_editor_page() as (page, session):
         select_chart_tool(page, "Select")
