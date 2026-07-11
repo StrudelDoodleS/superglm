@@ -299,18 +299,38 @@ export function createEditorActions({
 
   /**
    * @param {{term:string, indices:number[]}} selection
+   * @param {{settleNoop?:boolean}} [options]
    * @returns {Promise<ActionResult>}
    */
-  async function executeSelectionMutation({ term, indices }) {
+  async function executeSelectionMutation(
+    { term, indices },
+    { settleNoop = false } = {}
+  ) {
     if (store.getState().request.mutation.status === "running") {
       return skippedMutation("An editor mutation is already running.");
     }
 
     const normalized = normalizeSelectionIndices(indices);
+    const currentSnapshot = store.getState().remote.snapshot;
     const currentSelection = normalizeSelectionIndices(
-      store.getState().remote.snapshot?.selection[term] ?? []
+      currentSnapshot?.selection[term] ?? []
     );
-    if (selectionIndicesEqual(currentSelection, normalized)) {
+    if (
+      currentSnapshot?.selected_term === term &&
+      selectionIndicesEqual(currentSelection, normalized)
+    ) {
+      if (settleNoop) {
+        store.update((state) => ({
+          ...state,
+          view: { ...state.view, selectionPreview: null },
+          request: {
+            ...state.request,
+            mutation: { status: "idle", operation: null, error: null },
+            recovery: null
+          }
+        }));
+        return { ok: true, snapshot: currentSnapshot };
+      }
       return skippedMutation("The editor selection is already current.");
     }
 
@@ -528,7 +548,7 @@ export function createEditorActions({
       return executeSelectionMutation({
         term: /** @type {string} */ (retry.payload.term),
         indices: /** @type {number[]} */ (retry.payload.indices)
-      });
+      }, { settleNoop: true });
     }
     return executeStateMutation(retry);
   }

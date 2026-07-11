@@ -235,6 +235,42 @@ test("selection mutation normalizes semantic no-ops without posting", async () =
   assert.equal(store.getState().view.selectionPreview, null);
 });
 
+test("selection mutation posts equal indices when it changes the authoritative term", async () => {
+  const confirmed = snapshot(2);
+  confirmed.selection.age = [1, 2];
+  confirmed.terms.region = termPayload();
+  confirmed.selection.region = [1, 2];
+  const response = snapshot(2);
+  response.selected_term = "region";
+  response.terms.region = termPayload();
+  response.selection.age = [1, 2];
+  response.selection.region = [1, 2];
+  /** @type {Array<{path:string, payload:Record<string, unknown>}>} */
+  const requests = [];
+  const store = createEditorStore(createInitialEditorState(confirmed));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async (path, payload) => {
+        requests.push({ path, payload });
+        return response;
+      },
+      getState: async () => confirmed
+    }
+  });
+
+  const result = await actions.executeSelectionMutation({
+    term: "region",
+    indices: [2, 1]
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(requests, [
+    { path: "/select", payload: { term: "region", indices: [1, 2] } }
+  ]);
+  assert.equal(store.getState().remote.snapshot?.selected_term, "region");
+});
+
 test("selection mutation installs provisional state before posting and commits without evidence", async () => {
   const confirmed = snapshot(2);
   const response = snapshot(2);
@@ -1429,6 +1465,42 @@ test("selection retry routes through provisional selection semantics", async () 
     { path: "/select", payload: { term: "age", indices: [1, 3] } },
     { path: "/select", payload: { term: "age", indices: [1, 3] } }
   ]);
+});
+
+test("selection retry settles an applied response-loss recovery without posting again", async () => {
+  const confirmed = snapshot(2);
+  const applied = snapshot(2);
+  applied.selection.age = [1, 3];
+  let postCalls = 0;
+  const store = createEditorStore(createInitialEditorState(confirmed));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => {
+        postCalls += 1;
+        throw new Error("response lost");
+      },
+      getState: async () => applied
+    }
+  });
+
+  const failed = await actions.executeSelectionMutation({ term: "age", indices: [3, 1] });
+  assert.equal(failed.ok, false);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [1, 3]);
+  assert.equal(store.getState().request.mutation.status, "error");
+  assert.ok(store.getState().request.recovery?.retry);
+  const recoveredSnapshot = store.getState().remote.snapshot;
+
+  const retried = await actions.retryMutation();
+
+  assert.deepEqual(retried, { ok: true, snapshot: recoveredSnapshot });
+  assert.equal(postCalls, 1);
+  assert.deepEqual(store.getState().request.mutation, {
+    status: "idle", operation: null, error: null
+  });
+  assert.equal(store.getState().request.recovery, null);
+  assert.equal(store.getState().view.selectionPreview, null);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [1, 3]);
 });
 
 test("dismiss and missing retries are deterministic", async () => {
