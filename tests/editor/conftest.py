@@ -25,7 +25,7 @@ def editor_browser_model() -> SuperGLM:
         "FleetLightCommercial",
         "FleetHeavyCommercial",
         "ClassicAndCollectable",
-        "TemporaryAdditionalVehicle",
+        "Family👨‍👩‍👧‍👦DriverCaféCategory",
     ]
     n = 500
     curve = rng.uniform(0.0, 10.0, n)

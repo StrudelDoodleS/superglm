@@ -24,3 +24,20 @@
   color: #eaeef2;
   font-size: 12px;
 }
+
+.x-tick-label {
+  pointer-events: auto;
+  cursor: help;
+}
+
+.x-tick-label:focus-visible {
+  outline: none;
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 4px;
+  fill: var(--blue);
+}
+
+.axis-measure-layer {
+  pointer-events: none;
+}

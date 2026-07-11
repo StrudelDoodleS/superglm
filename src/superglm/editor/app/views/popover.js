@@ -6,6 +6,7 @@ export const TOOLTIP_SHOW_DELAY_MS = 350;
 
 /** @typedef {(callback: () => void, delay: number) => number} SetTimer */
 /** @typedef {(timer: number) => void} ClearTimer */
+/** @typedef {HTMLElement|SVGElement} PopoverTarget */
 
 export class PopoverDelay {
   /**
@@ -73,11 +74,11 @@ export class PopoverDelay {
  * @param {HTMLElement} options.popover
  */
 export function bindPopovers({ root, popover }) {
-  /** @type {HTMLElement | null} */
+  /** @type {PopoverTarget | null} */
   let target = null;
-  /** @type {HTMLElement | null} */
+  /** @type {PopoverTarget | null} */
   let hoveredTarget = null;
-  /** @type {HTMLElement | null} */
+  /** @type {PopoverTarget | null} */
   let focusedTarget = null;
 
   /** @param {string} selector @returns {HTMLElement} */
@@ -98,13 +99,14 @@ export function bindPopovers({ root, popover }) {
     onHide: hide,
   });
 
-  /** @param {EventTarget | null} node @returns {HTMLElement | null} */
+  /** @param {EventTarget | null} node @returns {PopoverTarget | null} */
   function candidate(node) {
     if (!(node instanceof Element)) return null;
     const closest = node.closest(
       "[data-tool], [data-help-operation], [data-help-control], [data-popover-title]",
     );
-    return closest instanceof HTMLElement ? closest : null;
+    if (closest instanceof HTMLElement) return closest;
+    return typeof SVGElement !== "undefined" && closest instanceof SVGElement ? closest : null;
   }
 
   /** @param {boolean} immediate */

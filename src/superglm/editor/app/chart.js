@@ -1,6 +1,9 @@
 import { fmt } from "./format.js";
-
-const MAX_LEVEL_LABELS = 30;
+import {
+  evenlySpacedIndices,
+  planCategoricalAxis,
+  splitLabelGraphemes
+} from "./chart/geometry.js";
 
 export function groupedTerms(terms) {
   const order = ["spline", "ordered categorical", "categorical", "polynomial", "numeric"];
@@ -28,10 +31,7 @@ export function drawChart(term, selection, context) {
   const visualMode = context.visualMode();
   svg.innerHTML = "";
   const width = 940, height = 520;
-  const margin = { left: 76, right: 76, top: 48, bottom: 72 };
-  const innerW = width - margin.left - margin.right;
-  const innerH = height - margin.top - margin.bottom;
-  definePlotClip(svg, margin, innerW, innerH);
+  const baseMargin = { left: 76, right: 76, top: 48, bottom: 72 };
   const view = resolveDisplayTerm(
     term,
     context.groupDisplayMode ? context.groupDisplayMode() : "expanded"
@@ -41,11 +41,36 @@ export function drawChart(term, selection, context) {
   const original = view.original_y;
   const previous = view.previous_y || null;
   const exposure = view.exposure || null;
-  if (!y.length) return;
+  if (!y.length) {
+    svg.dataset.axisMeasurementCount = "0";
+    return;
+  }
 
   const xDomain = view.x_domain || [Math.min(...x), Math.max(...x)];
   const baseXMin = xDomain[0];
   const baseXMax = xDomain[1];
+  const zoom = context.zoomState()[context.selectedTerm()];
+  const xMin = zoom ? zoom.xMin : baseXMin;
+  const xMax = zoom ? zoom.xMax : baseXMax;
+  const categoricalLayout = view.levels
+    ? categoricalAxisLayout(
+        svg,
+        view,
+        xMin,
+        xMax,
+        width - baseMargin.left - baseMargin.right,
+        height,
+        baseMargin
+      )
+    : null;
+  if (!categoricalLayout) svg.dataset.axisMeasurementCount = "0";
+  const margin = {
+    ...baseMargin,
+    bottom: categoricalLayout ? categoricalLayout.bottom : baseMargin.bottom
+  };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  definePlotClip(svg, margin, innerW, innerH);
   const ciValues = context.showCi() && view.ci_lower_y && view.ci_upper_y
     ? [...view.ci_lower_y, ...view.ci_upper_y]
     : [];
@@ -78,9 +103,6 @@ export function drawChart(term, selection, context) {
   const yPad = Math.max((yMaxRaw - yMinRaw) * 0.12, 0.05);
   const baseYMin = yMinRaw - yPad;
   const baseYMax = yMaxRaw + yPad;
-  const zoom = context.zoomState()[context.selectedTerm()];
-  const xMin = zoom ? zoom.xMin : baseXMin;
-  const xMax = zoom ? zoom.xMax : baseXMax;
   const yMin = zoom ? zoom.yMin : baseYMin;
   const yMax = zoom ? zoom.yMax : baseYMax;
   const sx = (v) => margin.left + ((v - xMin) / Math.max(xMax - xMin, 1e-12)) * innerW;
@@ -93,19 +115,35 @@ export function drawChart(term, selection, context) {
     line(svg, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
     text(svg, margin.left - 10, sy(tick) + 4, fmt(tick), "tick-label", "end");
   }
-  for (const tick of xTicks(view, xMin, xMax)) {
-    const tickX = sx(tick.value);
-    const tickY = margin.top + innerH + (tick.rotate ? 30 : 22);
-    line(svg, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
-    const tickLabel = text(
-      svg,
-      tickX,
-      tickY,
-      tick.label,
-      tick.rotate ? "tick-label angled" : "tick-label",
-      tick.rotate ? "end" : "middle"
-    );
-    if (tick.rotate) tickLabel.setAttribute("transform", `rotate(-45 ${tickX} ${tickY})`);
+  if (categoricalLayout) {
+    for (const tick of categoricalLayout.ticks) {
+      const tickX = sx(Number(tick.value));
+      const tickY = margin.top + innerH + 18;
+      line(svg, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
+      const tickLabel = text(
+        svg,
+        tickX,
+        tickY,
+        tick.displayLabel,
+        tick.angle ? "tick-label x-tick-label angled" : "tick-label x-tick-label",
+        tick.anchor
+      );
+      tickLabel.setAttribute("data-full-label", tick.fullLabel);
+      tickLabel.setAttribute("data-popover-title", "Category");
+      tickLabel.setAttribute("data-popover-body", tick.fullLabel);
+      tickLabel.setAttribute("aria-label", tick.fullLabel);
+      tickLabel.setAttribute("tabindex", "0");
+      if (tick.angle) {
+        tickLabel.setAttribute("transform", `rotate(${tick.angle} ${tickX} ${tickY})`);
+      }
+    }
+  } else {
+    for (const tick of continuousXTicks(xMin, xMax)) {
+      const tickX = sx(tick.value);
+      const tickY = margin.top + innerH + 22;
+      line(svg, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
+      text(svg, tickX, tickY, tick.label, "tick-label", "middle");
+    }
   }
   const baseline = Math.min(Math.max(1, yMin), yMax);
   line(svg, margin.left, sy(baseline), margin.left + innerW, sy(baseline), "zero");
@@ -113,7 +151,14 @@ export function drawChart(term, selection, context) {
   line(svg, margin.left, margin.top + innerH, margin.left + innerW, margin.top + innerH, "axis");
 
   text(svg, width / 2, 24, term.title, "label", "middle");
-  text(svg, width / 2, height - 20, term.x_label, "label", "middle");
+  text(
+    svg,
+    width / 2,
+    categoricalLayout ? categoricalLayout.titleY : height - 20,
+    term.x_label,
+    "label x-axis-title",
+    "middle"
+  );
   const yLabel = text(svg, 22, margin.top + innerH / 2, term.y_label, "label", "middle");
   yLabel.setAttribute("transform", `rotate(-90 22 ${margin.top + innerH / 2})`);
 
@@ -673,20 +718,64 @@ function svgClientPoint(svg, x, y) {
   };
 }
 
-function xTicks(term, xMin, xMax) {
-  if (term.levels && term.levels.length <= MAX_LEVEL_LABELS) {
-    return term.x.map((value, i) => ({
-      value,
-      label: term.levels[i],
-      rotate: term.levels.length > 8
-    }));
+function categoricalAxisLayout(svg, view, xMin, xMax, availableWidth, svgHeight, baseMargin) {
+  const labels = view.levels.map(String);
+  if (view.x.length !== labels.length) {
+    throw new RangeError("categorical axis values and labels must have the same length");
   }
-  if (term.levels) {
-    const step = Math.max(1, Math.ceil(term.levels.length / MAX_LEVEL_LABELS));
-    return term.x
-      .map((value, i) => ({ value, label: term.levels[i], rotate: true, index: i }))
-      .filter((tick) => tick.index === 0 || tick.index === term.levels.length - 1 || tick.index % step === 0);
+  const rows = labels.map((label, index) => ({ value: view.x[index], label }));
+  const visibleRows = rows.filter((row) => row.value >= xMin && row.value <= xMax);
+  const candidateIndices = evenlySpacedIndices(visibleRows.length, 30);
+  const candidates = candidateIndices.map((index) => visibleRows[index]);
+  const candidateLabels = candidates.map((row) => row.label);
+  const measurements = measureCategoricalLabels(svg, candidateLabels);
+  svg.dataset.axisMeasurementCount = String(candidateLabels.length);
+  return planCategoricalAxis({
+    values: candidates.map((row) => row.value),
+    labels: candidateLabels,
+    measurements,
+    availableWidth,
+    svgHeight,
+    baseLeft: baseMargin.left,
+    baseBottom: baseMargin.bottom
+  });
+}
+
+function measureCategoricalLabels(svg, labels) {
+  const layer = el("g", { class: "axis-measure-layer", "aria-hidden": "true" });
+  layer.setAttribute("visibility", "hidden");
+  svg.appendChild(layer);
+  try {
+    const probe = text(layer, 0, 0, "", "tick-label", "start");
+    const ellipsisWidth = measureText(probe, "…");
+    return labels.map((label) => {
+      const graphemes = splitLabelGraphemes(label);
+      const prefixWidths = [];
+      let prefix = "";
+      for (const grapheme of graphemes) {
+        prefix += grapheme;
+        prefixWidths.push(measureText(probe, prefix));
+      }
+      probe.textContent = label;
+      const box = probe.getBBox();
+      return {
+        fullWidth: prefixWidths.at(-1) || 0,
+        prefixWidths,
+        ellipsisWidth,
+        height: Math.max(1, box.height)
+      };
+    });
+  } finally {
+    layer.remove();
   }
+}
+
+function measureText(probe, value) {
+  probe.textContent = value;
+  return probe.getComputedTextLength();
+}
+
+function continuousXTicks(xMin, xMax) {
   return ticks(xMin, xMax, 6).map((value) => ({ value, label: fmt(value) }));
 }
 

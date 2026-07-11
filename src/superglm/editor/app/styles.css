@@ -1033,7 +1033,6 @@ button:active { background: #e6edf3; }
   -webkit-user-select: text;
 }
 .axis, .tick { stroke: #8c959f; stroke-width: 1; }
-.tick-label.angled { font-size: 10px; }
 .grid { stroke: var(--grid); stroke-width: 1; }
 .zero { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 4; }
 .original { fill: none; stroke: #8c959f; stroke-width: 1.7; stroke-dasharray: 7 5; }
@@ -1125,4 +1124,8 @@ button:active { background: #e6edf3; }
 .label { fill: #24292f; font-size: 13px; }
 .tick-label { fill: var(--muted); font-size: 11px; }
 .legend { fill: var(--muted); font-size: 12px; }
-svg text { pointer-events: none; user-select: none; -webkit-user-select: none; }
+svg text:not(.x-tick-label) {
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}

@@ -156,7 +156,9 @@ export const HELP_SECTIONS = Object.freeze([
  * @returns {Readonly<HelpEntry> | null}
  */
 export function helpForElement(element) {
-  if (!(element instanceof HTMLElement)) return null;
+  const isHtml = element instanceof HTMLElement;
+  const isSvg = typeof SVGElement !== "undefined" && element instanceof SVGElement;
+  if (!isHtml && !isSvg) return null;
 
   const tool = element.dataset.tool;
   if (tool && TOOL_HELP[tool]) return TOOL_HELP[tool];

@@ -4201,6 +4201,7 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
             "state/actions.js",
             "format.js",
             "chart.js",
+            "chart/geometry.js",
             "metrics.js",
             "summary.js",
             "reports.js",
@@ -4620,14 +4621,19 @@ def test_editor_chart_renders_previous_edit_line():
     assert "#f59e0b" in css
 
 
-def test_editor_chart_labels_ordered_categorical_levels_up_to_thirty():
+def test_editor_axis_uses_display_only_measured_geometry():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     chart_js = (root / "chart.js").read_text()
+    geometry_js = (root / "chart/geometry.js").read_text()
 
-    assert "MAX_LEVEL_LABELS = 30" in chart_js
-    assert "term.levels.length <= MAX_LEVEL_LABELS" in chart_js
-    assert "rotate: term.levels.length > 8" in chart_js
-    assert 'tick.rotate ? "end" : "middle"' in chart_js
+    assert "measureCategoricalLabels" in chart_js
+    assert "data-full-label" in chart_js
+    assert "axisMeasurementCount" in chart_js
+    assert "planCategoricalAxis" in chart_js
+    assert "splitLabelGraphemes" in chart_js
+    assert "fitMeasuredLabel" in geometry_js
+    assert "term.levels[" not in geometry_js
+    assert "MAX_LEVEL_LABELS" not in chart_js
 
 
 def test_editor_chart_points_have_relativity_exposure_tooltips():
@@ -4743,6 +4749,7 @@ def test_widget_serves_editor_app_assets(editor_model):
             "state/actions.js",
             "format.js",
             "chart.js",
+            "chart/geometry.js",
             "metrics.js",
             "summary.js",
             "reports.js",

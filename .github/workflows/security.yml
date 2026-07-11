@@ -138,6 +138,7 @@ jobs:
               required_suffixes = {
                   "superglm/editor/app/api/client.js",
                   "superglm/editor/app/api/contracts.js",
+                  "superglm/editor/app/chart/geometry.js",
                   "superglm/editor/app/state/store.js",
                   "superglm/editor/app/state/selectors.js",
                   "superglm/editor/app/state/actions.js",
