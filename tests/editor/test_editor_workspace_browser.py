@@ -318,3 +318,17 @@ def test_inspector_toggle_close_scrim_and_escape_restore_the_opener(open_editor_
         page.keyboard.press("Escape")
         assert inspector.get_attribute("data-open") == "false"
         assert help_action.evaluate("node => document.activeElement === node")
+
+
+def test_keyboard_help_restores_the_control_that_owned_focus(open_editor_page):
+    with open_editor_page(viewport={"width": 900, "height": 720}) as (page, _session):
+        inspector = page.locator("#inspector")
+        reference_ci = page.get_by_role("button", name="Reference CI")
+
+        reference_ci.focus()
+        page.keyboard.press("?")
+        assert inspector.get_by_role("tabpanel", name="Help").is_visible()
+
+        page.keyboard.press("Escape")
+        assert inspector.get_attribute("data-open") == "false"
+        assert reference_ci.evaluate("node => document.activeElement === node")

@@ -59,7 +59,6 @@ const inspectorNode = document.getElementById("inspector");
 const inspectorClose = document.getElementById("inspectorClose");
 const inspectorScrim = document.getElementById("inspectorScrim");
 const helpPane = document.getElementById("helpPane");
-const helpAction = document.getElementById("helpAction");
 const toolRail = document.getElementById("toolRail");
 const groupDisplayWrap = document.getElementById("groupDisplayWrap");
 const groupDisplayMode = document.getElementById("groupDisplayMode");
@@ -187,7 +186,7 @@ const inspector = bindInspector({
   isOpen: () => store.getState().view.inspectorOpen,
   isNarrow: () => narrowQuery.matches,
 });
-openHelp = () => inspector.open("help", helpAction);
+openHelp = () => inspector.open("help");
 
 store.subscribe(
   (state) => ({ pane: state.view.inspectorPane, open: state.view.inspectorOpen }),
