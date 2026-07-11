@@ -292,18 +292,17 @@ def test_inspector_toggle_close_scrim_and_escape_restore_the_opener(open_editor_
         help_action = page.get_by_role("button", name="Help", exact=True)
         scrim = page.locator("#inspectorScrim")
 
-        close.click()
         assert inspector.get_attribute("data-open") == "false"
         assert toggle.get_attribute("aria-expanded") == "false"
-        assert toggle.evaluate("node => document.activeElement === node")
 
         toggle.click()
         assert inspector.get_attribute("data-open") == "true"
-        toggle.click()
+        close.click()
         assert inspector.get_attribute("data-open") == "false"
+        assert toggle.evaluate("node => document.activeElement === node")
 
         toggle.click()
-        close.click()
+        scrim.click(position={"x": 1, "y": 1})
         assert inspector.get_attribute("data-open") == "false"
         assert toggle.evaluate("node => document.activeElement === node")
 
@@ -332,3 +331,92 @@ def test_keyboard_help_restores_the_control_that_owned_focus(open_editor_page):
         page.keyboard.press("Escape")
         assert inspector.get_attribute("data-open") == "false"
         assert reference_ci.evaluate("node => document.activeElement === node")
+
+
+def boxes_overlap(first: dict, second: dict) -> bool:
+    return not (
+        first["x"] + first["width"] <= second["x"]
+        or second["x"] + second["width"] <= first["x"]
+        or first["y"] + first["height"] <= second["y"]
+        or second["y"] + second["height"] <= first["y"]
+    )
+
+
+def test_notebook_view_keeps_chart_and_inspector_side_by_side(open_editor_page):
+    with open_editor_page(viewport={"width": 1180, "height": 720}) as (page, _session):
+        chart = page.locator("#chart").bounding_box()
+        metrics = page.locator(".metrics-strip").bounding_box()
+        inspector = page.locator("#inspector").bounding_box()
+
+        assert chart is not None
+        assert metrics is not None
+        assert inspector is not None
+        assert chart["width"] >= 600
+        assert metrics["y"] >= chart["y"] + chart["height"]
+        assert inspector["x"] > chart["x"] + chart["width"]
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert page.evaluate("document.documentElement.scrollHeight <= window.innerHeight")
+
+
+def test_narrow_view_syncs_the_dismissible_inspector_drawer(open_editor_page):
+    with open_editor_page(viewport={"width": 900, "height": 720}) as (page, _session):
+        inspector = page.locator("#inspector")
+        chart = page.locator("#chart").bounding_box()
+
+        assert chart is not None
+        assert inspector.get_attribute("data-open") == "false"
+        assert chart["width"] >= 700
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        page.get_by_role("button", name="Help", exact=True).click()
+        assert inspector.get_attribute("data-open") == "true"
+        page.keyboard.press("Escape")
+        assert inspector.get_attribute("data-open") == "false"
+
+        page.set_viewport_size({"width": 1100, "height": 720})
+        page.wait_for_function(
+            "() => document.querySelector('#inspector')?.dataset.open === 'true'"
+        )
+        page.set_viewport_size({"width": 900, "height": 720})
+        page.wait_for_function(
+            "() => document.querySelector('#inspector')?.dataset.open === 'false'"
+        )
+
+
+def test_open_narrow_drawer_clears_its_scrim_when_resized_wide(open_editor_page):
+    with open_editor_page(viewport={"width": 900, "height": 720}) as (page, _session):
+        inspector = page.locator("#inspector")
+        scrim = page.locator("#inspectorScrim")
+        reference_ci = page.get_by_role("button", name="Reference CI")
+
+        page.get_by_role("button", name="Help", exact=True).click()
+        assert inspector.get_attribute("data-open") == "true"
+        assert not scrim.is_hidden()
+
+        page.set_viewport_size({"width": 1100, "height": 720})
+        page.wait_for_function("() => !matchMedia('(max-width: 999px)').matches")
+        assert scrim.is_hidden()
+        reference_ci.click()
+        assert reference_ci.get_attribute("aria-pressed") == "true"
+
+
+def test_short_window_scrolls_without_chart_metric_overlap(open_editor_page):
+    with open_editor_page(viewport={"width": 1180, "height": 540}) as (page, _session):
+        chart = page.locator("#chart").bounding_box()
+        metrics = page.locator(".metrics-strip").bounding_box()
+
+        assert chart is not None
+        assert metrics is not None
+        assert chart["height"] >= 360
+        assert metrics["y"] >= chart["y"] + chart["height"]
+        assert not boxes_overlap(chart, metrics)
+        scroll_height = page.evaluate("document.documentElement.scrollHeight")
+        assert scroll_height > page.evaluate("window.innerHeight")
+        assert metrics["y"] + metrics["height"] <= scroll_height
+
+        page.locator(".metrics-strip").scroll_into_view_if_needed()
+        visible_metrics = page.locator(".metrics-strip").bounding_box()
+        assert visible_metrics is not None
+        assert visible_metrics["y"] >= 0
+        assert visible_metrics["y"] + visible_metrics["height"] <= (
+            page.evaluate("window.innerHeight") + 1
+        )

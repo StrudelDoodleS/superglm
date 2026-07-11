@@ -188,26 +188,31 @@ const inspector = bindInspector({
 });
 openHelp = () => inspector.open("help");
 
-store.subscribe(
-  (state) => ({ pane: state.view.inspectorPane, open: state.view.inspectorOpen }),
-  ({ pane, open }) => renderInspector({
+function renderInspectorView() {
+  const view = store.getState().view;
+  renderInspector({
     root: inspectorNode,
     toggle: inspectorToggle,
     scrim: inspectorScrim,
-    panel: pane,
-    open,
+    panel: view.inspectorPane,
+    open: view.inspectorOpen,
     narrow: narrowQuery.matches,
-  }),
+  });
+}
+
+/** @param {MediaQueryList|MediaQueryListEvent} [event] */
+function syncViewport(event = narrowQuery) {
+  actions.patchView({ inspectorOpen: !event.matches });
+  renderInspectorView();
+}
+
+store.subscribe(
+  (state) => ({ pane: state.view.inspectorPane, open: state.view.inspectorOpen }),
+  renderInspectorView,
   (left, right) => left.pane === right.pane && left.open === right.open,
 );
-renderInspector({
-  root: inspectorNode,
-  toggle: inspectorToggle,
-  scrim: inspectorScrim,
-  panel: store.getState().view.inspectorPane,
-  open: store.getState().view.inspectorOpen,
-  narrow: narrowQuery.matches,
-});
+narrowQuery.addEventListener("change", syncViewport);
+syncViewport();
 
 bindToolRail({
   root: toolRail,
