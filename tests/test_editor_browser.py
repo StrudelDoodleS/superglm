@@ -137,7 +137,7 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
     monkeypatch.setattr(browser_editor_widget, "_drag", fail_first_drag)
     monkeypatch.setattr(browser_editor_widget, "_state", fail_first_recovery_state)
 
-    def drag_selected_point(page, delta_y):
+    def begin_selected_point_drag(page, delta_y):
         point = page.locator("#chart circle.point.selected[data-index]").first
         point.wait_for()
         box = point.bounding_box()
@@ -147,7 +147,6 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
         page.mouse.move(x, y)
         page.mouse.down()
         page.mouse.move(x, y + delta_y, steps=5)
-        page.mouse.up()
 
     with sync_playwright() as runtime:
         browser = runtime.chromium.launch(headless=True)
@@ -166,11 +165,15 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
             confirmed_revision = browser_editor_widget.session.model_revision
             assert confirmed_path is not None
 
+            begin_selected_point_drag(page, -36)
+            preview_path = edited_path.get_attribute("d")
+            assert preview_path is not None
+            assert preview_path != confirmed_path
             with page.expect_response(
                 lambda response: response.request.method == "POST"
                 and response.url.split("?", maxsplit=1)[0].endswith("/drag")
             ) as failed_drag:
-                drag_selected_point(page, -36)
+                page.mouse.up()
             assert failed_drag.value.status == 500
             page.wait_for_function(
                 """() => {
@@ -193,11 +196,12 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
             page.locator("#appAlertDismiss").click()
             alert.wait_for(state="hidden")
 
+            begin_selected_point_drag(page, 28)
             with page.expect_response(
                 lambda response: response.request.method == "POST"
                 and response.url.split("?", maxsplit=1)[0].endswith("/drag")
             ) as successful_drag:
-                drag_selected_point(page, 28)
+                page.mouse.up()
             assert successful_drag.value.status == 200
             page.wait_for_function(
                 """confirmedPath =>
