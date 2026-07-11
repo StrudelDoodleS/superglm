@@ -17,12 +17,16 @@
     <button id="appAlertRetry" type="button">Retry</button>
     <button id="appAlertDismiss" type="button">Dismiss</button>
   </div>
-  <div id="appBusyOverlay" class="app-busy-overlay" hidden aria-live="polite">
+  <div id="appBusyOverlay" class="app-busy-overlay" hidden>
     <div class="app-busy-card">
       <div class="busy-spinner" aria-hidden="true"></div>
       <div>
-        <strong id="appBusyTitle">Working...</strong>
-        <span id="appBusyDetail">Please wait.</span>
+        <div id="appBusyAnnouncement" role="status" aria-live="polite"
+          aria-atomic="true" tabindex="-1">
+          <strong id="appBusyTitle">Working...</strong>
+          <span id="appBusyMessage">Please wait.</span>
+        </div>
+        <span id="appBusyDetail" aria-hidden="true">0 ms elapsed</span>
       </div>
     </div>
   </div>

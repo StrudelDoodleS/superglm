@@ -76,14 +76,61 @@ def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page
 
 def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_page):
     with open_editor_page() as (page, _session):
+        reference_ci = page.locator("#ciToggle")
+        reference_ci.focus()
+        assert reference_ci.evaluate("node => document.activeElement === node")
+
         page.evaluate("window.__superglmTest.setAppBusy(true, 'Testing busy state', 'Waiting')")
 
         for selector in ["#appBar", ".context-bar", "#editorView", "#reportPanel"]:
             assert page.locator(selector).get_attribute("inert") == ""
         assert page.locator(".app-shell").get_attribute("aria-busy") == "true"
         overlay = page.locator("#appBusyOverlay")
-        assert overlay.get_attribute("aria-live") == "polite"
+        assert overlay.get_attribute("aria-live") is None
         assert overlay.is_visible()
+        announcement = page.locator("#appBusyAnnouncement")
+        assert announcement.get_attribute("role") == "status"
+        assert announcement.get_attribute("aria-live") == "polite"
+        assert announcement.get_attribute("tabindex") == "-1"
+        assert announcement.evaluate("node => document.activeElement === node")
+        assert page.locator("#appBusyTitle").inner_text() == "Testing busy state"
+        assert page.locator("#appBusyMessage").inner_text() == "Waiting"
+        detail = page.locator("#appBusyDetail")
+        assert detail.get_attribute("aria-hidden") == "true"
+
+        page.evaluate(
+            "window.__superglmTest.setAppBusy(true, 'Ignored repeat title', 'Ignored repeat detail')"
+        )
+        assert page.locator("#appBusyTitle").inner_text() == "Testing busy state"
+        assert page.locator("#appBusyMessage").inner_text() == "Waiting"
+        first_elapsed = detail.inner_text()
+
+        page.evaluate(
+            """() => {
+                const target = document.querySelector('#appBusyAnnouncement');
+                window.__busyLiveMutationCount = 0;
+                window.__busyLiveObserver = new MutationObserver(records => {
+                    window.__busyLiveMutationCount += records.length;
+                });
+                window.__busyLiveObserver.observe(target, {
+                    subtree: true,
+                    childList: true,
+                    characterData: true,
+                });
+            }"""
+        )
+        page.wait_for_timeout(650)
+        observed = page.evaluate(
+            """() => {
+                window.__busyLiveObserver.disconnect();
+                return {
+                    mutations: window.__busyLiveMutationCount,
+                    elapsed: document.querySelector('#appBusyDetail').textContent,
+                };
+            }"""
+        )
+        assert observed["mutations"] == 0
+        assert observed["elapsed"] != first_elapsed
         assert page.locator("#appAlert").get_attribute("role") == "alert"
         assert page.locator("#appAlert").get_attribute("aria-live") == "assertive"
 
@@ -93,6 +140,7 @@ def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_pag
             assert page.locator(selector).get_attribute("inert") is None
         assert page.locator(".app-shell").get_attribute("aria-busy") == "false"
         assert overlay.is_hidden()
+        assert reference_ci.evaluate("node => document.activeElement === node")
 
 
 def test_text_selection_is_scoped_and_reduced_motion_stops_spinner(open_editor_page):

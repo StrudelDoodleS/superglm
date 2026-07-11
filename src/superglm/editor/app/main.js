@@ -38,7 +38,9 @@ const undoAction = document.getElementById("undoAction");
 const redoAction = document.getElementById("redoAction");
 const appShell = document.querySelector(".app-shell");
 const appBusyOverlay = document.getElementById("appBusyOverlay");
+const appBusyAnnouncement = document.getElementById("appBusyAnnouncement");
 const appBusyTitle = document.getElementById("appBusyTitle");
+const appBusyMessage = document.getElementById("appBusyMessage");
 const appBusyDetail = document.getElementById("appBusyDetail");
 const appAlert = document.getElementById("appAlert");
 const appAlertMessage = document.getElementById("appAlertMessage");
@@ -122,6 +124,8 @@ let buildFrame = null;
 let renderedTerm = "";
 let appBusyTimer = null;
 let appBusyStarted = 0;
+let appBusyActive = false;
+let appBusyOpener = null;
 let retryInProgress = false;
 let retryRecovery = null;
 
@@ -548,6 +552,16 @@ async function runStructuralRefit(label, action) {
 
 function setAppBusy(active, title = "Working...", detail = "") {
   if (!appShell || !appBusyOverlay) return;
+  const starting = active && !appBusyActive;
+  const stopping = !active && appBusyActive;
+  if (starting) {
+    const focused = document.activeElement;
+    appBusyOpener = focused instanceof Element &&
+      focused !== document.body &&
+      typeof focused.focus === "function"
+      ? focused
+      : null;
+  }
   if (appBusyTimer !== null) {
     clearInterval(appBusyTimer);
     appBusyTimer = null;
@@ -555,16 +569,29 @@ function setAppBusy(active, title = "Working...", detail = "") {
   for (const region of [appBar, contextBar, editorView, reportPanel]) {
     if (region) region.toggleAttribute("inert", active);
   }
+  appBusyActive = active;
   appShell.classList.toggle("is-busy", active);
   appShell.setAttribute("aria-busy", String(active));
   appBusyOverlay.hidden = !active;
-  if (!active) return;
+  if (!active) {
+    const opener = appBusyOpener;
+    appBusyOpener = null;
+    if (stopping && opener && opener.isConnected && typeof opener.focus === "function") {
+      opener.focus();
+    }
+    return;
+  }
+  const message = detail || "Refitting model";
+  if (starting) {
+    if (appBusyTitle) appBusyTitle.textContent = title;
+    if (appBusyMessage) appBusyMessage.textContent = message;
+    if (appBusyAnnouncement) appBusyAnnouncement.focus({ preventScroll: true });
+  }
   appBusyStarted = performance.now();
   const update = () => {
     const elapsed = performance.now() - appBusyStarted;
-    if (appBusyTitle) appBusyTitle.textContent = title;
     if (appBusyDetail) {
-      appBusyDetail.textContent = `${detail || "Refitting model"} · ${formatMilliseconds(elapsed)} elapsed`;
+      appBusyDetail.textContent = `${formatMilliseconds(elapsed)} elapsed`;
     }
   };
   update();
