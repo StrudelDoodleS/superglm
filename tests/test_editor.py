@@ -4597,6 +4597,59 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "busy-spinner" in css
 
 
+def test_editor_structural_confirmation_gate_precedes_every_refit_side_effect():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    html = (root / "index.html").read_text()
+    main_js = (root / "main.js").read_text()
+    confirm_js = (root / "views/structural_confirm.js").read_text()
+    root_css = (root / "styles.css").read_text()
+    dialog_css = (root / "styles/dialogs.css").read_text()
+
+    refit_start = main_js.index("async function runStructuralRefit")
+    refit_end = main_js.index("\nfunction setAppBusy", refit_start)
+    refit_source = main_js[refit_start:refit_end]
+    bindings_start = main_js.index('collapseLevels.addEventListener("click"', refit_end)
+    bindings_end = main_js.index("\nstore.subscribe", bindings_start)
+    bindings_source = main_js[bindings_start:bindings_end]
+    impact_index = refit_source.index("structuralImpact(")
+    confirm_index = refit_source.index("structuralConfirm.confirm(impact)")
+    contribution_index = refit_source.index("stopContributionBuild()")
+    timing_index = refit_source.index("performance.now()")
+    mutation_index = refit_source.index("actions.executeStructuralMutation")
+
+    assert main_js.count('from "./views/structural_confirm.js"') == 1
+    assert "selectSnapshot" in main_js[:refit_start]
+    assert "selectSnapshot(store.getState())" in refit_source
+    assert impact_index < confirm_index < contribution_index < timing_index < mutation_index
+    assert 'summarySource.value = "selected"' in refit_source
+    assert "stopContributionBuild()" not in bindings_source
+    assert "summarySource.value" not in bindings_source
+
+    assert html.count('id="structuralConfirmDialog"') == 1
+    assert (
+        '<dialog id="structuralConfirmDialog" class="structural-confirm" '
+        'aria-labelledby="structuralConfirmTitle" '
+        'aria-describedby="structuralConfirmMessage">'
+    ) in html.replace("\n", " ").replace("  ", " ")
+    assert '<form method="dialog">' in html
+    assert '<h2 id="structuralConfirmTitle">Confirm structural refit</h2>' in html
+    assert '<p id="structuralConfirmMessage"></p>' in html
+    assert '<button value="cancel" type="submit">Cancel</button>' in html
+    assert "Continue and refit</button>" in html
+    assert html.index("/assets/styles/panels.css") < html.index("/assets/styles/dialogs.css")
+
+    assert ".profile-dialog" not in root_css
+    assert ".save-dialog" not in root_css
+    assert ".profile-dialog" in dialog_css
+    assert ".save-dialog" in dialog_css
+    assert ".structural-confirm" in dialog_css
+    assert ".dialog-actions" in dialog_css
+    assert "overflow-wrap" in dialog_css
+    assert "@media" in dialog_css
+    assert "textContent" in confirm_js
+    assert "innerHTML" not in confirm_js
+
+
 def test_editor_inspector_has_summary_history_advanced_and_help_tabs():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     html = (root / "index.html").read_text()
@@ -4641,6 +4694,7 @@ def test_widget_serves_editor_app_assets(editor_model):
         assert '<link rel="stylesheet" href="/assets/styles/shell.css">' in shell
         assert '<link rel="stylesheet" href="/assets/styles/chart.css">' in shell
         assert '<link rel="stylesheet" href="/assets/styles/panels.css">' in shell
+        assert '<link rel="stylesheet" href="/assets/styles/dialogs.css">' in shell
         assert '<script type="module" src="/assets/main.js"></script>' in shell
         assert "<style>" not in shell
         assert "<script>\nconst svg" not in shell
@@ -4677,6 +4731,7 @@ def test_widget_serves_editor_app_assets(editor_model):
             "interactions.js",
             "views/inspector.js",
             "views/help_drawer.js",
+            "views/structural_confirm.js",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -4688,6 +4743,7 @@ def test_widget_serves_editor_app_assets(editor_model):
             "styles/shell.css",
             "styles/chart.css",
             "styles/panels.css",
+            "styles/dialogs.css",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:

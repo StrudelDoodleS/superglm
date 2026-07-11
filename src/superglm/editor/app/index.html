@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="/assets/styles/shell.css">
 <link rel="stylesheet" href="/assets/styles/chart.css">
 <link rel="stylesheet" href="/assets/styles/panels.css">
+<link rel="stylesheet" href="/assets/styles/dialogs.css">
 </head>
 <body>
   <div class="app-shell">
@@ -337,6 +338,17 @@
     <div id="reportFrame" class="report-frame"></div>
   </section>
   </div>
+
+  <dialog id="structuralConfirmDialog" class="structural-confirm" aria-labelledby="structuralConfirmTitle" aria-describedby="structuralConfirmMessage">
+    <form method="dialog">
+      <h2 id="structuralConfirmTitle">Confirm structural refit</h2>
+      <p id="structuralConfirmMessage"></p>
+      <div class="dialog-actions">
+        <button value="cancel" type="submit">Cancel</button>
+        <button value="confirm" class="primary" type="submit">Continue and refit</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="profileDialog" class="profile-dialog" aria-labelledby="profileDialogTitle">
     <div class="profile-dialog-head">

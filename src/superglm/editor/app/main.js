@@ -8,7 +8,8 @@ import {
   selectActiveTermName,
   selectCurrentSelection,
   selectGroupDisplayMode,
-  selectRenderableTerm
+  selectRenderableTerm,
+  selectSnapshot
 } from "./state/selectors.js";
 import {
   createEditorStore,
@@ -32,6 +33,7 @@ import { renderContextBar } from "./views/context_bar.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
 import { bindInspector, renderInspector } from "./views/inspector.js";
 import { bindPopovers } from "./views/popover.js";
+import { bindStructuralConfirm, structuralImpact } from "./views/structural_confirm.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
 const appBar = document.getElementById("appBar");
@@ -88,6 +90,7 @@ const saveStatus = document.getElementById("saveStatus");
 const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
 const uncollapseLevels = document.getElementById("uncollapseLevels");
+const structuralConfirmDialog = document.getElementById("structuralConfirmDialog");
 const metricSelect = document.getElementById("metricSelect");
 const metricGrid = document.getElementById("metricGrid");
 const summarySource = document.getElementById("summarySource");
@@ -119,6 +122,10 @@ const statusNode = document.getElementById("status");
 const uiPopover = document.getElementById("uiPopover");
 if (!uiPopover) throw new Error("Editor popover element is missing");
 bindPopovers({ root: document, popover: uiPopover });
+if (!(structuralConfirmDialog instanceof HTMLDialogElement)) {
+  throw new Error("Structural confirmation dialog is missing");
+}
+const structuralConfirm = bindStructuralConfirm(structuralConfirmDialog);
 
 let buildProgress = null;
 let buildFrame = null;
@@ -532,6 +539,24 @@ async function refreshActiveReport() {
 }
 
 async function runStructuralRefit(descriptor) {
+  const state = store.getState();
+  if (appBusyActive || state.request.mutation.status !== "idle") {
+    return { ok: false, skipped: true };
+  }
+  const snapshot = selectSnapshot(store.getState());
+  if (!snapshot) return { ok: false, skipped: true };
+  const impact = structuralImpact(snapshot, descriptor);
+  if (impact.requiresConfirmation && !(await structuralConfirm.confirm(impact))) {
+    return { ok: false, skipped: true };
+  }
+  if (appBusyActive || store.getState().request.mutation.status !== "idle") {
+    return { ok: false, skipped: true };
+  }
+
+  stopContributionBuild();
+  if (descriptor.name !== "restore collapsed levels") {
+    summarySource.value = "selected";
+  }
   const operationStart = performance.now();
   const requestStart = performance.now();
   let requestEnd = requestStart;
@@ -1131,21 +1156,16 @@ if (profileRun) {
 }
 if (collapseLevels) {
   collapseLevels.addEventListener("click", async () => {
-    stopContributionBuild();
-    summarySource.value = "selected";
     await runStructuralRefit(collapseTransition(selectedTerm()));
   });
 }
 if (ungroupLevels) {
   ungroupLevels.addEventListener("click", async () => {
-    stopContributionBuild();
-    summarySource.value = "selected";
     await runStructuralRefit(ungroupTransition(selectedTerm()));
   });
 }
 if (uncollapseLevels) {
   uncollapseLevels.addEventListener("click", async () => {
-    stopContributionBuild();
     await runStructuralRefit(uncollapseTransition());
   });
 }
