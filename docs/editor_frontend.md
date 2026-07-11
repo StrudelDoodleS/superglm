@@ -94,6 +94,9 @@ The store commits `state` and `summary` in one update. The browser crosses a two
 paint boundary, releases the blocking overlay, and then starts visible evidence without awaiting it.
 There is no successful post-refit `/state` fetch.
 
+Every JSON response also exposes `Server-Timing: json;dur=...`, which measures JSON-safe conversion
+and serialization separately from the route's model work.
+
 Metrics, summaries, and reports echo the requested revision and sequence. A response is accepted
 only when both still match the panel's current request. Superseded work and late responses never
 redraw the chart.

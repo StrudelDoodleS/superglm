@@ -414,12 +414,14 @@ def _client_error_message(exc: BaseException) -> str:
 def _json_response(payload: dict[str, Any], *, status_code: int = 200) -> Response:
     import json
 
+    json_started = time.perf_counter()
     body = json.dumps(jsonable(payload), allow_nan=False).encode("utf-8")
+    json_ms = (time.perf_counter() - json_started) * 1000.0
     return Response(
         content=body,
         status_code=status_code,
         media_type="application/json",
-        headers=_no_store_headers(),
+        headers={**_no_store_headers(), "Server-Timing": f"json;dur={json_ms:.3f}"},
     )
 
 

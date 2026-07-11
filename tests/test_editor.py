@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import urllib.error
 import urllib.parse
@@ -3867,6 +3868,24 @@ def test_widget_collapse_levels_reports_refit_timing(editor_model, monkeypatch):
         widget.close()
 
 
+def test_widget_json_responses_report_serialization_timing(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    request = urllib.request.Request(
+        f"{widget.url}/state",
+        headers=_editor_token_header(f"{widget.url}/state"),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            server_timing = response.headers.get("Server-Timing", "")
+
+        assert payload["model_revision"] == session.model_revision
+        assert re.fullmatch(r"json;dur=\d+(?:\.\d{3})", server_timing)
+    finally:
+        widget.close()
+
+
 def test_widget_http_uncollapse_levels_restores_previous_model(editor_model):
     session = EditorSession.from_model(editor_model, terms=["region"])
     widget = session.widget()
@@ -5044,6 +5063,7 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     html = (root / "index.html").read_text()
     main_js = (root / "main.js").read_text()
+    actions_js = (root / "state/actions.js").read_text()
     summary_js = (root / "summary.js").read_text()
     css = (root / "styles.css").read_text()
 
@@ -5062,19 +5082,30 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     collapse_start = summary_js.index("export function collapseTransition")
     collapse_end = summary_js.index("export function ungroupTransition", collapse_start)
     collapse_source = summary_js[collapse_start:collapse_end]
+    transition_start = actions_js.index("  async function executeStructuralMutation")
+    transition_end = actions_js.index("\n  /**\n   * Refresh one evidence panel", transition_start)
+    transition_source = actions_js[transition_start:transition_end]
 
     assert 'id="appBusyOverlay"' in html
     assert "setAppBusy" in main_js
     assert "actions.executeStructuralMutation" in refit_source
     assert "onRequestSettled" in refit_source
-    assert "waitForSecondary" in refit_source
-    assert refit_source.index("onRequestSettled") < refit_source.index("waitForSecondary")
+    assert "waitForSecondary" not in refit_source
     request_end_assignment = refit_source.index("requestEnd = performance.now()")
     assert refit_source.index("onRequestSettled") < request_end_assignment
-    assert request_end_assignment < refit_source.index("waitForSecondary")
-    assert refit_source.index("await refreshMetricsView()") < refit_source.index(
-        "await refreshActiveReport()"
+    assert "refreshMetricsView" not in refit_source
+    assert "refreshActiveReport" not in refit_source
+    assert transition_source.index("commitStructuralTransition") < transition_source.index(
+        "await waitForPaint()"
     )
+    assert transition_source.index("await waitForPaint()") < transition_source.index(
+        "finishStructuralMutation(null)"
+    )
+    assert transition_source.index("finishStructuralMutation(null)") < transition_source.index(
+        "scheduleVisibleEvidence"
+    )
+    assert "immediate: true" in transition_source
+    assert "summaryCommitted: true" in transition_source
     assert "actions.initialize()" not in refit_source
     assert '"/state"' not in refit_source
     assert "setAppBusy" not in refit_source
@@ -5102,9 +5133,10 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "runStructuralRefit(uncollapseTransition())" in bindings_source
     assert "(state) => state.remote.snapshot" in bindings_source
     assert "(state) => state.remote.summary" in bindings_source
-    assert "if (!summary) return;" in bindings_source
+    assert "if (summary)" in bindings_source
+    assert "(state) => state.request.evidence.summary" in bindings_source
     assert "renderStaleSummary" not in main_js
-    assert "renderSummary" in bindings_source
+    assert "renderSummaryEvidence" in bindings_source
     assert "state.request.mutation" in bindings_source
     assert 'path: "/collapse_levels"' in collapse_source
     assert 'payload: { term, method: "auto" }' in collapse_source
