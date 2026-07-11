@@ -41,6 +41,8 @@ export function createInitialEditorState(snapshot = null) {
  * input as immutable and return that same reference for a no-op. State commits, selector
  * comparisons, and listener notifications all finish before `update` returns. Listener-driven
  * nested updates run immediately, after the triggering subscription's cached value is updated.
+ * A listener failure does not starve later subscriptions; the first failure is rethrown after
+ * all remaining notifications have been attempted.
  *
  * @param {EditorState} initialState
  */
@@ -60,14 +62,24 @@ export function createEditorStore(initialState) {
     const next = updater(previous);
     if (next === previous) return;
     state = next;
+    let firstListenerError;
+    let listenerFailed = false;
     for (const subscription of subscriptions) {
       const selected = subscription.selector(state);
       if (!subscription.equals(selected, subscription.value)) {
         const oldValue = subscription.value;
         subscription.value = selected;
-        subscription.listener(selected, oldValue);
+        try {
+          subscription.listener(selected, oldValue);
+        } catch (error) {
+          if (!listenerFailed) {
+            listenerFailed = true;
+            firstListenerError = error;
+          }
+        }
       }
     }
+    if (listenerFailed) throw firstListenerError;
   }
 
   /**

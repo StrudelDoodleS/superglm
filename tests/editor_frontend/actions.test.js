@@ -11,6 +11,8 @@ import {
   setPreviewTerm
 } from "../../src/superglm/editor/app/state/store.js";
 
+/** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EditorState} EditorState */
+
 const { createEditorActions } = actionsModule;
 
 /** @returns {import('../../src/superglm/editor/app/api/contracts.js').TermPayload} */
@@ -333,6 +335,129 @@ for (const hookFailure of ["throw", "reject"]) {
   });
 }
 
+test("subscriber failures after structural commit retain success and notify remaining listeners", async () => {
+  const envelope = transitionEnvelope();
+  const store = createEditorStore(createInitialEditorState(snapshot(2)));
+  /** @type {string[]} */
+  const notifications = [];
+  store.subscribe((state) => state.remote.snapshot, () => {
+    notifications.push("snapshot");
+    throw new Error("snapshot listener failed");
+  });
+  store.subscribe((state) => state.remote.summary, () => {
+    notifications.push("summary");
+  });
+  store.subscribe((state) => state.request.mutation.status, (status) => {
+    notifications.push(`mutation:${status}`);
+    if (status === "idle") throw new Error("idle listener failed");
+  });
+  let postCalls = 0;
+  let recoveryCalls = 0;
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => {
+        postCalls += 1;
+        return envelope;
+      },
+      getState: async () => {
+        recoveryCalls += 1;
+        return snapshot(99);
+      }
+    },
+    waitForPaint: async () => {}
+  });
+
+  const result = await actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "age", method: "auto" }
+  });
+
+  assert.deepEqual(result, { ok: true, envelope });
+  assert.equal(postCalls, 1);
+  assert.equal(recoveryCalls, 0);
+  assert.strictEqual(store.getState().remote.snapshot, envelope.state);
+  assert.strictEqual(store.getState().remote.summary, envelope.summary);
+  assert.deepEqual(store.getState().request.mutation, {
+    status: "idle", operation: null, error: null
+  });
+  assert.equal(store.getState().request.recovery?.retry, null);
+  assert.match(store.getState().request.recovery?.message || "", /refresh.*incomplete/i);
+  assert.deepEqual(notifications, [
+    "mutation:running", "snapshot", "summary", "mutation:idle"
+  ]);
+});
+
+test("successful structural finalization cannot reject on an idle listener error", async () => {
+  const envelope = transitionEnvelope();
+  const store = createEditorStore(createInitialEditorState(snapshot(2)));
+  store.subscribe((state) => state.request.mutation.status, (status) => {
+    if (status === "idle") throw new Error("idle listener failed");
+  });
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => envelope,
+      getState: async () => { throw new Error("success must not recover through /state"); }
+    },
+    waitForPaint: async () => {}
+  });
+
+  const result = await actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "age", method: "auto" }
+  });
+
+  assert.deepEqual(result, { ok: true, envelope });
+  assert.equal(store.getState().request.mutation.status, "idle");
+  assert.equal(store.getState().request.recovery, null);
+  assert.strictEqual(store.getState().remote.snapshot, envelope.state);
+});
+
+test("structural commit failure before envelope installation stays ambiguous", async () => {
+  const baseStore = createEditorStore(createInitialEditorState(snapshot(2)));
+  const confirmedRemote = baseStore.getState().remote;
+  let updateCalls = 0;
+  const store = {
+    getState: baseStore.getState,
+    /** @param {(state:EditorState)=>EditorState} updater */
+    update(updater) {
+      updateCalls += 1;
+      if (updateCalls === 2) {
+        updater(baseStore.getState());
+        throw new Error("commit did not install");
+      }
+      baseStore.update(updater);
+    }
+  };
+  let recoveryCalls = 0;
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => transitionEnvelope(),
+      getState: async () => {
+        recoveryCalls += 1;
+        return snapshot(2);
+      }
+    },
+    waitForPaint: async () => {}
+  });
+
+  const result = await actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "age", method: "auto" }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(recoveryCalls, 1);
+  assert.strictEqual(baseStore.getState().remote, confirmedRemote);
+  assert.equal(baseStore.getState().request.mutation.status, "error");
+  assert.equal(baseStore.getState().request.recovery?.retry, null);
+});
+
 test("malformed structural response reconciles once and cannot be retried", async () => {
   const confirmedEnvelope = transitionEnvelope(2, "selected");
   const confirmedState = commitStructuralTransition(
@@ -607,7 +732,12 @@ test("ambiguous structural failure reconciles by current revision and never retr
     if (recoveryCase.retain) {
       assert.strictEqual(store.getState().remote, confirmedRemote, recoveryCase.name);
     } else {
-      assert.equal(store.getState().remote.summary, null, recoveryCase.name);
+      assert.equal(store.getState().remote.summary?.available, false, recoveryCase.name);
+      assert.match(
+        store.getState().remote.summary?.error || "",
+        /reconciled.*stale.*refresh/i,
+        recoveryCase.name
+      );
     }
     assert.equal(store.getState().request.recovery?.retry, null, recoveryCase.name);
     assert.match(
@@ -726,7 +856,7 @@ test("mutation retry descriptors snapshot caller-owned payloads", async () => {
   });
 });
 
-test("failed mutation commits a newer recovered snapshot and clears unmatched summary", async () => {
+test("failed mutation commits a newer recovered snapshot with unavailable summary", async () => {
   const initial = commitStructuralTransition(
     createInitialEditorState(snapshot(1)),
     transitionEnvelope(2, "old")
@@ -745,7 +875,8 @@ test("failed mutation commits a newer recovered snapshot and clears unmatched su
 
   assert.equal(result.ok, false);
   assert.strictEqual(store.getState().remote.snapshot, recovered);
-  assert.equal(store.getState().remote.summary, null);
+  assert.equal(store.getState().remote.summary?.available, false);
+  assert.match(store.getState().remote.summary?.error || "", /reconciled.*stale.*refresh/i);
   assert.equal(store.getState().request.recovery?.message, "response lost");
 });
 

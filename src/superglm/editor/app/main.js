@@ -19,7 +19,6 @@ import {
 import {
   collapseTransition,
   refreshSummary,
-  renderStaleSummary,
   renderSummary,
   runDistributionProfile,
   showDistributionProfileDialog,
@@ -1154,11 +1153,8 @@ if (uncollapseLevels) {
 store.subscribe((state) => state.remote.snapshot, () => render());
 store.subscribe(
   (state) => state.remote.summary,
-  (summary, previousSummary) => {
-    if (!summary) {
-      if (previousSummary) renderStaleSummary(summaryNodes());
-      return;
-    }
+  (summary) => {
+    if (!summary) return;
     summarySource.value = "selected";
     renderSummary(summary, summaryNodes());
   }

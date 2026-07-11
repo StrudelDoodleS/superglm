@@ -4585,9 +4585,8 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "runStructuralRefit(uncollapseTransition())" in bindings_source
     assert "(state) => state.remote.snapshot" in bindings_source
     assert "(state) => state.remote.summary" in bindings_source
-    assert "(summary, previousSummary)" in bindings_source
-    assert "if (previousSummary)" in bindings_source
-    assert "renderStaleSummary" in bindings_source
+    assert "if (!summary) return;" in bindings_source
+    assert "renderStaleSummary" not in main_js
     assert "renderSummary" in bindings_source
     assert "state.request.mutation" in bindings_source
     assert 'path: "/collapse_levels"' in collapse_source

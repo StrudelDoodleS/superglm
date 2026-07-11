@@ -12,6 +12,8 @@ import { selectModelRevision } from "./selectors.js";
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
 /** @typedef {import('../api/contracts.js').MutationDescriptor} MutationDescriptor */
+/** @typedef {import('../api/contracts.js').RecoveryRequestState} RecoveryRequestState */
+/** @typedef {import('../api/contracts.js').SummaryPayload} SummaryPayload */
 /** @typedef {import('../api/contracts.js').StructuralActionResult} StructuralActionResult */
 /** @typedef {import('../api/contracts.js').StructuralMutationDescriptor} StructuralMutationDescriptor */
 /** @typedef {import('../api/contracts.js').StructuralTransitionEnvelope} StructuralTransitionEnvelope */
@@ -129,6 +131,15 @@ async function notifyRequestSettled(onRequestSettled) {
   }
 }
 
+/** @returns {SummaryPayload} */
+function reconciledSummaryPayload() {
+  return {
+    available: false,
+    label: "Summary unavailable",
+    error: "The model state was reconciled, but its summary is stale. Refresh the summary."
+  };
+}
+
 /** @param {EditorActionOptions} options */
 export function createEditorActions({
   store,
@@ -136,6 +147,22 @@ export function createEditorActions({
   scheduleEvidence = () => {},
   waitForPaint = nextPaint
 }) {
+  /** @param {RecoveryRequestState|null} recovery */
+  function finishStructuralMutation(recovery) {
+    try {
+      store.update((state) => ({
+        ...state,
+        request: {
+          ...state.request,
+          mutation: { status: "idle", operation: null, error: null },
+          recovery
+        }
+      }));
+    } catch {
+      // The store installs the final request state before reporting listener failures.
+    }
+  }
+
   /**
    * Reconciles one state-only recovery response against the current remote revision. A recovered
    * snapshot can advance state only when it is strictly newer, and never carries a summary.
@@ -161,7 +188,13 @@ export function createEditorActions({
       const currentRevision = state.remote.snapshot?.model_revision ?? -1;
       const restored = recovered && recovered.model_revision > currentRevision
         ? commitRemote(
-            { ...state, remote: { snapshot: state.remote.snapshot, summary: null } },
+            {
+              ...state,
+              remote: {
+                snapshot: state.remote.snapshot,
+                summary: reconciledSummaryPayload()
+              }
+            },
             recovered
           )
         : { ...state, view: { ...state.view, preview: null } };
@@ -281,29 +314,22 @@ export function createEditorActions({
       return recoverMutation(value, name, null);
     }
 
-    store.update((state) => commitStructuralTransition(state, envelope));
+    const stateBeforeCommit = store.getState();
+    try {
+      store.update((state) => commitStructuralTransition(state, envelope));
+    } catch (value) {
+      if (store.getState() === stateBeforeCommit) return recoverMutation(value, name, null);
+      finishStructuralMutation({ message: STRUCTURAL_REFRESH_INCOMPLETE, retry: null });
+      return { ok: true, envelope };
+    }
     try {
       await waitForPaint();
       await waitForSecondary(envelope.state.model_revision);
     } catch {
-      store.update((state) => ({
-        ...state,
-        request: {
-          ...state.request,
-          mutation: { status: "idle", operation: null, error: null },
-          recovery: { message: STRUCTURAL_REFRESH_INCOMPLETE, retry: null }
-        }
-      }));
+      finishStructuralMutation({ message: STRUCTURAL_REFRESH_INCOMPLETE, retry: null });
       return { ok: true, envelope };
     }
-    store.update((state) => ({
-      ...state,
-      request: {
-        ...state.request,
-        mutation: { status: "idle", operation: null, error: null },
-        recovery: null
-      }
-    }));
+    finishStructuralMutation(null);
     return { ok: true, envelope };
   }
 

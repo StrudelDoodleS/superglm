@@ -284,6 +284,43 @@ test("subscription changes during notification take effect immediately", () => {
   assert.equal(addedCalls, 1);
 });
 
+test("listener errors do not starve later subscribers and rethrow after notification", () => {
+  const store = createEditorStore(createInitialEditorState(snapshot()));
+  /** @type {string[]} */
+  const notifications = [];
+  let throwOnce = true;
+  store.subscribe(
+    (state) => state.view.showCi,
+    (value, previous) => {
+      notifications.push(`first:${previous}->${value}`);
+      if (throwOnce) {
+        throwOnce = false;
+        throw new Error("listener exploded");
+      }
+    }
+  );
+  store.subscribe(
+    (state) => state.view.showCi,
+    (value, previous) => notifications.push(`second:${previous}->${value}`)
+  );
+
+  assert.throws(
+    () => store.update((state) => patchView(state, { showCi: true })),
+    /listener exploded/
+  );
+
+  assert.equal(store.getState().view.showCi, true);
+  assert.deepEqual(notifications, ["first:false->true", "second:false->true"]);
+
+  store.update((state) => patchView(state, { showCi: false }));
+  assert.deepEqual(notifications, [
+    "first:false->true",
+    "second:false->true",
+    "first:true->false",
+    "second:true->false"
+  ]);
+});
+
 test("remote commit falls back to the selected term when the active term disappears", () => {
   const initial = patchView(createInitialEditorState(snapshot()), { activeTerm: "missing" });
   const nextSnapshot = {

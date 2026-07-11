@@ -155,14 +155,6 @@ export function uncollapseTransition() {
   };
 }
 
-export function renderStaleSummary(nodes) {
-  renderSummary({
-    available: false,
-    label: "Summary unavailable",
-    error: "The model state was reconciled, but its summary is stale. Refresh the summary."
-  }, nodes);
-}
-
 export function renderSummary(payload, nodes) {
   const { summaryStatus, summaryNote, summaryFrame } = nodes;
   updateDistributionProfileActions(payload, nodes);
