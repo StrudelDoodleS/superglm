@@ -8,6 +8,10 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
+      - "package.json"
+      - "package-lock.json"
+      - "jsconfig.json"
+      - "tests/editor_frontend/**"
       - ".github/workflows/**"
 
 permissions:
@@ -37,7 +41,7 @@ jobs:
         run: uv run ruff check src/ tests/
 
       - name: Test
-        run: uv run pytest tests/ -q --cov=superglm --cov-branch --cov-report=xml --cov-report=term
+        run: uv run pytest tests/ -q -m "not browser" --cov=superglm --cov-branch --cov-report=xml --cov-report=term
 
       - name: Upload coverage
         if: matrix.python-version == '3.13'
@@ -66,3 +70,34 @@ jobs:
 
       - name: Ruff format check
         run: uv run ruff format --check src/ tests/
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --python 3.13 --extra dev
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check frontend modules
+        run: npm run check:frontend
+
+      - name: Install Chromium
+        run: uv run playwright install --with-deps chromium
+
+      - name: Browser tests
+        run: uv run pytest tests/test_editor_browser.py -m browser --run-browser -q

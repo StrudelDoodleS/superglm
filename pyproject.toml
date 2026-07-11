@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "fastapi>=0.115",
+    "playwright>=1.55",
     "pytest>=7.0",
     "pytest-cov",
     "ruff",
@@ -89,6 +90,7 @@ testpaths = ["tests"]
 addopts = "-v --tb=short"
 norecursedirs = ["scratch"]
 markers = [
+    "browser: runs real-browser editor integration tests",
     "slow: marks tests that fit real models (deselect with '-m \"not slow\"')",
 ]
 filterwarnings = [
