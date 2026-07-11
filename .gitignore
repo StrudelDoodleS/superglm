@@ -64,3 +64,8 @@ PROGRESS.md
 GENERATOR_STATUS.md
 REML_BAD_BEHAVIOUR.txt
 .omx/
+
+# Frontend development
+node_modules/
+playwright-report/
+test-results/
