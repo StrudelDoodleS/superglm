@@ -182,13 +182,10 @@ function setInteractionPreview(term, payload, selection) {
 }
 
 function clearInteractionPreview() {
-  let cleared = false;
   store.update((state) => {
     if (state.view.preview === null) return state;
-    cleared = true;
     return patchViewState(state, { preview: null });
   });
-  if (!cleared) return;
   const term = currentTerm();
   if (term) drawChart(term, currentSelection(), chartContext);
 }

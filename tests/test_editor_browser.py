@@ -354,6 +354,35 @@ def test_editor_browser_cancelled_drag_restores_confirmed_preview_without_post(
 
 
 @pytest.mark.browser
+def test_editor_browser_cancel_before_first_move_restores_confirmed_selection(
+    browser_editor_widget,
+):
+    with sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1180, "height": 720})
+            page.goto(browser_editor_widget.app_url)
+            page.locator("#chart path.edited").first.wait_for()
+            page.locator("#mode").select_option("move")
+            point = page.locator("#chart circle.point[data-index]").last
+            point.wait_for()
+            assert page.locator("#chart circle.point.selected[data-index]").count() == 0
+
+            point.hover()
+            page.mouse.down()
+            assert page.locator("#chart circle.point.selected[data-index]").count() == 1
+
+            page.locator("#chart").dispatch_event(
+                "pointercancel",
+                {"pointerId": 1, "pointerType": "mouse", "isPrimary": True, "button": 0},
+            )
+            assert page.locator("#chart circle.point.selected[data-index]").count() == 0
+            page.mouse.up()
+        finally:
+            browser.close()
+
+
+@pytest.mark.browser
 def test_editor_browser_failed_term_switch_keeps_authoritative_term(
     browser_editor_widget, monkeypatch
 ):
