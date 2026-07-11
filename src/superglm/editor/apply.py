@@ -43,7 +43,7 @@ _EDITOR_EDIT_ONLY_MEMO_STATE = (
 
 def _copy_model_for_editor_edits(model, *, share_transient_state: bool = False):
     """Copy a fitted model without duplicating its row-scale fit inputs."""
-    shared_names = _EDITOR_SHARED_ROW_INPUTS
+    shared_names: tuple[str, ...] = _EDITOR_SHARED_ROW_INPUTS
     if share_transient_state:
         shared_names += _EDITOR_EDIT_ONLY_MEMO_STATE
     shared = {name: getattr(model, name) for name in shared_names if hasattr(model, name)}

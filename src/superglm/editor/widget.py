@@ -12,7 +12,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -287,7 +287,7 @@ class EditorWidget:
         model_revision: int | None = None,
         request_sequence: int | None = None,
     ) -> dict[str, Any]:
-        selected_source = "in_force" if source in (None, "selected") else source
+        selected_source = "in_force" if source is None or source == "selected" else source
         with self._lock:
             current_revision = self.session.model_revision
             if model_revision is not None and int(model_revision) != current_revision:
@@ -322,14 +322,16 @@ class EditorWidget:
         )
         if original_metrics is None:
             return _superseded_payload(revision, request_sequence)
+        edited_metrics: dict[str, float]
         if selected_source == "original":
             edited_metrics = original_metrics
         else:
-            edited_metrics = self._dataset_metrics_for_evidence(
+            current_metrics = self._dataset_metrics_for_evidence(
                 "current", selected_model, eval_dataset, revision
             )
-            if edited_metrics is None:
+            if current_metrics is None:
                 return _superseded_payload(revision, request_sequence)
+            edited_metrics = current_metrics
         payload = metric_comparison_payload(
             metric,
             eval_dataset,
@@ -345,7 +347,7 @@ class EditorWidget:
 
     def _dataset_metrics_for_evidence(
         self,
-        role: str,
+        role: Literal["original", "current"],
         model,
         dataset,
         revision: int,
@@ -371,15 +373,16 @@ class EditorWidget:
             "score",
             f"{role}:{dataset.name}:{request.key.metric_signature!r}",
         )
-        outcome = self._evidence.submit(
-            evidence_key,
-            lambda request=request: {
+
+        def compute_metrics(request: DatasetMetricRequest = request) -> dict[str, Any]:
+            return {
                 "metrics": metrics_module.compute_dataset_metrics(
                     request.model,
                     request.dataset,
                 )
-            },
-        ).result()
+            }
+
+        outcome = self._evidence.submit(evidence_key, compute_metrics).result()
         if outcome.status == "superseded" or outcome.payload is None:
             return None
         values = outcome.payload["metrics"]
@@ -408,6 +411,9 @@ class EditorWidget:
             if model_revision is not None and int(model_revision) != current_revision:
                 return _superseded_payload(int(model_revision), request_sequence)
 
+        offset_terms_override: list[str] | None = None
+        offset_labels_override: list[dict[str, Any]] | None = None
+        collapse_info_override: dict[str, Any] | None = None
         if source == "in_force":
             model, revision = self._current_model_for_evidence()
             if model is None:
@@ -416,25 +422,24 @@ class EditorWidget:
                 if revision != self.session.model_revision:
                     return _superseded_payload(revision, request_sequence)
                 collapse_info = None if self._in_force_info is None else dict(self._in_force_info)
-            kwargs = {"collapse_info_override": collapse_info}
+            collapse_info_override = collapse_info
         else:
             with self._lock:
                 revision = self.session.model_revision
                 if source == "original":
                     model = self.session.reference_model
-                    kwargs = {}
                 else:
                     model = self._offset_refit_model
-                    kwargs = {
-                        "offset_terms_override": list(self._offset_refit_terms),
-                        "offset_labels_override": list(self._offset_refit_labels),
-                    }
+                    offset_terms_override = list(self._offset_refit_terms)
+                    offset_labels_override = list(self._offset_refit_labels)
 
         payload = summary_payload(
             self,
             source,
             model_override=model,
-            **kwargs,
+            offset_terms_override=offset_terms_override,
+            offset_labels_override=offset_labels_override,
+            collapse_info_override=collapse_info_override,
         )
         with self._lock:
             if revision != self.session.model_revision:
