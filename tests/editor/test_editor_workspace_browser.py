@@ -312,10 +312,19 @@ def test_raw_summary_html_is_isolated_in_a_sandboxed_iframe(open_editor_page):
                     && frame.textContent.trim().length > 0;
             }"""
         )
-        page.route(
-            "**/summary",
-            lambda route: route.fulfill(status=200, json=payload),
-        )
+
+        def fulfill_summary(route) -> None:
+            request_payload = route.request.post_data_json
+            route.fulfill(
+                status=200,
+                json={
+                    **payload,
+                    "model_revision": request_payload["model_revision"],
+                    "request_sequence": request_payload["request_sequence"],
+                },
+            )
+
+        page.route("**/summary", fulfill_summary)
         page.evaluate("delete document.documentElement.dataset.summarySandboxEscape")
 
         with page.expect_response(
