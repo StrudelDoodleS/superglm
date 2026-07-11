@@ -305,6 +305,13 @@ def test_raw_summary_html_is_isolated_in_a_sandboxed_iframe(open_editor_page):
     }
 
     with open_editor_page() as (page, _session):
+        page.wait_for_function(
+            """() => {
+                const frame = document.querySelector('#summaryFrame');
+                return frame?.getAttribute('aria-busy') === 'false'
+                    && frame.textContent.trim().length > 0;
+            }"""
+        )
         page.route(
             "**/summary",
             lambda route: route.fulfill(status=200, json=payload),
