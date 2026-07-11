@@ -100,4 +100,4 @@ jobs:
         run: uv run playwright install --with-deps chromium
 
       - name: Browser tests
-        run: uv run pytest tests/test_editor_browser.py -m browser --run-browser -q
+        run: uv run pytest tests/test_editor_browser.py tests/editor/ -m browser --run-browser -q
