@@ -537,10 +537,19 @@ def test_editor_browser_zoom_preserves_handle_visuals(browser_editor_widget):
 def test_editor_browser_report_error_clears_mismatched_report(browser_editor_widget, monkeypatch):
     original_report = browser_editor_widget._report
 
-    def fail_final_report(report="validation"):
+    def fail_final_report(
+        report="validation",
+        *,
+        model_revision=None,
+        request_sequence=None,
+    ):
         if report == "final":
             raise ValueError("final unavailable")
-        return original_report(report)
+        return original_report(
+            report,
+            model_revision=model_revision,
+            request_sequence=request_sequence,
+        )
 
     monkeypatch.setattr(browser_editor_widget, "_report", fail_final_report)
 
@@ -558,12 +567,15 @@ def test_editor_browser_report_error_clears_mismatched_report(browser_editor_wid
 
             page.locator('.app-tab[data-view="final"]').click()
             page.wait_for_function(
-                "document.querySelector('#reportStatus')?.textContent.includes('final unavailable')"
+                "document.querySelector('#reportFreshness')?.textContent.includes("
+                "'final unavailable'"
+                ")"
             )
 
             final_html = page.locator("#reportFrame").inner_html()
             assert "CV Report" not in final_html
             assert final_html == ""
             assert page.locator("#reportTitle").text_content() == "Final Fit Report"
+            assert page.locator("#reportFreshness").get_attribute("data-freshness") == "stale"
         finally:
             browser.close()

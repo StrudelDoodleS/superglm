@@ -304,8 +304,6 @@ function clearInteractionPreview() {
     if (state.view.preview === null) return state;
     return patchViewState(state, { preview: null });
   });
-  const term = currentTerm();
-  if (term) drawChart(term, currentSelection(), chartContext);
 }
 
 function setZoom(term, range) {
@@ -842,6 +840,23 @@ function renderInteractionPreview(preview) {
   drawChart(preview.payload, new Set(preview.selection), chartContext);
 }
 
+function renderInteractionState(current, previous) {
+  if (current.preview) {
+    renderInteractionPreview(current.preview);
+    return;
+  }
+  // A confirmed remote commit is rendered by the remote subscription. When
+  // only the private preview is cleared (cancel or failed request), repaint
+  // from the unchanged authoritative snapshot.
+  if (!previous.preview || current.snapshot !== previous.snapshot) return;
+  const term = currentTerm();
+  if (term) drawChart(term, currentSelection(), chartContext);
+}
+
+function sameInteractionState(next, previous) {
+  return next.preview === previous.preview && next.snapshot === previous.snapshot;
+}
+
 function renderRecovery(recovery) {
   if (!appAlert || !appAlertMessage || !appAlertRetry || !appAlertDismiss) return;
   const visibleRecovery = recovery || (retryInProgress ? retryRecovery : null);
@@ -1330,7 +1345,11 @@ store.subscribe(
   }
 );
 store.subscribe((state) => state.view, () => render(), sameViewOutsidePreview);
-store.subscribe((state) => state.view.preview, renderInteractionPreview);
+store.subscribe(
+  (state) => ({ preview: state.view.preview, snapshot: state.remote.snapshot }),
+  renderInteractionState,
+  sameInteractionState,
+);
 store.subscribe((state) => state.request.recovery, renderRecovery);
 store.subscribe((state) => state.request.mutation, renderMutationBusy);
 store.subscribe(

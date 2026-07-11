@@ -864,6 +864,37 @@ test("failed mutation commits a newer recovered snapshot with unavailable summar
   assert.equal(store.getState().request.recovery?.message, "response lost");
 });
 
+test("failed ordinary mutation accepts same-revision authoritative UI state", async () => {
+  const initial = commitStructuralTransition(
+    createInitialEditorState(snapshot(1)),
+    transitionEnvelope(2, "selected")
+  );
+  const confirmedSummary = initial.remote.summary;
+  const recovered = snapshot(2);
+  recovered.selected_term = "region";
+  recovered.terms.region = termPayload();
+  recovered.selection.region = [];
+  const store = createEditorStore(initial);
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => { throw new Error("response lost"); },
+      getState: async () => recovered
+    }
+  });
+
+  const result = await actions.executeStateMutation({
+    name: "term",
+    path: "/term",
+    payload: { term: "region" }
+  });
+
+  assert.equal(result.ok, false);
+  assert.strictEqual(store.getState().remote.snapshot, recovered);
+  assert.strictEqual(store.getState().remote.summary, confirmedSummary);
+  assert.equal(store.getState().remote.snapshot?.selected_term, "region");
+});
+
 test("late ordinary recovery cannot rewind or mix a newer authoritative pair", async () => {
   const recovery = deferred();
   const recoveryStarted = deferred();

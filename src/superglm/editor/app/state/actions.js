@@ -173,8 +173,9 @@ export function createEditorActions({
   }
 
   /**
-   * Reconciles one state-only recovery response against the current remote revision. A recovered
-   * snapshot can advance state only when it is strictly newer, and never carries a summary.
+   * Reconciles one state-only recovery response against the current remote revision. Structural
+   * recovery advances only to a newer revision. Ordinary recovery also accepts an equal revision
+   * because UI-only state, such as the selected term, does not increment the model revision.
    *
    * @param {unknown} error
    * @param {string} operation
@@ -195,18 +196,25 @@ export function createEditorActions({
     }
     store.update((state) => {
       const currentRevision = state.remote.snapshot?.model_revision ?? -1;
-      const restored = recovered && recovered.model_revision > currentRevision
-        ? commitRemote(
-            {
-              ...state,
-              remote: {
-                snapshot: state.remote.snapshot,
-                summary: reconciledSummaryPayload()
-              }
-            },
-            recovered
-          )
-        : { ...state, view: { ...state.view, preview: null } };
+      let restored;
+      if (recovered && recovered.model_revision > currentRevision) {
+        restored = commitRemote(
+          {
+            ...state,
+            remote: {
+              snapshot: state.remote.snapshot,
+              summary: reconciledSummaryPayload()
+            }
+          },
+          recovered
+        );
+      } else if (
+        recovered && retry !== null && recovered.model_revision === currentRevision
+      ) {
+        restored = commitRemote(state, recovered);
+      } else {
+        restored = { ...state, view: { ...state.view, preview: null } };
+      }
       return {
         ...restored,
         request: {

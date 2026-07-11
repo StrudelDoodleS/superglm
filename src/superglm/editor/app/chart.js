@@ -296,6 +296,18 @@ function definePlotClip(svg, margin, innerW, innerH) {
     height: innerH
   }));
   defs.appendChild(clip);
+  // Chromium excludes the exact boundary of an SVG clip from pointer hit
+  // testing. Give draggable marks enough room for their radius while keeping
+  // zoomed-out marks away from the axes and labels.
+  const interactionPad = 6;
+  const interactionClip = el("clipPath", { id: "plotInteractionClip" });
+  interactionClip.appendChild(el("rect", {
+    x: margin.left - interactionPad,
+    y: margin.top - interactionPad,
+    width: innerW + interactionPad * 2,
+    height: innerH + interactionPad * 2
+  }));
+  defs.appendChild(interactionClip);
   svg.appendChild(defs);
 }
 
@@ -320,6 +332,9 @@ function applyPlotClip(svg) {
   ].join(",");
   for (const node of svg.querySelectorAll(clipped)) {
     node.setAttribute("clip-path", "url(#plotClip)");
+  }
+  for (const node of svg.querySelectorAll(".point,.control-handle")) {
+    node.setAttribute("clip-path", "url(#plotInteractionClip)");
   }
 }
 
