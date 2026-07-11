@@ -3941,6 +3941,78 @@ def test_widget_http_metrics_recomputes_fit_metric_for_edited_copy(editor_model)
         widget.close()
 
 
+def test_live_metrics_and_report_share_validation_scalars(
+    editor_model,
+    editor_frame,
+    monkeypatch,
+):
+    import superglm.editor.metrics as metrics_module
+    import superglm.editor.reports as reports_module
+
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(X.iloc[:300], y[:300], None),
+        validation_data=(X.iloc[300:380], y[300:380], None),
+        test_data=(X.iloc[380:], y[380:], None),
+    )
+    widget = session.widget()
+    calls: list[tuple[int, str]] = []
+    original = metrics_module.compute_dataset_metrics
+
+    def counted(model, dataset):
+        calls.append((id(model.result), dataset.name))
+        return original(model, dataset)
+
+    monkeypatch.setattr(metrics_module, "compute_dataset_metrics", counted)
+    monkeypatch.setattr(reports_module, "compute_dataset_metrics", counted)
+    try:
+        metrics = widget._metrics("deviance", "in_force")
+        report = widget._report("validation")
+    finally:
+        widget.close()
+
+    validation_calls = [call for call in calls if call[1] == "validation"]
+    assert len(validation_calls) == 2
+    assert metrics["model_revision"] == session.model_revision
+    assert report["model_revision"] == session.model_revision
+
+
+def test_metric_comparison_payload_assembles_cached_scalars(editor_model, editor_frame):
+    from superglm.editor.evaluation import EvaluationDataset
+    from superglm.editor.metrics import metric_comparison_payload
+
+    X, y = editor_frame
+    dataset = EvaluationDataset("validation", "Validation", X.iloc[:20], y[:20])
+    original = {"deviance": 3.0, "aic": 5.0}
+    edited = {"deviance": 2.25, "aic": 4.5}
+
+    payload = metric_comparison_payload(
+        "deviance",
+        dataset,
+        original,
+        edited,
+        model_revision=7,
+        request_sequence=11,
+    )
+
+    assert payload == {
+        "available": True,
+        "model_revision": 7,
+        "request_sequence": 11,
+        "metric": "deviance",
+        "label": "Deviance",
+        "dataset": "validation",
+        "dataset_label": "Validation",
+        "n_obs": 20,
+        "original": 3.0,
+        "edited": 2.25,
+        "delta": -0.75,
+        "metrics": {"original": original, "edited": edited},
+    }
+
+
 def test_editor_session_accepts_plain_evaluation_tuples_and_cv_report(editor_model, editor_frame):
     from superglm.editor.metrics import metrics_payload
     from superglm.editor.reports import validation_report_payload

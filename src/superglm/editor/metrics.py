@@ -20,24 +20,64 @@ METRIC_LABELS = {
 }
 
 
+def metric_comparison_payload(
+    metric: str,
+    dataset: EvaluationDataset,
+    original_metrics: dict[str, float],
+    edited_metrics: dict[str, float],
+    *,
+    model_revision: int,
+    request_sequence: int | None = None,
+) -> dict[str, Any]:
+    """Assemble one comparison payload from already-computed scalar dictionaries."""
+    selected_metric = metric if metric in METRIC_LABELS else "deviance"
+    original = original_metrics[selected_metric]
+    edited = edited_metrics[selected_metric]
+    return {
+        "available": True,
+        "model_revision": int(model_revision),
+        "request_sequence": request_sequence,
+        "metric": selected_metric,
+        "label": METRIC_LABELS[selected_metric],
+        "dataset": dataset.name,
+        "dataset_label": dataset.label,
+        "n_obs": dataset.n_obs,
+        "original": original,
+        "edited": edited,
+        "delta": edited - original,
+        "metrics": {"original": original_metrics, "edited": edited_metrics},
+    }
+
+
 def metrics_payload(
     session,
     metric: str,
     *,
     source: str = "in_force",
     dataset: str | None = None,
+    model_revision: int | None = None,
+    request_sequence: int | None = None,
 ) -> dict[str, Any]:
     # Metrics compare the immutable original fit with the in-force editor model
     # on the retained training frame. Manual coefficient-edit metrics are
     # prediction diagnostics; structural refits are fitted-model metrics.
     metric = metric if metric in METRIC_LABELS else "deviance"
+    revision = session.model_revision if model_revision is None else int(model_revision)
     reference_model = getattr(session, "reference_model", session.model)
     if reference_model is None:
-        return {"available": False, "metric": metric, "error": "No source model is attached."}
+        return {
+            "available": False,
+            "model_revision": revision,
+            "request_sequence": request_sequence,
+            "metric": metric,
+            "error": "No source model is attached.",
+        }
     eval_dataset = named_metrics_dataset(session, dataset)
     if eval_dataset is None:
         return {
             "available": False,
+            "model_revision": revision,
+            "request_sequence": request_sequence,
             "metric": metric,
             "error": "No evaluation data is available.",
         }
@@ -45,20 +85,14 @@ def metrics_payload(
     selected_model = reference_model if source == "original" else session.to_model()
     original_metrics = compute_dataset_metrics(reference_model, eval_dataset)
     edited_metrics = compute_dataset_metrics(selected_model, eval_dataset)
-    original = original_metrics[metric]
-    edited = edited_metrics[metric]
-    return {
-        "available": True,
-        "metric": metric,
-        "label": METRIC_LABELS[metric],
-        "dataset": eval_dataset.name,
-        "dataset_label": eval_dataset.label,
-        "n_obs": eval_dataset.n_obs,
-        "original": original,
-        "edited": edited,
-        "delta": edited - original,
-        "metrics": {"original": original_metrics, "edited": edited_metrics},
-    }
+    return metric_comparison_payload(
+        metric,
+        eval_dataset,
+        original_metrics,
+        edited_metrics,
+        model_revision=revision,
+        request_sequence=request_sequence,
+    )
 
 
 def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, float]:

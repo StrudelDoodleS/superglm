@@ -16,12 +16,19 @@ from typing import Any
 
 import numpy as np
 
+from superglm.editor import metrics as metrics_module
+from superglm.editor.evaluation import evaluation_datasets, named_metrics_dataset
+from superglm.editor.evaluation_cache import (
+    EvaluationCache,
+    EvaluationKey,
+    model_metric_signature,
+)
 from superglm.editor.io import jsonable
-from superglm.editor.metrics import metrics_payload
+from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.payloads import history_payload, session_payload
 from superglm.editor.persistence import edited_model_for_export
-from superglm.editor.reports import report_payload
+from superglm.editor.reports import report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer
 from superglm.editor.summaries import offset_label_payload, summary_payload
 
@@ -57,6 +64,7 @@ class EditorWidget:
         self.selected_term = next(iter(self.terms), "")
         self._lock = threading.RLock()
         self._closed = False
+        self._evaluation_cache = EvaluationCache()
         # A local iframe avoids Jupyter widget-extension dependencies while
         # still letting Python own the authoritative edit state.
         self._server = EditorAppServer(self)
@@ -235,7 +243,34 @@ class EditorWidget:
     def _metrics(self, metric: str, source: str | None = None) -> dict[str, Any]:
         with self._lock:
             selected_source = "in_force" if source in (None, "selected") else source
-            return metrics_payload(self.session, metric, source=selected_source)
+            revision = self.session.model_revision
+            reference_model = getattr(self.session, "reference_model", self.session.model)
+            dataset = named_metrics_dataset(self.session, None)
+            if reference_model is None or dataset is None:
+                return metrics_payload(
+                    self.session,
+                    metric,
+                    source=selected_source,
+                    model_revision=revision,
+                )
+            selected_model = (
+                reference_model
+                if selected_source == "original"
+                else self.session.materialized_model()
+            )
+            original_metrics = self._cached_dataset_metrics(
+                "original", reference_model, dataset, revision
+            )
+            edited_metrics = self._cached_dataset_metrics(
+                "current", selected_model, dataset, revision
+            )
+            return metric_comparison_payload(
+                metric,
+                dataset,
+                original_metrics,
+                edited_metrics,
+                model_revision=revision,
+            )
 
     def _summary(self, source: str) -> dict[str, Any]:
         with self._lock:
@@ -245,7 +280,48 @@ class EditorWidget:
 
     def _report(self, report: str = "validation") -> dict[str, Any]:
         with self._lock:
-            return report_payload(self, report)
+            revision = self.session.model_revision
+            datasets = evaluation_datasets(self.session)
+            reference_model = getattr(self.session, "reference_model", self.session.model)
+            if reference_model is None:
+                return report_payload(self, report, model_revision=revision)
+            edited_model = self.session.materialized_model()
+            metric_pairs = {
+                dataset.name: (
+                    self._cached_dataset_metrics("original", reference_model, dataset, revision),
+                    self._cached_dataset_metrics("current", edited_model, dataset, revision),
+                )
+                for dataset in datasets
+            }
+            splits = split_metrics_payload(datasets, metric_pairs)
+            return report_payload(
+                self,
+                report,
+                splits=splits,
+                model_revision=revision,
+            )
+
+    def _cached_dataset_metrics(
+        self,
+        role: str,
+        model,
+        dataset,
+        revision: int,
+    ) -> dict[str, float]:
+        self._evaluation_cache.advance_current_revision(revision)
+        key = EvaluationKey(
+            role=role,
+            model_revision=0 if role == "original" else revision,
+            dataset_epoch=0,
+            split=dataset.name,
+            metric_signature=model_metric_signature(model),
+        )
+        cached = self._evaluation_cache.get(key)
+        if cached is not None:
+            return cached
+        values = metrics_module.compute_dataset_metrics(model, dataset)
+        self._evaluation_cache.put(key, values)
+        return values
 
     def _save_model(
         self,
