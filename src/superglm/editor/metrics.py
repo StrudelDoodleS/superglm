@@ -62,10 +62,51 @@ def metrics_payload(
 
 
 def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, float]:
+    fit_artifacts = _fit_artifact_metrics(model, dataset)
+    if fit_artifacts is not None:
+        return fit_artifacts
     weights = dataset.sample_weight
     if weights is None:
         weights = np.ones(dataset.n_obs, dtype=np.float64)
     return _compute_metrics(model, dataset.X, dataset.y, weights, dataset.offset)
+
+
+def _same_fit_dataset(model, dataset: EvaluationDataset) -> bool:
+    fit_weight_ref = getattr(model, "_fit_sample_weight_ref", None)
+    fit_weights = getattr(model, "_fit_weights", None)
+    fit_offset_ref = getattr(model, "_fit_offset_ref", None)
+    fit_offset = getattr(model, "_fit_offset", None)
+    weights_match = dataset.sample_weight is fit_weight_ref or dataset.sample_weight is fit_weights
+    offset_matches = dataset.offset is fit_offset_ref or dataset.offset is fit_offset
+    return (
+        dataset.X is getattr(model, "_fit_X_ref", None)
+        and dataset.y is getattr(model, "_fit_y_ref", None)
+        and weights_match
+        and offset_matches
+    )
+
+
+def _fit_artifact_metrics(model, dataset: EvaluationDataset) -> dict[str, float] | None:
+    fit_stats = getattr(model, "_fit_stats", None)
+    if fit_stats is None or not _same_fit_dataset(model, dataset):
+        return None
+
+    edf = float(model.result.effective_df)
+    n = dataset.n_obs
+    log_likelihood = float(fit_stats.log_likelihood)
+    aic = float(-2.0 * log_likelihood + 2.0 * edf)
+    bic = float(-2.0 * log_likelihood + np.log(max(n, 1)) * edf)
+    denom = n - edf - 1.0
+    return {
+        "deviance": float(model.result.deviance),
+        "aic": aic,
+        "aicc": float(aic + 2.0 * edf * (edf + 1.0) / denom) if denom > 0 else float("inf"),
+        "bic": bic,
+        "log_likelihood": log_likelihood,
+        "explained_deviance": float(fit_stats.explained_deviance),
+        "pearson_chi2": float(fit_stats.pearson_chi2),
+        "effective_df": edf,
+    }
 
 
 def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
