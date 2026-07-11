@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from superglm.types import GroupSlice
 
 
-_EDITOR_SHARED_FIT_INPUTS = (
+_EDITOR_SHARED_ROW_INPUTS = (
     "_dm",
     "_fit_X_ref",
     "_fit_y_ref",
@@ -28,6 +28,9 @@ _EDITOR_SHARED_FIT_INPUTS = (
     "_fit_offset_ref",
     "_fit_weights",
     "_fit_offset",
+)
+
+_EDITOR_EDIT_ONLY_MEMO_STATE = (
     "_fit_mu",
     "_fit_null_mu",
     "_fit_metrics_cache",
@@ -38,11 +41,12 @@ _EDITOR_SHARED_FIT_INPUTS = (
 )
 
 
-def _copy_model_for_editor_edits(model):
+def _copy_model_for_editor_edits(model, *, share_transient_state: bool = False):
     """Copy a fitted model without duplicating its row-scale fit inputs."""
-    shared = {
-        name: getattr(model, name) for name in _EDITOR_SHARED_FIT_INPUTS if hasattr(model, name)
-    }
+    shared_names = _EDITOR_SHARED_ROW_INPUTS
+    if share_transient_state:
+        shared_names += _EDITOR_EDIT_ONLY_MEMO_STATE
+    shared = {name: getattr(model, name) for name in shared_names if hasattr(model, name)}
     memo = {id(value): value for value in shared.values()}
     edited_model = copy.deepcopy(model, memo)
     for name, value in shared.items():
@@ -65,13 +69,23 @@ def apply_edits_to_model_copy_with_data(
     offset=None,
 ):
     """Return a deep-copied model and refresh scalar fit stats if data is available."""
-    edited_model = _copy_model_for_editor_edits(model)
-    edited_terms: list[str] = []
-    for term in terms.values():
-        if np.allclose(term.edited_log_effect, term.original_log_effect, rtol=0.0, atol=1e-14):
-            continue
+    changed_terms = [
+        term
+        for term in terms.values()
+        if not np.allclose(
+            term.edited_log_effect,
+            term.original_log_effect,
+            rtol=0.0,
+            atol=1e-14,
+        )
+    ]
+    edited_model = _copy_model_for_editor_edits(
+        model,
+        share_transient_state=bool(changed_terms),
+    )
+    for term in changed_terms:
         _apply_term_edit(edited_model, term)
-        edited_terms.append(term.name)
+    edited_terms = [term.name for term in changed_terms]
     has_scoring_data = (
         X is not None or y is not None or sample_weight is not None or offset is not None
     )
@@ -287,6 +301,8 @@ def _invalidate_model_caches(model, *, keep_inference: bool = False) -> None:
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
     model._fit_mu = None
+    model._fit_null_mu = None
+    model._fit_stats = None
 
 
 def _refresh_fit_statistics(

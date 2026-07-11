@@ -789,6 +789,68 @@ def test_to_model_stays_fresh_and_does_not_return_the_materialized_copy(editor_m
     np.testing.assert_allclose(second.result.beta, materialized.result.beta)
 
 
+def test_to_model_without_edits_keeps_transient_state_private(editor_model):
+    editor_model.summary()
+    editor_model.metrics(
+        editor_model._fit_X_ref,
+        editor_model._fit_y_ref,
+        sample_weight=editor_model._fit_sample_weight_ref,
+        offset=editor_model._fit_offset_ref,
+    )
+    source_objects = {
+        name: getattr(editor_model, name)
+        for name in (
+            "_runtime_canonical_state",
+            "_fast_prediction_state",
+            "_prediction_plan",
+            "_fit_mu",
+            "_fit_null_mu",
+            "_fit_stats",
+            "_fit_metrics_cache",
+            "_summary_cache",
+        )
+    }
+    source_mu = editor_model._fit_mu.copy()
+    source_null_mu = editor_model._fit_null_mu.copy()
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+
+    copied = session.to_model()
+
+    for name in (
+        "_dm",
+        "_fit_X_ref",
+        "_fit_y_ref",
+        "_fit_sample_weight_ref",
+        "_fit_offset_ref",
+        "_fit_weights",
+        "_fit_offset",
+    ):
+        assert getattr(copied, name) is getattr(editor_model, name)
+    for name, source_value in source_objects.items():
+        assert getattr(copied, name) is not source_value
+    assert not np.shares_memory(copied._fit_mu, editor_model._fit_mu)
+    assert not np.shares_memory(copied._fit_null_mu, editor_model._fit_null_mu)
+
+    copied._runtime_canonical_state["copy_only"] = True
+    copied._fast_prediction_state["copy_only"] = True
+    copied._prediction_plan["copy_only"] = []
+    copied._fit_mu[0] += 1.0
+    copied._fit_null_mu[0] += 1.0
+    copied._fit_metrics_cache.__dict__["copy_only"] = True
+    copied._summary_cache["copy_only"] = True
+    for name in source_objects:
+        setattr(copied, name, None)
+
+    assert all(getattr(editor_model, name) is value for name, value in source_objects.items())
+    assert "copy_only" not in editor_model._runtime_canonical_state
+    assert "copy_only" not in editor_model._fast_prediction_state
+    assert "copy_only" not in editor_model._prediction_plan
+    assert "copy_only" not in editor_model._fit_metrics_cache.__dict__
+    assert "copy_only" not in editor_model._summary_cache
+    np.testing.assert_array_equal(editor_model._fit_mu, source_mu)
+    np.testing.assert_array_equal(editor_model._fit_null_mu, source_null_mu)
+
+
 def test_materialized_model_shares_only_row_scale_fit_inputs():
     rng = np.random.default_rng(20260804)
     n = 120
