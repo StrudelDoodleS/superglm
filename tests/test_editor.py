@@ -4194,6 +4194,11 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         module_sources = []
         for asset in [
             "api.js",
+            "api/client.js",
+            "api/contracts.js",
+            "state/store.js",
+            "state/selectors.js",
+            "state/actions.js",
             "format.js",
             "chart.js",
             "metrics.js",
@@ -4240,7 +4245,7 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "selection-icon" in shell
         assert 'id="uncollapseLevels" class="selection-item"' in shell
         assert ">Undo collapse</button>" not in shell
-        assert "state.last_collapse.term === selectedTerm()" in js
+        assert "snapshot.last_collapse.term === selectedTerm()" in js
         assert 'aria-label="Smooth"' in shell
         assert 'aria-label="Level selected values"' in shell
         assert 'aria-label="Snap selected values"' in shell
@@ -4277,7 +4282,7 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "refitOffset" in shell
         assert "Fixed-offset refit" in shell
         assert "resetSummarySourceAfterInvalidatingEdit" in js
-        assert "invalidatesRefitSummary" in js
+        assert "scheduleEvidence" in js
         assert "better" not in shell
         assert "worse" not in shell
         state = _get_json(f"{widget.url}/state")
@@ -4321,9 +4326,10 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "Contrib" in shell
         assert "Build" in shell
         assert "showContrib" in js
-        assert "graphMode" in js
+        assert "function visualMode()" in js
+        assert 'view.mode === "zoom" && view.showContrib ? "handles" : view.mode' in js
         assert "visualMode" in js
-        assert 'modeSelect.value !== "zoom"' in js
+        assert "modeSelect.value = view.mode" in js
         assert "requestAnimationFrame" in js
         assert "buildDurationMs" in js
         assert "advanceContributionBuild" in js
@@ -4355,8 +4361,9 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "isEditableTarget" in js
         assert "metaKey" in js
         assert "errorBars" in js
-        assert "refreshMetrics" in js
-        assert "refreshReport" in js
+        assert "renderMetricGrid" in js
+        assert "renderReport" in js
+        assert "actions.refreshEvidence" in js
         assert "/report" in js
         assert "cv-report" in js
         assert "CV Summary" in js
@@ -4458,7 +4465,7 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "selectionTouchesCollapsedGroup" in js
         assert "updateResetOrderAction" in js
         assert 'type === "categorical" && term.level_order_changed' in js
-        assert "reset_order" in js
+        assert "button[data-op]" in js
         assert "orderDrag" in js
         assert "beginOrderDrag" in js
         assert '(term.term_type || term.kind || "") !== "categorical"' in js
@@ -4470,7 +4477,7 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
         assert "Math.min(levels.length," in js
         assert "pixelStep * count * 0.82" not in js
         assert "/reorder_levels" in js
-        assert "isDisplayOnlyOperation" in js
+        assert "executeStateMutation" in js
         assert "exposureDensity" in js
         assert "level_groups" in js
         assert "drawLevelGroups" in js
@@ -4540,7 +4547,7 @@ def test_editor_frontend_includes_grouped_display_control_and_view_mapping():
     assert 'id="groupDisplayMode"' in html
     assert 'id="groupDisplayWrap" class="toolbar-field group-display-toggle"' in html
     assert 'id="groupDisplayWrap" class="toolbar-field group-display-toggle" hidden' not in html
-    assert "groupDisplayModeByTerm" in main_js
+    assert "groupModeByTerm" in main_js
     assert "groupDisplayMode.disabled = !available" in main_js
     assert "groupDisplayWrap.hidden = !available" not in main_js
     assert "resolveDisplayTerm" in chart_js
@@ -4585,7 +4592,7 @@ def test_editor_group_display_change_resets_zoom_and_blocks_collapsed_reorder():
     main_js = (root / "main.js").read_text()
     interactions_js = (root / "interactions.js").read_text()
 
-    assert "delete zoomState[selectedTerm()]" in main_js
+    assert "delete zoomByTerm[term]" in main_js
     assert "scale.displayIsCollapsed" in interactions_js
     assert "if (scale.displayIsCollapsed) return false" in interactions_js
 
@@ -4705,6 +4712,11 @@ def test_widget_serves_editor_app_assets(editor_model):
 
         for asset in [
             "api.js",
+            "api/client.js",
+            "api/contracts.js",
+            "state/store.js",
+            "state/selectors.js",
+            "state/actions.js",
             "format.js",
             "chart.js",
             "metrics.js",
@@ -4718,6 +4730,10 @@ def test_widget_serves_editor_app_assets(editor_model):
                 assert response.read()
 
         assert 'from "./chart.js"' in js
+        assert 'from "./api/client.js"' in js
+        assert 'from "./state/actions.js"' in js
+        assert 'from "./state/selectors.js"' in js
+        assert 'from "./state/store.js"' in js
         assert 'from "./metrics.js"' in js
         assert 'from "./summary.js"' in js
         assert 'from "./interactions.js"' in js

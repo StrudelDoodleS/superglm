@@ -1,9 +1,17 @@
-import { requestBlob, requestJSON, postJSON } from "./api.js";
+import { editorClient } from "./api/client.js";
 import { drawChart, groupedTerms } from "./chart.js";
 import { fmt, fmtPercent } from "./format.js";
 import { renderHistory } from "./history.js";
-import { refreshMetrics } from "./metrics.js";
-import { refreshReport } from "./reports.js";
+import { renderMetricGrid } from "./metrics.js";
+import { renderReport } from "./reports.js";
+import { createEditorActions } from "./state/actions.js";
+import {
+  selectActiveTermName,
+  selectCurrentSelection,
+  selectGroupDisplayMode,
+  selectRenderableTerm
+} from "./state/selectors.js";
+import { createEditorStore, createInitialEditorState } from "./state/store.js";
 import {
   refreshSummary,
   runDistributionProfile,
@@ -86,72 +94,81 @@ const historyPane = document.getElementById("historyPane");
 const historyFrame = document.getElementById("historyFrame");
 const statusNode = document.getElementById("status");
 
-let state = null;
-let showCi = false;
-let showContrib = false;
-let graphMode = "select";
 let buildProgress = null;
 let buildFrame = null;
 let renderedTerm = "";
-let activeView = "editor";
 let appBusyTimer = null;
 let appBusyStarted = 0;
-const zoomState = {};
-const groupDisplayModeByTerm = {};
-const REFIT_INVALIDATING_ROUTES = new Set(["/op", "/drag", "/control"]);
+
+const store = createEditorStore(createInitialEditorState());
+const actions = createEditorActions({
+  store,
+  client: editorClient,
+  scheduleEvidence: () => {
+    resetSummarySourceAfterInvalidatingEdit();
+    void refreshMetricsView();
+    void refreshSummaryView();
+    void refreshActiveReport();
+  }
+});
 
 const chartContext = {
   svg,
   selectionMenu,
   modeSelect,
-  zoomState,
+  get zoomState() {
+    return store.getState().view.zoomByTerm;
+  },
   selectedTerm,
-  visualMode: () => graphMode,
-  showCi: () => showCi,
-  showContrib: () => showContrib,
+  visualMode,
+  showCi: () => store.getState().view.showCi,
+  showContrib: () => store.getState().view.showContrib,
   buildProgress: () => buildProgress,
   groupDisplayMode: () => activeGroupDisplayMode()
 };
 
 async function loadState() {
-  state = await requestJSON("/state");
-  render();
+  await actions.initialize();
 }
 
-async function postJSONWithRefresh(path, payload, options = {}) {
-  state = await postJSON(path, payload);
-  render();
-  resetSummarySourceAfterInvalidatingEdit(path, options);
-  if (options.refreshMetrics) await refreshMetricsView();
-  if (options.refreshSummary) await refreshSummaryView();
-  await refreshActiveReport();
+async function executeStateMutation(path, payload) {
+  return actions.executeStateMutation({
+    name: mutationName(path, payload),
+    path,
+    payload
+  });
 }
 
-function resetSummarySourceAfterInvalidatingEdit(path, options) {
-  const invalidatesRefitSummary = options.invalidatesRefitSummary ??
-    (options.refreshSummary && REFIT_INVALIDATING_ROUTES.has(path));
-  if (invalidatesRefitSummary && summarySource.value === "refit") {
+function mutationName(path, payload) {
+  if (path === "/op" && typeof payload.operation === "string") return payload.operation;
+  return path.replace(/^\//, "") || "editor mutation";
+}
+
+function resetSummarySourceAfterInvalidatingEdit() {
+  if (summarySource.value === "refit") {
     summarySource.value = "selected";
   }
 }
 
 function selectedTerm() {
-  if (!state) return "";
-  return state.selected_term || Object.keys(state.terms)[0] || "";
+  return selectActiveTermName(store.getState());
 }
 
 function currentTerm() {
-  return state ? state.terms[selectedTerm()] : null;
+  return selectRenderableTerm(store.getState());
 }
 
 function currentSelection() {
-  return state ? new Set(state.selection[selectedTerm()] || []) : new Set();
+  return new Set(selectCurrentSelection(store.getState()));
 }
 
 function activeGroupDisplayMode() {
-  const term = currentTerm();
-  if (!term || !term.group_display || !term.group_display.available) return "expanded";
-  return groupDisplayModeByTerm[selectedTerm()] || term.group_display.default_mode || "expanded";
+  return selectGroupDisplayMode(store.getState());
+}
+
+function visualMode() {
+  const view = store.getState().view;
+  return view.mode === "zoom" && view.showContrib ? "handles" : view.mode;
 }
 
 function summaryNodes() {
@@ -209,10 +226,11 @@ async function runProfileFromDialog() {
   const parameter = profileDialog.dataset.parameter || "tweedie_p";
   stopContributionBuild();
   summarySource.value = "selected";
-  await runDistributionProfile(summaryNodes(), parameter, refreshMetricsView);
-  state = await requestJSON("/state");
-  render();
-  await refreshActiveReport();
+  const payload = await runDistributionProfile(summaryNodes(), parameter, refreshMetricsView);
+  if (payload) {
+    await actions.initialize();
+    await refreshActiveReport();
+  }
 }
 
 async function saveEditedModel() {
@@ -220,7 +238,7 @@ async function saveEditedModel() {
   saveConfirm.disabled = true;
   if (saveStatus) saveStatus.textContent = "Saving...";
   try {
-    const payload = await requestJSON("/save_model", {
+    const payload = await editorClient.requestJSON("/save_model", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -242,7 +260,7 @@ async function downloadEditedModel() {
   if (saveStatus) saveStatus.textContent = "Preparing download...";
   const requestedName = saveFilename ? saveFilename.value : "superglm_edited_model.joblib";
   try {
-    const response = await requestBlob(
+    const response = await editorClient.requestBlob(
       `/download_model?filename=${encodeURIComponent(requestedName || "superglm_edited_model.joblib")}`
     );
     const blob = await response.blob();
@@ -313,7 +331,7 @@ async function openSaveDialog() {
 async function initializeSaveDirectory() {
   if (!saveDirectory || saveDirectory.value) return;
   try {
-    const payload = await requestJSON("/save_directory", {
+    const payload = await editorClient.requestJSON("/save_directory", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: saveDirectory ? saveDirectory.value : "" })
@@ -329,7 +347,7 @@ async function openDirectoryInFileManager() {
   saveOpenDirectory.disabled = true;
   if (saveStatus) saveStatus.textContent = "Opening folder...";
   try {
-    const payload = await requestJSON("/open_directory", {
+    const payload = await editorClient.requestJSON("/open_directory", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: saveDirectory ? saveDirectory.value : "." })
@@ -351,7 +369,10 @@ function formatSaveRouteError(error) {
 }
 
 async function refreshMetricsView() {
-  await refreshMetrics({ metricGrid, metricSelect });
+  await actions.refreshEvidence("metrics", "/metrics", {
+    metric: "deviance",
+    source: "in_force"
+  });
 }
 
 async function refreshSummaryView() {
@@ -359,8 +380,9 @@ async function refreshSummaryView() {
 }
 
 async function refreshActiveReport() {
+  const activeView = store.getState().view.activeView;
   if (activeView === "editor") return;
-  await refreshReport({ report: activeView, reportTitle, reportStatus, reportFrame });
+  await actions.refreshEvidence("report", "/report", { report: activeView });
 }
 
 async function runStructuralRefit(label, action) {
@@ -371,8 +393,7 @@ async function runStructuralRefit(label, action) {
     const payload = await action();
     const requestEnd = performance.now();
     if (!payload) return null;
-    state = await requestJSON("/state");
-    render();
+    await actions.initialize();
     await refreshMetricsView();
     await refreshActiveReport();
     const completed = performance.now();
@@ -452,7 +473,12 @@ function formatMilliseconds(value) {
 }
 
 async function showView(view) {
-  activeView = view === "final" ? "final" : view === "validation" ? "validation" : "editor";
+  const activeView = view === "final" ? "final" : view === "validation" ? "validation" : "editor";
+  actions.patchView({ activeView });
+  await refreshActiveReport();
+}
+
+function renderAppView(activeView) {
   editorView.hidden = activeView !== "editor";
   reportPanel.hidden = activeView === "editor";
   for (const tab of appTabs) {
@@ -460,13 +486,21 @@ async function showView(view) {
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", active ? "true" : "false");
   }
-  await refreshActiveReport();
 }
 
 function render() {
-  if (!state) return;
-  renderHistory(state.history, historyFrame);
-  const terms = state.terms || {};
+  const editorState = store.getState();
+  const snapshot = editorState.remote.snapshot;
+  if (!snapshot) return;
+  const view = editorState.view;
+  renderAppView(view.activeView);
+  showSidepanelPane(view.inspectorPane);
+  renderMetricsEvidence(editorState.request.evidence.metrics);
+  renderReportEvidence(editorState.request.evidence.report, view.activeView);
+  renderHistory(snapshot.history, historyFrame);
+  modeSelect.value = view.mode;
+  ciToggle.style.background = view.showCi ? "#dbeafe" : "#f6f8fa";
+  const terms = snapshot.terms || {};
   const selected = selectedTerm();
   termSelect.innerHTML = "";
   for (const [group, names] of groupedTerms(terms)) {
@@ -485,7 +519,7 @@ function render() {
   if (!term) return;
   if (selected !== renderedTerm) {
     renderedTerm = selected;
-    applyTermDefaults(term);
+    if (applyTermDefaults(term)) return;
   }
   const selection = currentSelection();
   const impact = term.impact || {};
@@ -498,12 +532,47 @@ function render() {
     activeGroupDisplayMode() === "collapsed" && term.group_display && term.group_display.available
       ? " · original line is grouped by exposure-weighted averaging"
       : "";
-  statusNode.textContent = `${selected} · ${term.term_type || term.kind}${edf} · ${selection.size} of ${term.n_points} selected · average edit relativity ${rel}x · selected exposure ${selectedShare}${collapsedOriginalNote}`;
-  updateHandleCount(term);
+  const recovery = editorState.request.recovery;
+  statusNode.style.color = recovery ? "#b42318" : "";
+  statusNode.textContent = recovery
+    ? recovery.message
+    : `${selected} · ${term.term_type || term.kind}${edf} · ${selection.size} of ${term.n_points} selected · average edit relativity ${rel}x · selected exposure ${selectedShare}${collapsedOriginalNote}`;
+  if (updateHandleCount(term)) return;
   updateGroupDisplayControl(term);
   updateCollapseAction(term, selection);
   updateResetOrderAction(term);
   drawChart(term, selection, chartContext);
+}
+
+function renderMetricsEvidence(evidence) {
+  const busy = evidence.status === "updating";
+  metricGrid.setAttribute("aria-busy", busy ? "true" : "false");
+  metricGrid.title = "";
+  renderMetricGrid(evidence.payload, { metricGrid, metricSelect });
+  if (evidence.status !== "error") return;
+  if (evidence.payload === null) {
+    metricGrid.textContent = evidence.error || "Metric unavailable.";
+  } else {
+    metricGrid.title = evidence.error || "Metric unavailable.";
+  }
+}
+
+function renderReportEvidence(evidence, activeView) {
+  const busy = evidence.status === "updating";
+  reportFrame.setAttribute("aria-busy", busy ? "true" : "false");
+  if (activeView === "editor") return;
+  const payloadMatchesView = evidence.payload !== null && evidence.payload.report === activeView;
+  if (payloadMatchesView) {
+    renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame });
+  } else {
+    reportTitle.textContent = activeView === "final" ? "Final Fit Report" : "Validation Report";
+    reportFrame.innerHTML = "";
+  }
+  if (evidence.status === "error") {
+    reportStatus.textContent = evidence.error || "Report unavailable.";
+  } else if (!payloadMatchesView || busy || evidence.status === "idle") {
+    reportStatus.textContent = "Loading report...";
+  }
 }
 
 function showSidepanelPane(view) {
@@ -532,6 +601,7 @@ function updateGroupDisplayControl(term) {
 }
 
 function updateCollapseAction(term, selection) {
+  const snapshot = store.getState().remote.snapshot;
   const type = term.term_type || term.kind || "";
   const isLevelTerm = type === "categorical" || type === "ordered categorical";
   if (collapseLevels) {
@@ -543,9 +613,10 @@ function updateCollapseAction(term, selection) {
   if (uncollapseLevels) {
     uncollapseLevels.hidden = !(
       isLevelTerm &&
-      state.can_uncollapse_levels &&
-      state.last_collapse &&
-      state.last_collapse.term === selectedTerm() &&
+      snapshot &&
+      snapshot.can_uncollapse_levels &&
+      snapshot.last_collapse &&
+      snapshot.last_collapse.term === selectedTerm() &&
       selectionTouchesCollapsedGroup(term, selection)
     );
   }
@@ -568,8 +639,9 @@ function updateResetOrderAction(term) {
 }
 
 function updateHandleCount(term) {
+  const view = store.getState().view;
   const controls = term.controls;
-  const active = graphMode === "handles" && controls && controls.count;
+  const active = visualMode() === "handles" && controls && controls.count;
   handleCountWrap.hidden = !active;
   const canShowContrib = active && Array.isArray(controls.basis) && controls.basis.length > 0;
   basisToggle.hidden = !canShowContrib;
@@ -577,12 +649,15 @@ function updateHandleCount(term) {
   buildDurationWrap.hidden = !canShowContrib;
   contribPlay.disabled = buildFrame !== null;
   updateBuildDurationLabel();
-  basisToggle.style.background = showContrib && canShowContrib ? "#dbeafe" : "#f6f8fa";
+  basisToggle.style.background = view.showContrib && canShowContrib ? "#dbeafe" : "#f6f8fa";
   if (!canShowContrib) {
-    showContrib = false;
     stopContributionBuild();
+    if (view.showContrib) {
+      actions.patchView({ showContrib: false });
+      return true;
+    }
   }
-  if (!active) return;
+  if (!active) return false;
   const min = Math.max(3, Number(controls.min_count || 3));
   const max = Math.max(min, Number(controls.max_count || controls.count || min));
   const value = Math.min(max, Math.max(min, Number(controls.count || min)));
@@ -590,26 +665,33 @@ function updateHandleCount(term) {
   handleCount.max = String(max);
   handleCount.value = String(value);
   handleCountValue.textContent = String(value);
+  return false;
 }
 
 function applyTermDefaults(term) {
   stopContributionBuild();
+  const view = store.getState().view;
+  const patch = {};
   if (
     term.group_display &&
     term.group_display.available &&
-    !groupDisplayModeByTerm[selectedTerm()]
+    !view.groupModeByTerm[selectedTerm()]
   ) {
-    groupDisplayModeByTerm[selectedTerm()] = term.group_display.default_mode || "expanded";
+    patch.groupModeByTerm = {
+      ...view.groupModeByTerm,
+      [selectedTerm()]: term.group_display.default_mode || "expanded"
+    };
   }
   if (canShowContributions(term)) {
-    modeSelect.value = "handles";
-    graphMode = "handles";
-    showContrib = true;
-  } else if (modeSelect.value === "handles" || graphMode === "handles") {
-    modeSelect.value = "select";
-    graphMode = "select";
-    showContrib = false;
+    if (view.mode !== "handles") patch.mode = "handles";
+    if (!view.showContrib) patch.showContrib = true;
+  } else {
+    if (view.mode === "handles") patch.mode = "select";
+    if (view.showContrib) patch.showContrib = false;
   }
+  if (!Object.keys(patch).length) return false;
+  actions.patchView(patch);
+  return true;
 }
 
 function canShowContributions(term) {
@@ -638,9 +720,8 @@ function startContributionBuild() {
   const term = currentTerm();
   if (!canShowContributions(term)) return;
   stopContributionBuild();
-  modeSelect.value = "handles";
-  graphMode = "handles";
-  showContrib = true;
+  buildProgress = 0;
+  actions.patchView({ mode: "handles", showContrib: true });
   runContributionBuild(0);
 }
 
@@ -707,15 +788,17 @@ svg.addEventListener(
 const interactions = bindInteractions({
   svg,
   modeSelect,
-  zoomState,
+  get zoomState() {
+    return store.getState().view.zoomByTerm;
+  },
   selectedTerm,
   currentTerm,
   currentSelection,
-  getState: () => state,
-  hasState: () => state !== null,
+  getState: () => store.getState().remote.snapshot,
+  hasState: () => store.getState().remote.snapshot !== null,
   render,
   drawChart: (term, selection) => drawChart(term, selection, chartContext),
-  postJSON: postJSONWithRefresh
+  postJSON: executeStateMutation
 });
 
 for (const tab of appTabs) {
@@ -725,30 +808,47 @@ for (const tab of appTabs) {
 }
 
 termSelect.addEventListener("change", async () => {
-  await postJSONWithRefresh("/term", { term: termSelect.value });
+  const term = termSelect.value;
+  const result = await executeStateMutation("/term", { term });
+  if (result.ok) {
+    actions.patchView({ activeTerm: term });
+    return;
+  }
+  const snapshot = store.getState().remote.snapshot;
+  const authoritativeTerm = snapshot?.selected_term;
+  if (authoritativeTerm && snapshot.terms[authoritativeTerm]) {
+    actions.patchView({ activeTerm: authoritativeTerm });
+  }
 });
 
 modeSelect.addEventListener("change", () => {
   stopContributionBuild();
-  if (modeSelect.value !== "zoom") graphMode = modeSelect.value;
-  if (graphMode === "handles" && canShowContributions(currentTerm())) {
-    showContrib = true;
-  }
-  render();
+  const mode = modeSelect.value;
+  const view = store.getState().view;
+  actions.patchView({
+    mode,
+    showContrib: mode === "zoom"
+      ? view.showContrib
+      : mode === "handles" && canShowContributions(currentTerm())
+  });
 });
 
 if (groupDisplayMode) {
   groupDisplayMode.addEventListener("change", () => {
-    groupDisplayModeByTerm[selectedTerm()] = groupDisplayMode.value;
-    delete zoomState[selectedTerm()];
-    render();
+    const view = store.getState().view;
+    const term = selectedTerm();
+    const zoomByTerm = { ...view.zoomByTerm };
+    delete zoomByTerm[term];
+    actions.patchView({
+      groupModeByTerm: { ...view.groupModeByTerm, [term]: groupDisplayMode.value },
+      zoomByTerm
+    });
   });
 }
 
 basisToggle.addEventListener("click", () => {
   stopContributionBuild();
-  showContrib = !showContrib;
-  render();
+  actions.patchView({ showContrib: !store.getState().view.showContrib });
 });
 
 contribPlay.addEventListener("click", startContributionBuild);
@@ -761,7 +861,7 @@ handleCount.addEventListener("input", () => {
 });
 
 handleCount.addEventListener("change", async () => {
-  await postJSONWithRefresh("/control_count", {
+  await executeStateMutation("/control_count", {
     term: selectedTerm(),
     count: Number(handleCount.value)
   });
@@ -771,26 +871,12 @@ for (const button of document.querySelectorAll("button[data-op]")) {
   button.addEventListener("click", async () => {
     const operation = button.dataset.op;
     if (operation !== "select_all") stopContributionBuild();
-    const displayOnly = isDisplayOnlyOperation(operation);
-    await postJSONWithRefresh(
-      "/op",
-      { operation },
-      {
-        refreshMetrics: operation !== "select_all" && !displayOnly,
-        refreshSummary: operation !== "select_all" && !displayOnly
-      }
-    );
+    await executeStateMutation("/op", { operation });
   });
 }
 
-function isDisplayOnlyOperation(operation) {
-  return operation === "reorder_levels" || operation === "reset_order";
-}
-
 ciToggle.addEventListener("click", () => {
-  showCi = !showCi;
-  ciToggle.style.background = showCi ? "#dbeafe" : "#f6f8fa";
-  render();
+  actions.patchView({ showCi: !store.getState().view.showCi });
 });
 
 resetZoom.addEventListener("click", interactions.resetZoomView);
@@ -807,15 +893,18 @@ if (saveOpenDirectory) {
   saveOpenDirectory.addEventListener("click", openDirectoryInFileManager);
 }
 if (summaryTab) {
-  summaryTab.addEventListener("click", () => showSidepanelPane("summary"));
+  summaryTab.addEventListener("click", () => actions.patchView({ inspectorPane: "summary" }));
 }
 if (historyTab) {
-  historyTab.addEventListener("click", () => showSidepanelPane("history"));
+  historyTab.addEventListener("click", () => actions.patchView({ inspectorPane: "history" }));
 }
 summarySource.addEventListener("change", refreshSummaryView);
 refitOffset.addEventListener("click", async () => {
-  await runOffsetRefit(summaryNodes(), refreshMetricsView);
-  await refreshActiveReport();
+  const payload = await runOffsetRefit(summaryNodes(), refreshMetricsView);
+  if (payload) {
+    await actions.initialize();
+    await refreshActiveReport();
+  }
 });
 if (reprofileTweedie) {
   reprofileTweedie.addEventListener("click", () => {
@@ -863,6 +952,8 @@ if (uncollapseLevels) {
     );
   });
 }
+
+store.subscribe((state) => state, () => render());
 
 loadState().then(async () => {
   await refreshMetricsView();
