@@ -133,7 +133,7 @@ function sleep(ms) {
 
 export function collapseTransition(term) {
   return {
-    name: "Refitting collapsed levels",
+    name: "collapse levels",
     path: "/collapse_levels",
     payload: { term, method: "auto" }
   };
@@ -141,7 +141,7 @@ export function collapseTransition(term) {
 
 export function ungroupTransition(term) {
   return {
-    name: "Refitting ungrouped levels",
+    name: "ungroup levels",
     path: "/ungroup_levels",
     payload: { term, method: "auto" }
   };
@@ -149,7 +149,7 @@ export function ungroupTransition(term) {
 
 export function uncollapseTransition() {
   return {
-    name: "Restoring previous collapsed-level model",
+    name: "restore collapsed levels",
     path: "/uncollapse_levels",
     payload: {}
   };

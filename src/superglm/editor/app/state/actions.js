@@ -148,7 +148,9 @@ export function createEditorActions({
         remote: currentRemote,
         view: { ...state.view, preview: null }
       };
-      const restored = recovered ? commitRemote(restoredBase, recovered) : restoredBase;
+      const restored = recovered && !isStructural
+        ? commitRemote(restoredBase, recovered)
+        : restoredBase;
       return {
         ...restored,
         request: {

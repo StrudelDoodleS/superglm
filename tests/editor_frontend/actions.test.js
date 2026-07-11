@@ -452,6 +452,35 @@ for (const failurePoint of ["post", "paint", "secondary"]) {
   });
 }
 
+test("structural recovery keeps the captured remote pair when state-only recovery succeeds", async () => {
+  const confirmedEnvelope = transitionEnvelope(2, "old");
+  const confirmedState = commitStructuralTransition(
+    createInitialEditorState(snapshot(1)),
+    confirmedEnvelope
+  );
+  const confirmedRemote = confirmedState.remote;
+  const store = createEditorStore(confirmedState);
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => { throw new Error("response lost"); },
+      getState: async () => snapshot(7)
+    },
+    waitForPaint: async () => {}
+  });
+
+  const result = await actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "age", method: "auto" }
+  });
+
+  assert.equal(result.ok, false);
+  assert.strictEqual(store.getState().remote, confirmedRemote);
+  assert.equal(store.getState().remote.snapshot?.model_revision, 2);
+  assert.strictEqual(store.getState().remote.summary, confirmedEnvelope.summary);
+});
+
 test("failed mutation preserves confirmed state, clears preview, and records retry", async () => {
   const confirmed = snapshot(2);
   const confirmedY = confirmed.terms.age.y;

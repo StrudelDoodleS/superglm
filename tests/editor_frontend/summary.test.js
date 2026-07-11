@@ -10,17 +10,17 @@ const {
 
 test("structural transition descriptors are pure route descriptions", () => {
   assert.deepEqual(collapseTransition("region"), {
-    name: "Refitting collapsed levels",
+    name: "collapse levels",
     path: "/collapse_levels",
     payload: { term: "region", method: "auto" }
   });
   assert.deepEqual(ungroupTransition("region"), {
-    name: "Refitting ungrouped levels",
+    name: "ungroup levels",
     path: "/ungroup_levels",
     payload: { term: "region", method: "auto" }
   });
   assert.deepEqual(uncollapseTransition(), {
-    name: "Restoring previous collapsed-level model",
+    name: "restore collapsed levels",
     path: "/uncollapse_levels",
     payload: {}
   });
