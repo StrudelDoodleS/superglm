@@ -78,7 +78,8 @@
  */
 /**
  * @typedef {MutationDescriptor & {
- *   waitForSecondary?:(revision:number)=>void|Promise<void>
+ *   waitForSecondary?:(revision:number)=>void|Promise<void>,
+ *   onRequestSettled?:()=>void|Promise<void>
  * }} StructuralMutationDescriptor
  */
 /**
@@ -112,7 +113,7 @@
 /**
  * @typedef {Object} RecoveryRequestState
  * @property {string} message
- * @property {MutationDescriptor|StructuralMutationDescriptor|null} retry
+ * @property {MutationDescriptor|null} retry
  */
 /**
  * @typedef {Object} EditorRequestState

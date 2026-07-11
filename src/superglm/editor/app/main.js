@@ -19,6 +19,7 @@ import {
 import {
   collapseTransition,
   refreshSummary,
+  renderStaleSummary,
   renderSummary,
   runDistributionProfile,
   showDistributionProfileDialog,
@@ -537,8 +538,10 @@ async function runStructuralRefit(descriptor) {
   let requestEnd = requestStart;
   const result = await actions.executeStructuralMutation({
     ...descriptor,
-    waitForSecondary: async () => {
+    onRequestSettled: () => {
       requestEnd = performance.now();
+    },
+    waitForSecondary: async () => {
       await refreshMetricsView();
       await refreshActiveReport();
     }
@@ -756,12 +759,14 @@ function renderRecovery(recovery) {
   if (!visibleRecovery) {
     appAlert.hidden = true;
     appAlertMessage.textContent = "";
+    appAlertRetry.hidden = false;
     appAlertRetry.disabled = false;
     appAlertDismiss.disabled = false;
     return;
   }
   appAlertMessage.textContent = visibleRecovery.message;
-  appAlertRetry.disabled = retryInProgress;
+  appAlertRetry.hidden = !visibleRecovery.retry;
+  appAlertRetry.disabled = retryInProgress || !visibleRecovery.retry;
   appAlertDismiss.disabled = retryInProgress;
   appAlert.hidden = false;
 }
@@ -769,7 +774,7 @@ function renderRecovery(recovery) {
 async function retryFailedMutation() {
   if (retryInProgress) return;
   const recovery = store.getState().request.recovery;
-  if (!recovery) return;
+  if (!recovery || !recovery.retry) return;
   retryRecovery = recovery;
   retryInProgress = true;
   renderRecovery(null);
@@ -1149,8 +1154,11 @@ if (uncollapseLevels) {
 store.subscribe((state) => state.remote.snapshot, () => render());
 store.subscribe(
   (state) => state.remote.summary,
-  (summary) => {
-    if (!summary) return;
+  (summary, previousSummary) => {
+    if (!summary) {
+      if (previousSummary) renderStaleSummary(summaryNodes());
+      return;
+    }
     summarySource.value = "selected";
     renderSummary(summary, summaryNodes());
   }

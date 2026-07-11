@@ -4,6 +4,7 @@ import test from "node:test";
 const summaryModulePath = "../../src/superglm/editor/app/summary.js";
 const {
   collapseTransition,
+  renderStaleSummary,
   uncollapseTransition,
   ungroupTransition
 } = await import(summaryModulePath);
@@ -34,4 +35,21 @@ test("transition descriptor payloads are independent caller-owned values", () =>
     term: "region",
     method: "auto"
   });
+});
+
+test("reconciled state replaces stale summary content with an unavailable message", () => {
+  const nodes = {
+    summaryStatus: { textContent: "Old summary" },
+    summaryNote: { textContent: "old note" },
+    summaryFrame: { innerHTML: "<p>stale model summary</p>" }
+  };
+
+  renderStaleSummary(nodes);
+
+  assert.equal(nodes.summaryStatus.textContent, "Summary unavailable");
+  assert.equal(nodes.summaryNote.textContent, "");
+  assert.match(nodes.summaryFrame.innerHTML, /reconciled/i);
+  assert.match(nodes.summaryFrame.innerHTML, /stale/i);
+  assert.match(nodes.summaryFrame.innerHTML, /refresh/i);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, /stale model summary/);
 });

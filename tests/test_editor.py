@@ -4536,6 +4536,9 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     busy_start = main_js.index("function renderMutationBusy")
     busy_end = main_js.index("\nfunction renderInteractionPreview", busy_start)
     busy_source = main_js[busy_start:busy_end]
+    recovery_start = main_js.index("function renderRecovery")
+    recovery_end = main_js.index("\nfunction renderMetricsEvidence", recovery_start)
+    recovery_source = main_js[recovery_start:recovery_end]
     bindings_start = main_js.index("if (collapseLevels) {", refit_end)
     bindings_end = main_js.index("\nloadState().then", bindings_start)
     bindings_source = main_js[bindings_start:bindings_end]
@@ -4546,7 +4549,12 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert 'id="appBusyOverlay"' in html
     assert "setAppBusy" in main_js
     assert "actions.executeStructuralMutation" in refit_source
+    assert "onRequestSettled" in refit_source
     assert "waitForSecondary" in refit_source
+    assert refit_source.index("onRequestSettled") < refit_source.index("waitForSecondary")
+    request_end_assignment = refit_source.index("requestEnd = performance.now()")
+    assert refit_source.index("onRequestSettled") < request_end_assignment
+    assert request_end_assignment < refit_source.index("waitForSecondary")
     assert refit_source.index("await refreshMetricsView()") < refit_source.index(
         "await refreshActiveReport()"
     )
@@ -4557,6 +4565,10 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "result.envelope" in refit_source
     assert 'mutation.status === "running"' in busy_source
     assert "setAppBusy(active" in busy_source
+    assert "appAlertRetry.hidden" in recovery_source
+    assert "!visibleRecovery.retry" in recovery_source
+    assert "!recovery.retry" in recovery_source
+    assert "appAlertDismiss.disabled = retryInProgress" in recovery_source
     assert "client_request_ms" in main_js
     assert "client_recovery_ms" in main_js
     assert "client_total_ms" in main_js
@@ -4573,6 +4585,9 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "runStructuralRefit(uncollapseTransition())" in bindings_source
     assert "(state) => state.remote.snapshot" in bindings_source
     assert "(state) => state.remote.summary" in bindings_source
+    assert "(summary, previousSummary)" in bindings_source
+    assert "if (previousSummary)" in bindings_source
+    assert "renderStaleSummary" in bindings_source
     assert "renderSummary" in bindings_source
     assert "state.request.mutation" in bindings_source
     assert 'path: "/collapse_levels"' in collapse_source

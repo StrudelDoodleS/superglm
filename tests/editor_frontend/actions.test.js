@@ -270,6 +270,7 @@ test("structural mutation commits once before paint and awaits secondary evidenc
     name: "collapse levels",
     path: "/collapse_levels",
     payload: { term: "age", method: "auto" },
+    onRequestSettled: () => { events.push("request-settled"); },
     waitForSecondary: async (revision) => {
       events.push(`secondary:${revision}`);
       secondaryStarted.resolve(undefined);
@@ -279,7 +280,9 @@ test("structural mutation commits once before paint and awaits secondary evidenc
   await secondaryStarted.promise;
 
   assert.equal(store.getState().request.mutation.status, "running");
-  assert.deepEqual(events, ["post", "commit", "paint", "secondary:7"]);
+  assert.deepEqual(events, [
+    "post", "request-settled", "commit", "paint", "secondary:7"
+  ]);
 
   secondary.resolve(undefined);
   const result = await pending;
@@ -288,10 +291,49 @@ test("structural mutation commits once before paint and awaits secondary evidenc
   assert.equal(postCalls, 1);
   assert.strictEqual(store.getState().remote.snapshot, envelope.state);
   assert.strictEqual(store.getState().remote.summary, envelope.summary);
-  assert.deepEqual(events, ["post", "commit", "paint", "secondary:7", "idle"]);
+  assert.deepEqual(events, [
+    "post", "request-settled", "commit", "paint", "secondary:7", "idle"
+  ]);
 });
 
-test("malformed structural response restores the confirmed pair and retry stays structural", async () => {
+for (const hookFailure of ["throw", "reject"]) {
+  test(`request-settled hook may ${hookFailure} without changing structural success`, async () => {
+    const envelope = transitionEnvelope();
+    const store = createEditorStore(createInitialEditorState(snapshot(2)));
+    let hookCalls = 0;
+    const actions = createEditorActions({
+      store,
+      client: {
+        postJSON: async () => envelope,
+        getState: async () => { throw new Error("success must not recover through /state"); }
+      },
+      waitForPaint: async () => {}
+    });
+
+    const onRequestSettled = hookFailure === "throw"
+      ? () => {
+          hookCalls += 1;
+          throw new Error("timing hook failed");
+        }
+      : async () => {
+          hookCalls += 1;
+          throw new Error("timing hook failed");
+        };
+    const result = await actions.executeStructuralMutation({
+      name: "collapse levels",
+      path: "/collapse_levels",
+      payload: { term: "age", method: "auto" },
+      onRequestSettled
+    });
+
+    assert.equal(hookCalls, 1);
+    assert.deepEqual(result, { ok: true, envelope });
+    assert.strictEqual(store.getState().remote.snapshot, envelope.state);
+    assert.equal(store.getState().request.recovery, null);
+  });
+}
+
+test("malformed structural response reconciles once and cannot be retried", async () => {
   const confirmedEnvelope = transitionEnvelope(2, "selected");
   const confirmedState = commitStructuralTransition(
     createInitialEditorState(snapshot(1)),
@@ -300,11 +342,9 @@ test("malformed structural response restores the confirmed pair and retry stays 
   const confirmedRemote = confirmedState.remote;
   const store = createEditorStore(confirmedState);
   const validEnvelope = transitionEnvelope();
-  const responses = [
-    { state: snapshot(7), timing: validEnvelope.timing },
-    validEnvelope
-  ];
   let postCalls = 0;
+  /** @type {string[]} */
+  const events = [];
   /** @type {number[]} */
   const secondaryRevisions = [];
   const actions = createEditorActions({
@@ -312,9 +352,13 @@ test("malformed structural response restores the confirmed pair and retry stays 
     client: {
       postJSON: async () => {
         postCalls += 1;
-        return responses.shift();
+        events.push("post");
+        return { state: snapshot(7), timing: validEnvelope.timing };
       },
-      getState: async () => { throw new Error("offline"); }
+      getState: async () => {
+        events.push("get");
+        throw new Error("offline");
+      }
     },
     waitForPaint: async () => {}
   });
@@ -322,6 +366,7 @@ test("malformed structural response restores the confirmed pair and retry stays 
     name: "collapse levels",
     path: "/collapse_levels",
     payload: { term: "age", method: "auto" },
+    onRequestSettled: () => { events.push("request-settled"); },
     waitForSecondary: (/** @type {number} */ revision) => { secondaryRevisions.push(revision); }
   };
 
@@ -332,12 +377,17 @@ test("malformed structural response restores the confirmed pair and retry stays 
   assert.match(failed.error.message, /malformed/i);
   assert.strictEqual(store.getState().remote, confirmedRemote);
   assert.equal(store.getState().request.mutation.status, "error");
+  assert.equal(store.getState().request.recovery?.retry, null);
+  assert.match(store.getState().request.recovery?.message || "", /outcome.*uncertain/i);
+  assert.match(store.getState().request.recovery?.message || "", /not retried/i);
+  assert.deepEqual(events, ["post", "request-settled", "get"]);
 
   const retried = await actions.retryMutation();
 
-  assert.deepEqual(retried, { ok: true, envelope: validEnvelope });
-  assert.equal(postCalls, 2);
-  assert.deepEqual(secondaryRevisions, [7]);
+  assert.equal(retried.ok, false);
+  assert.equal(retried.skipped, true);
+  assert.equal(postCalls, 1);
+  assert.deepEqual(secondaryRevisions, []);
 });
 
 test("structural response validates the state object before committing", async () => {
@@ -403,8 +453,8 @@ test("structural response rejects malformed snapshot and timing contracts", asyn
   }
 });
 
-for (const failurePoint of ["post", "paint", "secondary"]) {
-  test(`structural ${failurePoint} failure restores the confirmed snapshot and summary`, async () => {
+for (const failurePoint of ["paint", "secondary"]) {
+  test(`structural ${failurePoint} failure keeps authoritative success without recovery`, async () => {
     const confirmedEnvelope = transitionEnvelope(2, "selected");
     const confirmedState = commitStructuralTransition(
       createInitialEditorState(snapshot(1)),
@@ -412,17 +462,19 @@ for (const failurePoint of ["post", "paint", "secondary"]) {
     );
     const confirmedRemote = confirmedState.remote;
     const store = createEditorStore(confirmedState);
+    const envelope = transitionEnvelope();
+    let postCalls = 0;
     let recoveryCalls = 0;
     const actions = createEditorActions({
       store,
       client: {
         postJSON: async () => {
-          if (failurePoint === "post") throw new Error("post failed");
-          return transitionEnvelope();
+          postCalls += 1;
+          return envelope;
         },
         getState: async () => {
           recoveryCalls += 1;
-          throw new Error("offline");
+          return snapshot(99);
         }
       },
       waitForPaint: async () => {
@@ -439,46 +491,174 @@ for (const failurePoint of ["post", "paint", "secondary"]) {
       }
     });
 
-    assert.equal(result.ok, false);
-    if (result.ok) assert.fail(`${failurePoint} failure unexpectedly succeeded`);
-    assert.equal(result.error.message, `${failurePoint} failed`);
-    assert.equal(recoveryCalls, 1);
-    assert.strictEqual(store.getState().remote, confirmedRemote);
+    assert.deepEqual(result, { ok: true, envelope });
+    assert.equal(postCalls, 1);
+    assert.equal(recoveryCalls, 0);
+    assert.strictEqual(store.getState().remote.snapshot, envelope.state);
+    assert.strictEqual(store.getState().remote.summary, envelope.summary);
+    assert.notStrictEqual(store.getState().remote, confirmedRemote);
     assert.deepEqual(store.getState().request.mutation, {
-      status: "error",
-      operation: "collapse levels",
-      error: `${failurePoint} failed`
+      status: "idle", operation: null, error: null
     });
+    assert.equal(store.getState().request.recovery?.retry, null);
+    assert.match(store.getState().request.recovery?.message || "", /change completed/i);
+    assert.match(store.getState().request.recovery?.message || "", /refresh.*incomplete/i);
   });
 }
 
-test("structural recovery keeps the captured remote pair when state-only recovery succeeds", async () => {
-  const confirmedEnvelope = transitionEnvelope(2, "old");
+test("secondary failure preserves a newer authoritative remote pair", async () => {
+  const secondaryStarted = deferred();
+  const secondary = deferred();
+  const store = createEditorStore(createInitialEditorState(snapshot(2)));
+  const envelope = transitionEnvelope();
+  let recoveryCalls = 0;
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => envelope,
+      getState: async () => {
+        recoveryCalls += 1;
+        return snapshot(99);
+      }
+    },
+    waitForPaint: async () => {}
+  });
+
+  const pending = actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term: "age", method: "auto" },
+    waitForSecondary: async () => {
+      secondaryStarted.resolve(undefined);
+      await secondary.promise;
+    }
+  });
+  await secondaryStarted.promise;
+  const newerEnvelope = transitionEnvelope(8, "newer");
+  store.update((state) => commitStructuralTransition(state, newerEnvelope));
+  const newerRemote = store.getState().remote;
+  secondary.reject(new Error("secondary failed"));
+
+  const result = await pending;
+
+  assert.deepEqual(result, { ok: true, envelope });
+  assert.equal(recoveryCalls, 0);
+  assert.strictEqual(store.getState().remote, newerRemote);
+  assert.equal(store.getState().request.recovery?.retry, null);
+});
+
+test("ambiguous structural failure reconciles by current revision and never retries", async () => {
+  const cases = [
+    { name: "older", getState: async () => snapshot(1), revision: 2, retain: true },
+    { name: "equal", getState: async () => snapshot(2), revision: 2, retain: true },
+    { name: "newer", getState: async () => snapshot(3), revision: 3, retain: false },
+    {
+      name: "offline",
+      getState: async () => { throw new Error("offline"); },
+      revision: 2,
+      retain: true
+    },
+    {
+      name: "malformed",
+      getState: async () => ({ model_revision: 9 }),
+      revision: 2,
+      retain: true
+    }
+  ];
+
+  for (const recoveryCase of cases) {
+    const confirmedEnvelope = transitionEnvelope(2, "old");
+    const confirmedState = commitStructuralTransition(
+      createInitialEditorState(snapshot(1)),
+      confirmedEnvelope
+    );
+    const confirmedRemote = confirmedState.remote;
+    const store = createEditorStore(confirmedState);
+    let postCalls = 0;
+    let recoveryCalls = 0;
+    let settledCalls = 0;
+    const actions = createEditorActions({
+      store,
+      client: {
+        postJSON: async () => {
+          postCalls += 1;
+          throw new Error("response lost");
+        },
+        getState: async () => {
+          recoveryCalls += 1;
+          return recoveryCase.getState();
+        }
+      },
+      waitForPaint: async () => {}
+    });
+
+    const result = await actions.executeStructuralMutation({
+      name: "collapse levels",
+      path: "/collapse_levels",
+      payload: { term: "age", method: "auto" },
+      onRequestSettled: () => { settledCalls += 1; }
+    });
+
+    assert.equal(result.ok, false, recoveryCase.name);
+    assert.equal(postCalls, 1, recoveryCase.name);
+    assert.equal(recoveryCalls, 1, recoveryCase.name);
+    assert.equal(settledCalls, 1, recoveryCase.name);
+    assert.equal(store.getState().remote.snapshot?.model_revision, recoveryCase.revision);
+    if (recoveryCase.retain) {
+      assert.strictEqual(store.getState().remote, confirmedRemote, recoveryCase.name);
+    } else {
+      assert.equal(store.getState().remote.summary, null, recoveryCase.name);
+    }
+    assert.equal(store.getState().request.recovery?.retry, null, recoveryCase.name);
+    assert.match(
+      store.getState().request.recovery?.message || "",
+      /outcome.*uncertain.*not retried/i,
+      recoveryCase.name
+    );
+
+    const retry = await actions.retryMutation();
+    assert.equal(retry.ok, false, recoveryCase.name);
+    assert.equal(retry.skipped, true, recoveryCase.name);
+    assert.equal(postCalls, 1, recoveryCase.name);
+    assert.equal(recoveryCalls, 1, recoveryCase.name);
+  }
+});
+
+test("structural reconciliation uses the current revision after recovery starts", async () => {
+  const recovery = deferred();
+  const recoveryStarted = deferred();
   const confirmedState = commitStructuralTransition(
     createInitialEditorState(snapshot(1)),
-    confirmedEnvelope
+    transitionEnvelope(2, "old")
   );
-  const confirmedRemote = confirmedState.remote;
   const store = createEditorStore(confirmedState);
   const actions = createEditorActions({
     store,
     client: {
       postJSON: async () => { throw new Error("response lost"); },
-      getState: async () => snapshot(7)
+      getState: async () => {
+        recoveryStarted.resolve(undefined);
+        return recovery.promise;
+      }
     },
     waitForPaint: async () => {}
   });
 
-  const result = await actions.executeStructuralMutation({
+  const pending = actions.executeStructuralMutation({
     name: "collapse levels",
     path: "/collapse_levels",
     payload: { term: "age", method: "auto" }
   });
+  await recoveryStarted.promise;
+  const newerEnvelope = transitionEnvelope(5, "newer");
+  store.update((state) => commitStructuralTransition(state, newerEnvelope));
+  const newerRemote = store.getState().remote;
+  recovery.resolve(snapshot(3));
 
+  const result = await pending;
   assert.equal(result.ok, false);
-  assert.strictEqual(store.getState().remote, confirmedRemote);
-  assert.equal(store.getState().remote.snapshot?.model_revision, 2);
-  assert.strictEqual(store.getState().remote.summary, confirmedEnvelope.summary);
+  assert.strictEqual(store.getState().remote, newerRemote);
+  assert.equal(store.getState().request.recovery?.retry, null);
 });
 
 test("failed mutation preserves confirmed state, clears preview, and records retry", async () => {
@@ -546,8 +726,12 @@ test("mutation retry descriptors snapshot caller-owned payloads", async () => {
   });
 });
 
-test("failed mutation commits a recovered authoritative snapshot", async () => {
-  const store = createEditorStore(createInitialEditorState(snapshot(2)));
+test("failed mutation commits a newer recovered snapshot and clears unmatched summary", async () => {
+  const initial = commitStructuralTransition(
+    createInitialEditorState(snapshot(1)),
+    transitionEnvelope(2, "old")
+  );
+  const store = createEditorStore(initial);
   const recovered = snapshot(3);
   const actions = createEditorActions({
     store,
@@ -561,7 +745,43 @@ test("failed mutation commits a recovered authoritative snapshot", async () => {
 
   assert.equal(result.ok, false);
   assert.strictEqual(store.getState().remote.snapshot, recovered);
+  assert.equal(store.getState().remote.summary, null);
   assert.equal(store.getState().request.recovery?.message, "response lost");
+});
+
+test("late ordinary recovery cannot rewind or mix a newer authoritative pair", async () => {
+  const recovery = deferred();
+  const recoveryStarted = deferred();
+  const initial = commitStructuralTransition(
+    createInitialEditorState(snapshot(1)),
+    transitionEnvelope(2, "old")
+  );
+  const store = createEditorStore(initial);
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => { throw new Error("response lost"); },
+      getState: async () => {
+        recoveryStarted.resolve(undefined);
+        return recovery.promise;
+      }
+    }
+  });
+
+  const pending = actions.executeStateMutation({ name: "drag", path: "/drag", payload: {} });
+  await recoveryStarted.promise;
+  const newerEnvelope = transitionEnvelope(5, "newer");
+  store.update((state) => commitStructuralTransition(state, newerEnvelope));
+  const newerRemote = store.getState().remote;
+  recovery.resolve(snapshot(3));
+
+  const result = await pending;
+
+  assert.equal(result.ok, false);
+  assert.strictEqual(store.getState().remote, newerRemote);
+  assert.deepEqual(store.getState().request.recovery?.retry, {
+    name: "drag", path: "/drag", payload: {}
+  });
 });
 
 test("failed recovery never rewinds a newer authoritative commit", async () => {

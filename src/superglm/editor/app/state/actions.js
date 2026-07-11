@@ -115,6 +115,20 @@ function structuralEnvelope(value) {
   return /** @type {StructuralTransitionEnvelope} */ (value);
 }
 
+const STRUCTURAL_OUTCOME_UNCERTAIN =
+  "The model change outcome is uncertain. The operation was not retried.";
+const STRUCTURAL_REFRESH_INCOMPLETE =
+  "The model change completed, but browser refresh was incomplete.";
+
+/** @param {()=>void|Promise<void>} onRequestSettled @returns {Promise<void>} */
+async function notifyRequestSettled(onRequestSettled) {
+  try {
+    await onRequestSettled();
+  } catch {
+    // Timing hooks cannot change the mutation outcome.
+  }
+}
+
 /** @param {EditorActionOptions} options */
 export function createEditorActions({
   store,
@@ -123,46 +137,46 @@ export function createEditorActions({
   waitForPaint = nextPaint
 }) {
   /**
-   * Restores the last confirmed remote pair after a failed mutation, while retaining the existing
-   * authoritative-state recovery request and retry behavior.
+   * Reconciles one state-only recovery response against the current remote revision. A recovered
+   * snapshot can advance state only when it is strictly newer, and never carries a summary.
    *
    * @param {unknown} error
-   * @param {MutationDescriptor|StructuralMutationDescriptor} descriptor
-   * @param {EditorState['remote']} confirmed
+   * @param {string} operation
+   * @param {MutationDescriptor|null} retry
    * @returns {Promise<{ok:false, error:Error}>}
    */
-  async function recoverMutation(error, descriptor, confirmed) {
+  async function recoverMutation(error, operation, retry) {
     const normalizedError = normalizeError(error);
     /** @type {EditorSnapshot|null} */
     let recovered = null;
     try {
-      recovered = /** @type {EditorSnapshot} */ (await client.getState());
+      const candidate = await client.getState();
+      if (isEditorSnapshot(candidate)) {
+        recovered = /** @type {EditorSnapshot} */ (candidate);
+      }
     } catch {
-      // The exact last-confirmed remote pair remains authoritative while offline.
+      // The current remote pair remains authoritative while offline.
     }
-    const isStructural = "waitForSecondary" in descriptor;
     store.update((state) => {
-      const currentRemote = isStructural || state.remote === confirmed ? confirmed : state.remote;
-      const restoredBase = {
-        ...state,
-        remote: currentRemote,
-        view: { ...state.view, preview: null }
-      };
-      const restored = recovered && !isStructural
-        ? commitRemote(restoredBase, recovered)
-        : restoredBase;
+      const currentRevision = state.remote.snapshot?.model_revision ?? -1;
+      const restored = recovered && recovered.model_revision > currentRevision
+        ? commitRemote(
+            { ...state, remote: { snapshot: state.remote.snapshot, summary: null } },
+            recovered
+          )
+        : { ...state, view: { ...state.view, preview: null } };
       return {
         ...restored,
         request: {
           ...restored.request,
           mutation: {
             status: "error",
-            operation: descriptor.name,
+            operation,
             error: normalizedError.message
           },
           recovery: {
-            message: normalizedError.message,
-            retry: descriptor
+            message: retry ? normalizedError.message : STRUCTURAL_OUTCOME_UNCERTAIN,
+            retry
           }
         }
       };
@@ -183,8 +197,7 @@ export function createEditorActions({
       return skippedMutation("An editor mutation is already running.");
     }
 
-    const confirmed = store.getState().remote;
-    const previousRevision = confirmed.snapshot?.model_revision ?? -1;
+    const previousRevision = store.getState().remote.snapshot?.model_revision ?? -1;
     const descriptor = { name, path, payload: snapshotPayload(payload) };
     store.update((state) => ({
       ...state,
@@ -202,7 +215,7 @@ export function createEditorActions({
         await client.postJSON(path, descriptor.payload)
       );
     } catch (value) {
-      return recoverMutation(value, descriptor, confirmed);
+      return recoverMutation(value, name, descriptor);
     }
 
     store.update((state) => {
@@ -234,19 +247,14 @@ export function createEditorActions({
     name,
     path,
     payload,
+    onRequestSettled = () => {},
     waitForSecondary = async () => {}
   }) {
     if (store.getState().request.mutation.status === "running") {
       return skippedMutation("An editor mutation is already running.");
     }
 
-    const confirmed = store.getState().remote;
-    const descriptor = {
-      name,
-      path,
-      payload: snapshotPayload(payload),
-      waitForSecondary
-    };
+    const requestPayload = snapshotPayload(payload);
     store.update((state) => ({
       ...state,
       request: {
@@ -258,13 +266,35 @@ export function createEditorActions({
 
     /** @type {StructuralTransitionEnvelope} */
     let envelope;
+    /** @type {unknown} */
+    let response;
     try {
-      envelope = structuralEnvelope(await client.postJSON(path, descriptor.payload));
-      store.update((state) => commitStructuralTransition(state, envelope));
+      response = await client.postJSON(path, requestPayload);
+    } catch (value) {
+      await notifyRequestSettled(onRequestSettled);
+      return recoverMutation(value, name, null);
+    }
+    await notifyRequestSettled(onRequestSettled);
+    try {
+      envelope = structuralEnvelope(response);
+    } catch (value) {
+      return recoverMutation(value, name, null);
+    }
+
+    store.update((state) => commitStructuralTransition(state, envelope));
+    try {
       await waitForPaint();
       await waitForSecondary(envelope.state.model_revision);
-    } catch (value) {
-      return recoverMutation(value, descriptor, confirmed);
+    } catch {
+      store.update((state) => ({
+        ...state,
+        request: {
+          ...state.request,
+          mutation: { status: "idle", operation: null, error: null },
+          recovery: { message: STRUCTURAL_REFRESH_INCOMPLETE, retry: null }
+        }
+      }));
+      return { ok: true, envelope };
     }
     store.update((state) => ({
       ...state,
@@ -392,15 +422,13 @@ export function createEditorActions({
     }
   }
 
-  /** @returns {Promise<ActionResult|StructuralActionResult>} */
+  /** @returns {Promise<ActionResult>} */
   function retryMutation() {
     const retry = store.getState().request.recovery?.retry;
     if (!retry) {
       return Promise.resolve(skippedMutation("No failed editor mutation is available to retry."));
     }
-    return "waitForSecondary" in retry
-      ? executeStructuralMutation(retry)
-      : executeStateMutation(retry);
+    return executeStateMutation(retry);
   }
 
   /** @param {EvidencePanel} panel @returns {Promise<boolean>} */
