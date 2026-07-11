@@ -175,6 +175,229 @@ def test_select_x_and_levels(editor_model):
     assert session.selection("region").tolist() == [1, 2]
 
 
+def test_editor_model_revision_changes_only_for_prediction_mutations(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline", "region"])
+    assert session.model_revision == 0
+    assert session.edit_epoch == 0
+
+    session.select_indices("x_spline", [3, 4])
+    assert session.model_revision == 0
+
+    session.shift("x_spline", 0.1)
+    assert session.model_revision == 1
+    assert session.edit_epoch == 1
+
+    session.undo()
+    assert session.model_revision == 2
+    assert session.edit_epoch == 2
+
+    session.redo()
+    assert session.model_revision == 3
+    assert session.edit_epoch == 3
+
+    session.select_indices("region", [1])
+    session.reorder_levels("region", target_index=0)
+    assert session.model_revision == 3
+
+
+def test_editor_model_revision_noops_reset_and_cache_invalidation(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    term = session.terms["x_spline"]
+    assert session._materialized_edit_model is None
+    assert session._materialized_edit_epoch is None
+
+    with pytest.raises(KeyError):
+        session.shift("missing", 0.1)
+    assert session.model_revision == session.edit_epoch == 0
+
+    session.select_indices("x_spline", [3])
+    session.shift("x_spline", 0.1)
+    session.undo()
+    assert session.model_revision == session.edit_epoch == 2
+    assert len(session.redo_stack) == 1
+
+    cached_model = object()
+    session._materialized_edit_model = cached_model
+    session._materialized_edit_epoch = session.edit_epoch
+    session.set_value("x_spline", float(term.edited_log_effect[3]))
+
+    assert session.model_revision == session.edit_epoch == 2
+    assert session._materialized_edit_model is cached_model
+    assert session._materialized_edit_epoch == 2
+    assert session.history[-1].operation == "set_value"
+    assert session.redo_stack == []
+
+    session.shift("x_spline", 0.1)
+    assert session.model_revision == session.edit_epoch == 3
+    assert session._materialized_edit_model is None
+    assert session._materialized_edit_epoch is None
+
+    session._materialized_edit_model = object()
+    session._materialized_edit_epoch = session.edit_epoch
+    session.reset("x_spline")
+    assert session.model_revision == session.edit_epoch == 4
+    assert session._materialized_edit_model is None
+    assert session._materialized_edit_epoch is None
+    assert term.edited_log_effect[3] == pytest.approx(term.original_log_effect[3])
+
+    cached_model = object()
+    session._materialized_edit_model = cached_model
+    session._materialized_edit_epoch = session.edit_epoch
+    session.reset("x_spline")
+    assert session.model_revision == session.edit_epoch == 4
+    assert session._materialized_edit_model is cached_model
+    assert session._materialized_edit_epoch == 4
+
+
+def test_set_values_collapses_same_value_duplicates_without_revision_change(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    term = session.terms["x_spline"]
+    value = float(term.edited_log_effect[3])
+    cached_model = object()
+    session._materialized_edit_model = cached_model
+    session._materialized_edit_epoch = session.edit_epoch
+
+    session.set_values("x_spline", [3, 3], [value, value])
+
+    assert session.model_revision == session.edit_epoch == 0
+    assert session._materialized_edit_model is cached_model
+    assert session._materialized_edit_epoch == 0
+    np.testing.assert_array_equal(session.history[-1].indices, [3])
+    np.testing.assert_array_equal(session.history[-1].before, [value])
+    np.testing.assert_array_equal(session.history[-1].after, [value])
+
+
+def test_set_values_rejects_conflicting_duplicates_without_mutation(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4])
+    session.shift("x_spline", 0.1)
+    before = session.terms["x_spline"].edited_log_effect.copy()
+    old_history = session.history
+    old_records = list(session.history)
+    old_revision = session.model_revision
+    old_epoch = session.edit_epoch
+    cached_model = object()
+    session._materialized_edit_model = cached_model
+    session._materialized_edit_epoch = session.edit_epoch
+
+    with pytest.raises(ValueError, match="Conflicting values"):
+        session.set_values("x_spline", [3, 3], [0.1, 0.2])
+
+    np.testing.assert_array_equal(session.terms["x_spline"].edited_log_effect, before)
+    assert session.history is old_history
+    assert len(session.history) == len(old_records)
+    assert all(actual is expected for actual, expected in zip(session.history, old_records))
+    assert session.model_revision == old_revision
+    assert session.edit_epoch == old_epoch
+    assert session._materialized_edit_model is cached_model
+    assert session._materialized_edit_epoch == old_epoch
+
+
+def test_replace_in_force_model_advances_revision_once(editor_model):
+    replacement = editor_model._clone_without_features(set())
+    replacement.fit(editor_model._fit_X_ref, editor_model._fit_y_ref)
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+
+    session.replace_in_force_model(replacement)
+
+    assert session.model is replacement
+    assert session.model_revision == 1
+    assert session.edit_epoch == 1
+
+
+def test_replace_in_force_model_failure_restores_complete_session_state(
+    editor_model,
+    monkeypatch,
+):
+    replacement = editor_model._clone_without_features(set())
+    replacement.fit(editor_model._fit_X_ref, editor_model._fit_y_ref)
+    session = EditorSession.from_model(editor_model, terms=["x_spline", "region"])
+    session.select_levels("region", ["B"])
+    session.shift("region", 0.1)
+    session.select_indices("x_spline", [3])
+    session.shift("x_spline", 0.2)
+    session.undo("x_spline")
+    session.reorder_levels("region", target_index=0)
+
+    cached_model = object()
+    session._materialized_edit_model = cached_model
+    session._materialized_edit_epoch = session.edit_epoch
+
+    old_model = session.model
+    old_terms = session.terms
+    old_term_values = {name: term.edited_log_effect.copy() for name, term in session.terms.items()}
+    old_term_levels = {
+        name: None if term.levels is None else list(term.levels)
+        for name, term in session.terms.items()
+    }
+    old_selection = session._selection
+    old_selection_state = {
+        name: (indices, indices.copy()) for name, indices in session._selection.items()
+    }
+    old_history = session.history
+    old_redo = session.redo_stack
+    old_history_state = [
+        (record, record.indices, record.indices.copy()) for record in session.history
+    ]
+    old_redo_state = [
+        (record, record.indices, record.indices.copy()) for record in session.redo_stack
+    ]
+    old_level_orders = session._level_orders
+    old_level_order_state = {
+        name: (labels, list(labels)) for name, labels in session._level_orders.items()
+    }
+    old_revision = session.model_revision
+    old_epoch = session.edit_epoch
+
+    original_reapply = session._reapply_level_orders
+    staged: dict[str, bool] = {}
+
+    def fail_after_staged_reorder():
+        staged["model"] = session.model is replacement
+        staged["terms"] = session.terms is not old_terms
+        staged["selection"] = session._selection is not old_selection
+        staged["history"] = session.history is not old_history
+        staged["redo"] = session.redo_stack is not old_redo
+        staged["level_orders"] = session._level_orders is not old_level_orders
+        original_reapply()
+        raise RuntimeError("staged level reorder failed")
+
+    monkeypatch.setattr(session, "_reapply_level_orders", fail_after_staged_reorder)
+
+    with pytest.raises(RuntimeError, match="staged level reorder failed"):
+        session.replace_in_force_model(replacement)
+
+    assert all(staged.values())
+    assert session.model is old_model
+    assert session.terms is old_terms
+    for name, term in session.terms.items():
+        np.testing.assert_array_equal(term.edited_log_effect, old_term_values[name])
+        assert term.levels == old_term_levels[name]
+    assert session._selection is old_selection
+    for name, (indices, values) in old_selection_state.items():
+        assert session._selection[name] is indices
+        np.testing.assert_array_equal(session._selection[name], values)
+    assert session.history is old_history
+    assert session.redo_stack is old_redo
+    for stack, expected in (
+        (session.history, old_history_state),
+        (session.redo_stack, old_redo_state),
+    ):
+        assert len(stack) == len(expected)
+        for record, (old_record, old_indices, old_values) in zip(stack, expected, strict=True):
+            assert record is old_record
+            assert record.indices is old_indices
+            np.testing.assert_array_equal(record.indices, old_values)
+    assert session._level_orders is old_level_orders
+    for name, (labels, values) in old_level_order_state.items():
+        assert session._level_orders[name] is labels
+        assert session._level_orders[name] == values
+    assert session.model_revision == old_revision
+    assert session.edit_epoch == old_epoch
+    assert session._materialized_edit_model is cached_model
+    assert session._materialized_edit_epoch == old_epoch
+
+
 def test_shift_set_interpolate_isotonic_smooth_and_history(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     term = session.terms["x_spline"]
@@ -2599,6 +2822,20 @@ def test_widget_state_exposes_ci_bands_and_single_point_centering(editor_model):
             spline["original_y"],
             np.exp(session.terms["x_spline"].original_log_effect),
         )
+    finally:
+        widget.close()
+
+
+def test_widget_state_exposes_semantic_model_revision(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        initial = _get_json(f"{widget.url}/state")
+        _post_json(f"{widget.url}/select", {"term": "x_spline", "indices": [5, 6]})
+        selected = _get_json(f"{widget.url}/state")
+        changed = _post_json(f"{widget.url}/op", {"operation": "shift_up"})
+        assert initial["model_revision"] == selected["model_revision"] == 0
+        assert changed["model_revision"] == 1
     finally:
         widget.close()
 

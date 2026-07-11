@@ -91,6 +91,7 @@ class EditorWidget:
         with self._lock:
             self.terms = session_payload(self.session, self.control_counts)
             return {
+                "model_revision": self.session.model_revision,
                 "selected_term": self.selected_term,
                 "terms": self.terms,
                 "selection": {
