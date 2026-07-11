@@ -115,10 +115,28 @@ jobs:
                   raise SystemExit(f"Unexpected entries in {archive}: {bad[:20]}")
 
 
+          def require_editor_assets(names, archive):
+              required = {
+                  "superglm/editor/app/api/client.js",
+                  "superglm/editor/app/api/contracts.js",
+                  "superglm/editor/app/state/store.js",
+                  "superglm/editor/app/state/selectors.js",
+                  "superglm/editor/app/state/actions.js",
+              }
+              missing = {
+                  suffix for suffix in required if not any(name.endswith(suffix) for name in names)
+              }
+              if missing:
+                  raise SystemExit(
+                      f"Missing editor source assets in {archive}: {sorted(missing)}"
+                  )
+
+
           for wheel in Path("dist").glob("*.whl"):
               print(f"Inspecting {wheel}")
               with zipfile.ZipFile(wheel) as zf:
                   names = zf.namelist()
+              require_editor_assets(names, wheel)
               reject_bad_archive_names(names, wheel)
               for name in names[:50]:
                   print(" ", name)
@@ -127,6 +145,7 @@ jobs:
               print(f"Inspecting {sdist}")
               with tarfile.open(sdist) as tf:
                   names = tf.getnames()
+              require_editor_assets(names, sdist)
               reject_bad_archive_names(names, sdist)
               for name in names[:50]:
                   print(" ", name)
