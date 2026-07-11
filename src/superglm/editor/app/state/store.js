@@ -22,7 +22,8 @@ export function createInitialEditorState(snapshot = null) {
       groupModeByTerm: {},
       inspectorPane: "summary",
       inspectorOpen: true,
-      preview: null
+      preview: null,
+      selectionPreview: null
     },
     request: {
       mutation: { status: "idle", operation: null, error: null },
@@ -125,18 +126,68 @@ export function setPreviewTerm(state, term, payload, selection = []) {
   return patchView(state, { preview: { term, payload, selection: selection.slice() } });
 }
 
+/** @param {number[]} indices @returns {number[]} */
+export function normalizeSelectionIndices(indices) {
+  return [...new Set(indices)].sort((left, right) => left - right);
+}
+
+/** @param {number[]} left @param {number[]} right @returns {boolean} */
+export function selectionIndicesEqual(left, right) {
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+/** @param {EditorState} state @param {string} term @param {number[]} indices */
+export function setSelectionPreview(state, term, indices) {
+  const normalized = normalizeSelectionIndices(indices);
+  const current = state.view.selectionPreview;
+  if (
+    current?.term === term &&
+    selectionIndicesEqual(current.indices, normalized)
+  ) {
+    return state;
+  }
+  return patchView(state, { selectionPreview: { term, indices: normalized } });
+}
+
+/** @param {EditorState} state */
+export function clearSelectionPreview(state) {
+  if (state.view.selectionPreview === null) return state;
+  return patchView(state, { selectionPreview: null });
+}
+
 /** @param {EditorState} state @param {EditorSnapshot} snapshot */
 export function commitRemote(state, snapshot) {
   /** @type {EditorState} */
   const candidate = {
     ...state,
     remote: { snapshot, summary: state.remote.summary },
-    view: { ...state.view, preview: null }
+    view: { ...state.view, preview: null, selectionPreview: null }
   };
   return {
     ...candidate,
     view: { ...candidate.view, activeTerm: selectActiveTermName(candidate) }
   };
+}
+
+/** @param {EditorState} state @param {EditorSnapshot} snapshot */
+export function commitSelectionRemote(state, snapshot) {
+  const current = state.remote.snapshot;
+  if (
+    current &&
+    current.model_revision === snapshot.model_revision &&
+    current.selected_term === snapshot.selected_term
+  ) {
+    return {
+      ...state,
+      remote: {
+        ...state.remote,
+        snapshot: { ...current, selection: snapshot.selection }
+      },
+      view: { ...state.view, selectionPreview: null }
+    };
+  }
+  return commitRemote(state, snapshot);
 }
 
 /** @param {EditorState} state @param {StructuralTransitionEnvelope} envelope */

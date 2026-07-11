@@ -8,13 +8,18 @@ import * as storeModule from "../../src/superglm/editor/app/state/store.js";
 
 const {
   beginEvidence,
+  clearSelectionPreview,
   commitRemote,
+  commitSelectionRemote,
   commitStructuralTransition,
   completeEvidence,
   createEditorStore,
   createInitialEditorState,
   failEvidence,
+  normalizeSelectionIndices,
   patchView,
+  selectionIndicesEqual,
+  setSelectionPreview,
   setPreviewTerm
 } = storeModule;
 const {
@@ -163,14 +168,70 @@ test("store keeps confirmed remote data separate from a chart preview", () => {
   });
 });
 
+test("selection preview starts empty and normalizes provisional indices", () => {
+  const initial = createInitialEditorState(snapshot(3));
+
+  assert.equal(initial.view.selectionPreview, null);
+  assert.deepEqual(normalizeSelectionIndices([4, 2, 2]), [2, 4]);
+  assert.equal(selectionIndicesEqual([2, 4], [2, 4]), true);
+  assert.equal(selectionIndicesEqual([2, 4], [4, 2]), false);
+
+  const previewed = setSelectionPreview(initial, "age", [4, 2, 2]);
+  assert.deepEqual(previewed.view.selectionPreview, { term: "age", indices: [2, 4] });
+  assert.deepEqual(selectCurrentSelection(previewed), [2, 4]);
+  assert.deepEqual(selectCurrentSelection(clearSelectionPreview(previewed)), [0]);
+});
+
+test("selection preview overrides only the active term", () => {
+  const confirmed = snapshot(3);
+  confirmed.terms.region = { ...confirmed.terms.age, y: [2] };
+  confirmed.selection.region = [7];
+  let state = setSelectionPreview(createInitialEditorState(confirmed), "region", [5, 3]);
+
+  assert.deepEqual(selectCurrentSelection(state), [0]);
+
+  state = patchView(state, { activeTerm: "region" });
+  assert.deepEqual(selectCurrentSelection(state), [3, 5]);
+});
+
+test("selection commit preserves chart-bearing references for the same revision and term", () => {
+  const confirmed = snapshot(3);
+  const initial = createInitialEditorState(confirmed);
+  const previewed = setSelectionPreview(initial, "age", [4, 2, 2]);
+  const response = snapshot(3);
+  response.selection.age = [2, 4];
+  response.terms.age.y = [99];
+  response.history.active.push({ operation: "unexpected" });
+
+  const committed = commitSelectionRemote(previewed, response);
+
+  assert.equal(committed.view.selectionPreview, null);
+  assert.strictEqual(committed.remote.snapshot?.terms, confirmed.terms);
+  assert.strictEqual(committed.remote.snapshot?.history, confirmed.history);
+  assert.strictEqual(committed.remote.snapshot?.selection, response.selection);
+  assert.deepEqual(selectCurrentSelection(committed), [2, 4]);
+});
+
+test("selection commit falls back to a full commit when revision or selected term changes", () => {
+  for (const response of [snapshot(4), { ...snapshot(3), selected_term: "region" }]) {
+    const initial = setSelectionPreview(createInitialEditorState(snapshot(3)), "age", [2]);
+    const committed = commitSelectionRemote(initial, response);
+
+    assert.strictEqual(committed.remote.snapshot, response);
+    assert.equal(committed.view.selectionPreview, null);
+  }
+});
+
 test("remote commit clears preview and preserves valid view state", () => {
   let state = createInitialEditorState(snapshot());
   state = patchView(state, { mode: "move", showCi: true });
   state = setPreviewTerm(state, "age", { ...snapshot().terms.age, y: [1.4] });
+  state = setSelectionPreview(state, "age", [3]);
   state = commitRemote(state, snapshot(1));
   assert.equal(state.view.mode, "move");
   assert.equal(state.view.showCi, true);
   assert.equal(state.view.preview, null);
+  assert.equal(state.view.selectionPreview, null);
   assert.equal(selectActiveTermName(state), "age");
   assert.deepEqual(selectCurrentSelection(state), [0]);
 });
@@ -449,14 +510,19 @@ test("selectors expose confirmed state defaults and per-term display overrides",
 test("state modules expose only their requested public symbols", () => {
   assert.deepEqual(Object.keys(storeModule).sort(), [
     "beginEvidence",
+    "clearSelectionPreview",
     "commitRemote",
+    "commitSelectionRemote",
     "commitStructuralTransition",
     "completeEvidence",
     "createEditorStore",
     "createInitialEditorState",
     "failEvidence",
+    "normalizeSelectionIndices",
     "patchView",
-    "setPreviewTerm"
+    "selectionIndicesEqual",
+    "setPreviewTerm",
+    "setSelectionPreview"
   ]);
   assert.deepEqual(Object.keys(selectors).sort(), [
     "selectActiveTermName",

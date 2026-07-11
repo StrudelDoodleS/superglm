@@ -3,10 +3,14 @@
 import {
   beginEvidence,
   commitRemote,
+  commitSelectionRemote,
   commitStructuralTransition,
   completeEvidence,
   failEvidence,
-  patchView as patchViewState
+  normalizeSelectionIndices,
+  patchView as patchViewState,
+  selectionIndicesEqual,
+  setSelectionPreview
 } from "./store.js";
 import { selectModelRevision } from "./selectors.js";
 
@@ -180,9 +184,10 @@ export function createEditorActions({
    * @param {unknown} error
    * @param {string} operation
    * @param {MutationDescriptor|null} retry
+   * @param {(state:EditorState, snapshot:EditorSnapshot)=>EditorState} [commitRecovered]
    * @returns {Promise<{ok:false, error:Error}>}
    */
-  async function recoverMutation(error, operation, retry) {
+  async function recoverMutation(error, operation, retry, commitRecovered = commitRemote) {
     const normalizedError = normalizeError(error);
     /** @type {EditorSnapshot|null} */
     let recovered = null;
@@ -198,7 +203,7 @@ export function createEditorActions({
       const currentRevision = state.remote.snapshot?.model_revision ?? -1;
       let restored;
       if (recovered && recovered.model_revision > currentRevision) {
-        restored = commitRemote(
+        restored = commitRecovered(
           {
             ...state,
             remote: {
@@ -211,9 +216,12 @@ export function createEditorActions({
       } else if (
         recovered && retry !== null && recovered.model_revision === currentRevision
       ) {
-        restored = commitRemote(state, recovered);
+        restored = commitRecovered(state, recovered);
       } else {
-        restored = { ...state, view: { ...state.view, preview: null } };
+        restored = {
+          ...state,
+          view: { ...state.view, preview: null, selectionPreview: null }
+        };
       }
       return {
         ...restored,
@@ -286,6 +294,70 @@ export function createEditorActions({
         // Evidence refresh is independent of the already-confirmed mutation.
       }
     }
+    return { ok: true, snapshot };
+  }
+
+  /**
+   * @param {{term:string, indices:number[]}} selection
+   * @returns {Promise<ActionResult>}
+   */
+  async function executeSelectionMutation({ term, indices }) {
+    if (store.getState().request.mutation.status === "running") {
+      return skippedMutation("An editor mutation is already running.");
+    }
+
+    const normalized = normalizeSelectionIndices(indices);
+    const currentSelection = normalizeSelectionIndices(
+      store.getState().remote.snapshot?.selection[term] ?? []
+    );
+    if (selectionIndicesEqual(currentSelection, normalized)) {
+      return skippedMutation("The editor selection is already current.");
+    }
+
+    /** @type {MutationDescriptor} */
+    const descriptor = {
+      name: "select",
+      path: "/select",
+      payload: snapshotPayload({ term, indices: normalized })
+    };
+    store.update((state) => {
+      const previewed = setSelectionPreview(state, term, normalized);
+      return {
+        ...previewed,
+        request: {
+          ...previewed.request,
+          mutation: { status: "running", operation: "select", error: null },
+          recovery: null
+        }
+      };
+    });
+
+    /** @type {EditorSnapshot} */
+    let snapshot;
+    try {
+      snapshot = /** @type {EditorSnapshot} */ (
+        await client.postJSON(descriptor.path, descriptor.payload)
+      );
+    } catch (value) {
+      return recoverMutation(
+        value,
+        descriptor.name,
+        descriptor,
+        commitSelectionRemote
+      );
+    }
+
+    store.update((state) => {
+      const committed = commitSelectionRemote(state, snapshot);
+      return {
+        ...committed,
+        request: {
+          ...committed.request,
+          mutation: { status: "idle", operation: null, error: null },
+          recovery: null
+        }
+      };
+    });
     return { ok: true, snapshot };
   }
 
@@ -452,6 +524,12 @@ export function createEditorActions({
     if (!retry) {
       return Promise.resolve(skippedMutation("No failed editor mutation is available to retry."));
     }
+    if (retry.name === "select") {
+      return executeSelectionMutation({
+        term: /** @type {string} */ (retry.payload.term),
+        indices: /** @type {number[]} */ (retry.payload.indices)
+      });
+    }
     return executeStateMutation(retry);
   }
 
@@ -482,6 +560,7 @@ export function createEditorActions({
 
   return {
     initialize,
+    executeSelectionMutation,
     executeStateMutation,
     executeStructuralMutation,
     refreshEvidence,

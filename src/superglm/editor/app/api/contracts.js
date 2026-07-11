@@ -104,6 +104,7 @@
  * @property {'summary'|'history'|'advanced'|'help'} inspectorPane
  * @property {boolean} inspectorOpen
  * @property {{term:string, payload:TermPayload, selection:number[]}|null} preview
+ * @property {{term:string, indices:number[]}|null} selectionPreview
  */
 /**
  * @typedef {Object} MutationRequestState

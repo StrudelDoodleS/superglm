@@ -13,6 +13,7 @@ import {
   patchView as patchViewState,
   setPreviewTerm
 } from "../../src/superglm/editor/app/state/store.js";
+import { selectCurrentSelection } from "../../src/superglm/editor/app/state/selectors.js";
 
 /** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EditorState} EditorState */
 
@@ -206,6 +207,131 @@ test("same-revision mutation clears preview without scheduling evidence", async 
   assert.deepEqual(scheduled, []);
 });
 
+test("selection mutation normalizes semantic no-ops without posting", async () => {
+  const confirmed = snapshot(2);
+  confirmed.selection.age = [1, 2];
+  const store = createEditorStore(createInitialEditorState(confirmed));
+  let postCalls = 0;
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => {
+        postCalls += 1;
+        return snapshot(2);
+      },
+      getState: async () => confirmed
+    }
+  });
+
+  const result = await actions.executeSelectionMutation({
+    term: "age",
+    indices: [2, 1, 2]
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.skipped, true);
+  assert.equal(postCalls, 0);
+  assert.strictEqual(store.getState().remote.snapshot, confirmed);
+  assert.equal(store.getState().view.selectionPreview, null);
+});
+
+test("selection mutation installs provisional state before posting and commits without evidence", async () => {
+  const confirmed = snapshot(2);
+  const response = snapshot(2);
+  response.selection.age = [1, 2];
+  const pendingResponse = deferred();
+  const store = createEditorStore(createInitialEditorState(confirmed));
+  /** @type {Array<{path:string, payload:Record<string, unknown>}>} */
+  const requests = [];
+  /** @type {number[]} */
+  const scheduled = [];
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: (path, payload) => {
+        requests.push({ path, payload });
+        assert.deepEqual(selectCurrentSelection(store.getState()), [1, 2]);
+        assert.deepEqual(store.getState().request.mutation, {
+          status: "running", operation: "select", error: null
+        });
+        return pendingResponse.promise;
+      },
+      getState: async () => confirmed
+    },
+    scheduleVisibleEvidence: (revision) => { scheduled.push(revision); }
+  });
+
+  const pending = actions.executeSelectionMutation({ term: "age", indices: [2, 1, 2] });
+
+  assert.deepEqual(selectCurrentSelection(store.getState()), [1, 2]);
+  assert.deepEqual(store.getState().view.selectionPreview, {
+    term: "age", indices: [1, 2]
+  });
+  pendingResponse.resolve(response);
+  const result = await pending;
+
+  assert.deepEqual(result, { ok: true, snapshot: response });
+  assert.deepEqual(requests, [{ path: "/select", payload: { term: "age", indices: [1, 2] } }]);
+  assert.equal(store.getState().view.selectionPreview, null);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [1, 2]);
+  assert.deepEqual(store.getState().request.mutation, {
+    status: "idle", operation: null, error: null
+  });
+  assert.deepEqual(scheduled, []);
+});
+
+test("failed selection mutation rolls back through same-revision selection recovery", async () => {
+  const confirmed = snapshot(2);
+  const terms = confirmed.terms;
+  const history = confirmed.history;
+  const store = createEditorStore(createInitialEditorState(confirmed));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => { throw new Error("selection offline"); },
+      getState: async () => snapshot(2)
+    }
+  });
+
+  const result = await actions.executeSelectionMutation({ term: "age", indices: [3, 1] });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.message, "selection offline");
+  assert.equal(store.getState().view.selectionPreview, null);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [0]);
+  assert.strictEqual(store.getState().remote.snapshot?.terms, terms);
+  assert.strictEqual(store.getState().remote.snapshot?.history, history);
+  assert.deepEqual(store.getState().request.recovery?.retry, {
+    name: "select",
+    path: "/select",
+    payload: { term: "age", indices: [1, 3] }
+  });
+});
+
+test("selection recovery falls back to a full commit after a revision change", async () => {
+  const confirmed = snapshot(2);
+  const recovered = snapshot(3);
+  recovered.selection.age = [4];
+  const store = createEditorStore(createInitialEditorState(confirmed));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => { throw new Error("response lost"); },
+      getState: async () => recovered
+    }
+  });
+
+  const result = await actions.executeSelectionMutation({ term: "age", indices: [4] });
+
+  assert.equal(result.ok, false);
+  assert.strictEqual(store.getState().remote.snapshot, recovered);
+  assert.strictEqual(store.getState().remote.snapshot?.terms, recovered.terms);
+  assert.notStrictEqual(store.getState().remote.snapshot?.terms, confirmed.terms);
+  assert.equal(store.getState().view.selectionPreview, null);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [4]);
+  assert.equal(store.getState().remote.summary?.available, false);
+});
+
 test("a running mutation suppresses ordinary and structural duplicate submissions", async () => {
   const pendingResponse = deferred();
   const store = createEditorStore(createInitialEditorState(snapshot(0)));
@@ -223,6 +349,7 @@ test("a running mutation suppresses ordinary and structural duplicate submission
 
   const first = actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
   const second = await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
+  const selection = await actions.executeSelectionMutation({ term: "age", indices: [2] });
   const structural = await actions.executeStructuralMutation({
     name: "collapse levels",
     path: "/collapse_levels",
@@ -232,6 +359,9 @@ test("a running mutation suppresses ordinary and structural duplicate submission
   assert.equal(second.ok, false);
   assert.equal(second.skipped, true);
   assert.ok(second.error instanceof Error);
+  assert.equal(selection.ok, false);
+  assert.equal(selection.skipped, true);
+  assert.ok(selection.error instanceof Error);
   assert.equal(structural.ok, false);
   assert.equal(structural.skipped, true);
   assert.ok(structural.error instanceof Error);
@@ -1264,6 +1394,43 @@ test("mutation retry replays its stored descriptor", async () => {
   ]);
 });
 
+test("selection retry routes through provisional selection semantics", async () => {
+  const confirmed = snapshot(2);
+  const terms = confirmed.terms;
+  const response = snapshot(2);
+  response.selection.age = [1, 3];
+  let calls = 0;
+  /** @type {Array<{path:string, payload:Record<string, unknown>}>} */
+  const requests = [];
+  const store = createEditorStore(createInitialEditorState(confirmed));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async (path, payload) => {
+        calls += 1;
+        requests.push({ path, payload });
+        if (calls === 1) throw new Error("once");
+        assert.deepEqual(store.getState().view.selectionPreview, {
+          term: "age", indices: [1, 3]
+        });
+        return response;
+      },
+      getState: async () => snapshot(2)
+    }
+  });
+
+  await actions.executeSelectionMutation({ term: "age", indices: [3, 1] });
+  const result = await actions.retryMutation();
+
+  assert.equal(result.ok, true);
+  assert.strictEqual(store.getState().remote.snapshot?.terms, terms);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [1, 3]);
+  assert.deepEqual(requests, [
+    { path: "/select", payload: { term: "age", indices: [1, 3] } },
+    { path: "/select", payload: { term: "age", indices: [1, 3] } }
+  ]);
+});
+
 test("dismiss and missing retries are deterministic", async () => {
   const store = createEditorStore(createInitialEditorState(snapshot(1)));
   const actions = createEditorActions({
@@ -1300,6 +1467,7 @@ test("action module exposes only the controller factory, paint helper, and exact
   assert.deepEqual(Object.keys(actionsModule).sort(), ["createEditorActions", "nextPaint"]);
   assert.deepEqual(Object.keys(actions).sort(), [
     "dismissRecovery",
+    "executeSelectionMutation",
     "executeStateMutation",
     "executeStructuralMutation",
     "initialize",
