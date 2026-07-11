@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 import numpy as np
 import pandas as pd
@@ -69,7 +69,7 @@ def chromium_browser():
 
 @pytest.fixture
 def open_editor_page(chromium_browser, editor_browser_model):
-    opened: list[tuple[object, object]] = []
+    opened: list[ExitStack] = []
 
     @contextmanager
     def open_page(
@@ -77,16 +77,25 @@ def open_editor_page(chromium_browser, editor_browser_model):
         viewport: dict[str, int] | None = None,
         selected_term: str = "curve",
     ) -> Iterator[tuple[object, EditorSession]]:
-        session = EditorSession.from_model(
-            editor_browser_model,
-            terms=["curve", "territory", "long_category"],
-        )
-        widget = session.widget()
-        page = chromium_browser.new_page(viewport=viewport or {"width": 1180, "height": 720})
-        opened.append((page, widget))
+        resources = ExitStack()
+        opened.append(resources)
         try:
-            page.goto(f"{widget.app_url}&test=1", wait_until="networkidle")
+            session = EditorSession.from_model(
+                editor_browser_model,
+                terms=["curve", "territory", "long_category"],
+            )
+            widget = session.widget()
+            resources.callback(widget.close)
+            page = chromium_browser.new_page(viewport=viewport or {"width": 1180, "height": 720})
+            resources.callback(page.close)
+            page.goto(f"{widget.app_url}&test=1", wait_until="domcontentloaded")
             page.locator("#chart path.edited").first.wait_for()
+            page.wait_for_function(
+                """term => document.querySelector('#status')?.textContent?.startsWith(
+                    `${term} ·`
+                )""",
+                arg="curve",
+            )
             if selected_term != "curve":
                 with page.expect_response(
                     lambda response: (
@@ -104,12 +113,14 @@ def open_editor_page(chromium_browser, editor_browser_model):
                 page.locator("#chart path.edited").first.wait_for()
             yield page, session
         finally:
-            page.close()
-            widget.close()
-            opened.remove((page, widget))
+            if resources in opened:
+                opened.remove(resources)
+            resources.close()
 
-    yield open_page
-
-    for page, widget in reversed(opened):
-        page.close()
-        widget.close()
+    try:
+        yield open_page
+    finally:
+        with ExitStack() as teardown:
+            for resources in opened:
+                teardown.callback(resources.close)
+            opened.clear()
