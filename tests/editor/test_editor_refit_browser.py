@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("playwright.sync_api")
@@ -75,7 +77,7 @@ def _capture_editor_state(page, session, term: str) -> dict[str, object]:
 def _assert_dismissal_unchanged(
     page, session, term: str, before: dict[str, object], launcher, requests: list[object]
 ) -> None:
-    assert requests == []
+    assert [_path(request.url) for request in requests].count("/collapse_levels") == 0
     assert page.locator(".app-shell").get_attribute("aria-busy") == before["busy"]
     assert page.locator("#appBusyOverlay").is_hidden()
     assert page.locator("#summarySource").input_value() == before["source"]
@@ -105,6 +107,268 @@ def _abort_structural_requests(page) -> list[object]:
 
     page.route("**/collapse_levels", abort)
     return unexpected
+
+
+def _complete_metric_payload(request, *, edited_deviance: float) -> str:
+    request_payload = request.post_data_json
+    keys = (
+        "deviance",
+        "aic",
+        "bic",
+        "log_likelihood",
+        "explained_deviance",
+        "pearson_chi2",
+        "effective_df",
+    )
+    original = {key: float(index + 1) for index, key in enumerate(keys)}
+    edited = dict(original)
+    edited["deviance"] = edited_deviance
+    payload = {
+        "status": "complete",
+        "available": True,
+        "model_revision": request_payload["model_revision"],
+        "request_sequence": request_payload["request_sequence"],
+        "metric": "deviance",
+        "label": "Deviance",
+        "dataset": "training",
+        "dataset_label": "Training",
+        "n_obs": 500,
+        "original": original["deviance"],
+        "edited": edited_deviance,
+        "delta": edited_deviance - original["deviance"],
+        "metrics": {"original": original, "edited": edited},
+    }
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    assert len(body.encode()) < 1024
+    return body
+
+
+def test_structural_refit_commits_atomically_before_held_metrics(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, session):
+        _wait_for_editor_idle(page)
+        points = page.locator("#chart .point[data-index]")
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and _path(response.url) == "/select"
+        ):
+            points.nth(1).click()
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and _path(response.url) == "/select"
+        ):
+            points.nth(2).click(modifiers=["Control"])
+        page.wait_for_function(
+            "() => document.querySelectorAll('#chart .point.selected[data-index]').length === 2"
+        )
+
+        requests: list[object] = []
+        held_metrics: list[object] = []
+
+        def record_request(request) -> None:
+            requests.append(request)
+
+        def hold_metrics(route) -> None:
+            held_metrics.append(route)
+            page.evaluate("count => { window.__heldMetricRouteCount = count; }", len(held_metrics))
+
+        page.evaluate("window.__heldMetricRouteCount = 0")
+        page.on("request", record_request)
+        page.route("**/metrics", hold_metrics)
+        try:
+            with page.expect_request(
+                lambda request: request.method == "POST" and _path(request.url) == "/metrics"
+            ):
+                with page.expect_response(
+                    lambda response: (
+                        response.request.method == "POST"
+                        and _path(response.url) == "/collapse_levels"
+                    )
+                ) as collapse_info:
+                    page.get_by_role("button", name="Collapse and refit", exact=True).click()
+
+            assert collapse_info.value.status == 200
+            page.wait_for_function(
+                """revision => {
+                    const overlay = document.querySelector('#appBusyOverlay');
+                    const chart = document.querySelector('#chart');
+                    const summary = document.querySelector('#summaryFrame');
+                    const metrics = document.querySelector('#metricGrid');
+                    return overlay?.hidden
+                        && window.__heldMetricRouteCount === 1
+                        && chart?.dataset.modelRevision === revision
+                        && summary?.dataset.modelRevision === revision
+                        && metrics?.dataset.freshness === 'updating';
+                }""",
+                arg=str(session.model_revision),
+            )
+
+            chart_revision = page.locator("#chart").get_attribute("data-model-revision")
+            summary_revision = page.locator("#summaryFrame").get_attribute("data-model-revision")
+            assert chart_revision == summary_revision == str(session.model_revision)
+            assert page.locator("#appBusyOverlay").is_hidden()
+            assert page.locator("#metricGrid").get_attribute("data-freshness") == "updating"
+            assert len(held_metrics) == 1
+            request_paths = [_path(request.url) for request in requests]
+            assert request_paths.count("/collapse_levels") == 1
+            assert request_paths.count("/state") == 0
+        finally:
+            for route in held_metrics:
+                route.abort()
+            page.unroute("**/metrics", hold_metrics)
+
+
+def test_older_metrics_response_cannot_replace_newer_revision(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, session):
+        _wait_for_editor_idle(page)
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and _path(response.url) == "/select"
+        ):
+            page.locator('#chart .point[data-index="3"]').click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+
+        held_metrics: list[object] = []
+        pending_metrics: list[object] = []
+
+        def hold_metrics(route) -> None:
+            held_metrics.append(route)
+            pending_metrics.append(route)
+            page.evaluate("count => { window.__heldMetricRouteCount = count; }", len(held_metrics))
+
+        page.evaluate(
+            """() => {
+                window.__heldMetricRouteCount = 0;
+                window.__settledMetricSequences = [];
+                const responseJSON = Response.prototype.json;
+                window.__restoreMetricResponseJSON = () => {
+                    Response.prototype.json = responseJSON;
+                    delete window.__restoreMetricResponseJSON;
+                };
+                Response.prototype.json = async function() {
+                    const payload = await responseJSON.call(this);
+                    if (new URL(this.url).pathname.endsWith('/metrics')) {
+                        const sequence = Number(payload?.request_sequence);
+                        window.setTimeout(() => {
+                            window.__settledMetricSequences.push(sequence);
+                        }, 0);
+                    }
+                    return payload;
+                };
+            }"""
+        )
+        page.route("**/metrics", hold_metrics)
+        try:
+            increase = page.get_by_role("button", name="Increase selection", exact=True)
+            metric_requests: list[object] = []
+            for expected_revision in (1, 2):
+                with page.expect_request(
+                    lambda request: request.method == "POST" and _path(request.url) == "/metrics"
+                ) as metric_info:
+                    with page.expect_response(
+                        lambda response: (
+                            response.request.method == "POST" and _path(response.url) == "/op"
+                        )
+                    ) as edit_info:
+                        increase.click()
+
+                assert edit_info.value.status == 200
+                metric_request = metric_info.value
+                metric_requests.append(metric_request)
+                assert metric_request.post_data_json["model_revision"] == expected_revision
+                assert session.model_revision == expected_revision
+
+            page.wait_for_function("() => window.__heldMetricRouteCount === 2")
+            assert len(held_metrics) == 2
+            first_request, second_request = metric_requests
+            first_route, second_route = held_metrics
+            first_payload = first_request.post_data_json
+            second_payload = second_request.post_data_json
+            assert first_payload["model_revision"] < second_payload["model_revision"]
+            assert first_payload["request_sequence"] < second_payload["request_sequence"]
+
+            newer_value = 222.2
+            with page.expect_response(
+                lambda response: (
+                    _path(response.url) == "/metrics"
+                    and response.request.post_data_json["request_sequence"]
+                    == second_payload["request_sequence"]
+                )
+            ) as newer_response:
+                second_route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=_complete_metric_payload(
+                        second_request,
+                        edited_deviance=newer_value,
+                    ),
+                )
+                pending_metrics.remove(second_route)
+            newer_response.value.finished()
+            page.wait_for_function(
+                "sequence => window.__settledMetricSequences.includes(sequence)",
+                arg=second_payload["request_sequence"],
+            )
+
+            expected_current = {
+                "revision": str(second_payload["model_revision"]),
+                "value": str(newer_value),
+            }
+            page.wait_for_function(
+                """expected => {
+                    const metrics = document.querySelector('#metricGrid');
+                    const value = metrics?.querySelector('.metric-item-value');
+                    const chart = document.querySelector('#chart');
+                    const summary = document.querySelector('#summaryFrame');
+                    return metrics?.dataset.freshness === 'current'
+                        && value?.textContent === expected.value
+                        && chart?.dataset.modelRevision === expected.revision
+                        && summary?.dataset.modelRevision === expected.revision;
+                }""",
+                arg=expected_current,
+            )
+
+            older_value = 111.1
+            with page.expect_response(
+                lambda response: (
+                    _path(response.url) == "/metrics"
+                    and response.request.post_data_json["request_sequence"]
+                    == first_payload["request_sequence"]
+                )
+            ) as older_response:
+                first_route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=_complete_metric_payload(
+                        first_request,
+                        edited_deviance=older_value,
+                    ),
+                )
+                pending_metrics.remove(first_route)
+            older_response.value.finished()
+            page.wait_for_function(
+                "sequence => window.__settledMetricSequences.includes(sequence)",
+                arg=first_payload["request_sequence"],
+            )
+
+            page.wait_for_function(
+                """expected => {
+                    const metrics = document.querySelector('#metricGrid');
+                    const value = metrics?.querySelector('.metric-item-value');
+                    const chart = document.querySelector('#chart');
+                    const summary = document.querySelector('#summaryFrame');
+                    return metrics?.dataset.freshness === 'current'
+                        && value?.textContent === expected.value
+                        && chart?.dataset.modelRevision === expected.revision
+                        && summary?.dataset.modelRevision === expected.revision;
+                }""",
+                arg=expected_current,
+            )
+            assert page.locator("#metricFreshness").get_attribute("data-freshness") == "current"
+            assert page.locator("#metricGrid .metric-item-value").first.text_content() == str(
+                newer_value
+            )
+        finally:
+            for route in pending_metrics:
+                route.abort()
+            page.unroute("**/metrics", hold_metrics)
+            page.evaluate("window.__restoreMetricResponseJSON?.()")
 
 
 def test_structural_confirmation_is_bypassed_when_manual_history_is_empty(open_editor_page):
@@ -316,7 +580,7 @@ def test_changed_snapshot_requires_fresh_confirmation_before_structural_refit(op
         page.wait_for_function("() => window.__structuralDialogOpenCount === 2", timeout=1000)
         assert dialog.is_visible()
         assert unexpected_structural == []
-        assert requests == []
+        assert [_path(request.url) for request in requests].count("/collapse_levels") == 0
         assert dialog.locator("#structuralConfirmMessage").text_content() == (
             f"Collapse levels {', '.join(selected_labels)} in long_category? "
             "This refit clears 2 manual edit history entries."
