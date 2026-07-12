@@ -20,6 +20,9 @@ def remember_selection_dom(page) -> None:
                 chartDescendants: Array.from(document.querySelectorAll('#chart *')),
                 editedPath: document.querySelector('#chart path.edited'),
                 firstPoint: document.querySelector('#chart circle.point[data-index]'),
+                firstPointIndex: document.querySelector(
+                    '#chart circle.point[data-index]'
+                )?.dataset.index,
                 firstAxis: document.querySelector('#chart line.axis'),
                 chartTitle: document.querySelector('#chart text.label:not(.x-axis-title)'),
                 xAxisTitle: document.querySelector('#chart .x-axis-title'),
@@ -36,7 +39,7 @@ def selection_dom_is_unchanged(page) -> bool:
             const options = Array.from(document.querySelectorAll('#term option'));
             return before.editedPath === document.querySelector('#chart path.edited')
                 && before.firstPoint === document.querySelector(
-                    '#chart circle.point[data-index]'
+                    `#chart circle.point[data-index="${before.firstPointIndex}"]`
                 )
                 && before.firstAxis === document.querySelector('#chart line.axis')
                 && before.chartTitle === document.querySelector(
@@ -397,6 +400,7 @@ def test_selection_menu_does_not_block_adjacent_modifier_selection(open_editor_p
         adjacent = points.nth(2)
         first_index = int(first.get_attribute("data-index"))
         adjacent_index = int(adjacent.get_attribute("data-index"))
+        adjacent = page.locator(f'#chart circle.point[data-index="{adjacent_index}"]')
 
         with page.expect_response(lambda response: is_select_request(response.request)):
             first.click()
@@ -476,7 +480,7 @@ def test_select_all_is_incremental_bounded_and_keeps_bounds_behind_points(open_e
                 return {
                     halo: children.indexOf(svg.querySelector('.selection-bounds-halo')),
                     bounds: children.indexOf(svg.querySelector('.selection-bounds')),
-                    point: children.indexOf(svg.querySelector('circle.point[data-index]')),
+                    point: children.indexOf(svg.querySelector('.point-layer')),
                 };
             }"""
         )
@@ -495,6 +499,169 @@ def test_select_all_is_incremental_bounded_and_keeps_bounds_behind_points(open_e
         assert select_all_ops == []
         assert page.locator("#chart circle.point[data-index]").count() == initial_markers
         assert selection_dom_is_unchanged(page)
+
+
+def test_incremental_selection_raises_points_without_recreating_them(open_editor_page):
+    with open_editor_page(n_points=500) as (page, _session):
+        select_chart_tool(page, "Select")
+        point = page.locator("#chart circle.point[data-index]").last
+        selected_index = int(point.get_attribute("data-index"))
+        point.evaluate("node => { window.__selectedPointIdentity = node; }")
+
+        with page.expect_response(lambda response: is_select_request(response.request)):
+            point.click()
+
+        paint = page.evaluate(
+            """selectedIndex => {
+                const svg = document.querySelector('#chart');
+                const layer = svg.querySelector('.point-layer');
+                const legend = svg.querySelector('.legend-layer');
+                const points = Array.from(layer.querySelectorAll(':scope > circle.point[data-index]'));
+                const selected = layer.querySelector(
+                    `:scope > circle.point.selected[data-index="${selectedIndex}"]`
+                );
+                const unselected = layer.querySelector(':scope > circle.point:not(.selected)');
+                const selectedPositions = points
+                    .map((node, index) => node.classList.contains('selected') ? index : -1)
+                    .filter(index => index >= 0);
+                const unselectedPositions = points
+                    .map((node, index) => node.classList.contains('selected') ? -1 : index)
+                    .filter(index => index >= 0);
+                unselected.setAttribute('cx', selected.getAttribute('cx'));
+                unselected.setAttribute('cy', selected.getAttribute('cy'));
+                const box = selected.getBoundingClientRect();
+                const hit = document.elementFromPoint(
+                    box.left + box.width / 2,
+                    box.top + box.height / 2
+                );
+                return {
+                    identity: selected === window.__selectedPointIdentity,
+                    order: Math.max(...unselectedPositions) < Math.min(...selectedPositions),
+                    belowLegend: Array.from(svg.children).indexOf(layer)
+                        < Array.from(svg.children).indexOf(legend),
+                    hitIndex: hit?.closest('circle.point[data-index]')?.dataset.index ?? null,
+                };
+            }""",
+            selected_index,
+        )
+
+        assert paint == {
+            "identity": True,
+            "order": True,
+            "belowLegend": True,
+            "hitIndex": str(selected_index),
+        }
+
+
+def test_sparse_box_selection_keeps_supplemental_points_below_legend(open_editor_page):
+    with open_editor_page(n_points=500) as (page, _session):
+        select_chart_tool(page, "Select")
+        drag = page.evaluate(
+            """() => {
+                const svg = document.querySelector('#chart');
+                const scale = svg._scale;
+                const drawn = new Set(Array.from(
+                    svg.querySelectorAll('circle.point[data-index]'),
+                    node => Number(node.dataset.index)
+                ));
+                const target = scale.x.findIndex((_, index) => index > 10 && !drawn.has(index));
+                const client = (x, y) => {
+                    const point = svg.createSVGPoint();
+                    point.x = x;
+                    point.y = y;
+                    const result = point.matrixTransform(svg.getScreenCTM());
+                    return { x: result.x, y: result.y };
+                };
+                const cx = scale.sx(scale.x[target]);
+                const cy = scale.sy(scale.y[target]);
+                return { start: client(cx - 7, cy - 7), end: client(cx + 7, cy + 7) };
+            }"""
+        )
+
+        with page.expect_response(lambda response: is_select_request(response.request)):
+            page.mouse.move(drag["start"]["x"], drag["start"]["y"])
+            page.mouse.down()
+            page.mouse.move(drag["end"]["x"], drag["end"]["y"])
+            page.mouse.up()
+
+        layering = page.evaluate(
+            """() => {
+                const svg = document.querySelector('#chart');
+                const layer = svg.querySelector('.point-layer');
+                const legend = svg.querySelector('.legend-layer');
+                const supplemental = Array.from(
+                    layer.querySelectorAll('circle[data-selection-supplemental="true"]')
+                );
+                return {
+                    count: supplemental.length,
+                    allInLayer: supplemental.every(point => point.parentElement === layer),
+                    belowLegend: Array.from(svg.children).indexOf(layer)
+                        < Array.from(svg.children).indexOf(legend),
+                };
+            }"""
+        )
+        assert layering["count"] > 0
+        assert layering["allInLayer"] is True
+        assert layering["belowLegend"] is True
+
+
+def test_selection_palette_wraps_inside_narrow_notebook_viewport(open_editor_page):
+    with open_editor_page(viewport={"width": 360, "height": 560}, selected_term="territory") as (
+        page,
+        _session,
+    ):
+        select_chart_tool(page, "Select")
+        baseline_document_width = page.evaluate("document.documentElement.scrollWidth")
+        with page.expect_response(lambda response: is_select_request(response.request)):
+            page.locator('button[data-op="select_all"]').click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+
+        layout = page.evaluate(
+            """() => {
+                const menu = document.querySelector('#selectionMenu');
+                const chart = document.querySelector('#chart');
+                const menuBox = menu.getBoundingClientRect();
+                const chartBox = chart.getBoundingClientRect();
+                const buttons = Array.from(menu.children).flatMap(child => {
+                    if (child.matches(':scope > button.selection-item')) return [child];
+                    const button = child.querySelector(':scope > button.selection-item');
+                    return button ? [button] : [];
+                }).filter(button => button.getClientRects().length > 0);
+                return {
+                    scrollFits: menu.scrollWidth <= menu.clientWidth,
+                    documentWidth: document.documentElement.scrollWidth,
+                    viewportWidth: window.innerWidth,
+                    menuLeft: menuBox.left,
+                    menuRight: menuBox.right,
+                    chartLeft: chartBox.left,
+                    chartRight: chartBox.right,
+                    buttons: buttons.map(button => {
+                        const box = button.getBoundingClientRect();
+                        const hit = document.elementFromPoint(
+                            box.left + box.width / 2,
+                            box.top + box.height / 2
+                        );
+                        return {
+                            width: box.width,
+                            height: box.height,
+                            insideMenu: box.left >= menuBox.left && box.right <= menuBox.right,
+                            insideChart: box.left >= chartBox.left && box.right <= chartBox.right,
+                            hit: hit?.closest('button') === button,
+                        };
+                    }),
+                };
+            }"""
+        )
+
+        assert layout["scrollFits"] is True
+        assert layout["documentWidth"] <= baseline_document_width, layout
+        assert layout["buttons"]
+        for button in layout["buttons"]:
+            assert button["width"] == pytest.approx(40, abs=0.5)
+            assert button["height"] == pytest.approx(50, abs=0.5)
+            assert button["insideMenu"] is True
+            assert button["insideChart"] is True
+            assert button["hit"] is True
 
 
 def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page):

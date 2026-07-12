@@ -174,7 +174,7 @@ button:active { background: #e6edf3; }
   position: absolute;
   z-index: 5;
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 0;
   align-items: center;
   min-height: 50px;
