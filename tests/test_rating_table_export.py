@@ -1,10 +1,12 @@
 import warnings
+from io import BytesIO
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 from openpyxl import load_workbook
+from openpyxl.utils.cell import range_boundaries
 
 from superglm import (
     Categorical,
@@ -15,8 +17,14 @@ from superglm import (
     SuperGLM,
     export_rating_tables,
 )
-from superglm.export.rating_tables import build_rating_table_payload
-from superglm.export.summary import SummaryExportPayload, build_summary_export_payload
+from superglm.export.excel import write_rating_table_workbook
+from superglm.export.rating_tables import RatingTablePayload, build_rating_table_payload
+from superglm.export.summary import (
+    SummaryExportPayload,
+    SummaryOverviewRow,
+    SummaryTermRow,
+    build_summary_export_payload,
+)
 
 
 def _fit_export_model():
@@ -91,6 +99,39 @@ def _fit_term_offset_export_model(distinct_terms: int = 2, *, retain_fit_state: 
 
 def _overview_values(payload: SummaryExportPayload) -> dict[tuple[str, str], object]:
     return {(row.section, row.metric): row.value for row in payload.overview}
+
+
+def _workbook_payload(summary: SummaryExportPayload) -> RatingTablePayload:
+    return RatingTablePayload(
+        base_relativity=1.0,
+        selected_n_bins=20,
+        main_effects=[],
+        interactions=[],
+        discretization_impact=pd.DataFrame({"n_bins": [20]}),
+        summary=summary,
+    )
+
+
+def _write_workbook(payload: RatingTablePayload, target) -> None:
+    write_rating_table_workbook(
+        payload,
+        target,
+        sheet_name="Rating Tables",
+        summary_sheet_name="Model Summary",
+        impact_sheet_name="Discretization Impact",
+    )
+
+
+def _table_records(ws, table_name: str) -> list[dict[str, object]]:
+    min_col, min_row, max_col, max_row = range_boundaries(ws.tables[table_name].ref)
+    headers = [ws.cell(row=min_row, column=column).value for column in range(min_col, max_col + 1)]
+    return [
+        {
+            header: ws.cell(row=row, column=column).value
+            for header, column in zip(headers, range(min_col, max_col + 1), strict=True)
+        }
+        for row in range(min_row + 1, max_row + 1)
+    ]
 
 
 def _fit_ordered_export_model():
@@ -762,6 +803,7 @@ def test_rating_table_payload_passes_offset_to_discretization_impact(monkeypatch
 def test_excel_workbook_layout(tmp_path):
     model, X, y, w = _fit_export_model()
     output = tmp_path / "tables.xlsx"
+    expected_summary = build_summary_export_payload(model)
 
     model.export_rating_tables(output, X, y, sample_weight=w, n_bins=20)
 
@@ -782,6 +824,148 @@ def test_excel_workbook_layout(tmp_path):
     impact_ws = wb["Discretization Impact"]
     headers = [impact_ws.cell(row=1, column=i).value for i in range(1, 11)]
     assert headers[:3] == ["n_bins", "feature", "actual_bins"]
+
+    summary_ws = wb["Model Summary"]
+    assert summary_ws["A1"].value == "Model Summary"
+    assert summary_ws["A1"].font.bold
+    assert summary_ws["A1"].font.sz == pytest.approx(14.0)
+    assert summary_ws["A3"].value == "Fit and model overview"
+    assert [summary_ws.cell(row=4, column=column).value for column in range(1, 4)] == [
+        "Section",
+        "Metric",
+        "Value",
+    ]
+    assert set(summary_ws.tables) == {"ModelOverview", "TermInference"}
+    assert summary_ws.freeze_panes == "A5"
+
+    overview_table = summary_ws.tables["ModelOverview"]
+    overview_bounds = range_boundaries(overview_table.ref)
+    term_table = summary_ws.tables["TermInference"]
+    term_min_col, term_min_row, term_max_col, term_max_row = range_boundaries(term_table.ref)
+    assert term_min_row == overview_bounds[3] + 3
+    term_headers = [
+        summary_ws.cell(row=term_min_row, column=column).value
+        for column in range(term_min_col, term_max_col + 1)
+    ]
+    assert term_headers == [
+        "Term",
+        "Group",
+        "Kind",
+        "Estimate",
+        "Std Error",
+        "Statistic",
+        "Statistic Type",
+        "P Value",
+        "CI Lower",
+        "CI Upper",
+        "EDF",
+        "Lambda",
+        "Active",
+        "Significance",
+        "Warning",
+    ]
+
+    overview = {row["Metric"]: row["Value"] for row in _table_records(summary_ws, "ModelOverview")}
+    assert isinstance(overview["Observations"], int)
+    assert not isinstance(overview["Observations"], bool)
+    assert isinstance(overview["AIC"], float)
+    assert isinstance(overview["Converged"], bool)
+
+    terms = _table_records(summary_ws, "TermInference")
+    assert [(row["Term"], row["Kind"]) for row in terms] == [
+        (row.term, row.kind) for row in expected_summary.terms
+    ]
+    assert {row["Kind"] for row in terms} == {"coefficient", "level", "smooth"}
+    assert summary_ws.cell(row=term_max_row + 3, column=1).value == "Notes"
+    assert summary_ws.cell(row=term_max_row + 3, column=1).font.bold
+    assert [
+        summary_ws.cell(row=term_max_row + 4 + index, column=1).value
+        for index in range(len(expected_summary.notes))
+    ] == list(expected_summary.notes)
+    assert all(
+        "SuperGLM Results" not in str(cell.value) for row in summary_ws.iter_rows() for cell in row
+    )
+    assert summary_ws.column_dimensions["A"].width < 60
+
+
+def test_ordered_spline_workbook_keeps_only_global_inference(tmp_path):
+    model, levels = _fit_ordered_export_model()
+    summary = build_summary_export_payload(model)
+    output = tmp_path / "ordered_summary.xlsx"
+
+    _write_workbook(_workbook_payload(summary), output)
+
+    summary_ws = load_workbook(output, data_only=True)["Model Summary"]
+    rows = [row for row in _table_records(summary_ws, "TermInference") if row["Group"] == "band"]
+    smooth_rows = [row for row in rows if row["Kind"] == "smooth"]
+    level_rows = [row for row in rows if row["Kind"] == "level"]
+
+    assert len(smooth_rows) == 1
+    assert isinstance(smooth_rows[0]["P Value"], float)
+    assert len(level_rows) == len(levels)
+    for row in level_rows:
+        assert row["Estimate"] is not None
+        assert row["Std Error"] is not None
+        assert row["CI Lower"] is not None
+        assert row["CI Upper"] is not None
+        assert row["Statistic"] is None
+        assert row["P Value"] is None
+        assert row["Significance"] in (None, "")
+
+
+def test_excel_workbook_writes_to_binary_stream():
+    summary = SummaryExportPayload(
+        overview=(SummaryOverviewRow("Fit", "Observations", 12),),
+        terms=(
+            SummaryTermRow(
+                term="Intercept",
+                group="",
+                kind="coefficient",
+                estimate=0.25,
+                std_error=0.1,
+                statistic=2.5,
+                statistic_type="z",
+                p_value=0.012,
+                ci_lower=0.05,
+                ci_upper=0.45,
+                edf=None,
+                smoothing_lambda=None,
+                active=True,
+                significance="*",
+                warning="",
+            ),
+        ),
+        notes=("Typed workbook stream.",),
+    )
+    target = BytesIO()
+
+    _write_workbook(_workbook_payload(summary), target)
+
+    assert not target.closed
+    target.seek(0)
+    wb = load_workbook(target, data_only=True)
+    assert wb.sheetnames == ["Rating Tables", "Discretization Impact", "Model Summary"]
+    assert set(wb["Model Summary"].tables) == {"ModelOverview", "TermInference"}
+
+
+def test_excel_workbook_empty_terms_has_valid_blank_table_row():
+    summary = SummaryExportPayload(
+        overview=(SummaryOverviewRow("Fit", "Observations", 0),),
+        terms=(),
+        notes=(),
+    )
+    target = BytesIO()
+
+    _write_workbook(_workbook_payload(summary), target)
+
+    target.seek(0)
+    summary_ws = load_workbook(target, data_only=True)["Model Summary"]
+    table = summary_ws.tables["TermInference"]
+    min_col, min_row, max_col, max_row = range_boundaries(table.ref)
+    assert max_row == min_row + 1
+    assert [
+        summary_ws.cell(row=max_row, column=column).value for column in range(min_col, max_col + 1)
+    ] == [None] * 15
 
 
 def test_excel_workbook_includes_fit_offset_multiplier(tmp_path):

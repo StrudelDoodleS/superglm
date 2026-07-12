@@ -2,30 +2,128 @@
 
 from __future__ import annotations
 
+from os import PathLike
 from pathlib import Path
+from typing import BinaryIO
 
 import pandas as pd
 
+_TERM_COLUMNS = (
+    ("Term", "term"),
+    ("Group", "group"),
+    ("Kind", "kind"),
+    ("Estimate", "estimate"),
+    ("Std Error", "std_error"),
+    ("Statistic", "statistic"),
+    ("Statistic Type", "statistic_type"),
+    ("P Value", "p_value"),
+    ("CI Lower", "ci_lower"),
+    ("CI Upper", "ci_upper"),
+    ("EDF", "edf"),
+    ("Lambda", "smoothing_lambda"),
+    ("Active", "active"),
+    ("Significance", "significance"),
+    ("Warning", "warning"),
+)
+_TERM_NUMERIC_COLUMNS = frozenset(
+    {"Estimate", "Std Error", "Statistic", "P Value", "CI Lower", "CI Upper", "EDF", "Lambda"}
+)
 
-def _plain_summary_lines(summary) -> list[str]:
-    """Temporarily flatten a typed summary for the legacy one-cell renderer."""
-    lines = ["SuperGLM Results"]
-    current_section = None
-    for row in summary.overview:
-        if row.section != current_section:
-            lines.extend(["", row.section])
-            current_section = row.section
-        value = "" if row.value is None else str(row.value)
-        lines.append(f"{row.metric}: {value}")
 
-    lines.extend(["", "Terms", "term | kind | estimate | statistic | p-value"])
-    for row in summary.terms:
-        values = (row.term, row.kind, row.estimate, row.statistic, row.p_value)
-        lines.append(" | ".join("" if value is None else str(value) for value in values))
+def _resolve_workbook_target(
+    target: str | PathLike[str] | BinaryIO,
+) -> Path | BinaryIO:
+    if isinstance(target, str | PathLike):
+        out = Path(target)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        return out
+    return target
 
-    if summary.notes:
-        lines.extend(["", "Notes", *summary.notes])
-    return lines
+
+def _add_excel_table(
+    ws,
+    *,
+    display_name: str,
+    min_row: int,
+    max_row: int,
+    min_col: int,
+    max_col: int,
+) -> None:
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+
+    reference = f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
+    table = Table(displayName=display_name, ref=reference)
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium2",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    ws.add_table(table)
+
+
+def _write_summary_sheet(ws, summary) -> None:
+    from openpyxl.styles import Alignment, Font
+
+    ws["A1"] = "Model Summary"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A3"] = "Fit and model overview"
+    ws["A3"].font = Font(bold=True)
+
+    overview_header_row = 4
+    overview_headers = ("Section", "Metric", "Value")
+    for column, header in enumerate(overview_headers, start=1):
+        ws.cell(row=overview_header_row, column=column, value=header).font = Font(bold=True)
+    for row_number, overview_row in enumerate(summary.overview, start=overview_header_row + 1):
+        ws.cell(row=row_number, column=1, value=overview_row.section)
+        ws.cell(row=row_number, column=2, value=overview_row.metric)
+        value_cell = ws.cell(row=row_number, column=3, value=overview_row.value)
+        if isinstance(overview_row.value, int) and not isinstance(overview_row.value, bool):
+            value_cell.number_format = "0"
+        elif isinstance(overview_row.value, float):
+            value_cell.number_format = "0.000000"
+
+    overview_end_row = overview_header_row + len(summary.overview)
+    _add_excel_table(
+        ws,
+        display_name="ModelOverview",
+        min_row=overview_header_row,
+        max_row=overview_end_row,
+        min_col=1,
+        max_col=len(overview_headers),
+    )
+
+    term_header_row = overview_end_row + 3
+    for column, (header, _) in enumerate(_TERM_COLUMNS, start=1):
+        ws.cell(row=term_header_row, column=column, value=header).font = Font(bold=True)
+
+    term_rows = summary.terms or (None,)
+    for row_number, term_row in enumerate(term_rows, start=term_header_row + 1):
+        for column, (header, attribute) in enumerate(_TERM_COLUMNS, start=1):
+            value = None if term_row is None else getattr(term_row, attribute)
+            cell = ws.cell(row=row_number, column=column, value=value)
+            if value is not None and header in _TERM_NUMERIC_COLUMNS:
+                cell.number_format = "0.000000E+00" if header == "P Value" else "0.000000"
+
+    term_end_row = term_header_row + len(term_rows)
+    _add_excel_table(
+        ws,
+        display_name="TermInference",
+        min_row=term_header_row,
+        max_row=term_end_row,
+        min_col=1,
+        max_col=len(_TERM_COLUMNS),
+    )
+
+    notes_header_row = term_end_row + 3
+    ws.cell(row=notes_header_row, column=1, value="Notes").font = Font(bold=True)
+    for row_number, note in enumerate(summary.notes, start=notes_header_row + 1):
+        cell = ws.cell(row=row_number, column=1, value=note)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    ws.freeze_panes = "A5"
 
 
 def _write_dataframe(ws, df: pd.DataFrame, start_row: int, start_col: int) -> tuple[int, int]:
@@ -53,7 +151,7 @@ def _autosize(ws) -> None:
 
 def write_rating_table_workbook(
     payload,
-    file_path: str | Path,
+    target: str | PathLike[str] | BinaryIO,
     *,
     sheet_name: str,
     summary_sheet_name: str,
@@ -62,8 +160,7 @@ def write_rating_table_workbook(
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
-    out = Path(file_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
+    out = _resolve_workbook_target(target)
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name
@@ -110,11 +207,15 @@ def write_rating_table_workbook(
     _write_dataframe(impact_ws, payload.discretization_impact, 1, 1)
 
     summary_ws = wb.create_sheet(summary_sheet_name)
-    for row, line in enumerate(_plain_summary_lines(payload.summary), start=1):
-        cell = summary_ws.cell(row=row, column=1, value=line)
-        cell.font = Font(name="Consolas")
+    _write_summary_sheet(summary_ws, payload.summary)
 
     for sheet in wb.worksheets:
         _autosize(sheet)
-    summary_ws.column_dimensions["A"].width = 140
+    summary_ws.column_dimensions["A"].width = 32
+    summary_ws.column_dimensions["B"].width = 24
+    for column in "CDEFGHIJKLMNO":
+        summary_ws.column_dimensions[column].width = min(
+            max(summary_ws.column_dimensions[column].width, 14),
+            18,
+        )
     wb.save(out)
