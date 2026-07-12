@@ -62,6 +62,29 @@ test("transition descriptor payloads are independent caller-owned values", () =>
   });
 });
 
+test("rendering unchanged summary markup preserves the existing table DOM", () => {
+  let writes = 0;
+  let markup = "";
+  const summaryFrame = {
+    get innerHTML() { return markup; },
+    set innerHTML(value) {
+      writes += 1;
+      markup = value;
+    }
+  };
+  const nodes = {
+    summaryStatus: { textContent: "" },
+    summaryNote: { textContent: "" },
+    summaryFrame
+  };
+  const payload = { available: false, label: "Summary", error: "Unavailable" };
+
+  renderSummary(payload, nodes);
+  renderSummary(payload, nodes);
+
+  assert.equal(writes, 1);
+});
+
 test("state-only recovery publishes a stale summary payload when remote summary is null", async () => {
   const nodes = {
     summaryStatus: { textContent: "Old manual summary" },

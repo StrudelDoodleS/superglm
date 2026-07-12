@@ -756,32 +756,14 @@ function renderAppView(activeView) {
   reportPanel.hidden = activeView === "editor";
 }
 
-function render() {
+function renderChartWorkspace() {
   const editorState = store.getState();
   const snapshot = editorState.remote.snapshot;
   if (!snapshot) return;
   const view = editorState.view;
-  renderAppView(view.activeView);
-  renderMetricsEvidence(editorState.request.evidence.metrics);
-  renderReportEvidence(editorState.request.evidence.report, view.activeView);
-  renderHistory(snapshot.history, historyFrame);
   ciToggle.style.background = view.showCi ? "#dbeafe" : "#f6f8fa";
   ciToggle.setAttribute("aria-pressed", String(view.showCi));
-  const terms = snapshot.terms || {};
   const selected = selectedTerm();
-  termSelect.innerHTML = "";
-  for (const [group, names] of groupedTerms(terms)) {
-    const optgroup = document.createElement("optgroup");
-    optgroup.label = group;
-    for (const name of names) {
-      const option = document.createElement("option");
-      option.value = name;
-      option.textContent = name;
-      option.selected = name === selected;
-      optgroup.appendChild(option);
-    }
-    termSelect.appendChild(optgroup);
-  }
   const term = currentTerm();
   if (!term) return;
   if (selected !== renderedTerm) {
@@ -803,18 +785,141 @@ function render() {
   updateResetOrderAction(term);
   drawChart(term, selection, chartContext);
   const collapsedOriginalNote = selectionContextNote(term);
-  renderAppBar({
-    root: appBar,
-    activeView: view.activeView,
-    undoButton: undoAction,
-    redoButton: redoAction,
-    canUndo: Boolean(snapshot.history.active.length),
-    canRedo: Boolean(snapshot.history.redo.length)
-  });
   renderContextBar(
     { kindNode: termKind, edfNode: termEdf, statusNode },
     { name: selected, term, selectionSize: selection.size, note: collapsedOriginalNote }
   );
+}
+
+function termCatalogueKey(terms) {
+  return groupedTerms(terms).map(
+    ([group, names]) => `${group}\u0000${names.join("\u0000")}`
+  ).join("\u0001");
+}
+
+function selectTermPickerRenderState(state) {
+  const snapshot = selectSnapshot(state);
+  return {
+    ready: snapshot !== null,
+    catalogueKey: snapshot ? termCatalogueKey(snapshot.terms || {}) : "",
+    activeTerm: selectActiveTermName(state)
+  };
+}
+
+function sameTermPickerRenderState(next, previous) {
+  return next.ready === previous.ready &&
+    next.catalogueKey === previous.catalogueKey &&
+    next.activeTerm === previous.activeTerm;
+}
+
+function renderTermPickerState(next, previous) {
+  const snapshot = selectSnapshot(store.getState());
+  if (!snapshot) return;
+  if (!previous.ready || next.catalogueKey !== previous.catalogueKey) {
+    termSelect.innerHTML = "";
+    for (const [group, names] of groupedTerms(snapshot.terms || {})) {
+      const optgroup = document.createElement("optgroup");
+      optgroup.label = group;
+      for (const name of names) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        optgroup.appendChild(option);
+      }
+      termSelect.appendChild(optgroup);
+    }
+  }
+  if (termSelect.value !== next.activeTerm) termSelect.value = next.activeTerm;
+}
+
+function selectChartRenderState(state) {
+  const activeTerm = selectActiveTermName(state);
+  const view = state.view;
+  return {
+    ready: state.remote.snapshot !== null,
+    chartEpoch: state.remote.chartEpoch,
+    activeTerm,
+    mode: view.mode,
+    showCi: view.showCi,
+    showContrib: view.showContrib,
+    zoom: view.zoomByTerm[activeTerm] || null,
+    groupMode: Object.prototype.hasOwnProperty.call(view.groupModeByTerm, activeTerm)
+      ? view.groupModeByTerm[activeTerm]
+      : null
+  };
+}
+
+function sameChartRenderState(next, previous) {
+  return next.ready === previous.ready &&
+    next.chartEpoch === previous.chartEpoch &&
+    next.activeTerm === previous.activeTerm &&
+    next.mode === previous.mode &&
+    next.showCi === previous.showCi &&
+    next.showContrib === previous.showContrib &&
+    next.zoom === previous.zoom &&
+    next.groupMode === previous.groupMode;
+}
+
+function selectHistoryRenderState(state) {
+  const history = state.remote.snapshot?.history || null;
+  return { history, key: history ? JSON.stringify(history) : "" };
+}
+
+function sameHistoryRenderState(next, previous) {
+  return next.key === previous.key;
+}
+
+function renderHistoryState({ history }) {
+  if (history) renderHistory(history, historyFrame);
+}
+
+function selectAppBarRenderState(state) {
+  const snapshot = state.remote.snapshot;
+  return {
+    ready: snapshot !== null,
+    activeView: state.view.activeView,
+    canUndo: Boolean(snapshot?.history.active.length),
+    canRedo: Boolean(snapshot?.history.redo.length)
+  };
+}
+
+function sameAppBarRenderState(next, previous) {
+  return next.ready === previous.ready &&
+    next.activeView === previous.activeView &&
+    next.canUndo === previous.canUndo &&
+    next.canRedo === previous.canRedo;
+}
+
+function renderAppBarState(state) {
+  if (!state.ready) return;
+  renderAppBar({
+    root: appBar,
+    activeView: state.activeView,
+    undoButton: undoAction,
+    redoButton: redoAction,
+    canUndo: state.canUndo,
+    canRedo: state.canRedo
+  });
+}
+
+function selectActiveViewRenderState(state) {
+  return { ready: state.remote.snapshot !== null, activeView: state.view.activeView };
+}
+
+function sameActiveViewRenderState(next, previous) {
+  return next.ready === previous.ready && next.activeView === previous.activeView;
+}
+
+function renderActiveViewState({ ready, activeView }) {
+  if (!ready) return;
+  renderAppView(activeView);
+  renderReportEvidence(store.getState().request.evidence.report, activeView);
+}
+
+function renderSnapshotRevision(revision) {
+  if (revision === null) return;
+  svg.dataset.modelRevision = String(revision);
+  summaryFrame.dataset.modelRevision = String(revision);
 }
 
 function selectionContextNote(term) {
@@ -864,16 +969,6 @@ function sameSelectionState(next, previous) {
     return false;
   }
   return next.indices.every((value, index) => value === previous.indices[index]);
-}
-
-function sameViewOutsidePreview(next, previous) {
-  return next.activeTerm === previous.activeTerm &&
-    next.activeView === previous.activeView &&
-    next.mode === previous.mode &&
-    next.showCi === previous.showCi &&
-    next.showContrib === previous.showContrib &&
-    next.zoomByTerm === previous.zoomByTerm &&
-    next.groupModeByTerm === previous.groupModeByTerm;
 }
 
 function renderMutationBusy(mutation) {
@@ -1172,14 +1267,14 @@ function runContributionBuild(fromProgress) {
     const progress = Math.min(initialProgress + elapsed * (1 - initialProgress), 1);
     buildProgress = progress;
     if (progress >= 1) buildFrame = null;
-    render();
+    renderChartWorkspace();
     if (progress < 1) {
       buildFrame = requestAnimationFrame(step);
     }
   };
   buildProgress = initialProgress;
   buildFrame = requestAnimationFrame(step);
-  render();
+  renderChartWorkspace();
 }
 
 function advanceContributionBuild() {
@@ -1199,7 +1294,7 @@ function advanceContributionBuild() {
   if (next < 1) {
     runContributionBuild(next);
   } else {
-    render();
+    renderChartWorkspace();
   }
   return true;
 }
@@ -1246,6 +1341,7 @@ termSelect.addEventListener("change", async () => {
   const snapshot = store.getState().remote.snapshot;
   const authoritativeTerm = snapshot?.selected_term;
   if (authoritativeTerm && snapshot.terms[authoritativeTerm]) {
+    termSelect.value = authoritativeTerm;
     actions.patchView({ activeTerm: authoritativeTerm });
   }
 });
@@ -1376,14 +1472,23 @@ if (uncollapseLevels) {
   });
 }
 
-store.subscribe((state) => state.remote.chartEpoch, () => {
-  const snapshot = selectSnapshot(store.getState());
-  if (snapshot) {
-    svg.dataset.modelRevision = String(snapshot.model_revision);
-    summaryFrame.dataset.modelRevision = String(snapshot.model_revision);
-  }
-  render();
-});
+store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
+store.subscribe(
+  selectTermPickerRenderState,
+  renderTermPickerState,
+  sameTermPickerRenderState
+);
+store.subscribe(selectHistoryRenderState, renderHistoryState, sameHistoryRenderState);
+store.subscribe(selectAppBarRenderState, renderAppBarState, sameAppBarRenderState);
+store.subscribe(
+  selectActiveViewRenderState,
+  renderActiveViewState,
+  sameActiveViewRenderState
+);
+store.subscribe(
+  (state) => state.remote.snapshot?.model_revision ?? null,
+  renderSnapshotRevision
+);
 store.subscribe(
   (state) => state.remote.summary,
   (summary) => {
@@ -1400,7 +1505,6 @@ store.subscribe(
     evidenceTiming.observe("summary", evidence, previous);
   }
 );
-store.subscribe((state) => state.view, () => render(), sameViewOutsidePreview);
 store.subscribe(
   (state) => ({ preview: state.view.preview, snapshot: state.remote.snapshot }),
   renderInteractionState,

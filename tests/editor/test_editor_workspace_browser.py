@@ -758,6 +758,83 @@ def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page)
             held_term[0].continue_()
 
 
+def test_term_change_does_not_rewrite_unrelated_editor_panels(open_editor_page):
+    with open_editor_page() as (page, _session):
+        page.locator("#metricGrid > *").first.wait_for()
+        page.locator("#summaryFrame > *").first.wait_for()
+        page.locator("#historyFrame > *").first.wait_for(state="attached")
+        page.evaluate(
+            """() => {
+                window.__panelBoundaryNodes = {
+                    editedPath: document.querySelector('#chart path.edited'),
+                    metric: document.querySelector('#metricGrid > *'),
+                    summary: document.querySelector('#summaryFrame > *'),
+                    history: document.querySelector('#historyFrame > *'),
+                    termOptions: Array.from(document.querySelectorAll('#term option')),
+                };
+            }"""
+        )
+
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and response.url.endswith("/term")
+        ):
+            page.select_option("#term", "territory")
+        page.wait_for_function(
+            "() => document.querySelector('#status')?.dataset.term === 'territory'"
+        )
+
+        boundaries = page.evaluate(
+            """() => {
+                const before = window.__panelBoundaryNodes;
+                const options = Array.from(document.querySelectorAll('#term option'));
+                return {
+                    chartChanged: before.editedPath !== document.querySelector('#chart path.edited'),
+                    metricStable: before.metric === document.querySelector('#metricGrid > *'),
+                    summaryStable: before.summary === document.querySelector('#summaryFrame > *'),
+                    historyStable: before.history === document.querySelector('#historyFrame > *'),
+                    optionsStable: before.termOptions.length === options.length
+                        && before.termOptions.every((node, index) => node === options[index]),
+                };
+            }"""
+        )
+        assert boundaries == {
+            "chartChanged": True,
+            "metricStable": True,
+            "summaryStable": True,
+            "historyStable": True,
+            "optionsStable": True,
+        }
+
+
+def test_summary_updating_status_preserves_confirmed_table_nodes(open_editor_page):
+    with open_editor_page() as (page, _session):
+        summary_child = page.locator("#summaryFrame > *").first
+        summary_child.wait_for()
+        summary_child.evaluate("node => { window.__confirmedSummaryChild = node; }")
+        held_summary = []
+        page.route("**/summary", lambda route: held_summary.append(route))
+
+        page.locator("#summarySource").evaluate(
+            """node => {
+                node.value = 'in_force';
+                node.dispatchEvent(new Event('change', { bubbles: true }));
+            }"""
+        )
+        page.wait_for_timeout(50)
+        assert len(held_summary) == 1
+        page.wait_for_function(
+            "() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'true'"
+        )
+        assert page.evaluate(
+            "window.__confirmedSummaryChild === document.querySelector('#summaryFrame > *')"
+        )
+
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and response.url.endswith("/summary")
+        ):
+            held_summary[0].continue_()
+
+
 def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_page):
     with open_editor_page() as (page, _session):
         reference_ci = page.locator("#ciToggle")

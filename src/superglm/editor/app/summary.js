@@ -2,6 +2,7 @@ import { requestJSON } from "./api.js";
 import { escapeHTML, fmt } from "./format.js";
 
 const PROFILE_ESTIMATE_LABELS = { p: "p_hat", theta: "theta_hat" };
+const summaryMarkupByFrame = new WeakMap();
 
 export async function refreshSummary(nodes) {
   const { summarySource, summaryStatus, summaryFrame } = nodes;
@@ -161,14 +162,26 @@ export function renderSummary(payload, nodes) {
   if (!payload.available) {
     summaryStatus.textContent = payload.label || "Summary";
     summaryNote.textContent = "";
-    summaryFrame.innerHTML = `<div class="summary-empty">${escapeHTML(payload.error || "Summary unavailable.")}</div>`;
+    updateSummaryMarkup(
+      summaryFrame,
+      `<div class="summary-empty">${escapeHTML(payload.error || "Summary unavailable.")}</div>`
+    );
     return;
   }
   summaryStatus.textContent = payload.label || "Summary";
   summaryNote.textContent = payload.note || "";
   // Prefer the typed compact payload for the immediate panel. The raw HTML is
   // still included inside the disclosure for full notebook-style detail.
-  summaryFrame.innerHTML = payload.compact ? renderCompactSummary(payload) : payload.html || "";
+  updateSummaryMarkup(
+    summaryFrame,
+    payload.compact ? renderCompactSummary(payload) : payload.html || ""
+  );
+}
+
+function updateSummaryMarkup(summaryFrame, markup) {
+  if (summaryMarkupByFrame.get(summaryFrame) === markup) return;
+  summaryFrame.innerHTML = markup;
+  summaryMarkupByFrame.set(summaryFrame, markup);
 }
 
 export function updateDistributionProfileActions(payload, nodes) {
