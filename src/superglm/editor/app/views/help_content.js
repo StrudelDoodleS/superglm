@@ -31,7 +31,7 @@ export const TOOL_HELP = Object.freeze({
   }),
   help: Object.freeze({
     title: "Help",
-    body: "Open modes, gestures, shortcuts, curve operations, refits, and saving.",
+    body: "Open modes, gestures, shortcuts, curve operations, refits, and exporting.",
     shortcut: "?",
   }),
 });
@@ -142,9 +142,10 @@ export const HELP_SECTIONS = Object.freeze([
     ]),
   }),
   Object.freeze({
-    title: "Saving",
+    title: "Exporting",
     items: Object.freeze([
-      "Save writes or downloads the current Python-confirmed edited model.",
+      "Python model exports are round-trip validated and prediction-checked when evaluation rows are available.",
+      "Excel rating workbooks require training or retained fit data and include structured summary tables.",
     ]),
   }),
 ]);

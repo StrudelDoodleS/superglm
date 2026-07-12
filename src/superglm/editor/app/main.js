@@ -33,6 +33,7 @@ import {
 import { bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar } from "./views/app_bar.js";
 import { renderContextBar } from "./views/context_bar.js";
+import { bindExportDialog } from "./views/export_dialog.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
 import { bindInspector, renderInspector } from "./views/inspector.js";
 import { bindPopovers } from "./views/popover.js";
@@ -83,15 +84,16 @@ const buildDurationValue = document.getElementById("buildDurationValue");
 const resetZoom = document.getElementById("resetZoom");
 const ciToggle = document.getElementById("ciToggle");
 const resetOrder = document.getElementById("resetOrder");
-const saveModel = document.getElementById("saveModel");
-const saveDialog = document.getElementById("saveDialog");
-const saveDialogClose = document.getElementById("saveDialogClose");
-const saveDirectory = document.getElementById("saveDirectory");
-const saveOpenDirectory = document.getElementById("saveOpenDirectory");
-const saveFilename = document.getElementById("saveFilename");
-const saveConfirm = document.getElementById("saveConfirm");
-const saveDownload = document.getElementById("saveDownload");
-const saveStatus = document.getElementById("saveStatus");
+const exportAction = document.getElementById("exportAction");
+const exportDialog = document.getElementById("exportDialog");
+const exportDialogClose = document.getElementById("exportDialogClose");
+const exportDirectory = document.getElementById("exportDirectory");
+const exportOpenDirectory = document.getElementById("exportOpenDirectory");
+const exportFilename = document.getElementById("exportFilename");
+const exportSave = document.getElementById("exportSave");
+const exportDownload = document.getElementById("exportDownload");
+const exportStatus = document.getElementById("exportStatus");
+const exportFormatInputs = [...document.querySelectorAll('input[name="exportFormat"]')];
 const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
 const uncollapseLevels = document.getElementById("uncollapseLevels");
@@ -370,16 +372,6 @@ if (profileDialogClose && profileDialog) {
   });
 }
 
-if (saveDialogClose && saveDialog) {
-  saveDialogClose.addEventListener("click", () => {
-    if (typeof saveDialog.close === "function") {
-      saveDialog.close();
-    } else {
-      saveDialog.removeAttribute("open");
-    }
-  });
-}
-
 async function runProfileFromDialog() {
   if (!profileDialog) return;
   const parameter = profileDialog.dataset.parameter || "tweedie_p";
@@ -392,74 +384,19 @@ async function runProfileFromDialog() {
   }
 }
 
-async function saveEditedModel() {
-  if (!saveConfirm) return;
-  saveConfirm.disabled = true;
-  if (saveStatus) saveStatus.textContent = "Saving...";
-  try {
-    const payload = await editorClient.requestJSON("/save_model", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        directory: saveDirectory ? saveDirectory.value : ".",
-        filename: saveFilename ? saveFilename.value : "superglm_edited_model.joblib"
-      })
-    });
-    if (saveStatus) saveStatus.textContent = `Saved ${payload.path}`;
-  } catch (error) {
-    if (saveStatus) saveStatus.textContent = error.message;
-  } finally {
-    saveConfirm.disabled = false;
-  }
-}
-
-async function downloadEditedModel() {
-  if (!saveDownload) return;
-  saveDownload.disabled = true;
-  if (saveStatus) saveStatus.textContent = "Preparing download...";
-  const requestedName = saveFilename ? saveFilename.value : "superglm_edited_model.joblib";
-  try {
-    const response = await editorClient.requestBlob(
-      `/download_model?filename=${encodeURIComponent(requestedName || "superglm_edited_model.joblib")}`
-    );
-    const blob = await response.blob();
-    const filename =
-      filenameFromDisposition(response.headers.get("content-disposition")) ||
-      requestedName ||
-      "superglm_edited_model.joblib";
-    const message = await saveBlobToFile(blob, filename);
-    if (saveStatus) saveStatus.textContent = message;
-  } catch (error) {
-    if (saveStatus) saveStatus.textContent = error.message;
-  } finally {
-    saveDownload.disabled = false;
-  }
-}
-
-function filenameFromDisposition(disposition) {
-  if (!disposition) return "";
-  const match = disposition.match(/filename="([^"]+)"/i);
-  return match ? match[1] : "";
-}
-
-async function saveBlobToFile(blob, filename) {
+async function saveBlobToFile(blob, filename, fileType) {
   if (typeof window.showSaveFilePicker === "function" && window.isSecureContext) {
     try {
       const handle = await window.showSaveFilePicker({
         suggestedName: filename,
-        types: [
-          {
-            description: "Joblib model",
-            accept: { "application/octet-stream": [".joblib"] }
-          }
-        ]
+        types: [{ description: fileType.description, accept: fileType.accept }]
       });
       const writable = await handle.createWritable();
       await writable.write(blob);
       await writable.close();
       return `Saved ${filename}`;
     } catch (error) {
-      if (error && error.name === "AbortError") return "Download cancelled.";
+      if (error instanceof Error && error.name === "AbortError") return null;
     }
   }
   const url = URL.createObjectURL(blob);
@@ -477,55 +414,37 @@ async function saveBlobToFile(blob, filename) {
   return `Downloaded ${filename}`;
 }
 
-async function openSaveDialog() {
-  if (saveStatus) saveStatus.textContent = "";
-  await initializeSaveDirectory();
-  if (saveDialog && typeof saveDialog.showModal === "function") {
-    saveDialog.showModal();
-  } else if (saveDialog) {
-    saveDialog.setAttribute("open", "");
-  }
+if (
+  !(exportAction instanceof HTMLElement) ||
+  !(exportDialog instanceof HTMLDialogElement) ||
+  !(exportDialogClose instanceof HTMLElement) ||
+  !(exportDirectory instanceof HTMLInputElement) ||
+  !(exportFilename instanceof HTMLInputElement) ||
+  !(exportSave instanceof HTMLButtonElement) ||
+  !(exportDownload instanceof HTMLButtonElement) ||
+  !(exportStatus instanceof HTMLElement) ||
+  !exportFormatInputs.every((input) => input instanceof HTMLInputElement)
+) {
+  throw new Error("Editor export dialog is incomplete");
 }
-
-async function initializeSaveDirectory() {
-  if (!saveDirectory || saveDirectory.value) return;
-  try {
-    const payload = await editorClient.requestJSON("/save_directory", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: saveDirectory ? saveDirectory.value : "" })
-    });
-    if (payload && payload.path) saveDirectory.value = payload.path;
-  } catch (error) {
-    if (saveStatus) saveStatus.textContent = formatSaveRouteError(error);
-  }
-}
-
-async function openDirectoryInFileManager() {
-  if (!saveOpenDirectory) return;
-  saveOpenDirectory.disabled = true;
-  if (saveStatus) saveStatus.textContent = "Opening folder...";
-  try {
-    const payload = await editorClient.requestJSON("/open_directory", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: saveDirectory ? saveDirectory.value : "." })
-    });
-    if (saveStatus) saveStatus.textContent = `Opened ${payload.path}`;
-  } catch (error) {
-    if (saveStatus) saveStatus.textContent = formatSaveRouteError(error);
-  } finally {
-    saveOpenDirectory.disabled = false;
-  }
-}
-
-function formatSaveRouteError(error) {
-  const message = error && error.message ? error.message : String(error);
-  if (message === "not found") {
-    return "Save controls are newer than this running editor server. Rerun session.widget() or restart the kernel.";
-  }
-  return message;
-}
+bindExportDialog({
+  client: editorClient,
+  nodes: {
+    action: exportAction,
+    dialog: exportDialog,
+    close: exportDialogClose,
+    formatInputs: exportFormatInputs,
+    filename: exportFilename,
+    directory: exportDirectory,
+    download: exportDownload,
+    saveToKernel: exportSave,
+    openDirectory: exportOpenDirectory instanceof HTMLButtonElement
+      ? exportOpenDirectory
+      : null,
+    status: exportStatus
+  },
+  saveBlobToFile
+});
 
 async function refreshMetricsView() {
   await actions.refreshEvidence("metrics", "/metrics", {
@@ -1434,18 +1353,6 @@ if (summaryRetry) {
 }
 if (reportRetry) {
   reportRetry.addEventListener("click", () => { void actions.retryEvidence("report"); });
-}
-if (saveModel) {
-  saveModel.addEventListener("click", openSaveDialog);
-}
-if (saveConfirm) {
-  saveConfirm.addEventListener("click", saveEditedModel);
-}
-if (saveDownload) {
-  saveDownload.addEventListener("click", downloadEditedModel);
-}
-if (saveOpenDirectory) {
-  saveOpenDirectory.addEventListener("click", openDirectoryInFileManager);
 }
 summarySource.addEventListener("change", refreshSummaryView);
 refitOffset.addEventListener("click", async () => {
