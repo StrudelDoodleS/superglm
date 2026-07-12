@@ -5257,7 +5257,8 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "runStructuralRefit(collapseTransition(selectedTerm()))" in bindings_source
     assert "runStructuralRefit(ungroupTransition(selectedTerm()))" in bindings_source
     assert "runStructuralRefit(uncollapseTransition())" in bindings_source
-    assert "(state) => state.remote.chartEpoch" in bindings_source
+    assert "store.subscribe(selectChartRenderState" in bindings_source
+    assert "sameChartRenderState" in bindings_source
     assert "(state) => state.remote.summary" in bindings_source
     assert "if (summary)" in bindings_source
     assert "(state) => state.request.evidence.summary" in bindings_source
