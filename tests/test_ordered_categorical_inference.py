@@ -71,6 +71,19 @@ def test_ordered_spline_uses_same_global_wood_test_as_direct_spline():
     assert ordered_row.edf == pytest.approx(direct_row.edf, rel=1e-10)
 
 
+def test_ordered_spline_summary_propagates_wood_programming_errors(monkeypatch):
+    ordered, _, _, _, _, _ = _fit_ordered_and_direct_spline()
+    from superglm.stats import wood_pvalue
+
+    def fail_wood_test(*_args, **_kwargs):
+        raise RuntimeError("ordered Wood sentinel defect")
+
+    monkeypatch.setattr(wood_pvalue, "wood_test_smooth", fail_wood_test)
+
+    with pytest.raises(RuntimeError, match="ordered Wood sentinel defect"):
+        ordered.summary()
+
+
 def test_ordered_level_rows_are_effect_estimates_not_hypothesis_tests():
     ordered, _, _, _, _, levels = _fit_ordered_and_direct_spline()
     summary = ordered.summary()
@@ -111,6 +124,23 @@ def test_editor_payload_reserves_significance_for_global_ordered_smooth():
     assert level["stat_label"] == ""
     assert level["p_value"] is None
     assert level["sig_code"] == ""
+
+
+def test_metrics_feature_se_reports_ordered_level_contrasts():
+    ordered, _, X, y, weights, levels = _fit_ordered_and_direct_spline()
+
+    result = ordered.metrics(X, y, sample_weight=weights).feature_se("band")
+
+    assert set(result) == {"levels", "base_level", "se_log_relativity"}
+    assert list(result["levels"]) == levels
+    assert result["base_level"] == ordered._specs["band"]._base_level
+    se = np.asarray(result["se_log_relativity"])
+    assert se.shape == (len(levels),)
+    assert np.all(np.isfinite(se))
+    assert np.all(se >= 0.0)
+
+    summary_se = np.asarray([row.se for row in _level_rows(ordered.summary())])
+    np.testing.assert_allclose(se, summary_se, rtol=1e-12, atol=1e-12)
 
 
 def test_model_and_metrics_summaries_agree_on_ordered_smooth_test():
@@ -240,3 +270,28 @@ def test_inactive_ordered_spline_suppresses_level_uncertainty() -> None:
     assert "nan" not in html.lower()
     compact = [_compact_summary_row(row) for row in level_rows]
     assert all(row["se"] is None and row["p_value"] is None for row in compact)
+
+
+def test_inactive_metrics_feature_se_keeps_ordered_level_schema() -> None:
+    rng = np.random.default_rng(919)
+    levels = [f"L{i}" for i in range(7)]
+    X = pd.DataFrame({"band": np.tile(levels, 80)})
+    y = rng.poisson(1.0, len(X)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=1e6,
+        features={
+            "band": OrderedCategorical(
+                order=levels,
+                basis=Spline(kind="ps", k=7, select=True),
+            )
+        },
+    )
+    model.fit(X, y)
+
+    result = model.metrics(X, y).feature_se("band")
+
+    assert set(result) == {"levels", "base_level", "se_log_relativity"}
+    assert list(result["levels"]) == levels
+    assert result["base_level"] == model._specs["band"]._base_level
+    np.testing.assert_array_equal(result["se_log_relativity"], np.zeros(len(levels)))
