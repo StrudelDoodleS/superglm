@@ -791,6 +791,16 @@ function renderChartWorkspace() {
   );
 }
 
+function renderChartOnly() {
+  const state = store.getState();
+  const term = currentTerm();
+  if (!state.remote.snapshot || !term) return;
+  const selection = state.view.preview && state.view.preview.term === selectedTerm()
+    ? new Set(state.view.preview.selection)
+    : currentSelection();
+  drawChart(term, selection, chartContext);
+}
+
 function termCatalogueKey(terms) {
   return groupedTerms(terms).map(
     ([group, names]) => `${group}\u0000${names.join("\u0000")}`
@@ -1266,15 +1276,19 @@ function runContributionBuild(fromProgress) {
     const elapsed = Math.max((now - started) / duration, 0);
     const progress = Math.min(initialProgress + elapsed * (1 - initialProgress), 1);
     buildProgress = progress;
-    if (progress >= 1) buildFrame = null;
-    renderChartWorkspace();
+    if (progress >= 1) {
+      buildFrame = null;
+      contribPlay.disabled = false;
+    }
+    renderChartOnly();
     if (progress < 1) {
       buildFrame = requestAnimationFrame(step);
     }
   };
   buildProgress = initialProgress;
   buildFrame = requestAnimationFrame(step);
-  renderChartWorkspace();
+  contribPlay.disabled = true;
+  renderChartOnly();
 }
 
 function advanceContributionBuild() {
@@ -1294,7 +1308,8 @@ function advanceContributionBuild() {
   if (next < 1) {
     runContributionBuild(next);
   } else {
-    renderChartWorkspace();
+    contribPlay.disabled = false;
+    renderChartOnly();
   }
   return true;
 }
@@ -1305,6 +1320,7 @@ function stopContributionBuild() {
     buildFrame = null;
   }
   buildProgress = null;
+  contribPlay.disabled = false;
 }
 
 svg.addEventListener(

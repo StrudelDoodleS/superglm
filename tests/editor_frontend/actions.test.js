@@ -186,7 +186,13 @@ test("successful mutation commits once and schedules only a new revision", async
   const scheduled = [];
   const actions = createEditorActions({
     store,
-    client: { postJSON: async () => snapshot(1), getState: async () => snapshot(1) },
+    client: {
+      postJSON: async () => {
+        assert.equal(store.getState().request.mutation.blocking, false);
+        return snapshot(1);
+      },
+      getState: async () => snapshot(1)
+    },
     scheduleVisibleEvidence: (revision) => { scheduled.push(revision); }
   });
 

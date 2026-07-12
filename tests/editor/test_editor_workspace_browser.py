@@ -325,6 +325,8 @@ def test_collapsed_categorical_selection_posts_exact_source_indices_without_redr
         collapsed_levels=("territory", collapsed_levels),
     ) as (page, session):
         select_chart_tool(page, "Select")
+        assert page.locator("#groupDisplayMode").is_enabled()
+        assert page.locator("#groupDisplayMode").input_value() == "expanded"
         page.select_option("#groupDisplayMode", "collapsed")
         page.wait_for_function("() => document.querySelector('#chart')?._scale?.displayIsCollapsed")
 
@@ -740,6 +742,30 @@ def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page)
             held_select[0].continue_()
         page.unroute("**/select")
 
+        select_chart_tool(page, "Handles")
+        held_control = []
+        page.route("**/control", lambda route: held_control.append(route))
+        handle = page.locator("#chart .control-handle").first
+        box = handle.bounding_box()
+        assert box is not None
+        with page.expect_request(
+            lambda request: request.method == "POST" and request.url.endswith("/control")
+        ):
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            page.mouse.down()
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2 - 12)
+            page.mouse.up()
+        page.wait_for_timeout(50)
+        assert len(held_control) == 1
+        assert page.locator("#appBusyOverlay").is_hidden()
+        assert page.locator("#editorView").get_attribute("inert") is None
+        assert page.evaluate("document.activeElement?.id") != "appBusyAnnouncement"
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and response.url.endswith("/control")
+        ):
+            held_control[0].continue_()
+        page.unroute("**/control")
+
         held_term = []
         page.route("**/term", lambda route: held_term.append(route))
         with page.expect_request(
@@ -806,11 +832,81 @@ def test_term_change_does_not_rewrite_unrelated_editor_panels(open_editor_page):
         }
 
 
+def test_contribution_frames_update_only_the_chart_scene(open_editor_page):
+    with open_editor_page() as (page, _session):
+        page.locator("#metricGrid > *").first.wait_for()
+        page.locator("#summaryFrame > *").first.wait_for()
+        select_chart_tool(page, "Handles")
+        play = page.locator("#contribPlay")
+        play.wait_for(state="visible")
+        page.evaluate(
+            """() => {
+                window.__contributionBoundaryNodes = {
+                    chart: document.querySelector('#chart path.edited'),
+                    tool: document.querySelector('#toolRail [data-tool]'),
+                    statusText: document.querySelector('#status')?.firstChild,
+                    handleCountText: document.querySelector('#handleCountValue')?.firstChild,
+                    metric: document.querySelector('#metricGrid > *'),
+                    summary: document.querySelector('#summaryFrame > *'),
+                    history: document.querySelector('#historyFrame > *'),
+                    termOptions: Array.from(document.querySelectorAll('#term option')),
+                };
+            }"""
+        )
+
+        play.click()
+        page.locator("#chart .basis-build").wait_for()
+        page.evaluate(
+            "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+        )
+        boundaries = page.evaluate(
+            """() => {
+                const before = window.__contributionBoundaryNodes;
+                const options = Array.from(document.querySelectorAll('#term option'));
+                return {
+                    chartChanged: !before.chart.isConnected,
+                    toolStable: before.tool === document.querySelector('#toolRail [data-tool]'),
+                    statusStable: before.statusText === document.querySelector('#status')?.firstChild,
+                    handleCountStable: before.handleCountText
+                        === document.querySelector('#handleCountValue')?.firstChild,
+                    metricStable: before.metric === document.querySelector('#metricGrid > *'),
+                    summaryStable: before.summary === document.querySelector('#summaryFrame > *'),
+                    historyStable: before.history === document.querySelector('#historyFrame > *'),
+                    optionsStable: before.termOptions.length === options.length
+                        && before.termOptions.every((node, index) => node === options[index]),
+                    playDisabled: document.querySelector('#contribPlay').disabled,
+                };
+            }"""
+        )
+        assert boundaries == {
+            "chartChanged": True,
+            "toolStable": True,
+            "statusStable": True,
+            "handleCountStable": True,
+            "metricStable": True,
+            "summaryStable": True,
+            "historyStable": True,
+            "optionsStable": True,
+            "playDisabled": True,
+        }
+        select_chart_tool(page, "Select")
+
+
 def test_summary_updating_status_preserves_confirmed_table_nodes(open_editor_page):
     with open_editor_page() as (page, _session):
         summary_child = page.locator("#summaryFrame > *").first
         summary_child.wait_for()
-        summary_child.evaluate("node => { window.__confirmedSummaryChild = node; }")
+        summary_child.evaluate(
+            """node => {
+                window.__confirmedSummaryChild = node;
+                window.__summaryBoundaryNodes = {
+                    chart: document.querySelector('#chart path.edited'),
+                    metric: document.querySelector('#metricGrid > *'),
+                    history: document.querySelector('#historyFrame > *'),
+                    termOptions: Array.from(document.querySelectorAll('#term option')),
+                };
+            }"""
+        )
         held_summary = []
         page.route("**/summary", lambda route: held_summary.append(route))
 
@@ -832,7 +928,40 @@ def test_summary_updating_status_preserves_confirmed_table_nodes(open_editor_pag
         with page.expect_response(
             lambda response: response.request.method == "POST" and response.url.endswith("/summary")
         ):
-            held_summary[0].continue_()
+            backend_response = held_summary[0].fetch()
+            payload = backend_response.json()
+            payload["available"] = False
+            payload["label"] = "Replacement summary"
+            payload["error"] = "Replacement payload rendered locally."
+            payload["compact"] = None
+            payload["html"] = ""
+            held_summary[0].fulfill(response=backend_response, json=payload)
+
+        page.wait_for_function(
+            "() => document.querySelector('#summaryFrame')?.textContent.includes('Replacement')"
+        )
+        isolation = page.evaluate(
+            """() => {
+                const before = window.__summaryBoundaryNodes;
+                const options = Array.from(document.querySelectorAll('#term option'));
+                return {
+                    summaryChanged: window.__confirmedSummaryChild
+                        !== document.querySelector('#summaryFrame > *'),
+                    chartStable: before.chart === document.querySelector('#chart path.edited'),
+                    metricStable: before.metric === document.querySelector('#metricGrid > *'),
+                    historyStable: before.history === document.querySelector('#historyFrame > *'),
+                    optionsStable: before.termOptions.length === options.length
+                        && before.termOptions.every((node, index) => node === options[index]),
+                };
+            }"""
+        )
+        assert isolation == {
+            "summaryChanged": True,
+            "chartStable": True,
+            "metricStable": True,
+            "historyStable": True,
+            "optionsStable": True,
+        }
 
 
 def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_page):
