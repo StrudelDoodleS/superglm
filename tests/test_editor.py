@@ -24,6 +24,12 @@ from superglm import (
     generate_tweedie_cpg,
 )
 from superglm.editor import EditableTerm, EditorSession
+from superglm.editor.evaluation import coerce_dataset
+from superglm.editor.persistence import (
+    ModelArtifactValidation,
+    _spread_row_indices,
+    serialize_validated_model,
+)
 from superglm.inference.summary import ModelSummary, _BasisDetailRow, _CoefRow
 
 
@@ -158,6 +164,194 @@ def editor_model(editor_frame):
     )
     model.fit(X, y)
     return model
+
+
+def test_serialize_validated_model_round_trip_predictions(editor_model, editor_frame):
+    import io
+
+    import joblib
+
+    X, y = editor_frame
+    dataset = coerce_dataset("validation", (X, y))
+
+    data, validation = serialize_validated_model(editor_model, dataset=dataset, max_rows=17)
+    loaded = joblib.load(io.BytesIO(data))
+
+    assert isinstance(data, bytes)
+    assert validation == ModelArtifactValidation(
+        artifact_round_trip=True,
+        prediction_rows=17,
+        scope="artifact+predictions",
+    )
+    indices = _spread_row_indices(len(X), 17)
+    np.testing.assert_allclose(
+        loaded.predict(X.iloc[indices]),
+        editor_model.predict(X.iloc[indices]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_spread_row_indices_are_deterministic_bounded_and_include_endpoints():
+    first = _spread_row_indices(101, 17)
+    second = _spread_row_indices(101, 17)
+
+    np.testing.assert_array_equal(first, second)
+    assert len(first) == 17
+    assert first[0] == 0
+    assert first[-1] == 100
+    assert len(np.unique(first)) == len(first)
+    np.testing.assert_array_equal(_spread_row_indices(4, 17), np.arange(4))
+    np.testing.assert_array_equal(_spread_row_indices(0, 17), np.array([], dtype=np.intp))
+
+
+def test_serialize_validated_model_slices_spread_rows_and_offset_consistently(
+    editor_model,
+    editor_frame,
+    monkeypatch,
+):
+    import superglm.editor.persistence as persistence
+
+    X, y = editor_frame
+    offset = np.linspace(-0.2, 0.2, len(X))
+    dataset = coerce_dataset("validation", (X, y, None, offset))
+    expected_indices = _spread_row_indices(len(X), 17)
+    seen: dict[str, np.ndarray] = {}
+    real_load = persistence.joblib_load_bytes
+
+    def load_with_recording_predict(data):
+        loaded = real_load(data)
+        real_predict = loaded.predict
+
+        def recording_predict(X_rows, offset=None):
+            seen["indices"] = X_rows.index.to_numpy()
+            seen["offset"] = np.asarray(offset)
+            return real_predict(X_rows, offset=offset)
+
+        loaded.predict = recording_predict
+        return loaded
+
+    monkeypatch.setattr(persistence, "joblib_load_bytes", load_with_recording_predict)
+
+    _, validation = serialize_validated_model(editor_model, dataset=dataset, max_rows=17)
+
+    np.testing.assert_array_equal(seen["indices"], expected_indices)
+    np.testing.assert_array_equal(seen["offset"], offset[expected_indices])
+    assert validation.prediction_rows == 17
+
+
+@pytest.mark.parametrize("failure", ["mismatch", "nonfinite"])
+def test_serialize_validated_model_rejects_bad_loaded_predictions(
+    editor_model,
+    editor_frame,
+    monkeypatch,
+    failure,
+):
+    import superglm.editor.persistence as persistence
+
+    X, y = editor_frame
+    dataset = coerce_dataset("validation", (X, y))
+    real_load = persistence.joblib_load_bytes
+
+    def load_with_bad_predict(data):
+        loaded = real_load(data)
+        real_predict = loaded.predict
+
+        def bad_predict(X_rows, offset=None):
+            predictions = np.asarray(real_predict(X_rows, offset=offset), dtype=np.float64)
+            if failure == "nonfinite":
+                return np.full_like(predictions, np.nan)
+            return predictions + 1.0
+
+        loaded.predict = bad_predict
+        return loaded
+
+    monkeypatch.setattr(persistence, "joblib_load_bytes", load_with_bad_predict)
+
+    with pytest.raises(ValueError, match="prediction validation failed"):
+        serialize_validated_model(editor_model, dataset=dataset, max_rows=17)
+
+
+def test_serialize_validated_model_contract_only(editor_model):
+    data, validation = serialize_validated_model(editor_model)
+
+    assert isinstance(data, bytes)
+    assert validation == ModelArtifactValidation(
+        artifact_round_trip=True,
+        prediction_rows=0,
+        scope="artifact",
+    )
+
+
+def test_serialize_validated_model_empty_dataset_is_contract_only(editor_model, editor_frame):
+    X, y = editor_frame
+    dataset = coerce_dataset("validation", (X.iloc[:0], y[:0]))
+
+    _, validation = serialize_validated_model(editor_model, dataset=dataset)
+
+    assert validation.scope == "artifact"
+    assert validation.prediction_rows == 0
+
+
+def test_serialize_validated_model_rejects_invalid_max_rows(editor_model):
+    with pytest.raises(ValueError, match="max_rows"):
+        serialize_validated_model(editor_model, max_rows=0)
+
+
+@pytest.mark.parametrize(
+    "contract_failure",
+    [
+        "wrong_type",
+        "missing_result",
+        "noncallable_predict",
+        "beta_shape",
+        "nonfinite_beta",
+        "nonfinite_intercept",
+        "feature_order",
+        "spec_key_order",
+        "spec_type",
+    ],
+)
+def test_serialize_validated_model_rejects_bad_artifact_contract(
+    editor_model,
+    monkeypatch,
+    contract_failure,
+):
+    from dataclasses import replace
+
+    import superglm.editor.persistence as persistence
+
+    real_load = persistence.joblib_load_bytes
+
+    def load_invalid_artifact(data):
+        if contract_failure == "wrong_type":
+            return SimpleNamespace()
+        loaded = real_load(data)
+        if contract_failure == "missing_result":
+            loaded._result = None
+        elif contract_failure == "noncallable_predict":
+            loaded.predict = None
+        elif contract_failure == "beta_shape":
+            loaded._result = replace(loaded.result, beta=loaded.result.beta[:-1])
+        elif contract_failure == "nonfinite_beta":
+            beta = loaded.result.beta.copy()
+            beta[0] = np.nan
+            loaded._result = replace(loaded.result, beta=beta)
+        elif contract_failure == "nonfinite_intercept":
+            loaded._result = replace(loaded.result, intercept=np.inf)
+        elif contract_failure == "feature_order":
+            loaded._feature_order = list(reversed(loaded._feature_order))
+        elif contract_failure == "spec_key_order":
+            loaded._specs = dict(reversed(list(loaded._specs.items())))
+        elif contract_failure == "spec_type":
+            first_name = next(iter(loaded._specs))
+            loaded._specs[first_name] = Numeric()
+        return loaded
+
+    monkeypatch.setattr(persistence, "joblib_load_bytes", load_invalid_artifact)
+
+    with pytest.raises(ValueError, match="artifact validation failed"):
+        serialize_validated_model(editor_model)
 
 
 def test_session_extracts_1d_main_effects(editor_model):
@@ -1033,6 +1227,8 @@ def test_widget_evidence_and_export_reuse_materialized_model(
     tmp_path,
     monkeypatch,
 ):
+    import joblib
+
     import superglm.editor.apply as apply_module
 
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
@@ -1042,6 +1238,7 @@ def test_widget_evidence_and_export_reuse_materialized_model(
     materialized_calls = 0
     dumped: list[object] = []
     original_apply = apply_module.apply_edits_to_model_copy_with_data
+    original_dump = joblib.dump
 
     def counted_apply(*args, **kwargs):
         nonlocal materialized_calls
@@ -1050,8 +1247,7 @@ def test_widget_evidence_and_export_reuse_materialized_model(
 
     def capture_dump(model, target):
         dumped.append(model)
-        if isinstance(target, Path | str):
-            Path(target).touch()
+        return original_dump(model, target)
 
     monkeypatch.setattr(apply_module, "apply_edits_to_model_copy_with_data", counted_apply)
     monkeypatch.setattr("joblib.dump", capture_dump)
@@ -1072,7 +1268,7 @@ def test_widget_evidence_and_export_reuse_materialized_model(
     assert report["summary"]["available"] is True
     assert Path(saved["path"]).exists()
     assert filename == "edited-model.joblib"
-    assert downloaded == b""
+    assert downloaded
     assert dumped == [materialized, materialized]
 
 
@@ -4659,6 +4855,39 @@ def test_widget_http_save_model_writes_edited_joblib(editor_model, tmp_path):
     assert saved_model is not editor_model
     np.testing.assert_allclose(editor_model.result.beta, original_beta)
     assert not np.allclose(saved_model.result.beta, original_beta)
+
+
+def test_save_model_validation_failure_creates_no_file(
+    editor_model,
+    editor_frame,
+    tmp_path,
+    monkeypatch,
+):
+    import superglm.editor.persistence as persistence
+
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        validation_data=(X.iloc[-31:], y[-31:]),
+    )
+    target = tmp_path / "new-parent" / "edited-model.joblib"
+    seen_dataset = None
+
+    def fail_validation(model, *, dataset=None, max_rows=512):
+        nonlocal seen_dataset
+        seen_dataset = dataset
+        raise ValueError("artifact validation failed: forced failure")
+
+    monkeypatch.setattr(persistence, "serialize_validated_model", fail_validation)
+
+    with pytest.raises(ValueError, match="forced failure"):
+        session.save_model(target)
+
+    assert not target.exists()
+    assert not target.parent.exists()
+    assert seen_dataset is not None
+    assert seen_dataset.name == "validation"
 
 
 def test_save_model_uses_session_train_data_without_retained_fit_state(tmp_path):
