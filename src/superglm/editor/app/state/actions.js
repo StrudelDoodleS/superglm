@@ -503,6 +503,10 @@ export function createEditorActions({
         Number(response.model_revision) !== revision ||
         Number(response.request_sequence) !== sequence
       ) {
+        const message = isRecord(response) && response.status === "superseded"
+          ? "Evidence request was superseded. Retry to refresh this panel."
+          : "Evidence response did not match the current request. Retry to refresh this panel.";
+        store.update((state) => failEvidence(state, panel, revision, sequence, message));
         return false;
       }
       let accepted = false;

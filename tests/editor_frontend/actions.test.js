@@ -1293,6 +1293,28 @@ test("late evidence cannot replace a newer revision", async () => {
   assert.equal(store.getState().request.evidence.metrics.revision, 3);
 });
 
+test("a superseded current evidence request becomes retryable", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(3)));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async (_path, payload) => ({
+        status: "superseded",
+        model_revision: payload.model_revision,
+        request_sequence: payload.request_sequence
+      }),
+      getState: async () => snapshot(3)
+    }
+  });
+
+  assert.equal(await actions.refreshEvidence("metrics", "/metrics", { split: "validation" }), false);
+  assert.equal(store.getState().request.evidence.metrics.status, "error");
+  assert.match(store.getState().request.evidence.metrics.error || "", /superseded/i);
+  assert.deepEqual(store.getState().request.evidence.metrics.retry, {
+    path: "/metrics", payload: { split: "validation" }
+  });
+});
+
 test("only the latest same-revision evidence response is accepted", async () => {
   const firstResponse = deferred();
   const secondResponse = deferred();

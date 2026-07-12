@@ -421,6 +421,64 @@ def test_expanded_group_members_remain_individually_selectable_for_regrouping(
         assert page.locator("#chart circle.point.selected[data-index]").count() == 1
 
 
+def test_expanded_structural_group_moves_without_preview_jump(open_editor_page):
+    grouped_levels = ("T02", "T03")
+    with open_editor_page(
+        selected_term="territory",
+        collapsed_levels=("territory", grouped_levels),
+    ) as (page, session):
+        levels = session.terms["territory"].levels
+        source_indices = [levels.index(level) for level in grouped_levels]
+        points = [
+            page.locator(f'#chart circle.point[data-index="{index}"]') for index in source_indices
+        ]
+        select_chart_tool(page, "Move")
+        box = points[0].bounding_box()
+        assert box is not None
+        x = box["x"] + box["width"] / 2
+        y = box["y"] + box["height"] / 2
+        original_cy = float(points[0].get_attribute("cy"))
+
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y - 30)
+        page.wait_for_function(
+            """({indices, originalCy}) => {
+                const values = indices.map(index => Number(document.querySelector(
+                    `#chart circle.point[data-index="${index}"]`
+                )?.getAttribute('cy')));
+                return values.every(Number.isFinite)
+                    && Math.abs(values[0] - values[1]) < 1e-6
+                    && Math.abs(values[0] - originalCy) > 1;
+            }""",
+            arg={"indices": source_indices, "originalCy": original_cy},
+        )
+        preview_cy = float(points[0].get_attribute("cy"))
+
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/drag")
+            )
+        ) as drag_info:
+            page.mouse.up()
+
+        request = drag_info.value.request.post_data_json
+        assert request["indices"] == [source_indices[0]]
+        page.wait_for_function(
+            """({indices, previewCy}) => indices.every(index => {
+                const value = Number(document.querySelector(
+                    `#chart circle.point[data-index="${index}"]`
+                )?.getAttribute('cy'));
+                return Number.isFinite(value) && Math.abs(value - previewCy) < 1e-6;
+            })""",
+            arg={"indices": source_indices, "previewCy": preview_cy},
+        )
+        assert session.selection("territory").tolist() == [source_indices[0]]
+        effects = session.terms["territory"].edited_log_effect[source_indices]
+        assert effects[0] == pytest.approx(effects[1])
+
+
 def test_selection_menu_does_not_block_adjacent_modifier_selection(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, session):
         select_chart_tool(page, "Select")

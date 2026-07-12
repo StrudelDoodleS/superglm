@@ -66,6 +66,7 @@ export function bindInteractions(context) {
       const indices = selectionTouchesPoint
         ? Array.from(selection).sort((a, b) => a - b)
         : sourceForPoint;
+      const affectedIndices = structuralEditSourceIndices(activeTerm, indices);
       const preview = structuredClone(activeTerm);
       interaction.pointDrag = {
         term: context.selectedTerm(),
@@ -76,6 +77,8 @@ export function bindInteractions(context) {
         startValue: displayedTermValue(preview, displayIndex, context),
         indices,
         values: indices.map((j) => preview.y[j]),
+        affectedIndices,
+        affectedValues: affectedIndices.map((j) => preview.y[j]),
         delta: 0
       };
       if (!selectionTouchesPoint) {
@@ -207,7 +210,10 @@ export function bindInteractions(context) {
         handle_count: term.controls ? term.controls.count : undefined
       };
       interaction.controlDrag = null;
-      await context.actions.executeStateMutation({ name: "control", path: "/control", payload });
+      const result = await context.actions.executeStateMutation({
+        name: "control", path: "/control", payload
+      });
+      if (!result || !result.ok) context.clearPreviewTerm();
       return;
     }
     if (interaction.pointDrag) {
@@ -225,7 +231,10 @@ export function bindInteractions(context) {
         )
       };
       interaction.pointDrag = null;
-      await context.actions.executeStateMutation({ name: "drag", path: "/drag", payload });
+      const result = await context.actions.executeStateMutation({
+        name: "drag", path: "/drag", payload
+      });
+      if (!result || !result.ok) context.clearPreviewTerm();
       return;
     }
     if (interaction.orderDrag) {
@@ -390,10 +399,28 @@ function displayedTermValue(term, displayIndex, context) {
 }
 
 function updateDraggedSourceValues(term, drag, context) {
-  for (let k = 0; k < drag.indices.length; k++) {
-    term.y[drag.indices[k]] = Math.max(1e-12, drag.values[k] + drag.delta);
+  for (let k = 0; k < drag.affectedIndices.length; k++) {
+    term.y[drag.affectedIndices[k]] = Math.max(
+      1e-12,
+      drag.affectedValues[k] + drag.delta
+    );
   }
-  syncCollapsedDisplayFromRaw(term, context, drag.indices);
+  syncCollapsedDisplayFromRaw(term, context, drag.affectedIndices);
+}
+
+function structuralEditSourceIndices(term, sourceIndices) {
+  const affected = new Set(sourceIndices);
+  const groups = Array.isArray(term.level_groups) ? term.level_groups : [];
+  for (const group of groups) {
+    const members = Array.isArray(group.indices)
+      ? group.indices.map(Number).filter(
+        (index) => Number.isInteger(index) && index >= 0 && index < term.y.length
+      )
+      : [];
+    if (!members.some((index) => affected.has(index))) continue;
+    for (const index of members) affected.add(index);
+  }
+  return Array.from(affected).sort((a, b) => a - b);
 }
 
 function syncCollapsedDisplayFromRaw(term, context, sourceIndices) {
