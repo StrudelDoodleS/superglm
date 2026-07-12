@@ -5096,7 +5096,7 @@ def test_editor_interactions_map_group_display_indices_to_source_indices():
     assert "sourceIndicesForDisplayIndex" in interactions_js
     assert "sourceIndicesForDisplayIndices" in interactions_js
     assert "valuesForSourceIndices" in interactions_js
-    assert "expandedGroupSourceForIndex" in interactions_js
+    assert "if (!scale.displayIsCollapsed) return [index]" in interactions_js
     assert "displayToSourceIndices" in chart_js
 
 

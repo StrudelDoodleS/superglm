@@ -361,10 +361,9 @@ function toggleSourceSelection(selection, sourceIndices) {
 }
 
 function sourceIndicesForDisplayIndex(context, displayIndex) {
-  const term = context.currentTerm();
   const index = Number(displayIndex);
   const scale = context.svg._scale || {};
-  if (!scale.displayIsCollapsed) return expandedGroupSourceForIndex(term, index);
+  if (!scale.displayIsCollapsed) return [index];
   const mapping = scale.displayToSourceIndices;
   if (!Array.isArray(mapping)) return [index];
   const source = mapping[index];
@@ -380,15 +379,6 @@ function sourceIndicesForDisplayIndices(context, displayIndices) {
     }
   }
   return Array.from(out).sort((a, b) => a - b);
-}
-
-function expandedGroupSourceForIndex(term, index) {
-  const groups = Array.isArray(term && term.level_groups) ? term.level_groups : [];
-  for (const group of groups) {
-    const indices = Array.isArray(group.indices) ? group.indices.map(Number) : [];
-    if (indices.includes(Number(index))) return indices;
-  }
-  return [Number(index)];
 }
 
 function displayedTermValue(term, displayIndex, context) {

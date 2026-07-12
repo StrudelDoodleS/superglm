@@ -394,6 +394,33 @@ def test_collapsed_categorical_selection_posts_exact_source_indices_without_redr
         assert selection_dom_is_unchanged(page)
 
 
+def test_expanded_group_members_remain_individually_selectable_for_regrouping(
+    open_editor_page,
+):
+    with open_editor_page(
+        selected_term="territory",
+        collapsed_levels=("territory", ("T02", "T03")),
+    ) as (page, session):
+        select_chart_tool(page, "Select")
+        assert page.locator("#groupDisplayMode").input_value() == "expanded"
+        source_index = session.terms["territory"].levels.index("T02")
+        point = page.locator(f'#chart circle.point[data-index="{source_index}"]')
+
+        with page.expect_response(
+            lambda response: is_select_request(response.request)
+        ) as response_info:
+            point.click()
+
+        assert response_info.value.status == 200
+        assert response_info.value.request.post_data_json == {
+            "term": "territory",
+            "indices": [source_index],
+        }
+        page.wait_for_function("() => document.querySelector('#appBusyOverlay')?.hidden")
+        assert session.selection("territory").tolist() == [source_index]
+        assert page.locator("#chart circle.point.selected[data-index]").count() == 1
+
+
 def test_selection_menu_does_not_block_adjacent_modifier_selection(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, session):
         select_chart_tool(page, "Select")
