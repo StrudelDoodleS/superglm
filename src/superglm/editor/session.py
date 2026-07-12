@@ -563,16 +563,29 @@ class EditorSession:
             offset=offset,
         )
 
-    def capture_materialization_request(self) -> EditMaterializationRequest | None:
-        """Capture only plot-scale edits and immutable evaluation references."""
-        if not self.edited_terms():
+    def capture_materialization_request(
+        self,
+        *,
+        dataset=None,
+        include_unchanged: bool = False,
+    ) -> EditMaterializationRequest | None:
+        """Capture plot-scale state and immutable evaluation references."""
+        if not include_unchanged and not self.edited_terms():
             return None
         return EditMaterializationRequest(
             model_revision=self.model_revision,
             edit_epoch=self.edit_epoch,
             base_model=self.model,
             terms={name: term.copy() for name, term in self.terms.items()},
-            dataset=default_metrics_dataset(self),
+            dataset=default_metrics_dataset(self) if dataset is None else dataset,
+        )
+
+    def materialization_request_is_current(self, request: EditMaterializationRequest) -> bool:
+        """Return whether a captured model snapshot still identifies this session state."""
+        return (
+            request.model_revision == self.model_revision
+            and request.edit_epoch == self.edit_epoch
+            and request.base_model is self.model
         )
 
     def cached_materialized_model(
@@ -595,11 +608,7 @@ class EditorSession:
 
     def publish_materialized_model(self, request: EditMaterializationRequest, model) -> bool:
         """Publish a private model only if its entire snapshot is still current."""
-        if (
-            request.model_revision != self.model_revision
-            or request.edit_epoch != self.edit_epoch
-            or request.base_model is not self.model
-        ):
+        if not self.materialization_request_is_current(request):
             return False
         self._materialized_edit_model = model
         self._materialized_edit_epoch = request.edit_epoch

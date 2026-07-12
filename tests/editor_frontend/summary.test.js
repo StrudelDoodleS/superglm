@@ -11,6 +11,7 @@ const summaryModulePath = "../../src/superglm/editor/app/summary.js";
 const {
   collapseTransition,
   renderSummary,
+  runDistributionProfile,
   uncollapseTransition,
   ungroupTransition
 } = await import(summaryModulePath);
@@ -83,6 +84,46 @@ test("rendering unchanged summary markup preserves the existing table DOM", () =
   renderSummary(payload, nodes);
 
   assert.equal(writes, 1);
+});
+
+test("profile completion is accepted before the caller schedules new-revision evidence", async () => {
+  /** @type {string[]} */
+  const events = [];
+  const result = { available: false, label: "Profiled model", error: "No compact summary" };
+  const nodes = {
+    summaryStatus: { textContent: "" },
+    summaryNote: { textContent: "" },
+    summaryFrame: {
+      innerHTML: "",
+      /** @param {string} name @param {string} value */
+      setAttribute: (name, value) => events.push(`frame:${name}:${value}`)
+    }
+  };
+  /** @param {string} path */
+  const request = async (path) => {
+    events.push(`request:${path}`);
+    if (path.endsWith("/start")) return { status: "running", job_id: "job-7" };
+    return { status: "complete", result };
+  };
+
+  const payload = await runDistributionProfile(
+    nodes,
+    "tweedie_p",
+    async (/** @type {typeof result} */ accepted) => {
+      events.push(`accepted:${accepted.label}`);
+    },
+    { request, pause: async () => {} }
+  );
+
+  assert.strictEqual(payload, result);
+  assert.deepEqual(events.filter((event) => event.startsWith("request:")), [
+    "request:/profile_distribution/start",
+    "request:/profile_distribution/status/job-7"
+  ]);
+  assert.ok(events.indexOf("accepted:Profiled model") > events.indexOf(
+    "request:/profile_distribution/status/job-7"
+  ));
+  assert.equal(events.some((event) => event.includes("/metrics")), false);
 });
 
 test("state-only recovery publishes a stale summary payload when remote summary is null", async () => {

@@ -7,9 +7,11 @@ import { createEditorActions } from "./state/actions.js";
 import {
   selectActiveTermName,
   selectCurrentSelection,
+  selectEvidenceNeedsRefresh,
   selectGroupDisplayMode,
   selectRenderableTerm,
-  selectSnapshot
+  selectSnapshot,
+  selectVisibleEvidencePanels
 } from "./state/selectors.js";
 import {
   createEditorStore,
@@ -204,8 +206,12 @@ const inspector = bindInspector({
     actions.patchView({ inspectorPane: panel });
     const snapshot = store.getState().remote.snapshot;
     if (panel === "history" && snapshot) renderHistory(snapshot.history, historyFrame);
+    scheduleVisibleEvidenceCatchUp();
   },
-  onOpenChange: (open) => actions.patchView({ inspectorOpen: open }),
+  onOpenChange: (open) => {
+    actions.patchView({ inspectorOpen: open });
+    if (open) scheduleVisibleEvidenceCatchUp();
+  },
   isOpen: () => store.getState().view.inspectorOpen,
   isNarrow: () => narrowQuery.matches,
 });
@@ -231,7 +237,9 @@ function syncViewport(event = narrowQuery) {
     inspector.close({ restoreFocus: false });
     inspectorToggle.focus();
   } else {
-    actions.patchView({ inspectorOpen: !event.matches });
+    const open = !event.matches;
+    actions.patchView({ inspectorOpen: open });
+    if (open) scheduleVisibleEvidenceCatchUp();
   }
   renderInspectorView();
 }
@@ -377,11 +385,10 @@ async function runProfileFromDialog() {
   const parameter = profileDialog.dataset.parameter || "tweedie_p";
   stopContributionBuild();
   summarySource.value = "selected";
-  const payload = await runDistributionProfile(summaryNodes(), parameter, refreshMetricsView);
-  if (payload) {
-    await actions.initialize();
-    await refreshActiveReport();
-  }
+  await runDistributionProfile(summaryNodes(), parameter, async () => {
+    const snapshot = await actions.initialize();
+    scheduleVisibleEvidence(snapshot.model_revision, { immediate: true });
+  });
 }
 
 async function saveBlobToFile(blob, filename, fileType) {
@@ -465,33 +472,44 @@ async function refreshActiveReport() {
   await actions.refreshEvidence("report", "/report", { report: activeView });
 }
 
-function scheduleVisibleEvidence(revision, { immediate = false, summaryCommitted = false } = {}) {
+function scheduleVisibleEvidence(
+  revision,
+  { immediate = false, summaryCommitted = false, onlyStale = false } = {}
+) {
   const state = store.getState();
   if (state.remote.snapshot?.model_revision !== revision) return;
-  resetSummarySourceAfterInvalidatingEdit();
-  if (state.view.activeView !== "editor") {
-    actions.schedulePanelEvidence(
-      "report",
-      "/report",
-      { report: state.view.activeView },
-      { immediate }
-    );
-    return;
+  if (!onlyStale) resetSummarySourceAfterInvalidatingEdit();
+  for (const panel of selectVisibleEvidencePanels(state, { summaryCommitted })) {
+    if (onlyStale && !selectEvidenceNeedsRefresh(state, panel)) continue;
+    if (panel === "report") {
+      actions.schedulePanelEvidence(
+        panel,
+        "/report",
+        { report: state.view.activeView },
+        { immediate }
+      );
+    } else if (panel === "metrics") {
+      actions.schedulePanelEvidence(
+        panel,
+        "/metrics",
+        { metric: "deviance", source: "in_force" },
+        { immediate }
+      );
+    } else {
+      actions.schedulePanelEvidence(
+        panel,
+        "/summary",
+        { source: summarySource.value },
+        { immediate }
+      );
+    }
   }
-  actions.schedulePanelEvidence(
-    "metrics",
-    "/metrics",
-    { metric: "deviance", source: "in_force" },
-    { immediate }
-  );
-  if (!summaryCommitted && state.view.inspectorOpen && state.view.inspectorPane === "summary") {
-    actions.schedulePanelEvidence(
-      "summary",
-      "/summary",
-      { source: summarySource.value },
-      { immediate }
-    );
-  }
+}
+
+function scheduleVisibleEvidenceCatchUp() {
+  const revision = store.getState().remote.snapshot?.model_revision;
+  if (revision === undefined) return;
+  scheduleVisibleEvidence(revision, { immediate: true, onlyStale: true });
 }
 
 async function runStructuralRefit(descriptor) {
@@ -667,6 +685,10 @@ function formatMilliseconds(value) {
 async function showView(view) {
   const activeView = view === "final" ? "final" : view === "validation" ? "validation" : "editor";
   actions.patchView({ activeView });
+  if (activeView === "editor") {
+    scheduleVisibleEvidenceCatchUp();
+    return;
+  }
   await refreshActiveReport();
 }
 
@@ -1004,16 +1026,18 @@ function renderReportEvidence(evidence, activeView) {
   });
 }
 
-function renderSummaryEvidence(evidence) {
+function renderSummaryEvidence(evidence, previous = null) {
   const state = store.getState();
   const revision = state.remote.snapshot?.model_revision;
   const evidenceMatchesRevision = evidence.revision === revision;
-  const payload = evidenceMatchesRevision && evidence.payload !== null
+  const retainedPayloadIsFromPriorRevision = evidence.status === "updating" &&
+    previous !== null && previous.revision !== evidence.revision;
+  const payload = evidenceMatchesRevision && !retainedPayloadIsFromPriorRevision
     ? evidence.payload
-    : state.remote.summary;
+    : null;
   const effectiveEvidence = evidenceMatchesRevision
     ? evidence
-    : { ...evidence, status: "current", error: null };
+    : { ...evidence, status: "stale", error: null };
   summaryFrame.setAttribute(
     "aria-busy",
     effectiveEvidence.status === "updating" ? "true" : "false"
@@ -1021,7 +1045,10 @@ function renderSummaryEvidence(evidence) {
   summaryFrame.dataset.freshness = effectiveEvidence.status;
   if (payload !== null) {
     renderSummary(payload, summaryNodes());
-  } else if (effectiveEvidence.status === "error" || effectiveEvidence.status === "stale") {
+  } else if (
+    summaryFrame.innerHTML.trim().length === 0 &&
+    (effectiveEvidence.status === "error" || effectiveEvidence.status === "stale")
+  ) {
     summaryStatus.textContent = effectiveEvidence.error || "Summary unavailable.";
   }
   const summaryLabel = summaryStatus.textContent || "Summary";
@@ -1424,7 +1451,7 @@ store.subscribe(
 store.subscribe(
   (state) => state.request.evidence.summary,
   (evidence, previous) => {
-    renderSummaryEvidence(evidence);
+    renderSummaryEvidence(evidence, previous);
     evidenceTiming.observe("summary", evidence, previous);
   }
 );

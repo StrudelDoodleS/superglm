@@ -5,6 +5,7 @@ import * as selectors from "../../src/superglm/editor/app/state/selectors.js";
 import * as storeModule from "../../src/superglm/editor/app/state/store.js";
 
 /** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EditorState} EditorState */
+/** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EvidencePanel} EvidencePanel */
 
 const {
   beginEvidence,
@@ -28,6 +29,8 @@ const {
   selectCurrentTerm,
   selectEvidence,
   selectGroupDisplayMode,
+  selectEvidenceNeedsRefresh,
+  selectVisibleEvidencePanels,
   selectModelRevision,
   selectMutation,
   selectRenderableTerm,
@@ -332,6 +335,48 @@ test("remote commit clears preview and preserves valid view state", () => {
   assert.deepEqual(selectCurrentSelection(state), [0]);
 });
 
+test("a new model revision marks every prior evidence panel stale", () => {
+  let state = createInitialEditorState(snapshot(2));
+  const panels = /** @type {EvidencePanel[]} */ (["metrics", "summary", "report"]);
+  for (const [sequence, panel] of panels.entries()) {
+    state = beginEvidence(state, panel, 2, sequence + 1, {
+      path: `/${panel}`,
+      payload: {}
+    });
+    state = completeEvidence(state, panel, 2, sequence + 1, { panel });
+  }
+
+  const committed = commitRemote(state, snapshot(3));
+
+  for (const panel of panels) {
+    assert.equal(committed.request.evidence[panel].status, "stale");
+    assert.equal(committed.request.evidence[panel].revision, 2);
+    assert.deepEqual(committed.request.evidence[panel].payload, { panel });
+  }
+});
+
+test("visible evidence selectors catch editor panels up after returning from reports", () => {
+  let state = createInitialEditorState(snapshot(4));
+  state = beginEvidence(state, "metrics", 3, 1, { path: "/metrics", payload: {} });
+  state = completeEvidence(
+    { ...state, remote: { ...state.remote, snapshot: snapshot(3) } },
+    "metrics",
+    3,
+    1,
+    { available: true }
+  );
+  state = { ...state, remote: { ...state.remote, snapshot: snapshot(4) } };
+
+  assert.equal(selectEvidenceNeedsRefresh(state, "metrics"), true);
+  assert.deepEqual(selectVisibleEvidencePanels(state), ["metrics", "summary"]);
+
+  state = patchView(state, { activeView: "validation" });
+  assert.deepEqual(selectVisibleEvidencePanels(state), ["report"]);
+
+  state = patchView(state, { activeView: "editor", inspectorPane: "help" });
+  assert.deepEqual(selectVisibleEvidencePanels(state), ["metrics"]);
+});
+
 test("selector subscriptions ignore unrelated state changes", () => {
   const store = createEditorStore(createInitialEditorState(snapshot()));
   let calls = 0;
@@ -625,10 +670,12 @@ test("state modules expose only their requested public symbols", () => {
     "selectCurrentSelection",
     "selectCurrentTerm",
     "selectEvidence",
+    "selectEvidenceNeedsRefresh",
     "selectGroupDisplayMode",
     "selectModelRevision",
     "selectMutation",
     "selectRenderableTerm",
-    "selectSnapshot"
+    "selectSnapshot",
+    "selectVisibleEvidencePanels"
   ]);
 });

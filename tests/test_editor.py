@@ -5067,6 +5067,41 @@ def test_widget_http_download_export_excel_has_structured_summary(editor_model):
     assert summary["C4"].value == "Value"
 
 
+def test_excel_export_materializes_edited_model_on_training_split(editor_model, editor_frame):
+    import io
+
+    from openpyxl import load_workbook
+
+    X, y = editor_frame
+    train_X = X.iloc[:37].copy()
+    train_y = y[:37].copy()
+    validation_X = X.iloc[-29:].copy()
+    validation_y = y[-29:].copy()
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(train_X, train_y),
+        validation_data=(validation_X, validation_y),
+    )
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    try:
+        result = widget._export_bytes("xlsx")
+    finally:
+        widget.close()
+
+    workbook = load_workbook(io.BytesIO(result.data), data_only=True)
+    summary = workbook["Model Summary"]
+    overview = summary.tables["ModelOverview"]
+    rows = list(summary[overview.ref])
+    headers = [cell.value for cell in rows[0]]
+    records = [dict(zip(headers, (cell.value for cell in row))) for row in rows[1:]]
+    observations = next(row["Value"] for row in records if row["Metric"] == "Observations")
+
+    assert observations == len(train_X)
+
+
 def test_widget_http_download_export_excel_without_training_data_is_400():
     rng = np.random.default_rng(20260802)
     X = pd.DataFrame({"x": rng.normal(size=90)})

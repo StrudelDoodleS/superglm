@@ -341,6 +341,22 @@ class EditorWidget:
                 return None, request.model_revision
             return model, request.model_revision
 
+    def _model_materialized_for_dataset(self, dataset):
+        """Materialize a revision against one purpose-specific dataset without caching it."""
+        with self._lock:
+            request = self.session.capture_materialization_request(
+                dataset=dataset,
+                include_unchanged=True,
+            )
+            assert request is not None
+
+        model = materialize_edit_request(request)
+
+        with self._lock:
+            if not self.session.materialization_request_is_current(request):
+                return None, request.model_revision
+            return model, request.model_revision
+
     def _metrics(
         self,
         metric: str,
@@ -588,12 +604,12 @@ class EditorWidget:
         """Build one validated export from one captured model revision."""
         canonical_format = _normalise_export_format(format)
         safe_name = _safe_export_filename(canonical_format, filename)
-        model, revision = self._current_model_for_evidence()
-        if model is None:
-            raise RuntimeError("Export request was superseded.")
 
         validation_scope: str | None = None
         if canonical_format == "joblib":
+            model, revision = self._current_model_for_evidence()
+            if model is None:
+                raise RuntimeError("Export request was superseded.")
             data, validation = persistence.serialize_validated_model(
                 model,
                 dataset=default_metrics_dataset(self.session),
@@ -606,6 +622,9 @@ class EditorWidget:
                     "Excel export requires train_data or retained fit data; "
                     "validation/test data are not substituted."
                 )
+            model, revision = self._model_materialized_for_dataset(dataset)
+            if model is None:
+                raise RuntimeError("Export request was superseded.")
             from superglm.export.excel import write_rating_table_workbook
             from superglm.export.rating_tables import build_rating_table_payload
 

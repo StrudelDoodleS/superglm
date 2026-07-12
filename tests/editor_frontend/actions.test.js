@@ -1289,7 +1289,7 @@ test("late evidence cannot replace a newer revision", async () => {
 
   assert.equal(await pending, false);
   assert.equal(store.getState().request.evidence.metrics.payload, null);
-  assert.equal(store.getState().request.evidence.metrics.status, "updating");
+  assert.equal(store.getState().request.evidence.metrics.status, "stale");
   assert.equal(store.getState().request.evidence.metrics.revision, 3);
 });
 
@@ -1414,7 +1414,7 @@ test("stale evidence failures do not overwrite the newer revision", async () => 
 
   assert.equal(await pending, false);
   assert.equal(store.getState().request.evidence.summary.error, null);
-  assert.equal(store.getState().request.evidence.summary.status, "updating");
+  assert.equal(store.getState().request.evidence.summary.status, "stale");
   assert.equal(store.getState().request.evidence.summary.revision, 6);
 });
 

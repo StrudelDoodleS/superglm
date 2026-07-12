@@ -168,6 +168,82 @@ def _complete_metric_payload(request, *, edited_deviance: float) -> str:
     return body
 
 
+def test_hidden_summary_refreshes_when_reopened_after_an_edit(open_editor_page):
+    with open_editor_page() as (page, session):
+        _wait_for_editor_idle(page)
+        inspector = page.get_by_role("complementary", name="Model inspector")
+        inspector.get_by_role("tab", name="Help").click()
+        summary_requests: list[object] = []
+
+        def record_summary(request) -> None:
+            if request.method == "POST" and _path(request.url) == "/summary":
+                summary_requests.append(request)
+
+        page.on("request", record_summary)
+        page.locator('button[data-op="select_all"]').click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and _path(response.url) == "/op"
+        ):
+            page.get_by_role("button", name="Increase selection", exact=True).click()
+
+        page.wait_for_function(
+            "() => document.querySelector('#summaryFrame')?.dataset.freshness === 'stale'"
+        )
+        assert summary_requests == []
+
+        with page.expect_request(
+            lambda request: request.method == "POST" and _path(request.url) == "/summary"
+        ) as summary_info:
+            inspector.get_by_role("tab", name="Summary").click()
+
+        assert summary_info.value.post_data_json["model_revision"] == session.model_revision
+        page.wait_for_function(
+            "() => document.querySelector('#summaryFrame')?.dataset.freshness === 'current'"
+        )
+
+
+def test_editor_evidence_catches_up_after_an_edit_in_report_view(open_editor_page):
+    with open_editor_page() as (page, session):
+        _wait_for_editor_idle(page)
+        page.locator('button[data-op="select_all"]').click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and _path(response.url) == "/op"
+        ):
+            page.get_by_role("button", name="Increase selection", exact=True).click()
+        _wait_for_editor_idle(page)
+
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST" and _path(response.url) == "/report"
+            )
+        ):
+            page.get_by_role("tab", name="Validation", exact=True).click()
+
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and _path(response.url) == "/op"
+        ):
+            page.get_by_role("button", name="Undo edit").click()
+        page.wait_for_function(
+            "() => document.querySelector('#metricGrid')?.dataset.freshness === 'stale'"
+        )
+
+        with (
+            page.expect_request(
+                lambda request: request.method == "POST" and _path(request.url) == "/metrics"
+            ) as metrics_info,
+            page.expect_request(
+                lambda request: request.method == "POST" and _path(request.url) == "/summary"
+            ) as summary_info,
+        ):
+            page.get_by_role("tab", name="Editor", exact=True).click()
+
+        assert metrics_info.value.post_data_json["model_revision"] == session.model_revision
+        assert summary_info.value.post_data_json["model_revision"] == session.model_revision
+        _wait_for_editor_idle(page)
+
+
 def test_structural_refit_commits_atomically_before_held_metrics(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, session):
         _wait_for_editor_idle(page)

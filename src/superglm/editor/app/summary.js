@@ -47,7 +47,12 @@ export async function runOffsetRefit(nodes, refreshMetrics) {
   }
 }
 
-export async function runDistributionProfile(nodes, parameter, refreshMetrics) {
+export async function runDistributionProfile(
+  nodes,
+  parameter,
+  acceptProfile = async () => {},
+  { request = requestJSON, pause = sleep } = {}
+) {
   const { summaryStatus, summaryFrame, reprofileTweedie, reprofileNb2, profileRun } = nodes;
   const button = parameter === "tweedie_p" ? reprofileTweedie : reprofileNb2;
   openProfileDialog(nodes);
@@ -64,7 +69,7 @@ export async function runDistributionProfile(nodes, parameter, refreshMetrics) {
     options: profileOptionsPayload(nodes, parameter)
   }, nodes);
   try {
-    const started = await requestJSON("/profile_distribution/start", {
+    const started = await request("/profile_distribution/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ parameter, ...profileOptionsPayload(nodes, parameter) })
@@ -72,8 +77,8 @@ export async function runDistributionProfile(nodes, parameter, refreshMetrics) {
     let status = started;
     renderProfileTrace(status, nodes);
     while (status.status === "running") {
-      await sleep(250);
-      status = await requestJSON(`/profile_distribution/status/${encodeURIComponent(started.job_id)}`);
+      await pause(250);
+      status = await request(`/profile_distribution/status/${encodeURIComponent(started.job_id)}`);
       renderProfileTrace(status, nodes);
     }
     if (status.status === "error") {
@@ -82,7 +87,7 @@ export async function runDistributionProfile(nodes, parameter, refreshMetrics) {
     const payload = status.result || {};
     renderProfileTrace(status, nodes);
     renderSummary(payload, nodes);
-    await refreshMetrics();
+    await acceptProfile(payload);
     return payload;
   } catch (error) {
     summaryStatus.textContent = error.message;

@@ -175,11 +175,34 @@ function clearRemotePreviews(state) {
   };
 }
 
+/** @param {EditorState} state @param {number} revision */
+function invalidatePriorEvidence(state, revision) {
+  const evidence = { ...state.request.evidence };
+  let changed = false;
+  for (const panel of /** @type {EvidencePanel[]} */ (["metrics", "summary", "report"])) {
+    const current = evidence[panel];
+    if (
+      current.revision === revision ||
+      (current.status === "idle" && current.payload === null)
+    ) {
+      continue;
+    }
+    evidence[panel] = { ...current, status: "stale", error: null };
+    changed = true;
+  }
+  if (!changed) return state.request;
+  return { ...state.request, evidence };
+}
+
 /** @param {EditorState} state @param {EditorSnapshot} snapshot */
 export function commitRemote(state, snapshot) {
   if (isOlderGeneratedSnapshot(state.remote.snapshot, snapshot)) {
     return clearRemotePreviews(state);
   }
+  const previousRevision = state.remote.snapshot?.model_revision;
+  const request = previousRevision !== undefined && previousRevision !== snapshot.model_revision
+    ? invalidatePriorEvidence(state, snapshot.model_revision)
+    : state.request;
   /** @type {EditorState} */
   const candidate = {
     ...state,
@@ -188,7 +211,8 @@ export function commitRemote(state, snapshot) {
       summary: state.remote.summary,
       chartEpoch: state.remote.chartEpoch + 1
     },
-    view: { ...state.view, preview: null, selectionPreview: null }
+    view: { ...state.view, preview: null, selectionPreview: null },
+    request
   };
   return {
     ...candidate,
