@@ -877,7 +877,7 @@ function sameViewOutsidePreview(next, previous) {
 }
 
 function renderMutationBusy(mutation) {
-  const active = mutation.status === "running";
+  const active = mutation.status === "running" && mutation.blocking === true;
   setAppBusy(active, mutation.operation || "Working...", "Starting...");
 }
 

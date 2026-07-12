@@ -328,9 +328,9 @@ test("selection mutation installs provisional state before posting and commits w
       postJSON: (path, payload) => {
         requests.push({ path, payload });
         assert.deepEqual(selectCurrentSelection(store.getState()), [1, 2]);
-        assert.deepEqual(store.getState().request.mutation, {
-          status: "running", operation: "select", error: null
-        });
+      assert.deepEqual(store.getState().request.mutation, {
+        status: "running", operation: "select", error: null, blocking: false
+      });
         return pendingResponse.promise;
       },
       getState: async () => confirmed
@@ -460,6 +460,7 @@ test("structural mutation commits, paints, becomes idle, then schedules immediat
       postJSON: async (path, payload) => {
         postCalls += 1;
         events.push("post");
+        assert.equal(store.getState().request.mutation.blocking, true);
         assert.equal(path, "/collapse_levels");
         assert.deepEqual(payload, { term: "age", method: "auto" });
         return envelope;

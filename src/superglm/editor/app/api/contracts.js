@@ -113,6 +113,7 @@
  * @property {MutationStatus} status
  * @property {string|null} operation
  * @property {string|null} error
+ * @property {boolean} [blocking]
  */
 /**
  * @typedef {Object} RecoveryRequestState

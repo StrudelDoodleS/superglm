@@ -183,6 +183,9 @@ def test_structural_refit_commits_atomically_before_held_metrics(open_editor_pag
                     )
                 ) as collapse_info:
                     page.get_by_role("button", name="Collapse and refit", exact=True).click()
+                    page.locator("#appBusyOverlay").wait_for(state="visible")
+                    assert page.locator("#editorView").get_attribute("inert") == ""
+                    assert page.evaluate("document.activeElement?.id") == "appBusyAnnouncement"
 
             assert collapse_info.value.status == 200
             page.wait_for_function(

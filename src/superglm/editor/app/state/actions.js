@@ -262,7 +262,7 @@ export function createEditorActions({
       ...state,
       request: {
         ...state.request,
-        mutation: { status: "running", operation: name, error: null },
+        mutation: { status: "running", operation: name, error: null, blocking: false },
         recovery: null
       }
     }));
@@ -347,7 +347,12 @@ export function createEditorActions({
         ...previewed,
         request: {
           ...previewed.request,
-          mutation: { status: "running", operation: "select", error: null },
+          mutation: {
+            status: "running",
+            operation: "select",
+            error: null,
+            blocking: false
+          },
           recovery: null
         }
       };
@@ -403,7 +408,7 @@ export function createEditorActions({
       ...state,
       request: {
         ...state.request,
-        mutation: { status: "running", operation: name, error: null },
+        mutation: { status: "running", operation: name, error: null, blocking: true },
         recovery: null
       }
     }));

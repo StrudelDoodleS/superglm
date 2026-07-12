@@ -210,10 +210,17 @@ export function bindPopovers({ root, popover }) {
     dismiss();
   }
 
+  /** @param {Event} event */
+  function onClick(event) {
+    if (!candidate(event.target)) return;
+    dismiss();
+  }
+
   root.addEventListener("pointerover", onPointerOver);
   root.addEventListener("pointerout", onPointerOut);
   root.addEventListener("focusin", onFocusIn);
   root.addEventListener("focusout", onFocusOut);
+  root.addEventListener("click", onClick);
   root.addEventListener("keydown", onKeyDown);
 
   return Object.freeze({
@@ -225,6 +232,7 @@ export function bindPopovers({ root, popover }) {
       root.removeEventListener("pointerout", onPointerOut);
       root.removeEventListener("focusin", onFocusIn);
       root.removeEventListener("focusout", onFocusOut);
+      root.removeEventListener("click", onClick);
       root.removeEventListener("keydown", onKeyDown);
     },
   });

@@ -707,6 +707,57 @@ def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page
             popover.wait_for(state="hidden")
 
 
+def test_tool_rail_popover_closes_when_tool_is_activated(open_editor_page):
+    with open_editor_page() as (page, _session):
+        trigger = page.get_by_role("radiogroup", name="Chart tools").get_by_role(
+            "radio", name="Move", exact=True
+        )
+        popover = page.locator("#uiPopover")
+
+        trigger.hover()
+        popover.wait_for(state="visible")
+        trigger.click()
+
+        popover.wait_for(state="hidden")
+        assert trigger.get_attribute("aria-describedby") is None
+        page.wait_for_timeout(450)
+        assert popover.is_hidden()
+
+
+def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page):
+    with open_editor_page() as (page, _session):
+        held_select = []
+        page.route("**/select", lambda route: held_select.append(route))
+        point = page.locator("#chart circle.point[data-index]").first
+        with page.expect_request(is_select_request):
+            point.click()
+
+        assert len(held_select) == 1
+        assert page.locator("#appBusyOverlay").is_hidden()
+        assert page.locator("#editorView").get_attribute("inert") is None
+        assert page.evaluate("document.activeElement?.id") != "appBusyAnnouncement"
+        with page.expect_response(lambda response: is_select_request(response.request)):
+            held_select[0].continue_()
+        page.unroute("**/select")
+
+        held_term = []
+        page.route("**/term", lambda route: held_term.append(route))
+        with page.expect_request(
+            lambda request: request.method == "POST" and request.url.endswith("/term")
+        ):
+            page.select_option("#term", "territory")
+
+        page.wait_for_timeout(50)
+        assert len(held_term) == 1
+        assert page.locator("#appBusyOverlay").is_hidden()
+        assert page.locator("#editorView").get_attribute("inert") is None
+        assert page.evaluate("document.activeElement?.id") != "appBusyAnnouncement"
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and response.url.endswith("/term")
+        ):
+            held_term[0].continue_()
+
+
 def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_page):
     with open_editor_page() as (page, _session):
         reference_ci = page.locator("#ciToggle")
