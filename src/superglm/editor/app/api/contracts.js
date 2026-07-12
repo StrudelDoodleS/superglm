@@ -49,6 +49,8 @@
 /**
  * @typedef {Object} EditorSnapshot
  * @property {number} model_revision
+ * @property {number} [state_generation]
+ * @property {number} [chart_generation]
  * @property {string} selected_term
  * @property {Record<string, TermPayload>} terms
  * @property {Record<string, number[]>} selection

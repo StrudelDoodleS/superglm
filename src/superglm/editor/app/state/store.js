@@ -156,8 +156,30 @@ export function clearSelectionPreview(state) {
   return patchView(state, { selectionPreview: null });
 }
 
+/** @param {EditorSnapshot|null} current @param {EditorSnapshot} incoming */
+function isOlderGeneratedSnapshot(current, incoming) {
+  const currentGeneration = current?.state_generation;
+  const incomingGeneration = incoming.state_generation;
+  return typeof currentGeneration === "number" &&
+    typeof incomingGeneration === "number" &&
+    Number.isInteger(currentGeneration) &&
+    Number.isInteger(incomingGeneration) &&
+    incomingGeneration < currentGeneration;
+}
+
+/** @param {EditorState} state */
+function clearRemotePreviews(state) {
+  return {
+    ...state,
+    view: { ...state.view, preview: null, selectionPreview: null }
+  };
+}
+
 /** @param {EditorState} state @param {EditorSnapshot} snapshot */
 export function commitRemote(state, snapshot) {
+  if (isOlderGeneratedSnapshot(state.remote.snapshot, snapshot)) {
+    return clearRemotePreviews(state);
+  }
   /** @type {EditorState} */
   const candidate = {
     ...state,
@@ -177,9 +199,17 @@ export function commitRemote(state, snapshot) {
 /** @param {EditorState} state @param {EditorSnapshot} snapshot */
 export function commitSelectionRemote(state, snapshot) {
   const current = state.remote.snapshot;
+  if (isOlderGeneratedSnapshot(current, snapshot)) {
+    return clearRemotePreviews(state);
+  }
+  const hasChartGenerations = Number.isInteger(current?.chart_generation) &&
+    Number.isInteger(snapshot.chart_generation);
+  const sameChart = hasChartGenerations
+    ? current?.chart_generation === snapshot.chart_generation
+    : current?.model_revision === snapshot.model_revision;
   if (
     current &&
-    current.model_revision === snapshot.model_revision &&
+    sameChart &&
     current.selected_term === snapshot.selected_term
   ) {
     return {
@@ -197,6 +227,7 @@ export function commitSelectionRemote(state, snapshot) {
 /** @param {EditorState} state @param {StructuralTransitionEnvelope} envelope */
 export function commitStructuralTransition(state, envelope) {
   const committed = commitRemote(state, envelope.state);
+  if (committed.remote.snapshot !== envelope.state) return committed;
   const summary = committed.request.evidence.summary;
   return {
     ...committed,

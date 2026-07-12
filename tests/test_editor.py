@@ -3206,6 +3206,94 @@ def test_widget_state_exposes_semantic_model_revision(editor_model):
         widget.close()
 
 
+def test_widget_snapshot_generations_track_chart_mutation_categories(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline", "region"])
+    widget = session.widget()
+    try:
+        snapshots = [widget._state()]
+        snapshots.append(widget._select("x_spline", [5]))
+        snapshots.append(widget._set_term("region"))
+
+        before_control_revision = session.model_revision
+        snapshots.append(widget._set_control_count("x_spline", 6))
+        assert snapshots[-1]["model_revision"] == before_control_revision
+        controls = session.control_points("x_spline", n_handles=6)
+        handle_index = int(controls["x"].size // 2)
+        handle_value = float(np.exp(controls["log_effect"][handle_index] + 0.05))
+        snapshots.append(widget._control("x_spline", handle_index, handle_value))
+        snapshots.append(widget._drag("x_spline", [5], delta=0.01))
+        snapshots.append(widget._operate("shift_up"))
+        snapshots.append(widget._operate("undo"))
+        snapshots.append(widget._operate("redo"))
+        snapshots.append(widget._operate("reset"))
+
+        snapshots.append(widget._select("region", [1]))
+        before_reorder_revision = session.model_revision
+        snapshots.append(widget._reorder_levels("region", target_index=0))
+        assert snapshots[-1]["model_revision"] == before_reorder_revision
+        snapshots.append(widget._operate("reset_order", "region"))
+        snapshots.append(widget._operate("select_all", "region"))
+        snapshots.append(widget._state())
+    finally:
+        widget.close()
+
+    assert [state["state_generation"] for state in snapshots] == list(range(1, len(snapshots) + 1))
+    assert [state["chart_generation"] for state in snapshots] == [
+        0,
+        0,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        7,
+        8,
+        9,
+        9,
+        9,
+    ]
+
+
+def test_widget_structural_mutations_advance_chart_generation_once(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    try:
+        selected = widget._select("region", [1, 2])
+        collapsed = widget._collapse_levels("region", method="fit")["state"]
+        uncollapsed = widget._uncollapse_levels()["state"]
+        selected_again = widget._select("region", [1, 2])
+        collapsed_again = widget._collapse_levels("region", method="fit")["state"]
+        ungrouped = widget._ungroup_levels("region", method="fit")["state"]
+    finally:
+        widget.close()
+
+    assert [
+        state["state_generation"]
+        for state in (
+            selected,
+            collapsed,
+            uncollapsed,
+            selected_again,
+            collapsed_again,
+            ungrouped,
+        )
+    ] == [1, 2, 3, 4, 5, 6]
+    assert [
+        state["chart_generation"]
+        for state in (
+            selected,
+            collapsed,
+            uncollapsed,
+            selected_again,
+            collapsed_again,
+            ungrouped,
+        )
+    ] == [0, 1, 2, 2, 3, 4]
+
+
 def test_widget_composite_selection_serializes_state_once(editor_model, monkeypatch):
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     widget = session.widget()

@@ -66,6 +66,8 @@ class EditorWidget:
         self._token = secrets.token_urlsafe(24)
         self.terms = session_payload(session, self.control_counts)
         self.selected_term = next(iter(self.terms), "")
+        self._state_generation = 0
+        self._chart_generation = 0
         self._lock = threading.RLock()
         self._closed = False
         self._evaluation_cache = EvaluationCache()
@@ -104,7 +106,7 @@ class EditorWidget:
     def _state(self) -> dict[str, Any]:
         with self._lock:
             self.terms = session_payload(self.session, self.control_counts)
-            return {
+            state = {
                 "model_revision": self.session.model_revision,
                 "selected_term": self.selected_term,
                 "terms": self.terms,
@@ -121,6 +123,10 @@ class EditorWidget:
                 ),
                 "history": history_payload(self.session),
             }
+            self._state_generation += 1
+            state["state_generation"] = self._state_generation
+            state["chart_generation"] = self._chart_generation
+            return state
 
     def _select_term(self, term: str) -> None:
         if term not in self.session.terms:
@@ -182,6 +188,8 @@ class EditorWidget:
             # so any value-changing edit invalidates the stored refit result.
             if operation not in {"select_all", "reset_order"}:
                 self._invalidate_refit()
+            if operation != "select_all":
+                self._chart_generation += 1
             return self._state()
 
     def _drag(
@@ -200,6 +208,7 @@ class EditorWidget:
                 rel = np.maximum(np.asarray(values, dtype=np.float64), 1e-12)
                 self.session.set_values(term, indices, np.log(rel))
             self._invalidate_refit()
+            self._chart_generation += 1
             return self._state()
 
     def _control(
@@ -221,6 +230,7 @@ class EditorWidget:
                 n_handles=self.control_counts.get(term),
             )
             self._invalidate_refit()
+            self._chart_generation += 1
             return self._state()
 
     def _set_control_count(self, term: str, count: int) -> dict[str, Any]:
@@ -228,6 +238,7 @@ class EditorWidget:
             self._select_term(term)
             controls = self.session.control_points(term, n_handles=int(count))
             self.control_counts[term] = int(controls["x"].size)
+            self._chart_generation += 1
             return self._state()
 
     def _average_relativity(self, term: str) -> None:
@@ -771,6 +782,7 @@ class EditorWidget:
             self._in_force_info = dict(self._collapsed_refit_info)
             self._invalidate_refit()
             self._restore_selection(target, selected_levels, selected_indices)
+            self._chart_generation += 1
             return self._structural_transition(
                 "collapse_levels",
                 operation_start=operation_start,
@@ -796,6 +808,7 @@ class EditorWidget:
             self._in_force_info = dict(self._collapsed_refit_info)
             self._invalidate_refit()
             self._restore_selection(target, selected_levels, selected_indices)
+            self._chart_generation += 1
             return self._structural_transition(
                 "ungroup_levels",
                 operation_start=operation_start,
@@ -808,6 +821,7 @@ class EditorWidget:
             if term is not None:
                 self._select_term(term)
             self.session.reorder_levels(self.selected_term, target_index=int(target_index))
+            self._chart_generation += 1
             return self._state()
 
     def _uncollapse_levels(self) -> dict[str, Any]:
@@ -827,6 +841,7 @@ class EditorWidget:
             self._invalidate_refit()
             if self.selected_term not in self.session.terms:
                 self.selected_term = next(iter(self.session.terms), "")
+            self._chart_generation += 1
             return self._structural_transition(
                 "uncollapse_levels",
                 operation_start=operation_start,

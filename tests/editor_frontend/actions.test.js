@@ -139,6 +139,47 @@ test("initialize commits the authoritative snapshot and view patches stay local"
   assert.strictEqual(store.getState().remote, remote);
 });
 
+test("a delayed selection response cannot overwrite a newer initialized chart", async () => {
+  const confirmed = {
+    ...snapshot(2), state_generation: 10, chart_generation: 3
+  };
+  const delayedSelection = {
+    ...snapshot(2), state_generation: 11, chart_generation: 3
+  };
+  delayedSelection.selection.age = [1];
+  const initialized = {
+    ...snapshot(2), state_generation: 12, chart_generation: 4
+  };
+  initialized.terms.age = { ...initialized.terms.age, y: [1.5] };
+  initialized.selection.age = [2];
+  const selectionResponse = deferred();
+  const store = createEditorStore(createInitialEditorState(confirmed));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: () => selectionResponse.promise,
+      getState: async () => initialized
+    }
+  });
+
+  const pendingSelection = actions.executeSelectionMutation({ term: "age", indices: [1] });
+  assert.deepEqual(store.getState().view.selectionPreview, { term: "age", indices: [1] });
+  await actions.initialize();
+  actions.patchView({
+    preview: { term: "age", payload: termPayload(), selection: [3] },
+    selectionPreview: { term: "age", indices: [3] }
+  });
+  selectionResponse.resolve(delayedSelection);
+  const result = await pendingSelection;
+
+  assert.deepEqual(result, { ok: true, snapshot: delayedSelection });
+  assert.strictEqual(store.getState().remote.snapshot, initialized);
+  assert.equal(store.getState().remote.chartEpoch, 1);
+  assert.equal(store.getState().view.preview, null);
+  assert.equal(store.getState().view.selectionPreview, null);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [2]);
+});
+
 test("successful mutation commits once and schedules only a new revision", async () => {
   const store = createEditorStore(createInitialEditorState(snapshot(0)));
   /** @type {number[]} */

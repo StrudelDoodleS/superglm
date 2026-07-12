@@ -228,6 +228,81 @@ test("selection commit accepts authoritative payload without advancing the chart
   assert.deepEqual(selectCurrentSelection(committed), [2, 4]);
 });
 
+test("selection commit performs a full commit when chart geometry changed at one revision", () => {
+  const confirmed = {
+    ...snapshot(3), state_generation: 8, chart_generation: 4
+  };
+  const response = {
+    ...snapshot(3), state_generation: 9, chart_generation: 5
+  };
+  response.selection.age = [2, 4];
+  const base = createInitialEditorState(confirmed);
+  const initial = setSelectionPreview({
+    ...base,
+    remote: { ...base.remote, chartEpoch: 7 }
+  }, "age", [2, 4]);
+
+  const committed = commitSelectionRemote(initial, response);
+
+  assert.strictEqual(committed.remote.snapshot, response);
+  assert.equal(committed.remote.chartEpoch, 8);
+  assert.equal(committed.view.selectionPreview, null);
+});
+
+test("older generated snapshots cannot rewind either remote commit path", () => {
+  for (const commit of [commitRemote, commitSelectionRemote]) {
+    const current = {
+      ...snapshot(3), state_generation: 12, chart_generation: 6
+    };
+    const stale = {
+      ...snapshot(3), state_generation: 11, chart_generation: 5
+    };
+    stale.terms.age = { ...stale.terms.age, y: [0.5] };
+    let state = createInitialEditorState(current);
+    state = setPreviewTerm(state, "age", { ...current.terms.age, y: [1.5] });
+    state = setSelectionPreview(state, "age", [4]);
+    const remote = state.remote;
+
+    const committed = commit(state, stale);
+
+    assert.strictEqual(committed.remote, remote);
+    assert.strictEqual(committed.remote.snapshot, current);
+    assert.equal(committed.remote.chartEpoch, 0);
+    assert.equal(committed.view.preview, null);
+    assert.equal(committed.view.selectionPreview, null);
+  }
+});
+
+test("an older structural envelope cannot bypass generated snapshot ordering", () => {
+  const current = {
+    ...snapshot(8), state_generation: 20, chart_generation: 10
+  };
+  const staleEnvelope = transitionEnvelope();
+  staleEnvelope.state = {
+    ...staleEnvelope.state, state_generation: 19, chart_generation: 9
+  };
+  const summary = { available: true, source: "current" };
+  let state = createInitialEditorState(current);
+  state = {
+    ...state,
+    remote: { ...state.remote, summary },
+    view: {
+      ...state.view,
+      preview: { term: "age", payload: current.terms.age, selection: [1] },
+      selectionPreview: { term: "age", indices: [1] }
+    }
+  };
+  const remote = state.remote;
+
+  const committed = commitStructuralTransition(state, staleEnvelope);
+
+  assert.strictEqual(committed.remote, remote);
+  assert.strictEqual(committed.remote.snapshot, current);
+  assert.strictEqual(committed.remote.summary, summary);
+  assert.equal(committed.view.preview, null);
+  assert.equal(committed.view.selectionPreview, null);
+});
+
 test("selection commit falls back to a full commit when revision or selected term changes", () => {
   for (const response of [snapshot(4), { ...snapshot(3), selected_term: "region" }]) {
     const base = createInitialEditorState(snapshot(3));
