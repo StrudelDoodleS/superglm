@@ -5,9 +5,9 @@
 **Goal:** Make every editor selection gesture update without reconstructing or flashing the chart.
 
 **Architecture:** Add a dedicated provisional-selection lane to the browser store and a
-selection-specific action commit that preserves chart payload identity. Patch selected point
-styling, bounds, menu placement, and context text on the existing SVG; retain the full renderer for
-real model/geometry changes.
+selection-specific action commit that accepts the complete authoritative snapshot without advancing
+`chartEpoch`. Patch selected point styling, bounds, menu placement, and context text on the existing
+SVG; retain the full renderer for real model/geometry changes.
 
 **Tech Stack:** Native ES modules, immutable browser store, SVG DOM, Node test runner, Playwright,
 Python/FastAPI editor backend.
@@ -28,8 +28,8 @@ Python/FastAPI editor backend.
 
 Add tests proving that initial state has `selectionPreview: null`, a provisional selection overrides
 `selectCurrentSelection`, clearing it restores the committed Python selection, and a
-selection-specific remote commit preserves existing term/history object identity when model
-revision and active term are unchanged.
+selection-specific remote commit stores the complete response snapshot while leaving `chartEpoch`
+unchanged when model revision and active term are unchanged.
 
 ```js
 const initial = createInitialEditorState(snapshot(3));
@@ -40,8 +40,8 @@ const response = snapshot(3);
 response.selection.age = [2, 4];
 const committed = commitSelectionRemote(previewed, response);
 assert.equal(committed.view.selectionPreview, null);
-assert.strictEqual(committed.remote.snapshot.terms, initial.remote.snapshot.terms);
-assert.strictEqual(committed.remote.snapshot.history, initial.remote.snapshot.history);
+assert.strictEqual(committed.remote.snapshot, response);
+assert.equal(committed.remote.chartEpoch, initial.remote.chartEpoch);
 assert.deepEqual(selectCurrentSelection(committed), [2, 4]);
 ```
 
@@ -77,7 +77,7 @@ if (
     ...state,
     remote: {
       ...state.remote,
-      snapshot: { ...current, selection: snapshot.selection }
+      snapshot
     },
     view: { ...state.view, selectionPreview: null }
   };
@@ -104,8 +104,9 @@ assert.equal(store.getState().view.selectionPreview, null);
 ```
 
 Add a failure case where `postJSON` rejects, `getState` returns the prior selection, and the
-provisional selection is cleared without replacing the existing term payload objects. Add a
-different-revision recovery case that falls back to an ordinary full commit.
+provisional selection is cleared while the recovered snapshot becomes authoritative without
+advancing `chartEpoch`. Add a different-revision recovery case that falls back to an ordinary full
+commit.
 
 - [ ] **Step 5: Run the action tests and verify RED**
 
@@ -198,9 +199,9 @@ mapping through `displaySelection`.
 
 - [ ] **Step 4: Subscribe selection independently in `main.js`**
 
-Replace the snapshot-identity full-render subscription with a selector that observes chart-bearing
-snapshot references (`terms`, selected term, model revision, history/collapse metadata). Because
-`commitSelectionRemote` preserves those references, selection confirmation must not call `render()`.
+Subscribe the full renderer to `remote.chartEpoch`. Ordinary/full commits advance the epoch, while a
+same-revision, same-term `commitSelectionRemote` stores the complete snapshot without advancing it;
+selection confirmation therefore does not call `render()`.
 
 Add a separate semantic selection subscription. Its listener calls `updateChartSelection`,
 `updateCollapseAction`, and `renderContextBar`; it must not rebuild term options or unrelated panels.

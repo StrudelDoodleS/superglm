@@ -835,13 +835,63 @@ function positionSelectionMenu(svg, selectionMenu, bounds) {
   const localTop = topLeft.y - parentBox.top;
   const localRight = bottomRight.x - parentBox.left;
   const localBottom = bottomRight.y - parentBox.top;
-  let left = (localLeft + localRight) / 2 - menuBox.width / 2;
-  let top = localTop - menuBox.height - 12;
-  if (top < pad) top = localBottom + 12;
-  left = Math.max(pad, Math.min(chartBox.width - menuBox.width - pad, left));
-  top = Math.max(pad, Math.min(chartBox.height - menuBox.height - pad, top));
-  selectionMenu.style.left = `${left}px`;
-  selectionMenu.style.top = `${top}px`;
+  const centeredLeft = (localLeft + localRight) / 2 - menuBox.width / 2;
+  const centeredTop = (localTop + localBottom) / 2 - menuBox.height / 2;
+  const candidates = [
+    { left: centeredLeft, top: localTop - menuBox.height - 12 },
+    { left: centeredLeft, top: localBottom + 12 },
+    { left: localRight + 12, top: centeredTop },
+    { left: localLeft - menuBox.width - 12, top: centeredTop }
+  ];
+  const scale = svg._scale;
+  if (scale && scale.margin) {
+    const plotBottom = svgClientPoint(
+      svg,
+      scale.margin.left,
+      scale.margin.top + scale.innerH
+    );
+    candidates.push({
+      left: centeredLeft,
+      top: plotBottom.y - parentBox.top + pad
+    });
+  }
+  const maxLeft = Math.max(pad, chartBox.width - menuBox.width - pad);
+  const maxTop = Math.max(pad, chartBox.height - menuBox.height - pad);
+  const positioned = candidates.map((candidate) => ({
+    left: Math.max(pad, Math.min(maxLeft, candidate.left)),
+    top: Math.max(pad, Math.min(maxTop, candidate.top))
+  }));
+  let best = positioned[0];
+  let bestIntersections = selectionMenuPointIntersections(svg, parentBox, menuBox, best);
+  for (const candidate of positioned.slice(1)) {
+    const intersections = selectionMenuPointIntersections(svg, parentBox, menuBox, candidate);
+    if (intersections >= bestIntersections) continue;
+    best = candidate;
+    bestIntersections = intersections;
+  }
+  selectionMenu.style.left = `${best.left}px`;
+  selectionMenu.style.top = `${best.top}px`;
+}
+
+function selectionMenuPointIntersections(svg, parentBox, menuBox, candidate) {
+  const clearance = 2;
+  const menuLeft = parentBox.left + candidate.left - clearance;
+  const menuTop = parentBox.top + candidate.top - clearance;
+  const menuRight = menuLeft + menuBox.width + clearance * 2;
+  const menuBottom = menuTop + menuBox.height + clearance * 2;
+  let intersections = 0;
+  for (const point of svg.querySelectorAll("circle.point[data-index]")) {
+    const pointBox = point.getBoundingClientRect();
+    if (
+      pointBox.right >= menuLeft &&
+      pointBox.left <= menuRight &&
+      pointBox.bottom >= menuTop &&
+      pointBox.top <= menuBottom
+    ) {
+      intersections += 1;
+    }
+  }
+  return intersections;
 }
 
 function svgClientPoint(svg, x, y) {

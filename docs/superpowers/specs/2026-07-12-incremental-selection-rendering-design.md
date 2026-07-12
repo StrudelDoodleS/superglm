@@ -54,9 +54,10 @@ revision and not evidence that Python accepted the operation.
 ### Selection-only remote commit
 
 The action controller uses a selection-specific commit/recovery path. A successful `/select`
-response updates the authoritative snapshot and clears the provisional selection, but marks the
-commit as selection-only so the application does not invoke the full renderer. Other ordinary and
-structural mutations continue through their existing commit paths.
+response stores the complete authoritative snapshot and clears the provisional selection, but does
+not advance `chartEpoch`, so the application does not invoke the full renderer. It does not graft
+selection data onto retained term/history objects. Other ordinary and structural mutations continue
+through their existing commit paths.
 
 If the response reports different model geometry, model revision, or active-term state than the
 request began with, the optimization is abandoned and the normal full render runs. Selection-only

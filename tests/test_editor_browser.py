@@ -393,26 +393,25 @@ def test_editor_browser_failed_term_switch_keeps_authoritative_term(
     browser_editor_widget, monkeypatch
 ):
     original_set_term = browser_editor_widget._set_term
-    original_operate = browser_editor_widget._operate
-    operation_terms = []
-    operation_started = threading.Event()
-    release_operation = threading.Event()
+    original_select = browser_editor_widget._select
+    selection_terms = []
+    selection_started = threading.Event()
+    release_selection = threading.Event()
 
     def reject_region(term):
         if term == "region":
             raise ValueError("region unavailable")
         return original_set_term(term)
 
-    def record_operation_term(operation, term=None):
-        operation_terms.append(browser_editor_widget.selected_term)
-        if operation == "select_all":
-            operation_started.set()
-            if not release_operation.wait(timeout=5):
-                raise RuntimeError("Timed out waiting to release select_all")
-        return original_operate(operation, term)
+    def record_selection_term(term, indices):
+        selection_terms.append(browser_editor_widget.selected_term)
+        selection_started.set()
+        if not release_selection.wait(timeout=5):
+            raise RuntimeError("Timed out waiting to release selection")
+        return original_select(term, indices)
 
     monkeypatch.setattr(browser_editor_widget, "_set_term", reject_region)
-    monkeypatch.setattr(browser_editor_widget, "_operate", record_operation_term)
+    monkeypatch.setattr(browser_editor_widget, "_select", record_selection_term)
 
     with sync_playwright() as runtime:
         browser = runtime.chromium.launch(headless=True)
@@ -435,16 +434,16 @@ def test_editor_browser_failed_term_switch_keeps_authoritative_term(
 
             age_points = browser_editor_widget.terms["age"]["n_points"]
             page.locator('button[data-op="select_all"]').click()
-            assert operation_started.wait(timeout=2)
+            assert selection_started.wait(timeout=2)
             assert page.locator("#appAlert").is_hidden()
-            release_operation.set()
+            release_selection.set()
             page.wait_for_function(
                 "expected => document.querySelector('#status')?.textContent.includes(expected)",
                 arg=f"{age_points} of {age_points} selected",
             )
-            assert operation_terms == ["age"]
+            assert selection_terms == ["age"]
         finally:
-            release_operation.set()
+            release_selection.set()
             browser.close()
 
 
@@ -453,8 +452,8 @@ def test_editor_browser_lost_term_response_uses_recovered_authoritative_term(
     browser_editor_widget, monkeypatch
 ):
     original_set_term = browser_editor_widget._set_term
-    original_operate = browser_editor_widget._operate
-    operation_terms = []
+    original_select = browser_editor_widget._select
+    selection_terms = []
 
     def apply_region_then_lose_response(term):
         payload = original_set_term(term)
@@ -462,12 +461,12 @@ def test_editor_browser_lost_term_response_uses_recovered_authoritative_term(
             raise ValueError("response lost")
         return payload
 
-    def record_operation_term(operation, term=None):
-        operation_terms.append(browser_editor_widget.selected_term)
-        return original_operate(operation, term)
+    def record_selection_term(term, indices):
+        selection_terms.append(browser_editor_widget.selected_term)
+        return original_select(term, indices)
 
     monkeypatch.setattr(browser_editor_widget, "_set_term", apply_region_then_lose_response)
-    monkeypatch.setattr(browser_editor_widget, "_operate", record_operation_term)
+    monkeypatch.setattr(browser_editor_widget, "_select", record_selection_term)
 
     with sync_playwright() as runtime:
         browser = runtime.chromium.launch(headless=True)
@@ -494,7 +493,7 @@ def test_editor_browser_lost_term_response_uses_recovered_authoritative_term(
                 "expected => document.querySelector('#status')?.textContent.includes(expected)",
                 arg=f"{region_points} of {region_points} selected",
             )
-            assert operation_terms == ["region"]
+            assert selection_terms == ["region"]
         finally:
             browser.close()
 

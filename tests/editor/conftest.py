@@ -77,6 +77,7 @@ def open_editor_page(chromium_browser, editor_browser_model):
         viewport: dict[str, int] | None = None,
         selected_term: str = "curve",
         n_points: int = 200,
+        collapsed_levels: tuple[str, tuple[str, ...]] | None = None,
     ) -> Iterator[tuple[object, EditorSession]]:
         resources = ExitStack()
         opened.append(resources)
@@ -86,6 +87,10 @@ def open_editor_page(chromium_browser, editor_browser_model):
                 terms=["curve", "territory", "long_category"],
                 n_points=n_points,
             )
+            if collapsed_levels is not None:
+                collapsed_term, levels = collapsed_levels
+                session.select_levels(collapsed_term, levels)
+                session.replace_with_collapsed_levels(collapsed_term, method="fit")
             widget = session.widget()
             resources.callback(widget.close)
             page = chromium_browser.new_page(viewport=viewport or {"width": 1180, "height": 720})

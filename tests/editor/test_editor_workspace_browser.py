@@ -16,11 +16,14 @@ def remember_selection_dom(page) -> None:
     page.evaluate(
         """() => {
             window.__selectionDom = {
+                chart: document.querySelector('#chart'),
+                chartDescendants: Array.from(document.querySelectorAll('#chart *')),
                 editedPath: document.querySelector('#chart path.edited'),
                 firstPoint: document.querySelector('#chart circle.point[data-index]'),
                 firstAxis: document.querySelector('#chart line.axis'),
+                chartTitle: document.querySelector('#chart text.label:not(.x-axis-title)'),
                 xAxisTitle: document.querySelector('#chart .x-axis-title'),
-                termOption: document.querySelector('#term option[value="curve"]'),
+                termOptions: Array.from(document.querySelectorAll('#term option')),
             };
         }"""
     )
@@ -30,14 +33,20 @@ def selection_dom_is_unchanged(page) -> bool:
     return page.evaluate(
         """() => {
             const before = window.__selectionDom;
+            const options = Array.from(document.querySelectorAll('#term option'));
             return before.editedPath === document.querySelector('#chart path.edited')
                 && before.firstPoint === document.querySelector(
                     '#chart circle.point[data-index]'
                 )
                 && before.firstAxis === document.querySelector('#chart line.axis')
+                && before.chartTitle === document.querySelector(
+                    '#chart text.label:not(.x-axis-title)'
+                )
                 && before.xAxisTitle === document.querySelector('#chart .x-axis-title')
-                && before.termOption === document.querySelector(
-                    '#term option[value="curve"]'
+                && before.termOptions.length === options.length
+                && before.termOptions.every((option, index) => option === options[index])
+                && before.chartDescendants.every(
+                    node => node.isConnected && node.closest('#chart') === before.chart
                 );
         }"""
     )
@@ -45,6 +54,27 @@ def selection_dom_is_unchanged(page) -> bool:
 
 def is_select_request(request) -> bool:
     return request.method == "POST" and request.url.split("?", maxsplit=1)[0].endswith("/select")
+
+
+def selection_visual_state(page) -> dict:
+    return page.evaluate(
+        """() => {
+            const bounds = document.querySelector('#chart .selection-bounds');
+            return {
+                selectedIndices: Array.from(
+                    document.querySelectorAll('#chart circle.point.selected[data-index]')
+                ).map(point => Number(point.dataset.index)),
+                bounds: bounds ? {
+                    x: bounds.getAttribute('x'),
+                    y: bounds.getAttribute('y'),
+                    width: bounds.getAttribute('width'),
+                    height: bounds.getAttribute('height'),
+                } : null,
+                status: document.querySelector('#status')?.textContent,
+                menuHidden: document.querySelector('#selectionMenu')?.hidden,
+            };
+        }"""
+    )
 
 
 def test_real_editor_boots_and_draws_svg(open_editor_page):
@@ -205,6 +235,202 @@ def test_selection_incremental_feedback_precedes_delayed_backend_success(open_ed
         assert session.model_revision == initial_revision
         assert len(select_requests) == 1
         assert selection_dom_is_unchanged(page)
+
+
+def test_failed_delayed_selection_recovers_without_rebuilding_chart(open_editor_page):
+    with open_editor_page() as (page, session):
+        select_chart_tool(page, "Select")
+        term = "curve"
+        total_points = session.terms[term].size
+        authoritative_selection = list(range(total_points))
+
+        with page.expect_response(
+            lambda response: is_select_request(response.request)
+        ) as initial_response:
+            page.locator('button[data-op="select_all"]').click()
+        assert initial_response.value.status == 200
+        page.wait_for_function("() => document.querySelector('#appBusyOverlay')?.hidden")
+        assert session.selection(term).tolist() == authoritative_selection
+
+        remember_selection_dom(page)
+        authoritative_visuals = selection_visual_state(page)
+        held_routes = []
+        page.route("**/select", lambda route: held_routes.append(route))
+        candidate = page.locator("#chart circle.point[data-index]").nth(1)
+        candidate_index = int(candidate.get_attribute("data-index"))
+
+        with page.expect_request(is_select_request) as request_info:
+            candidate.click()
+
+        assert len(held_routes) == 1
+        assert request_info.value.post_data_json == {
+            "term": term,
+            "indices": [candidate_index],
+        }
+        page.wait_for_function(
+            """index => {
+                const point = document.querySelector(
+                    `#chart circle.point[data-index="${index}"]`
+                );
+                return point?.classList.contains('selected')
+                    && point.getAttribute('r') === '4.6'
+                    && document.querySelector('#status')?.textContent.startsWith('1 of ');
+            }""",
+            arg=candidate_index,
+        )
+        provisional_visuals = selection_visual_state(page)
+        assert provisional_visuals["selectedIndices"] == [candidate_index]
+        assert provisional_visuals["bounds"] != authoritative_visuals["bounds"]
+        assert provisional_visuals["status"] != authoritative_visuals["status"]
+        assert session.selection(term).tolist() == authoritative_selection
+        assert selection_dom_is_unchanged(page)
+
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "GET"
+                and response.url.split("?", maxsplit=1)[0].endswith("/state")
+            )
+        ) as recovery_response:
+            held_routes[0].fulfill(
+                status=500,
+                content_type="application/json",
+                body='{"error":"Selection rejected for browser test."}',
+            )
+
+        assert recovery_response.value.status == 200
+        alert = page.locator("#appAlert")
+        alert.wait_for(state="visible")
+        page.wait_for_function("() => document.querySelector('#appBusyOverlay')?.hidden")
+        page.wait_for_function(
+            "expected => document.querySelector('#status')?.textContent === expected",
+            arg=authoritative_visuals["status"],
+        )
+
+        assert "Selection rejected for browser test." in alert.inner_text()
+        assert page.locator("#appAlertRetry").is_visible()
+        assert selection_visual_state(page) == authoritative_visuals
+        assert session.selection(term).tolist() == authoritative_selection
+        assert selection_dom_is_unchanged(page)
+
+
+def test_collapsed_categorical_selection_posts_exact_source_indices_without_redraw(
+    open_editor_page,
+):
+    collapsed_levels = ("T02", "T03")
+    with open_editor_page(
+        selected_term="territory",
+        collapsed_levels=("territory", collapsed_levels),
+    ) as (page, session):
+        select_chart_tool(page, "Select")
+        page.select_option("#groupDisplayMode", "collapsed")
+        page.wait_for_function("() => document.querySelector('#chart')?._scale?.displayIsCollapsed")
+
+        mapping = page.evaluate(
+            "() => document.querySelector('#chart')._scale.displayToSourceIndices"
+        )
+        display_index = next(i for i, source in enumerate(mapping) if len(source) > 1)
+        source_indices = mapping[display_index]
+        levels = session.terms["territory"].levels
+        assert [levels[index] for index in source_indices] == list(collapsed_levels)
+        assert session.selection("territory").tolist() == []
+
+        held_routes = []
+        page.route("**/select", lambda route: held_routes.append(route))
+        remember_selection_dom(page)
+        point = page.locator(f'#chart circle.point[data-index="{display_index}"]')
+
+        with page.expect_request(is_select_request) as request_info:
+            point.click()
+
+        assert len(held_routes) == 1
+        assert request_info.value.post_data_json == {
+            "term": "territory",
+            "indices": source_indices,
+        }
+        assert session.selection("territory").tolist() == []
+        page.wait_for_function(
+            """({displayIndex, sourceCount}) => {
+                const point = document.querySelector(
+                    `#chart circle.point[data-index="${displayIndex}"]`
+                );
+                return point?.classList.contains('selected')
+                    && point.getAttribute('r') === '4.6'
+                    && document.querySelector('#status')?.textContent.startsWith(
+                        `${sourceCount} of `
+                    );
+            }""",
+            arg={"displayIndex": display_index, "sourceCount": len(source_indices)},
+        )
+        assert page.locator("#chart circle.point.selected[data-index]").count() == 1
+        assert page.locator("#selectionMenu").is_visible()
+        assert page.locator("#ungroupLevels").is_visible()
+        assert (
+            "original line is grouped by exposure-weighted averaging"
+            in page.locator("#status").inner_text()
+        )
+        assert selection_dom_is_unchanged(page)
+
+        with page.expect_response(
+            lambda response: is_select_request(response.request)
+        ) as response_info:
+            held_routes[0].continue_()
+
+        assert response_info.value.status == 200
+        page.wait_for_function("() => document.querySelector('#appBusyOverlay')?.hidden")
+        assert session.selection("territory").tolist() == source_indices
+        assert page.locator("#chart circle.point.selected[data-index]").count() == 1
+        assert page.locator("#selectionMenu").is_visible()
+        assert page.locator("#ungroupLevels").is_visible()
+        assert (
+            page.locator("#status")
+            .inner_text()
+            .startswith(f"{len(source_indices)} of {session.terms['territory'].size} selected")
+        )
+        assert selection_dom_is_unchanged(page)
+
+
+def test_selection_menu_does_not_block_adjacent_modifier_selection(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, session):
+        select_chart_tool(page, "Select")
+        points = page.locator("#chart circle.point[data-index]")
+        first = points.nth(1)
+        adjacent = points.nth(2)
+        first_index = int(first.get_attribute("data-index"))
+        adjacent_index = int(adjacent.get_attribute("data-index"))
+
+        with page.expect_response(lambda response: is_select_request(response.request)):
+            first.click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+
+        hit = adjacent.evaluate(
+            """point => {
+                const box = point.getBoundingClientRect();
+                const target = document.elementFromPoint(
+                    box.left + box.width / 2,
+                    box.top + box.height / 2
+                );
+                const menuBox = document.querySelector('#selectionMenu').getBoundingClientRect();
+                return {
+                    index: target?.closest('circle.point[data-index]')?.dataset.index ?? null,
+                    target: target?.getAttribute('aria-label') || target?.tagName || null,
+                    point: { left: box.left, top: box.top, width: box.width, height: box.height },
+                    menu: {
+                        left: menuBox.left,
+                        top: menuBox.top,
+                        width: menuBox.width,
+                        height: menuBox.height,
+                    },
+                };
+            }"""
+        )
+        assert hit["index"] == str(adjacent_index), hit
+
+        with page.expect_response(lambda response: is_select_request(response.request)):
+            adjacent.click(modifiers=["Control"])
+
+        assert session.selection("territory").tolist() == [first_index, adjacent_index]
+        assert page.locator("#chart circle.point.selected[data-index]").count() == 2
+        assert page.locator("#selectionMenu").is_visible()
 
 
 def test_select_all_is_incremental_bounded_and_keeps_bounds_behind_points(open_editor_page):
