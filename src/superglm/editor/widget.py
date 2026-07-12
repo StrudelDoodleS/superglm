@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import atexit
 import html
+import io
 import secrets
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,7 +21,12 @@ import numpy as np
 from superglm.editor import metrics as metrics_module
 from superglm.editor import persistence
 from superglm.editor.apply import materialize_edit_request
-from superglm.editor.evaluation import evaluation_datasets, named_metrics_dataset
+from superglm.editor.evaluation import (
+    default_metrics_dataset,
+    evaluation_datasets,
+    named_metrics_dataset,
+    training_export_dataset,
+)
 from superglm.editor.evaluation_cache import (
     DatasetMetricRequest,
     EvaluationCache,
@@ -31,12 +38,55 @@ from superglm.editor.io import jsonable
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.payloads import history_payload, session_payload
-from superglm.editor.persistence import edited_model_for_export
 from superglm.editor.reports import report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer
 from superglm.editor.summaries import offset_label_payload, summary_payload
 
 _LIVE_WIDGETS: set[EditorWidget] = set()
+
+_EXPORT_MEDIA_TYPES = {
+    "joblib": "application/octet-stream",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+_EXPORT_DEFAULT_FILENAMES = {
+    "joblib": "superglm_edited_model.joblib",
+    "xlsx": "superglm_rating_tables.xlsx",
+}
+
+
+@dataclass(frozen=True)
+class ExportResult:
+    """Complete revision-pinned export ready for download or disk."""
+
+    data: bytes
+    filename: str
+    media_type: str
+    model_revision: int
+    validation_scope: str | None = None
+
+
+def _normalise_export_format(format: str) -> str:
+    """Normalize user-facing export aliases to canonical formats."""
+    normalized = str(format).strip().lower().lstrip(".")
+    if normalized in {"joblib", "model"}:
+        return "joblib"
+    if normalized in {"xlsx", "excel"}:
+        return "xlsx"
+    raise ValueError(f"Unsupported export format: {format!r}")
+
+
+def _safe_export_filename(format: str, filename: str | None) -> str:
+    """Return a basename with the canonical suffix for ``format``."""
+    name = filename or _EXPORT_DEFAULT_FILENAMES[format]
+    if not name or Path(name).name != name or "/" in name or "\\" in name:
+        raise ValueError("filename must not contain directory separators")
+    suffix = Path(name).suffix.lower()
+    expected = f".{format}"
+    if suffix and suffix != expected:
+        raise ValueError(f"filename extension must be {expected} for {format} exports")
+    if not suffix:
+        name = f"{name}{expected}"
+    return name
 
 
 class EditorWidget:
@@ -523,47 +573,106 @@ class EditorWidget:
         filename: str | None = None,
         path: str | None = None,
     ) -> dict[str, Any]:
+        payload = self._export_file(
+            "joblib",
+            directory="." if directory is None else directory,
+            filename=filename,
+            path=path,
+        )
+        payload["message"] = f"Saved edited model to {payload['path']}"
+        return payload
+
+    def _export_bytes(self, format: str, filename: str | None = None) -> ExportResult:
+        """Build one validated export from one captured model revision."""
+        canonical_format = _normalise_export_format(format)
+        safe_name = _safe_export_filename(canonical_format, filename)
         model, revision = self._current_model_for_evidence()
         if model is None:
-            return _superseded_payload(revision, None)
+            raise RuntimeError("Export request was superseded.")
+
+        validation_scope: str | None = None
+        if canonical_format == "joblib":
+            data, validation = persistence.serialize_validated_model(
+                model,
+                dataset=default_metrics_dataset(self.session),
+            )
+            validation_scope = validation.scope
+        else:
+            dataset = training_export_dataset(self.session)
+            if dataset is None:
+                raise ValueError(
+                    "Excel export requires train_data or retained fit data; "
+                    "validation/test data are not substituted."
+                )
+            from superglm.export.excel import write_rating_table_workbook
+            from superglm.export.rating_tables import build_rating_table_payload
+
+            payload = build_rating_table_payload(
+                model,
+                dataset.X,
+                dataset.y,
+                sample_weight=dataset.sample_weight,
+                offset=dataset.offset,
+            )
+            buffer = io.BytesIO()
+            write_rating_table_workbook(
+                payload,
+                buffer,
+                sheet_name="Rating Tables",
+                summary_sheet_name="Model Summary",
+                impact_sheet_name="Discretization Impact",
+            )
+            data = buffer.getvalue()
+
         with self._lock:
             if revision != self.session.model_revision:
-                return _superseded_payload(revision, None)
-            if path:
-                target = Path(path).expanduser()
-            else:
-                name = filename or "superglm_edited_model.joblib"
-                if Path(name).name != name:
-                    raise ValueError("filename must not contain directory separators")
-                target = Path(directory or ".").expanduser() / name
-        saved = persistence.save_model(self.session, target, model_override=model)
-        saved_path = saved.resolve()
+                raise RuntimeError("Export request was superseded by a newer model revision.")
+        return ExportResult(
+            data=data,
+            filename=safe_name,
+            media_type=_EXPORT_MEDIA_TYPES[canonical_format],
+            model_revision=revision,
+            validation_scope=validation_scope,
+        )
+
+    def _export_file(
+        self,
+        format: str,
+        *,
+        directory: str = ".",
+        filename: str | None = None,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically write a completed export while its revision is current."""
+        canonical_format = _normalise_export_format(format)
+        if path:
+            requested_path = Path(path).expanduser()
+            safe_name = _safe_export_filename(canonical_format, requested_path.name)
+            target = requested_path.with_name(safe_name)
+        else:
+            safe_name = _safe_export_filename(canonical_format, filename)
+            target = Path(directory).expanduser() / safe_name
+
+        result = self._export_bytes(canonical_format, target.name)
+        with self._lock:
+            if result.model_revision != self.session.model_revision:
+                raise RuntimeError("Export request was superseded by a newer model revision.")
+            target.parent.mkdir(exist_ok=True, parents=True)
+            target.write_bytes(result.data)
+
+        saved_path = target.resolve()
         return {
             "path": str(saved_path),
             "directory": str(saved_path.parent),
             "filename": saved_path.name,
-            "message": f"Saved edited model to {saved_path}",
+            "message": f"Exported {saved_path.name} to {saved_path.parent}",
+            "model_revision": result.model_revision,
+            "validation": result.validation_scope,
         }
 
     def _download_model(self, filename: str | None = None) -> tuple[bytes, str]:
-        import io
-
-        import joblib
-
-        model, revision = self._current_model_for_evidence()
-        if model is None:
-            raise RuntimeError("Edited model request was superseded.")
-        with self._lock:
-            if revision != self.session.model_revision:
-                raise RuntimeError("Edited model request was superseded.")
-            name = filename or "superglm_edited_model.joblib"
-            if Path(name).name != name:
-                raise ValueError("filename must not contain directory separators")
-            if not Path(name).suffix:
-                name = f"{name}.joblib"
-        buffer = io.BytesIO()
-        joblib.dump(edited_model_for_export(self.session, model_override=model), buffer)
-        return buffer.getvalue(), name
+        result = self._export_bytes("joblib", filename)
+        return result.data, result.filename
 
     def _open_directory(self, path: str | None = None) -> dict[str, str]:
         opened = open_directory_path(path)

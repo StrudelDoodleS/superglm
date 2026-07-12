@@ -4974,6 +4974,204 @@ def test_widget_http_download_model_returns_joblib_attachment(editor_model):
     assert not np.allclose(downloaded_model.result.beta, original_beta)
 
 
+def test_training_export_dataset_prefers_explicit_train_over_retained_and_validation(
+    editor_model,
+    editor_frame,
+):
+    from superglm.editor.evaluation import training_export_dataset
+
+    X, y = editor_frame
+    explicit_X = X.iloc[:37].copy()
+    explicit_y = y[:37].copy()
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(explicit_X, explicit_y),
+        validation_data=(X.iloc[-29:], y[-29:]),
+    )
+
+    dataset = training_export_dataset(session)
+
+    assert dataset is not None
+    assert dataset.name == "train"
+    assert dataset.source == "supplied"
+    assert dataset.X is explicit_X
+    assert dataset.y is explicit_y
+
+
+def test_widget_http_download_export_joblib_is_validated_and_revision_pinned(
+    editor_model,
+    editor_frame,
+):
+    import io
+
+    import joblib
+
+    X, _ = editor_frame
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    expected_revision = session.model_revision
+    widget = session.widget()
+    try:
+        request = urllib.request.Request(
+            f"{widget.url}/download_export?format=model&filename=pricing-model",
+            headers=_editor_token_header(widget.url),
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = response.read()
+            headers = response.headers
+    finally:
+        widget.close()
+
+    downloaded = joblib.load(io.BytesIO(data))
+    assert headers["content-type"] == "application/octet-stream"
+    assert 'filename="pricing-model.joblib"' in headers["content-disposition"]
+    assert headers["x-superglm-model-revision"] == str(expected_revision)
+    assert headers["x-superglm-validation"] == "artifact+predictions"
+    predictions = downloaded.predict(X.iloc[:17])
+    assert np.all(np.isfinite(predictions))
+    assert not np.allclose(predictions, editor_model.predict(X.iloc[:17]))
+
+
+def test_widget_http_download_export_excel_has_structured_summary(editor_model):
+    import io
+
+    from openpyxl import load_workbook
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        request = urllib.request.Request(
+            f"{widget.url}/download_export?format=excel&filename=rating-output",
+            headers=_editor_token_header(widget.url),
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = response.read()
+            headers = response.headers
+    finally:
+        widget.close()
+
+    workbook = load_workbook(io.BytesIO(data), data_only=True)
+    summary = workbook["Model Summary"]
+    assert headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert 'filename="rating-output.xlsx"' in headers["content-disposition"]
+    assert headers["x-superglm-model-revision"] == "0"
+    assert headers.get("x-superglm-validation") is None
+    assert "ModelOverview" in summary.tables
+    assert "TermInference" in summary.tables
+    assert summary["A4"].value == "Section"
+    assert summary["B4"].value == "Metric"
+    assert summary["C4"].value == "Value"
+
+
+def test_widget_http_download_export_excel_without_training_data_is_400():
+    rng = np.random.default_rng(20260802)
+    X = pd.DataFrame({"x": rng.normal(size=90)})
+    y = 0.2 + 0.4 * X["x"].to_numpy() + rng.normal(0.0, 0.03, size=len(X))
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y)
+    session = EditorSession.from_model(
+        model,
+        terms=["x"],
+        validation_data=(X.iloc[:20], y[:20]),
+    )
+    widget = session.widget()
+    try:
+        request = urllib.request.Request(
+            f"{widget.url}/download_export?format=xlsx",
+            headers=_editor_token_header(widget.url),
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=10)
+        payload = json.loads(error.value.read().decode("utf-8"))
+    finally:
+        widget.close()
+
+    assert error.value.code == 400
+    assert "train_data" in payload["error"]
+    assert "retained fit data" in payload["error"]
+
+
+def test_widget_export_file_writes_joblib_and_excel(editor_model, tmp_path):
+    import joblib
+    from openpyxl import load_workbook
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        model_payload = _post_json(
+            f"{widget.url}/export_file",
+            {"format": "joblib", "directory": str(tmp_path), "filename": "pricing-model"},
+        )
+        excel_payload = _post_json(
+            f"{widget.url}/export_file",
+            {"format": "xlsx", "directory": str(tmp_path), "filename": "rating-output"},
+        )
+    finally:
+        widget.close()
+
+    saved_model = joblib.load(model_payload["path"])
+    workbook = load_workbook(excel_payload["path"], read_only=False)
+    assert saved_model.result is not None
+    assert model_payload["validation"] == "artifact+predictions"
+    assert model_payload["model_revision"] == 0
+    assert Path(model_payload["path"]).name == "pricing-model.joblib"
+    assert Path(excel_payload["path"]).name == "rating-output.xlsx"
+    assert "Model Summary" in workbook.sheetnames
+
+
+def test_widget_export_file_rejects_invalid_format_and_unsafe_filename(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        with pytest.raises(ValueError, match="Unsupported export format"):
+            widget._export_bytes("pdf")
+        with pytest.raises(ValueError, match="directory separators"):
+            widget._export_bytes("joblib", "../outside.joblib")
+        with pytest.raises(ValueError, match="extension"):
+            widget._export_bytes("joblib", "model.xlsx")
+    finally:
+        widget.close()
+
+
+def test_widget_export_file_discards_superseded_build(
+    editor_model,
+    tmp_path,
+    monkeypatch,
+):
+    from superglm.editor import widget as widget_module
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    target = tmp_path / "superseded.joblib"
+    original = widget_module.persistence.serialize_validated_model
+
+    def supersede_during_build(*args, **kwargs):
+        result = original(*args, **kwargs)
+        session._advance_model_revision()
+        return result
+
+    monkeypatch.setattr(
+        widget_module.persistence,
+        "serialize_validated_model",
+        supersede_during_build,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="superseded"):
+            widget._export_file("joblib", path=str(target))
+    finally:
+        widget.close()
+
+    assert not target.exists()
+
+
 def test_widget_http_download_model_uses_session_train_data_without_retained_fit_state():
     import io
 
@@ -5752,6 +5950,8 @@ def test_editor_server_declares_fastapi_routes():
     assert ("/report", frozenset({"POST"})) in routes
     assert ("/save_model", frozenset({"POST"})) in routes
     assert ("/download_model", frozenset({"GET"})) in routes
+    assert ("/export_file", frozenset({"POST"})) in routes
+    assert ("/download_export", frozenset({"GET"})) in routes
     assert ("/native_save_dialog", frozenset({"POST"})) not in routes
     assert ("/open_directory", frozenset({"POST"})) in routes
     assert ("/save_directory", frozenset({"POST"})) in routes

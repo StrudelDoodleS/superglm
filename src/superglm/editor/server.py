@@ -161,22 +161,28 @@ def create_editor_app(widget: Any) -> FastAPI:
             )
         )
 
+    @app.post("/export_file")
+    def export_file(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._export_file(
+                str(payload.get("format", "joblib")),
+                directory=str(payload.get("directory", ".")),
+                filename=None if "filename" not in payload else str(payload["filename"]),
+            )
+        )
+
+    @app.get("/download_export")
+    def download_export(format: str = "joblib", filename: str | None = None) -> Response:
+        return _guarded_export_download(
+            lambda: widget._export_bytes(format, filename),
+            log_message="Unhandled SuperGLM editor export download error.",
+        )
+
     @app.get("/download_model")
     def download_model(filename: str = "superglm_edited_model.joblib") -> Response:
-        try:
-            data, safe_name = widget._download_model(filename)
-        except _CLIENT_ERROR_TYPES as exc:
-            return _json_response({"error": _client_error_message(exc)}, status_code=400)
-        except Exception:  # pragma: no cover - surfaced to browser/tests as JSON
-            _LOGGER.exception("Unhandled SuperGLM editor download error.")
-            return _json_response({"error": "internal editor error"}, status_code=500)
-        return Response(
-            content=data,
-            media_type="application/octet-stream",
-            headers={
-                **_no_store_headers(),
-                "Content-Disposition": f'attachment; filename="{safe_name}"',
-            },
+        return _guarded_export_download(
+            lambda: widget._export_bytes("joblib", filename),
+            log_message="Unhandled SuperGLM editor download error.",
         )
 
     @app.post("/open_directory")
@@ -392,6 +398,30 @@ def _guarded_json(
             {**metadata, "error": "internal editor error"},
             status_code=500,
         )
+
+
+def _guarded_export_download(factory: Callable[[], Any], *, log_message: str) -> Response:
+    """Return export bytes with the same guarded error policy as JSON routes."""
+    try:
+        result = factory()
+    except _CLIENT_ERROR_TYPES as exc:
+        return _json_response({"error": _client_error_message(exc)}, status_code=400)
+    except Exception:  # pragma: no cover - surfaced to browser/tests as JSON
+        _LOGGER.exception(log_message)
+        return _json_response({"error": "internal editor error"}, status_code=500)
+
+    headers = {
+        **_no_store_headers(),
+        "Content-Disposition": f'attachment; filename="{result.filename}"',
+        "X-SuperGLM-Model-Revision": str(result.model_revision),
+    }
+    if result.validation_scope is not None:
+        headers["X-SuperGLM-Validation"] = result.validation_scope
+    return Response(
+        content=result.data,
+        media_type=result.media_type,
+        headers=headers,
+    )
 
 
 def _optional_int(value: Any) -> int | None:
