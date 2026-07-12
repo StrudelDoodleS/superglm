@@ -36,6 +36,31 @@ def _wait_for_editor_idle(page) -> None:
     )
 
 
+def _wait_for_timing_quiet(page, quiet_ms: int = 250) -> None:
+    page.evaluate(
+        """() => {
+            window.__timingQuietText = document.querySelector('#advancedTiming')?.textContent;
+            window.__timingQuietSince = performance.now();
+        }"""
+    )
+    page.wait_for_function(
+        """quiet => {
+            const text = document.querySelector('#advancedTiming')?.textContent;
+            if (text !== window.__timingQuietText) {
+                window.__timingQuietText = text;
+                window.__timingQuietSince = performance.now();
+                return false;
+            }
+            const metrics = document.querySelector('#metricGrid');
+            const summary = document.querySelector('#summaryFrame');
+            return metrics?.getAttribute('aria-busy') === 'false'
+                && summary?.getAttribute('aria-busy') === 'false'
+                && performance.now() - window.__timingQuietSince >= quiet;
+        }""",
+        arg=quiet_ms,
+    )
+
+
 def _track_dialog_and_requests(page) -> list[object]:
     requests: list[object] = []
 
@@ -580,6 +605,7 @@ def test_changed_snapshot_requires_fresh_confirmation_before_structural_refit(op
             "count => document.querySelectorAll('#chart .point.selected[data-index]').length === count",
             arg=len(selected_labels),
         )
+        _wait_for_timing_quiet(page)
         requests.clear()
         before = _capture_editor_state(page, session, term)
 
