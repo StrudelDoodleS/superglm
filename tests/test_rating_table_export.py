@@ -10,6 +10,7 @@ from superglm import (
     Categorical,
     Numeric,
     OrderedCategorical,
+    Polynomial,
     Spline,
     SuperGLM,
     export_rating_tables,
@@ -117,6 +118,58 @@ def _fit_ordered_export_model():
     return model, levels
 
 
+def _fit_selected_away_export_model():
+    n = 160
+    X = pd.DataFrame(
+        {
+            "x": np.linspace(-1.0, 1.0, n),
+            "cat": np.resize(np.array(["A", "B", "C", "D"], dtype=object), n),
+        }
+    )
+    y = np.ones(n)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=10.0,
+        features={"x": Numeric(), "cat": Categorical(base="first")},
+    )
+    model.fit(X, y)
+    return model
+
+
+def _fit_polynomial_categorical_export_model():
+    rng = np.random.default_rng(20260713)
+    n = 240
+    x = rng.uniform(-1.0, 1.0, n)
+    cat = rng.choice(["A", "B", "C"], n)
+    y = rng.poisson(np.exp(0.2 + 0.3 * x + 0.15 * (cat == "B"))).astype(float)
+    X = pd.DataFrame({"x": x, "cat": cat})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"x": Polynomial(degree=2), "cat": Categorical(base="first")},
+        interactions=[("x", "cat")],
+    )
+    model.fit(X, y)
+    return model
+
+
+def _fit_large_polynomial_interaction_export_model():
+    rng = np.random.default_rng(20260714)
+    n = 240
+    a = rng.uniform(-1.0, 1.0, n)
+    b = rng.uniform(-1.0, 1.0, n)
+    y = rng.poisson(np.exp(0.2 + 0.25 * a - 0.15 * b + 0.1 * a * b)).astype(float)
+    X = pd.DataFrame({"a": a, "b": b})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"a": Polynomial(degree=2), "b": Polynomial(degree=3)},
+        interactions=[("a", "b")],
+    )
+    model.fit(X, y)
+    return model
+
+
 def test_summary_export_preserves_typed_overview_and_intercept_inference():
     model, _, _, _ = _fit_export_model()
 
@@ -155,6 +208,7 @@ def test_summary_export_maps_spline_to_one_global_wood_test():
     assert isinstance(smooth.edf, float)
     assert isinstance(smooth.smoothing_lambda, float)
     assert smooth.active is True
+    assert "Wood (2013)" in "\n".join(payload.notes)
 
 
 def test_summary_export_keeps_ordered_level_estimates_but_only_one_global_p_value():
@@ -210,6 +264,79 @@ def test_summary_export_keeps_distribution_profile_values_typed():
     assert overview[("Distribution Profile", "Tweedie p Method")] == (
         "Profile (exact, phi=pearson)"
     )
+
+
+def test_summary_export_preserves_stale_and_fixed_offset_editor_caveats():
+    model, _, _, _ = _fit_export_model()
+    model._editor_inference_stale = True
+    model._editor_edits = {"terms": ["score"]}
+    model._editor_offset = {"terms": ["region"]}
+    model._summary_cache = None
+
+    notes = "\n".join(build_summary_export_payload(model).notes)
+
+    assert "suppressed" in notes
+    assert "Edited terms: score" in notes
+    assert "conditional on those fixed offsets" in notes
+    assert "Offset terms: region" in notes
+
+
+def test_summary_export_marks_selected_away_parametric_and_level_rows_inactive():
+    model = _fit_selected_away_export_model()
+    assert tuple(model.result.rank_info.selected_group_names) == ()
+
+    payload = build_summary_export_payload(model)
+
+    intercept = next(row for row in payload.terms if row.term == "Intercept")
+    selected_away = [row for row in payload.terms if row.term != "Intercept"]
+
+    assert intercept.active is True
+    assert {row.kind for row in selected_away} == {"coefficient", "level"}
+    assert all(row.estimate == 0.0 for row in selected_away)
+    assert all(row.active is False for row in selected_away)
+
+
+def test_summary_export_does_not_make_nonfinite_selected_away_row_active():
+    model = _fit_selected_away_export_model()
+    assert tuple(model.result.rank_info.selected_group_names) == ()
+    model.result.beta[0] = np.nan
+
+    row = next(row for row in build_summary_export_payload(model).terms if row.term == "x")
+
+    assert row.estimate is None
+    assert row.active is False
+
+
+def test_summary_export_labels_polynomial_categorical_tests_as_group_wald():
+    payload = build_summary_export_payload(_fit_polynomial_categorical_export_model())
+
+    rows = [row for row in payload.terms if row.group == "x:cat"]
+    notes = "\n".join(payload.notes)
+
+    assert len(rows) == 2
+    assert all(row.kind == "group" for row in rows)
+    assert all(row.estimate is None and row.std_error is None for row in rows)
+    assert all(row.statistic_type == "chi2" for row in rows)
+    assert all(isinstance(row.statistic, float) for row in rows)
+    assert all(isinstance(row.p_value, float) for row in rows)
+    assert "Group chi-square p-values are Wald approximations" in notes
+    assert "Wood (2013)" not in notes
+
+
+def test_summary_export_labels_large_polynomial_interaction_as_group_wald():
+    payload = build_summary_export_payload(_fit_large_polynomial_interaction_export_model())
+
+    row = next(row for row in payload.terms if row.term == "a:b")
+    notes = "\n".join(payload.notes)
+
+    assert row.kind == "group"
+    assert row.estimate is None
+    assert row.std_error is None
+    assert row.statistic_type == "chi2"
+    assert isinstance(row.statistic, float)
+    assert isinstance(row.p_value, float)
+    assert "Group chi-square p-values are Wald approximations" in notes
+    assert "Wood (2013)" not in notes
 
 
 def test_public_export_api_exists(tmp_path):
