@@ -215,9 +215,7 @@ def test_editor_evidence_catches_up_after_an_edit_in_report_view(open_editor_pag
         _wait_for_editor_idle(page)
 
         with page.expect_response(
-            lambda response: (
-                response.request.method == "POST" and _path(response.url) == "/report"
-            )
+            lambda response: response.request.method == "POST" and _path(response.url) == "/report"
         ):
             page.get_by_role("tab", name="Validation", exact=True).click()
 
