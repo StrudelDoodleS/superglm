@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Spline, SuperGLM
+from superglm import Categorical, OrderedCategorical, Spline, SuperGLM
 from superglm.editor import EditorSession
 
 
@@ -15,6 +15,7 @@ from superglm.editor import EditorSession
 def editor_browser_model() -> SuperGLM:
     rng = np.random.default_rng(20260711)
     territory_levels = [f"T{i:02d}" for i in range(1, 11)]
+    age_band_levels = ["18-24", "25-34", "35-44", "45-54", "55-64", "65+"]
     long_levels = [
         "MyReallyLongCategoryNameThatWouldNeverFit",
         "CommercialVehicleWithSpecialistUsage",
@@ -30,17 +31,20 @@ def editor_browser_model() -> SuperGLM:
     n = 500
     curve = rng.uniform(0.0, 10.0, n)
     territory = rng.choice(territory_levels, n)
+    age_band = rng.choice(age_band_levels, n)
     long_category = rng.choice(long_levels, n)
     y = (
         0.5
         + 0.12 * np.sin(curve)
         + 0.03 * np.array([territory_levels.index(value) for value in territory])
+        + 0.08 * np.array([age_band_levels.index(value) for value in age_band])
         + rng.normal(0.0, 0.04, n)
     )
     frame = pd.DataFrame(
         {
             "curve": curve,
             "territory": territory,
+            "age_band": age_band,
             "long_category": long_category,
         }
     )
@@ -51,6 +55,11 @@ def editor_browser_model() -> SuperGLM:
         features={
             "curve": Spline(n_knots=7),
             "territory": Categorical(base="first"),
+            "age_band": OrderedCategorical(
+                order=age_band_levels,
+                basis=Spline(kind="ps", k=5),
+                base="first",
+            ),
             "long_category": Categorical(base="first"),
         },
     )
@@ -84,7 +93,7 @@ def open_editor_page(chromium_browser, editor_browser_model):
         try:
             session = EditorSession.from_model(
                 editor_browser_model,
-                terms=["curve", "territory", "long_category"],
+                terms=["curve", "territory", "age_band", "long_category"],
                 n_points=n_points,
             )
             if collapsed_levels is not None:

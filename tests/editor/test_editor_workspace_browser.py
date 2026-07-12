@@ -1100,7 +1100,7 @@ def test_text_selection_is_scoped_and_reduced_motion_stops_spinner(open_editor_p
         assert motion["name"] == "none" or motion["seconds"] <= 0.000001
 
 
-def test_application_bar_exposes_views_undo_redo_and_save(open_editor_page):
+def test_application_bar_exposes_views_undo_redo_and_export(open_editor_page):
     with open_editor_page() as (page, _session):
         tabs = page.get_by_role("tablist", name="Editor views")
         assert tabs.get_by_role("tab").all_inner_texts() == [
@@ -1110,7 +1110,7 @@ def test_application_bar_exposes_views_undo_redo_and_save(open_editor_page):
         ]
         assert page.get_by_role("button", name="Undo edit").is_disabled()
         assert page.get_by_role("button", name="Redo edit").is_disabled()
-        assert page.get_by_role("button", name="Save edited model").is_visible()
+        assert page.get_by_role("button", name="Export model or workbook").is_visible()
 
         select_chart_tool(page, "Select")
         page.locator('button[data-op="select_all"]').click()
@@ -1125,7 +1125,7 @@ def test_application_bar_exposes_views_undo_redo_and_save(open_editor_page):
         page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
 
 
-def test_analyst_can_discover_edit_undo_redo_help_and_save(open_editor_page):
+def test_analyst_can_discover_edit_undo_redo_help_and_export(open_editor_page):
     with open_editor_page() as (page, _session):
         select_chart_tool(page, "Select")
         with page.expect_response(
@@ -1192,17 +1192,114 @@ def test_analyst_can_discover_edit_undo_redo_help_and_save(open_editor_page):
         page.get_by_role("button", name="Help", exact=True).click()
         assert page.get_by_role("tabpanel", name="Help").is_visible()
 
-        save = page.get_by_role("button", name="Save edited model")
-        assert save.is_visible()
+        export = page.get_by_role("button", name="Export model or workbook")
+        assert export.is_visible()
+        export.click()
+        page.get_by_role("dialog", name="Export").wait_for(state="visible")
+
+
+def test_export_dialog_downloads_both_formats_without_redrawing_the_app(open_editor_page):
+    with open_editor_page(selected_term="territory") as (page, _session):
+        page.locator("#summaryFrame > *").first.wait_for()
+        page.evaluate(
+            """() => {
+                window.__exportBoundaryNodes = {
+                    chart: document.querySelector('#chart'),
+                    summary: document.querySelector('#summaryFrame'),
+                    report: document.querySelector('#reportFrame'),
+                    term: document.querySelector('#term'),
+                };
+            }"""
+        )
+
+        page.get_by_role("button", name="Export model or workbook").click()
+        dialog = page.get_by_role("dialog", name="Export")
+        dialog.wait_for(state="visible")
+
+        dialog.get_by_role("radio", name="Python model").check()
         with page.expect_response(
             lambda response: (
-                response.request.method == "POST"
-                and response.url.split("?", maxsplit=1)[0].endswith("/save_directory")
+                response.request.method == "GET"
+                and response.url.split("?", maxsplit=1)[0].endswith("/download_export")
+                and "format=joblib" in response.url
             )
-        ) as save_directory_response:
-            save.click()
-        assert save_directory_response.value.status == 200
-        page.get_by_role("dialog", name="Save Edited Model").wait_for(state="visible")
+        ) as model_response:
+            dialog.get_by_role("button", name="Download", exact=True).click()
+        assert model_response.value.status == 200
+        assert model_response.value.headers["x-superglm-validation"].startswith("artifact")
+
+        dialog.get_by_role("radio", name="Excel rating workbook").check()
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "GET"
+                and response.url.split("?", maxsplit=1)[0].endswith("/download_export")
+                and "format=xlsx" in response.url
+            )
+        ) as excel_response:
+            dialog.get_by_role("button", name="Download", exact=True).click()
+        assert excel_response.value.status == 200
+        assert excel_response.value.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        assert page.evaluate(
+            """() => {
+                const before = window.__exportBoundaryNodes;
+                return before.chart === document.querySelector('#chart')
+                    && before.summary === document.querySelector('#summaryFrame')
+                    && before.report === document.querySelector('#reportFrame')
+                    && before.term === document.querySelector('#term');
+            }"""
+        )
+
+
+def test_ordered_summary_has_one_whole_smooth_test_and_no_level_tests(open_editor_page):
+    with open_editor_page(selected_term="age_band") as (page, _session):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelectorAll('#summaryFrame .summary-row').length > 0"""
+        )
+        compact_rows = page.locator("#summaryFrame .summary-row").evaluate_all(
+            """rows => rows.map(row => ({
+                term: row.querySelector('.summary-term span')?.textContent.trim() || '',
+                cells: Array.from(row.cells, cell => cell.textContent.trim()),
+            }))"""
+        )
+        smooth_rows = [row for row in compact_rows if row["term"] == "age_band"]
+        assert len(smooth_rows) == 1
+        assert smooth_rows[0]["cells"][4] not in {"", "--"}
+
+        level_rows = [row for row in compact_rows if row["term"].startswith("age_band[")]
+        assert level_rows
+        for row in level_rows:
+            assert row["cells"][2] not in {"", "--"}
+            assert row["cells"][3] not in {"", "--"}
+            assert row["cells"][4] == "--"
+            assert row["cells"][5] == ""
+
+        full_summary = page.frame_locator(".raw-summary-frame")
+        full_summary.locator("body").wait_for()
+        full_rows = full_summary.locator("tr").evaluate_all(
+            "rows => rows.map(row => Array.from(row.cells, cell => cell.textContent.trim()))"
+        )
+        full_smooth_rows = [
+            cells
+            for cells in full_rows
+            if cells
+            and cells[0] == "age_band"
+            and any("ordered spline" in cell and "p=" in cell for cell in cells)
+        ]
+        assert len(full_smooth_rows) == 1
+        assert any("p=" in cell for cell in full_smooth_rows[0])
+
+        for row in level_rows:
+            full_row = next(cells for cells in full_rows if cells and cells[0] == row["term"])
+            assert full_row[1] != "---"  # estimate
+            assert full_row[2] != "---"  # standard error
+            assert full_row[4] == "---"  # no separate level p-value
+            assert full_row[5] != "---"  # confidence interval lower bound
+            assert full_row[6] != "---"  # confidence interval upper bound
+            assert full_row[7] == ""  # no significance marker
 
 
 def test_raw_summary_html_is_isolated_in_a_sandboxed_iframe(open_editor_page):

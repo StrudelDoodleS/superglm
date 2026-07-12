@@ -23,6 +23,10 @@ ti.edf                      # effective degrees of freedom
 ti.spline                   # SplineMetadata (interior_knots, boundary_knots, basis_dim, ...)
 ```
 
+For a spline-backed `OrderedCategorical`, inference is a single whole-smooth Wood test. Its ordered
+level rows report effect estimates, standard errors, and confidence intervals for interpretation;
+they intentionally do not present separate level p-values or significance stars.
+
 By default this is the canonical fitted term contribution under the model's
 identifiability constraint. If you want a rebased reporting view where the
 geometric mean of relativities is 1, pass `centering="mean"` explicitly:
@@ -117,8 +121,11 @@ model.export_rating_tables(
 )
 ```
 
-The workbook includes selected-bin rating tables, a discretization impact sweep
-for `20, 50, 100, 200, 250` bins, and the model summary.
+The workbook includes selected-bin rating tables, a discretization impact sweep for
+`20, 50, 100, 200, 250` bins, and a structured Model Summary sheet. The `ModelOverview` and
+`TermInference` Excel tables use typed cells for metrics, estimates, intervals, and p-values instead
+of storing the formatted console summary as one text column. The editor exposes the same workbook
+through **Export > Excel rating workbook** when explicit training or retained fit data is available.
 
 ## Families
 

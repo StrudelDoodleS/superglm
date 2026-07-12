@@ -95,12 +95,18 @@ infrequent curve and diagnostic controls, and Help lists modes, gestures, operat
 On a narrow screen these panes share a dismissible drawer. Escape closes a popover or drawer and
 returns focus to its launcher.
 
-## Save and Export
+## Export
 
-Save writes an edited model artifact to a chosen directory. Download writes the same artifact
-through the browser when direct filesystem selection is unsuitable. The exported model uses
-Python's current authoritative edit revision; display-only zoom, mode, grouping view, and truncated
-tick text are not written into the model.
+Choose **Export > Python model** to download a fitted `.joblib` artifact or write it to a kernel
+path. SuperGLM loads the serialized artifact back before releasing it and, when evaluation rows are
+available, compares predictions on a bounded sample. The export always uses Python's current
+authoritative edit revision; display-only zoom, mode, grouping view, and truncated tick text are
+not written into the model.
+
+Choose **Export > Excel rating workbook** for deployment-oriented rating tables. This export needs
+explicit training data or fit data retained by the model. Its Model Summary sheet contains typed
+`ModelOverview` and `TermInference` tables, so numbers remain numeric Excel cells rather than one
+large formatted text block.
 
 ## Keyboard Shortcuts
 
