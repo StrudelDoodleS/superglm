@@ -5120,7 +5120,7 @@ def test_widget_export_file_writes_joblib_and_excel(editor_model, tmp_path):
     saved_model = joblib.load(model_payload["path"])
     workbook = load_workbook(excel_payload["path"], read_only=False)
     assert saved_model.result is not None
-    assert model_payload["validation"] == "artifact+predictions"
+    assert model_payload["validation_scope"] == "artifact+predictions"
     assert model_payload["model_revision"] == 0
     assert Path(model_payload["path"]).name == "pricing-model.joblib"
     assert Path(excel_payload["path"]).name == "rating-output.xlsx"

@@ -1277,6 +1277,7 @@ def test_ordered_summary_has_one_whole_smooth_test_and_no_level_tests(open_edito
             assert row["cells"][4] == "--"
             assert row["cells"][5] == ""
 
+        page.locator("details.raw-summary > summary").click()
         full_summary = page.frame_locator(".raw-summary-frame")
         full_summary.locator("body").wait_for()
         full_rows = full_summary.locator("tr").evaluate_all(

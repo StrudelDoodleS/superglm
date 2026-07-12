@@ -667,7 +667,7 @@ class EditorWidget:
             "filename": saved_path.name,
             "message": f"Exported {saved_path.name} to {saved_path.parent}",
             "model_revision": result.model_revision,
-            "validation": result.validation_scope,
+            "validation_scope": result.validation_scope,
         }
 
     def _download_model(self, filename: str | None = None) -> tuple[bytes, str]:
