@@ -208,7 +208,7 @@ class NegativeBinomial:
                 y * np.log(np.maximum(y, 1e-300) / mu)
                 - (y + theta) * np.log((y + theta) / (mu + theta))
             ),
-            2 * theta * np.log(theta / (mu + theta)),
+            2 * theta * np.log((mu + theta) / theta),
         )
         return d
 

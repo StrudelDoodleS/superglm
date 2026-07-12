@@ -9,6 +9,7 @@ import numpy as np
 
 from superglm.inference._term_helpers import spline_group_enrichment
 from superglm.inference.summary import _CoefRow
+from superglm.solvers.rank import selected_group_name_set
 from superglm.types import GroupSlice
 
 
@@ -19,12 +20,13 @@ def diagnostics(model) -> dict[str, Any]:
     res = model.result
     group_edf = model._group_edf
     reml_lam = getattr(model, "_reml_lambdas", None)
+    selected_names = selected_group_name_set(res, model._groups, penalty=model.penalty)
 
     out = {}
     for g in model._groups:
         bg = res.beta[g.sl]
         entry: dict[str, Any] = {
-            "active": bool(np.any(bg != 0)),
+            "active": g.name in selected_names,
             "group_norm": float(np.linalg.norm(bg)),
             "n_params": g.size,
         }
@@ -81,7 +83,8 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
     bic = -2 * ll + np.log(n) * edf
     denom = n - edf - 1.0
     aicc = aic + 2 * edf * (edf + 1) / denom if denom > 0 else np.inf
-    n_active = sum(1 for g in model._groups if np.linalg.norm(res.beta[g.sl]) > 1e-12)
+    selected_names = selected_group_name_set(res, model._groups, penalty=model.penalty)
+    n_active = len(selected_names)
     p_total = len(model._groups)
 
     ebic = bic + 2 * 0.5 * (
@@ -238,15 +241,16 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         precomputed_R_a=inf["R_a"],
         precomputed_edf=inf["edf"],
         precomputed_edf1=inf["edf1"],
+        coefficient_estimable_override=inf.get("coefficient_estimable"),
+        selected_group_names=selected_names,
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,
     )
     phi = res.phi
     se_dict: dict[str, np.ndarray] = {}
     se_raw_dict: dict[str, np.ndarray] = {}
-    beta = res.beta
     for g in model._groups:
-        if np.linalg.norm(beta[g.sl]) < 1e-12:
+        if g.name not in selected_names:
             se_dict[g.name] = np.zeros(g.size)
             se_raw_dict[g.name] = np.zeros(g.size)
         else:
@@ -273,6 +277,8 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         active_groups=active_groups,
         known_scale=known_scale,
         alpha=alpha,
+        coefficient_estimable_override=inf.get("coefficient_estimable"),
+        selected_group_names=selected_names,
     )
 
     summary_obj = ModelSummary(
@@ -290,16 +296,29 @@ def feature_groups(model, name: str) -> list[GroupSlice]:
 def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
     from superglm.features.interaction import PolynomialCategorical, SplineCategorical
     from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.inference._ordered_reference import ordered_reference_intercept
 
-    rows = [_CoefRow(name="Intercept", coef=float(model.result.intercept))]
+    intercept = ordered_reference_intercept(
+        model.result.intercept,
+        model.result.beta,
+        model._feature_order,
+        model._specs,
+        model._groups,
+    )
+    rows = [_CoefRow(name="Intercept", coef=intercept)]
     group_edf = getattr(model, "_group_edf", None)
     reml_lambdas = getattr(model, "_reml_lambdas", None)
+    selected_names = selected_group_name_set(
+        model.result,
+        model._groups,
+        penalty=model.penalty,
+    )
     handled_ordered_features: set[str] = set()
 
     for g in model._groups:
         beta_g = np.asarray(model.result.beta[g.sl], dtype=float)
         norm = float(np.linalg.norm(beta_g))
-        active = norm > 1e-12
+        active = g.name in selected_names
         spec = model._specs.get(g.feature_name) or model._interaction_specs.get(g.feature_name)
         edf = group_edf.get(g.name) if group_edf else None
 
@@ -315,13 +334,32 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
             )
             raw = spec.reconstruct(beta_combined)
             if spec.basis == "spline":
-                for i, level in enumerate(raw["levels"]):
+                metadata = spline_group_enrichment(
+                    feature_groups[0].name,
+                    spec._spline,
+                    group_edf,
+                    reml_lambdas,
+                    model.lambda2,
+                )
+                metadata["edf"] = feature_edf
+                rows.append(
+                    _CoefRow(
+                        name=g.feature_name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=len(beta_combined),
+                        active=any(fg.name in selected_names for fg in feature_groups),
+                        group_norm=float(np.linalg.norm(beta_combined)),
+                        subgroup_type="ordered_spline",
+                        **metadata,
+                    )
+                )
+                for level in raw["levels"]:
                     rows.append(
                         _CoefRow(
                             name=f"{g.feature_name}[{level}]",
                             group=g.feature_name,
                             coef=float(raw["level_log_relativities"][level]),
-                            edf=feature_edf if i == 0 else None,
                         )
                     )
             else:

@@ -268,7 +268,7 @@ class TensorMarginalInfo:
     vectors, penalties, constraints) without rebuilding from scratch.
     """
 
-    basis: NDArray  # (n, K_eff) centered + constrained basis
+    basis: NDArray  # centered + constrained basis on training rows or discrete support
     penalty: NDArray  # (K_eff, K_eff) penalty in centered space
     knots: NDArray  # full knot vector (for evaluating at new points)
     lo: float  # training range lower bound

@@ -7,7 +7,9 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.inference._metrics_design import MetricsDesign, factor_from_gram, weighted_moments
 from superglm.inference.summary import _BasisDetailRow, _CoefRow, _compute_coef_stats
+from superglm.solvers.rank import diagonal_of_square, selected_group_name_set
 from superglm.types import GroupSlice
 
 
@@ -17,7 +19,7 @@ def build_coef_rows(
     specs: dict,
     interaction_specs: dict,
     result: Any,
-    X_a: NDArray,
+    X_a: NDArray | MetricsDesign,
     W: NDArray,
     XtWX_inv: NDArray,
     XtWX_inv_aug: NDArray,
@@ -33,6 +35,9 @@ def build_coef_rows(
     precomputed_R_a: NDArray | None = None,
     precomputed_edf: NDArray | None = None,
     precomputed_edf1: NDArray | None = None,
+    precomputed_design_moments: tuple[NDArray, NDArray, NDArray] | None = None,
+    coefficient_estimable_override: NDArray | None = None,
+    selected_group_names: set[str] | None = None,
     group_matrices: list | None = None,
     sample_weights: NDArray | None = None,
 ) -> list[_CoefRow]:
@@ -62,6 +67,10 @@ def build_coef_rows(
     from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
     from superglm.group_matrix import CategoricalGroupMatrix
+    from superglm.inference._ordered_reference import (
+        ordered_reference_beta_contrast,
+        ordered_reference_intercept,
+    )
     from superglm.inference._term_covariance import feature_se_from_cov
     from superglm.inference._term_helpers import (
         _resolve_group_lambda,
@@ -69,6 +78,20 @@ def build_coef_rows(
     )
 
     beta = result.beta
+    selected_names = (
+        selected_group_name_set(result, groups)
+        if selected_group_names is None
+        else set(selected_group_names)
+    )
+    coefficient_estimable = (
+        np.asarray(coefficient_estimable_override, dtype=bool)
+        if coefficient_estimable_override is not None
+        else (
+            result.rank_info.coefficient_estimable()
+            if getattr(result, "rank_info", None) is not None
+            else np.ones(len(beta), dtype=bool)
+        )
+    )
 
     # ── Per-level diagnostics for categorical features ────────────
     # Compute observation count and exposure share per non-base level.
@@ -88,7 +111,7 @@ def build_coef_rows(
     # The augmented inverse has intercept at row/col 0; feature blocks start at 1.
     se_dict: dict[str, NDArray] = {}
     for g in groups:
-        if np.linalg.norm(beta[g.sl]) < 1e-12:
+        if g.name not in selected_names:
             se_dict[g.name] = np.zeros(g.size)
         else:
             ag = next((a for a in active_groups if a.name == g.name), None)
@@ -99,20 +122,41 @@ def build_coef_rows(
                 aug_sl = slice(1 + ag.start, 1 + ag.end)
                 var_diag = scale * np.diag(XtWX_inv_aug[aug_sl, aug_sl])
                 se_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
+        if g.name in selected_names:
+            se_dict[g.name] = se_dict[g.name].astype(float, copy=True)
+            se_dict[g.name][~coefficient_estimable[g.sl]] = np.nan
 
-    # Intercept SE from augmented inverse [0, 0] element
-    icpt_var = float(XtWX_inv_aug[0, 0])
-    if icpt_var > 0:
-        icpt_se = (
-            float(np.sqrt(icpt_var)) if known_scale else float(np.sqrt(max(phi, 0.0) * icpt_var))
+    # Ordered spline effects are displayed relative to their chosen base levels.
+    # Apply the same affine transformation to the intercept and its covariance.
+    feature_order = list(specs)
+    intercept = ordered_reference_intercept(
+        result.intercept,
+        beta,
+        feature_order,
+        specs,
+        groups,
+    )
+    full_reference_contrast = ordered_reference_beta_contrast(
+        len(beta),
+        feature_order,
+        specs,
+        groups,
+    )
+    augmented_reference_contrast = np.zeros(XtWX_inv_aug.shape[0], dtype=np.float64)
+    augmented_reference_contrast[0] = 1.0
+    original_groups = {group.name: group for group in groups}
+    for active_group in active_groups:
+        original_group = original_groups[active_group.name]
+        augmented_reference_contrast[1 + active_group.start : 1 + active_group.end] = (
+            full_reference_contrast[original_group.sl]
         )
-    else:
-        icpt_se = 0.0
+    icpt_var = float(augmented_reference_contrast @ XtWX_inv_aug @ augmented_reference_contrast)
+    scale = 1.0 if known_scale else max(phi, 0.0)
+    icpt_se = float(np.sqrt(max(scale * icpt_var, 0.0)))
 
     rows: list[_CoefRow] = []
 
     # Intercept row
-    intercept = result.intercept
     z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
     rows.append(
         _CoefRow(
@@ -130,8 +174,15 @@ def build_coef_rows(
     # When precomputed values are provided, use them directly.
     _R_factor = precomputed_R_a
     _influence_edf = None
+    _design_moments = precomputed_design_moments
     if precomputed_edf is not None and precomputed_edf1 is not None:
         _influence_edf = (precomputed_edf, precomputed_edf1)
+
+    def _get_design_moments():
+        nonlocal _design_moments
+        if _design_moments is None:
+            _design_moments = weighted_moments(X_a, W)
+        return _design_moments
 
     def _get_R_factor():
         nonlocal _R_factor
@@ -139,7 +190,7 @@ def build_coef_rows(
             if X_a.shape[1] == 0:
                 _R_factor = np.empty((0, 0))
             else:
-                _, _R_factor = np.linalg.qr(X_a * np.sqrt(W)[:, None], mode="reduced")
+                _R_factor = factor_from_gram(_get_design_moments()[2])
         return _R_factor
 
     def _get_influence_edf():
@@ -148,10 +199,10 @@ def build_coef_rows(
             if X_a.shape[1] == 0:
                 _influence_edf = (np.array([]), np.array([]))
             else:
-                XtWX = X_a.T @ (X_a * W[:, None])
-                F = XtWX_inv @ XtWX
+                data_gram = _get_design_moments()[2]
+                F = XtWX_inv_aug[1:, 1:] @ data_gram
                 edf = np.diag(F)
-                edf1 = 2.0 * edf - np.sum(F * F, axis=1)
+                edf1 = 2.0 * edf - diagonal_of_square(F)
                 _influence_edf = (edf, edf1)
         return _influence_edf
 
@@ -196,7 +247,7 @@ def build_coef_rows(
         spec = specs.get(g.feature_name) or interaction_specs.get(g.feature_name)
         b_g = beta[g.sl]
         se_g = se_dict[g.name]
-        active = np.linalg.norm(b_g) > 1e-12
+        active = g.name in selected_names
 
         if isinstance(spec, OrderedCategorical):
             if g.feature_name in handled_ordered_features:
@@ -205,7 +256,7 @@ def build_coef_rows(
 
             feature_groups = [fg for fg in groups if fg.feature_name == g.feature_name]
             beta_combined = np.concatenate([beta[fg.sl] for fg in feature_groups])
-            feature_active = bool(np.linalg.norm(beta_combined) > 1e-12)
+            feature_active = any(fg.name in selected_names for fg in feature_groups)
             feature_edf = (
                 sum(_get_group_edf_map().get(fg.name, 0.0) for fg in feature_groups)
                 if feature_active
@@ -226,22 +277,106 @@ def build_coef_rows(
             raw = spec.reconstruct(beta_combined)
 
             if spec.basis == "spline":
+                active_pairs = []
+                for feature_group in feature_groups:
+                    active_group = next(
+                        (ag for ag in active_groups if ag.name == feature_group.name),
+                        None,
+                    )
+                    if active_group is not None:
+                        active_pairs.append((feature_group, active_group))
+
+                stat = float("nan")
+                p_val = float("nan")
+                ref_df = float(sum(fg.size for fg in feature_groups))
+                curve_se_min = float("nan")
+                curve_se_max = float("nan")
+                beta_active = (
+                    np.concatenate([beta[fg.sl] for fg, _ in active_pairs])
+                    if active_pairs
+                    else np.empty(0, dtype=float)
+                )
+
+                if active_pairs:
+                    from superglm.stats.wood_pvalue import wood_test_smooth
+
+                    active_indices = np.concatenate(
+                        [np.arange(ag.start, ag.end) for _, ag in active_pairs]
+                    )
+                    augmented_indices = active_indices + 1
+                    V_b_j = scale * XtWX_inv_aug[np.ix_(augmented_indices, augmented_indices)]
+                    R_a = _get_R_factor()
+                    edf, edf1 = _get_influence_edf()
+                    edf1_j = float(np.sum(edf1[active_indices]))
+                    X_j = R_a[:, active_indices]
+                    res_df = -1.0 if known_scale else float(n_obs - np.sum(edf))
+
+                    try:
+                        stat, p_val, ref_df = wood_test_smooth(
+                            beta_active,
+                            X_j,
+                            V_b_j,
+                            edf1_j,
+                            res_df,
+                        )
+                    except Exception:
+                        pass
+                    curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
+
+                _, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(
+                    feature_groups[0].name,
+                    spec._spline,
+                )
+                rows.append(
+                    _CoefRow(
+                        name=g.feature_name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=len(beta_combined),
+                        active=feature_active,
+                        group_norm=float(np.linalg.norm(beta_active)),
+                        wald_chi2=stat if feature_active else None,
+                        wald_p=p_val if feature_active else None,
+                        ref_df=ref_df if feature_active else None,
+                        curve_se_min=curve_se_min,
+                        curve_se_max=curve_se_max,
+                        subgroup_type="ordered_spline",
+                        edf=feature_edf,
+                        smoothing_lambda=s_lam,
+                        spline_kind=s_kind,
+                        knot_strategy=s_knot_strat,
+                        boundary=s_bnd,
+                        monotone=getattr(spec._spline, "monotone", None),
+                        monotone_engine=g.monotone_engine,
+                        monotone_repaired=g.feature_name in _mono_repairs,
+                    )
+                )
+
                 levels = raw["levels"]
                 for i, level in enumerate(levels):
                     coef_val = float(raw["level_log_relativities"][level])
-                    se_val = float(se_levels[i]) if i < len(se_levels) else 0.0
-                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                    se_val: float | None = (
+                        float(se_levels[i]) if feature_active and i < len(se_levels) else None
+                    )
+                    level_ci_lo: float | None
+                    level_ci_hi: float | None
+                    if se_val is not None and np.isfinite(se_val) and se_val > 0.0:
+                        _, _, level_ci_lo, level_ci_hi = _compute_coef_stats(
+                            coef_val, se_val, alpha
+                        )
+                    elif se_val is not None and np.isfinite(se_val) and level == spec._base_level:
+                        level_ci_lo = level_ci_hi = coef_val
+                    else:
+                        se_val = None
+                        level_ci_lo = level_ci_hi = None
                     rows.append(
                         _CoefRow(
                             name=f"{g.feature_name}[{level}]",
                             group=g.feature_name,
                             coef=coef_val,
                             se=se_val,
-                            z=z,
-                            p=p,
-                            ci_low=ci_lo,
-                            ci_high=ci_hi,
-                            edf=feature_edf if i == 0 else None,
+                            ci_low=level_ci_lo,
+                            ci_high=level_ci_hi,
                         )
                     )
             else:
@@ -684,6 +819,7 @@ def build_coef_rows(
                     p=p,
                     ci_low=ci_lo,
                     ci_high=ci_hi,
+                    estimable=bool(coefficient_estimable[g.start]),
                 )
             )
 
@@ -701,8 +837,17 @@ def build_coef_rows(
                     p=p,
                     ci_low=ci_lo,
                     ci_high=ci_hi,
+                    estimable=bool(coefficient_estimable[g.start]),
                 )
             )
+
+    # Every coefficient-style branch consumes the same masked SE arrays, but
+    # not every feature-specific row constructor sets ``estimable`` directly.
+    # Keep the public flag consistent with the rank mask for categoricals,
+    # polynomials, and interaction coefficient rows as well as numerics.
+    for row in rows:
+        if row.se is not None and np.isnan(row.se):
+            row.estimable = False
 
     # ── Quasi-separation detection ──────────────────────────────
     # Primary: data-driven — flag categorical levels with too few obs.
@@ -721,13 +866,19 @@ def build_coef_rows(
     parametric_ses = [
         r.se
         for r in rows
-        if r.se is not None and r.se > 0 and not r.is_spline and r.name != "Intercept"
+        if r.se is not None
+        and r.se > 0
+        and r.p is not None
+        and not r.is_spline
+        and r.name != "Intercept"
     ]
     if parametric_ses:
         median_se = float(np.median(parametric_ses))
         sep_threshold = max(median_se * 50, 10.0)
         for r in rows:
             if r.quasi_separated or r.is_spline or r.name == "Intercept":
+                continue
+            if r.p is None:
                 continue
             if r.level_n_obs is not None:
                 continue  # already handled by data-driven check
@@ -746,6 +897,8 @@ def build_basis_detail(
     active_groups,
     known_scale,
     alpha=0.05,
+    coefficient_estimable_override=None,
+    selected_group_names=None,
 ):
     """Build per-coefficient detail for active 1-D spline groups.
 
@@ -756,6 +909,20 @@ def build_basis_detail(
 
     beta = result.beta
     phi = result.phi
+    selected_names = (
+        selected_group_name_set(result, groups)
+        if selected_group_names is None
+        else set(selected_group_names)
+    )
+    coefficient_estimable = (
+        np.asarray(coefficient_estimable_override, dtype=bool)
+        if coefficient_estimable_override is not None
+        else (
+            result.rank_info.coefficient_estimable()
+            if getattr(result, "rank_info", None) is not None
+            else np.ones(len(beta), dtype=bool)
+        )
+    )
     detail: dict[str, list] = {}
 
     for g in groups:
@@ -766,7 +933,7 @@ def build_basis_detail(
         if not isinstance(spec, _SplineBase):
             continue
         b_g = beta[g.sl]
-        if np.linalg.norm(b_g) < 1e-12:
+        if g.name not in selected_names:
             continue
 
         ag = next((a for a in active_groups if a.name == g.name), None)
@@ -777,6 +944,7 @@ def build_basis_detail(
         aug_sl = slice(1 + ag.start, 1 + ag.end)
         var_diag = scale * np.diag(XtWX_inv_aug[aug_sl, aug_sl])
         se_arr = np.sqrt(np.maximum(var_diag, 0.0))
+        se_arr[~coefficient_estimable[g.sl]] = np.nan
 
         rows = []
         for i in range(g.size):

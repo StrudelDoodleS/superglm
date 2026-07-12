@@ -16,6 +16,7 @@ from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
+from superglm.inference._ordered_reference import ordered_reference_intercept
 from superglm.links import LogLink
 
 if TYPE_CHECKING:
@@ -591,7 +592,17 @@ def build_rating_table_payload(
         features=continuous,
     )
     return RatingTablePayload(
-        base_relativity=float(np.exp(model.result.intercept)),
+        base_relativity=float(
+            np.exp(
+                ordered_reference_intercept(
+                    model.result.intercept,
+                    model.result.beta,
+                    model._feature_order,
+                    model._specs,
+                    model._groups,
+                )
+            )
+        ),
         selected_n_bins=int(n_bins),
         main_effects=main_effects,
         interactions=_interaction_blocks(model, n_bins),

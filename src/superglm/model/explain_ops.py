@@ -70,7 +70,14 @@ def metrics(model, X, y, sample_weight=None, offset=None):
 
 def drop1(model, X, y, sample_weight=None, offset=None, test="Chisq"):
     """Drop-one deviance analysis for each feature."""
-    return _drop1(model, X, y, offset=offset, test=test)
+    return _drop1(
+        model,
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+        test=test,
+    )
 
 
 def refit_unpenalised(model, X, y, sample_weight=None, offset=None, keep_smoothing=True):

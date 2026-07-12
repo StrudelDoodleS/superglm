@@ -17,6 +17,7 @@ from superglm.group_matrix import (
     SplineCategoricalGroupMatrix,
     _block_xtwx,
 )
+from superglm.solvers.rank import decompose_factor, decompose_gram
 from superglm.types import GroupSlice
 
 
@@ -26,6 +27,86 @@ def _second_diff_penalty(p: int) -> NDArray:
     return D2.T @ D2
 
 
+def _active_penalty_matrix(
+    group_matrices: list,
+    groups: list[GroupSlice],
+    active_groups: list[GroupSlice],
+    lambda2: float | dict[str, float],
+    *,
+    S_override: NDArray | None = None,
+    reml_penalties: list | None = None,
+) -> NDArray:
+    """Build ``S`` directly in compact active coordinates."""
+    p_active = sum(group.size for group in active_groups)
+    if p_active == 0:
+        return np.empty((0, 0), dtype=np.float64)
+
+    active_by_name = {group.name: group for group in active_groups}
+    if S_override is not None:
+        selected_columns = np.asarray(
+            [
+                column
+                for group in groups
+                if group.name in active_by_name
+                for column in range(group.start, group.end)
+            ],
+            dtype=np.intp,
+        )
+        return np.asarray(S_override[np.ix_(selected_columns, selected_columns)], dtype=np.float64)
+
+    S = np.zeros((p_active, p_active), dtype=np.float64)
+    if reml_penalties is not None:
+        for component in reml_penalties:
+            active_group = active_by_name.get(component.group_name)
+            if active_group is None:
+                continue
+            gm = group_matrices[component.group_index]
+            lam = lambda2[component.name] if isinstance(lambda2, dict) else lambda2
+            if lam == 0:
+                continue
+            omega = (
+                component.omega_ssp
+                if component.omega_ssp is not None
+                else gm.R_inv.T @ component.omega_raw @ gm.R_inv
+            )
+            S[active_group.sl, active_group.sl] += lam * omega
+
+        for group in groups:
+            active_group = active_by_name.get(group.name)
+            if active_group is None or group.scop_reparameterization is None or not group.penalized:
+                continue
+            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            if lam > 0:
+                S[active_group.sl, active_group.sl] += (
+                    lam * group.scop_reparameterization.penalty_matrix()
+                )
+        return S
+
+    for gm, group in zip(group_matrices, groups, strict=True):
+        active_group = active_by_name.get(group.name)
+        if active_group is None or not group.penalized:
+            continue
+        lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+        if lam == 0:
+            continue
+        if isinstance(
+            gm,
+            SparseSSPGroupMatrix
+            | SplineCategoricalGroupMatrix
+            | DiscretizedSplineCategoricalGroupMatrix
+            | DiscretizedSSPGroupMatrix,
+        ):
+            omega = gm.omega
+            if omega is None:
+                omega = _second_diff_penalty(gm.R_inv.shape[0])
+            S[active_group.sl, active_group.sl] = lam * gm.R_inv.T @ omega @ gm.R_inv
+        elif group.scop_reparameterization is not None:
+            S[active_group.sl, active_group.sl] = (
+                lam * group.scop_reparameterization.penalty_matrix()
+            )
+    return S
+
+
 def _penalised_xtwx_inv(
     beta: NDArray,
     W: NDArray,
@@ -33,6 +114,7 @@ def _penalised_xtwx_inv(
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
     S_override: NDArray | None = None,
+    selected_group_names: set[str] | None = None,
 ) -> tuple[NDArray, NDArray, NDArray, list[GroupSlice], list]:
     """Compute (X'WX + S)^{-1} via augmented QR + truncated SVD.
 
@@ -64,7 +146,11 @@ def _penalised_xtwx_inv(
     active_group_names: list[str] = []
     col = 0
     for gm, g in zip(group_matrices, groups):
-        if np.linalg.norm(beta[g.sl]) > 1e-12:
+        if (
+            g.name in selected_group_names
+            if selected_group_names is not None
+            else np.linalg.norm(beta[g.sl]) > 1e-12
+        ):
             arr = gm.toarray()
             active_cols.append(arr)
             active_gms.append(gm)
@@ -148,15 +234,7 @@ def _penalised_xtwx_inv(
 
     # Augmented QR: [sqrt(W)*X; sqrt(S)] → R'R = X'WX + S
     A = np.vstack([X_a * np.sqrt(W)[:, None], S_rows])
-    _, R = np.linalg.qr(A, mode="reduced")
-
-    # Truncated SVD for numerical stability.
-    # Regularize truncated directions so SEs are large-but-finite.
-    _, s_R, Vh_R = np.linalg.svd(R, full_matrices=False)
-    threshold = 1e-6 * s_R[0]
-    regularized = 1.0 / threshold**2
-    inv_s2 = np.where(s_R > threshold, 1.0 / s_R**2, regularized)
-    XtWX_S_inv = (Vh_R.T * inv_s2[None, :]) @ Vh_R
+    XtWX_S_inv = decompose_factor(A).pseudo_inverse()
 
     # Augmented (p+1)×(p+1) inverse including intercept row/column.
     # The augmented Fisher information is:
@@ -168,12 +246,7 @@ def _penalised_xtwx_inv(
     S_aug_rows = np.zeros((p_a + 1, p_a + 1))
     S_aug_rows[1:, 1:] = S_rows  # no penalty on intercept
     A_aug = np.vstack([X_aug * sqrtW[:, None], S_aug_rows])
-    _, R_aug = np.linalg.qr(A_aug, mode="reduced")
-    _, s_aug, Vh_aug = np.linalg.svd(R_aug, full_matrices=False)
-    threshold_aug = 1e-6 * s_aug[0]
-    regularized_aug = 1.0 / threshold_aug**2
-    inv_s2_aug = np.where(s_aug > threshold_aug, 1.0 / s_aug**2, regularized_aug)
-    XtWX_S_inv_aug = (Vh_aug.T * inv_s2_aug[None, :]) @ Vh_aug
+    XtWX_S_inv_aug = decompose_factor(A_aug).pseudo_inverse()
 
     return X_a, XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, active_gms
 
@@ -185,6 +258,9 @@ def _penalised_xtwx_inv_gram(
     groups: list[GroupSlice],
     lambda2: float | dict[str, float],
     S_override: NDArray | None = None,
+    selected_group_names: set[str] | None = None,
+    reml_penalties: list | None = None,
+    compute_augmented: bool = True,
 ) -> tuple[NDArray, NDArray, list[GroupSlice], NDArray | None, NDArray | None]:
     """Fast (X'WX + S)^{-1} via per-group gram matrices.
 
@@ -211,7 +287,11 @@ def _penalised_xtwx_inv_gram(
     active_group_names: list[str] = []
     col = 0
     for gm, g in zip(group_matrices, groups):
-        if np.linalg.norm(beta[g.sl]) > 1e-12:
+        if (
+            g.name in selected_group_names
+            if selected_group_names is not None
+            else np.linalg.norm(beta[g.sl]) > 1e-12
+        ):
             active_gms.append(gm)
             active_group_names.append(g.name)
             p_g = gm.shape[1]
@@ -241,59 +321,20 @@ def _penalised_xtwx_inv_gram(
     # For discretized groups this is O(n_bins) per block instead of O(n·p²).
     XtWX = _block_xtwx(active_gms, active_groups_out, W)
 
-    # Add penalty S (same logic as _penalised_xtwx_inv)
-    if S_override is not None:
-        active_idx = []
-        for ag, gname in zip(active_groups_out, active_group_names):
-            orig_g = next(g for g in groups if g.name == gname)
-            active_idx.extend(range(orig_g.start, orig_g.end))
-        active_idx_arr = np.array(active_idx)
-        S = S_override[np.ix_(active_idx_arr, active_idx_arr)]
-    else:
-        S = np.zeros((p_a, p_a))
-        for gm_orig, ag, gname in zip(active_gms, active_groups_out, active_group_names):
-            if not ag.penalized:
-                continue
+    S = _active_penalty_matrix(
+        group_matrices,
+        groups,
+        active_groups_out,
+        lambda2,
+        S_override=S_override,
+        reml_penalties=reml_penalties,
+    )
 
-            if isinstance(lambda2, dict):
-                lam_g = lambda2.get(gname, 0.0)
-            else:
-                lam_g = lambda2
-
-            if lam_g == 0:
-                continue
-
-            if isinstance(
-                gm_orig,
-                SparseSSPGroupMatrix
-                | SplineCategoricalGroupMatrix
-                | DiscretizedSplineCategoricalGroupMatrix
-                | DiscretizedSSPGroupMatrix,
-            ):
-                R_inv = gm_orig.R_inv
-                omega = gm_orig.omega
-                if omega is None:
-                    p_b = R_inv.shape[0]
-                    omega = _second_diff_penalty(p_b)
-                S[ag.sl, ag.sl] = lam_g * R_inv.T @ omega @ R_inv
-            elif ag.scop_reparameterization is not None:
-                S_scop = ag.scop_reparameterization.penalty_matrix()
-                S[ag.sl, ag.sl] = lam_g * S_scop
-
-    # Invert (X'WX + S) via eigendecomposition.
-    # Match the dense QR/SVD path: there we truncate singular values at
-    # ``rtol * s_max``. Since ``eigvals(M) = s**2``, the equivalent cutoff
-    # on the eigenvalue scale is ``rtol**2 * eig_max``.
-    # Truncated directions get a large regularized inverse (1/threshold)
-    # so that SEs are finite-but-huge rather than zero — correctly
-    # signaling "undetermined" for near-separated coefficients.
     M = XtWX + S
-    eigvals, eigvecs = np.linalg.eigh(M)
-    threshold = (1e-6**2) * max(eigvals.max(), 1e-12)
-    regularized = 1.0 / threshold
-    with np.errstate(divide="ignore"):
-        inv_eigvals = np.where(eigvals > threshold, 1.0 / eigvals, regularized)
-    XtWX_S_inv = (eigvecs * inv_eigvals[None, :]) @ eigvecs.T
+    XtWX_S_inv = decompose_gram(M).pseudo_inverse()
+
+    if not compute_augmented:
+        return XtWX_S_inv, np.empty((0, 0)), active_groups_out, XtWX, S
 
     # Augmented (p+1)×(p+1) inverse including intercept row/column.
     # Build X'W1 via per-group rmatvec (avoids materializing dense X_a).
@@ -307,11 +348,6 @@ def _penalised_xtwx_inv_gram(
     M_aug[0, 1:] = XtW1
     M_aug[1:, 0] = XtW1
     M_aug[1:, 1:] = M  # XtWX + S
-    eigvals_aug, eigvecs_aug = np.linalg.eigh(M_aug)
-    threshold_aug = (1e-6**2) * max(eigvals_aug.max(), 1e-12)
-    regularized_aug = 1.0 / threshold_aug
-    with np.errstate(divide="ignore"):
-        inv_eigvals_aug = np.where(eigvals_aug > threshold_aug, 1.0 / eigvals_aug, regularized_aug)
-    XtWX_S_inv_aug = (eigvecs_aug * inv_eigvals_aug[None, :]) @ eigvecs_aug.T
+    XtWX_S_inv_aug = decompose_gram(M_aug).pseudo_inverse()
 
     return XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, XtWX, S

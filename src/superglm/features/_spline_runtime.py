@@ -10,6 +10,10 @@ from scipy.interpolate import BSpline as BSpl
 
 from superglm.features import _spline_extrapolation, _spline_knots
 
+_SPLINE_SCORE_CHUNK_SIZE = 8192
+_SPLINE_SCORE_SAMPLE_SIZE = 4096
+_MAX_SPLINE_SCORE_SUPPORT_CELLS = 2_000_000
+
 
 def prepare_eval_points(spec: Any, x: NDArray) -> tuple[NDArray, bool]:
     """Apply the configured extrapolation policy for basis evaluation."""
@@ -147,7 +151,27 @@ def transform(spec: Any, x: NDArray) -> NDArray:
 
 def score(spec: Any, x: NDArray, beta: NDArray) -> NDArray:
     """Score a spline term directly from the public runtime basis."""
-    return cast(NDArray, np.asarray(transform(spec, x) @ beta, dtype=np.float64).ravel())
+    x = np.asarray(x, dtype=np.float64).ravel()
+    beta = np.asarray(beta, dtype=np.float64).ravel()
+    if x.size == 0:
+        return np.empty(0, dtype=np.float64)
+
+    sample_step = max(1, len(x) // _SPLINE_SCORE_SAMPLE_SIZE)
+    sample = x[::sample_step][:_SPLINE_SCORE_SAMPLE_SIZE]
+    if np.unique(sample).size <= max(1, sample.size // 2):
+        support, inverse = np.unique(x, return_inverse=True)
+        if support.size * max(beta.size, 1) <= _MAX_SPLINE_SCORE_SUPPORT_CELLS:
+            support_values = np.asarray(transform(spec, support) @ beta, dtype=np.float64).ravel()
+            return cast(NDArray, support_values[inverse])
+
+    result = np.empty(len(x), dtype=np.float64)
+    for start in range(0, len(x), _SPLINE_SCORE_CHUNK_SIZE):
+        stop = min(start + _SPLINE_SCORE_CHUNK_SIZE, len(x))
+        result[start:stop] = np.asarray(
+            transform(spec, x[start:stop]) @ beta,
+            dtype=np.float64,
+        ).ravel()
+    return result
 
 
 def reconstruct(spec: Any, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
