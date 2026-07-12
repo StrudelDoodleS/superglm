@@ -7,6 +7,27 @@ from pathlib import Path
 import pandas as pd
 
 
+def _plain_summary_lines(summary) -> list[str]:
+    """Temporarily flatten a typed summary for the legacy one-cell renderer."""
+    lines = ["SuperGLM Results"]
+    current_section = None
+    for row in summary.overview:
+        if row.section != current_section:
+            lines.extend(["", row.section])
+            current_section = row.section
+        value = "" if row.value is None else str(row.value)
+        lines.append(f"{row.metric}: {value}")
+
+    lines.extend(["", "Terms", "term | kind | estimate | statistic | p-value"])
+    for row in summary.terms:
+        values = (row.term, row.kind, row.estimate, row.statistic, row.p_value)
+        lines.append(" | ".join("" if value is None else str(value) for value in values))
+
+    if summary.notes:
+        lines.extend(["", "Notes", *summary.notes])
+    return lines
+
+
 def _write_dataframe(ws, df: pd.DataFrame, start_row: int, start_col: int) -> tuple[int, int]:
     from openpyxl.styles import Font
 
@@ -89,7 +110,7 @@ def write_rating_table_workbook(
     _write_dataframe(impact_ws, payload.discretization_impact, 1, 1)
 
     summary_ws = wb.create_sheet(summary_sheet_name)
-    for row, line in enumerate(payload.summary_lines, start=1):
+    for row, line in enumerate(_plain_summary_lines(payload.summary), start=1):
         cell = summary_ws.cell(row=row, column=1, value=line)
         cell.font = Font(name="Consolas")
 

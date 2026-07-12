@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm.export.summary import SummaryExportPayload, build_summary_export_payload
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
@@ -49,7 +50,7 @@ class RatingTablePayload:
     main_effects: list[RatingTableBlock]
     interactions: list[InteractionTableBlock]
     discretization_impact: pd.DataFrame
-    summary_lines: list[str]
+    summary: SummaryExportPayload
 
 
 _OFFSET_SOURCE_RESERVED_COLUMNS = frozenset({"Relativity", "Weight"})
@@ -607,7 +608,7 @@ def build_rating_table_payload(
         main_effects=main_effects,
         interactions=_interaction_blocks(model, n_bins),
         discretization_impact=impact,
-        summary_lines=str(model.summary(detail="compact")).splitlines(),
+        summary=build_summary_export_payload(model),
     )
 
 

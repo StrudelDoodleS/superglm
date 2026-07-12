@@ -1,12 +1,21 @@
 import warnings
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 from openpyxl import load_workbook
 
-from superglm import Categorical, Numeric, Spline, SuperGLM, export_rating_tables
+from superglm import (
+    Categorical,
+    Numeric,
+    OrderedCategorical,
+    Spline,
+    SuperGLM,
+    export_rating_tables,
+)
 from superglm.export.rating_tables import build_rating_table_payload
+from superglm.export.summary import SummaryExportPayload, build_summary_export_payload
 
 
 def _fit_export_model():
@@ -79,6 +88,130 @@ def _fit_term_offset_export_model(distinct_terms: int = 2, *, retain_fit_state: 
     return model, X, y, exposure, term, offset
 
 
+def _overview_values(payload: SummaryExportPayload) -> dict[tuple[str, str], object]:
+    return {(row.section, row.metric): row.value for row in payload.overview}
+
+
+def _fit_ordered_export_model():
+    rng = np.random.default_rng(20260712)
+    levels = [f"L{i}" for i in range(7)]
+    codes = np.tile(np.arange(len(levels)), 80)
+    rng.shuffle(codes)
+    X = pd.DataFrame({"band": np.asarray(levels, dtype=object)[codes]})
+    x_numeric = codes / (len(levels) - 1)
+    weights = rng.uniform(0.6, 1.8, len(codes))
+    eta = -0.8 + 0.9 * x_numeric + 0.15 * np.sin(2.0 * np.pi * x_numeric)
+    y = rng.poisson(np.exp(eta) * weights).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={
+            "band": OrderedCategorical(
+                order=levels,
+                base="first",
+                basis=Spline(kind="ps", k=7),
+            )
+        },
+    )
+    model.fit(X, y, sample_weight=weights)
+    return model, levels
+
+
+def test_summary_export_preserves_typed_overview_and_intercept_inference():
+    model, _, _, _ = _fit_export_model()
+
+    payload = build_summary_export_payload(model)
+    overview = _overview_values(payload)
+    intercept = next(row for row in payload.terms if row.term == "Intercept")
+
+    assert overview[("Model", "Method")] == "MLE"
+    assert isinstance(overview[("Fit", "Observations")], int)
+    assert isinstance(overview[("Fit", "Effective DF")], float)
+    assert isinstance(overview[("Fit", "Converged")], bool)
+    assert isinstance(overview[("Fit", "Iterations")], int)
+    assert isinstance(overview[("Information Criteria", "AIC")], float)
+    assert intercept.kind == "coefficient"
+    assert isinstance(intercept.estimate, float)
+    assert isinstance(intercept.p_value, float)
+    assert intercept.statistic_type == "z"
+    assert intercept.active is True
+
+
+def test_summary_export_maps_spline_to_one_global_wood_test():
+    model, _, _, _ = _fit_export_model()
+
+    payload = build_summary_export_payload(model)
+    age_rows = [row for row in payload.terms if row.group == "age"]
+    smooth = next(row for row in age_rows if row.kind == "smooth")
+
+    assert len([row for row in age_rows if row.kind == "smooth"]) == 1
+    assert smooth.estimate is None
+    assert smooth.std_error is None
+    assert smooth.ci_lower is None
+    assert smooth.ci_upper is None
+    assert isinstance(smooth.statistic, float)
+    assert smooth.statistic_type == "chi2"
+    assert isinstance(smooth.p_value, float)
+    assert isinstance(smooth.edf, float)
+    assert isinstance(smooth.smoothing_lambda, float)
+    assert smooth.active is True
+
+
+def test_summary_export_keeps_ordered_level_estimates_but_only_one_global_p_value():
+    model, levels = _fit_ordered_export_model()
+
+    payload = build_summary_export_payload(model)
+    rows = [row for row in payload.terms if row.group == "band"]
+    smooth_rows = [row for row in rows if row.kind == "smooth"]
+    level_rows = [row for row in rows if row.kind == "level"]
+
+    assert len(smooth_rows) == 1
+    assert isinstance(smooth_rows[0].p_value, float)
+    assert len(level_rows) == len(levels)
+    assert [row.term for row in level_rows] == [f"band[{level}]" for level in levels]
+    for row in level_rows:
+        assert isinstance(row.estimate, float)
+        assert isinstance(row.std_error, float)
+        assert isinstance(row.ci_lower, float)
+        assert isinstance(row.ci_upper, float)
+        assert row.statistic is None
+        assert row.statistic_type == ""
+        assert row.p_value is None
+        assert row.significance == ""
+
+
+def test_summary_export_keeps_distribution_profile_values_typed():
+    model, _, _, _ = _fit_export_model()
+    model._nb_profile_result = SimpleNamespace(
+        theta_hat=np.float64(2.75),
+        nll=10.0,
+        ci=lambda alpha: (np.float64(2.0), np.float64(3.5)),
+    )
+    model._tweedie_profile_result = SimpleNamespace(
+        p_hat=np.float64(1.55),
+        phi_hat=np.float64(0.8),
+        method="exact",
+        phi_method="pearson",
+        nll=11.0,
+        ci=lambda alpha: (np.float64(1.4), np.float64(1.7)),
+    )
+    model._summary_cache = None
+
+    overview = _overview_values(build_summary_export_payload(model))
+
+    assert overview[("Distribution Profile", "NB2 Theta")] == 2.75
+    assert overview[("Distribution Profile", "NB2 Theta CI Lower")] == 2.0
+    assert overview[("Distribution Profile", "NB2 Theta CI Upper")] == 3.5
+    assert overview[("Distribution Profile", "NB2 Theta Method")] == "Profile (exact)"
+    assert overview[("Distribution Profile", "Tweedie p")] == 1.55
+    assert overview[("Distribution Profile", "Tweedie p CI Lower")] == 1.4
+    assert overview[("Distribution Profile", "Tweedie p CI Upper")] == 1.7
+    assert overview[("Distribution Profile", "Tweedie phi")] == 0.8
+    assert overview[("Distribution Profile", "Tweedie p Method")] == (
+        "Profile (exact, phi=pearson)"
+    )
+
+
 def test_public_export_api_exists(tmp_path):
     model, X, y, w = _fit_export_model()
     output = tmp_path / "rating_tables.xlsx"
@@ -102,6 +235,8 @@ def test_default_selected_bins_are_150():
     age_block = next(block for block in payload.main_effects if block.name == "age")
 
     assert payload.selected_n_bins == 150
+    assert isinstance(payload.summary, SummaryExportPayload)
+    assert not hasattr(payload, "summary_lines")
     assert len(age_block.table) <= 150
     assert {"age", "Relativity", "Weight"} <= set(age_block.table.columns)
 
