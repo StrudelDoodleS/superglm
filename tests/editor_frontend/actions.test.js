@@ -318,14 +318,13 @@ test("selection mutation installs provisional state before posting and commits w
 
 test("failed selection mutation rolls back through same-revision selection recovery", async () => {
   const confirmed = snapshot(2);
-  const terms = confirmed.terms;
-  const history = confirmed.history;
+  const recovered = snapshot(2);
   const store = createEditorStore(createInitialEditorState(confirmed));
   const actions = createEditorActions({
     store,
     client: {
       postJSON: async () => { throw new Error("selection offline"); },
-      getState: async () => snapshot(2)
+      getState: async () => recovered
     }
   });
 
@@ -335,8 +334,8 @@ test("failed selection mutation rolls back through same-revision selection recov
   assert.equal(result.error.message, "selection offline");
   assert.equal(store.getState().view.selectionPreview, null);
   assert.deepEqual(selectCurrentSelection(store.getState()), [0]);
-  assert.strictEqual(store.getState().remote.snapshot?.terms, terms);
-  assert.strictEqual(store.getState().remote.snapshot?.history, history);
+  assert.strictEqual(store.getState().remote.snapshot, recovered);
+  assert.equal(store.getState().remote.chartEpoch, 0);
   assert.deepEqual(store.getState().request.recovery?.retry, {
     name: "select",
     path: "/select",
@@ -366,6 +365,7 @@ test("selection recovery falls back to a full commit after a revision change", a
   assert.equal(store.getState().view.selectionPreview, null);
   assert.deepEqual(selectCurrentSelection(store.getState()), [4]);
   assert.equal(store.getState().remote.summary?.available, false);
+  assert.equal(store.getState().remote.chartEpoch, 1);
 });
 
 test("a running mutation suppresses ordinary and structural duplicate submissions", async () => {
@@ -1432,7 +1432,6 @@ test("mutation retry replays its stored descriptor", async () => {
 
 test("selection retry routes through provisional selection semantics", async () => {
   const confirmed = snapshot(2);
-  const terms = confirmed.terms;
   const response = snapshot(2);
   response.selection.age = [1, 3];
   let calls = 0;
@@ -1459,7 +1458,8 @@ test("selection retry routes through provisional selection semantics", async () 
   const result = await actions.retryMutation();
 
   assert.equal(result.ok, true);
-  assert.strictEqual(store.getState().remote.snapshot?.terms, terms);
+  assert.strictEqual(store.getState().remote.snapshot, response);
+  assert.equal(store.getState().remote.chartEpoch, 0);
   assert.deepEqual(selectCurrentSelection(store.getState()), [1, 3]);
   assert.deepEqual(requests, [
     { path: "/select", payload: { term: "age", indices: [1, 3] } },

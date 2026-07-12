@@ -11,7 +11,7 @@ import { selectActiveTermName } from "./selectors.js";
 /** @param {EditorSnapshot|null} snapshot @returns {EditorState} */
 export function createInitialEditorState(snapshot = null) {
   return {
-    remote: { snapshot, summary: null },
+    remote: { snapshot, summary: null, chartEpoch: 0 },
     view: {
       activeTerm: snapshot?.selected_term || "",
       activeView: "editor",
@@ -161,7 +161,11 @@ export function commitRemote(state, snapshot) {
   /** @type {EditorState} */
   const candidate = {
     ...state,
-    remote: { snapshot, summary: state.remote.summary },
+    remote: {
+      snapshot,
+      summary: state.remote.summary,
+      chartEpoch: state.remote.chartEpoch + 1
+    },
     view: { ...state.view, preview: null, selectionPreview: null }
   };
   return {
@@ -182,7 +186,7 @@ export function commitSelectionRemote(state, snapshot) {
       ...state,
       remote: {
         ...state.remote,
-        snapshot: { ...current, selection: snapshot.selection }
+        snapshot
       },
       view: { ...state.view, selectionPreview: null }
     };
@@ -196,7 +200,7 @@ export function commitStructuralTransition(state, envelope) {
   const summary = committed.request.evidence.summary;
   return {
     ...committed,
-    remote: { snapshot: envelope.state, summary: envelope.summary },
+    remote: { ...committed.remote, snapshot: envelope.state, summary: envelope.summary },
     request: {
       ...committed.request,
       evidence: {

@@ -253,11 +253,13 @@ export function updateChartSelection(term, selection, context) {
   const { svg } = context;
   const scale = svg._scale;
   const selectionView = svg._selectionView;
-  if (!scale || !selectionView || selectionView.term !== term) return;
+  if (!scale || !selectionView) return;
+  selectionView.term = term;
 
   const { view, handlesMode } = selectionView;
   const displaySelected = displaySelection(view, selection);
   const basePoints = new Set(basePointIndices(view));
+  const showSupplementalPoints = displaySelected.size <= basePoints.size;
   const existingPoints = new Map();
   for (const point of svg.querySelectorAll("circle.point[data-index]")) {
     const index = Number(point.dataset.index);
@@ -265,7 +267,7 @@ export function updateChartSelection(term, selection, context) {
     const supplemental = point.dataset.selectionSupplemental === "true" ||
       !basePoints.has(index);
     if (supplemental) point.dataset.selectionSupplemental = "true";
-    if (supplemental && !displaySelected.has(index)) {
+    if (supplemental && (!showSupplementalPoints || !displaySelected.has(index))) {
       point.remove();
       continue;
     }
@@ -275,7 +277,7 @@ export function updateChartSelection(term, selection, context) {
     existingPoints.set(index, point);
   }
 
-  if (!handlesMode) {
+  if (!handlesMode && showSupplementalPoints) {
     for (const index of displaySelected) {
       if (
         existingPoints.has(index) ||
@@ -793,7 +795,13 @@ function updateSelectionBounds(svg, bounds) {
     }
     if (!node) {
       node = el("rect", { rx: 4, ry: 4, class: className });
-      svg.appendChild(node);
+      const foreground = svg.querySelector([
+        ".level-group-link",
+        ".level-group-marker",
+        ".level-group-label",
+        "circle.point[data-index]"
+      ].join(","));
+      svg.insertBefore(node, foreground);
     }
     node.setAttribute("x", bounds.x);
     node.setAttribute("y", bounds.y);

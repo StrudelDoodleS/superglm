@@ -69,7 +69,11 @@ function transitionEnvelope() {
 
 test("initial remote state has no summary and ordinary commits preserve the confirmed summary", () => {
   const initial = createInitialEditorState(snapshot(1));
-  assert.deepEqual(initial.remote, { snapshot: initial.remote.snapshot, summary: null });
+  assert.deepEqual(initial.remote, {
+    snapshot: initial.remote.snapshot,
+    summary: null,
+    chartEpoch: 0
+  });
 
   const envelope = transitionEnvelope();
   const structural = commitStructuralTransition(initial, envelope);
@@ -80,6 +84,8 @@ test("initial remote state has no summary and ordinary commits preserve the conf
   const ordinary = store.getState();
 
   assert.strictEqual(ordinary.remote.summary, envelope.summary);
+  assert.equal(structural.remote.chartEpoch, 1);
+  assert.equal(ordinary.remote.chartEpoch, 2);
   assert.equal(summaryNotifications, 0);
 });
 
@@ -110,11 +116,16 @@ test("structural transition commits snapshot and summary atomically without endi
   assert.equal(commits.length, 1);
   assert.equal(snapshots.length, 1);
   assert.equal(summaries.length, 1);
-  assert.deepEqual(commits[0], { snapshot: envelope.state, summary: envelope.summary });
+  assert.deepEqual(commits[0], {
+    snapshot: envelope.state,
+    summary: envelope.summary,
+    chartEpoch: 1
+  });
   assert.strictEqual(snapshots[0], envelope.state);
   assert.strictEqual(summaries[0], envelope.summary);
   assert.strictEqual(committed.remote.snapshot, envelope.state);
   assert.strictEqual(committed.remote.summary, envelope.summary);
+  assert.equal(committed.remote.chartEpoch, 1);
   assert.equal(committed.view.activeTerm, "age");
   assert.equal(committed.request.mutation.status, "running");
   assert.equal(committed.request.mutation.operation, "collapse");
@@ -194,30 +205,40 @@ test("selection preview overrides only the active term", () => {
   assert.deepEqual(selectCurrentSelection(state), [3, 5]);
 });
 
-test("selection commit preserves chart-bearing references for the same revision and term", () => {
+test("selection commit accepts authoritative payload without advancing the chart epoch", () => {
   const confirmed = snapshot(3);
-  const initial = createInitialEditorState(confirmed);
+  const initial = {
+    ...createInitialEditorState(confirmed),
+    remote: { snapshot: confirmed, summary: null, chartEpoch: 7 }
+  };
   const previewed = setSelectionPreview(initial, "age", [4, 2, 2]);
   const response = snapshot(3);
   response.selection.age = [2, 4];
-  response.terms.age.y = [99];
-  response.history.active.push({ operation: "unexpected" });
+  response.terms.age.impact = {
+    weighted_mean_relativity: 1.23,
+    selected_weight_share: 0.45
+  };
 
   const committed = commitSelectionRemote(previewed, response);
 
   assert.equal(committed.view.selectionPreview, null);
-  assert.strictEqual(committed.remote.snapshot?.terms, confirmed.terms);
-  assert.strictEqual(committed.remote.snapshot?.history, confirmed.history);
-  assert.strictEqual(committed.remote.snapshot?.selection, response.selection);
+  assert.strictEqual(committed.remote.snapshot, response);
+  assert.equal(committed.remote.chartEpoch, 7);
+  assert.deepEqual(committed.remote.snapshot?.terms.age.impact, response.terms.age.impact);
   assert.deepEqual(selectCurrentSelection(committed), [2, 4]);
 });
 
 test("selection commit falls back to a full commit when revision or selected term changes", () => {
   for (const response of [snapshot(4), { ...snapshot(3), selected_term: "region" }]) {
-    const initial = setSelectionPreview(createInitialEditorState(snapshot(3)), "age", [2]);
+    const base = createInitialEditorState(snapshot(3));
+    const initial = setSelectionPreview({
+      ...base,
+      remote: { ...base.remote, chartEpoch: 4 }
+    }, "age", [2]);
     const committed = commitSelectionRemote(initial, response);
 
     assert.strictEqual(committed.remote.snapshot, response);
+    assert.equal(committed.remote.chartEpoch, 5);
     assert.equal(committed.view.selectionPreview, null);
   }
 });

@@ -126,7 +126,7 @@
  */
 /**
  * @typedef {Object} EditorState
- * @property {{snapshot:EditorSnapshot|null, summary:SummaryPayload|null}} remote
+ * @property {{snapshot:EditorSnapshot|null, summary:SummaryPayload|null, chartEpoch:number}} remote
  * @property {EditorViewState} view
  * @property {EditorRequestState} request
  */

@@ -76,6 +76,7 @@ def open_editor_page(chromium_browser, editor_browser_model):
         *,
         viewport: dict[str, int] | None = None,
         selected_term: str = "curve",
+        n_points: int = 200,
     ) -> Iterator[tuple[object, EditorSession]]:
         resources = ExitStack()
         opened.append(resources)
@@ -83,6 +84,7 @@ def open_editor_page(chromium_browser, editor_browser_model):
             session = EditorSession.from_model(
                 editor_browser_model,
                 terms=["curve", "territory", "long_category"],
+                n_points=n_points,
             )
             widget = session.widget()
             resources.callback(widget.close)

@@ -844,41 +844,26 @@ function renderSelectionState({ termName, indices }) {
 }
 
 function selectSelectionState(state) {
+  const termName = selectActiveTermName(state);
+  const impact = selectSnapshot(state)?.terms[termName]?.impact || {};
   return {
-    termName: selectActiveTermName(state),
-    indices: selectCurrentSelection(state)
+    termName,
+    indices: selectCurrentSelection(state),
+    weightedMeanRelativity: impact.weighted_mean_relativity,
+    selectedWeightShare: impact.selected_weight_share
   };
 }
 
 function sameSelectionState(next, previous) {
-  if (next.termName !== previous.termName || next.indices.length !== previous.indices.length) {
+  if (
+    next.termName !== previous.termName ||
+    next.weightedMeanRelativity !== previous.weightedMeanRelativity ||
+    next.selectedWeightShare !== previous.selectedWeightShare ||
+    next.indices.length !== previous.indices.length
+  ) {
     return false;
   }
   return next.indices.every((value, index) => value === previous.indices[index]);
-}
-
-function selectChartBearingState(state) {
-  const snapshot = selectSnapshot(state);
-  if (!snapshot) return null;
-  return {
-    snapshot,
-    modelRevision: snapshot.model_revision,
-    selectedTerm: snapshot.selected_term,
-    terms: snapshot.terms,
-    history: snapshot.history,
-    canUncollapseLevels: snapshot.can_uncollapse_levels,
-    lastCollapse: snapshot.last_collapse
-  };
-}
-
-function sameChartBearingState(next, previous) {
-  if (next === null || previous === null) return next === previous;
-  return next.modelRevision === previous.modelRevision &&
-    next.selectedTerm === previous.selectedTerm &&
-    next.terms === previous.terms &&
-    next.history === previous.history &&
-    next.canUncollapseLevels === previous.canUncollapseLevels &&
-    next.lastCollapse === previous.lastCollapse;
 }
 
 function sameViewOutsidePreview(next, previous) {
@@ -1302,7 +1287,16 @@ handleCount.addEventListener("change", async () => {
 for (const button of document.querySelectorAll("button[data-op]")) {
   button.addEventListener("click", async () => {
     const operation = button.dataset.op;
-    if (operation !== "select_all") stopContributionBuild();
+    if (operation === "select_all") {
+      const term = currentTerm();
+      if (!term) return;
+      await actions.executeSelectionMutation({
+        term: selectedTerm(),
+        indices: term.x.map((_, index) => index)
+      });
+      return;
+    }
+    stopContributionBuild();
     await executeStateMutation("/op", { operation });
   });
 }
@@ -1382,13 +1376,14 @@ if (uncollapseLevels) {
   });
 }
 
-store.subscribe(selectChartBearingState, (chartState) => {
-  if (chartState) {
-    svg.dataset.modelRevision = String(chartState.modelRevision);
-    summaryFrame.dataset.modelRevision = String(chartState.modelRevision);
+store.subscribe((state) => state.remote.chartEpoch, () => {
+  const snapshot = selectSnapshot(store.getState());
+  if (snapshot) {
+    svg.dataset.modelRevision = String(snapshot.model_revision);
+    summaryFrame.dataset.modelRevision = String(snapshot.model_revision);
   }
   render();
-}, sameChartBearingState);
+});
 store.subscribe(
   (state) => state.remote.summary,
   (summary) => {

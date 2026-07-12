@@ -188,13 +188,86 @@ def test_selection_incremental_feedback_precedes_delayed_backend_success(open_ed
         with page.expect_response(
             lambda response: is_select_request(response.request)
         ) as response_info:
+            backend_response = held_routes[0].fetch()
+            payload = backend_response.json()
+            payload["terms"]["curve"]["impact"] = {
+                **payload["terms"]["curve"]["impact"],
+                "weighted_mean_relativity": 1.23,
+                "selected_weight_share": 0.45,
+            }
+            held_routes[0].fulfill(response=backend_response, json=payload)
+
+        assert response_info.value.status == 200
+        page.wait_for_function("() => document.querySelector('#appBusyOverlay')?.hidden")
+        assert "average edit relativity 1.23x" in page.locator("#status").inner_text()
+        assert "selected exposure 45%" in page.locator("#status").inner_text()
+        assert session.selection("curve").tolist() == [selected_index]
+        assert session.model_revision == initial_revision
+        assert len(select_requests) == 1
+        assert selection_dom_is_unchanged(page)
+
+
+def test_select_all_is_incremental_bounded_and_keeps_bounds_behind_points(open_editor_page):
+    with open_editor_page(n_points=500) as (page, session):
+        select_chart_tool(page, "Select")
+        initial_revision = session.model_revision
+        total_points = session.terms["curve"].size
+        initial_markers = page.locator("#chart circle.point[data-index]").count()
+        select_requests = []
+        select_all_ops = []
+        held_routes = []
+
+        def record_request(request) -> None:
+            if is_select_request(request):
+                select_requests.append(request)
+            elif (
+                request.method == "POST"
+                and request.url.split("?", maxsplit=1)[0].endswith("/op")
+                and request.post_data_json == {"operation": "select_all"}
+            ):
+                select_all_ops.append(request)
+
+        page.on("request", record_request)
+        page.route("**/select", lambda route: held_routes.append(route))
+        remember_selection_dom(page)
+
+        with page.expect_request(is_select_request, timeout=1500):
+            page.locator('button[data-op="select_all"]').click()
+
+        assert len(held_routes) == 1
+        assert session.selection("curve").tolist() == []
+        page.wait_for_function(
+            "count => document.querySelector('#status')?.textContent.startsWith(`${count} of `)",
+            arg=total_points,
+        )
+        assert selection_dom_is_unchanged(page)
+        assert page.locator("#chart circle.point[data-index]").count() == initial_markers
+        assert page.locator("#chart circle.point.selected[data-index]").count() == initial_markers
+        layer_order = page.evaluate(
+            """() => {
+                const svg = document.querySelector('#chart');
+                const children = Array.from(svg.children);
+                return {
+                    halo: children.indexOf(svg.querySelector('.selection-bounds-halo')),
+                    bounds: children.indexOf(svg.querySelector('.selection-bounds')),
+                    point: children.indexOf(svg.querySelector('circle.point[data-index]')),
+                };
+            }"""
+        )
+        assert 0 <= layer_order["halo"] < layer_order["bounds"] < layer_order["point"]
+
+        with page.expect_response(
+            lambda response: is_select_request(response.request)
+        ) as response_info:
             held_routes[0].continue_()
 
         assert response_info.value.status == 200
         page.wait_for_function("() => document.querySelector('#appBusyOverlay')?.hidden")
-        assert session.selection("curve").tolist() == [selected_index]
+        assert session.selection("curve").tolist() == list(range(total_points))
         assert session.model_revision == initial_revision
         assert len(select_requests) == 1
+        assert select_all_ops == []
+        assert page.locator("#chart circle.point[data-index]").count() == initial_markers
         assert selection_dom_is_unchanged(page)
 
 
@@ -636,7 +709,7 @@ def test_existing_svg_selection_operation_posts_linearise_unchanged(open_editor_
         with page.expect_response(
             lambda response: (
                 response.request.method == "POST"
-                and response.url.split("?", maxsplit=1)[0].endswith("/op")
+                and response.url.split("?", maxsplit=1)[0].endswith("/select")
             )
         ):
             page.locator('button[data-op="select_all"]').click()

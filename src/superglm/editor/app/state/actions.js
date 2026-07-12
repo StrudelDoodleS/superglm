@@ -207,6 +207,7 @@ export function createEditorActions({
           {
             ...state,
             remote: {
+              ...state.remote,
               snapshot: state.remote.snapshot,
               summary: reconciledSummaryPayload()
             }

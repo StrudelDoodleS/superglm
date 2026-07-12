@@ -563,8 +563,12 @@ def test_changed_snapshot_requires_fresh_confirmation_before_structural_refit(op
         with page.expect_response(
             lambda response: (
                 response.request.method == "POST"
-                and _path(response.url) == "/op"
-                and response.request.post_data_json == {"operation": "select_all"}
+                and _path(response.url) == "/select"
+                and response.request.post_data_json
+                == {
+                    "term": term,
+                    "indices": list(range(session.terms[term].size)),
+                }
             )
         ):
             page.locator('button[data-op="select_all"]').evaluate("node => node.click()")
