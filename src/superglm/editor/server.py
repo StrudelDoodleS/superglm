@@ -412,7 +412,7 @@ def _guarded_export_download(factory: Callable[[], Any], *, log_message: str) ->
 
     headers = {
         **_no_store_headers(),
-        "Content-Disposition": f'attachment; filename="{result.filename}"',
+        "Content-Disposition": _attachment_content_disposition(result.filename),
         "X-SuperGLM-Model-Revision": str(result.model_revision),
     }
     if result.validation_scope is not None:
@@ -422,6 +422,18 @@ def _guarded_export_download(factory: Callable[[], Any], *, log_message: str) ->
         media_type=result.media_type,
         headers=headers,
     )
+
+
+def _attachment_content_disposition(filename: str) -> str:
+    """Build an ASCII header with a UTF-8 RFC 5987 filename parameter."""
+    import unicodedata
+    from urllib.parse import quote
+
+    ascii_name = unicodedata.normalize("NFKD", filename).encode("ascii", "ignore").decode()
+    fallback = "".join("_" if character in {'"', "\\"} else character for character in ascii_name)
+    fallback = fallback or "download"
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
 
 
 def _optional_int(value: Any) -> int | None:

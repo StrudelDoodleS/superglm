@@ -5141,6 +5141,36 @@ def test_widget_export_file_rejects_invalid_format_and_unsafe_filename(editor_mo
         widget.close()
 
 
+@pytest.mark.parametrize("filename", ["bad\nname.joblib", "bad\rname.joblib", "bad\x7fname.joblib"])
+def test_widget_export_rejects_filename_control_characters(editor_model, filename):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        with pytest.raises(ValueError, match="control characters"):
+            widget._export_bytes("joblib", filename)
+    finally:
+        widget.close()
+
+
+def test_widget_download_export_encodes_quotes_and_unicode_in_disposition(editor_model):
+    filename = 'analyst "mödel".joblib'
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        query = urllib.parse.urlencode({"format": "joblib", "filename": filename})
+        request = urllib.request.Request(
+            f"{widget.url}/download_export?{query}",
+            headers=_editor_token_header(widget.url),
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            disposition = response.headers["content-disposition"]
+    finally:
+        widget.close()
+
+    assert 'filename="analyst _model_.joblib"' in disposition
+    assert "filename*=UTF-8''analyst%20%22m%C3%B6del%22.joblib" in disposition
+
+
 def test_widget_export_file_discards_superseded_build(
     editor_model,
     tmp_path,
@@ -5753,9 +5783,9 @@ def test_editor_structural_confirmation_gate_precedes_every_refit_side_effect():
     assert html.index("/assets/styles/panels.css") < html.index("/assets/styles/dialogs.css")
 
     assert ".profile-dialog" not in root_css
-    assert ".save-dialog" not in root_css
+    assert ".export-dialog" not in root_css
     assert ".profile-dialog" in dialog_css
-    assert ".save-dialog" in dialog_css
+    assert ".export-dialog" in dialog_css
     assert ".structural-confirm" in dialog_css
     assert ".dialog-actions" in dialog_css
     assert "overflow-wrap" in dialog_css

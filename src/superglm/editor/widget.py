@@ -80,6 +80,8 @@ def _safe_export_filename(format: str, filename: str | None) -> str:
     name = filename or _EXPORT_DEFAULT_FILENAMES[format]
     if not name or Path(name).name != name or "/" in name or "\\" in name:
         raise ValueError("filename must not contain directory separators")
+    if any(ord(character) < 32 or ord(character) == 127 for character in name):
+        raise ValueError("filename must not contain control characters")
     suffix = Path(name).suffix.lower()
     expected = f".{format}"
     if suffix and suffix != expected:
