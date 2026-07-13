@@ -2,6 +2,7 @@ import { requestJSON } from "./api.js";
 import { escapeHTML, fmt } from "./format.js";
 
 const PROFILE_ESTIMATE_LABELS = { p: "p_hat", theta: "theta_hat" };
+const summaryMarkupByFrame = new WeakMap();
 
 export async function refreshSummary(nodes) {
   const { summarySource, summaryStatus, summaryFrame } = nodes;
@@ -46,7 +47,12 @@ export async function runOffsetRefit(nodes, refreshMetrics) {
   }
 }
 
-export async function runDistributionProfile(nodes, parameter, refreshMetrics) {
+export async function runDistributionProfile(
+  nodes,
+  parameter,
+  acceptProfile = async () => {},
+  { request = requestJSON, pause = sleep } = {}
+) {
   const { summaryStatus, summaryFrame, reprofileTweedie, reprofileNb2, profileRun } = nodes;
   const button = parameter === "tweedie_p" ? reprofileTweedie : reprofileNb2;
   openProfileDialog(nodes);
@@ -63,7 +69,7 @@ export async function runDistributionProfile(nodes, parameter, refreshMetrics) {
     options: profileOptionsPayload(nodes, parameter)
   }, nodes);
   try {
-    const started = await requestJSON("/profile_distribution/start", {
+    const started = await request("/profile_distribution/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ parameter, ...profileOptionsPayload(nodes, parameter) })
@@ -71,8 +77,8 @@ export async function runDistributionProfile(nodes, parameter, refreshMetrics) {
     let status = started;
     renderProfileTrace(status, nodes);
     while (status.status === "running") {
-      await sleep(250);
-      status = await requestJSON(`/profile_distribution/status/${encodeURIComponent(started.job_id)}`);
+      await pause(250);
+      status = await request(`/profile_distribution/status/${encodeURIComponent(started.job_id)}`);
       renderProfileTrace(status, nodes);
     }
     if (status.status === "error") {
@@ -81,7 +87,7 @@ export async function runDistributionProfile(nodes, parameter, refreshMetrics) {
     const payload = status.result || {};
     renderProfileTrace(status, nodes);
     renderSummary(payload, nodes);
-    await refreshMetrics();
+    await acceptProfile(payload);
     return payload;
   } catch (error) {
     summaryStatus.textContent = error.message;
@@ -131,92 +137,56 @@ function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-export async function runCollapseRefit(nodes, termName, refreshMetrics) {
-  const { summarySource, summaryStatus, summaryFrame, collapseLevels } = nodes;
-  summaryStatus.textContent = "Refitting collapsed levels...";
-  summaryFrame.setAttribute("aria-busy", "true");
-  if (collapseLevels) collapseLevels.disabled = true;
-  try {
-    const payload = await requestJSON("/collapse_levels", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ term: termName, method: "auto" })
-    });
-    summarySource.value = "selected";
-    renderSummary(payload, nodes);
-    await refreshMetrics();
-    return payload;
-  } catch (error) {
-    summaryStatus.textContent = error.message;
-    return null;
-  } finally {
-    summaryFrame.setAttribute("aria-busy", "false");
-    if (collapseLevels) collapseLevels.disabled = false;
-  }
+export function collapseTransition(term) {
+  return {
+    name: "collapse levels",
+    path: "/collapse_levels",
+    payload: { term, method: "auto" }
+  };
 }
 
-export async function runUngroupRefit(nodes, termName, refreshMetrics) {
-  const { summarySource, summaryStatus, summaryFrame, ungroupLevels } = nodes;
-  summaryStatus.textContent = "Refitting ungrouped levels...";
-  summaryFrame.setAttribute("aria-busy", "true");
-  if (ungroupLevels) ungroupLevels.disabled = true;
-  try {
-    const payload = await requestJSON("/ungroup_levels", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ term: termName, method: "auto" })
-    });
-    summarySource.value = "selected";
-    renderSummary(payload, nodes);
-    await refreshMetrics();
-    return payload;
-  } catch (error) {
-    summaryStatus.textContent = error.message;
-    return null;
-  } finally {
-    summaryFrame.setAttribute("aria-busy", "false");
-    if (ungroupLevels) ungroupLevels.disabled = false;
-  }
+export function ungroupTransition(term) {
+  return {
+    name: "ungroup levels",
+    path: "/ungroup_levels",
+    payload: { term, method: "auto" }
+  };
 }
 
-export async function runUncollapseRefit(nodes, refreshMetrics) {
-  const { summarySource, summaryStatus, summaryFrame, uncollapseLevels } = nodes;
-  summaryStatus.textContent = "Restoring previous collapsed-level model...";
-  summaryFrame.setAttribute("aria-busy", "true");
-  if (uncollapseLevels) uncollapseLevels.disabled = true;
-  try {
-    const payload = await requestJSON("/uncollapse_levels", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({})
-    });
-    summarySource.value = "selected";
-    renderSummary(payload, nodes);
-    await refreshMetrics();
-    return payload;
-  } catch (error) {
-    summaryStatus.textContent = error.message;
-    return null;
-  } finally {
-    summaryFrame.setAttribute("aria-busy", "false");
-    if (uncollapseLevels) uncollapseLevels.disabled = false;
-  }
+export function uncollapseTransition() {
+  return {
+    name: "restore collapsed levels",
+    path: "/uncollapse_levels",
+    payload: {}
+  };
 }
 
-function renderSummary(payload, nodes) {
+export function renderSummary(payload, nodes) {
   const { summaryStatus, summaryNote, summaryFrame } = nodes;
   updateDistributionProfileActions(payload, nodes);
   if (!payload.available) {
     summaryStatus.textContent = payload.label || "Summary";
     summaryNote.textContent = "";
-    summaryFrame.innerHTML = `<div class="summary-empty">${escapeHTML(payload.error || "Summary unavailable.")}</div>`;
+    updateSummaryMarkup(
+      summaryFrame,
+      `<div class="summary-empty">${escapeHTML(payload.error || "Summary unavailable.")}</div>`
+    );
     return;
   }
   summaryStatus.textContent = payload.label || "Summary";
   summaryNote.textContent = payload.note || "";
   // Prefer the typed compact payload for the immediate panel. The raw HTML is
   // still included inside the disclosure for full notebook-style detail.
-  summaryFrame.innerHTML = payload.compact ? renderCompactSummary(payload) : payload.html || "";
+  updateSummaryMarkup(
+    summaryFrame,
+    payload.compact ? renderCompactSummary(payload) : payload.html || ""
+  );
+}
+
+function updateSummaryMarkup(summaryFrame, markup) {
+  if (summaryMarkupByFrame.get(summaryFrame) === markup) return;
+  summaryFrame.innerHTML = markup;
+  summaryMarkupByFrame.set(summaryFrame, markup);
 }
 
 export function updateDistributionProfileActions(payload, nodes) {

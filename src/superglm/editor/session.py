@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.editor import persistence
+from superglm.editor import apply, persistence
 from superglm.editor._types import EditableTerm, EditRecord
 from superglm.editor.collapse import (
     clone_with_replaced_feature,
@@ -17,7 +17,8 @@ from superglm.editor.collapse import (
 )
 from superglm.editor.controls import control_curve_after_move
 from superglm.editor.controls import control_points as _control_points
-from superglm.editor.evaluation import coerce_evaluation_data
+from superglm.editor.evaluation import coerce_evaluation_data, default_metrics_dataset
+from superglm.editor.evaluation_cache import EditMaterializationRequest
 from superglm.editor.level_order import (
     level_order_for_direction,
     level_order_for_labels,
@@ -71,6 +72,10 @@ class EditorSession:
         self.history: list[EditRecord] = []
         self.redo_stack: list[EditRecord] = []
         self.collapse_history: list[Any] = []
+        self._model_revision = 0
+        self._edit_epoch = 0
+        self._materialized_edit_model = None
+        self._materialized_edit_epoch: int | None = None
 
     @classmethod
     def from_model(
@@ -183,6 +188,22 @@ class EditorSession:
     # Selection is term-local and always stored as display-grid indices. The UI
     # may select by x range or category label, but downstream edit operations
     # only deal with integer positions in the editable term arrays.
+    @property
+    def model_revision(self) -> int:
+        """Semantic revision for prediction- or fit-evidence-changing state."""
+        return self._model_revision
+
+    @property
+    def edit_epoch(self) -> int:
+        """Monotonic invalidation token for the current edited-model materialization."""
+        return self._edit_epoch
+
+    def _advance_model_revision(self) -> None:
+        self._model_revision += 1
+        self._edit_epoch += 1
+        self._materialized_edit_model = None
+        self._materialized_edit_epoch = None
+
     def selection(self, term: str) -> NDArray[np.intp]:
         """Return selected point indices for a term."""
         self._require_term(term)
@@ -237,11 +258,15 @@ class EditorSession:
         else:
             idx = self._expand_collapsed_level_indices(term, idx)
         idx = np.unique(np.asarray(idx, dtype=np.intp))
-        editable.edited_log_effect[idx] = editable.original_log_effect[idx]
+        before = editable.edited_log_effect[idx].copy()
+        restored = editable.original_log_effect[idx].copy()
+        editable.edited_log_effect[idx] = restored
         if idx.size == editable.size:
             self._clear_term_history(term)
         else:
             self._trim_term_history(term, idx)
+        if not np.array_equal(before, restored):
+            self._advance_model_revision()
         return self
 
     def shift(self, term: str, delta: float) -> EditorSession:
@@ -271,6 +296,23 @@ class EditorSession:
         after = np.asarray(values, dtype=np.float64).ravel()
         if after.size != idx.size:
             raise ValueError(f"Expected {idx.size} values for term {term!r}, got {after.size}.")
+        assignment_positions: dict[int, int] = {}
+        unique_indices: list[int] = []
+        unique_values: list[float] = []
+        for raw_index, raw_value in zip(idx, after, strict=True):
+            index = int(raw_index)
+            value = float(raw_value)
+            position = assignment_positions.get(index)
+            if position is None:
+                assignment_positions[index] = len(unique_indices)
+                unique_indices.append(index)
+                unique_values.append(value)
+            elif unique_values[position] != value:
+                raise ValueError(
+                    f"Conflicting values were supplied for edit index {index} in term {term!r}."
+                )
+        idx = np.asarray(unique_indices, dtype=np.intp)
+        after = np.asarray(unique_values, dtype=np.float64)
         idx, after = self._expand_collapsed_level_assignments(term, idx, after)
         before = editable.edited_log_effect[idx].copy()
         self._commit(term, "set_values", idx, before, after, {})
@@ -471,8 +513,11 @@ class EditorSession:
         record = self._pop_record(self.history, term)
         if record is None:
             return self
+        current = self.terms[record.term].edited_log_effect[record.indices].copy()
         self.terms[record.term].edited_log_effect[record.indices] = record.before
         self.redo_stack.append(record)
+        if not np.array_equal(current, record.before):
+            self._advance_model_revision()
         return self
 
     def redo(self, term: str | None = None) -> EditorSession:
@@ -482,8 +527,11 @@ class EditorSession:
         record = self._pop_record(self.redo_stack, term)
         if record is None:
             return self
+        current = self.terms[record.term].edited_log_effect[record.indices].copy()
         self.terms[record.term].edited_log_effect[record.indices] = record.after
         self.history.append(record)
+        if not np.array_equal(current, record.after):
+            self._advance_model_revision()
         return self
 
     def to_model(self, *, X=None, y=None, sample_weight=None, offset=None):
@@ -493,8 +541,6 @@ class EditorSession:
         copy are refreshed against that data. Otherwise the fitted model's
         retained fit data is used when available.
         """
-        from superglm.editor.apply import apply_edits_to_model_copy_with_data
-
         if (
             X is None
             and y is None
@@ -508,7 +554,7 @@ class EditorSession:
                 y = train.y
                 sample_weight = train.sample_weight
                 offset = train.offset
-        return apply_edits_to_model_copy_with_data(
+        return apply.apply_edits_to_model_copy_with_data(
             self.model,
             self.terms,
             X=X,
@@ -516,6 +562,57 @@ class EditorSession:
             sample_weight=sample_weight,
             offset=offset,
         )
+
+    def capture_materialization_request(
+        self,
+        *,
+        dataset=None,
+        include_unchanged: bool = False,
+    ) -> EditMaterializationRequest | None:
+        """Capture plot-scale state and immutable evaluation references."""
+        if not include_unchanged and not self.edited_terms():
+            return None
+        return EditMaterializationRequest(
+            model_revision=self.model_revision,
+            edit_epoch=self.edit_epoch,
+            base_model=self.model,
+            terms={name: term.copy() for name, term in self.terms.items()},
+            dataset=default_metrics_dataset(self) if dataset is None else dataset,
+        )
+
+    def materialization_request_is_current(self, request: EditMaterializationRequest) -> bool:
+        """Return whether a captured model snapshot still identifies this session state."""
+        return (
+            request.model_revision == self.model_revision
+            and request.edit_epoch == self.edit_epoch
+            and request.base_model is self.model
+        )
+
+    def cached_materialized_model(
+        self,
+        edit_epoch: int,
+        *,
+        model_revision: int | None = None,
+        base_model=None,
+    ):
+        """Return the cached model only for matching live session identity."""
+        if int(edit_epoch) != self.edit_epoch:
+            return None
+        if model_revision is not None and int(model_revision) != self.model_revision:
+            return None
+        if base_model is not None and base_model is not self.model:
+            return None
+        if self._materialized_edit_epoch != int(edit_epoch):
+            return None
+        return self._materialized_edit_model
+
+    def publish_materialized_model(self, request: EditMaterializationRequest, model) -> bool:
+        """Publish a private model only if its entire snapshot is still current."""
+        if not self.materialization_request_is_current(request):
+            return False
+        self._materialized_edit_model = model
+        self._materialized_edit_epoch = request.edit_epoch
+        return True
 
     def save_model(self, path: str | Path) -> Path:
         return persistence.save_model(self, path)
@@ -879,9 +976,8 @@ class EditorSession:
 
     def replace_in_force_model(self, model, *, with_se: bool = True) -> EditorSession:
         """Replace the editable in-force model while retaining the original reference model."""
-        self.model = model
         train_data = self._evaluation_data.get("train")
-        self.terms = self._editable_terms_from_model(
+        new_terms = self._editable_terms_from_model(
             model,
             list(self._term_names),
             n_points=self.n_points,
@@ -889,10 +985,37 @@ class EditorSession:
             with_se=with_se,
             train_data=train_data,
         )
-        self._selection = {name: np.array([], dtype=np.intp) for name in self.terms}
-        self._reapply_level_orders()
-        self.history.clear()
-        self.redo_stack.clear()
+        new_selection = {name: np.array([], dtype=np.intp) for name in new_terms}
+
+        old_model = self.model
+        old_terms = self.terms
+        old_selection = self._selection
+        old_history = self.history
+        old_redo_stack = self.redo_stack
+        old_level_orders = self._level_orders
+
+        try:
+            self.model = model
+            self.terms = new_terms
+            self._selection = new_selection
+            self.history = []
+            self.redo_stack = []
+            self._level_orders = {name: list(labels) for name, labels in old_level_orders.items()}
+            self._reapply_level_orders()
+        except Exception:
+            self.model = old_model
+            self.terms = old_terms
+            self._selection = old_selection
+            self.history = old_history
+            self.redo_stack = old_redo_stack
+            self._level_orders = old_level_orders
+            raise
+
+        old_history.clear()
+        old_redo_stack.clear()
+        self.history = old_history
+        self.redo_stack = old_redo_stack
+        self._advance_model_revision()
         return self
 
     # Save/load stores the edit artifact, not the fitted model. The model passed
@@ -1216,6 +1339,7 @@ class EditorSession:
         indices = np.asarray(indices, dtype=np.intp).copy()
         before = np.asarray(before, dtype=np.float64).copy()
         after = np.asarray(after, dtype=np.float64).copy()
+        changed = not np.array_equal(before, after)
         self.terms[term].edited_log_effect[indices] = after
         self.history.append(
             EditRecord(
@@ -1228,6 +1352,8 @@ class EditorSession:
             )
         )
         self.redo_stack.clear()
+        if changed:
+            self._advance_model_revision()
 
     def _pop_record(self, records: list[EditRecord], term: str | None) -> EditRecord | None:
         if term is None:

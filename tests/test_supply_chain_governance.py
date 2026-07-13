@@ -115,6 +115,52 @@ def test_ci_workflows_define_read_only_top_level_permissions():
         assert "security-events: write" not in header
 
 
+def test_ci_browser_suites_run_in_separate_pytest_processes():
+    legacy = "uv run pytest tests/test_editor_browser.py -m browser --run-browser -q"
+    workspace = "uv run pytest tests/editor/ -m browser --run-browser -q"
+
+    for path in (".github/workflows/ci.yml", ".github/workflows/dev-ci.yml"):
+        workflow = _read(path)
+        assert legacy in workflow, path
+        assert workspace in workflow, path
+        assert "pytest tests/test_editor_browser.py tests/editor/" not in workflow, path
+        assert "pytest tests/editor/ tests/test_editor_browser.py" not in workflow, path
+
+
+def test_security_archive_check_requires_modular_editor_assets():
+    workflow = _read(".github/workflows/security.yml")
+    editor_root = ROOT / "src/superglm/editor/app"
+    current_assets = {
+        f"superglm/editor/app/{path.relative_to(editor_root).as_posix()}"
+        for path in editor_root.rglob("*")
+        if path.is_file() and (path.name == "index.html" or path.suffix in {".js", ".css"})
+    }
+    derivation_markers = (
+        'editor_root = Path("src/superglm/editor/app")',
+        'for path in editor_root.rglob("*")',
+        'path.name == "index.html"',
+        'path.suffix in {".js", ".css"}',
+        "path.relative_to(editor_root).as_posix()",
+    )
+
+    representative_assets = {
+        "superglm/editor/app/index.html",
+        "superglm/editor/app/main.js",
+        "superglm/editor/app/chart/geometry.js",
+        "superglm/editor/app/styles/tokens.css",
+        "superglm/editor/app/views/popover.js",
+    }
+
+    assert current_assets
+    assert all(asset.startswith("superglm/editor/app/") for asset in current_assets)
+    assert representative_assets <= current_assets
+    for marker in derivation_markers:
+        assert marker in workflow
+    assert 'for wheel in Path("dist").glob("*.whl")' in workflow
+    assert 'for sdist in Path("dist").glob("*.tar.gz")' in workflow
+    assert '"superglm/editor/app/index.html"' not in workflow
+
+
 def test_docs_workflow_scopes_write_permission_to_deploy_job():
     workflow = _read(".github/workflows/docs.yml")
     header = _workflow_header(workflow)

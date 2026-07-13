@@ -19,6 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: "24"
+          cache: npm
+
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
 
@@ -28,6 +33,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check frontend modules
+        run: npm run check:frontend
+
       - name: Ruff check
         run: uv run ruff check src/ tests/
 
@@ -35,7 +46,16 @@ jobs:
         run: uv run ruff format --check src/ tests/
 
       - name: Fast tests
-        run: uv run --with pyarrow pytest tests/ -q -m "not slow" --maxfail=1
+        run: uv run --with pyarrow pytest tests/ -q -m "not slow and not browser" --maxfail=1
+
+      - name: Install Chromium
+        run: uv run playwright install --with-deps chromium
+
+      - name: Legacy browser tests
+        run: uv run pytest tests/test_editor_browser.py -m browser --run-browser -q
+
+      - name: Workspace browser tests
+        run: uv run pytest tests/editor/ -m browser --run-browser -q
 
       - name: Docs build check
         run: uv sync --group docs --extra plotting && uv run mkdocs build --strict
@@ -56,4 +76,4 @@ jobs:
         run: uv sync --python 3.14 --extra dev
 
       - name: Full tests (3.14)
-        run: uv run pytest tests/ -q --maxfail=1
+        run: uv run pytest tests/ -q -m "not browser" --maxfail=1

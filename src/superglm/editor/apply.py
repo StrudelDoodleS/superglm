@@ -20,6 +20,40 @@ if TYPE_CHECKING:
     from superglm.types import GroupSlice
 
 
+_EDITOR_SHARED_ROW_INPUTS = (
+    "_dm",
+    "_fit_X_ref",
+    "_fit_y_ref",
+    "_fit_sample_weight_ref",
+    "_fit_offset_ref",
+    "_fit_weights",
+    "_fit_offset",
+)
+
+_EDITOR_EDIT_ONLY_MEMO_STATE = (
+    "_fit_mu",
+    "_fit_null_mu",
+    "_fit_metrics_cache",
+    "_fit_stats",
+    "_prediction_plan",
+    "_runtime_canonical_state",
+    "_fast_prediction_state",
+)
+
+
+def _copy_model_for_editor_edits(model, *, share_transient_state: bool = False):
+    """Copy a fitted model without duplicating its row-scale fit inputs."""
+    shared_names: tuple[str, ...] = _EDITOR_SHARED_ROW_INPUTS
+    if share_transient_state:
+        shared_names += _EDITOR_EDIT_ONLY_MEMO_STATE
+    shared = {name: getattr(model, name) for name in shared_names if hasattr(model, name)}
+    memo = {id(value): value for value in shared.values()}
+    edited_model = copy.deepcopy(model, memo)
+    for name, value in shared.items():
+        setattr(edited_model, name, value)
+    return edited_model
+
+
 def apply_edits_to_model_copy(model, terms: dict[str, EditableTerm]):
     """Return a deep-copied model with changed editor terms applied."""
     return apply_edits_to_model_copy_with_data(model, terms)
@@ -35,13 +69,23 @@ def apply_edits_to_model_copy_with_data(
     offset=None,
 ):
     """Return a deep-copied model and refresh scalar fit stats if data is available."""
-    edited_model = copy.deepcopy(model)
-    edited_terms: list[str] = []
-    for term in terms.values():
-        if np.allclose(term.edited_log_effect, term.original_log_effect, rtol=0.0, atol=1e-14):
-            continue
+    changed_terms = [
+        term
+        for term in terms.values()
+        if not np.allclose(
+            term.edited_log_effect,
+            term.original_log_effect,
+            rtol=0.0,
+            atol=1e-14,
+        )
+    ]
+    edited_model = _copy_model_for_editor_edits(
+        model,
+        share_transient_state=bool(changed_terms),
+    )
+    for term in changed_terms:
         _apply_term_edit(edited_model, term)
-        edited_terms.append(term.name)
+    edited_terms = [term.name for term in changed_terms]
     has_scoring_data = (
         X is not None or y is not None or sample_weight is not None or offset is not None
     )
@@ -57,6 +101,23 @@ def apply_edits_to_model_copy_with_data(
             offset=offset,
         )
     return edited_model
+
+
+def materialize_edit_request(request):
+    """Construct an edited model from an immutable session snapshot."""
+    kwargs = {}
+    if request.dataset is not None:
+        kwargs = {
+            "X": request.dataset.X,
+            "y": request.dataset.y,
+            "sample_weight": request.dataset.sample_weight,
+            "offset": request.dataset.offset,
+        }
+    return apply_edits_to_model_copy_with_data(
+        request.base_model,
+        request.terms,
+        **kwargs,
+    )
 
 
 def _apply_term_edit(model, term: EditableTerm) -> None:
@@ -251,10 +312,14 @@ def _invalidate_model_caches(model, *, keep_inference: bool = False) -> None:
             except AttributeError:
                 pass
     model._prediction_plan = None
+    model._runtime_canonical_state = copy.deepcopy(model._runtime_canonical_state)
+    model._fast_prediction_state = None
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
     model._fit_mu = None
+    model._fit_null_mu = None
+    model._fit_stats = None
 
 
 def _refresh_fit_statistics(
@@ -280,18 +345,27 @@ def _refresh_fit_statistics(
 
     explicit_scoring_data = X is not None or y is not None
     y_arr = np.asarray(y_ref, dtype=np.float64).ravel()
+    retained_weights = sample_weight is not None and sample_weight is getattr(
+        model, "_fit_weights", None
+    )
     if sample_weight is None:
         weights = None if explicit_scoring_data else getattr(model, "_fit_weights", None)
         if weights is None:
             weights = np.ones(y_arr.size, dtype=np.float64)
+    elif retained_weights:
+        weights = sample_weight
     else:
         weights = np.asarray(sample_weight, dtype=np.float64).ravel()
     if weights.size != y_arr.size:
         raise ValueError(f"sample_weight has length {weights.size}, expected {y_arr.size}.")
 
+    retained_offset = offset is not None and offset is getattr(model, "_fit_offset", None)
     if offset is None:
         offset_arr = None if explicit_scoring_data else getattr(model, "_fit_offset", None)
         offset_ref = None if explicit_scoring_data else getattr(model, "_fit_offset_ref", None)
+    elif retained_offset:
+        offset_arr = offset
+        offset_ref = getattr(model, "_fit_offset_ref", None)
     else:
         offset_arr = np.asarray(offset, dtype=np.float64).ravel()
         offset_ref = offset
@@ -341,10 +415,12 @@ def _refresh_fit_statistics(
         model._fit_y_ref = y
     if sample_weight is not None or explicit_scoring_data:
         model._fit_weights = weights
-        model._fit_sample_weight_ref = sample_weight
+        if not retained_weights:
+            model._fit_sample_weight_ref = sample_weight
     if offset is not None or explicit_scoring_data:
         model._fit_offset = offset_arr
-        model._fit_offset_ref = offset_ref
+        if not retained_offset:
+            model._fit_offset_ref = offset_ref
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None

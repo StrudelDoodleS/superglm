@@ -4,137 +4,200 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SuperGLM Editor</title>
+<link rel="stylesheet" href="/assets/styles/tokens.css">
 <link rel="stylesheet" href="/assets/styles.css">
+<link rel="stylesheet" href="/assets/styles/shell.css">
+<link rel="stylesheet" href="/assets/styles/chart.css">
+<link rel="stylesheet" href="/assets/styles/panels.css">
+<link rel="stylesheet" href="/assets/styles/dialogs.css">
 </head>
 <body>
   <div class="app-shell">
-  <div class="app-tabs" role="tablist" aria-label="Editor views">
-    <button class="app-tab active" type="button" data-view="editor" role="tab" aria-selected="true">
-      Editor
-    </button>
-    <button class="app-tab" type="button" data-view="validation" role="tab" aria-selected="false">
-      Validation Report
-    </button>
-    <button class="app-tab" type="button" data-view="final" role="tab" aria-selected="false">
-      Final Fit Report
-    </button>
+  <div id="appAlert" class="app-alert" role="alert" aria-live="assertive" hidden>
+    <span id="appAlertMessage"></span>
+    <button id="appAlertRetry" type="button">Retry</button>
+    <button id="appAlertDismiss" type="button">Dismiss</button>
   </div>
-  <div id="editorView" class="app-view">
-  <div class="toolbar">
-    <div class="toolbar-section">
-      <label>Term <select id="term"></select></label>
-      <label>Mode <select id="mode"><option value="select">Select</option><option value="zoom">Zoom</option><option value="move">Move</option><option value="handles">Handles</option></select></label>
-      <label id="groupDisplayWrap" class="toolbar-field group-display-toggle">
-        <span>Groups</span>
-        <select id="groupDisplayMode">
-          <option value="expanded">Expanded</option>
-          <option value="collapsed">Collapsed</option>
-        </select>
-      </label>
-      <label id="handleCountWrap" class="handle-count" hidden>
-        <span>Handles</span>
-        <input id="handleCount" type="range" min="3" max="12" value="12">
-        <output id="handleCountValue">12</output>
-      </label>
-      <button id="basisToggle" type="button" hidden title="Show spline basis contributions">
-        Contrib
-      </button>
-      <button id="contribPlay" type="button" hidden title="Animate basis contributions into the spline">
-        Build
-      </button>
-      <label id="buildDurationWrap" class="build-duration" hidden title="Debug: tune Build animation duration">
-        <span>Build</span>
-        <input id="buildDuration" type="range" min="4000" max="30000" step="500" value="10000">
-        <output id="buildDurationValue">10s</output>
-      </label>
+  <div id="appBusyOverlay" class="app-busy-overlay" hidden>
+    <div class="app-busy-card">
+      <div class="busy-spinner" aria-hidden="true"></div>
+      <div>
+        <div id="appBusyAnnouncement" role="status" aria-live="polite"
+          aria-atomic="true" tabindex="-1">
+          <strong id="appBusyTitle">Working...</strong>
+          <span id="appBusyMessage">Please wait.</span>
+        </div>
+        <span id="appBusyDetail" aria-hidden="true">0 ms elapsed</span>
+      </div>
     </div>
-    <div class="toolbar-section">
-      <button data-op="select_all">Select all</button>
-      <button id="resetZoom" type="button">Home</button>
-      <button id="ciToggle" type="button">Ref CI</button>
-      <button id="resetOrder" type="button" data-op="reset_order" hidden>Reset order</button>
-      <button data-op="reset">Reset</button>
-      <button id="saveModel" class="icon-button" type="button"
-        title="Save edited model" aria-label="Save edited model">
+  </div>
+  <header id="appBar" class="app-bar">
+    <div class="app-tabs" role="tablist" aria-label="Editor views">
+      <button id="editorTab" class="app-tab active" type="button" data-view="editor"
+        role="tab" aria-selected="true" aria-controls="editorView">Editor</button>
+      <button id="validationTab" class="app-tab" type="button" data-view="validation"
+        role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Validation</button>
+      <button id="finalTab" class="app-tab" type="button" data-view="final"
+        role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Final Fit</button>
+    </div>
+    <div class="app-actions" aria-label="Edit actions">
+      <button id="undoAction" type="button" aria-label="Undo edit"
+        aria-keyshortcuts="Control+Z Meta+Z" data-popover-title="Undo"
+        data-popover-body="Undo the most recent edit. Ctrl/Cmd+Z." disabled>Undo</button>
+      <button id="redoAction" type="button" aria-label="Redo edit"
+        aria-keyshortcuts="Control+Y Control+Shift+Z Meta+Shift+Z"
+        data-popover-title="Redo"
+        data-popover-body="Restore the most recently undone edit." disabled>Redo</button>
+      <button id="exportAction" class="icon-button" type="button"
+        aria-label="Export model or workbook" data-popover-title="Export"
+        data-popover-body="Download a validated Python model or Excel rating workbook.">
         <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M5 4h12l2 2v14H5z"></path>
-          <path d="M8 4v6h8V4"></path>
-          <path d="M8 15h8v5H8z"></path>
-          <path d="M14 4v4"></path>
+          <path d="M12 3v12"></path>
+          <path d="m7 10 5 5 5-5"></path>
+          <path d="M5 20h14"></path>
         </svg>
       </button>
     </div>
+  </header>
+  <div id="editorView" class="app-view">
+  <div class="context-bar" role="region" aria-label="Term context">
+    <label class="context-term">Term <select id="term"></select></label>
+    <span id="termKind" class="context-chip"></span>
+    <span id="termEdf" class="context-chip"></span>
+    <label id="groupDisplayWrap" class="toolbar-field group-display-toggle">
+      <span>Groups</span>
+      <select id="groupDisplayMode">
+        <option value="expanded">Expanded</option>
+        <option value="collapsed">Collapsed</option>
+      </select>
+    </label>
+    <button id="ciToggle" type="button" aria-pressed="false">Reference CI</button>
+    <button id="inspectorToggle" type="button" aria-expanded="true"
+      aria-controls="inspector">Inspector</button>
+    <span id="status" role="status" aria-live="polite"></span>
   </div>
-  <div id="status"></div>
-  <div class="main">
+  <div id="chartActionBar" class="chart-action-bar">
+    <label id="handleCountWrap" class="handle-count" hidden>
+      <span>Handles</span>
+      <input id="handleCount" type="range" min="3" max="12" value="12">
+      <output id="handleCountValue">12</output>
+    </label>
+    <button id="basisToggle" type="button" hidden title="Show spline basis contributions">Contrib</button>
+    <button id="contribPlay" type="button" hidden title="Animate basis contributions into the spline">Build</button>
+    <button type="button" data-op="select_all">Select all</button>
+    <button id="resetZoom" type="button">Home</button>
+    <button id="resetOrder" type="button" data-op="reset_order" hidden>Reset order</button>
+    <button type="button" data-op="reset">Reset</button>
+  </div>
+  <div class="main editor-workspace">
+    <nav id="toolRail" class="tool-rail" aria-label="Chart tools">
+      <div class="tool-rail-modes" role="radiogroup" aria-label="Chart tools"
+        aria-orientation="vertical">
+        <button type="button" role="radio" aria-checked="true" aria-label="Select"
+          aria-keyshortcuts="V" data-tool="select">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 3l13 9-6 2-3 6z"></path>
+          </svg>
+        </button>
+        <button type="button" role="radio" aria-checked="false" aria-label="Move"
+          aria-keyshortcuts="M" data-tool="move" tabindex="-1">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 2v20M2 12h20M12 2l-3 3m3-3 3 3M22 12l-3-3m3 3-3 3M12 22l-3-3m3 3 3-3M2 12l3-3m-3 3 3 3"></path>
+          </svg>
+        </button>
+        <button type="button" role="radio" aria-checked="false" aria-label="Zoom"
+          aria-keyshortcuts="Z" data-tool="zoom" tabindex="-1">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="10" cy="10" r="6"></circle>
+            <path d="M14.5 14.5 21 21M7 10h6M10 7v6"></path>
+          </svg>
+        </button>
+        <button type="button" role="radio" aria-checked="false" aria-label="Handles"
+          aria-keyshortcuts="H" data-tool="handles" tabindex="-1">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 17c4-10 12-10 16 0"></path>
+            <circle cx="4" cy="17" r="2"></circle>
+            <circle cx="12" cy="8" r="2"></circle>
+            <circle cx="20" cy="17" r="2"></circle>
+          </svg>
+        </button>
+      </div>
+      <button id="helpAction" class="tool-rail-help" type="button" aria-label="Help"
+        aria-keyshortcuts="?" data-tool="help">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M9.7 9a2.5 2.5 0 1 1 3.4 2.3c-.8.4-1.1.9-1.1 1.7M12 17h.01"></path>
+        </svg>
+      </button>
+    </nav>
     <div class="plot-column">
       <div class="chart-shell">
         <svg id="chart" viewBox="0 0 940 520" role="img" aria-label="SuperGLM editable effect"></svg>
         <div id="selectionMenu" class="selection-menu" aria-label="Selection actions" hidden>
-        <button class="selection-item" data-op="shift_up" type="button"
-          title="Increase selected values 5%" aria-label="Increase selected values 5%">
+        <button class="selection-item" data-op="shift_up" data-help-operation="shift_up"
+          type="button" aria-label="Increase selection">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 20V5"></path><path d="m7 10 5-5 5 5"></path>
             <path d="M6 20h12"></path><path d="M18 14h4"></path><path d="M20 12v4"></path>
           </svg>
         </button>
-        <button class="selection-item" data-op="shift_down" type="button"
-          title="Decrease selected values 5%" aria-label="Decrease selected values 5%">
+        <button class="selection-item" data-op="shift_down" data-help-operation="shift_down"
+          type="button" aria-label="Decrease selection">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 4v15"></path><path d="m7 14 5 5 5-5"></path>
             <path d="M6 4h12"></path><path d="M18 11h4"></path>
           </svg>
         </button>
         <div class="selection-separator" aria-hidden="true"></div>
-        <button class="selection-item" data-op="smooth" type="button"
-          title="Smooth" aria-label="Smooth">
+        <button class="selection-item" data-op="smooth" data-help-operation="smooth"
+          type="button" aria-label="Smooth selection">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M3 14c2.5-6 5.5-6 8 0s5.5 6 10 0"></path>
           </svg>
         </button>
-        <button class="selection-item" data-op="linearise" type="button"
-          title="Linearise" aria-label="Linearise">
+        <button class="selection-item" data-op="linearise" data-help-operation="linearise"
+          type="button" aria-label="Straighten selection">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 18 20 6"></path><path d="M5 17h3v3"></path><path d="M16 4h3v3"></path>
           </svg>
         </button>
         <div class="selection-separator" aria-hidden="true"></div>
-        <button class="selection-item" data-op="increasing" type="button"
-          title="Increasing" aria-label="Increasing">
+        <button class="selection-item" data-op="increasing" data-help-operation="increasing"
+          type="button" aria-label="Make increasing">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 17h4l3-5 3 2 5-7"></path><path d="M15 7h4v4"></path>
           </svg>
         </button>
-        <button class="selection-item" data-op="decreasing" type="button"
-          title="Decreasing" aria-label="Decreasing">
+        <button class="selection-item" data-op="decreasing" data-help-operation="decreasing"
+          type="button" aria-label="Make decreasing">
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 7h4l3 5 3-2 5 7"></path><path d="M15 17h4v-4"></path>
           </svg>
         </button>
         <div class="selection-separator" aria-hidden="true"></div>
         <div class="selection-menu-node">
-          <button class="selection-item" type="button" title="Level selected values"
-            aria-label="Level selected values" aria-haspopup="true">
+          <button class="selection-item" type="button" aria-label="Level selected values"
+            aria-haspopup="true" data-help-control="level">
             <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M4 9h16"></path><path d="M4 15h16"></path>
               <path d="M7 6v6"></path><path d="M17 12v6"></path>
             </svg>
           </button>
           <div class="selection-submenu" role="menu" aria-label="Level options">
-            <button class="selection-item" data-op="level_left" type="button" role="menuitem"
-              title="Level left" aria-label="Level left">
+            <button class="selection-item" data-op="level_left" data-help-operation="level_left"
+              type="button" role="menuitem" aria-label="Level from left">
               <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M5 7v10"></path><path d="M5 12h14"></path><path d="M9 9h10"></path><path d="M9 15h10"></path>
               </svg>
             </button>
-            <button class="selection-item" data-op="average" type="button" role="menuitem"
-              title="Average" aria-label="Average">
+            <button class="selection-item" data-op="average" data-help-operation="average"
+              type="button" role="menuitem" aria-label="Average selection">
               <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M4 8h16"></path><path d="M4 16h16"></path><path d="M7 12h10"></path>
               </svg>
             </button>
-            <button class="selection-item" data-op="level_right" type="button" role="menuitem"
-              title="Level right" aria-label="Level right">
+            <button class="selection-item" data-op="level_right" data-help-operation="level_right"
+              type="button" role="menuitem" aria-label="Level from right">
               <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M19 7v10"></path><path d="M5 12h14"></path><path d="M5 9h10"></path><path d="M5 15h10"></path>
               </svg>
@@ -142,22 +205,24 @@
           </div>
         </div>
         <div class="selection-menu-node">
-          <button class="selection-item" type="button" title="Snap selected values"
-            aria-label="Snap selected values" aria-haspopup="true">
+          <button class="selection-item" type="button" aria-label="Snap selected values"
+            aria-haspopup="true" data-help-control="snap">
             <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M5 6h14"></path><path d="M5 18h14"></path>
               <path d="m8 10 4-4 4 4"></path><path d="m8 14 4 4 4-4"></path>
             </svg>
           </button>
           <div class="selection-submenu" role="menu" aria-label="Snap options">
-            <button class="selection-item" data-op="snap_highest" type="button" role="menuitem"
-              title="Snap highest" aria-label="Snap highest">
+            <button class="selection-item" data-op="snap_highest"
+              data-help-operation="snap_highest" type="button" role="menuitem"
+              aria-label="Snap to highest">
               <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M5 6h14"></path><path d="M12 18V7"></path><path d="m8 11 4-4 4 4"></path>
               </svg>
             </button>
-            <button class="selection-item" data-op="snap_lowest" type="button" role="menuitem"
-              title="Snap lowest" aria-label="Snap lowest">
+            <button class="selection-item" data-op="snap_lowest"
+              data-help-operation="snap_lowest" type="button" role="menuitem"
+              aria-label="Snap to lowest">
               <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M5 18h14"></path><path d="M12 6v11"></path><path d="m8 13 4 4 4-4"></path>
               </svg>
@@ -165,24 +230,24 @@
           </div>
         </div>
         <div class="selection-separator" aria-hidden="true"></div>
-        <button id="collapseLevels" class="selection-item" type="button"
-          title="Collapse selected levels and refit" aria-label="Collapse selected levels and refit" hidden>
+        <button id="collapseLevels" class="selection-item"
+          data-help-operation="collapse_levels" type="button" aria-label="Collapse and refit" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M6 7h5"></path><path d="M13 7h5"></path>
             <path d="M6 17h12"></path><path d="M11 7v4"></path><path d="M13 7v4"></path>
             <path d="M10 13h4"></path><path d="M12 13v4"></path>
           </svg>
         </button>
-        <button id="ungroupLevels" class="selection-item" type="button"
-          title="Ungroup selected levels" aria-label="Ungroup selected levels" hidden>
+        <button id="ungroupLevels" class="selection-item"
+          data-help-operation="ungroup_levels" type="button" aria-label="Ungroup and refit" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M6 7h12"></path><path d="M6 17h5"></path><path d="M13 17h5"></path>
             <path d="M12 8v8"></path><path d="m9 11 3-3 3 3"></path>
             <path d="m9 13 3 3 3-3"></path>
           </svg>
         </button>
-        <button id="uncollapseLevels" class="selection-item" type="button"
-          title="Undo collapse" aria-label="Undo collapse" hidden>
+        <button id="uncollapseLevels" class="selection-item"
+          data-help-operation="uncollapse_levels" type="button" aria-label="Restore collapse" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M7 7h10"></path><path d="M7 17h10"></path>
             <path d="M10 7v10"></path><path d="M14 7v10"></path>
@@ -203,21 +268,35 @@
           <option value="pearson_chi2">Pearson Chi2</option>
           <option value="effective_df">Total EDF</option>
         </select>
-        <div id="metricGrid" class="metric-grid">Computing metrics...</div>
+        <div id="metricGrid" class="metric-grid" aria-busy="true"
+          data-freshness="idle">Computing metrics...</div>
+        <div class="evidence-status-row">
+          <div id="metricFreshness" class="evidence-freshness" aria-live="polite">Loading metrics...</div>
+          <button id="metricRetry" class="evidence-retry" type="button" hidden>Retry</button>
+        </div>
       </div>
     </div>
-    <aside id="summaryPanel" class="sidepanel">
-      <div class="sidepanel-tabs" role="tablist" aria-label="Model side panel">
-        <button id="summaryTab" class="sidepanel-tab active" type="button"
-          role="tab" aria-selected="true" aria-controls="summaryPane">
-          Model summary
-        </button>
-        <button id="historyTab" class="sidepanel-tab" type="button"
-          role="tab" aria-selected="false" aria-controls="historyPane">
-          Edit history
-        </button>
+    <aside id="inspector" class="inspector" aria-label="Model inspector" data-open="true">
+      <div class="inspector-head">
+        <div class="sidepanel-tabs" role="tablist" aria-label="Model inspector panels">
+          <button id="summaryTab" class="sidepanel-tab active" type="button" role="tab"
+            data-inspector-tab="summary" aria-selected="true"
+            aria-controls="summaryPane">Summary</button>
+          <button id="historyTab" class="sidepanel-tab" type="button" role="tab"
+            data-inspector-tab="history" aria-selected="false" aria-controls="historyPane"
+            tabindex="-1">History</button>
+          <button id="advancedTab" class="sidepanel-tab" type="button" role="tab"
+            data-inspector-tab="advanced" aria-selected="false" aria-controls="advancedPane"
+            tabindex="-1">Advanced</button>
+          <button id="helpTab" class="sidepanel-tab" type="button" role="tab"
+            data-inspector-tab="help" aria-selected="false" aria-controls="helpPane"
+            tabindex="-1">Help</button>
+        </div>
+        <button id="inspectorClose" class="inspector-close" type="button"
+          aria-label="Close inspector">Close</button>
       </div>
-      <div id="summaryPane" class="sidepanel-pane" role="tabpanel" aria-labelledby="summaryTab">
+      <div id="summaryPane" class="sidepanel-pane" role="tabpanel" aria-labelledby="summaryTab"
+        data-inspector-pane="summary">
         <div class="summary-controls">
           <select id="summarySource" hidden>
             <option value="selected">Selected model</option>
@@ -227,15 +306,34 @@
           <button id="reprofileTweedie" type="button" hidden>Re-profile p</button>
           <button id="reprofileNb2" type="button" hidden>Re-estimate theta</button>
         </div>
-        <div id="summaryStatus">Loading summary...</div>
+        <div class="evidence-status-row">
+          <div id="summaryStatus" class="evidence-freshness" aria-live="polite">Loading summary...</div>
+          <button id="summaryRetry" class="evidence-retry" type="button" hidden>Retry</button>
+        </div>
         <div id="summaryNote" class="summary-note"></div>
-        <div id="summaryFrame" class="summary-frame"></div>
+        <div id="summaryFrame" class="summary-frame" aria-busy="true"
+          data-freshness="idle"></div>
       </div>
       <div id="historyPane" class="sidepanel-pane" role="tabpanel"
-        aria-labelledby="historyTab" hidden>
+        aria-labelledby="historyTab" data-inspector-pane="history" hidden>
         <div id="historyFrame" class="history-frame"></div>
       </div>
+      <div id="advancedPane" class="sidepanel-pane" role="tabpanel"
+        aria-labelledby="advancedTab" data-inspector-pane="advanced" hidden>
+        <h2>Advanced editor controls</h2>
+        <label id="buildDurationWrap" class="build-duration">
+          <span>Build animation duration</span>
+          <input id="buildDuration" type="range" min="4000" max="30000" step="500"
+            value="10000" aria-label="Build animation duration">
+          <output id="buildDurationValue">10s</output>
+        </label>
+        <div id="advancedTiming" class="advanced-timing" aria-live="polite"></div>
+      </div>
+      <div id="helpPane" class="sidepanel-pane help-pane" role="tabpanel"
+        aria-labelledby="helpTab" data-inspector-pane="help" hidden></div>
     </aside>
+    <button id="inspectorScrim" class="inspector-scrim" type="button"
+      aria-label="Close inspector" hidden></button>
   </div>
   </div>
   <section id="reportPanel" class="report-panel app-view" hidden>
@@ -243,11 +341,27 @@
       <div>
         <h2 id="reportTitle">Validation Report</h2>
         <p id="reportStatus">Loading report...</p>
+        <div class="evidence-status-row">
+          <div id="reportFreshness" class="evidence-freshness" aria-live="polite">Loading report...</div>
+          <button id="reportRetry" class="evidence-retry" type="button" hidden>Retry</button>
+        </div>
       </div>
     </div>
-    <div id="reportFrame" class="report-frame"></div>
+    <div id="reportFrame" class="report-frame" aria-busy="true"
+      data-freshness="idle"></div>
   </section>
   </div>
+
+  <dialog id="structuralConfirmDialog" class="structural-confirm" aria-labelledby="structuralConfirmTitle" aria-describedby="structuralConfirmMessage">
+    <form method="dialog">
+      <h2 id="structuralConfirmTitle">Confirm structural refit</h2>
+      <p id="structuralConfirmMessage"></p>
+      <div class="dialog-actions">
+        <button value="cancel" type="submit">Cancel</button>
+        <button value="confirm" class="primary" type="submit">Continue and refit</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="profileDialog" class="profile-dialog" aria-labelledby="profileDialogTitle">
     <div class="profile-dialog-head">
@@ -289,33 +403,55 @@
     </div>
   </dialog>
 
-  <dialog id="saveDialog" class="save-dialog" aria-labelledby="saveDialogTitle">
+  <dialog id="exportDialog" class="export-dialog" aria-labelledby="exportDialogTitle">
     <div class="profile-dialog-head">
       <div>
-        <h2 id="saveDialogTitle">Save Edited Model</h2>
-        <p>Write the current in-force edited model copy as a joblib artifact.</p>
+        <h2 id="exportDialogTitle">Export</h2>
+        <p>Choose a validated Python model or an Excel rating workbook.</p>
       </div>
-      <button id="saveDialogClose" type="button" aria-label="Close save dialog">Close</button>
+      <button id="exportDialogClose" type="button" aria-label="Close export dialog">Close</button>
     </div>
-    <div class="save-options">
-      <div class="save-directory-row">
-        <label>Directory
-          <input id="saveDirectory" type="text" value="">
+    <fieldset class="export-format-group">
+      <legend>Export format</legend>
+      <div class="export-format-grid">
+        <label class="export-format-card">
+          <input type="radio" name="exportFormat" value="joblib"
+            aria-label="Python model" checked>
+          <span>
+            <strong>Python model</strong>
+            <small>Validated, fitted model for Python use</small>
+          </span>
         </label>
-        <button id="saveDownload" class="profile-run save-inline-action" type="button">
-          Download Edited Model
-        </button>
+        <label class="export-format-card">
+          <input type="radio" name="exportFormat" value="xlsx"
+            aria-label="Excel rating workbook">
+          <span>
+            <strong>Excel rating workbook</strong>
+            <small>Rating tables and structured fit summary</small>
+          </span>
+        </label>
       </div>
+    </fieldset>
+    <div class="export-fields">
       <label>Filename
-        <input id="saveFilename" type="text" value="superglm_edited_model.joblib">
+        <input id="exportFilename" type="text" value="superglm_edited_model.joblib">
+      </label>
+      <label>Kernel directory
+        <input id="exportDirectory" type="text" value="">
       </label>
     </div>
-    <div class="save-actions">
-      <button id="saveOpenDirectory" type="button">Open Folder</button>
-      <button id="saveConfirm" class="profile-run" type="button">Save To Kernel Path</button>
+    <div class="export-actions">
+      <button id="exportDownload" class="profile-run" type="button">Download</button>
+      <button id="exportSave" class="profile-run" type="button">Save to Kernel Path</button>
+      <button id="exportOpenDirectory" type="button">Open Folder</button>
     </div>
-    <div id="saveStatus" class="save-status" aria-live="polite"></div>
+    <div id="exportStatus" class="export-status" role="status" aria-live="polite"></div>
   </dialog>
+
+<div id="uiPopover" class="ui-popover" role="tooltip" hidden>
+  <strong data-popover-heading></strong>
+  <span data-popover-description></span>
+</div>
 
 <script type="module" src="/assets/main.js"></script>
 </body>

@@ -1,4 +1,3 @@
-import { requestJSON } from "./api.js";
 import { escapeHTML, fmt, fmtSigned } from "./format.js";
 
 const reportMetricKeys = [
@@ -10,24 +9,7 @@ const reportMetricKeys = [
   "effective_df"
 ];
 
-export async function refreshReport({ report, reportTitle, reportStatus, reportFrame }) {
-  reportStatus.textContent = "Loading report...";
-  reportFrame.setAttribute("aria-busy", "true");
-  try {
-    const payload = await requestJSON("/report", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ report })
-    });
-    renderReport(payload, { reportTitle, reportStatus, reportFrame });
-  } catch (error) {
-    reportStatus.textContent = error.message;
-  } finally {
-    reportFrame.setAttribute("aria-busy", "false");
-  }
-}
-
-function renderReport(payload, { reportTitle, reportStatus, reportFrame }) {
+export function renderReport(payload, { reportTitle, reportStatus, reportFrame }) {
   reportTitle.textContent = payload.title || "Report";
   reportStatus.textContent = payload.note || "";
   if (!payload.available) {
