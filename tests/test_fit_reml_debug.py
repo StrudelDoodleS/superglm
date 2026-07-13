@@ -2,8 +2,18 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from superglm import Constraint, PSpline, SuperGLM
+
+
+@pytest.fixture(autouse=True)
+def _restore_debug_level():
+    from superglm._debug import get_debug_level, set_debug_level
+
+    previous_level = get_debug_level()
+    yield
+    set_debug_level(previous_level)
 
 
 def _make_demo_data() -> tuple[pd.DataFrame, object]:
@@ -128,3 +138,9 @@ def test_debug_level_two_writes_reml_trace_files(tmp_path: Path, monkeypatch):
     ]
     assert scop_rows
     assert scop_rows[0]["step_norm"] >= 0.0
+
+
+def test_debug_tests_do_not_leak_enabled_state():
+    from superglm._debug import get_debug_level
+
+    assert get_debug_level() == 0

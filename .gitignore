@@ -51,6 +51,8 @@ REML_IMPLEMENTATION_PLAN.md
 # scratch/ is a playground for local dev only — not for public release.
 # Benchmarks, experiments, R comparisons, and throwaway scripts live here.
 scratch/
+docs/notebooks/spline_diagnostics/
+.superglm-debug/
 
 # Superpowers skill artifacts
 docs/superpowers/
@@ -64,3 +66,8 @@ PROGRESS.md
 GENERATOR_STATUS.md
 REML_BAD_BEHAVIOUR.txt
 .omx/
+
+# Frontend development
+node_modules/
+playwright-report/
+test-results/

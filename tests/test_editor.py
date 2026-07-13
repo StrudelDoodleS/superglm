@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import urllib.error
 import urllib.parse
@@ -23,6 +24,12 @@ from superglm import (
     generate_tweedie_cpg,
 )
 from superglm.editor import EditableTerm, EditorSession
+from superglm.editor.evaluation import coerce_dataset
+from superglm.editor.persistence import (
+    ModelArtifactValidation,
+    _spread_row_indices,
+    serialize_validated_model,
+)
 from superglm.inference.summary import ModelSummary, _BasisDetailRow, _CoefRow
 
 
@@ -32,7 +39,7 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
 
     assert "## Choose Spline Capacity With A k Sweep" in source
-    assert "n = 10_000" in source
+    assert "n = 150_000" in source
     assert "## In-Sample k Adequacy" in source
     assert "## Cross-Validated k Check" in source
     assert "from sklearn.model_selection import KFold" in source
@@ -44,6 +51,8 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     assert "TRUE_TWEEDIE_P" in source
     assert "TRUE_TWEEDIE_P_INIT" in source
     assert "TRUE_TWEEDIE_PHI" in source
+    assert "age = np.clip(rng.normal(" in source
+    assert "age_effect -= np.average(age_effect, weights=exposure)" in source
     assert "mu = np.exp(eta)" in source
     assert "y = generate_tweedie_cpg(" in source
     assert "TERRITORY_LEVELS" in source
@@ -54,6 +63,8 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     assert '"T10"' in source
     assert "territory_effect" in source
     assert "family=families.tweedie(p=TRUE_TWEEDIE_P_INIT)" in source
+    assert "discrete=True" in source
+    assert "n_bins=512" in source
     assert "model.estimate_p(" in source
     assert "tweedie_profile.search_trace" in source
     assert 'method="brent"' in source
@@ -76,7 +87,11 @@ def test_editor_demo_notebook_includes_k_adequacy_sweep():
     assert "recommend_k_from_cv" in source
     assert "cv_one_se_k" in source
     assert "cv_recommended_k" in source
-    assert "median_age_band_min_p" in source
+    assert 'basis=Spline(kind="ps", k=5)' in source
+    assert "median_age_band_p" in source
+    assert "median_age_band_min_p" not in source
+    assert "np.nanmin(p_values)" not in source
+    assert "row.name == term" in source
     assert "chosen_k = cv_recommended_k" in source
     assert "age_edf" in source
     assert "total_edf" in source
@@ -151,6 +166,194 @@ def editor_model(editor_frame):
     return model
 
 
+def test_serialize_validated_model_round_trip_predictions(editor_model, editor_frame):
+    import io
+
+    import joblib
+
+    X, y = editor_frame
+    dataset = coerce_dataset("validation", (X, y))
+
+    data, validation = serialize_validated_model(editor_model, dataset=dataset, max_rows=17)
+    loaded = joblib.load(io.BytesIO(data))
+
+    assert isinstance(data, bytes)
+    assert validation == ModelArtifactValidation(
+        artifact_round_trip=True,
+        prediction_rows=17,
+        scope="artifact+predictions",
+    )
+    indices = _spread_row_indices(len(X), 17)
+    np.testing.assert_allclose(
+        loaded.predict(X.iloc[indices]),
+        editor_model.predict(X.iloc[indices]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_spread_row_indices_are_deterministic_bounded_and_include_endpoints():
+    first = _spread_row_indices(101, 17)
+    second = _spread_row_indices(101, 17)
+
+    np.testing.assert_array_equal(first, second)
+    assert len(first) == 17
+    assert first[0] == 0
+    assert first[-1] == 100
+    assert len(np.unique(first)) == len(first)
+    np.testing.assert_array_equal(_spread_row_indices(4, 17), np.arange(4))
+    np.testing.assert_array_equal(_spread_row_indices(0, 17), np.array([], dtype=np.intp))
+
+
+def test_serialize_validated_model_slices_spread_rows_and_offset_consistently(
+    editor_model,
+    editor_frame,
+    monkeypatch,
+):
+    import superglm.editor.persistence as persistence
+
+    X, y = editor_frame
+    offset = np.linspace(-0.2, 0.2, len(X))
+    dataset = coerce_dataset("validation", (X, y, None, offset))
+    expected_indices = _spread_row_indices(len(X), 17)
+    seen: dict[str, np.ndarray] = {}
+    real_load = persistence.joblib_load_bytes
+
+    def load_with_recording_predict(data):
+        loaded = real_load(data)
+        real_predict = loaded.predict
+
+        def recording_predict(X_rows, offset=None):
+            seen["indices"] = X_rows.index.to_numpy()
+            seen["offset"] = np.asarray(offset)
+            return real_predict(X_rows, offset=offset)
+
+        loaded.predict = recording_predict
+        return loaded
+
+    monkeypatch.setattr(persistence, "joblib_load_bytes", load_with_recording_predict)
+
+    _, validation = serialize_validated_model(editor_model, dataset=dataset, max_rows=17)
+
+    np.testing.assert_array_equal(seen["indices"], expected_indices)
+    np.testing.assert_array_equal(seen["offset"], offset[expected_indices])
+    assert validation.prediction_rows == 17
+
+
+@pytest.mark.parametrize("failure", ["mismatch", "nonfinite"])
+def test_serialize_validated_model_rejects_bad_loaded_predictions(
+    editor_model,
+    editor_frame,
+    monkeypatch,
+    failure,
+):
+    import superglm.editor.persistence as persistence
+
+    X, y = editor_frame
+    dataset = coerce_dataset("validation", (X, y))
+    real_load = persistence.joblib_load_bytes
+
+    def load_with_bad_predict(data):
+        loaded = real_load(data)
+        real_predict = loaded.predict
+
+        def bad_predict(X_rows, offset=None):
+            predictions = np.asarray(real_predict(X_rows, offset=offset), dtype=np.float64)
+            if failure == "nonfinite":
+                return np.full_like(predictions, np.nan)
+            return predictions + 1.0
+
+        loaded.predict = bad_predict
+        return loaded
+
+    monkeypatch.setattr(persistence, "joblib_load_bytes", load_with_bad_predict)
+
+    with pytest.raises(ValueError, match="prediction validation failed"):
+        serialize_validated_model(editor_model, dataset=dataset, max_rows=17)
+
+
+def test_serialize_validated_model_contract_only(editor_model):
+    data, validation = serialize_validated_model(editor_model)
+
+    assert isinstance(data, bytes)
+    assert validation == ModelArtifactValidation(
+        artifact_round_trip=True,
+        prediction_rows=0,
+        scope="artifact",
+    )
+
+
+def test_serialize_validated_model_empty_dataset_is_contract_only(editor_model, editor_frame):
+    X, y = editor_frame
+    dataset = coerce_dataset("validation", (X.iloc[:0], y[:0]))
+
+    _, validation = serialize_validated_model(editor_model, dataset=dataset)
+
+    assert validation.scope == "artifact"
+    assert validation.prediction_rows == 0
+
+
+def test_serialize_validated_model_rejects_invalid_max_rows(editor_model):
+    with pytest.raises(ValueError, match="max_rows"):
+        serialize_validated_model(editor_model, max_rows=0)
+
+
+@pytest.mark.parametrize(
+    "contract_failure",
+    [
+        "wrong_type",
+        "missing_result",
+        "noncallable_predict",
+        "beta_shape",
+        "nonfinite_beta",
+        "nonfinite_intercept",
+        "feature_order",
+        "spec_key_order",
+        "spec_type",
+    ],
+)
+def test_serialize_validated_model_rejects_bad_artifact_contract(
+    editor_model,
+    monkeypatch,
+    contract_failure,
+):
+    from dataclasses import replace
+
+    import superglm.editor.persistence as persistence
+
+    real_load = persistence.joblib_load_bytes
+
+    def load_invalid_artifact(data):
+        if contract_failure == "wrong_type":
+            return SimpleNamespace()
+        loaded = real_load(data)
+        if contract_failure == "missing_result":
+            loaded._result = None
+        elif contract_failure == "noncallable_predict":
+            loaded.predict = None
+        elif contract_failure == "beta_shape":
+            loaded._result = replace(loaded.result, beta=loaded.result.beta[:-1])
+        elif contract_failure == "nonfinite_beta":
+            beta = loaded.result.beta.copy()
+            beta[0] = np.nan
+            loaded._result = replace(loaded.result, beta=beta)
+        elif contract_failure == "nonfinite_intercept":
+            loaded._result = replace(loaded.result, intercept=np.inf)
+        elif contract_failure == "feature_order":
+            loaded._feature_order = list(reversed(loaded._feature_order))
+        elif contract_failure == "spec_key_order":
+            loaded._specs = dict(reversed(list(loaded._specs.items())))
+        elif contract_failure == "spec_type":
+            first_name = next(iter(loaded._specs))
+            loaded._specs[first_name] = Numeric()
+        return loaded
+
+    monkeypatch.setattr(persistence, "joblib_load_bytes", load_invalid_artifact)
+
+    with pytest.raises(ValueError, match="artifact validation failed"):
+        serialize_validated_model(editor_model)
+
+
 def test_session_extracts_1d_main_effects(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline", "region"])
 
@@ -169,6 +372,229 @@ def test_select_x_and_levels(editor_model):
 
     session.select_levels("region", ["B", "C"])
     assert session.selection("region").tolist() == [1, 2]
+
+
+def test_editor_model_revision_changes_only_for_prediction_mutations(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline", "region"])
+    assert session.model_revision == 0
+    assert session.edit_epoch == 0
+
+    session.select_indices("x_spline", [3, 4])
+    assert session.model_revision == 0
+
+    session.shift("x_spline", 0.1)
+    assert session.model_revision == 1
+    assert session.edit_epoch == 1
+
+    session.undo()
+    assert session.model_revision == 2
+    assert session.edit_epoch == 2
+
+    session.redo()
+    assert session.model_revision == 3
+    assert session.edit_epoch == 3
+
+    session.select_indices("region", [1])
+    session.reorder_levels("region", target_index=0)
+    assert session.model_revision == 3
+
+
+def test_editor_model_revision_noops_reset_and_cache_invalidation(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    term = session.terms["x_spline"]
+    assert session._materialized_edit_model is None
+    assert session._materialized_edit_epoch is None
+
+    with pytest.raises(KeyError):
+        session.shift("missing", 0.1)
+    assert session.model_revision == session.edit_epoch == 0
+
+    session.select_indices("x_spline", [3])
+    session.shift("x_spline", 0.1)
+    session.undo()
+    assert session.model_revision == session.edit_epoch == 2
+    assert len(session.redo_stack) == 1
+
+    cached_model = object()
+    session._materialized_edit_model = cached_model
+    session._materialized_edit_epoch = session.edit_epoch
+    session.set_value("x_spline", float(term.edited_log_effect[3]))
+
+    assert session.model_revision == session.edit_epoch == 2
+    assert session._materialized_edit_model is cached_model
+    assert session._materialized_edit_epoch == 2
+    assert session.history[-1].operation == "set_value"
+    assert session.redo_stack == []
+
+    session.shift("x_spline", 0.1)
+    assert session.model_revision == session.edit_epoch == 3
+    assert session._materialized_edit_model is None
+    assert session._materialized_edit_epoch is None
+
+    session._materialized_edit_model = object()
+    session._materialized_edit_epoch = session.edit_epoch
+    session.reset("x_spline")
+    assert session.model_revision == session.edit_epoch == 4
+    assert session._materialized_edit_model is None
+    assert session._materialized_edit_epoch is None
+    assert term.edited_log_effect[3] == pytest.approx(term.original_log_effect[3])
+
+    cached_model = object()
+    session._materialized_edit_model = cached_model
+    session._materialized_edit_epoch = session.edit_epoch
+    session.reset("x_spline")
+    assert session.model_revision == session.edit_epoch == 4
+    assert session._materialized_edit_model is cached_model
+    assert session._materialized_edit_epoch == 4
+
+
+def test_set_values_collapses_same_value_duplicates_without_revision_change(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    term = session.terms["x_spline"]
+    value = float(term.edited_log_effect[3])
+    cached_model = object()
+    session._materialized_edit_model = cached_model
+    session._materialized_edit_epoch = session.edit_epoch
+
+    session.set_values("x_spline", [3, 3], [value, value])
+
+    assert session.model_revision == session.edit_epoch == 0
+    assert session._materialized_edit_model is cached_model
+    assert session._materialized_edit_epoch == 0
+    np.testing.assert_array_equal(session.history[-1].indices, [3])
+    np.testing.assert_array_equal(session.history[-1].before, [value])
+    np.testing.assert_array_equal(session.history[-1].after, [value])
+
+
+def test_set_values_rejects_conflicting_duplicates_without_mutation(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4])
+    session.shift("x_spline", 0.1)
+    before = session.terms["x_spline"].edited_log_effect.copy()
+    old_history = session.history
+    old_records = list(session.history)
+    old_revision = session.model_revision
+    old_epoch = session.edit_epoch
+    cached_model = object()
+    session._materialized_edit_model = cached_model
+    session._materialized_edit_epoch = session.edit_epoch
+
+    with pytest.raises(ValueError, match="Conflicting values"):
+        session.set_values("x_spline", [3, 3], [0.1, 0.2])
+
+    np.testing.assert_array_equal(session.terms["x_spline"].edited_log_effect, before)
+    assert session.history is old_history
+    assert len(session.history) == len(old_records)
+    assert all(actual is expected for actual, expected in zip(session.history, old_records))
+    assert session.model_revision == old_revision
+    assert session.edit_epoch == old_epoch
+    assert session._materialized_edit_model is cached_model
+    assert session._materialized_edit_epoch == old_epoch
+
+
+def test_replace_in_force_model_advances_revision_once(editor_model):
+    replacement = editor_model._clone_without_features(set())
+    replacement.fit(editor_model._fit_X_ref, editor_model._fit_y_ref)
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+
+    session.replace_in_force_model(replacement)
+
+    assert session.model is replacement
+    assert session.model_revision == 1
+    assert session.edit_epoch == 1
+
+
+def test_replace_in_force_model_failure_restores_complete_session_state(
+    editor_model,
+    monkeypatch,
+):
+    replacement = editor_model._clone_without_features(set())
+    replacement.fit(editor_model._fit_X_ref, editor_model._fit_y_ref)
+    session = EditorSession.from_model(editor_model, terms=["x_spline", "region"])
+    session.select_levels("region", ["B"])
+    session.shift("region", 0.1)
+    session.select_indices("x_spline", [3])
+    session.shift("x_spline", 0.2)
+    session.undo("x_spline")
+    session.reorder_levels("region", target_index=0)
+
+    cached_model = object()
+    session._materialized_edit_model = cached_model
+    session._materialized_edit_epoch = session.edit_epoch
+
+    old_model = session.model
+    old_terms = session.terms
+    old_term_values = {name: term.edited_log_effect.copy() for name, term in session.terms.items()}
+    old_term_levels = {
+        name: None if term.levels is None else list(term.levels)
+        for name, term in session.terms.items()
+    }
+    old_selection = session._selection
+    old_selection_state = {
+        name: (indices, indices.copy()) for name, indices in session._selection.items()
+    }
+    old_history = session.history
+    old_redo = session.redo_stack
+    old_history_state = [
+        (record, record.indices, record.indices.copy()) for record in session.history
+    ]
+    old_redo_state = [
+        (record, record.indices, record.indices.copy()) for record in session.redo_stack
+    ]
+    old_level_orders = session._level_orders
+    old_level_order_state = {
+        name: (labels, list(labels)) for name, labels in session._level_orders.items()
+    }
+    old_revision = session.model_revision
+    old_epoch = session.edit_epoch
+
+    original_reapply = session._reapply_level_orders
+    staged: dict[str, bool] = {}
+
+    def fail_after_staged_reorder():
+        staged["model"] = session.model is replacement
+        staged["terms"] = session.terms is not old_terms
+        staged["selection"] = session._selection is not old_selection
+        staged["history"] = session.history is not old_history
+        staged["redo"] = session.redo_stack is not old_redo
+        staged["level_orders"] = session._level_orders is not old_level_orders
+        original_reapply()
+        raise RuntimeError("staged level reorder failed")
+
+    monkeypatch.setattr(session, "_reapply_level_orders", fail_after_staged_reorder)
+
+    with pytest.raises(RuntimeError, match="staged level reorder failed"):
+        session.replace_in_force_model(replacement)
+
+    assert all(staged.values())
+    assert session.model is old_model
+    assert session.terms is old_terms
+    for name, term in session.terms.items():
+        np.testing.assert_array_equal(term.edited_log_effect, old_term_values[name])
+        assert term.levels == old_term_levels[name]
+    assert session._selection is old_selection
+    for name, (indices, values) in old_selection_state.items():
+        assert session._selection[name] is indices
+        np.testing.assert_array_equal(session._selection[name], values)
+    assert session.history is old_history
+    assert session.redo_stack is old_redo
+    for stack, expected in (
+        (session.history, old_history_state),
+        (session.redo_stack, old_redo_state),
+    ):
+        assert len(stack) == len(expected)
+        for record, (old_record, old_indices, old_values) in zip(stack, expected, strict=True):
+            assert record is old_record
+            assert record.indices is old_indices
+            np.testing.assert_array_equal(record.indices, old_values)
+    assert session._level_orders is old_level_orders
+    for name, (labels, values) in old_level_order_state.items():
+        assert session._level_orders[name] is labels
+        assert session._level_orders[name] == values
+    assert session.model_revision == old_revision
+    assert session.edit_epoch == old_epoch
+    assert session._materialized_edit_model is cached_model
+    assert session._materialized_edit_epoch == old_epoch
 
 
 def test_shift_set_interpolate_isotonic_smooth_and_history(editor_model):
@@ -478,6 +904,372 @@ def test_to_model_returns_copy_and_leaves_source_unchanged(editor_model):
     np.testing.assert_allclose(editor_model.result.beta, original_beta)
     assert editor_model.result.intercept == original_intercept
     assert not np.allclose(edited.result.beta, original_beta)
+
+
+def test_materialized_model_reuses_one_copy_per_real_edit_epoch(
+    editor_model,
+    monkeypatch,
+):
+    from superglm.editor import session as session_module
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    real_apply = session_module.apply.apply_edits_to_model_copy_with_data
+    applied_epochs: list[int] = []
+
+    def counted_apply(*args, **kwargs):
+        applied_epochs.append(session.edit_epoch)
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(
+        session_module.apply,
+        "apply_edits_to_model_copy_with_data",
+        counted_apply,
+    )
+
+    widget = session.widget()
+    try:
+        assert widget._current_model_for_evidence()[0] is editor_model
+        assert applied_epochs == []
+
+        session.select_x("x_spline", 2.0, 5.0)
+        session.shift("x_spline", 0.35)
+        first = widget._current_model_for_evidence()[0]
+        assert widget._current_model_for_evidence()[0] is first
+        assert applied_epochs == [1]
+
+        session.shift("x_spline", 0.10)
+        second = widget._current_model_for_evidence()[0]
+        assert second is not first
+        assert applied_epochs == [1, 2]
+
+        session.undo()
+        after_undo = widget._current_model_for_evidence()[0]
+        assert after_undo is not second
+        assert applied_epochs == [1, 2, 3]
+
+        session.redo()
+        after_redo = widget._current_model_for_evidence()[0]
+        assert after_redo is not after_undo
+        assert applied_epochs == [1, 2, 3, 4]
+
+        session.reset("x_spline")
+        assert widget._current_model_for_evidence()[0] is editor_model
+        assert applied_epochs == [1, 2, 3, 4]
+    finally:
+        widget.close()
+
+
+def test_materialized_model_is_invalidated_by_structural_replacement(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4])
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    cached = widget._current_model_for_evidence()[0]
+
+    replacement = editor_model._clone_without_features(set())
+    replacement.fit(editor_model._fit_X_ref, editor_model._fit_y_ref)
+    session.replace_in_force_model(replacement)
+
+    try:
+        assert session._materialized_edit_model is None
+        assert session._materialized_edit_epoch is None
+        assert widget._current_model_for_evidence()[0] is replacement
+        assert widget._current_model_for_evidence()[0] is not cached
+    finally:
+        widget.close()
+
+
+def test_materialization_request_copies_terms_and_rejects_stale_publish(
+    editor_model,
+    editor_frame,
+):
+    from superglm.editor.apply import materialize_edit_request
+    from superglm.editor.evaluation import default_metrics_dataset
+
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        validation_data=(X.iloc[300:380], y[300:380], None),
+    )
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    dataset = default_metrics_dataset(session)
+    request = session.capture_materialization_request()
+
+    assert request is not None
+    assert request.base_model is session.model
+    assert request.dataset is dataset
+    assert request.dataset.X is dataset.X
+    assert request.dataset.y is dataset.y
+    captured_term = request.terms["x_spline"]
+    live_term = session.terms["x_spline"]
+    assert captured_term is not live_term
+    assert not np.shares_memory(captured_term.edited_log_effect, live_term.edited_log_effect)
+
+    stale_model = materialize_edit_request(request)
+    session.shift("x_spline", 0.1)
+    assert session.publish_materialized_model(request, stale_model) is False
+    assert session.cached_materialized_model(request.edit_epoch) is None
+
+    current_request = session.capture_materialization_request()
+    assert current_request is not None
+    current_model = materialize_edit_request(current_request)
+    assert session.publish_materialized_model(current_request, current_model) is True
+    assert (
+        session.cached_materialized_model(
+            current_request.edit_epoch,
+            model_revision=current_request.model_revision,
+            base_model=current_request.base_model,
+        )
+        is current_model
+    )
+    assert (
+        session.cached_materialized_model(
+            current_request.edit_epoch,
+            model_revision=current_request.model_revision + 1,
+            base_model=current_request.base_model,
+        )
+        is None
+    )
+    assert (
+        session.cached_materialized_model(
+            current_request.edit_epoch,
+            model_revision=current_request.model_revision,
+            base_model=object(),
+        )
+        is None
+    )
+
+
+def test_to_model_stays_fresh_and_does_not_return_the_materialized_copy(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+
+    widget = session.widget()
+    try:
+        materialized = widget._current_model_for_evidence()[0]
+        first = session.to_model()
+        second = session.to_model()
+
+        assert first is not second
+        assert first is not materialized
+        assert second is not materialized
+        assert widget._current_model_for_evidence()[0] is materialized
+        np.testing.assert_allclose(first.result.beta, materialized.result.beta)
+        np.testing.assert_allclose(second.result.beta, materialized.result.beta)
+    finally:
+        widget.close()
+
+
+def test_to_model_without_edits_keeps_transient_state_private(editor_model):
+    editor_model.summary()
+    editor_model.metrics(
+        editor_model._fit_X_ref,
+        editor_model._fit_y_ref,
+        sample_weight=editor_model._fit_sample_weight_ref,
+        offset=editor_model._fit_offset_ref,
+    )
+    source_objects = {
+        name: getattr(editor_model, name)
+        for name in (
+            "_runtime_canonical_state",
+            "_fast_prediction_state",
+            "_prediction_plan",
+            "_fit_mu",
+            "_fit_null_mu",
+            "_fit_stats",
+            "_fit_metrics_cache",
+            "_summary_cache",
+        )
+    }
+    source_mu = editor_model._fit_mu.copy()
+    source_null_mu = editor_model._fit_null_mu.copy()
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+
+    copied = session.to_model()
+
+    for name in (
+        "_dm",
+        "_fit_X_ref",
+        "_fit_y_ref",
+        "_fit_sample_weight_ref",
+        "_fit_offset_ref",
+        "_fit_weights",
+        "_fit_offset",
+    ):
+        assert getattr(copied, name) is getattr(editor_model, name)
+    for name, source_value in source_objects.items():
+        assert getattr(copied, name) is not source_value
+    assert not np.shares_memory(copied._fit_mu, editor_model._fit_mu)
+    assert not np.shares_memory(copied._fit_null_mu, editor_model._fit_null_mu)
+
+    copied._runtime_canonical_state["copy_only"] = True
+    copied._fast_prediction_state["copy_only"] = True
+    copied._prediction_plan["copy_only"] = []
+    copied._fit_mu[0] += 1.0
+    copied._fit_null_mu[0] += 1.0
+    copied._fit_metrics_cache.__dict__["copy_only"] = True
+    copied._summary_cache["copy_only"] = True
+    for name in source_objects:
+        setattr(copied, name, None)
+
+    assert all(getattr(editor_model, name) is value for name, value in source_objects.items())
+    assert "copy_only" not in editor_model._runtime_canonical_state
+    assert "copy_only" not in editor_model._fast_prediction_state
+    assert "copy_only" not in editor_model._prediction_plan
+    assert "copy_only" not in editor_model._fit_metrics_cache.__dict__
+    assert "copy_only" not in editor_model._summary_cache
+    np.testing.assert_array_equal(editor_model._fit_mu, source_mu)
+    np.testing.assert_array_equal(editor_model._fit_null_mu, source_null_mu)
+
+
+def test_materialized_model_shares_only_row_scale_fit_inputs():
+    rng = np.random.default_rng(20260804)
+    n = 120
+    X = pd.DataFrame({"x": rng.normal(size=n), "z": rng.normal(size=n)})
+    sample_weight = rng.uniform(0.5, 2.0, size=n)
+    offset = rng.normal(0.0, 0.03, size=n)
+    y = (
+        0.4
+        + 0.3 * X["x"].to_numpy()
+        - 0.2 * X["z"].to_numpy()
+        + 0.1 * X["x"].to_numpy() * X["z"].to_numpy()
+        + offset
+        + rng.normal(0.0, 0.04, size=n)
+    )
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.1,
+        features={"x": Numeric(), "z": Numeric()},
+        interactions=[("x", "z")],
+    )
+    model.fit(X, y, sample_weight=sample_weight, offset=offset)
+    model.summary()
+    model.metrics(
+        model._fit_X_ref,
+        model._fit_y_ref,
+        sample_weight=model._fit_sample_weight_ref,
+        offset=model._fit_offset_ref,
+    )
+    source_objects = {
+        name: getattr(model, name)
+        for name in (
+            "_fit_mu",
+            "_fit_null_mu",
+            "_fit_stats",
+            "_fit_metrics_cache",
+            "_prediction_plan",
+            "_runtime_canonical_state",
+            "_fast_prediction_state",
+            "_summary_cache",
+        )
+    }
+    source_mu = model._fit_mu.copy()
+    source_null_mu = model._fit_null_mu.copy()
+    source_beta = model.result.beta.copy()
+    source_deviance = model.result.deviance
+
+    session = EditorSession.from_model(model, terms=["x"])
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+    widget = session.widget()
+    try:
+        edited = widget._current_model_for_evidence()[0]
+    finally:
+        widget.close()
+
+    for name in (
+        "_dm",
+        "_fit_X_ref",
+        "_fit_y_ref",
+        "_fit_sample_weight_ref",
+        "_fit_offset_ref",
+        "_fit_weights",
+        "_fit_offset",
+    ):
+        assert getattr(edited, name) is getattr(model, name)
+
+    assert edited._result is not model._result
+    assert edited._solver_result is not model._solver_result
+    assert not np.shares_memory(edited._result.beta, model._result.beta)
+    assert not np.shares_memory(edited._solver_result.beta, model._solver_result.beta)
+    assert edited._specs is not model._specs
+    assert all(edited._specs[name] is not spec for name, spec in model._specs.items())
+    assert edited._interaction_specs is not model._interaction_specs
+    assert all(
+        edited._interaction_specs[name] is not spec
+        for name, spec in model._interaction_specs.items()
+    )
+    assert edited.penalty is not model.penalty
+    assert edited._runtime_canonical_state is not model._runtime_canonical_state
+    assert edited._fast_prediction_state is not model._fast_prediction_state
+
+    assert edited._fit_mu is not model._fit_mu
+    assert edited._fit_null_mu is not model._fit_null_mu
+    assert not np.shares_memory(edited._fit_mu, model._fit_mu)
+    assert not np.shares_memory(edited._fit_null_mu, model._fit_null_mu)
+    assert edited._fit_stats is not model._fit_stats
+    assert edited._prediction_plan is not model._prediction_plan
+    assert edited._fit_metrics_cache is None
+    assert edited._summary_cache is None
+
+    assert all(getattr(model, name) is value for name, value in source_objects.items())
+    np.testing.assert_array_equal(model._fit_mu, source_mu)
+    np.testing.assert_array_equal(model._fit_null_mu, source_null_mu)
+    np.testing.assert_array_equal(model.result.beta, source_beta)
+    assert model.result.deviance == source_deviance
+
+
+def test_widget_evidence_and_export_reuse_materialized_model(
+    editor_model,
+    tmp_path,
+    monkeypatch,
+):
+    import joblib
+
+    import superglm.editor.apply as apply_module
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    materialized_calls = 0
+    dumped: list[object] = []
+    original_apply = apply_module.apply_edits_to_model_copy_with_data
+    original_dump = joblib.dump
+
+    def counted_apply(*args, **kwargs):
+        nonlocal materialized_calls
+        materialized_calls += 1
+        return original_apply(*args, **kwargs)
+
+    def capture_dump(model, target):
+        dumped.append(model)
+        return original_dump(model, target)
+
+    monkeypatch.setattr(apply_module, "apply_edits_to_model_copy_with_data", counted_apply)
+    monkeypatch.setattr("joblib.dump", capture_dump)
+    try:
+        summary = widget._summary("in_force")
+        metrics = widget._metrics("deviance", "in_force")
+        report = widget._report("final")
+        saved = widget._save_model(path=str(tmp_path / "edited-model.joblib"))
+        downloaded, filename = widget._download_model("edited-model.joblib")
+    finally:
+        widget.close()
+
+    materialized = session._materialized_edit_model
+    assert materialized_calls == 1
+    assert materialized is not None
+    assert summary["available"] is True
+    assert metrics["available"] is True
+    assert report["summary"]["available"] is True
+    assert Path(saved["path"]).exists()
+    assert filename == "edited-model.joblib"
+    assert downloaded
+    assert dumped == [materialized, materialized]
 
 
 def test_to_model_refreshes_fit_statistics_after_manual_edit(editor_model):
@@ -2589,12 +3381,157 @@ def test_widget_state_exposes_ci_bands_and_single_point_centering(editor_model):
         np.testing.assert_allclose(numeric["y"], np.exp(session.terms["x_num"].edited_log_effect))
         assert spline["ci_lower_y"] is not None
         assert spline["ci_upper_y"] is not None
+        assert spline["effective_df"] == pytest.approx(session.terms["x_spline"].metadata["edf"])
         assert len(spline["ci_lower_y"]) == spline["n_points"]
         np.testing.assert_allclose(spline["y"], np.exp(session.terms["x_spline"].edited_log_effect))
         np.testing.assert_allclose(
             spline["original_y"],
             np.exp(session.terms["x_spline"].original_log_effect),
         )
+    finally:
+        widget.close()
+
+
+def test_widget_state_exposes_semantic_model_revision(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        initial = _get_json(f"{widget.url}/state")
+        _post_json(f"{widget.url}/select", {"term": "x_spline", "indices": [5, 6]})
+        selected = _get_json(f"{widget.url}/state")
+        changed = _post_json(f"{widget.url}/op", {"operation": "shift_up"})
+        assert initial["model_revision"] == selected["model_revision"] == 0
+        assert changed["model_revision"] == 1
+    finally:
+        widget.close()
+
+
+def test_widget_snapshot_generations_track_chart_mutation_categories(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline", "region"])
+    widget = session.widget()
+    try:
+        snapshots = [widget._state()]
+        snapshots.append(widget._select("x_spline", [5]))
+        snapshots.append(widget._set_term("region"))
+
+        before_control_revision = session.model_revision
+        snapshots.append(widget._set_control_count("x_spline", 6))
+        assert snapshots[-1]["model_revision"] == before_control_revision
+        controls = session.control_points("x_spline", n_handles=6)
+        handle_index = int(controls["x"].size // 2)
+        handle_value = float(np.exp(controls["log_effect"][handle_index] + 0.05))
+        snapshots.append(widget._control("x_spline", handle_index, handle_value))
+        snapshots.append(widget._drag("x_spline", [5], delta=0.01))
+        snapshots.append(widget._operate("shift_up"))
+        snapshots.append(widget._operate("undo"))
+        snapshots.append(widget._operate("redo"))
+        snapshots.append(widget._operate("reset"))
+
+        snapshots.append(widget._select("region", [1]))
+        before_reorder_revision = session.model_revision
+        snapshots.append(widget._reorder_levels("region", target_index=0))
+        assert snapshots[-1]["model_revision"] == before_reorder_revision
+        snapshots.append(widget._operate("reset_order", "region"))
+        snapshots.append(widget._operate("select_all", "region"))
+        snapshots.append(widget._state())
+    finally:
+        widget.close()
+
+    assert [state["state_generation"] for state in snapshots] == list(range(1, len(snapshots) + 1))
+    assert [state["chart_generation"] for state in snapshots] == [
+        0,
+        0,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        7,
+        8,
+        9,
+        9,
+        9,
+    ]
+
+
+def test_widget_structural_mutations_advance_chart_generation_once(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    try:
+        selected = widget._select("region", [1, 2])
+        collapsed = widget._collapse_levels("region", method="fit")["state"]
+        uncollapsed = widget._uncollapse_levels()["state"]
+        selected_again = widget._select("region", [1, 2])
+        collapsed_again = widget._collapse_levels("region", method="fit")["state"]
+        ungrouped = widget._ungroup_levels("region", method="fit")["state"]
+    finally:
+        widget.close()
+
+    assert [
+        state["state_generation"]
+        for state in (
+            selected,
+            collapsed,
+            uncollapsed,
+            selected_again,
+            collapsed_again,
+            ungrouped,
+        )
+    ] == [1, 2, 3, 4, 5, 6]
+    assert [
+        state["chart_generation"]
+        for state in (
+            selected,
+            collapsed,
+            uncollapsed,
+            selected_again,
+            collapsed_again,
+            ungrouped,
+        )
+    ] == [0, 1, 2, 2, 3, 4]
+
+
+def test_widget_final_ungroup_keeps_collapse_metadata_history_aligned(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    try:
+        widget._select("region", [1, 2])
+        widget._collapse_levels("region", method="fit")
+        widget._select("region", [1, 2])
+
+        state = widget._ungroup_levels("region", method="fit")["state"]
+    finally:
+        widget.close()
+
+    assert session.collapse_history == []
+    assert widget._collapse_info_history == []
+    assert widget._in_force_info is None
+    assert state["can_uncollapse_levels"] is False
+    assert state["last_collapse"] is None
+
+
+def test_widget_composite_selection_serializes_state_once(editor_model, monkeypatch):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    state_calls = 0
+    original_state = widget._state
+
+    def counted_state():
+        nonlocal state_calls
+        state_calls += 1
+        return original_state()
+
+    try:
+        monkeypatch.setattr(widget, "_state", counted_state)
+
+        payload = widget._select("x_spline", [3, 4])
+
+        assert state_calls == 1
+        assert payload["selected_term"] == "x_spline"
+        assert payload["selection"]["x_spline"] == [3, 4]
     finally:
         widget.close()
 
@@ -2976,25 +3913,201 @@ def test_widget_http_collapse_levels_refit_updates_summary_source(editor_model):
             {"term": "region", "method": "fit"},
         )
 
-        assert payload["available"] is True
-        assert payload["source"] == "in_force"
-        assert payload["label"] == "In-force edit model"
+        assert set(payload) == {"state", "summary", "timing"}
+        assert payload["summary"]["available"] is True
+        assert payload["summary"]["source"] == "in_force"
+        assert payload["summary"]["label"] == "In-force edit model"
+        assert payload["state"]["model_revision"] == session.model_revision == 1
+        assert payload["state"]["terms"]["region"]["y"][1] == pytest.approx(
+            payload["state"]["terms"]["region"]["y"][2]
+        )
+        assert payload["timing"]["fit_ms"] >= 0.0
+        assert payload["timing"]["summary_ms"] >= 0.0
+        assert payload["timing"]["state_ms"] >= 0.0
         assert widget.session.model is not editor_model
         grouping = widget.session.model.features["region"]._grouping
         assert grouping.original_to_group["B"] == "B+C"
         assert grouping.original_to_group["C"] == "B+C"
-
-        state = _get_json(f"{widget.url}/state")
-        assert "model_source" not in state
-        assert "model_sources" not in state
-        assert state["terms"]["region"]["y"][1] == pytest.approx(state["terms"]["region"]["y"][2])
-
-        summary = _post_json(f"{widget.url}/summary", {"source": "in_force"})
-        assert summary["available"] is True
-        assert summary["source"] == "in_force"
-        assert "Current editable model" in summary["note"]
+        assert "model_source" not in payload["state"]
+        assert "model_sources" not in payload["state"]
+        assert "Current editable model" in payload["summary"]["note"]
     finally:
         widget.close()
+
+
+def test_widget_http_ungroup_levels_returns_transition_envelope(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    try:
+        _post_json(f"{widget.url}/select", {"term": "region", "indices": [1, 2]})
+        _post_json(f"{widget.url}/collapse_levels", {"term": "region", "method": "fit"})
+
+        payload = _post_json(
+            f"{widget.url}/ungroup_levels",
+            {"term": "region", "method": "fit"},
+        )
+
+        assert set(payload) == {"state", "summary", "timing"}
+        assert payload["summary"]["available"] is True
+        assert payload["summary"]["source"] == "in_force"
+        assert payload["state"]["model_revision"] == session.model_revision == 2
+        assert payload["timing"]["operation"] == "ungroup_levels"
+        assert payload["timing"]["fit_ms"] >= 0.0
+        assert payload["timing"]["summary_ms"] >= 0.0
+        assert payload["timing"]["state_ms"] >= 0.0
+    finally:
+        widget.close()
+
+
+def _structural_alias_fixture(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    session.select_levels("region", ["B", "C"])
+    widget._collapse_levels("region", method="fit")
+    current_info = {
+        "term": "region",
+        "method": "fit",
+        "details": {"groups": [{"label": "B+C", "levels": ["B", "C"]}]},
+    }
+    collapsed_info = {
+        "term": "region",
+        "method": "fit",
+        "details": {"groups": [{"label": "B+C", "levels": ["B", "C"]}]},
+    }
+    widget._in_force_info = current_info
+    widget._collapsed_refit_info = collapsed_info
+    widget._collapse_info_history.append(dict(current_info))
+    envelope = widget._structural_transition(
+        "collapse_levels",
+        operation_start=0.0,
+        fit_start=0.0,
+        fit_end=0.0,
+    )
+    return session, widget, envelope, current_info, collapsed_info
+
+
+def test_structural_transition_envelope_mutation_cannot_change_live_state(editor_model):
+    session, widget, envelope, current_info, collapsed_info = _structural_alias_fixture(
+        editor_model
+    )
+    expected_levels = list(session.terms["region"].levels)
+    expected_current = json.loads(json.dumps(current_info))
+    expected_collapsed = json.loads(json.dumps(collapsed_info))
+    try:
+        envelope["state"]["terms"]["region"]["levels"][0] = "envelope-level"
+        envelope["summary"]["collapse"]["term"] = "envelope-term"
+        envelope["summary"]["collapse"]["details"]["groups"][0]["levels"][0] = (
+            "envelope-summary-nested"
+        )
+        envelope["state"]["last_collapse"]["term"] = "envelope-last-term"
+        envelope["state"]["last_collapse"]["details"]["groups"][0]["levels"][0] = (
+            "envelope-last-nested"
+        )
+
+        assert session.terms["region"].levels == expected_levels
+        assert widget._in_force_info == expected_current
+        assert widget._collapsed_refit_info == expected_collapsed
+        assert widget._collapse_info_history[-1] == expected_current
+
+        widget._uncollapse_levels()
+        assert widget._in_force_info == expected_current
+    finally:
+        widget.close()
+
+
+def test_live_state_mutation_cannot_change_structural_transition_envelope(editor_model):
+    session, widget, envelope, current_info, collapsed_info = _structural_alias_fixture(
+        editor_model
+    )
+    expected_levels = list(envelope["state"]["terms"]["region"]["levels"])
+    expected_summary = json.loads(json.dumps(envelope["summary"]["collapse"]))
+    expected_last_collapse = json.loads(json.dumps(envelope["state"]["last_collapse"]))
+    try:
+        session.terms["region"].levels[0] = "live-level"
+        current_info["term"] = "live-term"
+        current_info["details"]["groups"][0]["levels"][0] = "live-summary-nested"
+        collapsed_info["term"] = "live-last-term"
+        collapsed_info["details"]["groups"][0]["levels"][0] = "live-last-nested"
+        widget._collapse_info_history[-1]["details"]["groups"][0]["levels"][1] = (
+            "live-history-nested"
+        )
+
+        assert envelope["state"]["terms"]["region"]["levels"] == expected_levels
+        assert envelope["summary"]["collapse"] == expected_summary
+        assert envelope["state"]["last_collapse"] == expected_last_collapse
+    finally:
+        widget.close()
+
+
+def test_structural_transition_holds_widget_lock_through_snapshot_detachment(
+    editor_model,
+    monkeypatch,
+):
+    import superglm.editor.widget as widget_module
+
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    detachment_entered = threading.Event()
+    release_detachment = threading.Event()
+    mutation_attempted = threading.Event()
+    mutation_done = threading.Event()
+    transition_errors = []
+    mutation_errors = []
+    original_jsonable = widget_module.jsonable
+    detachment_calls = 0
+
+    def blocking_jsonable(value):
+        nonlocal detachment_calls
+        detachment_calls += 1
+        if detachment_calls == 2:
+            detachment_entered.set()
+            if not release_detachment.wait(timeout=2):
+                raise TimeoutError("snapshot detachment was not released")
+        return original_jsonable(value)
+
+    def run_transition():
+        try:
+            widget._structural_transition(
+                "collapse_levels",
+                operation_start=0.0,
+                fit_start=0.0,
+                fit_end=0.0,
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            transition_errors.append(exc)
+
+    def run_mutation():
+        try:
+            mutation_attempted.set()
+            widget._select("region", [0])
+        except BaseException as exc:  # pragma: no cover - asserted below
+            mutation_errors.append(exc)
+        finally:
+            mutation_done.set()
+
+    transition_thread = threading.Thread(target=run_transition)
+    mutation_thread = threading.Thread(target=run_mutation)
+    try:
+        monkeypatch.setattr(widget_module, "jsonable", blocking_jsonable)
+        transition_thread.start()
+        assert detachment_entered.wait(timeout=2), "transition never began JSON-safe detachment"
+
+        mutation_thread.start()
+        assert mutation_attempted.wait(timeout=2), "competing mutation was never attempted"
+        assert not mutation_done.wait(timeout=0.1), "mutation escaped the transition lock"
+    finally:
+        release_detachment.set()
+        transition_thread.join(timeout=2)
+        if mutation_thread.ident is not None:
+            mutation_thread.join(timeout=2)
+        widget.close()
+
+    assert not transition_thread.is_alive()
+    assert not mutation_thread.is_alive()
+    assert transition_errors == []
+    assert mutation_errors == []
+    assert mutation_done.is_set()
+    assert detachment_calls == 2
 
 
 def test_widget_collapse_restores_selection_by_level_when_indices_are_stale(
@@ -3033,8 +4146,56 @@ def test_widget_collapse_restores_selection_by_level_when_indices_are_stale(
 
         payload = widget._collapse_levels("region", method="fit")
 
-        assert payload["available"] is True
+        assert payload["summary"]["available"] is True
         assert session.selection("region").tolist() == [1]
+    finally:
+        widget.close()
+
+
+def test_widget_collapse_levels_reports_refit_timing(editor_model, monkeypatch):
+    import superglm.editor.widget as widget_module
+
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    clock = iter([10.00, 10.01, 10.06, 10.07, 10.09, 10.10, 10.13])
+    try:
+        monkeypatch.setattr(widget_module.time, "perf_counter", lambda: next(clock))
+        monkeypatch.setattr(
+            session,
+            "replace_with_collapsed_levels",
+            lambda term, *, method="auto": editor_model,
+        )
+        monkeypatch.setattr(
+            widget_module,
+            "summary_payload",
+            lambda *_args, **_kwargs: {"available": True, "source": "in_force"},
+        )
+
+        payload = widget._collapse_levels("region", method="fit")
+
+        assert payload["timing"]["operation"] == "collapse_levels"
+        assert payload["timing"]["fit_ms"] == pytest.approx(50.0)
+        assert payload["timing"]["summary_ms"] == pytest.approx(20.0)
+        assert payload["timing"]["state_ms"] == pytest.approx(30.0)
+        assert payload["timing"]["server_total_ms"] == pytest.approx(130.0)
+    finally:
+        widget.close()
+
+
+def test_widget_json_responses_report_serialization_timing(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    request = urllib.request.Request(
+        f"{widget.url}/state",
+        headers=_editor_token_header(f"{widget.url}/state"),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            server_timing = response.headers.get("Server-Timing", "")
+
+        assert payload["model_revision"] == session.model_revision
+        assert re.fullmatch(r"json;dur=\d+(?:\.\d{3})", server_timing)
     finally:
         widget.close()
 
@@ -3044,22 +4205,30 @@ def test_widget_http_uncollapse_levels_restores_previous_model(editor_model):
     widget = session.widget()
     try:
         _post_json(f"{widget.url}/select", {"term": "region", "indices": [1, 2]})
-        _post_json(f"{widget.url}/collapse_levels", {"term": "region", "method": "fit"})
-        collapsed_state = _get_json(f"{widget.url}/state")
+        collapse_payload = _post_json(
+            f"{widget.url}/collapse_levels", {"term": "region", "method": "fit"}
+        )
+        collapsed_state = collapse_payload["state"]
         assert collapsed_state["can_uncollapse_levels"] is True
         assert widget.session.model is not editor_model
         assert widget.session.model.features["region"]._grouping.original_to_group["B"] == "B+C"
 
         payload = _post_json(f"{widget.url}/uncollapse_levels", {})
 
-        assert payload["available"] is True
-        assert payload["source"] == "in_force"
+        assert set(payload) == {"state", "summary", "timing"}
+        assert payload["summary"]["available"] is True
+        assert payload["summary"]["source"] == "in_force"
+        assert payload["state"]["model_revision"] == session.model_revision == 2
         assert widget.session.model is editor_model
         assert getattr(widget.session.model.features["region"], "_grouping", None) is None
-        state = _get_json(f"{widget.url}/state")
+        state = payload["state"]
         assert state["can_uncollapse_levels"] is False
         assert state["last_collapse"] is None
         assert state["terms"]["region"]["y"][1] != pytest.approx(state["terms"]["region"]["y"][2])
+        assert payload["timing"]["operation"] == "uncollapse_levels"
+        assert payload["timing"]["fit_ms"] >= 0.0
+        assert payload["timing"]["summary_ms"] >= 0.0
+        assert payload["timing"]["state_ms"] >= 0.0
     finally:
         widget.close()
 
@@ -3117,6 +4286,10 @@ def test_widget_http_control_handle_updates_session(editor_model):
             controls["basis_index"].astype(int).tolist()
         )
         payload_controls = state["terms"]["x_spline"]["controls"]
+        assert "build_basis" in payload_controls
+        assert "build_log_effect" in payload_controls
+        assert len(payload_controls["build_basis"]) == len(payload_controls["build_log_effect"])
+        assert len(payload_controls["build_basis"][0]) == state["terms"]["x_spline"]["n_points"]
         payload_basis = np.asarray(payload_controls["basis"], dtype=np.float64)
         raw_basis = editor_model._specs["x_spline"]._raw_basis_matrix(term.x)
         if hasattr(raw_basis, "toarray"):
@@ -3200,6 +4373,181 @@ def test_widget_http_metrics_recomputes_fit_metric_for_edited_copy(editor_model)
         assert "effective_df" in changed["metrics"]["edited"]
     finally:
         widget.close()
+
+
+def test_http_evidence_echoes_revision_sequence_and_supersedes_stale_requests(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        revision = session.model_revision
+        requests = (
+            ("metrics", {"metric": "deviance"}),
+            ("report", {"report": "validation"}),
+            ("summary", {"source": "original"}),
+        )
+        for sequence, (path, request_payload) in enumerate(requests, start=10):
+            payload = _post_json(
+                f"{widget.url}/{path}",
+                {
+                    **request_payload,
+                    "model_revision": revision,
+                    "request_sequence": sequence,
+                },
+            )
+            assert payload["model_revision"] == revision
+            assert payload["request_sequence"] == sequence
+
+        _post_json(f"{widget.url}/select", {"term": "x_spline", "indices": [20, 21]})
+        _post_json(f"{widget.url}/op", {"operation": "shift_up"})
+        stale = _post_json(
+            f"{widget.url}/metrics",
+            {
+                "metric": "deviance",
+                "model_revision": revision,
+                "request_sequence": 99,
+            },
+        )
+
+        assert stale == {
+            "status": "superseded",
+            "model_revision": revision,
+            "request_sequence": 99,
+        }
+    finally:
+        widget.close()
+
+
+def test_http_evidence_failure_echoes_revision_and_sequence(editor_model, monkeypatch):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+
+    def fail(*_args, **_kwargs):
+        raise ValueError("metric failure")
+
+    monkeypatch.setattr(widget, "_metrics", fail)
+    try:
+        data = json.dumps(
+            {
+                "metric": "deviance",
+                "model_revision": session.model_revision,
+                "request_sequence": 123,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{widget.url}/metrics",
+            data=data,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                **_editor_token_header(f"{widget.url}/metrics"),
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(request, timeout=5)
+        payload = json.loads(exc_info.value.read().decode("utf-8"))
+
+        assert exc_info.value.code == 400
+        assert payload == {
+            "model_revision": session.model_revision,
+            "request_sequence": 123,
+            "error": "metric failure",
+        }
+    finally:
+        widget.close()
+
+
+def test_live_metrics_and_report_share_validation_scalars(
+    editor_model,
+    editor_frame,
+    monkeypatch,
+):
+    import superglm.editor.metrics as metrics_module
+    import superglm.editor.reports as reports_module
+
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(X.iloc[:300], y[:300], None),
+        validation_data=(X.iloc[300:380], y[300:380], None),
+        test_data=(X.iloc[380:], y[380:], None),
+    )
+    widget = session.widget()
+    calls: list[tuple[int, str]] = []
+    original = metrics_module.compute_dataset_metrics
+
+    def counted(model, dataset):
+        calls.append((id(model.result), dataset.name))
+        return original(model, dataset)
+
+    monkeypatch.setattr(metrics_module, "compute_dataset_metrics", counted)
+    monkeypatch.setattr(reports_module, "compute_dataset_metrics", counted)
+    try:
+        metrics = widget._metrics("deviance", "in_force")
+        report = widget._report("validation")
+    finally:
+        widget.close()
+
+    validation_calls = [call for call in calls if call[1] == "validation"]
+    assert len(validation_calls) == 2
+    assert metrics["model_revision"] == session.model_revision
+    assert report["model_revision"] == session.model_revision
+
+
+def test_original_metric_request_does_not_poison_current_revision_cache(editor_model):
+    from superglm.editor.evaluation import default_metrics_dataset
+    from superglm.editor.metrics import compute_dataset_metrics
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.35)
+    dataset = default_metrics_dataset(session)
+    assert dataset is not None
+    expected_edited = compute_dataset_metrics(session.to_model(), dataset)["deviance"]
+    widget = session.widget()
+    try:
+        original = widget._metrics("deviance", "original")
+        in_force = widget._metrics("deviance", "in_force")
+    finally:
+        widget.close()
+
+    assert original["edited"] == pytest.approx(original["original"])
+    assert in_force["edited"] == pytest.approx(expected_edited)
+    assert in_force["edited"] != pytest.approx(in_force["original"])
+
+
+def test_metric_comparison_payload_assembles_cached_scalars(editor_model, editor_frame):
+    from superglm.editor.evaluation import EvaluationDataset
+    from superglm.editor.metrics import metric_comparison_payload
+
+    X, y = editor_frame
+    dataset = EvaluationDataset("validation", "Validation", X.iloc[:20], y[:20])
+    original = {"deviance": 3.0, "aic": 5.0}
+    edited = {"deviance": 2.25, "aic": 4.5}
+
+    payload = metric_comparison_payload(
+        "deviance",
+        dataset,
+        original,
+        edited,
+        model_revision=7,
+        request_sequence=11,
+    )
+
+    assert payload == {
+        "available": True,
+        "model_revision": 7,
+        "request_sequence": 11,
+        "metric": "deviance",
+        "label": "Deviance",
+        "dataset": "validation",
+        "dataset_label": "Validation",
+        "n_obs": 20,
+        "original": 3.0,
+        "edited": 2.25,
+        "delta": -0.75,
+        "metrics": {"original": original, "edited": edited},
+    }
 
 
 def test_editor_session_accepts_plain_evaluation_tuples_and_cv_report(editor_model, editor_frame):
@@ -3461,6 +4809,32 @@ def test_widget_http_reports_are_display_only_evidence_surfaces(editor_model, ed
         widget.close()
 
 
+def test_final_report_summary_uses_training_fit_statistics_after_edits(
+    editor_model,
+    editor_frame,
+):
+    X, y = editor_frame
+    train_X = X.iloc[:37].copy()
+    train_y = y[:37].copy()
+    validation_X = X.iloc[-29:].copy()
+    validation_y = y[-29:].copy()
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(train_X, train_y),
+        validation_data=(validation_X, validation_y),
+    )
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    try:
+        final = widget._report("final")
+    finally:
+        widget.close()
+
+    assert final["summary"]["compact"]["model"]["n_obs"] == len(train_X)
+
+
 def test_widget_http_report_sanitizes_non_finite_cv_values(editor_model, editor_frame):
     X, y = editor_frame
     session = EditorSession.from_model(
@@ -3526,6 +4900,39 @@ def test_widget_http_save_model_writes_edited_joblib(editor_model, tmp_path):
     assert saved_model is not editor_model
     np.testing.assert_allclose(editor_model.result.beta, original_beta)
     assert not np.allclose(saved_model.result.beta, original_beta)
+
+
+def test_save_model_validation_failure_creates_no_file(
+    editor_model,
+    editor_frame,
+    tmp_path,
+    monkeypatch,
+):
+    import superglm.editor.persistence as persistence
+
+    X, y = editor_frame
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        validation_data=(X.iloc[-31:], y[-31:]),
+    )
+    target = tmp_path / "new-parent" / "edited-model.joblib"
+    seen_dataset = None
+
+    def fail_validation(model, *, dataset=None, max_rows=512):
+        nonlocal seen_dataset
+        seen_dataset = dataset
+        raise ValueError("artifact validation failed: forced failure")
+
+    monkeypatch.setattr(persistence, "serialize_validated_model", fail_validation)
+
+    with pytest.raises(ValueError, match="forced failure"):
+        session.save_model(target)
+
+    assert not target.exists()
+    assert not target.parent.exists()
+    assert seen_dataset is not None
+    assert seen_dataset.name == "validation"
 
 
 def test_save_model_uses_session_train_data_without_retained_fit_state(tmp_path):
@@ -3610,6 +5017,269 @@ def test_widget_http_download_model_returns_joblib_attachment(editor_model):
     assert downloaded_model is not editor_model
     np.testing.assert_allclose(editor_model.result.beta, original_beta)
     assert not np.allclose(downloaded_model.result.beta, original_beta)
+
+
+def test_training_export_dataset_prefers_explicit_train_over_retained_and_validation(
+    editor_model,
+    editor_frame,
+):
+    from superglm.editor.evaluation import training_export_dataset
+
+    X, y = editor_frame
+    explicit_X = X.iloc[:37].copy()
+    explicit_y = y[:37].copy()
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(explicit_X, explicit_y),
+        validation_data=(X.iloc[-29:], y[-29:]),
+    )
+
+    dataset = training_export_dataset(session)
+
+    assert dataset is not None
+    assert dataset.name == "train"
+    assert dataset.source == "supplied"
+    assert dataset.X is explicit_X
+    assert dataset.y is explicit_y
+
+
+def test_widget_http_download_export_joblib_is_validated_and_revision_pinned(
+    editor_model,
+    editor_frame,
+):
+    import io
+
+    import joblib
+
+    X, _ = editor_frame
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    expected_revision = session.model_revision
+    widget = session.widget()
+    try:
+        request = urllib.request.Request(
+            f"{widget.url}/download_export?format=model&filename=pricing-model",
+            headers=_editor_token_header(widget.url),
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = response.read()
+            headers = response.headers
+    finally:
+        widget.close()
+
+    downloaded = joblib.load(io.BytesIO(data))
+    assert headers["content-type"] == "application/octet-stream"
+    assert 'filename="pricing-model.joblib"' in headers["content-disposition"]
+    assert headers["x-superglm-model-revision"] == str(expected_revision)
+    assert headers["x-superglm-validation"] == "artifact+predictions"
+    predictions = downloaded.predict(X.iloc[:17])
+    assert np.all(np.isfinite(predictions))
+    assert not np.allclose(predictions, editor_model.predict(X.iloc[:17]))
+
+
+def test_widget_http_download_export_excel_has_structured_summary(editor_model):
+    import io
+
+    from openpyxl import load_workbook
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        request = urllib.request.Request(
+            f"{widget.url}/download_export?format=excel&filename=rating-output",
+            headers=_editor_token_header(widget.url),
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = response.read()
+            headers = response.headers
+    finally:
+        widget.close()
+
+    workbook = load_workbook(io.BytesIO(data), data_only=True)
+    summary = workbook["Model Summary"]
+    assert headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert 'filename="rating-output.xlsx"' in headers["content-disposition"]
+    assert headers["x-superglm-model-revision"] == "0"
+    assert headers.get("x-superglm-validation") is None
+    assert "ModelOverview" in summary.tables
+    assert "TermInference" in summary.tables
+    assert summary["A4"].value == "Section"
+    assert summary["B4"].value == "Metric"
+    assert summary["C4"].value == "Value"
+
+
+def test_excel_export_materializes_edited_model_on_training_split(editor_model, editor_frame):
+    import io
+
+    from openpyxl import load_workbook
+
+    X, y = editor_frame
+    train_X = X.iloc[:37].copy()
+    train_y = y[:37].copy()
+    validation_X = X.iloc[-29:].copy()
+    validation_y = y[-29:].copy()
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(train_X, train_y),
+        validation_data=(validation_X, validation_y),
+    )
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    try:
+        result = widget._export_bytes("xlsx")
+    finally:
+        widget.close()
+
+    workbook = load_workbook(io.BytesIO(result.data), data_only=True)
+    summary = workbook["Model Summary"]
+    overview = summary.tables["ModelOverview"]
+    rows = list(summary[overview.ref])
+    headers = [cell.value for cell in rows[0]]
+    records = [dict(zip(headers, (cell.value for cell in row))) for row in rows[1:]]
+    observations = next(row["Value"] for row in records if row["Metric"] == "Observations")
+
+    assert observations == len(train_X)
+
+
+def test_widget_http_download_export_excel_without_training_data_is_400():
+    rng = np.random.default_rng(20260802)
+    X = pd.DataFrame({"x": rng.normal(size=90)})
+    y = 0.2 + 0.4 * X["x"].to_numpy() + rng.normal(0.0, 0.03, size=len(X))
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y)
+    session = EditorSession.from_model(
+        model,
+        terms=["x"],
+        validation_data=(X.iloc[:20], y[:20]),
+    )
+    widget = session.widget()
+    try:
+        request = urllib.request.Request(
+            f"{widget.url}/download_export?format=xlsx",
+            headers=_editor_token_header(widget.url),
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=10)
+        payload = json.loads(error.value.read().decode("utf-8"))
+    finally:
+        widget.close()
+
+    assert error.value.code == 400
+    assert "train_data" in payload["error"]
+    assert "retained fit data" in payload["error"]
+
+
+def test_widget_export_file_writes_joblib_and_excel(editor_model, tmp_path):
+    import joblib
+    from openpyxl import load_workbook
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        model_payload = _post_json(
+            f"{widget.url}/export_file",
+            {"format": "joblib", "directory": str(tmp_path), "filename": "pricing-model"},
+        )
+        excel_payload = _post_json(
+            f"{widget.url}/export_file",
+            {"format": "xlsx", "directory": str(tmp_path), "filename": "rating-output"},
+        )
+    finally:
+        widget.close()
+
+    saved_model = joblib.load(model_payload["path"])
+    workbook = load_workbook(excel_payload["path"], read_only=False)
+    assert saved_model.result is not None
+    assert model_payload["validation_scope"] == "artifact+predictions"
+    assert model_payload["model_revision"] == 0
+    assert Path(model_payload["path"]).name == "pricing-model.joblib"
+    assert Path(excel_payload["path"]).name == "rating-output.xlsx"
+    assert "Model Summary" in workbook.sheetnames
+
+
+def test_widget_export_file_rejects_invalid_format_and_unsafe_filename(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        with pytest.raises(ValueError, match="Unsupported export format"):
+            widget._export_bytes("pdf")
+        with pytest.raises(ValueError, match="directory separators"):
+            widget._export_bytes("joblib", "../outside.joblib")
+        with pytest.raises(ValueError, match="extension"):
+            widget._export_bytes("joblib", "model.xlsx")
+    finally:
+        widget.close()
+
+
+@pytest.mark.parametrize("filename", ["bad\nname.joblib", "bad\rname.joblib", "bad\x7fname.joblib"])
+def test_widget_export_rejects_filename_control_characters(editor_model, filename):
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        with pytest.raises(ValueError, match="control characters"):
+            widget._export_bytes("joblib", filename)
+    finally:
+        widget.close()
+
+
+def test_widget_download_export_encodes_quotes_and_unicode_in_disposition(editor_model):
+    filename = 'analyst "mödel".joblib'
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    try:
+        query = urllib.parse.urlencode({"format": "joblib", "filename": filename})
+        request = urllib.request.Request(
+            f"{widget.url}/download_export?{query}",
+            headers=_editor_token_header(widget.url),
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            disposition = response.headers["content-disposition"]
+    finally:
+        widget.close()
+
+    assert 'filename="analyst _model_.joblib"' in disposition
+    assert "filename*=UTF-8''analyst%20%22m%C3%B6del%22.joblib" in disposition
+
+
+def test_widget_export_file_discards_superseded_build(
+    editor_model,
+    tmp_path,
+    monkeypatch,
+):
+    from superglm.editor import widget as widget_module
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    widget = session.widget()
+    target = tmp_path / "superseded.joblib"
+    original = widget_module.persistence.serialize_validated_model
+
+    def supersede_during_build(*args, **kwargs):
+        result = original(*args, **kwargs)
+        session._advance_model_revision()
+        return result
+
+    monkeypatch.setattr(
+        widget_module.persistence,
+        "serialize_validated_model",
+        supersede_during_build,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="superseded"):
+            widget._export_file("joblib", path=str(target))
+    finally:
+        widget.close()
+
+    assert not target.exists()
 
 
 def test_widget_http_download_model_uses_session_train_data_without_retained_fit_state():
@@ -3925,344 +5595,24 @@ def test_widget_app_shell_contains_drag_editor(editor_model):
     try:
         with urllib.request.urlopen(widget.url, timeout=5) as response:
             shell = response.read().decode("utf-8")
-        js_request = urllib.request.Request(f"{widget.url}/assets/main.js", method="GET")
-        with urllib.request.urlopen(js_request, timeout=5) as response:
-            js = response.read().decode("utf-8")
+
         module_sources = []
-        for asset in [
-            "api.js",
-            "format.js",
-            "chart.js",
-            "metrics.js",
-            "summary.js",
-            "reports.js",
-            "interactions.js",
-        ]:
+        for asset in ["main.js", "api/client.js", "interactions.js", "summary.js"]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
                 module_sources.append(response.read().decode("utf-8"))
-        js = "\n".join([js, *module_sources])
-        css_request = urllib.request.Request(f"{widget.url}/assets/styles.css", method="GET")
-        with urllib.request.urlopen(css_request, timeout=5) as response:
-            css = response.read().decode("utf-8")
+        js = "\n".join(module_sources)
 
-        assert '<link rel="stylesheet" href="/assets/styles.css">' in shell
         assert '<script type="module" src="/assets/main.js"></script>' in shell
-        assert "Editor" in shell
-        assert "Validation Report" in shell
-        assert "Final Fit Report" in shell
-        assert "reportPanel" in shell
-        assert "reportFrame" in shell
-        assert "Run CV" not in shell
-        assert 'id="modelSource"' not in shell
-        assert 'value="original"' not in shell
-        assert "Mode" in shell
-        assert "Move" in shell
-        assert "Handles" in shell
-        assert "Select all" in shell
-        assert "Undo collapse" in shell
-        assert "Linearise" in shell
-        assert "Level left" in shell
-        assert "Level right" in shell
-        assert "Ungroup selected levels" in shell
-        assert "Snap highest" in shell
-        assert "Snap lowest" in shell
-        assert "Home" in shell
-        assert "CI" in shell
-        assert "chart-shell" in shell
-        assert "selectionMenu" in shell
-        assert "selection-item" in shell
-        assert "selection-separator" in shell
-        assert "selection-submenu" in shell
-        assert "selection-icon" in shell
-        assert 'id="uncollapseLevels" class="selection-item"' in shell
-        assert ">Undo collapse</button>" not in shell
-        assert "state.last_collapse.term === selectedTerm()" in js
-        assert 'aria-label="Smooth"' in shell
-        assert 'aria-label="Level selected values"' in shell
-        assert 'aria-label="Snap selected values"' in shell
-        assert ">Smooth</button>" not in shell
-        assert ">Average</button>" not in shell
-        assert ">Linearise</button>" not in shell
-        assert ">Increasing</button>" not in shell
-        assert ">Decreasing</button>" not in shell
-        assert ">Level left</button>" not in shell
-        assert ">Level right</button>" not in shell
-        assert ">Snap highest</button>" not in shell
-        assert ">Snap lowest</button>" not in shell
-        assert ">Undo</button>" not in shell
-        assert ">Redo</button>" not in shell
-        assert "Ref CI" in shell
-        assert "Reset" in shell
-        assert "saveModel" in shell
-        assert "saveDialog" in shell
-        assert "saveDirectory" in shell
-        assert "saveFilename" in shell
-        assert "Save edited model" in shell
-        assert "app-shell" in shell
-        assert "app-shell" in css
-        assert "justify-content: center" in css
-        assert "openSaveDialog" in js
-        assert "Reset order" in shell
-        assert "resetOrder" in shell
-        assert "metricSelect" in shell
-        assert "metricGrid" in shell
-        assert "Recompute all" not in shell
-        assert "summaryPanel" in shell
-        assert "summaryFrame" in shell
-        assert "summarySource" in shell
-        assert "refitOffset" in shell
-        assert "Fixed-offset refit" in shell
-        assert "resetSummarySourceAfterInvalidatingEdit" in js
-        assert "invalidatesRefitSummary" in js
-        assert "better" not in shell
-        assert "worse" not in shell
-        state = _get_json(f"{widget.url}/state")
-        assert state["terms"]["x_spline"]["y_label"] == "relativity"
-        assert state["terms"]["x_spline"]["effective_df"] == pytest.approx(
-            session.terms["x_spline"].metadata["edf"]
-        )
-        controls = state["terms"]["x_spline"]["controls"]
-        assert "build_basis" in controls
-        assert "build_log_effect" in controls
-        assert len(controls["build_basis"]) == len(controls["build_log_effect"])
-        assert len(controls["build_basis"][0]) == state["terms"]["x_spline"]["n_points"]
-        assert "Average" in shell
-        assert "pointerdown" in js
-        assert "pointermove" in js
-        assert "pointerup" in js
-        assert 'addEventListener("wheel"' in js
-        assert "zoomState" in js
-        assert "resetZoom" in js
-        assert "panDrag" in js
-        assert "panZoomView" in js
-        assert "getScreenCTM" in js
-        assert "matrixTransform" in js
-        assert "pendingClickIndex" in js
-        assert "nearestIndex" not in js
-        assert "togglePointSelection" in js
-        assert "event.ctrlKey || event.metaKey" in js
-        assert "selectedPoints" in js
-        assert "optgroup" in js
-        assert "relativity" in js
+        assert 'role="tablist" aria-label="Editor views"' in shell
+        assert 'id="chart"' in shell
+        assert 'id="selectionMenu"' in shell
+        assert 'id="inspector"' in shell
         assert "X-SuperGLM-Editor-Token" in js
-        assert "URLSearchParams(window.location.search)" in js
         assert "/drag" in js
         assert "/control" in js
-        assert "/control_count" in js
-        assert "handleCount" in js
-        assert "basisToggle" in shell
-        assert "contribPlay" in shell
-        assert "buildDuration" in shell
-        assert "buildDurationValue" in shell
-        assert "Contrib" in shell
-        assert "Build" in shell
-        assert "showContrib" in js
-        assert "graphMode" in js
-        assert "visualMode" in js
-        assert 'modeSelect.value !== "zoom"' in js
-        assert "requestAnimationFrame" in js
-        assert "buildDurationMs" in js
-        assert "advanceContributionBuild" in js
-        assert "contribPlay.disabled = buildFrame !== null" in js
-        assert "buildAccumulationCurve" in js
-        assert "drawActiveBasis" in js
-        assert "activeBasisIndex" in js
-        assert "basisColor" in js
-        assert "mixBuildColor" in js
-        assert "data-progress" in js
-        assert "data-active-basis" in js
-        assert "total - j" not in js
-        assert "buildContributionCurves" not in js
-        assert "basis-contribution" in js
-        assert "basis-contribution" in css
-        assert "basis-build" in js
-        assert "basis-build" in css
-        assert "basis-active" in js
-        assert "basis-active" in css
-        assert "basis-sweep" not in js
-        assert "basis-scanline" not in js
-        assert "basis-scan-dot" not in js
-        assert "basis-build-halo" in js
-        assert "basis-build-halo" in css
-        assert "if (!buildActive) path(svg, x, original" in js
-        assert "controlDrag" in js
-        assert "data-control-index" in js
-        assert "keydown" in js
-        assert "isEditableTarget" in js
-        assert "metaKey" in js
-        assert "errorBars" in js
-        assert "refreshMetrics" in js
-        assert "refreshReport" in js
-        assert "/report" in js
-        assert "cv-report" in js
-        assert "CV Summary" in js
-        assert "Split Loss" in js
-        assert "Fold Loss" in js
-        assert "Run CV" not in js
-        assert "modelSource" not in js
-        assert '<option value="zoom">Zoom</option>' in shell
-        assert "zoomBox" in js
-        assert "beginBoxZoom" in js
-        assert "applyBoxZoom" in js
-        assert "box-zoom" in js
-        assert 'metricGrid.textContent = "Computing metrics..."' not in js
-        assert 'summaryFrame.innerHTML = ""' not in js
         assert "/metrics" in js
         assert "/summary" in js
-        assert "/profile_distribution" in js
-        assert "/save_model" in js
-        assert "/download_model" in js
-        assert "/open_directory" in js
-        assert "saveEditedModel" in js
-        assert "downloadEditedModel" in js
-        assert "openDirectoryInFileManager" in js
-        assert "initializeSaveDirectory" in js
-        assert "/save_directory" in js
-        assert 'body: JSON.stringify({ path: saveDirectory ? saveDirectory.value : "" })' in js
-        assert "formatSaveRouteError" in js
-        assert "Rerun session.widget()" in js
-        assert "Opening folder" in js
-        assert "saveBlobToFile" in js
-        assert "showSaveFilePicker" in js
-        assert "URL.createObjectURL" in js
-        assert "openSaveDialog" in js
-        assert "directoryDialog" not in shell
-        assert "Choose Save Location" not in shell
-        assert 'id="saveDownload"' in shell
-        assert 'id="saveOpenDirectory"' in shell
-        assert "Open Folder" in shell
-        assert "Download Edited Model" in shell
-        assert 'id="saveDownload" class="profile-run save-inline-action"' in shell
-        assert 'id="saveDirectory" type="text" value=""' in shell
-        assert "Saved " in js
-        assert "/profile_distribution/start" in js
-        assert "/profile_distribution/status/" in js
-        assert "runDistributionProfile" in js
-        assert "reprofileTweedie" in shell
-        assert "reprofileNb2" in shell
-        assert "profileDialog" in shell
-        assert "profileDialogClose" in shell
-        assert "profileRun" in shell
-        assert "profileOptions" in shell
-        assert "profileTolerance" in shell
-        assert '<option value="mle" selected>MLE</option>' in shell
-        assert "profileTracePlot" in shell
-        assert "profile-dialog" in css
-        assert "profile-trace-line" in css
-        assert "profile-trace-best" in css
-        assert "profile-learning-curve" in css
-        assert "profile-learning-point" in css
-        assert "profileLearningCurvesSVG" in js
-        assert "profileFitTraceRows" in js
-        assert "profileFitIterTicks" in js
-        assert "fitTraceKind" in js
-        assert "profileStatusLabel" in js
-        assert "profile-running" in css
-        assert "profile-spin" in css
-        assert "profileTraceLegend" in shell
-        assert "profile-trace-figure" in css
-        assert "profile-trace-legend" in css
-        assert "profileEstimate" in js
-        assert "outerProfileObjective" in js
-        assert "profileObjectiveSVG" in js
-        assert "return profileObjectiveSVG" in js
-        assert "profile loss" in js
-        assert "inner fit trace" in js
-        assert "profile_ci" in js
-        assert "final refit" in js
-        assert "p_hat" in js
-        assert "CI" in js
-        assert "start -> final" in js
-        assert "showModal" in js
-        assert "openProfileDialog" in js
-        assert "showDistributionProfileDialog" in js
-        assert "profileRun.addEventListener" in js
-        assert "trace_iterations" in js
-        assert "Profile trace" in shell
-        assert "profileOptionsPayload" in js
-        assert "renderProfileTrace" in js
-        assert "updateDistributionProfileActions" in js
-        assert "renderSummaryRows" in js
-        assert "summary-group-row" in js
-        assert "summary-group-row" in css
-        assert 'colspan="6"' in js
-        assert "/refit_offset" in js
-        assert "/collapse_levels" in js
-        assert "/uncollapse_levels" in js
-        assert "can_uncollapse_levels" in js
-        assert "last_collapse" in js
-        assert "selectionTouchesCollapsedGroup" in js
-        assert "updateResetOrderAction" in js
-        assert 'type === "categorical" && term.level_order_changed' in js
-        assert "reset_order" in js
-        assert "orderDrag" in js
-        assert "beginOrderDrag" in js
-        assert '(term.term_type || term.kind || "") !== "categorical"' in js
-        assert "drawOrderDropPreview" in js
-        assert "clearOrderDropPreview" in js
-        assert "order-drop-preview" in js
-        assert "order-drop-ghost" in js
-        assert "targetIndexFromPoint" in js
-        assert "Math.min(levels.length," in js
-        assert "pixelStep * count * 0.82" not in js
-        assert "/reorder_levels" in js
-        assert "isDisplayOnlyOperation" in js
-        assert "exposureDensity" in js
-        assert "level_groups" in js
-        assert "drawLevelGroups" in js
-        assert "drawLevelGroupMarker" in js
-        assert "levelGroupColor" in js
-        assert "level-group-link" in js
-        assert "level-group-link" in css
-        assert "level-group-marker" in css
-        assert "level-group-label" in css
-        assert "order-drop-preview" in css
-        assert "order-drop-ghost" in css
-        assert "plotClip" in js
-        assert "applyPlotClip" in js
-        assert "positionSelectionMenu" in js
-        assert "compact-summary" in js
-        assert "summary-table" in js
-        assert "row.edf" in js
-        assert "formatCompactNumber" in js
-        assert "summary-number" in css
-        assert "se-cell" in js
-        assert "raw-summary" in js
-        assert "renderRawSummaryFrame" in js
-        assert 'sandbox=""' in js
-        assert 'srcdoc="${escapeHTML' in js
-        assert '<div class="raw-summary-body">${payload.html || ""}</div>' not in js
-        assert "payloadNumber" in js
-        assert "rotate(-90" in js
-        assert "toExponential" not in js
-        assert "100dvh" in css
-        assert "overflow: hidden" in css
-        assert "minmax(0, 1fr)" in css
-        assert "user-select: none" in css
-        assert "-webkit-user-select: none" in css
-        assert "pointer-events: all" in css
-        assert "overflow-x: hidden" in css
-        assert "sig-strong" in css
-        assert "sig-none" in css
-        assert "sig-unknown" in css
-        assert "control-handle" in css
-        assert "ci-whisker" in css
-        assert "metric-item" in css
-        assert "metric-divider" in css
-        assert "grid-template-rows: 28px 20px auto" in css
-        assert "metric-card" not in css
-        assert "app-tabs" in css
-        assert "report-table" in css
-        assert "cv-report" in css
-        assert "effective_df" in js
-        assert "Log Likelihood" in shell
-        assert "Explained Deviance" in shell
-        assert "Pearson Chi2" in shell
-        assert "exposure-axis" in css
-        assert "selection-bounds" in css
-        assert "#F4D35E" in css
-        assert "#D8A10F" in css
     finally:
         widget.close()
 
@@ -4277,7 +5627,7 @@ def test_editor_frontend_includes_grouped_display_control_and_view_mapping():
     assert 'id="groupDisplayMode"' in html
     assert 'id="groupDisplayWrap" class="toolbar-field group-display-toggle"' in html
     assert 'id="groupDisplayWrap" class="toolbar-field group-display-toggle" hidden' not in html
-    assert "groupDisplayModeByTerm" in main_js
+    assert "groupModeByTerm" in main_js
     assert "groupDisplayMode.disabled = !available" in main_js
     assert "groupDisplayWrap.hidden = !available" not in main_js
     assert "resolveDisplayTerm" in chart_js
@@ -4294,7 +5644,7 @@ def test_editor_interactions_map_group_display_indices_to_source_indices():
     assert "sourceIndicesForDisplayIndex" in interactions_js
     assert "sourceIndicesForDisplayIndices" in interactions_js
     assert "valuesForSourceIndices" in interactions_js
-    assert "expandedGroupSourceForIndex" in interactions_js
+    assert "if (!scale.displayIsCollapsed) return [index]" in interactions_js
     assert "displayToSourceIndices" in chart_js
 
 
@@ -4322,7 +5672,7 @@ def test_editor_group_display_change_resets_zoom_and_blocks_collapsed_reorder():
     main_js = (root / "main.js").read_text()
     interactions_js = (root / "interactions.js").read_text()
 
-    assert "delete zoomState[selectedTerm()]" in main_js
+    assert "delete zoomByTerm[term]" in main_js
     assert "scale.displayIsCollapsed" in interactions_js
     assert "if (scale.displayIsCollapsed) return false" in interactions_js
 
@@ -4339,14 +5689,19 @@ def test_editor_chart_renders_previous_edit_line():
     assert "#f59e0b" in css
 
 
-def test_editor_chart_labels_ordered_categorical_levels_up_to_thirty():
+def test_editor_axis_uses_display_only_measured_geometry():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     chart_js = (root / "chart.js").read_text()
+    geometry_js = (root / "chart/geometry.js").read_text()
 
-    assert "MAX_LEVEL_LABELS = 30" in chart_js
-    assert "term.levels.length <= MAX_LEVEL_LABELS" in chart_js
-    assert "rotate: term.levels.length > 8" in chart_js
-    assert 'tick.rotate ? "end" : "middle"' in chart_js
+    assert "measureCategoricalLabels" in chart_js
+    assert "data-full-label" in chart_js
+    assert "axisMeasurementCount" in chart_js
+    assert "planCategoricalAxis" in chart_js
+    assert "splitLabelGraphemes" in chart_js
+    assert "fitMeasuredLabel" in geometry_js
+    assert "term.levels[" not in geometry_js
+    assert "MAX_LEVEL_LABELS" not in chart_js
 
 
 def test_editor_chart_points_have_relativity_exposure_tooltips():
@@ -4362,18 +5717,181 @@ def test_editor_chart_points_have_relativity_exposure_tooltips():
     assert "point-tooltip" in css
 
 
-def test_editor_right_panel_has_history_tab():
+def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     html = (root / "index.html").read_text()
     main_js = (root / "main.js").read_text()
+    actions_js = (root / "state/actions.js").read_text()
+    timing_js = (root / "state/timing.js").read_text()
+    summary_js = (root / "summary.js").read_text()
     css = (root / "styles.css").read_text()
+
+    refit_start = main_js.index("async function runStructuralRefit")
+    refit_end = main_js.index("\nfunction setAppBusy", refit_start)
+    refit_source = main_js[refit_start:refit_end]
+    busy_start = main_js.index("function renderMutationBusy")
+    busy_end = main_js.index("\nfunction renderInteractionPreview", busy_start)
+    busy_source = main_js[busy_start:busy_end]
+    recovery_start = main_js.index("function renderRecovery")
+    recovery_end = main_js.index("\nfunction renderMetricsEvidence", recovery_start)
+    recovery_source = main_js[recovery_start:recovery_end]
+    bindings_start = main_js.index("if (collapseLevels) {", refit_end)
+    bindings_end = main_js.index("\nloadState().then", bindings_start)
+    bindings_source = main_js[bindings_start:bindings_end]
+    collapse_start = summary_js.index("export function collapseTransition")
+    collapse_end = summary_js.index("export function ungroupTransition", collapse_start)
+    collapse_source = summary_js[collapse_start:collapse_end]
+    transition_start = actions_js.index("  async function executeStructuralMutation")
+    transition_end = actions_js.index("\n  /**\n   * Refresh one evidence panel", transition_start)
+    transition_source = actions_js[transition_start:transition_end]
+
+    assert 'id="appBusyOverlay"' in html
+    assert "setAppBusy" in main_js
+    assert "actions.executeStructuralMutation" in refit_source
+    assert "onRequestSettled" in refit_source
+    assert "waitForSecondary" not in refit_source
+    request_end_assignment = refit_source.index("requestEnd = performance.now()")
+    assert refit_source.index("onRequestSettled") < request_end_assignment
+    assert "refreshMetricsView" not in refit_source
+    assert "refreshActiveReport" not in refit_source
+    assert transition_source.index("commitStructuralTransition") < transition_source.index(
+        "await waitForPaint()"
+    )
+    assert transition_source.index("await waitForPaint()") < transition_source.index(
+        "finishStructuralMutation(null)"
+    )
+    assert transition_source.index("finishStructuralMutation(null)") < transition_source.index(
+        "scheduleVisibleEvidence"
+    )
+    assert "immediate: true" in transition_source
+    assert "summaryCommitted: true" in transition_source
+    assert "actions.initialize()" not in refit_source
+    assert '"/state"' not in refit_source
+    assert "setAppBusy" not in refit_source
+    assert "refreshSummaryView" not in refit_source
+    assert "result.envelope" in refit_source
+    assert 'mutation.status === "running"' in busy_source
+    assert "setAppBusy(active" in busy_source
+    assert "appAlertRetry.hidden" in recovery_source
+    assert "!visibleRecovery.retry" in recovery_source
+    assert "!recovery.retry" in recovery_source
+    assert "appAlertDismiss.disabled = retryInProgress" in recovery_source
+    assert "clientTransitionTiming" in main_js
+    for field in (
+        "client_request_ms",
+        "client_commit_ms",
+        "client_paint_ms",
+        "client_primary_ms",
+        "client_total_ms",
+    ):
+        assert field in timing_js
+    assert "client_recovery_ms" not in main_js
+    assert "client_recovery_ms" not in timing_js
+    assert "onPrimaryCommitted" in refit_source
+    assert "onPaintSettled" in refit_source
+    assert "createEvidenceTimingTracker" in main_js
+    assert 'evidenceTiming.observe("metrics"' in main_js
+    assert 'evidenceTiming.observe("summary"' in main_js
+    assert 'evidenceTiming.observe("report"' in main_js
+    assert "formatEvidenceTimingDetails" in main_js
+    assert "formatTimingDetails" in main_js
+    assert "Refit completed in" in main_js
+    assert 'id="advancedTiming"' in html
+    assert "advancedTiming.textContent" in main_js
+    assert 'summaryNote.textContent = payload.note || ""' in main_js
+    assert "collapseTransition" in main_js[:refit_start]
+    assert "ungroupTransition" in main_js[:refit_start]
+    assert "uncollapseTransition" in main_js[:refit_start]
+    assert "runStructuralRefit(collapseTransition(selectedTerm()))" in bindings_source
+    assert "runStructuralRefit(ungroupTransition(selectedTerm()))" in bindings_source
+    assert "runStructuralRefit(uncollapseTransition())" in bindings_source
+    assert "store.subscribe(selectChartRenderState" in bindings_source
+    assert "sameChartRenderState" in bindings_source
+    assert "(state) => state.remote.summary" in bindings_source
+    assert "if (summary)" in bindings_source
+    assert "(state) => state.request.evidence.summary" in bindings_source
+    assert "renderStaleSummary" not in main_js
+    assert "renderSummaryEvidence" in bindings_source
+    assert "state.request.mutation" in bindings_source
+    assert 'path: "/collapse_levels"' in collapse_source
+    assert 'payload: { term, method: "auto" }' in collapse_source
+    assert "requestJSON" not in collapse_source
+    assert "app-busy-overlay" in css
+    assert "app-shell.is-busy" in css
+    assert "busy-spinner" in css
+
+
+def test_editor_structural_confirmation_gate_precedes_every_refit_side_effect():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    html = (root / "index.html").read_text()
+    main_js = (root / "main.js").read_text()
+    confirm_js = (root / "views/structural_confirm.js").read_text()
+    root_css = (root / "styles.css").read_text()
+    dialog_css = (root / "styles/dialogs.css").read_text()
+
+    refit_start = main_js.index("async function runStructuralRefit")
+    refit_end = main_js.index("\nfunction setAppBusy", refit_start)
+    refit_source = main_js[refit_start:refit_end]
+    bindings_start = main_js.index('collapseLevels.addEventListener("click"', refit_end)
+    bindings_end = main_js.index("\nstore.subscribe", bindings_start)
+    bindings_source = main_js[bindings_start:bindings_end]
+    impact_index = refit_source.index("structuralImpact(")
+    confirm_index = refit_source.index("structuralConfirm.confirm(impact)")
+    contribution_index = refit_source.index("stopContributionBuild()")
+    timing_index = refit_source.index("performance.now()")
+    mutation_index = refit_source.index("actions.executeStructuralMutation")
+
+    assert main_js.count('from "./views/structural_confirm.js"') == 1
+    assert "selectSnapshot" in main_js[:refit_start]
+    assert "selectSnapshot(store.getState())" in refit_source
+    assert impact_index < confirm_index < contribution_index < timing_index < mutation_index
+    assert 'summarySource.value = "selected"' in refit_source
+    assert "stopContributionBuild()" not in bindings_source
+    assert "summarySource.value" not in bindings_source
+
+    assert html.count('id="structuralConfirmDialog"') == 1
+    assert (
+        '<dialog id="structuralConfirmDialog" class="structural-confirm" '
+        'aria-labelledby="structuralConfirmTitle" '
+        'aria-describedby="structuralConfirmMessage">'
+    ) in html.replace("\n", " ").replace("  ", " ")
+    assert '<form method="dialog">' in html
+    assert '<h2 id="structuralConfirmTitle">Confirm structural refit</h2>' in html
+    assert '<p id="structuralConfirmMessage"></p>' in html
+    assert '<button value="cancel" type="submit">Cancel</button>' in html
+    assert "Continue and refit</button>" in html
+    assert html.index("/assets/styles/panels.css") < html.index("/assets/styles/dialogs.css")
+
+    assert ".profile-dialog" not in root_css
+    assert ".export-dialog" not in root_css
+    assert ".profile-dialog" in dialog_css
+    assert ".export-dialog" in dialog_css
+    assert ".structural-confirm" in dialog_css
+    assert ".dialog-actions" in dialog_css
+    assert "overflow-wrap" in dialog_css
+    assert "@media" in dialog_css
+    assert "textContent" in confirm_js
+    assert "innerHTML" not in confirm_js
+
+
+def test_editor_inspector_has_summary_history_advanced_and_help_tabs():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    html = (root / "index.html").read_text()
+    main_js = (root / "main.js").read_text()
+    css = (root / "styles/panels.css").read_text()
     history_js_path = root / "history.js"
 
-    assert "Model summary" in html
-    assert "Edit history" in html
+    assert 'aria-label="Model inspector"' in html
+    assert ">Summary</button>" in html
+    assert ">History</button>" in html
+    assert ">Advanced</button>" in html
+    assert ">Help</button>" in html
     assert "historyFrame" in html
+    assert "advancedTiming" in html
+    assert html.count('id="buildDurationWrap"') == 1
     assert 'from "./history.js"' in main_js
-    assert ".sidepanel-pane[hidden]" in css
+    assert ".inspector" in css
+    assert ".help-pane" in css
     assert history_js_path.exists()
 
 
@@ -4395,7 +5913,12 @@ def test_widget_serves_editor_app_assets(editor_model):
     try:
         with urllib.request.urlopen(widget.url, timeout=5) as response:
             shell = response.read().decode("utf-8")
+        assert '<link rel="stylesheet" href="/assets/styles/tokens.css">' in shell
         assert '<link rel="stylesheet" href="/assets/styles.css">' in shell
+        assert '<link rel="stylesheet" href="/assets/styles/shell.css">' in shell
+        assert '<link rel="stylesheet" href="/assets/styles/chart.css">' in shell
+        assert '<link rel="stylesheet" href="/assets/styles/panels.css">' in shell
+        assert '<link rel="stylesheet" href="/assets/styles/dialogs.css">' in shell
         assert '<script type="module" src="/assets/main.js"></script>' in shell
         assert "<style>" not in shell
         assert "<script>\nconst svg" not in shell
@@ -4418,19 +5941,45 @@ def test_widget_serves_editor_app_assets(editor_model):
 
         for asset in [
             "api.js",
+            "api/client.js",
+            "api/contracts.js",
+            "state/store.js",
+            "state/selectors.js",
+            "state/actions.js",
+            "state/timing.js",
             "format.js",
             "chart.js",
+            "chart/geometry.js",
             "metrics.js",
             "summary.js",
             "reports.js",
             "interactions.js",
+            "views/inspector.js",
+            "views/help_drawer.js",
+            "views/structural_confirm.js",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
                 assert response.headers["Content-Type"].startswith("application/javascript")
                 assert response.read()
 
+        for asset in [
+            "styles/tokens.css",
+            "styles/shell.css",
+            "styles/chart.css",
+            "styles/panels.css",
+            "styles/dialogs.css",
+        ]:
+            request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
+            with urllib.request.urlopen(request, timeout=5) as response:
+                assert response.headers["Content-Type"].startswith("text/css")
+                assert response.read()
+
         assert 'from "./chart.js"' in js
+        assert 'from "./api/client.js"' in js
+        assert 'from "./state/actions.js"' in js
+        assert 'from "./state/selectors.js"' in js
+        assert 'from "./state/store.js"' in js
         assert 'from "./metrics.js"' in js
         assert 'from "./summary.js"' in js
         assert 'from "./interactions.js"' in js
@@ -4511,6 +6060,8 @@ def test_editor_server_declares_fastapi_routes():
     assert ("/report", frozenset({"POST"})) in routes
     assert ("/save_model", frozenset({"POST"})) in routes
     assert ("/download_model", frozenset({"GET"})) in routes
+    assert ("/export_file", frozenset({"POST"})) in routes
+    assert ("/download_export", frozenset({"GET"})) in routes
     assert ("/native_save_dialog", frozenset({"POST"})) not in routes
     assert ("/open_directory", frozenset({"POST"})) in routes
     assert ("/save_directory", frozenset({"POST"})) in routes

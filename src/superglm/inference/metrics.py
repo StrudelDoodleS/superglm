@@ -1002,7 +1002,9 @@ class ModelMetrics:
         """
         from superglm.features.categorical import Categorical
         from superglm.features.numeric import Numeric
+        from superglm.features.ordered_categorical import OrderedCategorical
         from superglm.features.spline import _SplineBase
+        from superglm.inference._term_covariance import feature_se_from_cov
 
         groups = self._model._feature_groups(name)
         spec = self._model._specs[name]
@@ -1013,6 +1015,25 @@ class ModelMetrics:
             self._groups,
             penalty=self._model.penalty,
         )
+        if isinstance(spec, OrderedCategorical) and spec.basis == "spline":
+            _, _, _, XtWX_inv_aug, active_groups = self._active_info
+            phi = self.phi if phi_scale else 1.0
+            se = feature_se_from_cov(
+                name,
+                phi * XtWX_inv_aug[1:, 1:],
+                active_groups,
+                self._result,
+                self._groups,
+                self._model._specs,
+                self._model._interaction_specs,
+                n_points=n_points,
+            )
+            return {
+                "levels": spec._ordered_levels,
+                "base_level": spec._base_level,
+                "se_log_relativity": se,
+            }
+
         if not any(group.name in selected_names for group in groups):
             if isinstance(spec, _SplineBase):
                 x_grid = np.linspace(spec._lo, spec._hi, n_points)

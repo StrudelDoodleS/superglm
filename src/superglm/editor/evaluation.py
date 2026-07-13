@@ -104,6 +104,18 @@ def default_metrics_dataset(session) -> EvaluationDataset | None:
     return None
 
 
+def training_export_dataset(session) -> EvaluationDataset | None:
+    """Return training data suitable for rating-table export.
+
+    Validation and test splits are deliberately excluded: rating tables describe
+    the fitted portfolio, so callers must provide ``train_data`` or retain fit data.
+    """
+    explicit = getattr(session, "_evaluation_data", {})
+    if "train" in explicit:
+        return explicit["train"]
+    return retained_fit_dataset(session)
+
+
 def named_metrics_dataset(session, name: str | None) -> EvaluationDataset | None:
     """Resolve an optional split name for metric/report calls."""
     if name in (None, "", "default"):
@@ -142,4 +154,5 @@ __all__ = [
     "evaluation_datasets",
     "named_metrics_dataset",
     "retained_fit_dataset",
+    "training_export_dataset",
 ]

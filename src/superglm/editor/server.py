@@ -122,16 +122,34 @@ def create_editor_app(widget: Any) -> FastAPI:
             lambda: widget._metrics(
                 str(payload.get("metric", "deviance")),
                 None if "source" not in payload else str(payload["source"]),
-            )
+                dataset=None if "dataset" not in payload else str(payload["dataset"]),
+                model_revision=_optional_int(payload.get("model_revision")),
+                request_sequence=_optional_int(payload.get("request_sequence")),
+            ),
+            response_metadata=_evidence_metadata(payload),
         )
 
     @app.post("/summary")
     def summary(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(lambda: widget._summary(str(payload.get("source", "original"))))
+        return _guarded_json(
+            lambda: widget._summary(
+                str(payload.get("source", "original")),
+                model_revision=_optional_int(payload.get("model_revision")),
+                request_sequence=_optional_int(payload.get("request_sequence")),
+            ),
+            response_metadata=_evidence_metadata(payload),
+        )
 
     @app.post("/report")
     def report(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(lambda: widget._report(str(payload.get("report", "validation"))))
+        return _guarded_json(
+            lambda: widget._report(
+                str(payload.get("report", "validation")),
+                model_revision=_optional_int(payload.get("model_revision")),
+                request_sequence=_optional_int(payload.get("request_sequence")),
+            ),
+            response_metadata=_evidence_metadata(payload),
+        )
 
     @app.post("/save_model")
     def save_model(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
@@ -143,22 +161,28 @@ def create_editor_app(widget: Any) -> FastAPI:
             )
         )
 
+    @app.post("/export_file")
+    def export_file(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._export_file(
+                str(payload.get("format", "joblib")),
+                directory=str(payload.get("directory", ".")),
+                filename=None if "filename" not in payload else str(payload["filename"]),
+            )
+        )
+
+    @app.get("/download_export")
+    def download_export(format: str = "joblib", filename: str | None = None) -> Response:
+        return _guarded_export_download(
+            lambda: widget._export_bytes(format, filename),
+            log_message="Unhandled SuperGLM editor export download error.",
+        )
+
     @app.get("/download_model")
     def download_model(filename: str = "superglm_edited_model.joblib") -> Response:
-        try:
-            data, safe_name = widget._download_model(filename)
-        except _CLIENT_ERROR_TYPES as exc:
-            return _json_response({"error": _client_error_message(exc)}, status_code=400)
-        except Exception:  # pragma: no cover - surfaced to browser/tests as JSON
-            _LOGGER.exception("Unhandled SuperGLM editor download error.")
-            return _json_response({"error": "internal editor error"}, status_code=500)
-        return Response(
-            content=data,
-            media_type="application/octet-stream",
-            headers={
-                **_no_store_headers(),
-                "Content-Disposition": f'attachment; filename="{safe_name}"',
-            },
+        return _guarded_export_download(
+            lambda: widget._export_bytes("joblib", filename),
+            log_message="Unhandled SuperGLM editor download error.",
         )
 
     @app.post("/open_directory")
@@ -355,14 +379,72 @@ def _request_token(request: Request) -> str:
     )
 
 
-def _guarded_json(factory: Callable[[], dict[str, Any]]) -> Response:
+def _guarded_json(
+    factory: Callable[[], dict[str, Any]],
+    *,
+    response_metadata: dict[str, Any] | None = None,
+) -> Response:
+    metadata = {} if response_metadata is None else dict(response_metadata)
     try:
         return _json_response(factory())
     except _CLIENT_ERROR_TYPES as exc:
-        return _json_response({"error": _client_error_message(exc)}, status_code=400)
+        return _json_response(
+            {**metadata, "error": _client_error_message(exc)},
+            status_code=400,
+        )
     except Exception:  # pragma: no cover - surfaced to browser/tests as JSON
         _LOGGER.exception("Unhandled SuperGLM editor request error.")
+        return _json_response(
+            {**metadata, "error": "internal editor error"},
+            status_code=500,
+        )
+
+
+def _guarded_export_download(factory: Callable[[], Any], *, log_message: str) -> Response:
+    """Return export bytes with the same guarded error policy as JSON routes."""
+    try:
+        result = factory()
+    except _CLIENT_ERROR_TYPES as exc:
+        return _json_response({"error": _client_error_message(exc)}, status_code=400)
+    except Exception:  # pragma: no cover - surfaced to browser/tests as JSON
+        _LOGGER.exception(log_message)
         return _json_response({"error": "internal editor error"}, status_code=500)
+
+    headers = {
+        **_no_store_headers(),
+        "Content-Disposition": _attachment_content_disposition(result.filename),
+        "X-SuperGLM-Model-Revision": str(result.model_revision),
+    }
+    if result.validation_scope is not None:
+        headers["X-SuperGLM-Validation"] = result.validation_scope
+    return Response(
+        content=result.data,
+        media_type=result.media_type,
+        headers=headers,
+    )
+
+
+def _attachment_content_disposition(filename: str) -> str:
+    """Build an ASCII header with a UTF-8 RFC 5987 filename parameter."""
+    import unicodedata
+    from urllib.parse import quote
+
+    ascii_name = unicodedata.normalize("NFKD", filename).encode("ascii", "ignore").decode()
+    fallback = "".join("_" if character in {'"', "\\"} else character for character in ascii_name)
+    fallback = fallback or "download"
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
+
+
+def _optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
+def _evidence_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model_revision": payload.get("model_revision"),
+        "request_sequence": payload.get("request_sequence"),
+    }
 
 
 def _client_error_message(exc: BaseException) -> str:
@@ -374,12 +456,14 @@ def _client_error_message(exc: BaseException) -> str:
 def _json_response(payload: dict[str, Any], *, status_code: int = 200) -> Response:
     import json
 
+    json_started = time.perf_counter()
     body = json.dumps(jsonable(payload), allow_nan=False).encode("utf-8")
+    json_ms = (time.perf_counter() - json_started) * 1000.0
     return Response(
         content=body,
         status_code=status_code,
         media_type="application/json",
-        headers=_no_store_headers(),
+        headers={**_no_store_headers(), "Server-Timing": f"json;dur={json_ms:.3f}"},
     )
 
 

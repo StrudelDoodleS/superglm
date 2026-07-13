@@ -8,24 +8,87 @@ from __future__ import annotations
 
 import atexit
 import html
+import io
 import secrets
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
+from superglm.editor import metrics as metrics_module
+from superglm.editor import persistence
+from superglm.editor.apply import materialize_edit_request
+from superglm.editor.evaluation import (
+    default_metrics_dataset,
+    evaluation_datasets,
+    named_metrics_dataset,
+    training_export_dataset,
+)
+from superglm.editor.evaluation_cache import (
+    DatasetMetricRequest,
+    EvaluationCache,
+    EvaluationKey,
+    model_metric_signature,
+)
+from superglm.editor.evidence import EvidenceCoordinator, EvidenceKey
 from superglm.editor.io import jsonable
-from superglm.editor.metrics import metrics_payload
+from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.payloads import history_payload, session_payload
-from superglm.editor.persistence import edited_model_for_export
-from superglm.editor.reports import report_payload
+from superglm.editor.reports import report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer
 from superglm.editor.summaries import offset_label_payload, summary_payload
 
 _LIVE_WIDGETS: set[EditorWidget] = set()
+
+_EXPORT_MEDIA_TYPES = {
+    "joblib": "application/octet-stream",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+_EXPORT_DEFAULT_FILENAMES = {
+    "joblib": "superglm_edited_model.joblib",
+    "xlsx": "superglm_rating_tables.xlsx",
+}
+
+
+@dataclass(frozen=True)
+class ExportResult:
+    """Complete revision-pinned export ready for download or disk."""
+
+    data: bytes
+    filename: str
+    media_type: str
+    model_revision: int
+    validation_scope: str | None = None
+
+
+def _normalise_export_format(format: str) -> str:
+    """Normalize user-facing export aliases to canonical formats."""
+    normalized = str(format).strip().lower().lstrip(".")
+    if normalized in {"joblib", "model"}:
+        return "joblib"
+    if normalized in {"xlsx", "excel"}:
+        return "xlsx"
+    raise ValueError(f"Unsupported export format: {format!r}")
+
+
+def _safe_export_filename(format: str, filename: str | None) -> str:
+    """Return a basename with the canonical suffix for ``format``."""
+    name = filename or _EXPORT_DEFAULT_FILENAMES[format]
+    if not name or Path(name).name != name or "/" in name or "\\" in name:
+        raise ValueError("filename must not contain directory separators")
+    if any(ord(character) < 32 or ord(character) == 127 for character in name):
+        raise ValueError("filename must not contain control characters")
+    suffix = Path(name).suffix.lower()
+    expected = f".{format}"
+    if suffix and suffix != expected:
+        raise ValueError(f"filename extension must be {expected} for {format} exports")
+    if not suffix:
+        name = f"{name}{expected}"
+    return name
 
 
 class EditorWidget:
@@ -55,8 +118,12 @@ class EditorWidget:
         self._token = secrets.token_urlsafe(24)
         self.terms = session_payload(session, self.control_counts)
         self.selected_term = next(iter(self.terms), "")
+        self._state_generation = 0
+        self._chart_generation = 0
         self._lock = threading.RLock()
         self._closed = False
+        self._evaluation_cache = EvaluationCache()
+        self._evidence = EvidenceCoordinator(f"editor-{id(self):x}")
         # A local iframe avoids Jupyter widget-extension dependencies while
         # still letting Python own the authoritative edit state.
         self._server = EditorAppServer(self)
@@ -85,12 +152,14 @@ class EditorWidget:
             return
         self._closed = True
         _LIVE_WIDGETS.discard(self)
+        self._evidence.close()
         self._server.close()
 
     def _state(self) -> dict[str, Any]:
         with self._lock:
             self.terms = session_payload(self.session, self.control_counts)
-            return {
+            state = {
+                "model_revision": self.session.model_revision,
                 "selected_term": self.selected_term,
                 "terms": self.terms,
                 "selection": {
@@ -106,24 +175,31 @@ class EditorWidget:
                 ),
                 "history": history_payload(self.session),
             }
+            self._state_generation += 1
+            state["state_generation"] = self._state_generation
+            state["chart_generation"] = self._chart_generation
+            return state
+
+    def _select_term(self, term: str) -> None:
+        if term not in self.session.terms:
+            raise KeyError(f"Unknown editable term: {term!r}")
+        self.selected_term = term
 
     def _set_term(self, term: str) -> dict[str, Any]:
         with self._lock:
-            if term not in self.session.terms:
-                raise KeyError(f"Unknown editable term: {term!r}")
-            self.selected_term = term
+            self._select_term(term)
             return self._state()
 
     def _select(self, term: str, indices: list[int]) -> dict[str, Any]:
         with self._lock:
-            self._set_term(term)
+            self._select_term(term)
             self.session.select_indices(term, indices)
             return self._state()
 
     def _operate(self, operation: str, term: str | None = None) -> dict[str, Any]:
         with self._lock:
             if term is not None:
-                self._set_term(term)
+                self._select_term(term)
             target = self.selected_term
             if operation == "shift_up":
                 self.session.shift(target, float(np.log(1.05)))
@@ -164,6 +240,8 @@ class EditorWidget:
             # so any value-changing edit invalidates the stored refit result.
             if operation not in {"select_all", "reset_order"}:
                 self._invalidate_refit()
+            if operation != "select_all":
+                self._chart_generation += 1
             return self._state()
 
     def _drag(
@@ -174,7 +252,7 @@ class EditorWidget:
         values: list[float] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
-            self._set_term(term)
+            self._select_term(term)
             self.session.select_indices(term, indices)
             if values is None:
                 self.session.shift(term, float(delta))
@@ -182,6 +260,7 @@ class EditorWidget:
                 rel = np.maximum(np.asarray(values, dtype=np.float64), 1e-12)
                 self.session.set_values(term, indices, np.log(rel))
             self._invalidate_refit()
+            self._chart_generation += 1
             return self._state()
 
     def _control(
@@ -192,7 +271,7 @@ class EditorWidget:
         handle_count: int | None = None,
     ) -> dict[str, Any]:
         with self._lock:
-            self._set_term(term)
+            self._select_term(term)
             if handle_count is not None:
                 controls = self.session.control_points(term, n_handles=int(handle_count))
                 self.control_counts[term] = int(controls["x"].size)
@@ -203,13 +282,15 @@ class EditorWidget:
                 n_handles=self.control_counts.get(term),
             )
             self._invalidate_refit()
+            self._chart_generation += 1
             return self._state()
 
     def _set_control_count(self, term: str, count: int) -> dict[str, Any]:
         with self._lock:
-            self._set_term(term)
+            self._select_term(term)
             controls = self.session.control_points(term, n_handles=int(count))
             self.control_counts[term] = int(controls["x"].size)
+            self._chart_generation += 1
             return self._state()
 
     def _average_relativity(self, term: str) -> None:
@@ -228,20 +309,291 @@ class EditorWidget:
         value = float(np.average(np.exp(editable.edited_log_effect[idx]), weights=weights))
         self.session.set_values(term, idx, np.full(idx.size, np.log(max(value, 1e-12))))
 
-    def _metrics(self, metric: str, source: str | None = None) -> dict[str, Any]:
+    def _current_model_for_evidence(self):
+        """Resolve one current model without materializing under the widget lock."""
         with self._lock:
-            selected_source = "in_force" if source in (None, "selected") else source
-            return metrics_payload(self.session, metric, source=selected_source)
+            revision = self.session.model_revision
+            if not self.session.edited_terms():
+                return self.session.model, revision
+            epoch = self.session.edit_epoch
+            base_model = self.session.model
+            cached = self.session.cached_materialized_model(
+                epoch,
+                model_revision=revision,
+                base_model=base_model,
+            )
+            if cached is not None:
+                return cached, revision
+            request = self.session.capture_materialization_request()
+            assert request is not None
 
-    def _summary(self, source: str) -> dict[str, Any]:
-        with self._lock:
-            if source == "selected":
-                source = "in_force"
-            return summary_payload(self, source)
+        key = EvidenceKey(request.model_revision, "materialize", "current")
+        outcome = self._evidence.submit(
+            key,
+            lambda request=request: {"model": materialize_edit_request(request)},
+        ).result()
+        if outcome.status == "superseded" or outcome.payload is None:
+            return None, request.model_revision
+        model = outcome.payload["model"]
 
-    def _report(self, report: str = "validation") -> dict[str, Any]:
         with self._lock:
-            return report_payload(self, report)
+            if not self.session.publish_materialized_model(request, model):
+                return None, request.model_revision
+            return model, request.model_revision
+
+    def _model_materialized_for_dataset(self, dataset):
+        """Materialize a revision against one purpose-specific dataset without caching it."""
+        with self._lock:
+            request = self.session.capture_materialization_request(
+                dataset=dataset,
+                include_unchanged=True,
+            )
+            assert request is not None
+
+        model = materialize_edit_request(request)
+
+        with self._lock:
+            if not self.session.materialization_request_is_current(request):
+                return None, request.model_revision
+            return model, request.model_revision
+
+    def _metrics(
+        self,
+        metric: str,
+        source: str | None = None,
+        *,
+        dataset: str | None = None,
+        model_revision: int | None = None,
+        request_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        selected_source = "in_force" if source is None or source == "selected" else source
+        with self._lock:
+            current_revision = self.session.model_revision
+            if model_revision is not None and int(model_revision) != current_revision:
+                return _superseded_payload(int(model_revision), request_sequence)
+            reference_model = getattr(self.session, "reference_model", self.session.model)
+
+        if selected_source == "original":
+            selected_model = reference_model
+            revision = current_revision
+        else:
+            selected_model, revision = self._current_model_for_evidence()
+        if selected_model is None:
+            return _superseded_payload(revision, request_sequence)
+
+        with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, request_sequence)
+            reference_model = getattr(self.session, "reference_model", self.session.model)
+            eval_dataset = named_metrics_dataset(self.session, dataset)
+            if reference_model is None or eval_dataset is None:
+                return metrics_payload(
+                    self.session,
+                    metric,
+                    source=selected_source,
+                    dataset=dataset,
+                    model_revision=revision,
+                    request_sequence=request_sequence,
+                )
+
+        original_metrics = self._dataset_metrics_for_evidence(
+            "original", reference_model, eval_dataset, revision
+        )
+        if original_metrics is None:
+            return _superseded_payload(revision, request_sequence)
+        edited_metrics: dict[str, float]
+        if selected_source == "original":
+            edited_metrics = original_metrics
+        else:
+            current_metrics = self._dataset_metrics_for_evidence(
+                "current", selected_model, eval_dataset, revision
+            )
+            if current_metrics is None:
+                return _superseded_payload(revision, request_sequence)
+            edited_metrics = current_metrics
+        payload = metric_comparison_payload(
+            metric,
+            eval_dataset,
+            original_metrics,
+            edited_metrics,
+            model_revision=revision,
+            request_sequence=request_sequence,
+        )
+        with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, request_sequence)
+        return payload
+
+    def _dataset_metrics_for_evidence(
+        self,
+        role: Literal["original", "current"],
+        model,
+        dataset,
+        revision: int,
+    ) -> dict[str, float] | None:
+        with self._lock:
+            if revision != self.session.model_revision:
+                return None
+            self._evaluation_cache.advance_current_revision(revision)
+            key = EvaluationKey(
+                role=role,
+                model_revision=0 if role == "original" else revision,
+                dataset_epoch=0,
+                split=dataset.name,
+                metric_signature=model_metric_signature(model),
+            )
+            cached = self._evaluation_cache.get(key)
+            if cached is not None:
+                return cached
+            request = DatasetMetricRequest(key=key, model=model, dataset=dataset)
+
+        evidence_key = EvidenceKey(
+            revision,
+            "score",
+            f"{role}:{dataset.name}:{request.key.metric_signature!r}",
+        )
+
+        def compute_metrics(request: DatasetMetricRequest = request) -> dict[str, Any]:
+            return {
+                "metrics": metrics_module.compute_dataset_metrics(
+                    request.model,
+                    request.dataset,
+                )
+            }
+
+        outcome = self._evidence.submit(evidence_key, compute_metrics).result()
+        if outcome.status == "superseded" or outcome.payload is None:
+            return None
+        values = outcome.payload["metrics"]
+        with self._lock:
+            if revision != self.session.model_revision:
+                return None
+            self._evaluation_cache.advance_current_revision(revision)
+            self._evaluation_cache.put(request.key, values)
+            return dict(values)
+
+    def _summary(
+        self,
+        source: str,
+        *,
+        model_revision: int | None = None,
+        request_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        if source == "selected":
+            source = "in_force"
+        if source in {"edited", "collapse"}:
+            source = "in_force"
+        source = source if source in {"original", "in_force", "refit"} else "in_force"
+
+        with self._lock:
+            current_revision = self.session.model_revision
+            if model_revision is not None and int(model_revision) != current_revision:
+                return _superseded_payload(int(model_revision), request_sequence)
+
+        offset_terms_override: list[str] | None = None
+        offset_labels_override: list[dict[str, Any]] | None = None
+        collapse_info_override: dict[str, Any] | None = None
+        if source == "in_force":
+            model, revision = self._current_model_for_evidence()
+            if model is None:
+                return _superseded_payload(revision, request_sequence)
+            with self._lock:
+                if revision != self.session.model_revision:
+                    return _superseded_payload(revision, request_sequence)
+                collapse_info = None if self._in_force_info is None else dict(self._in_force_info)
+            collapse_info_override = collapse_info
+        else:
+            with self._lock:
+                revision = self.session.model_revision
+                if source == "original":
+                    model = self.session.reference_model
+                else:
+                    model = self._offset_refit_model
+                    offset_terms_override = list(self._offset_refit_terms)
+                    offset_labels_override = list(self._offset_refit_labels)
+
+        payload = summary_payload(
+            self,
+            source,
+            model_override=model,
+            offset_terms_override=offset_terms_override,
+            offset_labels_override=offset_labels_override,
+            collapse_info_override=collapse_info_override,
+        )
+        with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, request_sequence)
+        payload["model_revision"] = revision
+        payload["request_sequence"] = request_sequence
+        return payload
+
+    def _report(
+        self,
+        report: str = "validation",
+        *,
+        model_revision: int | None = None,
+        request_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            current_revision = self.session.model_revision
+            if model_revision is not None and int(model_revision) != current_revision:
+                return _superseded_payload(int(model_revision), request_sequence)
+        edited_model, revision = self._current_model_for_evidence()
+        if edited_model is None:
+            return _superseded_payload(revision, request_sequence)
+
+        with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, request_sequence)
+            datasets = tuple(evaluation_datasets(self.session))
+            reference_model = getattr(self.session, "reference_model", self.session.model)
+            collapse_info = None if self._in_force_info is None else dict(self._in_force_info)
+            if reference_model is None:
+                return report_payload(
+                    self,
+                    report,
+                    model_revision=revision,
+                    request_sequence=request_sequence,
+                )
+
+        summary_model = edited_model
+        if report == "final" and self.session.edited_terms():
+            fit_dataset = training_export_dataset(self.session)
+            metrics_dataset = default_metrics_dataset(self.session)
+            if fit_dataset is not None and (
+                metrics_dataset is None or fit_dataset.name != metrics_dataset.name
+            ):
+                summary_model, summary_revision = self._model_materialized_for_dataset(fit_dataset)
+                if summary_model is None or summary_revision != revision:
+                    return _superseded_payload(summary_revision, request_sequence)
+
+        metric_pairs: dict[str, tuple[dict[str, float], dict[str, float]]] = {}
+        for eval_dataset in datasets:
+            original = self._dataset_metrics_for_evidence(
+                "original", reference_model, eval_dataset, revision
+            )
+            if original is None:
+                return _superseded_payload(revision, request_sequence)
+            edited = self._dataset_metrics_for_evidence(
+                "current", edited_model, eval_dataset, revision
+            )
+            if edited is None:
+                return _superseded_payload(revision, request_sequence)
+            metric_pairs[eval_dataset.name] = (original, edited)
+        splits = split_metrics_payload(datasets, metric_pairs)
+        payload = report_payload(
+            self,
+            report,
+            splits=splits,
+            model_revision=revision,
+            request_sequence=request_sequence,
+            model_override=summary_model,
+            collapse_info_override=collapse_info,
+        )
+        with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, request_sequence)
+        return payload
 
     def _save_model(
         self,
@@ -250,37 +602,109 @@ class EditorWidget:
         filename: str | None = None,
         path: str | None = None,
     ) -> dict[str, Any]:
+        payload = self._export_file(
+            "joblib",
+            directory="." if directory is None else directory,
+            filename=filename,
+            path=path,
+        )
+        payload["message"] = f"Saved edited model to {payload['path']}"
+        return payload
+
+    def _export_bytes(self, format: str, filename: str | None = None) -> ExportResult:
+        """Build one validated export from one captured model revision."""
+        canonical_format = _normalise_export_format(format)
+        safe_name = _safe_export_filename(canonical_format, filename)
+
+        validation_scope: str | None = None
+        if canonical_format == "joblib":
+            model, revision = self._current_model_for_evidence()
+            if model is None:
+                raise RuntimeError("Export request was superseded.")
+            data, validation = persistence.serialize_validated_model(
+                model,
+                dataset=default_metrics_dataset(self.session),
+            )
+            validation_scope = validation.scope
+        else:
+            dataset = training_export_dataset(self.session)
+            if dataset is None:
+                raise ValueError(
+                    "Excel export requires train_data or retained fit data; "
+                    "validation/test data are not substituted."
+                )
+            model, revision = self._model_materialized_for_dataset(dataset)
+            if model is None:
+                raise RuntimeError("Export request was superseded.")
+            from superglm.export.excel import write_rating_table_workbook
+            from superglm.export.rating_tables import build_rating_table_payload
+
+            payload = build_rating_table_payload(
+                model,
+                dataset.X,
+                dataset.y,
+                sample_weight=dataset.sample_weight,
+                offset=dataset.offset,
+            )
+            buffer = io.BytesIO()
+            write_rating_table_workbook(
+                payload,
+                buffer,
+                sheet_name="Rating Tables",
+                summary_sheet_name="Model Summary",
+                impact_sheet_name="Discretization Impact",
+            )
+            data = buffer.getvalue()
+
         with self._lock:
-            if path:
-                target = Path(path).expanduser()
-            else:
-                name = filename or "superglm_edited_model.joblib"
-                if Path(name).name != name:
-                    raise ValueError("filename must not contain directory separators")
-                target = Path(directory or ".").expanduser() / name
-            saved = self.session.save_model(target)
-            saved_path = saved.resolve()
-            return {
-                "path": str(saved_path),
-                "directory": str(saved_path.parent),
-                "filename": saved_path.name,
-                "message": f"Saved edited model to {saved_path}",
-            }
+            if revision != self.session.model_revision:
+                raise RuntimeError("Export request was superseded by a newer model revision.")
+        return ExportResult(
+            data=data,
+            filename=safe_name,
+            media_type=_EXPORT_MEDIA_TYPES[canonical_format],
+            model_revision=revision,
+            validation_scope=validation_scope,
+        )
+
+    def _export_file(
+        self,
+        format: str,
+        *,
+        directory: str = ".",
+        filename: str | None = None,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically write a completed export while its revision is current."""
+        canonical_format = _normalise_export_format(format)
+        if path:
+            requested_path = Path(path).expanduser()
+            safe_name = _safe_export_filename(canonical_format, requested_path.name)
+            target = requested_path.with_name(safe_name)
+        else:
+            safe_name = _safe_export_filename(canonical_format, filename)
+            target = Path(directory).expanduser() / safe_name
+
+        result = self._export_bytes(canonical_format, target.name)
+        with self._lock:
+            if result.model_revision != self.session.model_revision:
+                raise RuntimeError("Export request was superseded by a newer model revision.")
+            target.parent.mkdir(exist_ok=True, parents=True)
+            target.write_bytes(result.data)
+
+        saved_path = target.resolve()
+        return {
+            "path": str(saved_path),
+            "directory": str(saved_path.parent),
+            "filename": saved_path.name,
+            "message": f"Exported {saved_path.name} to {saved_path.parent}",
+            "model_revision": result.model_revision,
+            "validation_scope": result.validation_scope,
+        }
 
     def _download_model(self, filename: str | None = None) -> tuple[bytes, str]:
-        import io
-
-        import joblib
-
-        with self._lock:
-            name = filename or "superglm_edited_model.joblib"
-            if Path(name).name != name:
-                raise ValueError("filename must not contain directory separators")
-            if not Path(name).suffix:
-                name = f"{name}.joblib"
-            buffer = io.BytesIO()
-            joblib.dump(edited_model_for_export(self.session), buffer)
-            return buffer.getvalue(), name
+        result = self._export_bytes("joblib", filename)
+        return result.data, result.filename
 
     def _open_directory(self, path: str | None = None) -> dict[str, str]:
         opened = open_directory_path(path)
@@ -454,50 +878,107 @@ class EditorWidget:
             job["finished_at"] = time.time()
             self._profile_condition.notify_all()
 
+    def _structural_transition(
+        self,
+        operation: str,
+        *,
+        operation_start: float,
+        fit_start: float,
+        fit_end: float,
+    ) -> dict[str, Any]:
+        with self._lock:
+            summary_start = time.perf_counter()
+            summary = jsonable(summary_payload(self, "in_force"))
+            summary_end = time.perf_counter()
+            state_start = time.perf_counter()
+            state = jsonable(self._state())
+            state_end = time.perf_counter()
+            return {
+                "state": state,
+                "summary": summary,
+                "timing": {
+                    "operation": operation,
+                    "fit_ms": _elapsed_ms(fit_start, fit_end),
+                    "summary_ms": _elapsed_ms(summary_start, summary_end),
+                    "state_ms": _elapsed_ms(state_start, state_end),
+                    "server_total_ms": _elapsed_ms(operation_start, state_end),
+                },
+            }
+
     def _collapse_levels(self, term: str | None = None, method: str = "auto") -> dict[str, Any]:
         with self._lock:
+            operation_start = time.perf_counter()
             if term is not None:
-                self._set_term(term)
+                self._select_term(term)
             target = self.selected_term
             selected_indices = self.session.selection(target).astype(int).tolist()
             selected_levels = self._selected_level_labels(target)
             previous_info = None if self._in_force_info is None else dict(self._in_force_info)
+            fit_start = time.perf_counter()
             refit_model = self.session.replace_with_collapsed_levels(target, method=method)
+            fit_end = time.perf_counter()
             self._collapse_info_history.append(previous_info)
             self._collapsed_refit_model = refit_model
             self._collapsed_refit_info = dict(getattr(refit_model, "_editor_level_collapse", {}))
             self._in_force_info = dict(self._collapsed_refit_info)
             self._invalidate_refit()
             self._restore_selection(target, selected_levels, selected_indices)
-            return summary_payload(self, "in_force")
+            self._chart_generation += 1
+            return self._structural_transition(
+                "collapse_levels",
+                operation_start=operation_start,
+                fit_start=fit_start,
+                fit_end=fit_end,
+            )
 
     def _ungroup_levels(self, term: str | None = None, method: str = "auto") -> dict[str, Any]:
         with self._lock:
+            operation_start = time.perf_counter()
             if term is not None:
-                self._set_term(term)
+                self._select_term(term)
             target = self.selected_term
             selected_indices = self.session.selection(target).astype(int).tolist()
             selected_levels = self._selected_level_labels(target)
             previous_info = None if self._in_force_info is None else dict(self._in_force_info)
+            previous_history_depth = len(self.session.collapse_history)
+            fit_start = time.perf_counter()
             refit_model = self.session.replace_with_ungrouped_levels(target, method=method)
-            self._collapse_info_history.append(previous_info)
+            fit_end = time.perf_counter()
+            current_history_depth = len(self.session.collapse_history)
+            if current_history_depth > previous_history_depth:
+                self._collapse_info_history.append(previous_info)
+            elif current_history_depth < previous_history_depth:
+                del self._collapse_info_history[current_history_depth:]
             self._collapsed_refit_model = refit_model
-            self._collapsed_refit_info = dict(getattr(refit_model, "_editor_level_collapse", {}))
-            self._in_force_info = dict(self._collapsed_refit_info)
+            refit_info = getattr(refit_model, "_editor_level_collapse", None)
+            self._collapsed_refit_info = None if not refit_info else dict(refit_info)
+            self._in_force_info = (
+                None if self._collapsed_refit_info is None else dict(self._collapsed_refit_info)
+            )
             self._invalidate_refit()
             self._restore_selection(target, selected_levels, selected_indices)
-            return summary_payload(self, "in_force")
+            self._chart_generation += 1
+            return self._structural_transition(
+                "ungroup_levels",
+                operation_start=operation_start,
+                fit_start=fit_start,
+                fit_end=fit_end,
+            )
 
     def _reorder_levels(self, term: str | None = None, target_index: int = 0) -> dict[str, Any]:
         with self._lock:
             if term is not None:
-                self._set_term(term)
+                self._select_term(term)
             self.session.reorder_levels(self.selected_term, target_index=int(target_index))
+            self._chart_generation += 1
             return self._state()
 
     def _uncollapse_levels(self) -> dict[str, Any]:
         with self._lock:
+            operation_start = time.perf_counter()
+            fit_start = time.perf_counter()
             restored_model = self.session.uncollapse_levels()
+            fit_end = time.perf_counter()
             restored_info = (
                 self._collapse_info_history.pop() if self._collapse_info_history else None
             )
@@ -509,7 +990,13 @@ class EditorWidget:
             self._invalidate_refit()
             if self.selected_term not in self.session.terms:
                 self.selected_term = next(iter(self.session.terms), "")
-            return summary_payload(self, "in_force")
+            self._chart_generation += 1
+            return self._structural_transition(
+                "uncollapse_levels",
+                operation_start=operation_start,
+                fit_start=fit_start,
+                fit_end=fit_end,
+            )
 
     def _selected_level_labels(self, term: str) -> list[str]:
         editable = self.session.terms.get(term)
@@ -547,6 +1034,17 @@ class EditorWidget:
         self._offset_refit_model = None
         self._offset_refit_terms = []
         self._offset_refit_labels = []
+
+
+def _superseded_payload(
+    model_revision: int,
+    request_sequence: int | None,
+) -> dict[str, Any]:
+    return {
+        "status": "superseded",
+        "model_revision": int(model_revision),
+        "request_sequence": request_sequence,
+    }
 
 
 def _close_live_widgets() -> None:
@@ -620,6 +1118,10 @@ def _normalise_profile_estimate(estimate: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("objective_label", "loss")
     payload.setdefault("lower_is_better", True)
     return jsonable(payload)
+
+
+def _elapsed_ms(start: float, end: float) -> float:
+    return max(0.0, (end - start) * 1000.0)
 
 
 def _merge_profile_trace_rows(job: dict[str, Any], rows: list[dict[str, Any]]) -> None:

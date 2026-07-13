@@ -6,11 +6,21 @@ from typing import Any
 
 import numpy as np
 
-from superglm.editor.evaluation import default_metrics_dataset
+from superglm.editor.apply import materialize_edit_request
 from superglm.editor.terms import native_log_effect_values
 
+_UNSET = object()
 
-def summary_payload(widget, source: str) -> dict[str, Any]:
+
+def summary_payload(
+    widget,
+    source: str,
+    *,
+    model_override=None,
+    offset_terms_override: list[str] | None = None,
+    offset_labels_override: list[dict[str, Any]] | None = None,
+    collapse_info_override: Any = _UNSET,
+) -> dict[str, Any]:
     # The editor has one working lane: the in-force editable model. The
     # immutable original remains available as a reference payload for plots,
     # deltas, and explicit audit calls.
@@ -20,22 +30,34 @@ def summary_payload(widget, source: str) -> dict[str, Any]:
         source = "in_force"
     source = source if source in {"original", "in_force", "refit"} else "in_force"
     if source == "original":
-        model = widget.session.reference_model
+        model = widget.session.reference_model if model_override is None else model_override
         label = "Original"
         offset_terms: list[str] = []
         offset_labels: list[dict[str, Any]] = []
         collapse_info = None
     elif source == "in_force":
-        model = _in_force_summary_model(widget.session)
+        model = _in_force_summary_model(widget.session, model_override=model_override)
         label = "In-force edit model"
         offset_terms = []
         offset_labels = []
-        collapse_info = getattr(widget, "_in_force_info", None)
+        collapse_info = (
+            getattr(widget, "_in_force_info", None)
+            if collapse_info_override is _UNSET
+            else collapse_info_override
+        )
     elif source == "refit":
-        model = widget._offset_refit_model
+        model = widget._offset_refit_model if model_override is None else model_override
         label = "Fixed-offset refit"
-        offset_terms = list(widget._offset_refit_terms)
-        offset_labels = list(widget._offset_refit_labels)
+        offset_terms = (
+            list(widget._offset_refit_terms)
+            if offset_terms_override is None
+            else list(offset_terms_override)
+        )
+        offset_labels = (
+            list(widget._offset_refit_labels)
+            if offset_labels_override is None
+            else list(offset_labels_override)
+        )
         collapse_info = None
         if model is None:
             return {
@@ -81,18 +103,14 @@ def summary_payload(widget, source: str) -> dict[str, Any]:
     }
 
 
-def _in_force_summary_model(session):
+def _in_force_summary_model(session, *, model_override=None):
+    if model_override is not None:
+        return model_override
     if not session.edited_terms():
         return session.model
-    dataset = default_metrics_dataset(session)
-    if dataset is None:
-        return session.to_model()
-    return session.to_model(
-        X=dataset.X,
-        y=dataset.y,
-        sample_weight=dataset.sample_weight,
-        offset=dataset.offset,
-    )
+    request = session.capture_materialization_request()
+    assert request is not None
+    return materialize_edit_request(request)
 
 
 def offset_label_payload(session, terms: list[str]) -> list[dict[str, Any]]:

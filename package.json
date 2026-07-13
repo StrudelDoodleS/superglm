@@ -1,0 +1,15 @@
+{
+  "name": "superglm-editor-development",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test:frontend": "node --test tests/editor_frontend/*.test.js",
+    "typecheck:frontend": "tsc -p jsconfig.json",
+    "check:frontend": "npm run typecheck:frontend && npm run test:frontend"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^7.0.2"
+  }
+}

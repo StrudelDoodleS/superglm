@@ -319,7 +319,7 @@ def build_coef_rows(
                             edf1_j,
                             res_df,
                         )
-                    except Exception:
+                    except np.linalg.LinAlgError:
                         pass
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
 

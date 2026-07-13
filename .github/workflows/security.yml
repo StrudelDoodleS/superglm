@@ -115,10 +115,48 @@ jobs:
                   raise SystemExit(f"Unexpected entries in {archive}: {bad[:20]}")
 
 
+          editor_root = Path("src/superglm/editor/app")
+          required_suffixes = {
+              f"superglm/editor/app/{path.relative_to(editor_root).as_posix()}"
+              for path in editor_root.rglob("*")
+              if path.is_file()
+              and (path.name == "index.html" or path.suffix in {".js", ".css"})
+          }
+
+
+          def require_editor_assets(names, archive):
+              archive_name = Path(archive).name
+              if archive_name.endswith(".whl"):
+                  source_prefix = ""
+              elif archive_name.endswith(".tar.gz"):
+                  expected_root = archive_name.removesuffix(".tar.gz")
+                  roots = {
+                      parts[0] for name in names if (parts := Path(name).parts)
+                  }
+                  if roots != {expected_root}:
+                      raise SystemExit(
+                          f"Unexpected source roots in {archive}: "
+                          f"expected {[expected_root]}, found {sorted(roots)}"
+                      )
+                  source_prefix = f"{expected_root}/src/"
+              else:
+                  raise SystemExit(
+                      f"Unsupported package archive for editor asset check: {archive}"
+                  )
+
+              required = {f"{source_prefix}{suffix}" for suffix in required_suffixes}
+              missing = required.difference(names)
+              if missing:
+                  raise SystemExit(
+                      f"Missing editor source assets in {archive}: {sorted(missing)}"
+                  )
+
+
           for wheel in Path("dist").glob("*.whl"):
               print(f"Inspecting {wheel}")
               with zipfile.ZipFile(wheel) as zf:
                   names = zf.namelist()
+              require_editor_assets(names, wheel)
               reject_bad_archive_names(names, wheel)
               for name in names[:50]:
                   print(" ", name)
@@ -127,6 +165,7 @@ jobs:
               print(f"Inspecting {sdist}")
               with tarfile.open(sdist) as tf:
                   names = tf.getnames()
+              require_editor_assets(names, sdist)
               reject_bad_archive_names(names, sdist)
               for name in names[:50]:
                   print(" ", name)

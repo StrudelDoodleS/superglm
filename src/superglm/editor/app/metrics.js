@@ -1,4 +1,3 @@
-import { requestJSON } from "./api.js";
 import { fmt, fmtSigned } from "./format.js";
 
 const metricKeys = [
@@ -11,40 +10,12 @@ const metricKeys = [
   "effective_df"
 ];
 
-let metricPayload = null;
-
-export async function refreshMetrics({ metricGrid, metricSelect }) {
-  if (metricPayload === null && !metricGrid.querySelector(".metric-item")) {
-    renderMetricGrid(null, { metricGrid, metricSelect });
-  }
-  metricGrid.setAttribute("aria-busy", "true");
-  try {
-    metricPayload = await requestJSON("/metrics", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        metric: "deviance",
-        source: "in_force"
-      })
-    });
-    renderMetricGrid(metricPayload, { metricGrid, metricSelect });
-  } catch (error) {
-    if (metricPayload === null) {
-      metricGrid.textContent = error.message;
-    } else {
-      metricGrid.title = error.message;
-    }
-  } finally {
-    metricGrid.setAttribute("aria-busy", "false");
-  }
-}
-
 function metricLabel(metric, metricSelect) {
   const option = Array.from(metricSelect.options).find((opt) => opt.value === metric);
   return option ? option.textContent : metric;
 }
 
-function renderMetricGrid(payload, { metricGrid, metricSelect }) {
+export function renderMetricGrid(payload, { metricGrid, metricSelect }) {
   if (payload === null) {
     metricGrid.innerHTML = metricKeys.map((metric) => `
       <div class="metric-item">

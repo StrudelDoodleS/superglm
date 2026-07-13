@@ -1,6 +1,33 @@
 import { fmt } from "./format.js";
+import {
+  evenlySpacedIndices,
+  planCategoricalAxis,
+  splitLabelGraphemes
+} from "./chart/geometry.js";
 
-const MAX_LEVEL_LABELS = 30;
+const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
+const CATEGORICAL_FONT_PROPERTIES = Object.freeze([
+  "font-family",
+  "font-size",
+  "font-size-adjust",
+  "font-style",
+  "font-weight",
+  "font-stretch",
+  "font-variant",
+  "font-feature-settings",
+  "font-variation-settings",
+  "font-kerning",
+  "font-optical-sizing",
+  "font-synthesis",
+  "letter-spacing",
+  "word-spacing",
+  "line-height",
+  "text-transform",
+  "text-rendering",
+  "direction",
+  "writing-mode"
+]);
+const categoricalMeasurementCaches = new WeakMap();
 
 export function groupedTerms(terms) {
   const order = ["spline", "ordered categorical", "categorical", "polynomial", "numeric"];
@@ -24,14 +51,11 @@ export function drawChart(term, selection, context) {
   // Full redraw renderer. The Python state payload is authoritative; this
   // module only turns the current payload into SVG plus scale metadata used by
   // interactions.js.
-  const { svg, modeSelect, zoomState } = context;
-  const visualMode = context.visualMode ? context.visualMode() : modeSelect.value;
+  const { svg } = context;
+  const visualMode = context.visualMode();
   svg.innerHTML = "";
   const width = 940, height = 520;
-  const margin = { left: 76, right: 76, top: 48, bottom: 72 };
-  const innerW = width - margin.left - margin.right;
-  const innerH = height - margin.top - margin.bottom;
-  definePlotClip(svg, margin, innerW, innerH);
+  const baseMargin = { left: 76, right: 76, top: 48, bottom: 72 };
   const view = resolveDisplayTerm(
     term,
     context.groupDisplayMode ? context.groupDisplayMode() : "expanded"
@@ -41,11 +65,36 @@ export function drawChart(term, selection, context) {
   const original = view.original_y;
   const previous = view.previous_y || null;
   const exposure = view.exposure || null;
-  if (!y.length) return;
+  if (!y.length) {
+    svg.dataset.axisMeasurementCount = "0";
+    return;
+  }
 
   const xDomain = view.x_domain || [Math.min(...x), Math.max(...x)];
   const baseXMin = xDomain[0];
   const baseXMax = xDomain[1];
+  const zoom = context.zoomState()[context.selectedTerm()];
+  const xMin = zoom ? zoom.xMin : baseXMin;
+  const xMax = zoom ? zoom.xMax : baseXMax;
+  const categoricalLayout = view.levels
+    ? categoricalAxisLayout(
+        svg,
+        view,
+        xMin,
+        xMax,
+        width - baseMargin.left - baseMargin.right,
+        height,
+        baseMargin
+      )
+    : null;
+  if (!categoricalLayout) svg.dataset.axisMeasurementCount = "0";
+  const margin = {
+    ...baseMargin,
+    bottom: categoricalLayout ? categoricalLayout.bottom : baseMargin.bottom
+  };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  definePlotClip(svg, margin, innerW, innerH);
   const ciValues = context.showCi() && view.ci_lower_y && view.ci_upper_y
     ? [...view.ci_lower_y, ...view.ci_upper_y]
     : [];
@@ -78,9 +127,6 @@ export function drawChart(term, selection, context) {
   const yPad = Math.max((yMaxRaw - yMinRaw) * 0.12, 0.05);
   const baseYMin = yMinRaw - yPad;
   const baseYMax = yMaxRaw + yPad;
-  const zoom = zoomState[context.selectedTerm()];
-  const xMin = zoom ? zoom.xMin : baseXMin;
-  const xMax = zoom ? zoom.xMax : baseXMax;
   const yMin = zoom ? zoom.yMin : baseYMin;
   const yMax = zoom ? zoom.yMax : baseYMax;
   const sx = (v) => margin.left + ((v - xMin) / Math.max(xMax - xMin, 1e-12)) * innerW;
@@ -93,19 +139,35 @@ export function drawChart(term, selection, context) {
     line(svg, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
     text(svg, margin.left - 10, sy(tick) + 4, fmt(tick), "tick-label", "end");
   }
-  for (const tick of xTicks(view, xMin, xMax)) {
-    const tickX = sx(tick.value);
-    const tickY = margin.top + innerH + (tick.rotate ? 30 : 22);
-    line(svg, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
-    const tickLabel = text(
-      svg,
-      tickX,
-      tickY,
-      tick.label,
-      tick.rotate ? "tick-label angled" : "tick-label",
-      tick.rotate ? "end" : "middle"
-    );
-    if (tick.rotate) tickLabel.setAttribute("transform", `rotate(-45 ${tickX} ${tickY})`);
+  if (categoricalLayout) {
+    for (const tick of categoricalLayout.ticks) {
+      const tickX = sx(Number(tick.value));
+      const tickY = margin.top + innerH + 18;
+      line(svg, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
+      const tickLabel = text(
+        svg,
+        tickX,
+        tickY,
+        tick.displayLabel,
+        tick.angle ? "tick-label x-tick-label angled" : "tick-label x-tick-label",
+        tick.anchor
+      );
+      tickLabel.setAttribute("data-full-label", tick.fullLabel);
+      tickLabel.setAttribute("data-popover-title", "Category");
+      tickLabel.setAttribute("data-popover-body", tick.fullLabel);
+      tickLabel.setAttribute("aria-label", tick.fullLabel);
+      tickLabel.setAttribute("tabindex", "0");
+      if (tick.angle) {
+        tickLabel.setAttribute("transform", `rotate(${tick.angle} ${tickX} ${tickY})`);
+      }
+    }
+  } else {
+    for (const tick of continuousXTicks(xMin, xMax)) {
+      const tickX = sx(tick.value);
+      const tickY = margin.top + innerH + 22;
+      line(svg, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
+      text(svg, tickX, tickY, tick.label, "tick-label", "middle");
+    }
   }
   const baseline = Math.min(Math.max(1, yMin), yMax);
   line(svg, margin.left, sy(baseline), margin.left + innerW, sy(baseline), "zero");
@@ -113,7 +175,14 @@ export function drawChart(term, selection, context) {
   line(svg, margin.left, margin.top + innerH, margin.left + innerW, margin.top + innerH, "axis");
 
   text(svg, width / 2, 24, term.title, "label", "middle");
-  text(svg, width / 2, height - 20, term.x_label, "label", "middle");
+  text(
+    svg,
+    width / 2,
+    categoricalLayout ? categoricalLayout.titleY : height - 20,
+    term.x_label,
+    "label x-axis-title",
+    "middle"
+  );
   const yLabel = text(svg, 22, margin.top + innerH / 2, term.y_label, "label", "middle");
   yLabel.setAttribute("transform", `rotate(-90 22 ${margin.top + innerH / 2})`);
 
@@ -149,20 +218,30 @@ export function drawChart(term, selection, context) {
     else drawLevelGroups(svg, view, sx, sy);
   }
   const visiblePoints = visiblePointIndices(view, displaySelected);
+  const basePoints = new Set(basePointIndices(view));
   const selectedPoints = [];
   const unselectedPoints = [];
+  let pointLayer = null;
   if (!handlesMode) {
+    pointLayer = el("g", { class: "point-layer" });
+    svg.appendChild(pointLayer);
     for (const i of visiblePoints) {
       if (displaySelected.has(i)) selectedPoints.push(i);
       else unselectedPoints.push(i);
     }
-    for (const i of unselectedPoints) drawPoint(svg, view, x, y, sx, sy, i, false);
-    for (const i of selectedPoints) drawPoint(svg, view, x, y, sx, sy, i, true);
+    for (const i of unselectedPoints) {
+      drawPoint(svg, pointLayer, view, x, y, sx, sy, i, false, !basePoints.has(i));
+    }
+    for (const i of selectedPoints) {
+      drawPoint(svg, pointLayer, view, x, y, sx, sy, i, true, !basePoints.has(i));
+    }
   } else {
     drawControlHandles(svg, term, sx, sy, margin, innerH);
   }
   applyPlotClip(svg);
-  legend(svg, width - 160, 26, view.displayIsCollapsed, Boolean(previous));
+  const legendLayer = el("g", { class: "legend-layer" });
+  svg.appendChild(legendLayer);
+  legend(legendLayer, width - 160, 26, view.displayIsCollapsed, Boolean(previous));
 
   svg._scale = {
     sx, sy, x, y, xMin, xMax, yMin, yMax,
@@ -171,7 +250,82 @@ export function drawChart(term, selection, context) {
     displayToSourceIndices: view.displayToSourceIndices,
     displayIsCollapsed: view.displayIsCollapsed
   };
+  svg._selectionView = { term, view, handlesMode, pointLayer };
   positionSelectionMenu(svg, context.selectionMenu, handlesMode ? null : selectedBounds);
+}
+
+export function updateChartSelection(term, selection, context) {
+  const { svg } = context;
+  const scale = svg._scale;
+  const selectionView = svg._selectionView;
+  if (!scale || !selectionView) return;
+  selectionView.term = term;
+
+  const { view, handlesMode, pointLayer } = selectionView;
+  const displaySelected = displaySelection(view, selection);
+  const basePoints = new Set(basePointIndices(view));
+  const showSupplementalPoints = displaySelected.size <= basePoints.size;
+  const existingPoints = new Map();
+  const selectedPoints = [];
+  for (const point of svg.querySelectorAll("circle.point[data-index]")) {
+    const index = Number(point.dataset.index);
+    if (!Number.isInteger(index)) continue;
+    const supplemental = point.dataset.selectionSupplemental === "true" ||
+      !basePoints.has(index);
+    if (supplemental) point.dataset.selectionSupplemental = "true";
+    if (supplemental && (!showSupplementalPoints || !displaySelected.has(index))) {
+      point.remove();
+      continue;
+    }
+    const selected = displaySelected.has(index);
+    point.classList.toggle("selected", selected);
+    point.setAttribute("r", selected ? "4.6" : "3.4");
+    if (selected) selectedPoints.push(point);
+    existingPoints.set(index, point);
+  }
+
+  if (!handlesMode && pointLayer && showSupplementalPoints) {
+    for (const index of displaySelected) {
+      if (
+        existingPoints.has(index) ||
+        index < 0 ||
+        index >= view.y.length
+      ) continue;
+      const point = drawPoint(
+        svg,
+        pointLayer,
+        view,
+        view.x,
+        view.y,
+        scale.sx,
+        scale.sy,
+        index,
+        true,
+        true
+      );
+      point.setAttribute("clip-path", "url(#plotInteractionClip)");
+      selectedPoints.push(point);
+    }
+  }
+  if (pointLayer) {
+    selectedPoints.sort((left, right) => Number(left.dataset.index) - Number(right.dataset.index));
+    for (const point of selectedPoints) pointLayer.appendChild(point);
+  }
+
+  const bounds = handlesMode
+    ? null
+    : selectionBounds(
+        view.x,
+        view.y,
+        displaySelected,
+        scale.sx,
+        scale.sy,
+        scale.margin,
+        scale.innerW,
+        scale.innerH
+      );
+  updateSelectionBounds(svg, bounds);
+  positionSelectionMenu(svg, context.selectionMenu, bounds);
 }
 
 function resolveDisplayTerm(term, mode) {
@@ -227,6 +381,18 @@ function definePlotClip(svg, margin, innerW, innerH) {
     height: innerH
   }));
   defs.appendChild(clip);
+  // Chromium excludes the exact boundary of an SVG clip from pointer hit
+  // testing. Give draggable marks enough room for their radius while keeping
+  // zoomed-out marks away from the axes and labels.
+  const interactionPad = 6;
+  const interactionClip = el("clipPath", { id: "plotInteractionClip" });
+  interactionClip.appendChild(el("rect", {
+    x: margin.left - interactionPad,
+    y: margin.top - interactionPad,
+    width: innerW + interactionPad * 2,
+    height: innerH + interactionPad * 2
+  }));
+  defs.appendChild(interactionClip);
   svg.appendChild(defs);
 }
 
@@ -252,12 +418,15 @@ function applyPlotClip(svg) {
   for (const node of svg.querySelectorAll(clipped)) {
     node.setAttribute("clip-path", "url(#plotClip)");
   }
+  for (const node of svg.querySelectorAll(".point,.control-handle")) {
+    node.setAttribute("clip-path", "url(#plotInteractionClip)");
+  }
 }
 
 function visiblePointIndices(term, selection) {
   // Large continuous grids draw a representative point subset for performance,
   // but selected points are always forced visible.
-  const base = term.handle_indices || term.x.map((_, i) => i);
+  const base = basePointIndices(term);
   const out = new Set(base);
   if (selection.size <= base.length) {
     for (const i of selection) out.add(i);
@@ -265,12 +434,18 @@ function visiblePointIndices(term, selection) {
   return Array.from(out).sort((a, b) => a - b);
 }
 
-function drawPoint(svg, term, x, y, sx, sy, i, selected) {
-  const circle = el("circle", {
+function basePointIndices(term) {
+  return term.handle_indices || term.x.map((_, i) => i);
+}
+
+function drawPoint(svg, pointLayer, term, x, y, sx, sy, i, selected, supplemental = false) {
+  const attrs = {
     cx: sx(x[i]), cy: sy(y[i]), r: selected ? 4.6 : 3.4,
     class: selected ? "point selected" : "point",
     "data-index": i
-  });
+  };
+  if (supplemental) attrs["data-selection-supplemental"] = "true";
+  const circle = el("circle", attrs);
   circle.addEventListener("pointerenter", () => {
     showPointTooltip(svg, circle, pointTooltipLines(term, i));
   });
@@ -278,7 +453,8 @@ function drawPoint(svg, term, x, y, sx, sy, i, selected) {
     showPointTooltip(svg, circle, pointTooltipLines(term, i));
   });
   circle.addEventListener("pointerleave", () => hidePointTooltip(svg));
-  svg.appendChild(circle);
+  pointLayer.appendChild(circle);
+  return circle;
 }
 
 function pointTooltipLines(term, i) {
@@ -623,6 +799,30 @@ function drawSelectionBounds(svg, bounds) {
   }
 }
 
+function updateSelectionBounds(svg, bounds) {
+  for (const className of ["selection-bounds-halo", "selection-bounds"]) {
+    let node = svg.querySelector(`.${className}`);
+    if (!bounds) {
+      if (node) node.remove();
+      continue;
+    }
+    if (!node) {
+      node = el("rect", { rx: 4, ry: 4, class: className });
+      const foreground = svg.querySelector([
+        ".level-group-link",
+        ".level-group-marker",
+        ".level-group-label",
+        ".point-layer"
+      ].join(","));
+      svg.insertBefore(node, foreground);
+    }
+    node.setAttribute("x", bounds.x);
+    node.setAttribute("y", bounds.y);
+    node.setAttribute("width", bounds.width);
+    node.setAttribute("height", bounds.height);
+  }
+}
+
 function positionSelectionMenu(svg, selectionMenu, bounds) {
   // Bounds are in SVG coordinates; menu positioning needs viewport coordinates
   // because the menu is ordinary HTML layered over the SVG.
@@ -648,13 +848,63 @@ function positionSelectionMenu(svg, selectionMenu, bounds) {
   const localTop = topLeft.y - parentBox.top;
   const localRight = bottomRight.x - parentBox.left;
   const localBottom = bottomRight.y - parentBox.top;
-  let left = (localLeft + localRight) / 2 - menuBox.width / 2;
-  let top = localTop - menuBox.height - 12;
-  if (top < pad) top = localBottom + 12;
-  left = Math.max(pad, Math.min(chartBox.width - menuBox.width - pad, left));
-  top = Math.max(pad, Math.min(chartBox.height - menuBox.height - pad, top));
-  selectionMenu.style.left = `${left}px`;
-  selectionMenu.style.top = `${top}px`;
+  const centeredLeft = (localLeft + localRight) / 2 - menuBox.width / 2;
+  const centeredTop = (localTop + localBottom) / 2 - menuBox.height / 2;
+  const candidates = [
+    { left: centeredLeft, top: localTop - menuBox.height - 12 },
+    { left: centeredLeft, top: localBottom + 12 },
+    { left: localRight + 12, top: centeredTop },
+    { left: localLeft - menuBox.width - 12, top: centeredTop }
+  ];
+  const scale = svg._scale;
+  if (scale && scale.margin) {
+    const plotBottom = svgClientPoint(
+      svg,
+      scale.margin.left,
+      scale.margin.top + scale.innerH
+    );
+    candidates.push({
+      left: centeredLeft,
+      top: plotBottom.y - parentBox.top + pad
+    });
+  }
+  const maxLeft = Math.max(pad, chartBox.width - menuBox.width - pad);
+  const maxTop = Math.max(pad, chartBox.height - menuBox.height - pad);
+  const positioned = candidates.map((candidate) => ({
+    left: Math.max(pad, Math.min(maxLeft, candidate.left)),
+    top: Math.max(pad, Math.min(maxTop, candidate.top))
+  }));
+  let best = positioned[0];
+  let bestIntersections = selectionMenuPointIntersections(svg, parentBox, menuBox, best);
+  for (const candidate of positioned.slice(1)) {
+    const intersections = selectionMenuPointIntersections(svg, parentBox, menuBox, candidate);
+    if (intersections >= bestIntersections) continue;
+    best = candidate;
+    bestIntersections = intersections;
+  }
+  selectionMenu.style.left = `${best.left}px`;
+  selectionMenu.style.top = `${best.top}px`;
+}
+
+function selectionMenuPointIntersections(svg, parentBox, menuBox, candidate) {
+  const clearance = 2;
+  const menuLeft = parentBox.left + candidate.left - clearance;
+  const menuTop = parentBox.top + candidate.top - clearance;
+  const menuRight = menuLeft + menuBox.width + clearance * 2;
+  const menuBottom = menuTop + menuBox.height + clearance * 2;
+  let intersections = 0;
+  for (const point of svg.querySelectorAll("circle.point[data-index]")) {
+    const pointBox = point.getBoundingClientRect();
+    if (
+      pointBox.right >= menuLeft &&
+      pointBox.left <= menuRight &&
+      pointBox.bottom >= menuTop &&
+      pointBox.top <= menuBottom
+    ) {
+      intersections += 1;
+    }
+  }
+  return intersections;
 }
 
 function svgClientPoint(svg, x, y) {
@@ -673,20 +923,102 @@ function svgClientPoint(svg, x, y) {
   };
 }
 
-function xTicks(term, xMin, xMax) {
-  if (term.levels && term.levels.length <= MAX_LEVEL_LABELS) {
-    return term.x.map((value, i) => ({
-      value,
-      label: term.levels[i],
-      rotate: term.levels.length > 8
-    }));
+function categoricalAxisLayout(svg, view, xMin, xMax, availableWidth, svgHeight, baseMargin) {
+  const labels = view.levels.map(String);
+  if (view.x.length !== labels.length) {
+    throw new RangeError("categorical axis values and labels must have the same length");
   }
-  if (term.levels) {
-    const step = Math.max(1, Math.ceil(term.levels.length / MAX_LEVEL_LABELS));
-    return term.x
-      .map((value, i) => ({ value, label: term.levels[i], rotate: true, index: i }))
-      .filter((tick) => tick.index === 0 || tick.index === term.levels.length - 1 || tick.index % step === 0);
+  const rows = labels.map((label, index) => ({ value: view.x[index], label }));
+  const visibleRows = rows.filter((row) => row.value >= xMin && row.value <= xMax);
+  const candidateIndices = evenlySpacedIndices(visibleRows.length, 30);
+  const candidates = candidateIndices.map((index) => visibleRows[index]);
+  const candidateLabels = candidates.map((row) => row.label);
+  const measurements = measureCategoricalLabels(svg, candidateLabels);
+  svg.dataset.axisMeasurementCount = String(candidateLabels.length);
+  return planCategoricalAxis({
+    values: candidates.map((row) => row.value),
+    labels: candidateLabels,
+    measurements,
+    availableWidth,
+    svgHeight,
+    baseLeft: baseMargin.left,
+    baseBottom: baseMargin.bottom
+  });
+}
+
+function measureCategoricalLabels(svg, labels) {
+  const layer = el("g", { class: "axis-measure-layer", "aria-hidden": "true" });
+  layer.setAttribute("visibility", "hidden");
+  svg.appendChild(layer);
+  try {
+    const probe = text(layer, 0, 0, "", "tick-label", "start");
+    const cache = categoricalMeasurementCache(svg, probe);
+    if (cache.ellipsisWidth === null) {
+      cache.ellipsisWidth = measureText(probe, "…");
+    }
+    return labels.map((label) => {
+      const cached = cache.labels.get(label);
+      if (cached) {
+        cache.labels.delete(label);
+        cache.labels.set(label, cached);
+        return cached;
+      }
+      const graphemes = splitLabelGraphemes(label);
+      const prefixWidths = [];
+      let prefix = "";
+      for (const grapheme of graphemes) {
+        prefix += grapheme;
+        prefixWidths.push(measureText(probe, prefix));
+      }
+      probe.textContent = label;
+      const box = probe.getBBox();
+      const measurement = Object.freeze({
+        fullWidth: prefixWidths.at(-1) || 0,
+        prefixWidths: Object.freeze(prefixWidths),
+        ellipsisWidth: cache.ellipsisWidth,
+        height: Math.max(1, box.height)
+      });
+      cache.labels.set(label, measurement);
+      evictOldCategoricalMeasurements(cache.labels);
+      return measurement;
+    });
+  } finally {
+    layer.remove();
   }
+}
+
+function categoricalMeasurementCache(svg, probe) {
+  const fontSignature = categoricalFontSignature(probe);
+  const current = categoricalMeasurementCaches.get(svg);
+  if (current && current.fontSignature === fontSignature) return current;
+  const cache = {
+    fontSignature,
+    ellipsisWidth: null,
+    labels: new Map()
+  };
+  categoricalMeasurementCaches.set(svg, cache);
+  return cache;
+}
+
+function categoricalFontSignature(probe) {
+  const style = window.getComputedStyle(probe);
+  return JSON.stringify(CATEGORICAL_FONT_PROPERTIES.map(
+    (property) => [property, style.getPropertyValue(property)]
+  ));
+}
+
+function evictOldCategoricalMeasurements(cache) {
+  while (cache.size > CATEGORICAL_MEASUREMENT_CACHE_LIMIT) {
+    cache.delete(cache.keys().next().value);
+  }
+}
+
+function measureText(probe, value) {
+  probe.textContent = value;
+  return probe.getComputedTextLength();
+}
+
+function continuousXTicks(xMin, xMax) {
   return ticks(xMin, xMax, 6).map((value) => ({ value, label: fmt(value) }));
 }
 
