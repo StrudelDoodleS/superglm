@@ -3494,6 +3494,25 @@ def test_widget_structural_mutations_advance_chart_generation_once(editor_model)
     ] == [0, 1, 2, 2, 3, 4]
 
 
+def test_widget_final_ungroup_keeps_collapse_metadata_history_aligned(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    try:
+        widget._select("region", [1, 2])
+        widget._collapse_levels("region", method="fit")
+        widget._select("region", [1, 2])
+
+        state = widget._ungroup_levels("region", method="fit")["state"]
+    finally:
+        widget.close()
+
+    assert session.collapse_history == []
+    assert widget._collapse_info_history == []
+    assert widget._in_force_info is None
+    assert state["can_uncollapse_levels"] is False
+    assert state["last_collapse"] is None
+
+
 def test_widget_composite_selection_serializes_state_once(editor_model, monkeypatch):
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     widget = session.widget()
@@ -4788,6 +4807,32 @@ def test_widget_http_reports_are_display_only_evidence_surfaces(editor_model, ed
         ]
     finally:
         widget.close()
+
+
+def test_final_report_summary_uses_training_fit_statistics_after_edits(
+    editor_model,
+    editor_frame,
+):
+    X, y = editor_frame
+    train_X = X.iloc[:37].copy()
+    train_y = y[:37].copy()
+    validation_X = X.iloc[-29:].copy()
+    validation_y = y[-29:].copy()
+    session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline"],
+        train_data=(train_X, train_y),
+        validation_data=(validation_X, validation_y),
+    )
+    session.select_indices("x_spline", [4, 5, 6])
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    try:
+        final = widget._report("final")
+    finally:
+        widget.close()
+
+    assert final["summary"]["compact"]["model"]["n_obs"] == len(train_X)
 
 
 def test_widget_http_report_sanitizes_non_finite_cv_values(editor_model, editor_frame):

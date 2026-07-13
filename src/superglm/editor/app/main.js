@@ -826,11 +826,16 @@ function renderHistoryState({ history }) {
 
 function selectAppBarRenderState(state) {
   const snapshot = state.remote.snapshot;
+  const selectedTerm = snapshot?.selected_term;
   return {
     ready: snapshot !== null,
     activeView: state.view.activeView,
-    canUndo: Boolean(snapshot?.history.active.length),
-    canRedo: Boolean(snapshot?.history.redo.length)
+    canUndo: Boolean(
+      selectedTerm && snapshot?.history.active.some((record) => record.term === selectedTerm)
+    ),
+    canRedo: Boolean(
+      selectedTerm && snapshot?.history.redo.some((record) => record.term === selectedTerm)
+    )
   };
 }
 

@@ -556,6 +556,17 @@ class EditorWidget:
                     request_sequence=request_sequence,
                 )
 
+        summary_model = edited_model
+        if report == "final" and self.session.edited_terms():
+            fit_dataset = training_export_dataset(self.session)
+            metrics_dataset = default_metrics_dataset(self.session)
+            if fit_dataset is not None and (
+                metrics_dataset is None or fit_dataset.name != metrics_dataset.name
+            ):
+                summary_model, summary_revision = self._model_materialized_for_dataset(fit_dataset)
+                if summary_model is None or summary_revision != revision:
+                    return _superseded_payload(summary_revision, request_sequence)
+
         metric_pairs: dict[str, tuple[dict[str, float], dict[str, float]]] = {}
         for eval_dataset in datasets:
             original = self._dataset_metrics_for_evidence(
@@ -576,7 +587,7 @@ class EditorWidget:
             splits=splits,
             model_revision=revision,
             request_sequence=request_sequence,
-            model_override=edited_model,
+            model_override=summary_model,
             collapse_info_override=collapse_info,
         )
         with self._lock:
@@ -929,13 +940,21 @@ class EditorWidget:
             selected_indices = self.session.selection(target).astype(int).tolist()
             selected_levels = self._selected_level_labels(target)
             previous_info = None if self._in_force_info is None else dict(self._in_force_info)
+            previous_history_depth = len(self.session.collapse_history)
             fit_start = time.perf_counter()
             refit_model = self.session.replace_with_ungrouped_levels(target, method=method)
             fit_end = time.perf_counter()
-            self._collapse_info_history.append(previous_info)
+            current_history_depth = len(self.session.collapse_history)
+            if current_history_depth > previous_history_depth:
+                self._collapse_info_history.append(previous_info)
+            elif current_history_depth < previous_history_depth:
+                del self._collapse_info_history[current_history_depth:]
             self._collapsed_refit_model = refit_model
-            self._collapsed_refit_info = dict(getattr(refit_model, "_editor_level_collapse", {}))
-            self._in_force_info = dict(self._collapsed_refit_info)
+            refit_info = getattr(refit_model, "_editor_level_collapse", None)
+            self._collapsed_refit_info = None if not refit_info else dict(refit_info)
+            self._in_force_info = (
+                None if self._collapsed_refit_info is None else dict(self._collapsed_refit_info)
+            )
             self._invalidate_refit()
             self._restore_selection(target, selected_levels, selected_indices)
             self._chart_generation += 1

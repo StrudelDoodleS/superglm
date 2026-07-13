@@ -1183,6 +1183,46 @@ def test_application_bar_exposes_views_undo_redo_and_export(open_editor_page):
         page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
 
 
+def test_application_bar_history_actions_follow_the_selected_term(open_editor_page):
+    with open_editor_page(selected_term="curve") as (page, _session):
+        select_chart_tool(page, "Select")
+        page.locator('button[data-op="select_all"]').click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+        page.get_by_role("button", name="Increase selection").click()
+        page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
+
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/term")
+            )
+        ):
+            page.locator("#term").select_option("territory")
+        page.wait_for_function("() => document.querySelector('#undoAction').disabled")
+        assert page.get_by_role("button", name="Undo edit").is_disabled()
+
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/term")
+            )
+        ):
+            page.locator("#term").select_option("curve")
+        page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
+        page.get_by_role("button", name="Undo edit").click()
+        page.wait_for_function("() => !document.querySelector('#redoAction').disabled")
+
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/term")
+            )
+        ):
+            page.locator("#term").select_option("territory")
+        page.wait_for_function("() => document.querySelector('#redoAction').disabled")
+        assert page.get_by_role("button", name="Redo edit").is_disabled()
+
+
 def test_analyst_can_discover_edit_undo_redo_help_and_export(open_editor_page):
     with open_editor_page() as (page, _session):
         select_chart_tool(page, "Select")
