@@ -2155,6 +2155,16 @@ _TRACE_COLUMNS = [
     "source",
     "fit_trace",
     "fit_trace_kind",
+    "edf",
+    "phi_converged",
+    "phi_n_evaluations",
+    "phi_boundary",
+    "phi_optimizer",
+    "objective_finite",
+    "n_saddlepoint",
+    "n_positive",
+    "saddlepoint_fraction",
+    "phi_used_fallback",
 ]
 _SADDLEPOINT_NOTE_THRESHOLD = 0.10
 _SADDLEPOINT_WARN_THRESHOLD = 0.25
@@ -2362,32 +2372,108 @@ def _build_saddlepoint_messages(p: float, diagnostics: _TweedieLogpdfDiagnostics
     return [message]
 
 
-def _fit_iteration_trace(iteration_log) -> list[dict[str, float | int]]:
-    """Convert solver diagnostics into a compact frontend learning curve."""
+def _fit_iteration_trace(iteration_log) -> tuple[tuple[int, float], ...]:
+    """Freeze solver diagnostics into a compact frontend learning curve."""
     if not iteration_log:
-        return []
-    return [
-        {
-            "iteration": int(row.iteration),
-            "loss": float(row.deviance),
-        }
-        for row in iteration_log
-    ]
+        return ()
+    return tuple((int(row.iteration), float(row.deviance)) for row in iteration_log)
 
 
-def _reml_iteration_trace(reml_result) -> list[dict[str, float | int]]:
-    """Convert REML objective history into the same compact curve shape."""
+def _reml_iteration_trace(reml_result) -> tuple[tuple[int, float], ...]:
+    """Freeze REML objective history into the same compact curve shape."""
     history = getattr(reml_result, "objective_history", None)
     if not history:
-        return []
-    return [
-        {
-            "iteration": int(i),
-            "loss": float(value),
-        }
-        for i, value in enumerate(history)
-        if np.isfinite(value)
-    ]
+        return ()
+    return tuple((int(i), float(value)) for i, value in enumerate(history) if np.isfinite(value))
+
+
+@dataclass(frozen=True)
+class _ProfileEvaluation:
+    """One complete, immutable fixed-p profile evaluation."""
+
+    step: int
+    p: float
+    mu: NDArray
+    edf: float
+    n_iter: int
+    fit_converged: bool
+    source: str
+    fit_trace: tuple[tuple[int, float], ...]
+    fit_trace_kind: str
+    phi_result: _PhiProfileResult
+
+    @property
+    def phi(self) -> float:
+        """Profiled dispersion from the authoritative inner result."""
+        return self.phi_result.phi
+
+    @property
+    def nll(self) -> float:
+        """Mean NLL from the authoritative inner result."""
+        return self.phi_result.nll
+
+
+def _owned_readonly_array(values: NDArray) -> NDArray:
+    """Copy an array into owning read-only storage for a cached record."""
+    owned = np.array(values, dtype=np.float64, copy=True)
+    owned.setflags(write=False)
+    return owned
+
+
+def _phi_boundary_label(result: _PhiProfileResult) -> str:
+    """Return a compact trace label for an inner dispersion boundary."""
+    if result.lower_boundary and result.upper_boundary:
+        return "both"
+    if result.lower_boundary:
+        return "lower"
+    if result.upper_boundary:
+        return "upper"
+    return ""
+
+
+def _materialize_profile_trace_row(record: _ProfileEvaluation) -> dict[str, Any]:
+    """Build a fresh mutable public/callback payload from an immutable record."""
+    phi_result = record.phi_result
+    diagnostics = phi_result.diagnostics
+    return {
+        "step": record.step,
+        "p": record.p,
+        "phi": record.phi,
+        "nll": record.nll,
+        "n_iter": record.n_iter,
+        "fit_converged": record.fit_converged,
+        "source": record.source,
+        "fit_trace": [
+            {"iteration": iteration, "loss": loss} for iteration, loss in record.fit_trace
+        ],
+        "fit_trace_kind": record.fit_trace_kind,
+        "edf": record.edf,
+        "phi_converged": phi_result.converged,
+        "phi_n_evaluations": phi_result.n_evaluations,
+        "phi_boundary": _phi_boundary_label(phi_result),
+        "phi_optimizer": phi_result.optimizer,
+        "objective_finite": phi_result.objective_finite,
+        "n_saddlepoint": diagnostics.n_saddlepoint,
+        "n_positive": diagnostics.n_positive,
+        "saddlepoint_fraction": diagnostics.saddlepoint_fraction,
+        "phi_used_fallback": phi_result.used_fallback,
+    }
+
+
+def _profile_trace_frame(
+    evaluation_cache: dict[float, _ProfileEvaluation],
+) -> pd.DataFrame:
+    """Materialize the immutable cache as a fresh search-trace DataFrame."""
+    rows = [_materialize_profile_trace_row(record) for record in evaluation_cache.values()]
+    return pd.DataFrame(rows, columns=_TRACE_COLUMNS)
+
+
+def _previous_finite_phi(evaluation_cache: dict[float, _ProfileEvaluation]) -> float | None:
+    """Return the most recently evaluated finite positive dispersion."""
+    for record in reversed(tuple(evaluation_cache.values())):
+        if np.isfinite(record.phi) and record.phi > 0.0:
+            return record.phi
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2422,14 +2508,14 @@ class _ProfileContext:
     # Mutable warm-start state
     warm_beta: NDArray | None = field(default=None, repr=False)
     warm_intercept: float | None = field(default=None, repr=False)
-    last_p_eval: float | None = field(default=None, repr=False)
-    last_mu: NDArray | None = field(default=None, repr=False)
-    last_edf: float | None = field(default=None, repr=False)
 
-    # Trace accumulator
-    trace_rows: list[dict] = field(default_factory=list, repr=False)
-    _nll_cache: dict[float, float] = field(default_factory=dict, repr=False)
-    n_evals: int = field(default=0, repr=False)
+    # Complete candidate cache; insertion order is the immutable search trace.
+    _evaluation_cache: dict[float, _ProfileEvaluation] = field(default_factory=dict, repr=False)
+
+    @property
+    def n_evals(self) -> int:
+        """Number of distinct fixed-p evaluations retained by this context."""
+        return len(self._evaluation_cache)
 
     def evaluate(self, p: float, source: str = "") -> float:
         """Fit at p, profile phi, record trace row, return mean NLL."""
@@ -2438,8 +2524,8 @@ class _ProfileContext:
         from superglm.distributions import Tweedie
 
         key = round(p, 12)
-        if key in self._nll_cache:
-            return self._nll_cache[key]
+        if key in self._evaluation_cache:
+            return self._evaluation_cache[key].nll
 
         _t0 = _time.perf_counter()
         dist = Tweedie(p)
@@ -2479,91 +2565,64 @@ class _ProfileContext:
         mu = clip_mu(self.link.inverse(eta), dist)
         df_resid = max(float(len(self.y_arr)) - float(result.effective_df), 1.0)
 
-        phi, nll = _profile_phi(
+        phi_result = _profile_phi_detailed(
             self.y_arr,
             mu,
             p,
             weights=self.w_arr,
             df_resid=df_resid,
             phi_method=self.phi_method,
+            phi_start=_previous_finite_phi(self._evaluation_cache),
         )
+
+        record = _ProfileEvaluation(
+            step=self.n_evals,
+            p=float(p),
+            mu=_owned_readonly_array(mu),
+            edf=float(result.effective_df),
+            n_iter=int(result.n_iter),
+            fit_converged=bool(result.converged),
+            source=source,
+            fit_trace=(_fit_iteration_trace(result.iteration_log) if self.trace_iterations else ()),
+            fit_trace_kind="weighted deviance" if self.trace_iterations else "",
+            phi_result=phi_result,
+        )
+        self._evaluation_cache[key] = record
 
         # Update warm starts
         self.warm_beta = result.beta
         self.warm_intercept = result.intercept
-        self.last_p_eval = p
-        self.last_mu = mu
-        self.last_edf = float(result.effective_df)
 
-        # Record trace
-        row = {
-            "step": self.n_evals,
-            "p": p,
-            "phi": phi,
-            "nll": nll,
-            "n_iter": result.n_iter,
-            "fit_converged": result.converged,
-            "source": source,
-            "fit_trace": _fit_iteration_trace(result.iteration_log),
-            "fit_trace_kind": "weighted deviance" if self.trace_iterations else "",
-        }
-        self.trace_rows.append(row)
         if self.trace_callback is not None and source:
-            self.trace_callback(dict(row))
-        self._nll_cache[key] = nll
-        self.n_evals += 1
+            self.trace_callback(_materialize_profile_trace_row(record))
         _elapsed = _time.perf_counter() - _t0
 
         logger.info(
-            f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  phi={phi:.4f}  "
-            f"nll={nll:.4f}  iters={result.n_iter}  {_elapsed:.2f}s"
+            f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  phi={record.phi:.4f}  "
+            f"nll={record.nll:.4f}  iters={result.n_iter}  {_elapsed:.2f}s"
         )
         if self.verbose:
             print(
-                f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  iters={result.n_iter}  {_elapsed:.2f}s"
+                f"  p={p:.4f}  phi={record.phi:.4f}  nll={record.nll:.4f}  "
+                f"iters={result.n_iter}  {_elapsed:.2f}s"
             )
 
-        return nll
+        return record.nll
 
     def finalize(self, p_hat: float, method: str, converged: bool) -> TweedieProfileResult:
         """Build result with final phi at p_hat and search_trace DataFrame."""
-        p_hat = round(p_hat, 12)
-        nll = self._nll_cache.get(p_hat, self.evaluate(p_hat, source="final"))
-
-        # Get phi at p_hat
-        if self.last_p_eval is not None and round(self.last_p_eval, 12) == p_hat:
-            mu_final = self.last_mu
-            edf_final = self.last_edf
-        else:
-            # One final fit at p_hat
+        key = round(p_hat, 12)
+        if key not in self._evaluation_cache:
             self.evaluate(p_hat, source="final")
-            mu_final = self.last_mu
-            edf_final = self.last_edf
-
-        df_resid_final = max(float(len(self.y_arr)) - float(edf_final), 1.0)
-        phi_hat, _ = _profile_phi(
-            self.y_arr,
-            mu_final,
-            p_hat,
-            weights=self.w_arr,
-            df_resid=df_resid_final,
-            phi_method=self.phi_method,
-        )
-        _, diagnostics = _tweedie_logpdf_impl(
-            self.y_arr,
-            mu_final,
-            phi_hat,
-            p_hat,
-            weights=self.w_arr,
-        )
-        warnings_list = _build_saddlepoint_messages(p_hat, diagnostics)
-
-        trace = pd.DataFrame(self.trace_rows, columns=_TRACE_COLUMNS)
+        record = self._evaluation_cache[key]
+        diagnostics = record.phi_result.diagnostics
+        warnings_list = _build_saddlepoint_messages(record.p, diagnostics)
+        trace = _profile_trace_frame(self._evaluation_cache)
 
         return TweedieProfileResult(
-            p_hat=p_hat,
-            phi_hat=phi_hat,
-            nll=nll,
+            p_hat=record.p,
+            phi_hat=record.phi,
+            nll=record.nll,
             n_evaluations=self.n_evals,
             converged=converged,
             method=method,
@@ -2662,15 +2721,13 @@ class _ProfileContextREML:
     trace_callback: Any = field(default=None, repr=False)
     trace_iterations: bool = False
 
-    # Mutable state
-    last_p_eval: float | None = field(default=None, repr=False)
-    last_mu: NDArray | None = field(default=None, repr=False)
-    last_edf: float | None = field(default=None, repr=False)
+    # Complete candidate cache; insertion order is the immutable search trace.
+    _evaluation_cache: dict[float, _ProfileEvaluation] = field(default_factory=dict, repr=False)
 
-    # Trace accumulator
-    trace_rows: list[dict] = field(default_factory=list, repr=False)
-    _nll_cache: dict[float, float] = field(default_factory=dict, repr=False)
-    n_evals: int = field(default=0, repr=False)
+    @property
+    def n_evals(self) -> int:
+        """Number of distinct fixed-p evaluations retained by this context."""
+        return len(self._evaluation_cache)
 
     def evaluate(self, p: float, source: str = "") -> float:
         """Fit REML at p, profile phi, record trace row, return mean NLL."""
@@ -2679,8 +2736,8 @@ class _ProfileContextREML:
         from superglm.distributions import Tweedie
 
         key = round(p, 12)
-        if key in self._nll_cache:
-            return self._nll_cache[key]
+        if key in self._evaluation_cache:
+            return self._evaluation_cache[key].nll
 
         _t0 = _time.perf_counter()
         self.model.family = Tweedie(p=p)
@@ -2688,18 +2745,15 @@ class _ProfileContextREML:
 
         mu = np.maximum(self.model.predict(self.X), 1e-10)
         df_resid = max(float(len(self.y)) - float(self.model.result.effective_df), 1.0)
-        phi, nll = _profile_phi(
+        phi_result = _profile_phi_detailed(
             self.y,
             mu,
             p,
             weights=self.w_arr,
             df_resid=df_resid,
             phi_method=self.phi_method,
+            phi_start=_previous_finite_phi(self._evaluation_cache),
         )
-
-        self.last_p_eval = p
-        self.last_mu = mu
-        self.last_edf = float(self.model.result.effective_df)
 
         n_iter = (
             self.model._reml_result.n_reml_iter
@@ -2707,73 +2761,54 @@ class _ProfileContextREML:
             else 0
         )
 
-        row = {
-            "step": self.n_evals,
-            "p": p,
-            "phi": phi,
-            "nll": nll,
-            "n_iter": n_iter,
-            "fit_converged": self.model.result.converged,
-            "source": source,
-            "fit_trace": (
+        record = _ProfileEvaluation(
+            step=self.n_evals,
+            p=float(p),
+            mu=_owned_readonly_array(mu),
+            edf=float(self.model.result.effective_df),
+            n_iter=int(n_iter),
+            fit_converged=bool(self.model.result.converged),
+            source=source,
+            fit_trace=(
                 _reml_iteration_trace(getattr(self.model, "_reml_result", None))
                 if self.trace_iterations
-                else []
+                else ()
             ),
-            "fit_trace_kind": "REML objective" if self.trace_iterations else "",
-        }
-        self.trace_rows.append(row)
+            fit_trace_kind="REML objective" if self.trace_iterations else "",
+            phi_result=phi_result,
+        )
+        self._evaluation_cache[key] = record
+
         if self.trace_callback is not None and source:
-            self.trace_callback(dict(row))
-        self._nll_cache[key] = nll
-        self.n_evals += 1
+            self.trace_callback(_materialize_profile_trace_row(record))
         _elapsed = _time.perf_counter() - _t0
 
         logger.info(
-            f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  phi={phi:.4f}  "
-            f"nll={nll:.4f}  reml_iters={n_iter}  {_elapsed:.2f}s"
+            f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  phi={record.phi:.4f}  "
+            f"nll={record.nll:.4f}  reml_iters={n_iter}  {_elapsed:.2f}s"
         )
         if self.verbose:
             print(
-                f"  p={p:.4f}  phi={phi:.4f}  nll={nll:.4f}  reml_iters={n_iter}  {_elapsed:.2f}s"
+                f"  p={p:.4f}  phi={record.phi:.4f}  nll={record.nll:.4f}  "
+                f"reml_iters={n_iter}  {_elapsed:.2f}s"
             )
 
-        return nll
+        return record.nll
 
     def finalize(self, p_hat: float, method: str, converged: bool) -> TweedieProfileResult:
         """Build result with final phi at p_hat and search_trace DataFrame."""
-        p_hat = round(p_hat, 12)
-
-        # Ensure we have mu at p_hat
-        if self.last_p_eval is None or round(self.last_p_eval, 12) != p_hat:
+        key = round(p_hat, 12)
+        if key not in self._evaluation_cache:
             self.evaluate(p_hat, source="final")
-
-        nll = self._nll_cache[p_hat]
-
-        df_resid_final = max(float(len(self.y)) - float(self.last_edf), 1.0)
-        phi_hat, _ = _profile_phi(
-            self.y,
-            self.last_mu,
-            p_hat,
-            weights=self.w_arr,
-            df_resid=df_resid_final,
-            phi_method=self.phi_method,
-        )
-        _, diagnostics = _tweedie_logpdf_impl(
-            self.y,
-            self.last_mu,
-            phi_hat,
-            p_hat,
-            weights=self.w_arr,
-        )
-        warnings_list = _build_saddlepoint_messages(p_hat, diagnostics)
-
-        trace = pd.DataFrame(self.trace_rows, columns=_TRACE_COLUMNS)
+        record = self._evaluation_cache[key]
+        diagnostics = record.phi_result.diagnostics
+        warnings_list = _build_saddlepoint_messages(record.p, diagnostics)
+        trace = _profile_trace_frame(self._evaluation_cache)
 
         return TweedieProfileResult(
-            p_hat=p_hat,
-            phi_hat=phi_hat,
-            nll=nll,
+            p_hat=record.p,
+            phi_hat=record.phi,
+            nll=record.nll,
             n_evaluations=self.n_evals,
             converged=converged,
             method=method,

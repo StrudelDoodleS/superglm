@@ -2,6 +2,7 @@
 
 import warnings
 from dataclasses import FrozenInstanceError, replace
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -14,6 +15,7 @@ from superglm import SuperGLM
 from superglm.distributions import Tweedie as TweedieDistribution
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
+from superglm.links import LogLink
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.profiling.tweedie import (
     TweedieProfileResult,
@@ -2508,6 +2510,257 @@ class TestEstimatePFitMode:
 # =====================================================================
 # Search methods
 # =====================================================================
+
+
+class TestImmutableProfileEvaluations:
+    """Finalization must use the complete cached winning candidate."""
+
+    _CANDIDATES = {
+        1.2: {
+            "mu": 2.0,
+            "edf": 0.2,
+            "n_iter": 12,
+            "fit_converged": True,
+            "phi": 12.0,
+            "nll": 2.0,
+            "phi_converged": True,
+            "phi_evaluations": 21,
+            "phi_optimizer": "brentq",
+            "phi_boundary": "",
+            "phi_used_fallback": False,
+            "n_positive": 10,
+            "n_saddlepoint": 1,
+        },
+        1.5: {
+            "mu": 5.0,
+            "edf": 1.5,
+            "n_iter": 15,
+            "fit_converged": False,
+            "phi": 15.0,
+            "nll": 0.5,
+            "phi_converged": False,
+            "phi_evaluations": 51,
+            "phi_optimizer": "bounded",
+            "phi_boundary": "upper",
+            "phi_used_fallback": True,
+            "n_positive": 10,
+            "n_saddlepoint": 2,
+        },
+        1.8: {
+            "mu": 8.0,
+            "edf": 1.8,
+            "n_iter": 18,
+            "fit_converged": True,
+            "phi": 18.0,
+            "nll": 1.8,
+            "phi_converged": True,
+            "phi_evaluations": 81,
+            "phi_optimizer": "brentq",
+            "phi_boundary": "lower",
+            "phi_used_fallback": False,
+            "n_positive": 10,
+            "n_saddlepoint": 8,
+        },
+    }
+
+    @classmethod
+    def _phi_result(cls, p):
+        values = cls._CANDIDATES[round(float(p), 1)]
+        return tweedie_module._PhiProfileResult(
+            phi=values["phi"],
+            nll=values["nll"],
+            converged=values["phi_converged"],
+            objective_finite=True,
+            n_evaluations=values["phi_evaluations"],
+            n_score_evaluations=values["phi_evaluations"] - 3,
+            n_value_only_evaluations=3,
+            n_fallback_evaluations=3 if values["phi_used_fallback"] else 0,
+            optimizer=values["phi_optimizer"],
+            score=0.0,
+            used_fallback=values["phi_used_fallback"],
+            fallback_reason="forced fixture" if values["phi_used_fallback"] else None,
+            branch_switch_detected=values["phi_used_fallback"],
+            lower_boundary=values["phi_boundary"] == "lower",
+            upper_boundary=values["phi_boundary"] == "upper",
+            diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                n_positive=values["n_positive"],
+                n_saddlepoint=values["n_saddlepoint"],
+            ),
+            message=f"phi profile at p={p}",
+        )
+
+    @staticmethod
+    def _mutating_callback(rows):
+        def callback(row):
+            rows.append(row)
+            row["phi"] = -999.0
+            if row["fit_trace"]:
+                row["fit_trace"][0]["loss"] = -999.0
+
+        return callback
+
+    @classmethod
+    def _assert_winning_result(cls, ctx, result, callback_rows, fit_calls, phi_calls):
+        winner = cls._CANDIDATES[1.5]
+        assert result.p_hat == pytest.approx(1.5)
+        assert result.phi_hat == pytest.approx(winner["phi"])
+        assert result.nll == pytest.approx(winner["nll"])
+        assert result.n_evaluations == len(result.search_trace) == 3
+        assert fit_calls == [1.2, 1.5, 1.8]
+        assert [call[0] for call in phi_calls] == [1.2, 1.5, 1.8]
+        assert [call[1] for call in phi_calls] == [None, 12.0, 15.0]
+
+        winning_row = result.search_trace.loc[result.search_trace["p"] == 1.5].iloc[0]
+        assert winning_row["edf"] == pytest.approx(winner["edf"])
+        assert not bool(winning_row["fit_converged"])
+        assert not bool(winning_row["phi_converged"])
+        assert winning_row["phi_n_evaluations"] == winner["phi_evaluations"]
+        assert winning_row["phi_boundary"] == winner["phi_boundary"]
+        assert winning_row["phi_optimizer"] == winner["phi_optimizer"]
+        assert bool(winning_row["objective_finite"])
+        assert bool(winning_row["phi_used_fallback"])
+        assert winning_row["n_positive"] == winner["n_positive"]
+        assert winning_row["n_saddlepoint"] == winner["n_saddlepoint"]
+        assert winning_row["saddlepoint_fraction"] == pytest.approx(0.2)
+        assert winning_row["fit_trace"][0]["loss"] != -999.0
+        assert callback_rows[1]["phi"] == -999.0
+
+        assert result.n_positive == winner["n_positive"]
+        assert result.n_saddlepoint == winner["n_saddlepoint"]
+        assert result.saddlepoint_fraction == pytest.approx(0.2)
+
+        record = ctx._evaluation_cache[1.5]
+        assert record.p == pytest.approx(1.5)
+        assert isinstance(record.phi_result, tweedie_module._PhiProfileResult)
+        assert record.phi == pytest.approx(winner["phi"])
+        assert record.nll == pytest.approx(winner["nll"])
+        assert record.mu.flags.owndata
+        assert not record.mu.flags.writeable
+        np.testing.assert_allclose(record.mu, winner["mu"])
+        with pytest.raises(FrozenInstanceError):
+            record.edf = -1.0
+
+    def test_fit_context_finalizes_cached_winner_without_extra_work(self, monkeypatch):
+        y = np.array([0.0, 1.0, 2.0, 3.0])
+        fit_calls = []
+        phi_calls = []
+        callback_rows = []
+
+        def fake_fit_irls_direct(**kwargs):
+            p = round(float(kwargs["family"].p), 1)
+            fit_calls.append(p)
+            values = self._CANDIDATES[p]
+            mu = np.full(len(y), values["mu"])
+            result = SimpleNamespace(
+                beta=np.log(mu),
+                intercept=0.0,
+                effective_df=values["edf"],
+                n_iter=values["n_iter"],
+                converged=values["fit_converged"],
+                iteration_log=[SimpleNamespace(iteration=values["n_iter"], deviance=100.0 * p)],
+            )
+            return result, None
+
+        def fake_profile_phi(y_arg, mu, p, **kwargs):
+            p = round(float(p), 1)
+            values = self._CANDIDATES[p]
+            np.testing.assert_allclose(mu, values["mu"])
+            phi_calls.append((p, kwargs.get("phi_start", "missing")))
+            return self._phi_result(p)
+
+        monkeypatch.setattr(tweedie_module, "fit_irls_direct", fake_fit_irls_direct)
+        monkeypatch.setattr(tweedie_module, "_profile_phi_detailed", fake_profile_phi)
+
+        ctx = tweedie_module._ProfileContext(
+            y_arr=y,
+            w_arr=np.ones(len(y)),
+            offset_arr=np.zeros(len(y)),
+            dm=SimpleNamespace(matvec=lambda beta: beta),
+            groups=[],
+            link=LogLink(),
+            penalty=None,
+            use_direct=True,
+            lambda2=None,
+            direct_solve="auto",
+            phi_method="mle",
+            verbose=False,
+            ll_scale=float(len(y)),
+            trace_callback=self._mutating_callback(callback_rows),
+            trace_iterations=True,
+        )
+        for p in (1.2, 1.5, 1.8):
+            ctx.evaluate(p, source="grid")
+
+        def fail_extra_work(*args, **kwargs):
+            raise AssertionError("finalization performed extra fit/profile/density work")
+
+        ctx.evaluate = fail_extra_work
+        monkeypatch.setattr(tweedie_module, "_tweedie_logpdf_impl", fail_extra_work)
+        result = ctx.finalize(1.5, method="grid", converged=True)
+
+        self._assert_winning_result(ctx, result, callback_rows, fit_calls, phi_calls)
+
+    def test_reml_context_finalizes_cached_winner_without_extra_work(self, monkeypatch):
+        y = np.array([0.0, 1.0, 2.0, 3.0])
+        fit_calls = []
+        phi_calls = []
+        callback_rows = []
+        case = self
+
+        class FakeREMLModel:
+            family = None
+            result = None
+            _reml_result = None
+
+            def fit_reml(self, X, y_arg, *, sample_weight=None, offset=None):
+                p = round(float(self.family.p), 1)
+                fit_calls.append(p)
+                values = case._CANDIDATES[p]
+                self._mu = np.full(len(y), values["mu"])
+                self.result = SimpleNamespace(
+                    effective_df=values["edf"],
+                    converged=values["fit_converged"],
+                )
+                self._reml_result = SimpleNamespace(
+                    n_reml_iter=values["n_iter"],
+                    objective_history=[100.0 * p, 10.0 * p],
+                )
+
+            def predict(self, X):
+                return self._mu
+
+        def fake_profile_phi(y_arg, mu, p, **kwargs):
+            p = round(float(p), 1)
+            values = self._CANDIDATES[p]
+            np.testing.assert_allclose(mu, values["mu"])
+            phi_calls.append((p, kwargs.get("phi_start", "missing")))
+            return self._phi_result(p)
+
+        monkeypatch.setattr(tweedie_module, "_profile_phi_detailed", fake_profile_phi)
+        ctx = tweedie_module._ProfileContextREML(
+            model=FakeREMLModel(),
+            X=np.ones((len(y), 1)),
+            y=y,
+            sample_weight=None,
+            offset=None,
+            w_arr=np.ones(len(y)),
+            phi_method="mle",
+            verbose=False,
+            ll_scale=float(len(y)),
+            trace_callback=self._mutating_callback(callback_rows),
+            trace_iterations=True,
+        )
+        for p in (1.2, 1.5, 1.8):
+            ctx.evaluate(p, source="grid")
+
+        def fail_extra_work(*args, **kwargs):
+            raise AssertionError("finalization performed extra fit/profile/density work")
+
+        ctx.evaluate = fail_extra_work
+        monkeypatch.setattr(tweedie_module, "_tweedie_logpdf_impl", fail_extra_work)
+        result = ctx.finalize(1.5, method="grid", converged=True)
+
+        self._assert_winning_result(ctx, result, callback_rows, fit_calls, phi_calls)
 
 
 class TestSearchMethods:
