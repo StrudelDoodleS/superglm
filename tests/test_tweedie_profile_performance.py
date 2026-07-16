@@ -63,7 +63,7 @@ def _routine_exact_fixture() -> _PhiFixture:
 
 
 def _large_routine_exact_fixture() -> _PhiFixture:
-    """A representative-size exact profile with the routine objective shape."""
+    """A size-scaled exact profile for per-observation density-cost characterization."""
     base = _routine_exact_fixture()
     return _PhiFixture(
         name="routine-exact-n3000",
@@ -74,9 +74,9 @@ def _large_routine_exact_fixture() -> _PhiFixture:
 
 
 def _difficult_branch_fixture() -> _PhiFixture:
-    """A deterministic branch-jump case requiring the global safeguard."""
+    """A deterministic branch-jump case that exercises fallback provenance."""
     return _PhiFixture(
-        name="difficult-global-safeguard",
+        name="difficult-branch-fallback",
         p=1.0181533410437358,
         y=np.array([1.81787899, 11275.9262, 0.0, 0.00306563885, 0.0000232882792, 1.18207511]),
         mu=np.array(
@@ -219,7 +219,6 @@ def test_generator_cpg_moments_and_zero_mass_match_compound_poisson_formulas():
     np.testing.assert_allclose(np.mean(y == 0.0), expected_zero_mass, atol=0.015)
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize(
     ("p", "phi", "seed"),
     [
@@ -368,7 +367,7 @@ def run_tweedie_phi_profile_benchmark(*, repeats: int = 5) -> list[dict[str, obj
 
 
 def run_large_routine_phi_profile_benchmark(*, repeats: int = 3) -> dict[str, object]:
-    """Characterize representative-size exact-branch profile timing."""
+    """Characterize exact-branch density cost at a size-scaled n=3000."""
     return _benchmark_fixture(_large_routine_exact_fixture(), repeats=repeats)
 
 
@@ -402,7 +401,7 @@ def test_tweedie_phi_profile_benchmark_report():
     assert routine["saddle_fraction"] == 0.0
     assert routine["density_passes"] < routine["reference_density_passes"]
     assert routine["nll"] == pytest.approx(routine["reference_nll"], abs=1e-10)
-    assert difficult["fixture"] == "difficult-global-safeguard"
+    assert difficult["fixture"] == "difficult-branch-fallback"
     assert difficult["used_fallback"] is True
     assert difficult["fallback_count"] > 0
     assert difficult["saddle_fraction"] >= 0.0
@@ -411,7 +410,7 @@ def test_tweedie_phi_profile_benchmark_report():
 
 @pytest.mark.slow
 def test_large_routine_phi_profile_timing_characterization():
-    """Report representative-size medians without asserting a wall-clock winner."""
+    """Report size-scaled density-cost medians without asserting a wall-clock winner."""
     row = run_large_routine_phi_profile_benchmark(repeats=3)
 
     print(

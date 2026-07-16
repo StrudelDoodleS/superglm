@@ -2022,6 +2022,8 @@ class TestProfileLikelihood:
         )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
         np.testing.assert_allclose(result.phi_hat, phi_true, rtol=0.2)
+        assert result.converged
+        assert not result.phi_used_fallback
         assert result.density_exact
         assert result.n_saddlepoint == 0
 
@@ -2863,6 +2865,8 @@ class TestEstimatePFitMode:
         assert isinstance(result, TweedieProfileResult)
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.25)
         np.testing.assert_allclose(result.phi_hat, 3.0, rtol=0.20)
+        assert result.converged
+        assert not result.phi_used_fallback
         winning_row = result.search_trace.iloc[result.search_trace["nll"].to_numpy().argmin()]
         assert winning_row["p"] == pytest.approx(result.p_hat)
         assert winning_row["edf"] == pytest.approx(model.result.effective_df, rel=1e-8, abs=1e-8)
