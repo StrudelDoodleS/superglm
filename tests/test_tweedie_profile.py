@@ -2368,6 +2368,20 @@ def _deterministic_profile_result():
     )
 
 
+def _reference_offset_tweedie_null_mu(y, sample_weight, offset, distribution):
+    """Evaluate the closed-form Tweedie log-link intercept-score root."""
+    y_arr = np.asarray(y, dtype=np.float64)
+    weights = np.asarray(sample_weight, dtype=np.float64)
+    offset_arr = np.asarray(offset, dtype=np.float64)
+    p = float(distribution.p)
+    numerator = np.sum(weights * y_arr * np.exp((1.0 - p) * offset_arr))
+    denominator = np.sum(weights * np.exp((2.0 - p) * offset_arr))
+    intercept = float(np.log(numerator / denominator))
+    link = LogLink()
+    eta = stabilize_eta(intercept + offset_arr, link)
+    return clip_mu(link.inverse(eta), distribution)
+
+
 @pytest.mark.parametrize(
     "function",
     [SuperGLM.estimate_p, profile_ops_module.estimate_p, estimate_tweedie_p],
@@ -2419,6 +2433,13 @@ class TestEstimatePFitMode:
                 return fitted
 
             solver = captured["solver_result"]
+            captured["public_dynamic_metadata"] = object()
+            captured["solver_dynamic_metadata"] = np.array([1.0, 2.0])
+            model.result.profile_sync_metadata = captured["public_dynamic_metadata"]
+            solver.profile_sync_metadata = captured["solver_dynamic_metadata"]
+            if model._reml_result is not None:
+                captured["reml_dynamic_metadata"] = {"future": np.array([3.0, 4.0])}
+                model._reml_result.profile_sync_metadata = captured["reml_dynamic_metadata"]
             eta = model._dm.matvec(solver.beta) + solver.intercept + model._fit_offset
             eta = stabilize_eta(eta, model._link)
             captured["solver_mu"] = clip_mu(model._link.inverse(eta), model._distribution)
@@ -2438,6 +2459,10 @@ class TestEstimatePFitMode:
 
         def release_spy(candidate):
             release_events.append((candidate._retain_fit_state, candidate._tweedie_profile_result))
+            if not candidate._retain_fit_state:
+                captured["pre_release_null_mu"] = candidate._fit_null_mu.copy()
+                captured["pre_release_fit_stats"] = candidate._fit_stats
+                captured["pre_release_summary"] = candidate.summary()
             return real_release(candidate)
 
         monkeypatch.setattr(fit_ops_module, "_maybe_release_fit_state", release_spy)
@@ -2466,6 +2491,11 @@ class TestEstimatePFitMode:
         assert model._solver_pirls_result() is not captured["solver_result"]
         assert model.result.beta is captured["public_result"].beta
         assert model._solver_pirls_result().beta is captured["solver_result"].beta
+        assert model.result.profile_sync_metadata is captured["public_dynamic_metadata"]
+        assert (
+            model._solver_pirls_result().profile_sync_metadata
+            is captured["solver_dynamic_metadata"]
+        )
         assert captured["public_result"].phi != pytest.approx(result.phi_hat)
         assert captured["solver_result"].phi != pytest.approx(result.phi_hat)
 
@@ -2481,6 +2511,7 @@ class TestEstimatePFitMode:
             assert model._reml_result.lambda_history is captured["reml_result"].lambda_history
             assert model._reml_lambdas is captured["reml_lambdas"]
             assert model._reml_penalties is captured["reml_penalties"]
+            assert model._reml_result.profile_sync_metadata is captured["reml_dynamic_metadata"]
         else:
             assert model._reml_result is None
 
@@ -2491,10 +2522,28 @@ class TestEstimatePFitMode:
             y, captured["solver_mu"], sample_weight, result.phi_hat
         )
         assert model._fit_stats.log_likelihood == pytest.approx(expected_ll)
+        reference_null_mu = _reference_offset_tweedie_null_mu(
+            y, sample_weight, offset, model._distribution
+        )
+        expected_null_ll = model._distribution.log_likelihood(
+            y, reference_null_mu, sample_weight, result.phi_hat
+        )
+        expected_null_deviance = float(
+            np.sum(sample_weight * model._distribution.deviance_unit(y, reference_null_mu))
+        )
+        expected_deviance = float(
+            np.sum(sample_weight * model._distribution.deviance_unit(y, captured["solver_mu"]))
+        )
+        expected_explained_deviance = 1.0 - expected_deviance / expected_null_deviance
+        assert model._fit_stats.null_log_likelihood == pytest.approx(expected_null_ll)
+        assert model._fit_stats.null_deviance == pytest.approx(expected_null_deviance)
+        assert model._fit_stats.explained_deviance == pytest.approx(expected_explained_deviance)
 
         if retain_fit_state:
             np.testing.assert_allclose(model._fit_mu, captured["solver_mu"])
-            assert model._fit_null_mu is not None
+            np.testing.assert_allclose(
+                model._fit_null_mu, reference_null_mu, rtol=1e-10, atol=1e-10
+            )
             for cache_name in (
                 "_coef_covariance",
                 "_fit_active_info",
@@ -2507,6 +2556,20 @@ class TestEstimatePFitMode:
             )
             np.testing.assert_allclose(model._coef_covariance[0], expected_covariance)
         else:
+            np.testing.assert_allclose(
+                captured["pre_release_null_mu"], reference_null_mu, rtol=1e-10, atol=1e-10
+            )
+            assert captured["pre_release_fit_stats"] is model._fit_stats
+            pre_release_summary = captured["pre_release_summary"]
+            assert pre_release_summary["information_criteria"][
+                "null_log_likelihood"
+            ] == pytest.approx(expected_null_ll)
+            assert pre_release_summary["deviance"]["null_deviance"] == pytest.approx(
+                expected_null_deviance
+            )
+            assert pre_release_summary["deviance"]["explained_deviance"] == pytest.approx(
+                expected_explained_deviance
+            )
             for released_name in (
                 "_dm",
                 "_fit_weights",
@@ -2531,7 +2594,15 @@ class TestEstimatePFitMode:
         fresh_metrics = model.metrics(X, y, sample_weight=sample_weight, offset=offset)
         assert fresh_metrics is not captured["old_metrics"]
         assert np.isfinite(fresh_metrics.log_likelihood)
-        assert model.summary() is not captured["old_summary"]
+        fresh_summary = model.summary()
+        assert fresh_summary is not captured["old_summary"]
+        assert fresh_summary["information_criteria"]["null_log_likelihood"] == pytest.approx(
+            expected_null_ll
+        )
+        assert fresh_summary["deviance"]["null_deviance"] == pytest.approx(expected_null_deviance)
+        assert fresh_summary["deviance"]["explained_deviance"] == pytest.approx(
+            expected_explained_deviance
+        )
 
     @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
     @pytest.mark.parametrize("retain_fit_state", [True, False])
