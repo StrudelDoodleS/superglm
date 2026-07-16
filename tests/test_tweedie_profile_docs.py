@@ -20,6 +20,25 @@ def _notebook_source() -> str:
     )
 
 
+def test_tweedie_notebook_first_code_cell_executes_supported_public_imports():
+    path = _ROOT / "docs/notebooks/tweedie_profile_estimation.ipynb"
+    notebook = json.loads(path.read_text())
+    first_code_cell = next(cell for cell in notebook["cells"] if cell.get("cell_type") == "code")
+    source = "".join(first_code_cell.get("source", []))
+    namespace: dict[str, object] = {}
+
+    exec(compile(source, str(path), "exec"), namespace)
+
+    from superglm import generate_tweedie_cpg
+
+    assert namespace["generate_tweedie_cpg"] is generate_tweedie_cpg
+    assert all(
+        cell.get("execution_count") is None and cell.get("outputs", []) == []
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+    )
+
+
 def test_tweedie_family_guide_documents_current_profile_contract():
     guide = (_ROOT / "docs/guide/families.md").read_text()
     tweedie = guide.split("## Tweedie: estimating the power parameter", maxsplit=1)[1]
