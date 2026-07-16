@@ -27,10 +27,9 @@ def cached_tweedie_profile_ci(
     legacy or manually populated tuple is deliberately ignored. Missing
     reporting attributes on legacy/fake results are treated as uncached.
     """
-    phi_method = _normalise_phi_method(getattr(result, "phi_method", None))
-    if phi_method == "pearson":
+    if _has_exact_phi_method(result, "pearson"):
         return None, _CI_PEARSON_UNAVAILABLE
-    if phi_method != "mle":
+    if not _has_exact_phi_method(result, "mle"):
         return None, _CI_NOT_COMPUTED
 
     try:
@@ -49,15 +48,14 @@ def cached_tweedie_profile_ci(
 def tweedie_profile_method_label(result: Any) -> str:
     """Describe the statistical and density methods without overstating them."""
     search_method = _search_method_label(getattr(result, "method", None))
-    phi_method = _normalise_phi_method(getattr(result, "phi_method", None))
     density_approximation = _uses_density_approximation(result)
 
-    if phi_method == "mle":
+    if _has_exact_phi_method(result, "mle"):
         qualifiers = [search_method]
         if density_approximation:
             qualifiers.append("density approximation")
         return f"Profile MLE ({'; '.join(qualifiers)})"
-    if phi_method == "pearson":
+    if _has_exact_phi_method(result, "pearson"):
         qualifiers = [search_method, "Pearson plug-in"]
         if density_approximation:
             qualifiers.append("density approximation")
@@ -76,15 +74,16 @@ def tweedie_profile_report_identity(result: Any, alpha: float) -> tuple[Any, ...
     return (
         id(result),
         str(getattr(result, "method", "")),
-        _normalise_phi_method(getattr(result, "phi_method", None)),
+        repr(getattr(result, "phi_method", None)),
         _density_identity(result),
         status,
         interval_key,
     )
 
 
-def _normalise_phi_method(value: Any) -> str:
-    return str(value or "").strip().lower()
+def _has_exact_phi_method(result: Any, expected: str) -> bool:
+    value = getattr(result, "phi_method", None)
+    return isinstance(value, str) and value == expected
 
 
 def _search_method_label(value: Any) -> str:

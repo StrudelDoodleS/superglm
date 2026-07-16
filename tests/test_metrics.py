@@ -1694,6 +1694,21 @@ class TestTweedieProfileSummary:
             assert "CI unavailable for Pearson plug-in" in str(summary)
             assert "CI unavailable for Pearson plug-in" in summary._repr_html_()
 
+    def test_summary_requires_exact_mle_method_value_for_cached_ci(self, fitted_poisson):
+        model, _, _, _ = fitted_poisson
+        profile = self._profile_result(
+            phi_method="MLE",
+            ci_cache={0.05: (1.4, 1.7)},
+        )
+        model._tweedie_profile_result = profile
+        model._summary_cache = None
+
+        summary = model.summary()
+
+        assert summary._info["tweedie_p_ci"] is None
+        assert summary._info["tweedie_p_ci_status"] == "not computed"
+        assert summary._info["tweedie_p_method"] == "Profile (Brent)"
+
     def test_model_summary_refreshes_when_cached_ci_or_search_identity_changes(
         self, fitted_poisson
     ):
