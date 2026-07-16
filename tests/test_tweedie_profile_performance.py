@@ -12,6 +12,7 @@ import statistics
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
+from functools import partial
 from unittest.mock import patch
 
 import numpy as np
@@ -399,6 +400,7 @@ def _bounded_inner_phi_reference(
     df_resid=None,
     phi_method="mle",
     phi_start=None,
+    optimizer_successes=None,
 ):
     """Replace only analytic inner search with bounded value-only minimization.
 
@@ -434,6 +436,9 @@ def _bounded_inner_phi_reference(
         method="bounded",
         options={"xatol": tweedie_module._PHI_BOUNDED_XATOL, "maxiter": 200},
     )
+    local_optimizer_success = bool(optimizer.success)
+    if optimizer_successes is not None:
+        optimizer_successes.append(local_optimizer_success)
     log_phi = float(optimizer.x)
     nll = float(objective(log_phi))
     diagnostics = cache[log_phi][1].diagnostics
@@ -442,10 +447,14 @@ def _bounded_inner_phi_reference(
     lower_boundary = bool(log_phi - tweedie_module._LOG_PHI_LOWER_BOUND <= boundary_tolerance)
     upper_boundary = bool(tweedie_module._LOG_PHI_UPPER_BOUND - log_phi <= boundary_tolerance)
     branch_signatures = {item[1].positive_saddlepoint_mask.tobytes() for item in cache.values()}
+    branch_switch_detected = len(branch_signatures) > 1
+    local_status = "succeeded" if local_optimizer_success else "failed"
     return tweedie_module._PhiProfileResult(
         phi=float(np.exp(log_phi)),
         nll=nll,
-        converged=bool(optimizer.success and objective_finite),
+        # SciPy success is only local; one value-only bounded search does not
+        # certify the global phi optimum, especially across branch switches.
+        converged=False,
         objective_finite=objective_finite,
         n_evaluations=len(cache),
         n_score_evaluations=0,
@@ -455,13 +464,14 @@ def _bounded_inner_phi_reference(
         score=None,
         used_fallback=False,
         fallback_reason=None,
-        branch_switch_detected=len(branch_signatures) > 1,
+        branch_switch_detected=branch_switch_detected,
         lower_boundary=lower_boundary,
         upper_boundary=upper_boundary,
         diagnostics=diagnostics,
         message=(
-            "Test reference replaced only analytic phi-score search with "
-            "derivative-free bounded minimization."
+            f"Local derivative-free bounded minimization {local_status}; the test "
+            "reference does not certify global phi convergence."
+            + (" Density branch signatures changed." if branch_switch_detected else "")
         ),
     )
 
@@ -534,13 +544,19 @@ def _run_end_to_end_profile_once(
     real_profile = tweedie_module._profile_phi_detailed
     density_calls: list[bool] = []
     inner_density_passes = 0
+    local_optimizer_successes: list[bool] = []
 
     def counted_evaluate(prepared, phi, *, compute_score=False):
         density_calls.append(bool(compute_score))
         return real_evaluate(prepared, phi, compute_score=compute_score)
 
     profile_target = (
-        _bounded_inner_phi_reference if mode == "reference-bounded-inner" else real_profile
+        partial(
+            _bounded_inner_phi_reference,
+            optimizer_successes=local_optimizer_successes,
+        )
+        if mode == "reference-bounded-inner"
+        else real_profile
     )
 
     def counted_profile(*args, **kwargs):
@@ -571,7 +587,14 @@ def _run_end_to_end_profile_once(
     trace_density_passes = int(result.search_trace["phi_n_evaluations"].sum())
     assert trace_density_passes == inner_density_passes
     assert len(density_calls) >= inner_density_passes
-    assert result.search_trace["phi_converged"].all()
+    if mode == "reference-bounded-inner":
+        assert len(local_optimizer_successes) == result.n_evaluations
+        assert not result.search_trace["phi_converged"].any()
+        local_inner_optimizer_success = all(local_optimizer_successes)
+    else:
+        assert not local_optimizer_successes
+        assert result.search_trace["phi_converged"].all()
+        local_inner_optimizer_success = None
     return {
         "case": case.name,
         "fit_mode": case.fit_mode,
@@ -586,11 +609,14 @@ def _run_end_to_end_profile_once(
         "phi_fallback_count": int(result.search_trace["phi_n_fallback_evaluations"].sum()),
         "elapsed_seconds": elapsed,
         "converged": bool(result.converged),
+        "outer_converged": bool(result.outer_converged),
+        "objective_finite": bool(result.objective_finite),
+        "local_inner_optimizer_success": local_inner_optimizer_success,
     }
 
 
 def _aggregate_end_to_end_runs(runs: list[dict[str, object]]) -> dict[str, object]:
-    """Median-aggregate every numeric benchmark field across repeated runs."""
+    """Median floats after requiring deterministic integer and boolean fields."""
     if not runs:
         raise ValueError("end-to-end benchmark requires at least one run")
     mode = runs[0]["mode"]
@@ -608,27 +634,97 @@ def _aggregate_end_to_end_runs(runs: list[dict[str, object]]) -> dict[str, objec
         "phi_fallback_count",
     )
     float_fields = ("p_hat", "phi_hat", "nll", "saddle_fraction")
+    common_integers = {}
+    for field in integer_fields:
+        values = {int(run[field]) for run in runs}
+        if len(values) != 1:
+            raise AssertionError(f"non-deterministic {field} across repeated runs: {values}")
+        common_integers[field] = values.pop()
+
+    boolean_fields = (
+        "converged",
+        "outer_converged",
+        "objective_finite",
+        "local_inner_optimizer_success",
+    )
+    common_booleans = {}
+    for field in boolean_fields:
+        values = {run[field] for run in runs}
+        if len(values) != 1:
+            raise AssertionError(f"non-deterministic {field} across repeated runs: {values}")
+        common_booleans[field] = values.pop()
+
     row: dict[str, object] = {
         "case": case,
         "fit_mode": fit_mode,
         "mode": mode,
         "repeats": len(runs),
-        "converged": all(bool(run["converged"]) for run in runs),
         "elapsed_median_seconds": statistics.median(float(run["elapsed_seconds"]) for run in runs),
+        **common_integers,
+        **common_booleans,
     }
-    row.update(
-        {field: int(statistics.median(int(run[field]) for run in runs)) for field in integer_fields}
-    )
     row.update(
         {field: statistics.median(float(run[field]) for run in runs) for field in float_fields}
     )
     return row
 
 
-def run_end_to_end_profile_benchmark(*, repeats: int = 3) -> list[dict[str, object]]:
-    """Compare public outer Brent search with analytic and bounded inner phi search."""
-    if repeats < 3:
-        raise ValueError("end-to-end benchmark requires at least three repeats")
+def test_end_to_end_aggregation_rejects_non_deterministic_integer_fields():
+    """Repeat aggregation must not conceal changing search/pass counts."""
+    run = {
+        "case": "fit-numeric",
+        "fit_mode": "fit",
+        "mode": "production-analytic-inner",
+        "n_observations": 600,
+        "outer_evaluations": 8,
+        "inner_density_passes": 173,
+        "phi_fallback_count": 0,
+        "p_hat": 1.6,
+        "phi_hat": 2.5,
+        "nll": 2.3,
+        "saddle_fraction": 0.0,
+        "elapsed_seconds": 0.2,
+        "converged": True,
+        "outer_converged": True,
+        "objective_finite": True,
+        "local_inner_optimizer_success": None,
+    }
+    changed = {**run, "inner_density_passes": 174}
+
+    with pytest.raises(AssertionError, match="inner_density_passes"):
+        _aggregate_end_to_end_runs([run, changed, run, changed])
+
+
+def test_end_to_end_timed_mode_order_is_counterbalanced():
+    """Four timed repeats must give each mode two first-position runs."""
+    production = "production-analytic-inner"
+    reference = "reference-bounded-inner"
+
+    assert _counterbalanced_mode_orders(4) == (
+        (production, reference),
+        (reference, production),
+        (production, reference),
+        (reference, production),
+    )
+    with pytest.raises(ValueError, match="even number.*at least four"):
+        _counterbalanced_mode_orders(3)
+
+
+def _counterbalanced_mode_orders(repeats: int) -> tuple[tuple[str, str], ...]:
+    """Alternate which inner-profile mode runs first across timed repeats."""
+    if repeats < 4 or repeats % 2:
+        raise ValueError("end-to-end benchmark requires an even number of repeats, at least four")
+    production = "production-analytic-inner"
+    reference = "reference-bounded-inner"
+    return tuple(
+        (production, reference) if index % 2 == 0 else (reference, production)
+        for index in range(repeats)
+    )
+
+
+def run_end_to_end_profile_benchmark(*, repeats: int = 4) -> list[dict[str, object]]:
+    """Warm, counterbalance, and compare analytic and bounded inner phi searches."""
+    timed_orders = _counterbalanced_mode_orders(repeats)
 
     original_profile = tweedie_module._profile_phi_detailed
     original_evaluate = tweedie_module._evaluate_tweedie_density
@@ -638,8 +734,14 @@ def run_end_to_end_profile_benchmark(*, repeats: int = 3) -> list[dict[str, obje
             "production-analytic-inner": [],
             "reference-bounded-inner": [],
         }
-        for _ in range(repeats):
-            for mode in runs_by_mode:
+        # Warm both complete public paths, but exclude warm-up timings from medians.
+        for mode in runs_by_mode:
+            _run_end_to_end_profile_once(mode, case)
+            assert tweedie_module._profile_phi_detailed is original_profile
+            assert tweedie_module._evaluate_tweedie_density is original_evaluate
+
+        for order in timed_orders:
+            for mode in order:
                 runs_by_mode[mode].append(_run_end_to_end_profile_once(mode, case))
                 assert tweedie_module._profile_phi_detailed is original_profile
                 assert tweedie_module._evaluate_tweedie_density is original_evaluate
@@ -731,7 +833,7 @@ def test_large_routine_phi_profile_timing_characterization():
 @pytest.mark.slow
 def test_end_to_end_analytic_inner_vs_bounded_inner_benchmark_report():
     """Compare public outer Brent searches while changing only the inner phi optimizer."""
-    rows = run_end_to_end_profile_benchmark(repeats=3)
+    rows = run_end_to_end_profile_benchmark(repeats=4)
 
     print(
         "Reference change: replace only the production analytic inner phi-score search "
@@ -747,6 +849,10 @@ def test_end_to_end_analytic_inner_vs_bounded_inner_benchmark_report():
             f"p_hat={row['p_hat']:.8g} phi_hat={row['phi_hat']:.8g} "
             f"NLL={row['nll']:.8g} saddle_fraction={row['saddle_fraction']:.6f} "
             f"phi_fallback_count={row['phi_fallback_count']} "
+            f"local_inner_optimizer_success={row['local_inner_optimizer_success']} "
+            f"certified_converged={row['converged']} "
+            f"outer_converged={row['outer_converged']} "
+            f"objective_finite={row['objective_finite']} "
             f"elapsed_median_s={row['elapsed_median_seconds']:.6f}"
         )
 
@@ -757,7 +863,7 @@ def test_end_to_end_analytic_inner_vs_bounded_inner_benchmark_report():
         ("reml-spline", "reference-bounded-inner"),
     ]
     for row in rows:
-        assert row["repeats"] == 3
+        assert row["repeats"] == 4
         assert 300 <= row["n_observations"] <= 1_000
         assert row["outer_evaluations"] > 0
         assert row["inner_density_passes"] >= row["outer_evaluations"]
@@ -766,9 +872,16 @@ def test_end_to_end_analytic_inner_vs_bounded_inner_benchmark_report():
         assert np.isfinite(row["nll"])
         assert 0.0 <= row["saddle_fraction"] <= 1.0
         assert row["phi_fallback_count"] >= 0
-        assert row["converged"] is True
 
     for production, reference in ((rows[0], rows[1]), (rows[2], rows[3])):
+        assert production["converged"] is True
+        assert production["outer_converged"] is True
+        assert production["objective_finite"] is True
+        assert production["local_inner_optimizer_success"] is None
+        assert reference["converged"] is False
+        assert reference["outer_converged"] is True
+        assert reference["objective_finite"] is True
+        assert reference["local_inner_optimizer_success"] is True
         assert production["p_hat"] == pytest.approx(reference["p_hat"], abs=5e-3)
         assert production["phi_hat"] == pytest.approx(reference["phi_hat"], rel=5e-3)
         assert production["nll"] == pytest.approx(reference["nll"], abs=1e-7)
