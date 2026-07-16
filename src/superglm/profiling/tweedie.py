@@ -22,6 +22,7 @@ References
 
 from __future__ import annotations
 
+import copy
 import logging
 import warnings as _warnings
 from dataclasses import dataclass, field
@@ -2502,6 +2503,10 @@ class _ProfileContext:
     phi_method: str
     verbose: bool
     ll_scale: float
+    max_iter: int = 100
+    tol: float = 1e-6
+    active_set: bool = False
+    convergence: str = "deviance"
     trace_callback: Any = field(default=None, repr=False)
     trace_iterations: bool = False
 
@@ -2542,7 +2547,10 @@ class _ProfileContext:
                 beta_init=self.warm_beta,
                 intercept_init=self.warm_intercept,
                 direct_solve=self.direct_solve,
+                max_iter=self.max_iter,
+                tol=self.tol,
                 record_diagnostics=self.trace_iterations,
+                convergence=self.convergence,
             )
         else:
             result = fit_pirls(
@@ -2556,7 +2564,12 @@ class _ProfileContext:
                 offset=self.offset_arr,
                 beta_init=self.warm_beta,
                 intercept_init=self.warm_intercept,
+                max_iter_outer=self.max_iter,
+                tol=self.tol,
+                active_set=self.active_set,
+                lambda2=self.lambda2,
                 record_diagnostics=self.trace_iterations,
+                convergence=self.convergence,
             )
 
         eta = stabilize_eta(
@@ -2637,6 +2650,23 @@ class _ProfileContext:
         )
 
 
+def _clone_profile_model(model, X, sample_weight):
+    """Clone configured profile state and resolve shorthand only on the clone."""
+    profile_model = model._clone_without_features(
+        set(),
+        lambda2=copy.deepcopy(model.lambda2),
+    )
+    if model._splines is not None and not model._specs:
+        # clone_without_features() normally clones resolved specs. Preserve
+        # unresolved shorthand metadata and resolve it only on the scratch model.
+        profile_model._splines = copy.deepcopy(model._splines)
+        profile_model._n_knots = copy.deepcopy(model._n_knots)
+        profile_model._degree = model._degree
+        profile_model._categorical_base = model._categorical_base
+        profile_model._auto_detect_features(X, sample_weight)
+    return profile_model
+
+
 def _build_profile_context(
     model,
     X,
@@ -2649,45 +2679,86 @@ def _build_profile_context(
     trace_iterations: bool = False,
 ) -> _ProfileContext:
     """One-time setup: build design matrix, calibrate lambda, create context."""
-    from superglm.distributions import Tweedie
+    from superglm.distributions import Tweedie, validate_response
 
     y_arr = np.asarray(y, dtype=np.float64)
 
-    if model._splines is not None and not model._specs:
-        model._auto_detect_features(X, sample_weight)
+    # Profile fits and later CI probes must not rewrite the caller's fitted
+    # design, resolved family/link, penalty, groups, or inference caches.
+    profile_model = _clone_profile_model(model, X, sample_weight)
+
+    # Match fit()'s fit-only lambda-policy guard before building the design.
+    for name, spec in profile_model._specs.items():
+        lambda_policy = getattr(spec, "_lambda_policy", None)
+        if lambda_policy is not None:
+            raise NotImplementedError(
+                f"lambda_policy on feature '{name}' is only supported with "
+                f"fit_reml(), not fit(). Use fit_reml() or remove lambda_policy."
+            )
 
     # Temporary p so _build_design_matrix can resolve the distribution.
     # The design matrix itself doesn't depend on p.
-    saved_family = model.family
-    model.family = Tweedie(p=1.5)
+    saved_family = profile_model.family
+    profile_model.family = Tweedie(p=1.5)
     try:
-        y_arr, w_arr, offset_arr = model._build_design_matrix(X, y_arr, sample_weight, offset)
+        y_arr, w_arr, offset_arr = profile_model._build_design_matrix(
+            X, y_arr, sample_weight, offset
+        )
     finally:
-        model.family = saved_family
+        profile_model.family = saved_family
 
-    if model.penalty.lambda1 is None:
-        model.penalty.lambda1 = model._compute_lambda_max(y_arr, w_arr) * 0.1
+    validate_response(y_arr, profile_model._distribution)
+
+    if profile_model.penalty.lambda1 is None:
+        profile_model.penalty.lambda1 = profile_model._compute_lambda_max(y_arr, w_arr) * 0.1
 
     if offset_arr is None:
         offset_arr = np.zeros(len(y_arr))
 
-    penalty = model.penalty
-    groups = model._groups
-    use_direct = penalty.lambda1 is not None and (
-        penalty.lambda1 == 0 or not penalty_has_targets(penalty, groups)
+    penalty = profile_model.penalty
+    groups = profile_model._groups
+    has_lambda1_targets = penalty_has_targets(penalty, groups)
+
+    if (
+        any(group.monotone_engine is not None for group in groups)
+        and penalty.lambda1 is not None
+        and penalty.lambda1 > 0
+        and has_lambda1_targets
+    ):
+        raise NotImplementedError(
+            "Monotone fit-time constraints are not supported with selection_penalty > 0. "
+            "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
+        )
+
+    monotone_engines = {
+        group.monotone_engine for group in groups if group.monotone_engine is not None
+    }
+    if len(monotone_engines) > 1:
+        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
+
+    has_constraints = any(group.constraints is not None for group in groups)
+    has_scop = any(group.monotone_engine == "scop" for group in groups)
+    use_direct = (
+        has_constraints
+        or has_scop
+        or (penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets))
     )
 
     return _ProfileContext(
         y_arr=y_arr,
         w_arr=w_arr,
         offset_arr=offset_arr,
-        dm=model._dm,
+        dm=profile_model._dm,
         groups=groups,
-        link=model._link,
+        link=profile_model._link,
         penalty=penalty,
         use_direct=use_direct,
-        lambda2=model.lambda2,
-        direct_solve=getattr(model, "_direct_solve", "auto"),
+        lambda2=profile_model.lambda2,
+        direct_solve=profile_model._direct_solve,
+        max_iter=profile_model._max_iter,
+        tol=profile_model._tol,
+        active_set=profile_model._active_set,
+        convergence=profile_model._convergence,
         phi_method=phi_method,
         verbose=verbose,
         ll_scale=float(len(y_arr)),
@@ -2743,7 +2814,20 @@ class _ProfileContextREML:
         self.model.family = Tweedie(p=p)
         self.model.fit_reml(self.X, self.y, sample_weight=self.sample_weight, offset=self.offset)
 
-        mu = np.maximum(self.model.predict(self.X), 1e-10)
+        fit_mu = getattr(self.model, "_fit_mu", None)
+        if (
+            isinstance(fit_mu, np.ndarray)
+            and fit_mu.shape == self.y.shape
+            and np.all(np.isfinite(fit_mu))
+            and np.all(fit_mu > 0.0)
+        ):
+            mu = fit_mu.copy()
+        else:
+            mu = np.asarray(
+                self.model.predict(self.X, offset=self.offset),
+                dtype=np.float64,
+            )
+        mu = np.maximum(mu, 1e-10)
         df_resid = max(float(len(self.y)) - float(self.model.result.effective_df), 1.0)
         phi_result = _profile_phi_detailed(
             self.y,
@@ -2835,13 +2919,10 @@ def _build_profile_context_reml(
     trace_iterations: bool = False,
 ) -> _ProfileContextREML:
     """Build context for REML-based profile estimation."""
-    if model._splines is not None and not model._specs:
-        model._auto_detect_features(X, sample_weight)
-
     # REML profile evaluations call fit_reml(), which rewrites the fitted model
     # state. Keep that mutation inside an isolated scratch model so result.ci()
     # and profile plots cannot leave the caller's model at a probe p.
-    profile_model = model._clone_without_features(set())
+    profile_model = _clone_profile_model(model, X, sample_weight)
     if getattr(model, "_last_fit_meta", None) is not None:
         profile_model._last_fit_meta = dict(model._last_fit_meta)
 

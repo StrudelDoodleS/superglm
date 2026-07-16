@@ -1,5 +1,6 @@
 """Tests for Tweedie profile likelihood — p estimation."""
 
+import pickle
 import warnings
 from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
@@ -81,6 +82,35 @@ def _tight_value_only_phi_reference(y, mu, p, *, weights=None):
     )
     assert result.success
     return result, calls
+
+
+def _profile_solver_result(dm, *, effective_df=1.0):
+    """Minimal converged solver result for one-point profile dispatch spies."""
+    return SimpleNamespace(
+        beta=np.zeros(dm.shape[1], dtype=np.float64),
+        intercept=0.0,
+        effective_df=effective_df,
+        n_iter=1,
+        converged=True,
+        iteration_log=[],
+    )
+
+
+def _snapshot_fitted_model(model, X, *, offset=None):
+    """Capture exact caller state plus important top-level object identities."""
+    prediction = model.predict(X, offset=offset).copy()
+    return {
+        "prediction": prediction,
+        "identity": {name: id(value) for name, value in model.__dict__.items()},
+        "state": pickle.dumps(model.__dict__, protocol=5),
+    }
+
+
+def _assert_fitted_model_unchanged(model, X, snapshot, *, offset=None):
+    """Assert profiling preserved values, aliases, caches, and predictions."""
+    np.testing.assert_allclose(model.predict(X, offset=offset), snapshot["prediction"])
+    assert {name: id(value) for name, value in model.__dict__.items()} == snapshot["identity"]
+    assert pickle.dumps(model.__dict__, protocol=5) == snapshot["state"]
 
 
 # =====================================================================
@@ -2020,16 +2050,18 @@ class TestProfileLikelihood:
         )
         X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
         y = np.array([1.0, 2.0, 3.0])
+        caller_state = pickle.dumps(model.__dict__, protocol=5)
 
         def fail_build(*args, **kwargs):
             raise RuntimeError("build failed")
 
-        monkeypatch.setattr(model, "_build_design_matrix", fail_build)
+        monkeypatch.setattr(SuperGLM, "_build_design_matrix", fail_build)
 
         with pytest.raises(RuntimeError, match="build failed"):
             estimate_tweedie_p(model, X, y)
 
         assert model.family.p == pytest.approx(1.7)
+        assert pickle.dumps(model.__dict__, protocol=5) == caller_state
 
     def test_result_has_search_trace(self):
         """search_trace should be populated with >= 3 entries from Brent."""
@@ -2512,6 +2544,279 @@ class TestEstimatePFitMode:
 # =====================================================================
 
 
+class TestProfileFitParity:
+    """Fixed-p profile fits must be identical to the ordinary fit regimes."""
+
+    def test_pirls_profile_forwards_model_controls_and_lambda2(self, monkeypatch):
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 12)})
+        y = np.linspace(0.5, 2.0, len(X))
+        captured = {}
+
+        def fake_fit_pirls(**kwargs):
+            captured.update(kwargs)
+            return _profile_solver_result(kwargs["X"])
+
+        monkeypatch.setattr(tweedie_module, "fit_pirls", fake_fit_pirls)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0.2,
+            spline_penalty=7.5,
+            active_set=True,
+            tol=2e-5,
+            max_iter=17,
+            convergence="deviance",
+            features={"x": Numeric()},
+        )
+
+        ctx = tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
+        ctx.evaluate(1.5, source="one_point")
+
+        assert captured["lambda2"] == 7.5
+        assert captured["max_iter_outer"] == 17
+        assert captured["tol"] == pytest.approx(2e-5)
+        assert captured["active_set"] is True
+        assert captured["convergence"] == "deviance"
+        assert captured["penalty"] is ctx.penalty
+
+    def test_direct_profile_forwards_model_controls_and_lambda2(self, monkeypatch):
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 12)})
+        y = np.linspace(0.5, 2.0, len(X))
+        captured = {}
+
+        def fake_fit_irls_direct(**kwargs):
+            captured.update(kwargs)
+            return _profile_solver_result(kwargs["X"]), None
+
+        monkeypatch.setattr(tweedie_module, "fit_irls_direct", fake_fit_irls_direct)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            spline_penalty=8.5,
+            direct_solve="qr",
+            tol=3e-5,
+            max_iter=19,
+            convergence="deviance",
+            features={"x": Numeric()},
+        )
+
+        ctx = tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
+        ctx.evaluate(1.5, source="one_point")
+
+        assert captured["lambda2"] == 8.5
+        assert captured["max_iter"] == 19
+        assert captured["tol"] == pytest.approx(3e-5)
+        assert captured["direct_solve"] == "qr"
+        assert captured["convergence"] == "deviance"
+
+    def test_flexible_spline_profile_matches_independent_fixed_p_fit(self):
+        rng = np.random.default_rng(20260716)
+        n = 120
+        x = np.linspace(0.0, 1.0, n)
+        X = pd.DataFrame({"x": x})
+        mu = np.exp(1.2 + 0.8 * np.sin(2.0 * np.pi * x))
+        y = generate_tweedie_cpg(n, mu=mu, phi=1.5, p=1.5, rng=rng)
+        model_kwargs = dict(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0.01,
+            spline_penalty=1000.0,
+            features={"x": Spline(n_knots=20)},
+        )
+
+        independent = SuperGLM(**model_kwargs)
+        independent.fit(X, y)
+        independent_mu = independent.predict(X)
+        independent_edf = float(independent.result.effective_df)
+        independent_phi = estimate_phi(
+            y,
+            independent_mu,
+            1.5,
+            df_resid=float(n) - independent_edf,
+        )
+
+        profiled = estimate_tweedie_p(
+            SuperGLM(**model_kwargs),
+            X,
+            y,
+            method="grid",
+            grid=np.array([1.5]),
+            phi_method="pearson",
+        )
+        row = profiled.search_trace.iloc[0]
+
+        assert row["edf"] == pytest.approx(independent_edf, rel=1e-10, abs=1e-10)
+        assert profiled.phi_hat == pytest.approx(independent_phi, rel=1e-10, abs=1e-10)
+
+    def test_reml_profile_uses_offset_aware_fitted_mean(self):
+        rng = np.random.default_rng(20260716)
+        n = 120
+        x = np.linspace(-1.0, 1.0, n)
+        X = pd.DataFrame({"x": x})
+        offset = 1.2 * np.sin(np.pi * x) + 0.3 * x
+        mu = np.exp(0.7 + 0.25 * x + offset)
+        y = generate_tweedie_cpg(n, mu=mu, phi=1.2, p=1.5, rng=rng)
+        model_kwargs = dict(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x": Spline(n_knots=6, penalty="ssp")},
+        )
+
+        independent = SuperGLM(**model_kwargs)
+        independent.fit_reml(X, y, offset=offset)
+        independent_mu = independent._fit_mu
+        assert independent_mu is not None
+        independent_edf = float(independent.result.effective_df)
+        independent_phi = estimate_phi(
+            y,
+            independent_mu,
+            1.5,
+            df_resid=float(n) - independent_edf,
+        )
+        independent_nll = -float(np.mean(tweedie_logpdf(y, independent_mu, independent_phi, 1.5)))
+
+        offset_free_mu = independent.predict(X)
+        offset_free_phi = estimate_phi(
+            y,
+            offset_free_mu,
+            1.5,
+            df_resid=float(n) - independent_edf,
+        )
+        offset_free_nll = -float(np.mean(tweedie_logpdf(y, offset_free_mu, offset_free_phi, 1.5)))
+
+        profiled = estimate_tweedie_p(
+            SuperGLM(**model_kwargs),
+            X,
+            y,
+            offset=offset,
+            fit_mode="fit_reml",
+            method="grid",
+            grid=np.array([1.5]),
+            phi_method="pearson",
+        )
+
+        assert profiled.phi_hat == pytest.approx(independent_phi, rel=1e-9, abs=1e-9)
+        assert profiled.nll == pytest.approx(independent_nll, rel=1e-9, abs=1e-9)
+        assert abs(profiled.phi_hat - offset_free_phi) > 1.0
+        assert abs(profiled.nll - offset_free_nll) > 0.5
+
+    def test_low_level_ordinary_profile_and_later_probe_leave_caller_unchanged(self):
+        rng = np.random.default_rng(20260716)
+        n = 48
+        x = np.linspace(-1.0, 1.0, n)
+        X = pd.DataFrame({"x": x})
+        offset = 0.3 * x
+        mu = np.exp(0.5 + 0.2 * x + offset)
+        y = generate_tweedie_cpg(n, mu=mu, phi=1.0, p=1.5, rng=rng)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.4),
+            selection_penalty=0,
+            features={"x": Numeric()},
+        )
+        model.fit(X, y, offset=offset)
+        snapshot = _snapshot_fitted_model(model, X, offset=offset)
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            offset=offset,
+            method="grid",
+            grid=np.array([1.4, 1.6]),
+            phi_method="pearson",
+        )
+        result._objective(1.7, source="ci_probe")
+
+        _assert_fitted_model_unchanged(model, X, snapshot, offset=offset)
+
+    def test_low_level_profile_keeps_unfitted_shorthand_configuration_immutable(self):
+        rng = np.random.default_rng(20260716)
+        n = 40
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        y = generate_tweedie_cpg(
+            n,
+            mu=np.exp(0.5 + 0.2 * X["x"].to_numpy()),
+            phi=1.0,
+            p=1.5,
+            rng=rng,
+        )
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            spline_penalty=2.0,
+            splines=["x"],
+            n_knots=7,
+            degree=2,
+        )
+        assert model._specs == {}
+        snapshot = pickle.dumps(model.__dict__, protocol=5)
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="grid",
+            grid=np.array([1.5]),
+            phi_method="pearson",
+        )
+
+        assert np.isfinite(result.nll)
+        assert pickle.dumps(model.__dict__, protocol=5) == snapshot
+
+    def test_low_level_reml_profile_and_later_probe_leave_caller_unchanged(self):
+        rng = np.random.default_rng(20260716)
+        n = 48
+        x = np.linspace(-1.0, 1.0, n)
+        X = pd.DataFrame({"x": x})
+        offset = 0.4 * np.sin(np.pi * x)
+        mu = np.exp(0.4 + 0.3 * x + offset)
+        y = generate_tweedie_cpg(n, mu=mu, phi=1.0, p=1.5, rng=rng)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.4),
+            selection_penalty=0,
+            spline_penalty=0.25,
+            features={"x": Spline(n_knots=5, penalty="ssp")},
+        )
+        model.fit_reml(X, y, offset=offset, max_reml_iter=5)
+        snapshot = _snapshot_fitted_model(model, X, offset=offset)
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            offset=offset,
+            fit_mode="fit_reml",
+            method="grid",
+            grid=np.array([1.4, 1.6]),
+            phi_method="pearson",
+        )
+        result._objective(1.7, source="ci_probe")
+
+        _assert_fitted_model_unchanged(model, X, snapshot, offset=offset)
+
+    def test_reml_profile_clone_uses_configured_lambda2_not_previous_reml_lambdas(self):
+        rng = np.random.default_rng(20260716)
+        n = 40
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, n)})
+        y = generate_tweedie_cpg(
+            n,
+            mu=np.exp(0.4 + 0.2 * X["x"].to_numpy()),
+            phi=1.0,
+            p=1.5,
+            rng=rng,
+        )
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            spline_penalty=0.25,
+            features={"x": Spline(n_knots=5, penalty="ssp")},
+        )
+        model.fit_reml(X, y, max_reml_iter=5)
+        assert model._reml_lambdas is not None
+
+        ctx = tweedie_module._build_profile_context_reml(model, X, y, None, None, "pearson", False)
+
+        assert ctx.model.lambda2 == model.lambda2 == 0.25
+
+
 class TestImmutableProfileEvaluations:
     """Finalization must use the complete cached winning candidate."""
 
@@ -2726,7 +3031,7 @@ class TestImmutableProfileEvaluations:
                     objective_history=[100.0 * p, 10.0 * p],
                 )
 
-            def predict(self, X):
+            def predict(self, X, offset=None):
                 return self._mu
 
         def fake_profile_phi(y_arg, mu, p, **kwargs):
@@ -2868,7 +3173,7 @@ class TestImmutableProfileEvaluations:
                     objective_history=[],
                 )
 
-            def predict(self, X):
+            def predict(self, X, offset=None):
                 return self._mu
 
         def fake_profile_phi(y_arg, mu, p, **kwargs):
