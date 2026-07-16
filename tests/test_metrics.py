@@ -1617,7 +1617,7 @@ class TestTweedieProfileSummary:
             selection_penalty=0.0,
             features={"x": Numeric()},
         )
-        model.estimate_p(X, y, p_bounds=(1.1, 1.9))
+        model.estimate_p(X, y, p_bounds=(1.1, 1.9), phi_method="mle")
         m = model.metrics(X, y)
         text = str(m.summary())
         assert "Tweedie p" in text

@@ -2009,7 +2009,13 @@ class TestProfileLikelihood:
             features={"dummy": Numeric()},
         )
 
-        result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
         assert isinstance(result, TweedieProfileResult)
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
 
@@ -2028,7 +2034,13 @@ class TestProfileLikelihood:
         X = pd.DataFrame({"x1": x1, "x2": x2})
 
         model = _make_model_with_covariates(lambda1=0.0)
-        result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
 
     @pytest.mark.parametrize("phi_method", ["pearson", "mle"])
@@ -2120,6 +2132,7 @@ class TestProfileLikelihood:
             sample_weight=exposure_scaled,
             offset=np.log(sample_weight),
             p_bounds=(1.2, 1.95),
+            phi_method="pearson",
         )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
 
@@ -2133,7 +2146,7 @@ class TestProfileLikelihood:
         X = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
         y = np.array([1.0, 2.0, 3.0])
         with pytest.raises(ValueError, match="tweedie"):
-            estimate_tweedie_p(model, X, y)
+            estimate_tweedie_p(model, X, y, phi_method="pearson")
 
     def test_design_matrix_error_restores_temporary_family(self, monkeypatch):
         """Temporary p used for design-matrix setup should be exception-safe."""
@@ -2152,7 +2165,7 @@ class TestProfileLikelihood:
         monkeypatch.setattr(SuperGLM, "_build_design_matrix", fail_build)
 
         with pytest.raises(RuntimeError, match="build failed"):
-            estimate_tweedie_p(model, X, y)
+            estimate_tweedie_p(model, X, y, phi_method="pearson")
 
         assert model.family.p == pytest.approx(1.7)
         assert pickle.dumps(model.__dict__, protocol=5) == caller_state
@@ -2407,7 +2420,13 @@ class TestEstimatePFitMode:
         family_before = model.family
 
         with pytest.raises(ValueError, match="weights must be finite and strictly positive"):
-            model.estimate_p(X, y, sample_weight=invalid_weights, fit_mode="fit")
+            model.estimate_p(
+                X,
+                y,
+                sample_weight=invalid_weights,
+                fit_mode="fit",
+                phi_method="pearson",
+            )
 
         assert model.family is family_before
         assert model._specs == {}
@@ -2434,6 +2453,7 @@ class TestEstimatePFitMode:
                 y,
                 sample_weight=invalid_weights,
                 fit_mode=fit_mode,
+                phi_method="pearson",
                 method="grid",
                 grid=np.array([1.5]),
             )
@@ -2466,6 +2486,7 @@ class TestEstimatePFitMode:
                 y,
                 sample_weight=invalid_weights,
                 fit_mode=fit_mode,
+                phi_method="pearson",
                 method="grid",
                 grid=np.array([1.5]),
             )
@@ -2501,7 +2522,7 @@ class TestEstimatePFitMode:
         assert np.all(np.isfinite(model.predict(X)))
 
     def test_fit_mode_fit_recovers_p(self):
-        """fit_mode='fit' (default) should recover p."""
+        """The real public default-MLE fit path should recover p."""
         X, y, p_true = _tweedie_data()
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
@@ -2510,6 +2531,7 @@ class TestEstimatePFitMode:
         )
         result = model.estimate_p(X, y, fit_mode="fit")
         assert isinstance(result, TweedieProfileResult)
+        assert result.phi_method == "mle"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
         # Model should be refitted with estimated p
         assert model.family.p == result.p_hat
@@ -2538,7 +2560,7 @@ class TestEstimatePFitMode:
             selection_penalty=0,
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
-        result = model.estimate_p(X, y, fit_mode="reml")
+        result = model.estimate_p(X, y, fit_mode="reml", phi_method="pearson")
         assert isinstance(result, TweedieProfileResult)
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
         # Model should be refitted with REML
@@ -2597,7 +2619,7 @@ class TestEstimatePFitMode:
         model.fit(X, y)
         assert model._last_fit_meta["method"] == "fit"
 
-        result = model.estimate_p(X, y, fit_mode="inherit")
+        result = model.estimate_p(X, y, fit_mode="inherit", phi_method="pearson")
         assert model._last_fit_meta["method"] == "fit"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
 
@@ -2626,7 +2648,7 @@ class TestEstimatePFitMode:
             fake_estimate_tweedie_p,
         )
 
-        result = model.estimate_p(X, y, fit_mode="inherit")
+        result = model.estimate_p(X, y, fit_mode="inherit", phi_method="pearson")
 
         assert result.p_hat == 1.45
         assert calls == ["fit"]
@@ -2644,7 +2666,7 @@ class TestEstimatePFitMode:
         model.fit_reml(X, y)
         assert model._last_fit_meta["method"] == "fit_reml"
 
-        result = model.estimate_p(X, y, fit_mode="inherit")
+        result = model.estimate_p(X, y, fit_mode="inherit", phi_method="pearson")
         assert model._last_fit_meta["method"] == "fit_reml"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
 
@@ -2657,7 +2679,7 @@ class TestEstimatePFitMode:
             features={"x1": Numeric()},
         )
         assert model._last_fit_meta is None
-        model.estimate_p(X, y, fit_mode="inherit")
+        model.estimate_p(X, y, fit_mode="inherit", phi_method="pearson")
         assert model._last_fit_meta["method"] == "fit"
 
     def test_invalid_fit_mode_raises(self):
@@ -2667,7 +2689,7 @@ class TestEstimatePFitMode:
             family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
         )
         with pytest.raises(ValueError, match="fit_mode"):
-            model.estimate_p(X, y, fit_mode="bogus")
+            model.estimate_p(X, y, fit_mode="bogus", phi_method="pearson")
 
     def test_invalid_phi_method_raises(self):
         """Invalid phi_method should raise immediately."""
@@ -2684,7 +2706,7 @@ class TestEstimatePFitMode:
         y = np.array([1.0, 2.0, 3.0])
         model = SuperGLM(family="poisson", selection_penalty=0, features={"x": Numeric()})
         with pytest.raises(ValueError, match="tweedie"):
-            model.estimate_p(X, y)
+            model.estimate_p(X, y, phi_method="pearson")
 
     @pytest.mark.slow
     def test_reml_and_fit_agree_on_p(self):
@@ -2695,14 +2717,14 @@ class TestEstimatePFitMode:
             selection_penalty=0,
             features={"x1": Numeric()},
         )
-        result_fit = model_fit.estimate_p(X, y, fit_mode="fit")
+        result_fit = model_fit.estimate_p(X, y, fit_mode="fit", phi_method="pearson")
 
         model_reml = SuperGLM(
             family=TweedieDistribution(p=1.5),
             selection_penalty=0,
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
-        result_reml = model_reml.estimate_p(X, y, fit_mode="reml")
+        result_reml = model_reml.estimate_p(X, y, fit_mode="reml", phi_method="pearson")
 
         # Both should land near p_true; allow wider tolerance since
         # different model flexibility may shift the estimate slightly
@@ -3416,7 +3438,15 @@ class TestSearchMethods:
             selection_penalty=0,
             features={"x1": Numeric()},
         )
-        result = estimate_tweedie_p(model, X, y, method="grid", n_grid=20, p_bounds=(1.1, 1.9))
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="grid",
+            n_grid=20,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
         assert isinstance(result, TweedieProfileResult)
         assert result.method == "grid"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
@@ -3430,7 +3460,14 @@ class TestSearchMethods:
             features={"x1": Numeric()},
         )
         grid = np.array([1.3, 1.5, 1.6, 1.7, 1.9])
-        result = estimate_tweedie_p(model, X, y, method="grid", grid=grid)
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="grid",
+            grid=grid,
+            phi_method="pearson",
+        )
         assert len(result.search_trace) == len(grid)
         assert result.p_hat in grid
 
@@ -3443,7 +3480,13 @@ class TestSearchMethods:
             features={"x1": Numeric()},
         )
         result = estimate_tweedie_p(
-            model, X, y, method="grid_refine", n_grid_coarse=10, p_bounds=(1.1, 1.9)
+            model,
+            X,
+            y,
+            method="grid_refine",
+            n_grid_coarse=10,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
         )
         assert result.method == "grid_refine"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
@@ -3463,7 +3506,14 @@ class TestSearchMethods:
             selection_penalty=0,
             features={"x1": Numeric()},
         )
-        result = estimate_tweedie_p(model, X, y, method="profile_opt", p_bounds=(1.1, 1.9))
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="profile_opt",
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
         assert result.method == "profile_opt"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
         # Must have optimizer evals beyond init — proves the cache didn't
@@ -3481,7 +3531,13 @@ class TestSearchMethods:
             features={"x1": Numeric()},
         )
         result = estimate_tweedie_p(
-            model, X, y, method="profile_opt", optimizer="Powell", p_bounds=(1.1, 1.9)
+            model,
+            X,
+            y,
+            method="profile_opt",
+            optimizer="Powell",
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
         )
         assert result.method == "profile_opt"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
@@ -3595,7 +3651,14 @@ class TestSearchMethods:
             features={"x1": Numeric()},
         )
         result = estimate_tweedie_p(
-            model, X, y, sample_weight=sample_weight, method="grid", n_grid=15, p_bounds=(1.1, 1.9)
+            model,
+            X,
+            y,
+            sample_weight=sample_weight,
+            method="grid",
+            n_grid=15,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
         )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
 
@@ -3609,7 +3672,14 @@ class TestSearchMethods:
             features={"x1": Spline(n_knots=6, penalty="ssp")},
         )
         result = estimate_tweedie_p(
-            model, X, y, method="grid", n_grid=10, fit_mode="fit_reml", p_bounds=(1.1, 1.9)
+            model,
+            X,
+            y,
+            method="grid",
+            n_grid=10,
+            fit_mode="fit_reml",
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
         )
         assert result.method == "grid"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.25)
@@ -3621,7 +3691,7 @@ class TestSearchMethods:
             family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
         )
         with pytest.raises(ValueError, match="method"):
-            estimate_tweedie_p(model, X, y, method="bogus")
+            estimate_tweedie_p(model, X, y, method="bogus", phi_method="pearson")
 
     def test_invalid_optimizer_raises(self):
         """Invalid optimizer should raise ValueError."""
@@ -3630,7 +3700,14 @@ class TestSearchMethods:
             family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
         )
         with pytest.raises(ValueError, match="optimizer"):
-            estimate_tweedie_p(model, X, y, method="profile_opt", optimizer="bogus")
+            estimate_tweedie_p(
+                model,
+                X,
+                y,
+                method="profile_opt",
+                optimizer="bogus",
+                phi_method="pearson",
+            )
 
     def test_joint_ml_not_implemented(self):
         """method='joint_ml' should raise NotImplementedError."""
@@ -3639,7 +3716,7 @@ class TestSearchMethods:
             family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
         )
         with pytest.raises(NotImplementedError, match="joint_ml"):
-            estimate_tweedie_p(model, X, y, method="joint_ml")
+            estimate_tweedie_p(model, X, y, method="joint_ml", phi_method="pearson")
 
     def test_integrated_not_implemented(self):
         """method='integrated' should raise NotImplementedError."""
@@ -3648,7 +3725,7 @@ class TestSearchMethods:
             family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
         )
         with pytest.raises(NotImplementedError, match="integrated"):
-            estimate_tweedie_p(model, X, y, method="integrated")
+            estimate_tweedie_p(model, X, y, method="integrated", phi_method="pearson")
 
 
 def _fake_search_context(objective):
@@ -4099,7 +4176,13 @@ class TestSearchTrace:
             selection_penalty=0,
             features={"x1": Numeric()},
         )
-        result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
         trace = result.search_trace
         assert isinstance(trace, pd.DataFrame)
         expected_cols = {"step", "p", "phi", "nll", "n_iter", "fit_converged", "source"}
@@ -4116,7 +4199,15 @@ class TestSearchTrace:
             features={"x1": Numeric()},
         )
         n_grid = 12
-        result = estimate_tweedie_p(model, X, y, method="grid", n_grid=n_grid, p_bounds=(1.1, 1.9))
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="grid",
+            n_grid=n_grid,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
         assert len(result.search_trace) == n_grid
         assert (result.search_trace["source"] == "grid").all()
 
@@ -4129,7 +4220,13 @@ class TestSearchTrace:
             features={"x1": Numeric()},
         )
         result = estimate_tweedie_p(
-            model, X, y, method="grid_refine", n_grid_coarse=8, p_bounds=(1.1, 1.9)
+            model,
+            X,
+            y,
+            method="grid_refine",
+            n_grid_coarse=8,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
         )
         sources = set(result.search_trace["source"].unique())
         assert "grid_coarse" in sources
@@ -4143,7 +4240,14 @@ class TestSearchTrace:
             selection_penalty=0,
             features={"x1": Numeric()},
         )
-        result = estimate_tweedie_p(model, X, y, method="profile_opt", p_bounds=(1.1, 1.9))
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="profile_opt",
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
         sources = set(result.search_trace["source"].unique())
         assert "init" in sources
         # Optimizer evals may hit cached init points, so "optimizer" source
@@ -4186,12 +4290,27 @@ class TestMethodAgreement:
         m1 = SuperGLM(
             family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
         )
-        r1 = estimate_tweedie_p(m1, X, y, method="brent", p_bounds=(1.1, 1.9))
+        r1 = estimate_tweedie_p(
+            m1,
+            X,
+            y,
+            method="brent",
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
 
         m2 = SuperGLM(
             family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
         )
-        r2 = estimate_tweedie_p(m2, X, y, method="grid", n_grid=30, p_bounds=(1.1, 1.9))
+        r2 = estimate_tweedie_p(
+            m2,
+            X,
+            y,
+            method="grid",
+            n_grid=30,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
 
         np.testing.assert_allclose(r1.p_hat, r2.p_hat, atol=0.1)
 
@@ -4202,13 +4321,26 @@ class TestMethodAgreement:
         m1 = SuperGLM(
             family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
         )
-        r1 = estimate_tweedie_p(m1, X, y, method="brent", p_bounds=(1.1, 1.9))
+        r1 = estimate_tweedie_p(
+            m1,
+            X,
+            y,
+            method="brent",
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
 
         m2 = SuperGLM(
             family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
         )
         r2 = estimate_tweedie_p(
-            m2, X, y, method="grid_refine", n_grid_coarse=10, p_bounds=(1.1, 1.9)
+            m2,
+            X,
+            y,
+            method="grid_refine",
+            n_grid_coarse=10,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
         )
 
         np.testing.assert_allclose(r1.p_hat, r2.p_hat, atol=0.1)
@@ -4220,7 +4352,14 @@ class TestMethodAgreement:
         model = SuperGLM(
             family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
         )
-        result = estimate_tweedie_p(model, X, y, method=method, p_bounds=(1.1, 1.9))
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method=method,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
 
 
@@ -4238,7 +4377,15 @@ class TestDeprecatedCache:
             selection_penalty=0,
             features={"x1": Numeric()},
         )
-        result = estimate_tweedie_p(model, X, y, method="grid", n_grid=5, p_bounds=(1.1, 1.9))
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="grid",
+            n_grid=5,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
 
         with pytest.warns(DeprecationWarning, match="cache.*deprecated"):
             cache = result.cache

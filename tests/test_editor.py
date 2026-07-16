@@ -2629,7 +2629,12 @@ def test_reprofile_distribution_parameter_dispatches_to_model(
     monkeypatch.setattr(type(editor_model), "estimate_theta", fake_estimate_theta)
     monkeypatch.setattr(session, "replace_in_force_model", fake_replace)
 
-    p_result = session.reprofile_distribution("tweedie_p", method="grid", n_grid=7)
+    p_result = session.reprofile_distribution(
+        "tweedie_p",
+        method="grid",
+        n_grid=7,
+        phi_method="pearson",
+    )
     theta_result = session.reprofile_distribution("nb2_theta", theta_bounds=(0.2, 20.0))
 
     assert p_result == "p-result"
@@ -2638,7 +2643,12 @@ def test_reprofile_distribution_parameter_dispatches_to_model(
     assert calls[0]["model"] is not editor_model
     assert calls[0]["X"] is X
     assert calls[0]["y"] is y
-    assert calls[0]["kwargs"] == {"method": "grid", "n_grid": 7, "fit_mode": "inherit"}
+    assert calls[0]["kwargs"] == {
+        "method": "grid",
+        "n_grid": 7,
+        "phi_method": "pearson",
+        "fit_mode": "inherit",
+    }
     assert calls[1]["parameter"] == "theta"
     assert calls[1]["model"] is not editor_model
     assert calls[1]["kwargs"] == {"theta_bounds": (0.2, 20.0), "fit_mode": "inherit"}
@@ -2666,6 +2676,7 @@ def test_reprofile_distribution_uses_cloned_in_force_model():
     session.reprofile_distribution(
         "tweedie_p",
         fit_mode="fit",
+        phi_method="pearson",
         method="grid",
         grid=np.array([1.25, 1.45]),
     )
@@ -2695,7 +2706,12 @@ def test_reprofile_distribution_clears_collapse_history(editor_model, editor_fra
 
     monkeypatch.setattr(type(editor_model), "estimate_p", fake_estimate_p)
 
-    result = session.reprofile_distribution("tweedie_p", method="grid", grid=np.array([1.45]))
+    result = session.reprofile_distribution(
+        "tweedie_p",
+        method="grid",
+        grid=np.array([1.45]),
+        phi_method="pearson",
+    )
 
     assert result == "p-result"
     assert session.model._editor_profile_marker == "profiled"
@@ -2713,7 +2729,12 @@ def test_reprofile_distribution_rejects_pending_manual_edits(editor_model, edito
     session.shift("x_spline", 0.1)
 
     with pytest.raises(RuntimeError, match="manual coefficient edits"):
-        session.reprofile_distribution("tweedie_p", method="grid", grid=np.array([1.25, 1.45]))
+        session.reprofile_distribution(
+            "tweedie_p",
+            method="grid",
+            grid=np.array([1.25, 1.45]),
+            phi_method="pearson",
+        )
 
 
 def test_tweedie_profile_trace_can_include_candidate_fit_curves():
@@ -2734,6 +2755,7 @@ def test_tweedie_profile_trace_can_include_candidate_fit_curves():
         X,
         y,
         fit_mode="fit",
+        phi_method="pearson",
         method="grid",
         grid=np.array([1.25, 1.45, 1.65]),
         trace_iterations=True,
@@ -2766,6 +2788,7 @@ def test_tweedie_reml_profile_trace_can_include_candidate_objective_curves():
         X,
         y,
         fit_mode="inherit",
+        phi_method="pearson",
         method="grid",
         grid=np.array([1.25, 1.45]),
         trace_iterations=True,

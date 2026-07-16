@@ -828,7 +828,7 @@ class TestTweedieProfileCI:
             selection_penalty=0.001,
             features={"x": Numeric()},
         )
-        result = estimate_tweedie_p(model, X, y)
+        result = estimate_tweedie_p(model, X, y, phi_method="mle")
         ci_lo, ci_hi = result.ci(alpha=0.05)
 
         # Should be a valid interval containing p_hat
@@ -859,7 +859,7 @@ class TestTweedieProfileCI:
             selection_penalty=0.001,
             features={"x": Numeric()},
         )
-        result = estimate_tweedie_p(model, X, y)
+        result = estimate_tweedie_p(model, X, y, phi_method="pearson")
         fig = result.profile_plot(n_points=20)
 
         assert isinstance(fig, plt.Figure)
