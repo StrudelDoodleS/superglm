@@ -300,6 +300,7 @@ def _prepare_tweedie_density(
 ) -> _PreparedTweedieDensity:
     """Prepare fixed terms for repeated density evaluations over ``phi``."""
     y, mu, p, validated_weights = _validate_tweedie_inputs(y, mu, p, weights)
+    weights_array: NDArray[np.float64]
     if validated_weights is None:
         weights_array = np.ones(len(y), dtype=np.float64)
     else:
@@ -391,8 +392,10 @@ def _evaluate_tweedie_density(
     inverse_phi_eff = prepared.weights / phi
     log_phi_eff = log_phi - prepared.log_weight
 
-    logpdf = np.empty(len(prepared.y), dtype=np.float64)
-    log_phi_score = np.empty(len(prepared.y), dtype=np.float64) if compute_score else None
+    logpdf: NDArray[np.float64] = np.empty(len(prepared.y), dtype=np.float64)
+    log_phi_score: NDArray[np.float64] | None = (
+        np.empty(len(prepared.y), dtype=np.float64) if compute_score else None
+    )
 
     zero = prepared.zero_mask
     if np.any(zero):
@@ -415,10 +418,10 @@ def _evaluate_tweedie_density(
         # Select the numerical branch in log space. In particular, do not
         # clip log(t): clipping can move an observation across t_arg_limit.
         try_exact = log_t < prepared.log_t_arg_limit
-        exact = np.zeros(len(log_t), dtype=np.bool_)
-        t_positive = np.full(len(log_t), np.nan, dtype=np.float64)
-        wright_a_plus_one = np.full(len(log_t), np.nan, dtype=np.float64)
-        positive_logpdf = np.empty(len(log_t), dtype=np.float64)
+        exact: NDArray[np.bool_] = np.zeros(len(log_t), dtype=np.bool_)
+        t_positive: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
+        wright_a_plus_one: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
+        positive_logpdf: NDArray[np.float64] = np.empty(len(log_t), dtype=np.float64)
 
         if np.any(try_exact):
             try_exact_indices = np.flatnonzero(try_exact)
@@ -467,7 +470,7 @@ def _evaluate_tweedie_density(
         logpdf[positive] = positive_logpdf
 
         if log_phi_score is not None:
-            positive_score = np.full(len(log_t), np.nan, dtype=np.float64)
+            positive_score: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
             if np.any(saddlepoint):
                 positive_score[saddlepoint] = (
                     0.5
@@ -702,7 +705,7 @@ class _PhiBranchMask:
 
     def unpack(self) -> NDArray:
         packed = np.frombuffer(self.packed, dtype=np.uint8)
-        mask = np.unpackbits(
+        mask: NDArray[np.bool_] = np.unpackbits(
             packed,
             count=self.size,
             bitorder="little",
@@ -715,7 +718,7 @@ class _PhiBranchMask:
             raise ValueError("branch masks must have the same size")
         left = np.frombuffer(self.packed, dtype=np.uint8)
         right = np.frombuffer(other.packed, dtype=np.uint8)
-        changed = np.unpackbits(
+        changed: NDArray[np.bool_] = np.unpackbits(
             np.bitwise_xor(left, right),
             count=self.size,
             bitorder="little",
@@ -923,7 +926,7 @@ def _phi_profile_seeds(
     add(phi_start, "warm start")
     pearson_usable = add(pearson_phi, "Pearson seed")
     if not pearson_usable:
-        deviance = np.empty(len(prepared.y), dtype=np.float64)
+        deviance: NDArray[np.float64] = np.empty(len(prepared.y), dtype=np.float64)
         deviance[prepared.zero_mask] = 2.0 * prepared.zero_rate_numerator[prepared.zero_mask]
         deviance[prepared.positive_mask] = prepared.positive_saddlepoint_deviance
         with np.errstate(all="ignore"):
@@ -2456,11 +2459,13 @@ class TweedieProfileResult:
 
     def _ensure_density_compat_state(self) -> None:
         """Restore density fields absent from legacy construction or pickle state."""
+        legacy_n_positive: Any = getattr(self, "n_positive", None)
+        legacy_n_saddlepoint: Any = getattr(self, "n_saddlepoint", None)
         summary = _classify_density_diagnostics(
             getattr(self, "p_hat", np.nan),
             _TweedieLogpdfDiagnostics(
-                n_positive=getattr(self, "n_positive", None),
-                n_saddlepoint=getattr(self, "n_saddlepoint", None),
+                n_positive=legacy_n_positive,
+                n_saddlepoint=legacy_n_saddlepoint,
             ),
         )
         density_was_derived = bool(
@@ -2698,7 +2703,9 @@ class TweedieProfileResult:
                 grid_lo = max(1.01, grid_lo)
                 grid_hi = min(1.99, grid_hi)
         else:
-            support = np.append(np.asarray(trace_ps, dtype=np.float64), self.p_hat)
+            support: NDArray[np.float64] = np.append(
+                np.asarray(trace_ps, dtype=np.float64), self.p_hat
+            )
             support_lo = float(np.min(support))
             support_hi = float(np.max(support))
             margin = max(0.05, 0.2 * (support_hi - support_lo))
