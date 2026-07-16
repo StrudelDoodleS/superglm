@@ -26,7 +26,7 @@ import copy
 import logging
 import warnings as _warnings
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -2180,6 +2180,40 @@ _SADDLEPOINT_NOTE_THRESHOLD = 0.10
 _SADDLEPOINT_WARN_THRESHOLD = 0.25
 
 
+@dataclass(frozen=True)
+class TweedieProfileCIEvaluation:
+    """One finite fixed-p likelihood-ratio evaluation used by a profile CI."""
+
+    p: float
+    nll: float
+    lr_statistic: float
+
+
+@dataclass(frozen=True)
+class TweedieProfileCIEndpoint:
+    """One profile-CI endpoint and how it was obtained."""
+
+    value: float
+    status: Literal["root_found", "truncated"]
+    at_range_boundary: bool
+    lr_statistic: float
+
+
+@dataclass(frozen=True)
+class TweedieProfileCIDetails:
+    """Immutable evidence and diagnostics for one Tweedie profile CI."""
+
+    alpha: float
+    cutoff: float
+    p_range: tuple[float, float]
+    lower: TweedieProfileCIEndpoint
+    upper: TweedieProfileCIEndpoint
+    interval: tuple[float, float]
+    n_new_evaluations: int
+    evaluations: tuple[TweedieProfileCIEvaluation, ...]
+    warnings: tuple[str, ...]
+
+
 @dataclass
 class TweedieProfileResult:
     """Result of Tweedie power parameter estimation.
@@ -2193,7 +2227,13 @@ class TweedieProfileResult:
     nll : float
         Mean negative log-likelihood at (p_hat, phi_hat).
     n_evaluations : int
-        Total number of profile evaluations.
+        Completed distinct fixed-p records in the immutable search snapshot.
+        Later CI or plotting probes do not change this value.
+    n_total_evaluations : int
+        Dynamic count of all completed distinct fixed-p records, including
+        successful post-search CI or plotting probes.
+    n_post_search_evaluations : int
+        Number of completed distinct records added after the search snapshot.
     converged : bool
         Whether the search converged.
     method : str
@@ -2273,6 +2313,34 @@ class TweedieProfileResult:
     _objective: Any = field(default=None, repr=False)
     _ll_scale: float = field(default=0.0, repr=False)
     _ci_cache: dict[float, tuple[float, float]] = field(default_factory=dict, repr=False)
+    _ci_details_cache: dict[float, TweedieProfileCIDetails] = field(
+        default_factory=dict, repr=False
+    )
+    _ci_p_range: tuple[float, float] = field(default=(1.02, 1.98), repr=False)
+    _ci_seed_points: tuple[float, ...] = field(default=(), repr=False)
+    _evaluation_count: Any = field(default=None, repr=False)
+    _evaluation_record: Any = field(default=None, repr=False)
+
+    @property
+    def n_total_evaluations(self) -> int:
+        """Completed distinct fixed-p records, including later CI/plot probes."""
+        if self._evaluation_count is None:
+            return int(self.n_evaluations)
+        return max(int(self.n_evaluations), int(self._evaluation_count()))
+
+    @property
+    def n_post_search_evaluations(self) -> int:
+        """Completed distinct fixed-p records added after the search snapshot."""
+        return max(0, self.n_total_evaluations - int(self.n_evaluations))
+
+    def _validate_ci_winner(self) -> None:
+        """Reject likelihood-ratio inference from an invalid winning record."""
+        for name in ("objective_finite", "fit_converged", "phi_converged"):
+            if not bool(getattr(self, name)):
+                raise RuntimeError(
+                    f"Tweedie profile CI requires {name}=True for the winning "
+                    f"record at p={self.p_hat:g}."
+                )
 
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
         """Profile likelihood confidence interval for Tweedie p.
@@ -2280,16 +2348,56 @@ class TweedieProfileResult:
         Requires that the result was produced by ``estimate_tweedie_p``.
         Results are cached so repeated calls (e.g. from summary()) are free.
         """
-        if alpha in self._ci_cache:
-            return self._ci_cache[alpha]
+        alpha_value, _, _, _, _ = _validate_profile_ci_inputs(
+            self.p_hat,
+            self.nll,
+            self._ll_scale,
+            alpha,
+            self._ci_p_range,
+        )
+        if alpha_value in self._ci_cache:
+            return self._ci_cache[alpha_value]
         if self._objective is None:
             raise RuntimeError(
                 "Profile CI requires the objective function. Use "
                 "estimate_tweedie_p() to produce this result."
             )
-        result = profile_ci_p(self._objective, self.p_hat, self.nll, self._ll_scale, alpha=alpha)
-        self._ci_cache[alpha] = result
-        return result
+        self._validate_ci_winner()
+        details = _profile_ci_p_detailed(
+            self._objective,
+            self.p_hat,
+            self.nll,
+            self._ll_scale,
+            alpha=alpha_value,
+            p_range=self._ci_p_range,
+            seed_points=self._ci_seed_points,
+            evaluation_count=self._evaluation_count,
+            evaluation_record=self._evaluation_record,
+        )
+        for message in details.warnings:
+            _warnings.warn(message, UserWarning, stacklevel=2)
+        # Preserve this exact tuple object for compatibility consumers.
+        self._ci_cache[alpha_value] = details.interval
+        self._ci_details_cache[alpha_value] = details
+        return details.interval
+
+    def ci_details(self, alpha: float = 0.05) -> TweedieProfileCIDetails:
+        """Return immutable endpoint status and evaluation evidence for ``ci``."""
+        alpha_value, _, _, _, _ = _validate_profile_ci_inputs(
+            self.p_hat,
+            self.nll,
+            self._ll_scale,
+            alpha,
+            self._ci_p_range,
+        )
+        if alpha_value in self._ci_cache and alpha_value not in self._ci_details_cache:
+            raise RuntimeError(
+                "Tweedie profile CI details are unavailable for a pre-populated "
+                "tuple-only cache entry."
+            )
+        if alpha_value not in self._ci_details_cache:
+            self.ci(alpha=alpha_value)
+        return self._ci_details_cache[alpha_value]
 
     def profile_plot(
         self,
@@ -2576,6 +2684,14 @@ class _ProfileContext:
         """Number of distinct fixed-p evaluations retained by this context."""
         return len(self._evaluation_cache)
 
+    def evaluation_count(self) -> int:
+        """Return the completed-record count for result-owned diagnostics."""
+        return len(self._evaluation_cache)
+
+    def evaluation_record(self, p: float) -> _ProfileEvaluation | None:
+        """Return the authoritative completed record for an exact p key."""
+        return self._evaluation_cache.get(float(p))
+
     def evaluate(self, p: float, source: str = "") -> float:
         """Fit at p, profile phi, record trace row, return mean NLL."""
         import time as _time
@@ -2841,6 +2957,14 @@ class _ProfileContextREML:
     def n_evals(self) -> int:
         """Number of distinct fixed-p evaluations retained by this context."""
         return len(self._evaluation_cache)
+
+    def evaluation_count(self) -> int:
+        """Return the completed-record count for result-owned diagnostics."""
+        return len(self._evaluation_cache)
+
+    def evaluation_record(self, p: float) -> _ProfileEvaluation | None:
+        """Return the authoritative completed record for an exact p key."""
+        return self._evaluation_cache.get(float(p))
 
     def evaluate(self, p: float, source: str = "") -> float:
         """Fit REML at p, profile phi, record trace row, return mean NLL."""
@@ -3123,6 +3247,9 @@ def _finalize_profile_record(
         phi_message=phi_result.message,
         _objective=ctx.evaluate,
         _ll_scale=ctx.ll_scale,
+        _ci_seed_points=tuple(float(value) for value in trace["p"]),
+        _evaluation_count=ctx.evaluation_count,
+        _evaluation_record=ctx.evaluation_record,
     )
 
 
@@ -3579,6 +3706,314 @@ def estimate_tweedie_p(
 # ---------------------------------------------------------------------------
 
 
+_CI_SCAN_SUBINTERVALS = 16
+_CI_ROOT_XTOL = 1e-4
+_CI_ZERO_ATOL = 1e-10
+_CI_BETTER_LR_ATOL = 1e-6
+
+
+class _TweedieProfileCIObjectiveValueError(ValueError):
+    """Contextualized value failure raised by the profile-CI objective."""
+
+
+class _TweedieProfileCIObjectiveError(RuntimeError):
+    """Contextualized non-value failure raised by the profile-CI objective."""
+
+
+def _validate_profile_ci_inputs(
+    p_hat: float,
+    nll_hat: float,
+    ll_scale: float,
+    alpha: float,
+    p_range: tuple[float, float],
+) -> tuple[float, float, float, float, tuple[float, float]]:
+    """Validate and normalize scalar profile-CI inputs without evaluating it."""
+    try:
+        alpha_value = float(alpha)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("alpha must be finite and strictly between 0 and 1") from exc
+    if not np.isfinite(alpha_value) or not 0.0 < alpha_value < 1.0:
+        raise ValueError("alpha must be finite and strictly between 0 and 1")
+
+    normalized: dict[str, float] = {}
+    for name, value in (("p_hat", p_hat), ("nll_hat", nll_hat), ("ll_scale", ll_scale)):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"{name} must be a finite scalar") from exc
+        if not np.isfinite(parsed):
+            raise ValueError(f"{name} must be a finite scalar")
+        normalized[name] = parsed
+    if normalized["ll_scale"] <= 0.0:
+        raise ValueError("ll_scale must be finite and strictly positive")
+
+    try:
+        range_values = np.asarray(p_range)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("p_range must be two ordered finite bounds") from exc
+    if range_values.shape != (2,) or np.iscomplexobj(range_values):
+        raise ValueError("p_range must be two ordered finite bounds")
+    try:
+        lo, hi = (float(range_values[0]), float(range_values[1]))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("p_range must be two ordered finite bounds") from exc
+    if not np.isfinite(lo) or not np.isfinite(hi) or not lo < hi:
+        raise ValueError("p_range must be two ordered finite bounds")
+    if not lo <= normalized["p_hat"] <= hi:
+        raise ValueError("p_range must contain p_hat")
+    return (
+        alpha_value,
+        normalized["p_hat"],
+        normalized["nll_hat"],
+        normalized["ll_scale"],
+        (lo, hi),
+    )
+
+
+def _validate_ci_profile_record(record: Any, p: float) -> None:
+    """Require an authoritative completed fixed-p record to be CI-usable."""
+    if record is None:
+        raise RuntimeError(
+            f"Tweedie profile CI did not retain a completed fixed-p record at p={p:g}."
+        )
+    phi_result = getattr(record, "phi_result", None)
+    objective_finite = bool(
+        phi_result is not None
+        and getattr(phi_result, "objective_finite", False)
+        and np.isfinite(getattr(record, "nll", np.nan))
+    )
+    checks = (
+        ("objective_finite", objective_finite),
+        ("fit_converged", bool(getattr(record, "fit_converged", False))),
+        ("phi_converged", bool(getattr(phi_result, "converged", False))),
+    )
+    for name, valid in checks:
+        if not valid:
+            raise RuntimeError(f"Tweedie profile CI candidate has {name}=False at p={p:g}.")
+
+
+def _profile_ci_p_detailed(
+    objective,
+    p_hat: float,
+    nll_hat: float,
+    ll_scale: float,
+    *,
+    alpha: float = 0.05,
+    p_range: tuple[float, float] = (1.02, 1.98),
+    seed_points: tuple[float, ...] = (),
+    evaluation_count=None,
+    evaluation_record=None,
+) -> TweedieProfileCIDetails:
+    """Compute the connected LR interval with explicit endpoint semantics.
+
+    The bounded scan walks outward from ``p_hat`` and roots the first sampled
+    barrier it encounters. It fills gaps between cached search points to at
+    most one sixteenth of the full configured range, avoiding a doubled
+    per-side budget. As with any finite scan, a narrower unsampled likelihood
+    island cannot be guaranteed detectable. ``n_new_evaluations`` counts
+    completed distinct records when a context count callback is supplied.
+    """
+    from scipy.stats import chi2
+
+    alpha, p_hat, nll_hat, ll_scale, p_range = _validate_profile_ci_inputs(
+        p_hat, nll_hat, ll_scale, alpha, p_range
+    )
+    if not callable(objective):
+        raise ValueError("objective must be callable")
+    lo, hi = p_range
+    cutoff = float(chi2.ppf(1.0 - alpha, 1))
+    if not np.isfinite(cutoff) or cutoff <= 0.0:
+        raise RuntimeError(f"Tweedie profile CI produced an invalid LR cutoff for alpha={alpha:g}.")
+
+    before_count = int(evaluation_count()) if evaluation_count is not None else 0
+    evidence: dict[float, TweedieProfileCIEvaluation] = {}
+
+    def evaluate(p: float) -> TweedieProfileCIEvaluation:
+        key = float(p)
+        if key in evidence:
+            return evidence[key]
+        try:
+            raw_nll = objective(key)
+        except ValueError as exc:
+            raise _TweedieProfileCIObjectiveValueError(
+                f"Tweedie profile CI objective failed at p={key:g}: {exc}"
+            ) from exc
+        except Exception as exc:
+            raise _TweedieProfileCIObjectiveError(
+                f"Tweedie profile CI objective failed at p={key:g}: {type(exc).__name__}: {exc}"
+            ) from exc
+        try:
+            values = np.asarray(raw_nll)
+            if values.size != 1 or np.iscomplexobj(values):
+                raise ValueError("objective did not return one real scalar")
+            nll = float(values.reshape(-1)[0])
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"Tweedie profile CI objective returned an invalid value at p={key:g}: {exc}"
+            ) from exc
+        if not np.isfinite(nll):
+            raise ValueError(f"Tweedie profile CI objective returned non-finite NLL at p={key:g}.")
+        if evaluation_record is not None:
+            _validate_ci_profile_record(evaluation_record(key), key)
+
+        lr_statistic = float(2.0 * ll_scale * (nll - nll_hat))
+        if not np.isfinite(lr_statistic):
+            raise ValueError(f"Tweedie profile CI produced a non-finite LR statistic at p={key:g}.")
+        # This tolerance is in total LR-statistic units: one-thousandth of
+        # the requested cutoff ignores harmless outer-profile optimization
+        # error while still treating a substantively better basin as a search
+        # failure. The final term covers unusually large floating-point scale.
+        better_tolerance = max(
+            _CI_BETTER_LR_ATOL,
+            1e-3 * cutoff,
+            128.0 * np.finfo(np.float64).eps * ll_scale * max(abs(nll), abs(nll_hat), 1.0),
+        )
+        if lr_statistic < -better_tolerance:
+            raise RuntimeError(
+                f"Tweedie profile CI found a better profile value; rerun/expand search "
+                f"(p={key:g}, LR={lr_statistic:.6g})."
+            )
+        point = TweedieProfileCIEvaluation(
+            p=key,
+            nll=nll,
+            lr_statistic=lr_statistic,
+        )
+        evidence[key] = point
+        return point
+
+    def criterion(point: TweedieProfileCIEvaluation) -> float:
+        return point.lr_statistic - cutoff
+
+    def is_zero(value: float) -> bool:
+        return bool(abs(value) <= _CI_ZERO_ATOL * max(1.0, cutoff))
+
+    # A connected interval only depends on the path from the estimate to the
+    # first LR crossing. Remote points beyond that crossing are neither part
+    # of the interval nor relevant density evidence. A bound is evaluated
+    # later only when the outward scan reaches it without an earlier root.
+    center = evaluate(p_hat)
+    center_criterion = criterion(center)
+    if center_criterion > _CI_ZERO_ATOL * max(1.0, cutoff):
+        raise RuntimeError(
+            f"Tweedie profile CI estimate at p={p_hat:g} lies outside its own LR region."
+        )
+
+    finite_seeds: set[float] = set()
+    for value in seed_points:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if np.isfinite(parsed) and lo <= parsed <= hi and parsed != p_hat:
+            finite_seeds.add(parsed)
+
+    anchors = sorted({lo, p_hat, hi} | finite_seeds)
+    scan_candidates = set(anchors)
+    max_gap = (hi - lo) / float(_CI_SCAN_SUBINTERVALS)
+    for left, right in zip(anchors[:-1], anchors[1:]):
+        ratio = (right - left) / max_gap
+        roundoff = 32.0 * np.finfo(np.float64).eps * max(1.0, abs(ratio))
+        n_intervals = max(1, int(np.ceil(ratio - roundoff)))
+        if n_intervals > 1:
+            scan_candidates.update(
+                float(value)
+                for value in np.linspace(left, right, n_intervals + 1, dtype=np.float64)[1:-1]
+            )
+
+    def locate(bound: float, *, side: Literal["lower", "upper"]) -> TweedieProfileCIEndpoint:
+        if side == "lower":
+            ordered = sorted((p for p in scan_candidates if bound <= p < p_hat), reverse=True)
+        else:
+            ordered = sorted(p for p in scan_candidates if p_hat < p <= bound)
+
+        previous = center
+        previous_value = center_criterion
+        for candidate in ordered:
+            current = evaluate(candidate)
+            current_value = criterion(current)
+            if is_zero(current_value):
+                return TweedieProfileCIEndpoint(
+                    value=current.p,
+                    status="root_found",
+                    at_range_boundary=bool(current.p == bound),
+                    lr_statistic=current.lr_statistic,
+                )
+            if previous_value < 0.0 < current_value:
+                bracket = tuple(sorted((previous.p, current.p)))
+                try:
+                    root_value, root_result = brentq(
+                        lambda p: criterion(evaluate(p)),
+                        bracket[0],
+                        bracket[1],
+                        xtol=_CI_ROOT_XTOL,
+                        rtol=4.0 * np.finfo(np.float64).eps,
+                        full_output=True,
+                        disp=False,
+                    )
+                    root = float(root_value)
+                except (
+                    _TweedieProfileCIObjectiveValueError,
+                    _TweedieProfileCIObjectiveError,
+                ):
+                    raise
+                except (ValueError, RuntimeError) as exc:
+                    raise RuntimeError(
+                        f"Tweedie numerical CI root failed on {side} bracket "
+                        f"[{bracket[0]:g}, {bracket[1]:g}]: {exc}"
+                    ) from exc
+                root_point = evaluate(root)
+                if not bool(root_result.converged) or not bracket[0] <= root <= bracket[1]:
+                    raise RuntimeError(
+                        f"Tweedie numerical CI root validation failed at p={root:g} "
+                        f"on the {side} side."
+                    )
+                return TweedieProfileCIEndpoint(
+                    value=root,
+                    status="root_found",
+                    at_range_boundary=bool(root == bound),
+                    lr_statistic=root_point.lr_statistic,
+                )
+            previous = current
+            previous_value = current_value
+
+        bound_point = evaluate(bound)
+        return TweedieProfileCIEndpoint(
+            value=bound,
+            status="truncated",
+            at_range_boundary=True,
+            lr_statistic=bound_point.lr_statistic,
+        )
+
+    lower = locate(lo, side="lower")
+    upper = locate(hi, side="upper")
+    interval = (lower.value, upper.value)
+    warning_messages: list[str] = []
+    for label, endpoint in (("Lower", lower), ("Upper", upper)):
+        if endpoint.status == "truncated":
+            warning_messages.append(
+                f"{label} Tweedie profile CI is truncated at the configured p_range "
+                f"boundary p={endpoint.value:g}; the LR cutoff was not reached on the "
+                "connected interval."
+            )
+
+    if evaluation_count is None:
+        n_new_evaluations = len(evidence)
+    else:
+        after_count = int(evaluation_count())
+        n_new_evaluations = max(0, after_count - before_count)
+    return TweedieProfileCIDetails(
+        alpha=alpha,
+        cutoff=cutoff,
+        p_range=p_range,
+        lower=lower,
+        upper=upper,
+        interval=interval,
+        n_new_evaluations=n_new_evaluations,
+        evaluations=tuple(evidence.values()),
+        warnings=tuple(warning_messages),
+    )
+
+
 def profile_ci_p(
     objective,
     p_hat: float,
@@ -3588,52 +4023,19 @@ def profile_ci_p(
     alpha: float = 0.05,
     p_range: tuple[float, float] = (1.02, 1.98),
 ) -> tuple[float, float]:
-    """Profile likelihood confidence interval for Tweedie power p.
+    """Return the connected profile likelihood confidence interval for p.
 
-    Each evaluation calls ``objective(p)`` which refits the GLM via PIRLS.
-    The objective returns mean NLL per observation, so the LRT
-    statistic is ``2 * ll_scale * (mean_nll(p) - mean_nll(p_hat))``.
-
-    Parameters
-    ----------
-    objective : callable
-        Profile objective ``p -> mean_nll``.
-    p_hat : float
-        MLE of p.
-    nll_hat : float
-        Mean NLL at p_hat.
-    ll_scale : float
-        Number of effective observations used to convert mean NLL to total.
-    alpha : float
-        Significance level.
-    p_range : tuple
-        Search range for CI endpoints.
-
-    Returns
-    -------
-    (ci_lower, ci_upper) : tuple of float
+    Use :meth:`TweedieProfileResult.ci_details` for root/truncation status and
+    the immutable fixed-p evidence behind a result-owned interval.
     """
-    from scipy.optimize import brentq
-    from scipy.stats import chi2
-
-    cutoff = chi2.ppf(1.0 - alpha, 1)
-
-    def g(p: float) -> float:
-        nll = objective(p)
-        return 2.0 * ll_scale * (nll - nll_hat) - cutoff
-
-    # Lower bound
-    lo = p_range[0]
-    try:
-        ci_lower = brentq(g, lo, p_hat, xtol=1e-3)
-    except ValueError:
-        ci_lower = lo
-
-    # Upper bound
-    hi = p_range[1]
-    try:
-        ci_upper = brentq(g, p_hat, hi, xtol=1e-3)
-    except ValueError:
-        ci_upper = hi
-
-    return (ci_lower, ci_upper)
+    details = _profile_ci_p_detailed(
+        objective,
+        p_hat,
+        nll_hat,
+        ll_scale,
+        alpha=alpha,
+        p_range=p_range,
+    )
+    for message in details.warnings:
+        _warnings.warn(message, UserWarning, stacklevel=2)
+    return details.interval
