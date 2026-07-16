@@ -39,6 +39,13 @@ def _call_tweedie_low_level(function_name, y, mu, *, phi=2.0, p=1.5, weights=Non
     return estimate_phi(y, mu, p, weights=weights)
 
 
+def _stable_p_one_half_deviance(y, mu):
+    """Closed-form p=1.5 unit deviance without subtracting close square roots."""
+    delta = (y - mu) / mu
+    root_difference = delta / (np.sqrt(1.0 + delta) + 1.0)
+    return 4.0 * np.sqrt(mu) * root_difference**2
+
+
 # =====================================================================
 # TestGenerateTweedieCPG
 # =====================================================================
@@ -128,6 +135,21 @@ class TestTweedieLogpdf:
         phi, p = 5.0, 1.5
         lp = tweedie_logpdf(y, mu, phi, p, t_arg_limit=0.0)  # forces saddlepoint
         assert np.all(np.isfinite(lp))
+
+    def test_saddlepoint_close_y_mu_is_stable_at_large_scale(self):
+        """The compatibility helper must not lose close-y/mu unit deviance."""
+        mu = np.array([1e12])
+        y = mu * (1.0 + 1e-12)
+        phi = np.array([1e-12])
+        p = 1.5
+        deviance = _stable_p_one_half_deviance(y, mu)
+        expected = -0.5 * (np.log(2.0 * np.pi) + np.log(phi) + p * np.log(y)) - deviance / (
+            2.0 * phi
+        )
+
+        actual = tweedie_module._saddlepoint(y, mu, phi, p)
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-13, atol=1e-12)
 
     def test_all_invalid_wright_terms_use_saddlepoint(self, monkeypatch):
         """Every invalid Wright term must be populated by the fallback."""
@@ -467,6 +489,106 @@ class TestTweedieLogPhiScore:
         analytic = float(np.mean(evaluation.log_phi_score))
         finite_difference = self._finite_difference_score(prepared, phi)
         np.testing.assert_allclose(analytic, finite_difference, rtol=1e-8, atol=1e-9)
+
+    def test_log_phi_score_forced_saddlepoint_close_y_mu_is_stable(self):
+        """Close large responses need a non-negative deviance, value, and score."""
+        mu = np.array([1e12])
+        y = mu * (1.0 + 1e-12)
+        phi, p = 1e-12, 1.5
+        expected_deviance = _stable_p_one_half_deviance(y, mu)
+        prepared = tweedie_module._prepare_tweedie_density(
+            y,
+            mu,
+            p,
+            t_arg_limit=0.0,
+        )
+
+        assert np.all(np.isfinite(prepared.positive_saddlepoint_deviance))
+        assert np.all(prepared.positive_saddlepoint_deviance >= 0.0)
+        np.testing.assert_allclose(
+            prepared.positive_saddlepoint_deviance,
+            expected_deviance,
+            rtol=2e-12,
+            atol=0.0,
+        )
+
+        evaluation = tweedie_module._evaluate_tweedie_density(
+            prepared,
+            phi,
+            compute_score=True,
+        )
+        expected_logpdf = -0.5 * (
+            np.log(2.0 * np.pi) + np.log(phi) + p * np.log(y)
+        ) - expected_deviance / (2.0 * phi)
+        expected_score = 0.5 - expected_deviance / (2.0 * phi)
+
+        assert evaluation.score_valid
+        np.testing.assert_allclose(evaluation.logpdf, expected_logpdf, rtol=1e-13, atol=1e-12)
+        np.testing.assert_allclose(
+            evaluation.log_phi_score,
+            expected_score,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        finite_difference = self._finite_difference_score(prepared, phi)
+        np.testing.assert_allclose(
+            float(np.mean(evaluation.log_phi_score)),
+            finite_difference,
+            rtol=1e-8,
+            atol=1e-9,
+        )
+
+    def test_log_phi_score_accepts_scaled_ratio_roundoff_near_one(self):
+        """An O(a*eps) ratio deficit is numerical noise, not score failure."""
+        y = np.array([1.0])
+        mu = np.array([1.0])
+        phi, p = 94.32317335438263, 102.0 / 101.0
+        prepared = tweedie_module._prepare_tweedie_density(y, mu, p)
+
+        evaluation = tweedie_module._evaluate_tweedie_density(
+            prepared,
+            phi,
+            compute_score=True,
+        )
+
+        assert evaluation.diagnostics.n_saddlepoint == 0
+        assert evaluation.score_valid
+        assert evaluation.log_phi_score is not None
+        finite_difference = self._finite_difference_score(prepared, phi)
+        np.testing.assert_allclose(
+            float(np.mean(evaluation.log_phi_score)),
+            finite_difference,
+            rtol=1e-8,
+            atol=1e-9,
+        )
+
+    def test_log_phi_score_rejects_materially_subunit_ratio(self, monkeypatch):
+        """The scaled tolerance must not turn a materially invalid ratio into a score."""
+        y = np.array([1.0])
+        mu = np.array([1.0])
+        phi, p = 94.32317335438263, 102.0 / 101.0
+        prepared = tweedie_module._prepare_tweedie_density(y, mu, p)
+        exact_value = tweedie_module._evaluate_tweedie_density(prepared, phi)
+        real_wright_bessel = tweedie_module.wright_bessel
+
+        def materially_low_ratio(a, b, t):
+            if b == a:
+                return 0.99 * a * real_wright_bessel(a, a + 1.0, t)
+            return real_wright_bessel(a, b, t)
+
+        monkeypatch.setattr(tweedie_module, "wright_bessel", materially_low_ratio)
+
+        evaluation = tweedie_module._evaluate_tweedie_density(
+            prepared,
+            phi,
+            compute_score=True,
+        )
+
+        assert evaluation.diagnostics.n_saddlepoint == 0
+        np.testing.assert_array_equal(evaluation.logpdf, exact_value.logpdf)
+        assert not evaluation.score_valid
+        assert evaluation.log_phi_score is not None
+        assert np.all(np.isnan(evaluation.log_phi_score))
 
     def test_log_phi_score_derivative_failure_keeps_exact_density(self, monkeypatch):
         y = np.array([0.4, 1.5, 5.0])

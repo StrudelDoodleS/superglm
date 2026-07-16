@@ -206,6 +206,65 @@ def _validate_tweedie_phi(phi: float) -> float:
     return phi_float
 
 
+_TWEEDIE_DEVIANCE_SERIES_THRESHOLD = 1e-3
+_TWEEDIE_DEVIANCE_SERIES_TERMS = 8
+
+
+def _tweedie_positive_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
+    """Compute positive-response unit deviance without close-mean cancellation."""
+    y_array, mu_array = np.broadcast_arrays(
+        np.asarray(y, dtype=np.float64),
+        np.asarray(mu, dtype=np.float64),
+    )
+    delta = (y_array - mu_array) / mu_array
+    near = np.abs(delta) <= _TWEEDIE_DEVIANCE_SERIES_THRESHOLD
+    g = np.empty_like(delta)
+
+    if np.any(near):
+        delta_near = delta[near]
+        term = np.full_like(delta_near, 0.5)
+        series = term.copy()
+        # The recurrence adds k=1,...,8 from the integral expansion. At the
+        # 1e-3 threshold, the first omitted term is O(1e-27), below binary64
+        # rounding even for the largest coefficient over 1 < p < 2.
+        for k in range(_TWEEDIE_DEVIANCE_SERIES_TERMS):
+            term *= -delta_near * (p + k) / (k + 3.0)
+            series += term
+        g[near] = delta_near**2 * series
+
+    regular = ~near & (delta > -1.0)
+    if np.any(regular):
+        delta_regular = delta[regular]
+        with np.errstate(all="ignore"):
+            log_ratio = np.log1p(delta_regular)
+            first = (1.0 + delta_regular) * np.expm1((1.0 - p) * log_ratio) / (1.0 - p)
+            second = np.expm1((2.0 - p) * log_ratio) / (2.0 - p)
+        g[regular] = first - second
+
+    # For a positive y many orders below mu, delta can round to exactly -1.
+    # Recover log(y / mu) from the original values; this branch is far from
+    # the cancellation region, so the power-scale formula is well-conditioned.
+    rounded_to_minus_one = ~near & ~regular
+    if np.any(rounded_to_minus_one):
+        with np.errstate(all="ignore"):
+            log_ratio = np.log(y_array[rounded_to_minus_one]) - np.log(
+                mu_array[rounded_to_minus_one]
+            )
+            ratio = np.exp(log_ratio)
+            ratio_two_minus_p = np.exp((2.0 - p) * log_ratio)
+            first = (ratio_two_minus_p - ratio) / (1.0 - p)
+            second = (ratio_two_minus_p - 1.0) / (2.0 - p)
+        g[rounded_to_minus_one] = first - second
+
+    with np.errstate(all="ignore"):
+        deviance = 2.0 * np.power(mu_array, 2.0 - p) * g
+    negative_roundoff = np.isfinite(deviance) & (deviance < 0.0)
+    if np.any(negative_roundoff):
+        deviance = deviance.copy()
+        deviance[negative_roundoff] = 0.0
+    return deviance
+
+
 def _prepare_tweedie_density(
     y: NDArray,
     mu: NDArray,
@@ -250,11 +309,10 @@ def _prepare_tweedie_density(
         positive_canonical_c = y_positive * mu_one_minus_p[positive_mask] / (
             1.0 - p
         ) - mu_two_minus_p[positive_mask] / (2.0 - p)
-        y_one_minus_p = np.power(y_positive, 1.0 - p)
-        y_two_minus_p = np.power(y_positive, 2.0 - p)
-        positive_saddlepoint_deviance = 2.0 * (
-            y_positive * (y_one_minus_p - mu_one_minus_p[positive_mask]) / (1.0 - p)
-            - (y_two_minus_p - mu_two_minus_p[positive_mask]) / (2.0 - p)
+        positive_saddlepoint_deviance = _tweedie_positive_unit_deviance(
+            y_positive,
+            mu[positive_mask],
+            p,
         )
         positive_saddlepoint_log_base = np.log(2.0 * np.pi) + p * positive_log_y
 
@@ -397,7 +455,13 @@ def _evaluate_tweedie_density(
                     )
                     ratio = wright_a / (prepared.a * wright_a_plus_one[exact])
 
-                ratio_tolerance = 64.0 * np.finfo(np.float64).eps
+                # Wright evaluations accumulate parameter-scaled rounding as
+                # a grows near p=1. Cap the allowance so a materially sub-unit
+                # ratio still invalidates the analytic score.
+                ratio_tolerance = min(
+                    1e-10,
+                    64.0 * np.finfo(np.float64).eps * max(1.0, prepared.a),
+                )
                 ratio_valid = (
                     np.isfinite(wright_a)
                     & (wright_a > 0.0)
@@ -499,9 +563,7 @@ def tweedie_logpdf(
 def _saddlepoint(y: NDArray, mu: NDArray, phi: NDArray, p: float) -> NDArray:
     """Saddlepoint approximation to the Tweedie log-density."""
     y_safe = np.maximum(y, 1e-300)
-    term1 = y * (np.power(y_safe, 1 - p) - np.power(mu, 1 - p)) / (1 - p)
-    term2 = (np.power(y_safe, 2 - p) - np.power(mu, 2 - p)) / (2 - p)
-    deviance = 2 * (term1 - term2)
+    deviance = _tweedie_positive_unit_deviance(y_safe, mu, p)
     return -0.5 * np.log(2 * np.pi * phi * np.power(y_safe, p)) - deviance / (2 * phi)
 
 
