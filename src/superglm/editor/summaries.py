@@ -197,6 +197,9 @@ def _compact_summary_payload(
             "bic": _compact_scalar(info.get("bic")),
             "log_likelihood": _compact_scalar(info.get("log_likelihood")),
             "tweedie_p": _compact_scalar(info.get("tweedie_p")),
+            "tweedie_p_ci": _compact_profile_ci(info.get("tweedie_p_ci")),
+            "tweedie_p_ci_status": _compact_scalar(info.get("tweedie_p_ci_status")),
+            "tweedie_p_method": _compact_scalar(info.get("tweedie_p_method")),
             "nb_theta": _compact_scalar(info.get("nb_theta")),
         },
         "rows": rows,
@@ -290,6 +293,12 @@ def _compact_scalar(value: Any) -> Any:
     if isinstance(value, int | str | bool):
         return value
     return str(value)
+
+
+def _compact_profile_ci(value: Any) -> list[Any] | None:
+    if not isinstance(value, tuple | list) or len(value) < 2:
+        return None
+    return [_compact_scalar(value[0]), _compact_scalar(value[1])]
 
 
 def _display_method(value: Any) -> str:

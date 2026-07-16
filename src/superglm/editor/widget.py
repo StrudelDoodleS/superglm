@@ -41,6 +41,7 @@ from superglm.editor.payloads import history_payload, session_payload
 from superglm.editor.reports import report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer
 from superglm.editor.summaries import offset_label_payload, summary_payload
+from superglm.profiling._reporting import cached_tweedie_profile_ci
 
 _LIVE_WIDGETS: set[EditorWidget] = set()
 
@@ -1071,7 +1072,8 @@ def _profile_trace_rows(result: Any) -> list[dict[str, Any]]:
 
 def _profile_estimate_payload(result: Any, parameter: str) -> dict[str, Any]:
     key = parameter.lower().replace("-", "_")
-    if key in {"tweedie", "tweedie_p", "p"}:
+    is_tweedie = key in {"tweedie", "tweedie_p", "p"}
+    if is_tweedie:
         value = getattr(result, "p_hat", None)
         label = "p_hat"
         name = "p"
@@ -1086,25 +1088,32 @@ def _profile_estimate_payload(result: Any, parameter: str) -> dict[str, Any]:
 
     ci_low = None
     ci_high = None
-    ci = getattr(result, "ci", None)
-    if callable(ci):
-        try:
-            ci_low, ci_high = ci(alpha=0.05)
-        except Exception:
-            ci_low, ci_high = None, None
+    ci_status = None
+    if is_tweedie:
+        cached_ci, ci_status = cached_tweedie_profile_ci(result, 0.05)
+        if cached_ci is not None:
+            ci_low, ci_high = cached_ci
+    else:
+        ci = getattr(result, "ci", None)
+        if callable(ci):
+            try:
+                ci_low, ci_high = ci(alpha=0.05)
+            except Exception:
+                ci_low, ci_high = None, None
 
-    return _normalise_profile_estimate(
-        {
-            "parameter": name,
-            "label": label,
-            "value": value,
-            "ci_low": ci_low,
-            "ci_high": ci_high,
-            "objective": getattr(result, "nll", None),
-            "objective_label": "loss",
-            "lower_is_better": True,
-        }
-    )
+    estimate = {
+        "parameter": name,
+        "label": label,
+        "value": value,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "objective": getattr(result, "nll", None),
+        "objective_label": "loss",
+        "lower_is_better": True,
+    }
+    if ci_status is not None:
+        estimate["ci_status"] = ci_status
+    return _normalise_profile_estimate(estimate)
 
 
 def _normalise_profile_estimate(estimate: dict[str, Any]) -> dict[str, Any]:
@@ -1114,6 +1123,13 @@ def _normalise_profile_estimate(estimate: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("value", None)
     payload.setdefault("ci_low", None)
     payload.setdefault("ci_high", None)
+    if payload.get("parameter") == "p":
+        payload.setdefault(
+            "ci_status",
+            "available"
+            if payload.get("ci_low") is not None and payload.get("ci_high") is not None
+            else "not computed",
+        )
     payload.setdefault("objective", None)
     payload.setdefault("objective_label", "loss")
     payload.setdefault("lower_is_better", True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from superglm.distributions import NegativeBinomial, Tweedie
+from superglm.profiling._reporting import cached_tweedie_profile_ci
 
 logger = logging.getLogger(__name__)
 
@@ -113,12 +114,15 @@ def _resolve_profile_fit_mode(model, fit_mode: str) -> str:
 
 
 def _tweedie_estimate_payload(result):
+    ci, ci_status = cached_tweedie_profile_ci(result, 0.05)
+    ci_low, ci_high = (None, None) if ci is None else ci
     return {
         "parameter": "p",
         "label": "p_hat",
         "value": getattr(result, "p_hat", None),
-        "ci_low": _cached_ci(result)[0],
-        "ci_high": _cached_ci(result)[1],
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "ci_status": ci_status,
         "objective": getattr(result, "nll", None),
         "objective_label": "loss",
         "lower_is_better": True,

@@ -35,6 +35,57 @@ function snapshot(revision) {
   };
 }
 
+function profileTraceNodes() {
+  return {
+    summaryStatus: { textContent: "" },
+    summaryNote: { textContent: "" },
+    summaryFrame: { innerHTML: "", setAttribute: () => {} },
+    profileProgress: {
+      hidden: true,
+      classList: { toggle: () => {} }
+    },
+    profileTraceStatus: { textContent: "" },
+    profileTraceLegend: { innerHTML: "" },
+    profileTracePlot: { innerHTML: "" },
+    profileTraceTable: { innerHTML: "" }
+  };
+}
+
+/** @param {string} ciStatus */
+async function completedProfileLegend(ciStatus) {
+  const nodes = profileTraceNodes();
+  const result = { available: false, label: "Profiled model", error: "No compact summary" };
+  let requestCount = 0;
+  const request = async () => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      return { status: "running", phase: "profile_ci", job_id: "job-ci", trace: [] };
+    }
+    return {
+      status: "complete",
+      parameter: "tweedie_p",
+      trace: [{ p: 1.55, nll: 0.1 }],
+      profile_estimate: {
+        parameter: "p",
+        label: "p_hat",
+        value: 1.55,
+        ci_low: null,
+        ci_high: null,
+        ci_status: ciStatus
+      },
+      result
+    };
+  };
+
+  await runDistributionProfile(
+    nodes,
+    "tweedie_p",
+    async () => {},
+    { request, pause: async () => {} }
+  );
+  return nodes;
+}
+
 test("structural transition descriptors are pure route descriptions", () => {
   assert.deepEqual(collapseTransition("region"), {
     name: "collapse levels",
@@ -124,6 +175,21 @@ test("profile completion is accepted before the caller schedules new-revision ev
     "request:/profile_distribution/status/job-7"
   ));
   assert.equal(events.some((event) => event.includes("/metrics")), false);
+});
+
+test("uncached Tweedie MLE profile reports that its CI was not computed", async () => {
+  const nodes = await completedProfileLegend("not computed");
+
+  assert.match(nodes.profileTraceLegend.innerHTML, /CI not computed/);
+  assert.doesNotMatch(nodes.profileTraceLegend.innerHTML, /CI pending/);
+  assert.doesNotMatch(nodes.profileTraceStatus.textContent, /profile CI/i);
+});
+
+test("Pearson plug-in profile reports that a likelihood-ratio CI is unavailable", async () => {
+  const nodes = await completedProfileLegend("unavailable for Pearson plug-in");
+
+  assert.match(nodes.profileTraceLegend.innerHTML, /CI unavailable/);
+  assert.doesNotMatch(nodes.profileTraceLegend.innerHTML, /CI pending/);
 });
 
 test("state-only recovery publishes a stale summary payload when remote summary is null", async () => {

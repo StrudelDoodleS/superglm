@@ -277,6 +277,10 @@ def test_summary_export_keeps_ordered_level_estimates_but_only_one_global_p_valu
 
 def test_summary_export_keeps_distribution_profile_values_typed():
     model, _, _, _ = _fit_export_model()
+
+    def unexpected_tweedie_ci(*args, **kwargs):
+        raise AssertionError("summary export must not evaluate a Tweedie profile CI")
+
     model._nb_profile_result = SimpleNamespace(
         theta_hat=np.float64(2.75),
         nll=10.0,
@@ -285,10 +289,13 @@ def test_summary_export_keeps_distribution_profile_values_typed():
     model._tweedie_profile_result = SimpleNamespace(
         p_hat=np.float64(1.55),
         phi_hat=np.float64(0.8),
-        method="exact",
-        phi_method="pearson",
+        method="brent",
+        phi_method="mle",
+        density_exact=True,
         nll=11.0,
-        ci=lambda alpha: (np.float64(1.4), np.float64(1.7)),
+        _ci_cache={0.05: (np.float64(1.4), np.float64(1.7))},
+        ci=unexpected_tweedie_ci,
+        ci_details=unexpected_tweedie_ci,
     )
     model._summary_cache = None
 
@@ -301,10 +308,66 @@ def test_summary_export_keeps_distribution_profile_values_typed():
     assert overview[("Distribution Profile", "Tweedie p")] == 1.55
     assert overview[("Distribution Profile", "Tweedie p CI Lower")] == 1.4
     assert overview[("Distribution Profile", "Tweedie p CI Upper")] == 1.7
+    assert overview[("Distribution Profile", "Tweedie p CI Status")] == "available"
     assert overview[("Distribution Profile", "Tweedie phi")] == 0.8
-    assert overview[("Distribution Profile", "Tweedie p Method")] == (
-        "Profile (exact, phi=pearson)"
+    assert overview[("Distribution Profile", "Tweedie p Method")] == "Profile MLE (Brent)"
+
+
+def test_summary_export_ignores_stale_pearson_profile_ci():
+    model, _, _, _ = _fit_export_model()
+
+    def unexpected_ci(*args, **kwargs):
+        raise AssertionError("summary export must not evaluate a Tweedie profile CI")
+
+    model._tweedie_profile_result = SimpleNamespace(
+        p_hat=np.float64(1.55),
+        phi_hat=np.float64(0.8),
+        method="brent",
+        phi_method="pearson",
+        density_exact=True,
+        nll=11.0,
+        _ci_cache={0.05: (np.float64(1.4), np.float64(1.7))},
+        ci=unexpected_ci,
+        ci_details=unexpected_ci,
     )
+    model._summary_cache = None
+
+    overview = _overview_values(build_summary_export_payload(model))
+
+    assert overview[("Distribution Profile", "Tweedie p CI Lower")] is None
+    assert overview[("Distribution Profile", "Tweedie p CI Upper")] is None
+    assert overview[("Distribution Profile", "Tweedie p CI Status")] == (
+        "unavailable for Pearson plug-in"
+    )
+    assert overview[("Distribution Profile", "Tweedie p Method")] == (
+        "Approximate profile (Brent; Pearson plug-in)"
+    )
+
+
+def test_summary_export_marks_uncached_mle_profile_ci_not_computed():
+    model, _, _, _ = _fit_export_model()
+
+    def unexpected_ci(*args, **kwargs):
+        raise AssertionError("summary export must not evaluate a Tweedie profile CI")
+
+    model._tweedie_profile_result = SimpleNamespace(
+        p_hat=np.float64(1.55),
+        phi_hat=np.float64(0.8),
+        method="brent",
+        phi_method="mle",
+        density_exact=True,
+        nll=11.0,
+        _ci_cache={},
+        ci=unexpected_ci,
+        ci_details=unexpected_ci,
+    )
+    model._summary_cache = None
+
+    overview = _overview_values(build_summary_export_payload(model))
+
+    assert overview[("Distribution Profile", "Tweedie p CI Lower")] is None
+    assert overview[("Distribution Profile", "Tweedie p CI Upper")] is None
+    assert overview[("Distribution Profile", "Tweedie p CI Status")] == "not computed"
 
 
 def test_summary_export_preserves_stale_and_fixed_offset_editor_caveats():

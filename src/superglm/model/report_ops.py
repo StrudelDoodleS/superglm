@@ -9,6 +9,11 @@ import numpy as np
 
 from superglm.inference._term_helpers import spline_group_enrichment
 from superglm.inference.summary import _CoefRow
+from superglm.profiling._reporting import (
+    cached_tweedie_profile_ci,
+    tweedie_profile_method_label,
+    tweedie_profile_report_identity,
+)
 from superglm.solvers.rank import selected_group_name_set
 from superglm.types import GroupSlice
 
@@ -65,7 +70,9 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
     if cache is None:
         cache = {}
         model._summary_cache = cache
-    key = (float(alpha), detail)
+    tw_pr = getattr(model, "_tweedie_profile_result", None)
+    tweedie_identity = None if tw_pr is None else tweedie_profile_report_identity(tw_pr, alpha)
+    key = (float(alpha), detail, tweedie_identity)
     cached = cache.get(key)
     if cached is not None:
         return cached
@@ -198,14 +205,15 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         model_info["nb_theta_method"] = "Profile (exact)"
         model_info["nb_profile_nll"] = nb_pr.nll
 
-    tw_pr = getattr(model, "_tweedie_profile_result", None)
     if tw_pr is not None:
-        ci = tw_pr.ci(alpha=alpha)
+        ci, ci_status = cached_tweedie_profile_ci(tw_pr, alpha)
         model_info["tweedie_p"] = tw_pr.p_hat
         model_info["tweedie_p_ci"] = ci
+        model_info["tweedie_p_ci_status"] = ci_status
         model_info["tweedie_phi"] = tw_pr.phi_hat
-        model_info["tweedie_p_method"] = f"Profile ({tw_pr.method}, phi={tw_pr.phi_method})"
-        model_info["tweedie_profile_nll"] = tw_pr.nll
+        model_info["tweedie_p_method"] = tweedie_profile_method_label(tw_pr)
+        if hasattr(tw_pr, "nll"):
+            model_info["tweedie_profile_nll"] = tw_pr.nll
 
     editor_inference_stale = bool(model_info.get("editor_inference_stale", False))
     if editor_inference_stale:

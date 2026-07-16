@@ -1478,6 +1478,46 @@ def test_in_force_summary_uses_session_train_data_without_retained_fit_state():
     assert payload["compact"]["model"]["deviance"] is not None
 
 
+@pytest.mark.parametrize(
+    ("phi_method", "expected_status"),
+    [
+        ("mle", "not computed"),
+        ("pearson", "unavailable for Pearson plug-in"),
+    ],
+)
+def test_in_force_summary_never_computes_tweedie_ci(
+    editor_model,
+    phi_method,
+    expected_status,
+):
+    from superglm.editor.summaries import summary_payload
+
+    def unexpected_ci(*args, **kwargs):
+        raise AssertionError("editor summary must not evaluate a Tweedie profile CI")
+
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.model._tweedie_profile_result = SimpleNamespace(
+        p_hat=1.55,
+        phi_hat=0.8,
+        nll=11.0,
+        method="brent",
+        phi_method=phi_method,
+        density_exact=True,
+        _ci_cache={0.05: (1.4, 1.7)} if phi_method == "pearson" else {},
+        ci=unexpected_ci,
+        ci_details=unexpected_ci,
+    )
+    session.model._summary_cache = None
+    widget = SimpleNamespace(session=session, _in_force_info=None)
+
+    payload = summary_payload(widget, "in_force")
+
+    assert payload["available"] is True
+    assert payload["compact"]["model"]["tweedie_p"] == 1.55
+    assert payload["compact"]["model"]["tweedie_p_ci"] is None
+    assert payload["compact"]["model"]["tweedie_p_ci_status"] == expected_status
+
+
 def test_in_force_summary_uses_validation_data_without_retained_fit_state():
     from superglm.editor.summaries import summary_payload
 
@@ -2216,6 +2256,27 @@ def test_compact_summary_shows_regular_reference_level(editor_model):
     assert reference_row["sig_class"] == "sig-reference"
 
 
+def test_compact_summary_carries_tweedie_ci_status_and_cached_interval():
+    from superglm.editor.summaries import _compact_summary_payload
+
+    summary = SimpleNamespace(
+        _info={
+            "family": "Tweedie",
+            "tweedie_p": 1.55,
+            "tweedie_p_ci": (1.4, 1.7),
+            "tweedie_p_ci_status": "available",
+            "tweedie_p_method": "Profile MLE (Brent)",
+        },
+        _coef_rows=[],
+    )
+
+    payload = _compact_summary_payload(summary, "in_force", [], [])
+
+    assert payload["model"]["tweedie_p_ci"] == [1.4, 1.7]
+    assert payload["model"]["tweedie_p_ci_status"] == "available"
+    assert payload["model"]["tweedie_p_method"] == "Profile MLE (Brent)"
+
+
 def test_collapse_selected_levels_across_existing_groups_preserves_remainders():
     rng = np.random.default_rng(20260707)
     levels = [f"T{i:02d}" for i in range(1, 7)]
@@ -2823,11 +2884,14 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
         nll = 0.12
         method = "brent"
         phi_method = "mle"
+        density_exact = True
+        _ci_cache = {}
         search_trace = FakeTrace()
 
         def ci(self, alpha=0.05):
-            assert alpha == 0.05
-            return (1.31, 1.53)
+            raise AssertionError("editor payload must not evaluate a Tweedie profile CI")
+
+        ci_details = ci
 
     def fake_reprofile(parameter, **kwargs):
         calls.append({"parameter": parameter, "kwargs": kwargs})
@@ -2862,12 +2926,71 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
         "parameter": "p",
         "label": "p_hat",
         "value": 1.42,
-        "ci_low": 1.31,
-        "ci_high": 1.53,
+        "ci_low": None,
+        "ci_high": None,
+        "ci_status": "not computed",
         "objective": 0.12,
         "objective_label": "loss",
         "lower_is_better": True,
     }
+
+
+@pytest.mark.parametrize(
+    ("phi_method", "ci_cache", "expected_low", "expected_high", "expected_status"),
+    [
+        ("mle", {}, None, None, "not computed"),
+        ("mle", {0.05: (1.31, 1.53)}, 1.31, 1.53, "available"),
+        (
+            "pearson",
+            {0.05: (1.31, 1.53)},
+            None,
+            None,
+            "unavailable for Pearson plug-in",
+        ),
+    ],
+)
+def test_tweedie_editor_profile_payload_only_reads_valid_cached_mle_ci(
+    phi_method,
+    ci_cache,
+    expected_low,
+    expected_high,
+    expected_status,
+):
+    from superglm.editor.widget import _profile_estimate_payload
+
+    def unexpected_ci(*args, **kwargs):
+        raise AssertionError("editor payload must not evaluate a Tweedie profile CI")
+
+    result = SimpleNamespace(
+        p_hat=1.42,
+        phi_hat=0.3,
+        nll=0.12,
+        method="brent",
+        phi_method=phi_method,
+        density_exact=True,
+        _ci_cache=dict(ci_cache),
+        ci=unexpected_ci,
+        ci_details=unexpected_ci,
+    )
+
+    payload = _profile_estimate_payload(result, "tweedie_p")
+
+    assert payload["ci_low"] == expected_low
+    assert payload["ci_high"] == expected_high
+    assert payload["ci_status"] == expected_status
+
+
+def test_tweedie_editor_profile_payload_tolerates_legacy_missing_ci_state():
+    from superglm.editor.widget import _profile_estimate_payload
+
+    payload = _profile_estimate_payload(
+        SimpleNamespace(p_hat=1.42, phi_hat=0.3, nll=0.12),
+        "tweedie_p",
+    )
+
+    assert payload["ci_low"] is None
+    assert payload["ci_high"] is None
+    assert payload["ci_status"] == "not computed"
 
 
 def test_widget_profile_distribution_job_reports_live_trace(
@@ -3001,11 +3124,16 @@ def test_widget_profile_distribution_job_reports_best_parameter_and_refit_phase(
         p_hat = 1.5
         phi_hat = 0.2
         nll = 0.1
+        method = "brent"
+        phi_method = "mle"
+        density_exact = True
+        _ci_cache = {0.05: (1.4, 1.6)}
         search_trace = FakeTrace()
 
         def ci(self, alpha=0.05):
-            assert alpha == 0.05
-            return (1.4, 1.6)
+            raise AssertionError("editor payload must not evaluate a Tweedie profile CI")
+
+        ci_details = ci
 
     def fake_reprofile(parameter, **kwargs):
         kwargs["trace_callback"]({"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"})
@@ -3053,10 +3181,12 @@ def test_widget_profile_distribution_job_reports_best_parameter_and_refit_phase(
     assert status["phase"] == "final_refit"
     assert status["profile_estimate"]["value"] == 1.5
     assert status["profile_estimate"]["ci_low"] is None
+    assert status["profile_estimate"]["ci_status"] == "not computed"
     assert complete["status"] == "complete"
     assert complete["phase"] == "complete"
     assert complete["result"]["profile_estimate"]["ci_low"] == 1.4
     assert complete["result"]["profile_estimate"]["ci_high"] == 1.6
+    assert complete["result"]["profile_estimate"]["ci_status"] == "available"
 
 
 def test_reprofile_distribution_parameter_rejects_unknown_parameter(editor_model, editor_frame):
@@ -5842,6 +5972,14 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "app-busy-overlay" in css
     assert "app-shell.is-busy" in css
     assert "busy-spinner" in css
+
+
+def test_editor_profile_ui_does_not_promise_an_implicit_ci_phase():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    summary_js = (root / "summary.js").read_text()
+
+    assert 'job.phase === "profile_ci"' not in summary_js
+    assert '"profile_ci"' not in summary_js
 
 
 def test_editor_structural_confirmation_gate_precedes_every_refit_side_effect():

@@ -2365,7 +2365,7 @@ class TestEstimatePFitMode:
 
         def objective(p):
             objective_calls.append(float(p))
-            return 0.0
+            return (float(p) - 1.5) ** 2
 
         result = TweedieProfileResult(
             p_hat=1.5,
@@ -2391,22 +2391,47 @@ class TestEstimatePFitMode:
 
         monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", fake_estimate_tweedie_p)
         monkeypatch.setattr(result, "ci", unexpected_ci)
-        progress_phases = []
+        progress_events = []
 
         returned = model.estimate_p(
             X,
             y,
-            progress_callback=lambda phase, payload: progress_phases.append(phase),
+            progress_callback=lambda phase, payload: progress_events.append((phase, payload)),
         )
 
         assert returned is result
         assert profiler_kwargs["phi_method"] == "mle"
         assert profiler_kwargs["method"] == "brent"
-        assert progress_phases == ["best_found", "final_refit"]
+        assert [phase for phase, _ in progress_events] == ["best_found", "final_refit"]
+        assert all(
+            payload["profile_estimate"]["ci_status"] == "not computed"
+            for _, payload in progress_events
+        )
         assert result._ci_cache == {}
         assert result._ci_details_cache == {}
         assert objective_calls == []
         assert result.n_total_evaluations == total_evaluations
+
+        interval = TweedieProfileResult.ci(result, alpha=0.05)
+        assert result._ci_cache[0.05] is interval
+
+        summary = model.summary(alpha=0.05)
+        assert summary._info["tweedie_p_ci"] is interval
+        assert summary._info["tweedie_p_ci_status"] == "available"
+
+    def test_progress_payload_ignores_stale_pearson_lr_cache(self):
+        result = SimpleNamespace(
+            p_hat=1.5,
+            nll=0.0,
+            phi_method="pearson",
+            _ci_cache={0.05: (1.4, 1.6)},
+        )
+
+        payload = profile_ops_module._tweedie_estimate_payload(result)
+
+        assert payload["ci_low"] is None
+        assert payload["ci_high"] is None
+        assert payload["ci_status"] == "unavailable for Pearson plug-in"
 
     def test_invalid_complex_weight_is_rejected_before_feature_auto_detection(self):
         X, y, _ = _tweedie_data(n=24, seed=20260719)
