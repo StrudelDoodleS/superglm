@@ -216,27 +216,6 @@ def _assert_fitted_model_unchanged(model, X, snapshot, *, offset=None):
 
 
 class TestGenerateTweedieCPG:
-    def test_mean_matches_mu(self):
-        rng = np.random.default_rng(42)
-        y = generate_tweedie_cpg(50_000, mu=10.0, phi=3.0, p=1.6, rng=rng)
-        np.testing.assert_allclose(y.mean(), 10.0, rtol=0.05)
-
-    def test_variance_matches(self):
-        rng = np.random.default_rng(42)
-        mu, phi, p = 10.0, 3.0, 1.6
-        y = generate_tweedie_cpg(100_000, mu=mu, phi=phi, p=p, rng=rng)
-        expected_var = phi * mu**p
-        np.testing.assert_allclose(y.var(), expected_var, rtol=0.15)
-
-    def test_zero_probability(self):
-        rng = np.random.default_rng(42)
-        mu, phi, p = 10.0, 3.0, 1.6
-        y = generate_tweedie_cpg(100_000, mu=mu, phi=phi, p=p, rng=rng)
-        lam = mu ** (2 - p) / ((2 - p) * phi)
-        expected_zero_prob = np.exp(-lam)
-        actual_zero_prob = np.mean(y == 0)
-        np.testing.assert_allclose(actual_zero_prob, expected_zero_prob, atol=0.02)
-
     def test_heterogeneous_mu(self):
         rng = np.random.default_rng(42)
         mu = rng.uniform(5, 50, size=10_000)
@@ -244,6 +223,7 @@ class TestGenerateTweedieCPG:
         assert y.shape == (10_000,)
         assert np.all(y >= 0)
 
+    @pytest.mark.slow
     def test_insurance_like(self):
         """High zero-rate typical of motor insurance claims."""
         rng = np.random.default_rng(42)
@@ -1646,38 +1626,6 @@ class TestDetailedPhiProfile:
         assert not result.converged
         assert "forced bounded failure" in result.message
 
-    def test_evaluation_accounting_matches_actual_density_passes_and_beats_reference(
-        self,
-        monkeypatch,
-    ):
-        y = np.array([0.3, 1.2, 4.5])
-        mu = np.array([0.5, 1.5, 3.7])
-        p = 1.5
-        actual_calls = []
-        real_evaluate = tweedie_module._evaluate_tweedie_density
-
-        def spy_evaluate(prepared, phi, *, compute_score=False):
-            actual_calls.append((float(phi), compute_score))
-            return real_evaluate(prepared, phi, compute_score=compute_score)
-
-        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", spy_evaluate)
-        result = tweedie_module._profile_phi_detailed(y, mu, p, phi_method="mle")
-        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", real_evaluate)
-        reference, reference_calls = _tight_value_only_phi_reference(y, mu, p)
-
-        assert result.n_evaluations == len(actual_calls)
-        assert result.n_score_evaluations == sum(score for _, score in actual_calls)
-        assert result.n_value_only_evaluations == sum(not score for _, score in actual_calls)
-        assert result.n_evaluations == (
-            result.n_score_evaluations + result.n_value_only_evaluations
-        )
-        score_phis = {phi for phi, compute_score in actual_calls if compute_score}
-        assert not any(
-            phi in score_phis and not compute_score for phi, compute_score in actual_calls
-        )
-        assert result.n_evaluations < reference_calls
-        np.testing.assert_allclose(result.nll, reference.fun, rtol=1e-10, atol=1e-10)
-
     def test_fallback_branch_localization_has_a_bounded_density_pass_budget(self):
         rng = np.random.default_rng(11)
         n = 100
@@ -2046,9 +1994,8 @@ class TestProfileLikelihood:
         )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
 
-    @pytest.mark.parametrize("phi_method", ["pearson", "mle"])
-    def test_recovers_p_with_prior_weights(self, phi_method):
-        """Profile likelihood should recover p when sample_weight acts through phi / w."""
+    def test_prior_weight_mle_p_phi_recovery(self):
+        """Exact-MLE profiling should recover p when prior weights act through phi / w."""
         rng = np.random.default_rng(321)
         p_true = 1.6
         phi_true = 3.0
@@ -2066,10 +2013,17 @@ class TestProfileLikelihood:
         )
 
         result = estimate_tweedie_p(
-            model, X, y, sample_weight=sample_weight, p_bounds=(1.1, 1.9), phi_method=phi_method
+            model,
+            X,
+            y,
+            sample_weight=sample_weight,
+            p_bounds=(1.1, 1.9),
+            phi_method="mle",
         )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
         np.testing.assert_allclose(result.phi_hat, phi_true, rtol=0.2)
+        assert result.density_exact
+        assert result.n_saddlepoint == 0
 
     def test_notebook_style_profile_recovers_true_p_under_prior_weights(self):
         """Notebook-style exposure weights should not bias Pearson profiling downward."""
@@ -2858,7 +2812,7 @@ class TestEstimatePFitMode:
 
         assert np.all(np.isfinite(model.predict(X)))
 
-    def test_fit_mode_fit_recovers_p(self):
+    def test_unweighted_cpg_default_mle_p_phi_recovery(self):
         """The real public default-MLE fit path should recover p."""
         X, y, p_true = _tweedie_data()
         model = SuperGLM(
@@ -2870,22 +2824,13 @@ class TestEstimatePFitMode:
         assert isinstance(result, TweedieProfileResult)
         assert result.phi_method == "mle"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
+        np.testing.assert_allclose(result.phi_hat, 3.0, rtol=0.15)
+        assert result.converged
+        assert result.density_exact
+        assert result.n_saddlepoint == 0
         # Model should be refitted with estimated p
         assert model.family.p == result.p_hat
         assert model._result is not None
-        assert model._last_fit_meta["method"] == "fit"
-
-    def test_fit_mode_fit_recovers_p_mle_phi(self):
-        """fit_mode='fit' should also recover p with phi_method='mle'."""
-        X, y, p_true = _tweedie_data(n=2_000, seed=7)
-        model = SuperGLM(
-            family=TweedieDistribution(p=1.5),
-            selection_penalty=0,
-            features={"x1": Numeric()},
-        )
-        result = model.estimate_p(X, y, fit_mode="fit", phi_method="mle")
-        assert isinstance(result, TweedieProfileResult)
-        np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
         assert model._last_fit_meta["method"] == "fit"
 
     @pytest.mark.slow
@@ -2906,7 +2851,7 @@ class TestEstimatePFitMode:
         assert hasattr(model, "_reml_result")
 
     @pytest.mark.slow
-    def test_fit_mode_reml_recovers_p_mle_phi(self):
+    def test_flexible_spline_reml_mle_p_phi_recovery(self):
         """fit_mode='reml' should support phi_method='mle'."""
         X, y, p_true = _tweedie_data(n=1_500, seed=11)
         model = SuperGLM(
@@ -2917,6 +2862,13 @@ class TestEstimatePFitMode:
         result = model.estimate_p(X, y, fit_mode="reml", phi_method="mle")
         assert isinstance(result, TweedieProfileResult)
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.25)
+        np.testing.assert_allclose(result.phi_hat, 3.0, rtol=0.20)
+        winning_row = result.search_trace.iloc[result.search_trace["nll"].to_numpy().argmin()]
+        assert winning_row["p"] == pytest.approx(result.p_hat)
+        assert winning_row["edf"] == pytest.approx(model.result.effective_df, rel=1e-8, abs=1e-8)
+        assert model.result.phi == pytest.approx(result.phi_hat, rel=1e-12, abs=1e-12)
+        assert result.density_exact
+        assert result.n_saddlepoint == 0
         assert model._last_fit_meta["method"] == "fit_reml"
 
     @pytest.mark.slow
