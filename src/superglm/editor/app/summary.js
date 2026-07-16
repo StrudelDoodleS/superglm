@@ -461,7 +461,7 @@ function profileEstimateCIText(estimate) {
     return "CI unavailable for Pearson plug-in";
   }
   if (!low || !high) {
-    return "CI not computed";
+    return estimate.ci_status === "not computed" ? "CI not computed" : "CI pending";
   }
   return `CI [${low}, ${high}]`;
 }

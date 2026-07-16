@@ -51,10 +51,11 @@ function profileTraceNodes() {
   };
 }
 
-/** @param {string} ciStatus */
-async function completedProfileLegend(ciStatus) {
+/** @param {string | undefined} ciStatus @param {string} [parameter] */
+async function completedProfileLegend(ciStatus, parameter = "tweedie_p") {
   const nodes = profileTraceNodes();
   const result = { available: false, label: "Profiled model", error: "No compact summary" };
+  const isNb2 = parameter === "nb2_theta";
   let requestCount = 0;
   const request = async () => {
     requestCount += 1;
@@ -63,11 +64,11 @@ async function completedProfileLegend(ciStatus) {
     }
     return {
       status: "complete",
-      parameter: "tweedie_p",
-      trace: [{ p: 1.55, nll: 0.1 }],
+      parameter,
+      trace: [{ [isNb2 ? "theta" : "p"]: 1.55, nll: 0.1 }],
       profile_estimate: {
-        parameter: "p",
-        label: "p_hat",
+        parameter: isNb2 ? "theta" : "p",
+        label: isNb2 ? "theta_hat" : "p_hat",
         value: 1.55,
         ci_low: null,
         ci_high: null,
@@ -79,7 +80,7 @@ async function completedProfileLegend(ciStatus) {
 
   await runDistributionProfile(
     nodes,
-    "tweedie_p",
+    parameter,
     async () => {},
     { request, pause: async () => {} }
   );
@@ -190,6 +191,13 @@ test("Pearson plug-in profile reports that a likelihood-ratio CI is unavailable"
 
   assert.match(nodes.profileTraceLegend.innerHTML, /CI unavailable/);
   assert.doesNotMatch(nodes.profileTraceLegend.innerHTML, /CI pending/);
+});
+
+test("NB2 profile keeps its pending CI wording until its interval is available", async () => {
+  const nodes = await completedProfileLegend(undefined, "nb2_theta");
+
+  assert.match(nodes.profileTraceLegend.innerHTML, /CI pending/);
+  assert.doesNotMatch(nodes.profileTraceLegend.innerHTML, /CI not computed/);
 });
 
 test("state-only recovery publishes a stale summary payload when remote summary is null", async () => {
