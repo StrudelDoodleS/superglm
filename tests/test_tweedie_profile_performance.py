@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import statistics
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from unittest.mock import patch
 
@@ -22,6 +23,7 @@ import superglm.profiling.tweedie as tweedie_module
 from superglm import SuperGLM
 from superglm.distributions import Tweedie
 from superglm.features.numeric import Numeric
+from superglm.features.spline import Spline
 from superglm.profiling.tweedie import generate_tweedie_cpg
 
 
@@ -52,24 +54,38 @@ class _BoundedReference:
     elapsed_seconds: float
 
 
+@dataclass(frozen=True)
+class _EndToEndProfileCase:
+    name: str
+    X: pd.DataFrame
+    y: np.ndarray
+    fit_mode: str
+    p_bounds: tuple[float, float]
+    xatol: float
+    maxiter: int
+
+
 def _routine_exact_fixture() -> _PhiFixture:
-    """A routine profile whose winning density branch is wholly exact."""
+    """A weighted exact-branch fixture with an atom at zero and a robust pass margin."""
     return _PhiFixture(
-        name="routine-exact",
-        y=np.array([0.3, 1.2, 4.5]),
-        mu=np.array([0.5, 1.5, 3.7]),
-        p=1.5,
+        name="routine-weighted-zero-exact",
+        y=np.array([0.0, 0.3, 1.2, 4.5, 8.0]),
+        mu=np.array([0.2, 0.5, 1.5, 3.7, 7.0]),
+        p=1.55,
+        weights=np.array([0.4, 0.8, 1.2, 1.8, 2.4]),
     )
 
 
 def _large_routine_exact_fixture() -> _PhiFixture:
     """A size-scaled exact profile for per-observation density-cost characterization."""
     base = _routine_exact_fixture()
+    assert base.weights is not None
     return _PhiFixture(
         name="routine-exact-n3000",
-        y=np.tile(base.y, 1_000),
-        mu=np.tile(base.mu, 1_000),
+        y=np.tile(base.y, 600),
+        mu=np.tile(base.mu, 600),
         p=base.p,
+        weights=np.tile(base.weights, 600),
     )
 
 
@@ -122,7 +138,7 @@ def _counted_production_profile(fixture: _PhiFixture) -> _CountedProfile:
 
 
 def _bounded_value_only_reference(fixture: _PhiFixture) -> _BoundedReference:
-    """Profile one prepared exact objective with an independent bounded search."""
+    """Profile one prepared production objective with an independent bounded search."""
     started = time.perf_counter()
     prepared = tweedie_module._prepare_tweedie_density(
         fixture.y,
@@ -168,13 +184,16 @@ def _bounded_value_only_reference(fixture: _PhiFixture) -> _BoundedReference:
     )
 
 
-def test_routine_exact_mle_uses_fewer_density_passes_than_tight_bounded_reference():
-    """The analytic exact-branch search agrees with, and outworks, a tight reference."""
+def test_weighted_zero_exact_mle_uses_fewer_density_passes_than_tight_bounded_reference():
+    """The analytic exact-branch search agrees with a tight prepared-objective reference."""
     fixture = _routine_exact_fixture()
     production = _counted_production_profile(fixture)
     reference = _bounded_value_only_reference(fixture)
     result = production.result
 
+    assert fixture.name == "routine-weighted-zero-exact"
+    assert fixture.weights is not None
+    assert fixture.y[0] == 0.0
     assert reference.optimizer.success
     assert result.objective_finite
     assert result.converged
@@ -192,8 +211,8 @@ def test_routine_exact_mle_uses_fewer_density_passes_than_tight_bounded_referenc
     assert result.n_value_only_evaluations == production.value_only_passes
     assert result.n_evaluations == result.n_score_evaluations + result.n_value_only_evaluations
     assert reference.objective_calls > reference.density_passes
-    # Preserve the pass-count ordering without pinning optimizer-specific counts.
-    assert production.density_passes < reference.density_passes
+    # Require a useful margin without pinning optimizer-specific exact counts.
+    assert production.density_passes + 5 <= reference.density_passes
     np.testing.assert_allclose(result.nll, reference.optimizer.fun, rtol=0.0, atol=1e-10)
     np.testing.assert_allclose(np.log(result.phi), reference.optimizer.x, rtol=0.0, atol=5e-6)
 
@@ -371,6 +390,263 @@ def run_large_routine_phi_profile_benchmark(*, repeats: int = 3) -> dict[str, ob
     return _benchmark_fixture(_large_routine_exact_fixture(), repeats=repeats)
 
 
+def _bounded_inner_phi_reference(
+    y,
+    mu,
+    p,
+    *,
+    weights=None,
+    df_resid=None,
+    phi_method="mle",
+    phi_start=None,
+):
+    """Replace only analytic inner search with bounded value-only minimization.
+
+    The reference retains production input preparation, vector-density evaluation,
+    hard log-phi bounds, and bounded-fallback tolerance. ``df_resid`` and
+    ``phi_start`` are accepted for signature equivalence but are not inputs to an
+    exact MLE objective.
+    """
+    del df_resid, phi_start
+    if phi_method != "mle":
+        raise AssertionError("the end-to-end bounded reference requires phi_method='mle'")
+
+    prepared = tweedie_module._prepare_tweedie_density(y, mu, p, weights=weights)
+    cache: dict[float, tuple[float, object]] = {}
+
+    def objective(log_phi):
+        key = float(log_phi)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached[0]
+        evaluation = tweedie_module._evaluate_tweedie_density(
+            prepared,
+            float(np.exp(key)),
+            compute_score=False,
+        )
+        nll = -float(np.mean(evaluation.logpdf))
+        cache[key] = (nll, evaluation)
+        return nll
+
+    optimizer = minimize_scalar(
+        objective,
+        bounds=(tweedie_module._LOG_PHI_LOWER_BOUND, tweedie_module._LOG_PHI_UPPER_BOUND),
+        method="bounded",
+        options={"xatol": tweedie_module._PHI_BOUNDED_XATOL, "maxiter": 200},
+    )
+    log_phi = float(optimizer.x)
+    nll = float(objective(log_phi))
+    diagnostics = cache[log_phi][1].diagnostics
+    objective_finite = bool(np.isfinite(nll) and np.isfinite(log_phi))
+    boundary_tolerance = 4.0 * tweedie_module._PHI_BOUNDED_XATOL
+    lower_boundary = bool(log_phi - tweedie_module._LOG_PHI_LOWER_BOUND <= boundary_tolerance)
+    upper_boundary = bool(tweedie_module._LOG_PHI_UPPER_BOUND - log_phi <= boundary_tolerance)
+    branch_signatures = {item[1].positive_saddlepoint_mask.tobytes() for item in cache.values()}
+    return tweedie_module._PhiProfileResult(
+        phi=float(np.exp(log_phi)),
+        nll=nll,
+        converged=bool(optimizer.success and objective_finite),
+        objective_finite=objective_finite,
+        n_evaluations=len(cache),
+        n_score_evaluations=0,
+        n_value_only_evaluations=len(cache),
+        n_fallback_evaluations=0,
+        optimizer="bounded-reference",
+        score=None,
+        used_fallback=False,
+        fallback_reason=None,
+        branch_switch_detected=len(branch_signatures) > 1,
+        lower_boundary=lower_boundary,
+        upper_boundary=upper_boundary,
+        diagnostics=diagnostics,
+        message=(
+            "Test reference replaced only analytic phi-score search with "
+            "derivative-free bounded minimization."
+        ),
+    )
+
+
+def _end_to_end_profile_cases() -> tuple[_EndToEndProfileCase, ...]:
+    """Return deterministic ordinary-fit and REML-spline profile cases."""
+    numeric_rng = np.random.default_rng(20260718)
+    numeric_x = np.linspace(-1.5, 1.5, 600)
+    numeric_mu = np.exp(1.1 + 0.35 * numeric_x)
+    numeric_y = generate_tweedie_cpg(
+        len(numeric_x),
+        mu=numeric_mu,
+        phi=2.5,
+        p=1.6,
+        rng=numeric_rng,
+    )
+
+    reml_rng = np.random.default_rng(20260719)
+    reml_x = np.linspace(-1.5, 1.5, 300)
+    reml_mu = np.exp(1.0 + 0.35 * reml_x + 0.2 * np.sin(np.pi * reml_x))
+    reml_y = generate_tweedie_cpg(
+        len(reml_x),
+        mu=reml_mu,
+        phi=2.5,
+        p=1.6,
+        rng=reml_rng,
+    )
+    return (
+        _EndToEndProfileCase(
+            name="fit-numeric",
+            X=pd.DataFrame({"x": numeric_x}),
+            y=numeric_y,
+            fit_mode="fit",
+            p_bounds=(1.3, 1.85),
+            xatol=5e-3,
+            maxiter=20,
+        ),
+        _EndToEndProfileCase(
+            name="reml-spline",
+            X=pd.DataFrame({"x": reml_x}),
+            y=reml_y,
+            fit_mode="reml",
+            p_bounds=(1.35, 1.8),
+            xatol=1e-2,
+            maxiter=15,
+        ),
+    )
+
+
+def _run_end_to_end_profile_once(
+    mode: str,
+    case: _EndToEndProfileCase,
+) -> dict[str, object]:
+    """Run one public outer profile and count real inner density passes."""
+    if mode not in {"production-analytic-inner", "reference-bounded-inner"}:
+        raise ValueError(f"unknown end-to-end benchmark mode: {mode}")
+
+    if case.name == "fit-numeric":
+        feature = Numeric()
+    elif case.name == "reml-spline":
+        feature = Spline(n_knots=6, penalty="ssp")
+    else:
+        raise ValueError(f"unknown end-to-end benchmark case: {case.name}")
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0,
+        features={"x": feature},
+    )
+    real_evaluate = tweedie_module._evaluate_tweedie_density
+    real_profile = tweedie_module._profile_phi_detailed
+    density_calls: list[bool] = []
+    inner_density_passes = 0
+
+    def counted_evaluate(prepared, phi, *, compute_score=False):
+        density_calls.append(bool(compute_score))
+        return real_evaluate(prepared, phi, compute_score=compute_score)
+
+    profile_target = (
+        _bounded_inner_phi_reference if mode == "reference-bounded-inner" else real_profile
+    )
+
+    def counted_profile(*args, **kwargs):
+        nonlocal inner_density_passes
+        before = len(density_calls)
+        result = profile_target(*args, **kwargs)
+        inner_density_passes += len(density_calls) - before
+        return result
+
+    started = time.perf_counter()
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(tweedie_module, "_evaluate_tweedie_density", counted_evaluate)
+        )
+        stack.enter_context(patch.object(tweedie_module, "_profile_phi_detailed", counted_profile))
+        result = model.estimate_p(
+            case.X,
+            case.y,
+            p_bounds=case.p_bounds,
+            xatol=case.xatol,
+            maxiter=case.maxiter,
+            fit_mode=case.fit_mode,
+            phi_method="mle",
+            method="brent",
+        )
+    elapsed = time.perf_counter() - started
+
+    trace_density_passes = int(result.search_trace["phi_n_evaluations"].sum())
+    assert trace_density_passes == inner_density_passes
+    assert len(density_calls) >= inner_density_passes
+    assert result.search_trace["phi_converged"].all()
+    return {
+        "case": case.name,
+        "fit_mode": case.fit_mode,
+        "mode": mode,
+        "n_observations": len(case.y),
+        "outer_evaluations": int(result.n_evaluations),
+        "inner_density_passes": inner_density_passes,
+        "p_hat": float(result.p_hat),
+        "phi_hat": float(result.phi_hat),
+        "nll": float(result.nll),
+        "saddle_fraction": float(result.saddlepoint_fraction),
+        "phi_fallback_count": int(result.search_trace["phi_n_fallback_evaluations"].sum()),
+        "elapsed_seconds": elapsed,
+        "converged": bool(result.converged),
+    }
+
+
+def _aggregate_end_to_end_runs(runs: list[dict[str, object]]) -> dict[str, object]:
+    """Median-aggregate every numeric benchmark field across repeated runs."""
+    if not runs:
+        raise ValueError("end-to-end benchmark requires at least one run")
+    mode = runs[0]["mode"]
+    case = runs[0]["case"]
+    fit_mode = runs[0]["fit_mode"]
+    if any(run["mode"] != mode for run in runs):
+        raise ValueError("cannot aggregate mixed end-to-end benchmark modes")
+    if any(run["case"] != case or run["fit_mode"] != fit_mode for run in runs):
+        raise ValueError("cannot aggregate mixed end-to-end benchmark cases")
+
+    integer_fields = (
+        "n_observations",
+        "outer_evaluations",
+        "inner_density_passes",
+        "phi_fallback_count",
+    )
+    float_fields = ("p_hat", "phi_hat", "nll", "saddle_fraction")
+    row: dict[str, object] = {
+        "case": case,
+        "fit_mode": fit_mode,
+        "mode": mode,
+        "repeats": len(runs),
+        "converged": all(bool(run["converged"]) for run in runs),
+        "elapsed_median_seconds": statistics.median(float(run["elapsed_seconds"]) for run in runs),
+    }
+    row.update(
+        {field: int(statistics.median(int(run[field]) for run in runs)) for field in integer_fields}
+    )
+    row.update(
+        {field: statistics.median(float(run[field]) for run in runs) for field in float_fields}
+    )
+    return row
+
+
+def run_end_to_end_profile_benchmark(*, repeats: int = 3) -> list[dict[str, object]]:
+    """Compare public outer Brent search with analytic and bounded inner phi search."""
+    if repeats < 3:
+        raise ValueError("end-to-end benchmark requires at least three repeats")
+
+    original_profile = tweedie_module._profile_phi_detailed
+    original_evaluate = tweedie_module._evaluate_tweedie_density
+    rows = []
+    for case in _end_to_end_profile_cases():
+        runs_by_mode = {
+            "production-analytic-inner": [],
+            "reference-bounded-inner": [],
+        }
+        for _ in range(repeats):
+            for mode in runs_by_mode:
+                runs_by_mode[mode].append(_run_end_to_end_profile_once(mode, case))
+                assert tweedie_module._profile_phi_detailed is original_profile
+                assert tweedie_module._evaluate_tweedie_density is original_evaluate
+        rows.extend(_aggregate_end_to_end_runs(runs) for runs in runs_by_mode.values())
+    return rows
+
+
 @pytest.mark.slow
 def test_tweedie_phi_profile_benchmark_report():
     """Print repeat medians under ``pytest -s`` without enforcing wall time."""
@@ -395,7 +671,7 @@ def test_tweedie_phi_profile_benchmark_report():
         )
 
     routine, difficult = rows
-    assert routine["fixture"] == "routine-exact"
+    assert routine["fixture"] == "routine-weighted-zero-exact"
     assert routine["used_fallback"] is False
     assert routine["converged"] is True
     assert routine["saddle_fraction"] == 0.0
@@ -430,7 +706,10 @@ def test_large_routine_phi_profile_timing_characterization():
         f"reference_density_passes={row['reference_density_passes']} "
         f"reference_elapsed_median_s={row['reference_elapsed_median_seconds']:.6f}"
     )
-    if row["elapsed_median_seconds"] > row["reference_elapsed_median_seconds"]:
+    if (
+        row["elapsed_median_seconds"] > row["reference_elapsed_median_seconds"]
+        and row["density_passes"] < row["reference_density_passes"]
+    ):
         print(
             "Timing characterization: production is slower here despite fewer density "
             "passes; its analytic search computes an additional Wright value for exact "
@@ -447,3 +726,49 @@ def test_large_routine_phi_profile_timing_characterization():
     assert row["density_passes"] == row["score_passes"] + row["value_only_passes"]
     assert row["nll"] == pytest.approx(row["reference_nll"], abs=1e-10)
     assert row["log_phi"] == pytest.approx(row["reference_log_phi"], abs=5e-6)
+
+
+@pytest.mark.slow
+def test_end_to_end_analytic_inner_vs_bounded_inner_benchmark_report():
+    """Compare public outer Brent searches while changing only the inner phi optimizer."""
+    rows = run_end_to_end_profile_benchmark(repeats=3)
+
+    print(
+        "Reference change: replace only the production analytic inner phi-score search "
+        "with value-only bounded minimization; retain public outer Brent and fit semantics."
+    )
+    for row in rows:
+        print(
+            "Tweedie end-to-end profile benchmark "
+            f"case={row['case']} fit_mode={row['fit_mode']} mode={row['mode']} "
+            f"repeats={row['repeats']} n={row['n_observations']} "
+            f"outer_evaluations={row['outer_evaluations']} "
+            f"inner_density_passes={row['inner_density_passes']} "
+            f"p_hat={row['p_hat']:.8g} phi_hat={row['phi_hat']:.8g} "
+            f"NLL={row['nll']:.8g} saddle_fraction={row['saddle_fraction']:.6f} "
+            f"phi_fallback_count={row['phi_fallback_count']} "
+            f"elapsed_median_s={row['elapsed_median_seconds']:.6f}"
+        )
+
+    assert [(row["case"], row["mode"]) for row in rows] == [
+        ("fit-numeric", "production-analytic-inner"),
+        ("fit-numeric", "reference-bounded-inner"),
+        ("reml-spline", "production-analytic-inner"),
+        ("reml-spline", "reference-bounded-inner"),
+    ]
+    for row in rows:
+        assert row["repeats"] == 3
+        assert 300 <= row["n_observations"] <= 1_000
+        assert row["outer_evaluations"] > 0
+        assert row["inner_density_passes"] >= row["outer_evaluations"]
+        assert np.isfinite(row["p_hat"])
+        assert np.isfinite(row["phi_hat"]) and row["phi_hat"] > 0.0
+        assert np.isfinite(row["nll"])
+        assert 0.0 <= row["saddle_fraction"] <= 1.0
+        assert row["phi_fallback_count"] >= 0
+        assert row["converged"] is True
+
+    for production, reference in ((rows[0], rows[1]), (rows[2], rows[3])):
+        assert production["p_hat"] == pytest.approx(reference["p_hat"], abs=5e-3)
+        assert production["phi_hat"] == pytest.approx(reference["phi_hat"], rel=5e-3)
+        assert production["nll"] == pytest.approx(reference["nll"], abs=1e-7)
