@@ -20,6 +20,8 @@ unrepresentable inputs before they can silently generate the wrong distribution.
 - Formally support per-observation dispersion for weighted simulations.
 - Reject invalid shapes, domains, complex values, NaNs, infinities, and derived
   parameters that NumPy cannot represent safely.
+- Never misclassify an underflowed positive-claim Gamma draw as a structural Tweedie
+  zero.
 - Return a finite, non-negative `float64` vector of exact shape `(n,)`.
 - Keep the implementation limited to the compound Poisson–Gamma regime `1 < p < 2`.
 
@@ -75,14 +77,24 @@ the inputs:
    beta_i   = phi_i * (p - 1) * mu_i ** (p - 1)
    ```
 
-5. Require `lambda`, `alpha`, and `beta` to be finite and strictly positive. Apply
-   NumPy's documented Poisson safety rule and reject any rate for which
-   `lambda + 10 * sqrt(lambda)` reaches the signed 64-bit limit.
+5. Require `lambda`, `alpha`, and `beta` to be finite and strictly positive. Preserve
+   the existing direct arithmetic order for ordinary-call bit compatibility; joint
+   CPG constraints imply that a directly underflowed `beta` cannot be rescued while
+   retaining a NumPy-safe `lambda`. Match NumPy's exact Poisson safety boundary:
+
+   ```text
+   lambda_max = float(int64_max) - 10 * sqrt(float(int64_max))
+   ```
+
+   Reject `lambda > lambda_max`; NumPy accepts the endpoint itself.
 6. Draw `N_i ~ Poisson(lambda_i)`. Require an integer, non-negative result of exact
    shape `(n,)`. Before the Gamma draw, require the positive-event shapes
    `alpha * N_i` to be finite and strictly positive.
-7. Draw positive observations with `Gamma(alpha * N_i, scale=beta_i)` and validate the
-   final shape, finiteness, and non-negativity of the result.
+7. Draw positive observations with `Gamma(alpha * N_i, scale=beta_i)`. Validate the
+   raw Gamma result before assigning it into `y`: it must be real, have exact shape
+   `(count_nonzero(N),)`, and be finite and strictly positive. Exact zero here is a
+   numerical underflow, not a structural Tweedie zero. Validate the final output shape,
+   finiteness, and non-negativity after assignment.
 
 Invalid pre-draw inputs must not advance the supplied RNG. A failure depending on the
 realized Poisson counts can occur only after that Poisson draw; no Gamma draw occurs in
@@ -97,8 +109,12 @@ that case.
 - Preserve the original exception as the cause when a NumPy sampler rejects otherwise
   validated parameters, while raising a generator-specific `ValueError` with parameter
   context.
-- Raise `RuntimeError` if a Generator-compatible object violates the expected draw shape
-  or returns non-finite/negative values.
+- Raise `ValueError` if an otherwise valid Gamma draw underflows to zero or overflows to
+  a non-finite value. This can occur with NumPy itself for extreme but finite CPG
+  parameters, so it is a numerical representability failure rather than proof of a
+  malformed compatible object.
+- Raise `RuntimeError` if a Generator-compatible object violates an expected draw shape
+  or dtype, returns invalid Poisson counts, or returns negative/complex Gamma values.
 
 Messages identify the offending argument or derived quantity and state the accepted
 contract; tests assert useful message fragments rather than entire strings.
@@ -124,7 +140,9 @@ Implementation follows red-green TDD. Focused tests will cover:
 - invalid `n`, `p`, `mu`, and `phi` types, shapes, domains, complex values, NaNs, and
   infinities;
 - validation before RNG use;
-- Poisson-limit and derived Gamma-shape representability;
+- the exact NumPy Poisson-limit endpoint and derived Gamma-shape representability;
+- a real NumPy regression near `p=2` where positive-count Gamma draws otherwise
+  underflow to zero and catastrophically inflate the structural-zero mass;
 - malformed Generator-compatible outputs;
 - the existing ordinary and near-boundary CPG moment characterizations.
 
