@@ -17,7 +17,7 @@ def estimate_p(
     offset=None,
     *,
     fit_mode="fit",
-    phi_method="pearson",
+    phi_method="mle",
     method="brent",
     progress_callback=None,
     **kwargs,
@@ -71,16 +71,6 @@ def estimate_p(
     model._fit_stats = _compute_fit_stats(
         y, mu, weights, offset_arr, model._distribution, model._link, result.phi_hat
     )
-
-    # Eagerly compute the default CI so summary() doesn't trigger expensive
-    # profile refits on first access. REML profile objectives evaluate against
-    # an isolated scratch model, so CI probes cannot mutate this fitted model.
-    if result._objective is not None:
-        if progress_callback is not None:
-            progress_callback("profile_ci", {"profile_estimate": _tweedie_estimate_payload(result)})
-        result.ci(alpha=0.05)
-        if progress_callback is not None:
-            progress_callback("profile_ci", {"profile_estimate": _tweedie_estimate_payload(result)})
 
     return result
 

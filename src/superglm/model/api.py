@@ -677,7 +677,7 @@ class SuperGLM:
         offset: NDArray | None = None,
         *,
         fit_mode: str = "fit",
-        phi_method: str = "pearson",
+        phi_method: str = "mle",
         method: str = "brent",
         **kwargs,
     ):

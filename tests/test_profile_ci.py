@@ -557,6 +557,48 @@ class TestTweedieProfileCI:
         with pytest.raises(RuntimeError, match="details.*pre-populated"):
             result.ci_details(alpha=0.05)
 
+    @pytest.mark.parametrize("method_name", ["ci", "ci_details"])
+    def test_pearson_ci_methods_reject_stale_likelihood_ratio_caches(self, method_name):
+        def unexpected_objective(p):
+            raise AssertionError(f"Pearson CI guard must run before objective access at p={p}")
+
+        result = self._bare_result(unexpected_objective)
+        result.phi_method = "pearson"
+        stale_interval = (0.25, 0.75)
+        stale_details = SimpleNamespace(interval=stale_interval)
+        result._ci_cache[0.05] = stale_interval
+        result._ci_details_cache[0.05] = stale_details
+
+        with pytest.raises(RuntimeError) as exc_info:
+            getattr(result, method_name)(alpha=0.05)
+
+        message = str(exc_info.value)
+        assert "exact MLE" in message
+        assert "bootstrap/sandwich" in message
+        assert result._ci_cache[0.05] is stale_interval
+        assert result._ci_details_cache[0.05] is stale_details
+
+    @pytest.mark.parametrize("method_name", ["ci", "ci_details"])
+    def test_pearson_ci_guard_runs_before_any_cache_lookup(self, method_name):
+        class UnexpectedCacheAccess(dict):
+            def __contains__(self, key):
+                raise AssertionError(f"Pearson CI guard must run before cache lookup for {key}")
+
+            def __getitem__(self, key):
+                raise AssertionError(f"Pearson CI guard must run before cache access for {key}")
+
+        result = self._bare_result(
+            lambda p: (_ for _ in ()).throw(
+                AssertionError(f"Pearson CI guard must run before objective access at p={p}")
+            )
+        )
+        result.phi_method = "pearson"
+        result._ci_cache = UnexpectedCacheAccess({0.05: (0.25, 0.75)})
+        result._ci_details_cache = UnexpectedCacheAccess({0.05: SimpleNamespace()})
+
+        with pytest.raises(RuntimeError, match="exact MLE.*bootstrap/sandwich"):
+            getattr(result, method_name)(alpha=0.05)
+
     @pytest.mark.parametrize(
         "field",
         ["objective_finite", "fit_converged", "phi_converged"],
@@ -1120,7 +1162,7 @@ class TestTweedieProfilePlotLabels:
         ],
     )
     def test_profile_plot_uses_honest_estimate_and_interval_labels(
-        self, kwargs, expected, forbidden
+        self, monkeypatch, kwargs, expected, forbidden
     ):
         import matplotlib
 
@@ -1128,10 +1170,12 @@ class TestTweedieProfilePlotLabels:
         import matplotlib.pyplot as plt
 
         result = self._result(**kwargs)
-        if kwargs.get("phi_method") == "pearson":
-            result.ci_details = lambda *args, **kwds: (_ for _ in ()).throw(
-                AssertionError("Pearson profile plot must not compute a likelihood-ratio CI")
-            )
+
+        def unexpected_ci(*args, **kwargs):
+            raise AssertionError("profile_plot must never call ci() or ci_details()")
+
+        monkeypatch.setattr(result, "ci", unexpected_ci)
+        monkeypatch.setattr(result, "ci_details", unexpected_ci)
         fig = result.profile_plot(n_points=3)
         labels = [text.get_text() for text in fig.axes[0].get_legend().get_texts()]
         joined = " | ".join(labels)
@@ -1143,4 +1187,86 @@ class TestTweedieProfilePlotLabels:
             ax = fig.axes[0]
             assert "likelihood" not in ax.get_title().lower()
             assert ax.get_ylabel() == "Profile objective difference"
+        plt.close(fig)
+
+    def test_mle_profile_plot_uses_tuple_only_cached_interval_without_ci_calls(self, monkeypatch):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = self._result()
+        result._ci_details_cache.clear()
+
+        def unexpected_ci(*args, **kwargs):
+            raise AssertionError("profile_plot must never call ci() or ci_details()")
+
+        monkeypatch.setattr(result, "ci", unexpected_ci)
+        monkeypatch.setattr(result, "ci_details", unexpected_ci)
+
+        fig = result.profile_plot(n_points=3)
+        ax = fig.axes[0]
+        labels = " | ".join(text.get_text() for text in ax.get_legend().get_texts())
+        assert "cutoff" in labels
+        assert "profile interval (density provenance unavailable)" in labels
+        assert ax.get_ylabel() == "Profile deviance"
+        assert "likelihood" in ax.get_title().lower()
+        plt.close(fig)
+
+    @pytest.mark.parametrize(
+        ("alpha", "clear_cache"),
+        [(0.05, True), (0.10, False)],
+        ids=["uncached", "different-alpha-cache"],
+    )
+    def test_mle_profile_plot_never_computes_ci_and_uses_only_matching_cache(
+        self, monkeypatch, alpha, clear_cache
+    ):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = self._result()
+        if clear_cache:
+            result._ci_cache.clear()
+            result._ci_details_cache.clear()
+
+        def unexpected_ci(*args, **kwargs):
+            raise AssertionError("profile_plot must not compute a profile CI")
+
+        monkeypatch.setattr(result, "ci", unexpected_ci)
+        monkeypatch.setattr(result, "ci_details", unexpected_ci)
+
+        fig = result.profile_plot(alpha=alpha, n_points=3)
+        ax = fig.axes[0]
+        labels = " | ".join(text.get_text() for text in ax.get_legend().get_texts())
+        assert "cutoff" not in labels
+        assert "interval" not in labels
+        assert ax.get_ylabel() == "Profile objective difference"
+        assert "likelihood" not in ax.get_title().lower()
+        plt.close(fig)
+
+    def test_pearson_profile_plot_ignores_stale_lr_cache_without_ci_calls(self, monkeypatch):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = self._result(phi_method="pearson")
+
+        def unexpected_ci(*args, **kwargs):
+            raise AssertionError("Pearson profile_plot must not access LR CI methods")
+
+        monkeypatch.setattr(result, "ci", unexpected_ci)
+        monkeypatch.setattr(result, "ci_details", unexpected_ci)
+
+        fig = result.profile_plot(n_points=3)
+        ax = fig.axes[0]
+        labels = " | ".join(text.get_text() for text in ax.get_legend().get_texts())
+        assert "MLE" not in labels
+        assert "LR" not in labels
+        assert "cutoff" not in labels
+        assert "interval" not in labels
+        assert ax.get_ylabel() == "Profile objective difference"
+        assert "likelihood" not in ax.get_title().lower()
         plt.close(fig)

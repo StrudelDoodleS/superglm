@@ -1,5 +1,6 @@
 """Tests for Tweedie profile likelihood — p estimation."""
 
+import inspect
 import pickle
 import warnings
 from dataclasses import FrozenInstanceError, replace
@@ -17,6 +18,7 @@ from superglm.distributions import Tweedie as TweedieDistribution
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.links import LogLink
+from superglm.model import profile_ops as profile_ops_module
 from superglm.penalties.base import penalty_has_targets
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.profiling.tweedie import (
@@ -2170,7 +2172,13 @@ class TestProfileLikelihood:
             features={"dummy": Numeric()},
         )
 
-        result = estimate_tweedie_p(model, X, y, p_bounds=(1.1, 1.9))
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            p_bounds=(1.1, 1.9),
+            phi_method="pearson",
+        )
         assert len(result.search_trace) >= 3
         assert result.method == "brent"
         assert result.phi_method == "pearson"
@@ -2320,7 +2328,73 @@ def _tweedie_data(n=3000, p_true=1.6, seed=42):
     return X, y, p_true
 
 
+@pytest.mark.parametrize(
+    "function",
+    [SuperGLM.estimate_p, profile_ops_module.estimate_p, estimate_tweedie_p],
+)
+def test_public_tweedie_profile_entry_points_default_to_mle_and_brent(function):
+    signature = inspect.signature(function)
+
+    assert signature.parameters["phi_method"].default == "mle"
+    assert signature.parameters["method"].default == "brent"
+
+
 class TestEstimatePFitMode:
+    def test_public_estimate_is_lazy_about_ci_and_profile_evaluations(self, monkeypatch):
+        X, y, _ = _tweedie_data(n=48, seed=20260804)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        objective_calls = []
+        total_evaluations = 2
+
+        def objective(p):
+            objective_calls.append(float(p))
+            return 0.0
+
+        result = TweedieProfileResult(
+            p_hat=1.5,
+            phi_hat=1.0,
+            nll=0.0,
+            n_evaluations=total_evaluations,
+            converged=True,
+            method="brent",
+            phi_method="mle",
+            search_trace=pd.DataFrame({"p": [1.4, 1.5], "nll": [0.1, 0.0]}),
+            _objective=objective,
+            _ll_scale=float(len(y)),
+            _evaluation_count=lambda: total_evaluations,
+        )
+        profiler_kwargs = {}
+
+        def fake_estimate_tweedie_p(*args, **kwargs):
+            profiler_kwargs.update(kwargs)
+            return result
+
+        def unexpected_ci(*args, **kwargs):
+            raise AssertionError("public estimate_p must not compute a profile CI eagerly")
+
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", fake_estimate_tweedie_p)
+        monkeypatch.setattr(result, "ci", unexpected_ci)
+        progress_phases = []
+
+        returned = model.estimate_p(
+            X,
+            y,
+            progress_callback=lambda phase, payload: progress_phases.append(phase),
+        )
+
+        assert returned is result
+        assert profiler_kwargs["phi_method"] == "mle"
+        assert profiler_kwargs["method"] == "brent"
+        assert progress_phases == ["best_found", "final_refit"]
+        assert result._ci_cache == {}
+        assert result._ci_details_cache == {}
+        assert objective_calls == []
+        assert result.n_total_evaluations == total_evaluations
+
     def test_invalid_complex_weight_is_rejected_before_feature_auto_detection(self):
         X, y, _ = _tweedie_data(n=24, seed=20260719)
         model = SuperGLM(
@@ -2488,7 +2562,7 @@ class TestEstimatePFitMode:
 
     @pytest.mark.slow
     def test_fit_mode_reml_profile_ci_leaves_final_fit_state(self):
-        """Eager profile CI should not leave the fitted model at a CI probe p."""
+        """An explicit later CI should not leave the fitted model at a CI probe p."""
         X, y, _ = _tweedie_data(n=600, seed=17)
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
@@ -2500,10 +2574,14 @@ class TestEstimatePFitMode:
             X,
             y,
             fit_mode="reml",
-            method="grid",
-            grid=np.array([1.35, 1.5, 1.65]),
+            phi_method="mle",
+            p_bounds=(1.3, 1.75),
+            xatol=1e-4,
         )
 
+        assert result._ci_cache == {}
+        assert result._ci_details_cache == {}
+        result.ci(alpha=0.05)
         assert 0.05 in result._ci_cache
         assert model.family.p == pytest.approx(result.p_hat)
         assert model._distribution.p == pytest.approx(result.p_hat)
@@ -4081,7 +4159,14 @@ class TestSearchTrace:
                 selection_penalty=0,
                 features={"x1": Numeric()},
             )
-            result = estimate_tweedie_p(m, X, y, method=method, p_bounds=(1.1, 1.9))
+            result = estimate_tweedie_p(
+                m,
+                X,
+                y,
+                method=method,
+                p_bounds=(1.1, 1.9),
+                phi_method="pearson",
+            )
             assert result.method == method
             assert result.phi_method == "pearson"
 

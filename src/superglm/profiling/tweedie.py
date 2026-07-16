@@ -2546,6 +2546,15 @@ class TweedieProfileResult:
                     f"record at p={self.p_hat:g}."
                 )
 
+    def _validate_ci_phi_method(self) -> None:
+        """Require exact dispersion profiling before likelihood-ratio inference."""
+        if self.phi_method != "mle":
+            raise RuntimeError(
+                "Tweedie likelihood-ratio profile CI requires exact MLE dispersion "
+                "profiling (phi_method='mle'); use bootstrap/sandwich inference for "
+                "Pearson plug-in profiles."
+            )
+
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
         """Profile likelihood confidence interval for Tweedie p.
 
@@ -2554,6 +2563,7 @@ class TweedieProfileResult:
         The interval targets the nearest detected connected LR component.
         Its finite max-gap scan can miss a narrower unsampled LR island.
         """
+        self._validate_ci_phi_method()
         alpha_value, _, _, _, _ = _validate_profile_ci_inputs(
             self.p_hat,
             self.nll,
@@ -2606,6 +2616,7 @@ class TweedieProfileResult:
 
     def ci_details(self, alpha: float = 0.05) -> TweedieProfileCIDetails:
         """Return immutable endpoint status and evaluation evidence for ``ci``."""
+        self._validate_ci_phi_method()
         alpha_value, _, _, _, _ = _validate_profile_ci_inputs(
             self.p_hat,
             self.nll,
@@ -2658,12 +2669,26 @@ class TweedieProfileResult:
 
         import matplotlib.pyplot as plt
 
+        try:
+            alpha_value = float(alpha)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("alpha must be finite and strictly between 0 and 1") from exc
+        if not np.isfinite(alpha_value) or not 0.0 < alpha_value < 1.0:
+            raise ValueError("alpha must be finite and strictly between 0 and 1")
+
         is_mle_profile = self.phi_method == "mle"
         trace_ps = self.search_trace["p"].values
+        cached_interval = self._ci_cache.get(alpha_value) if is_mle_profile else None
         details: TweedieProfileCIDetails | None = None
-        if is_mle_profile:
-            details = self.ci_details(alpha=alpha)
-            ci_lo, ci_hi = details.interval
+        if cached_interval is not None:
+            cached_details = self._ci_details_cache.get(alpha_value)
+            if (
+                cached_details is not None
+                and getattr(cached_details, "alpha", None) == alpha_value
+                and getattr(cached_details, "interval", None) == cached_interval
+            ):
+                details = cached_details
+            ci_lo, ci_hi = cached_interval
             margin = 0.2 * (ci_hi - ci_lo)
             grid_lo = max(1.01, ci_lo - margin)
             grid_hi = min(1.99, ci_hi + margin)
@@ -2722,28 +2747,30 @@ class TweedieProfileResult:
             linewidth=0.8,
             label=estimate_label,
         )
-        if details is not None:
+        if cached_interval is not None:
             from scipy.stats import chi2
 
-            cutoff = float(chi2.ppf(1.0 - alpha, 1))
+            cutoff = float(chi2.ppf(1.0 - alpha_value, 1))
             ax.axhline(
                 cutoff,
                 linestyle="--",
                 color="grey",
                 linewidth=0.8,
-                label=f"{100 * (1 - alpha):.0f}% cutoff",
+                label=f"{100 * (1 - alpha_value):.0f}% cutoff",
             )
-            if details.density_exact is None:
+            if details is None or details.density_exact is None:
                 interval_kind = "profile interval (density provenance unavailable)"
             elif self.density_exact is False or details.density_exact is False:
                 interval_kind = "approximation-based LR interval"
             else:
                 interval_kind = "LR interval"
-            truncated = [
-                side
-                for side, endpoint in (("lower", details.lower), ("upper", details.upper))
-                if endpoint.status == "truncated"
-            ]
+            truncated = []
+            if details is not None:
+                truncated = [
+                    side
+                    for side, endpoint in (("lower", details.lower), ("upper", details.upper))
+                    if endpoint.status == "truncated"
+                ]
             truncation_label = ""
             if truncated:
                 sides = " and ".join(truncated)
@@ -2755,13 +2782,13 @@ class TweedieProfileResult:
                 alpha=0.10,
                 color="firebrick",
                 label=(
-                    f"{100 * (1 - alpha):.0f}% {interval_kind}: "
+                    f"{100 * (1 - alpha_value):.0f}% {interval_kind}: "
                     f"[{ci_lo:.3f}, {ci_hi:.3f}]{truncation_label}"
                 ),
             )
 
         ax.set_xlabel("p")
-        if self.phi_method == "mle":
+        if cached_interval is not None:
             ax.set_ylabel("Profile deviance")
             ax.set_title("Tweedie p profile likelihood")
         else:
@@ -3853,7 +3880,7 @@ def estimate_tweedie_p(
     maxiter: int = 30,
     verbose: bool = False,
     fit_mode: str = "fit",
-    phi_method: str = "pearson",
+    phi_method: str = "mle",
     method: str = "brent",
     n_grid: int = 20,
     grid: NDArray | None = None,
