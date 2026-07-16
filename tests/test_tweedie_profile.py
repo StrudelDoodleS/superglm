@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import superglm.profiling.tweedie as tweedie_module
 from superglm import SuperGLM
 from superglm.distributions import Tweedie as TweedieDistribution
 from superglm.features.numeric import Numeric
@@ -127,6 +128,24 @@ class TestTweedieLogpdf:
         phi, p = 5.0, 1.5
         lp = tweedie_logpdf(y, mu, phi, p, t_arg_limit=0.0)  # forces saddlepoint
         assert np.all(np.isfinite(lp))
+
+    def test_all_invalid_wright_terms_use_saddlepoint(self, monkeypatch):
+        """Every invalid Wright term must be populated by the fallback."""
+        y = np.array([0.5, 2.0, 8.0])
+        mu = np.array([0.8, 1.5, 6.0])
+        phi, p = 2.0, 1.5
+
+        def all_nan_wright(a, b, t):
+            return np.full_like(t, np.nan, dtype=np.float64)
+
+        monkeypatch.setattr(tweedie_module, "wright_bessel", all_nan_wright)
+
+        logpdf, diagnostics = tweedie_module._tweedie_logpdf_impl(y, mu, phi, p)
+        expected = tweedie_module._saddlepoint(y, mu, np.full_like(y, phi), p)
+
+        np.testing.assert_allclose(logpdf, expected, rtol=1e-14, atol=1e-14)
+        assert diagnostics.n_positive == len(y)
+        assert diagnostics.n_saddlepoint == diagnostics.n_positive
 
     def test_weights_scale_phi(self):
         """logpdf(y, mu, phi, p, weights=2) == logpdf(y, mu, phi/2, p)."""
@@ -272,6 +291,213 @@ class TestTweedieLogpdf:
 
         with pytest.raises(ValueError, match="phi must be finite and strictly positive"):
             tweedie_logpdf(y, mu, invalid_phi, 1.5)
+
+
+class TestTweedieLogPhiScore:
+    """Analytic mean-NLL derivatives with respect to ``log(phi)``."""
+
+    @staticmethod
+    def _finite_difference_score(prepared, phi):
+        h = 1e-5
+        u = np.log(phi)
+
+        def mean_nll(log_phi):
+            evaluation = tweedie_module._evaluate_tweedie_density(
+                prepared,
+                float(np.exp(log_phi)),
+            )
+            return -float(np.mean(evaluation.logpdf))
+
+        return (mean_nll(u + h) - mean_nll(u - h)) / (2.0 * h)
+
+    @pytest.mark.parametrize(
+        ("y", "mu", "phi", "p", "weights", "t_arg_limit"),
+        [
+            pytest.param(
+                np.array([0.0, 0.0, 0.0]),
+                np.array([0.7, 2.0, 8.0]),
+                1.7,
+                1.5,
+                None,
+                1e14,
+                id="all-zeros",
+            ),
+            pytest.param(
+                np.array([0.3, 1.2, 4.5]),
+                np.array([0.5, 1.5, 3.7]),
+                1.3,
+                1.5,
+                None,
+                1e14,
+                id="exact-positives",
+            ),
+            pytest.param(
+                np.array([0.0, 0.2, 0.0, 3.0]),
+                np.array([0.4, 0.3, 2.0, 2.5]),
+                2.1,
+                1.6,
+                None,
+                1e14,
+                id="mixed",
+            ),
+            pytest.param(
+                np.array([0.2, 1.0, 5.0, 9.0]),
+                np.array([0.3, 1.4, 4.0, 7.0]),
+                2.4,
+                1.55,
+                np.array([0.25, 0.8, 1.7, 4.0]),
+                1e14,
+                id="unequal-prior-weights",
+            ),
+            pytest.param(
+                np.array([0.3, 2.0, 7.0]),
+                np.array([0.6, 1.5, 5.5]),
+                1.8,
+                1.5,
+                None,
+                0.0,
+                id="forced-saddlepoint",
+            ),
+            pytest.param(
+                np.array([0.0, 0.4, 3.0, 8.0]),
+                np.array([0.5, 0.7, 2.5, 6.0]),
+                2.2,
+                1.65,
+                np.array([0.3, 0.9, 2.0, 3.5]),
+                0.0,
+                id="weighted-forced-saddlepoint",
+            ),
+            pytest.param(
+                np.array([0.04, 0.05, 0.06]),
+                np.array([0.035, 0.055, 0.08]),
+                1.0,
+                1.05,
+                None,
+                1e14,
+                id="p-near-one",
+            ),
+            pytest.param(
+                np.array([0.2, 1.0, 5.0]),
+                np.array([0.3, 1.4, 4.0]),
+                1.2,
+                1.95,
+                None,
+                1e14,
+                id="p-near-two",
+            ),
+        ],
+    )
+    def test_log_phi_score_matches_centered_finite_difference(
+        self,
+        y,
+        mu,
+        phi,
+        p,
+        weights,
+        t_arg_limit,
+    ):
+        prepared = tweedie_module._prepare_tweedie_density(
+            y,
+            mu,
+            p,
+            weights=weights,
+            t_arg_limit=t_arg_limit,
+        )
+        evaluation = tweedie_module._evaluate_tweedie_density(
+            prepared,
+            phi,
+            compute_score=True,
+        )
+
+        assert evaluation.score_valid
+        assert evaluation.log_phi_score is not None
+        analytic = float(np.mean(evaluation.log_phi_score))
+        finite_difference = self._finite_difference_score(prepared, phi)
+        np.testing.assert_allclose(analytic, finite_difference, rtol=1e-8, atol=1e-9)
+
+    def test_log_phi_score_constant_weight_matches_rescaled_phi(self):
+        y = np.array([0.0, 0.4, 1.5, 5.0])
+        mu = np.array([0.2, 0.7, 1.2, 4.5])
+        phi, p, weight = 2.3, 1.6, 2.75
+        weighted = tweedie_module._prepare_tweedie_density(
+            y,
+            mu,
+            p,
+            weights=np.full_like(y, weight),
+        )
+        unweighted = tweedie_module._prepare_tweedie_density(y, mu, p)
+
+        weighted_eval = tweedie_module._evaluate_tweedie_density(
+            weighted,
+            phi,
+            compute_score=True,
+        )
+        rescaled_eval = tweedie_module._evaluate_tweedie_density(
+            unweighted,
+            phi / weight,
+            compute_score=True,
+        )
+
+        assert weighted_eval.score_valid
+        assert rescaled_eval.score_valid
+        np.testing.assert_allclose(weighted_eval.logpdf, rescaled_eval.logpdf, rtol=1e-13)
+        np.testing.assert_allclose(
+            weighted_eval.log_phi_score,
+            rescaled_eval.log_phi_score,
+            rtol=1e-13,
+        )
+
+    def test_log_phi_score_t_underflow_preserves_exact_branch(self):
+        """Finite log(t) must keep an exact density even when exp(log(t)) is zero."""
+        y = np.array([1.0, 2.0])
+        mu = np.array([0.8, 2.5])
+        phi, p = 1e300, 1.5
+        prepared = tweedie_module._prepare_tweedie_density(y, mu, p)
+
+        evaluation = tweedie_module._evaluate_tweedie_density(
+            prepared,
+            phi,
+            compute_score=True,
+        )
+
+        assert evaluation.diagnostics.n_saddlepoint == 0
+        assert np.all(np.isfinite(evaluation.logpdf))
+        assert evaluation.score_valid
+        assert evaluation.log_phi_score is not None
+        analytic = float(np.mean(evaluation.log_phi_score))
+        finite_difference = self._finite_difference_score(prepared, phi)
+        np.testing.assert_allclose(analytic, finite_difference, rtol=1e-8, atol=1e-9)
+
+    def test_log_phi_score_derivative_failure_keeps_exact_density(self, monkeypatch):
+        y = np.array([0.4, 1.5, 5.0])
+        mu = np.array([0.7, 1.2, 4.5])
+        phi, p = 1.9, 1.6
+        prepared = tweedie_module._prepare_tweedie_density(y, mu, p)
+        exact_value = tweedie_module._evaluate_tweedie_density(prepared, phi)
+        real_wright_bessel = tweedie_module.wright_bessel
+
+        def fail_derivative_wright(a, b, t):
+            result = real_wright_bessel(a, b, t)
+            if np.isclose(b, a):
+                return np.full_like(t, np.nan, dtype=np.float64)
+            return result
+
+        monkeypatch.setattr(tweedie_module, "wright_bessel", fail_derivative_wright)
+
+        evaluation = tweedie_module._evaluate_tweedie_density(
+            prepared,
+            phi,
+            compute_score=True,
+        )
+        saddlepoint = tweedie_module._saddlepoint(y, mu, np.full_like(y, phi), p)
+
+        assert exact_value.diagnostics.n_saddlepoint == 0
+        assert evaluation.diagnostics.n_saddlepoint == 0
+        np.testing.assert_array_equal(evaluation.logpdf, exact_value.logpdf)
+        assert not np.allclose(evaluation.logpdf, saddlepoint, rtol=1e-8, atol=1e-10)
+        assert not evaluation.score_valid
+        assert evaluation.log_phi_score is not None
+        assert np.all(np.isnan(evaluation.log_phi_score))
 
 
 # =====================================================================

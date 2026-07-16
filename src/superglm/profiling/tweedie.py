@@ -114,6 +114,46 @@ class _TweedieLogpdfDiagnostics:
         return float(self.n_saddlepoint) / float(self.n_positive)
 
 
+@dataclass(frozen=True)
+class _PreparedTweedieDensity:
+    """Phi-independent terms for repeated Tweedie density evaluations."""
+
+    y: NDArray
+    mu: NDArray
+    weights: NDArray
+    p: float
+    t_arg_limit: float
+    log_t_arg_limit: float
+    a: float
+    zero_mask: NDArray
+    positive_mask: NDArray
+    positive_indices: NDArray
+    zero_rate_numerator: NDArray
+    log_weight: NDArray
+    positive_log_y: NDArray
+    positive_canonical_c: NDArray
+    positive_saddlepoint_deviance: NDArray
+    positive_saddlepoint_log_base: NDArray
+    positive_log_t_phi_independent: NDArray
+
+
+@dataclass(frozen=True)
+class _TweedieDensityEvaluation:
+    """One Tweedie density evaluation, optionally including its NLL score."""
+
+    logpdf: NDArray
+    log_phi_score: NDArray | None
+    diagnostics: _TweedieLogpdfDiagnostics
+    score_valid: bool
+
+
+def _readonly_copy(values: NDArray, *, dtype: Any | None = None) -> NDArray:
+    """Return an owning, read-only array for an immutable evaluation record."""
+    result = np.array(values, dtype=dtype, copy=True)
+    result.setflags(write=False)
+    return result
+
+
 def _validate_tweedie_inputs(
     y: NDArray,
     mu: NDArray,
@@ -166,6 +206,233 @@ def _validate_tweedie_phi(phi: float) -> float:
     return phi_float
 
 
+def _prepare_tweedie_density(
+    y: NDArray,
+    mu: NDArray,
+    p: float,
+    *,
+    weights: NDArray | None = None,
+    t_arg_limit: float = 1e14,
+) -> _PreparedTweedieDensity:
+    """Prepare fixed terms for repeated density evaluations over ``phi``."""
+    y, mu, p, validated_weights = _validate_tweedie_inputs(y, mu, p, weights)
+    if validated_weights is None:
+        weights_array = np.ones(len(y), dtype=np.float64)
+    else:
+        weights_array = validated_weights
+
+    t_arg_limit_array = np.asarray(t_arg_limit)
+    if t_arg_limit_array.ndim != 0:
+        raise ValueError("t_arg_limit must be a scalar")
+    try:
+        t_arg_limit_float = float(t_arg_limit_array)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("t_arg_limit must be a scalar") from exc
+    if t_arg_limit_float > 0.0:
+        log_t_arg_limit = float(np.log(t_arg_limit_float))
+    else:
+        # A non-positive limit intentionally forces every positive term onto
+        # the saddlepoint branch. NaN retains the old all-saddle behavior.
+        log_t_arg_limit = np.nan if np.isnan(t_arg_limit_float) else -np.inf
+
+    zero_mask = y == 0.0
+    positive_mask = ~zero_mask
+    positive_indices = np.flatnonzero(positive_mask)
+    y_positive = y[positive_mask]
+
+    with np.errstate(all="ignore"):
+        mu_one_minus_p = np.power(mu, 1.0 - p)
+        mu_two_minus_p = np.power(mu, 2.0 - p)
+        zero_rate_numerator = mu_two_minus_p / (2.0 - p)
+        log_weight = np.log(weights_array)
+        positive_log_y = np.log(y_positive)
+
+        positive_canonical_c = y_positive * mu_one_minus_p[positive_mask] / (
+            1.0 - p
+        ) - mu_two_minus_p[positive_mask] / (2.0 - p)
+        y_one_minus_p = np.power(y_positive, 1.0 - p)
+        y_two_minus_p = np.power(y_positive, 2.0 - p)
+        positive_saddlepoint_deviance = 2.0 * (
+            y_positive * (y_one_minus_p - mu_one_minus_p[positive_mask]) / (1.0 - p)
+            - (y_two_minus_p - mu_two_minus_p[positive_mask]) / (2.0 - p)
+        )
+        positive_saddlepoint_log_base = np.log(2.0 * np.pi) + p * positive_log_y
+
+        a = (2.0 - p) / (p - 1.0)
+        alpha = -a
+        positive_log_t_phi_independent = (
+            alpha * (np.log(p - 1.0) - positive_log_y)
+            - np.log(2.0 - p)
+            + (a + 1.0) * log_weight[positive_mask]
+        )
+
+    return _PreparedTweedieDensity(
+        y=_readonly_copy(y, dtype=np.float64),
+        mu=_readonly_copy(mu, dtype=np.float64),
+        weights=_readonly_copy(weights_array, dtype=np.float64),
+        p=p,
+        t_arg_limit=t_arg_limit_float,
+        log_t_arg_limit=log_t_arg_limit,
+        a=a,
+        zero_mask=_readonly_copy(zero_mask, dtype=np.bool_),
+        positive_mask=_readonly_copy(positive_mask, dtype=np.bool_),
+        positive_indices=_readonly_copy(positive_indices, dtype=np.intp),
+        zero_rate_numerator=_readonly_copy(zero_rate_numerator, dtype=np.float64),
+        log_weight=_readonly_copy(log_weight, dtype=np.float64),
+        positive_log_y=_readonly_copy(positive_log_y, dtype=np.float64),
+        positive_canonical_c=_readonly_copy(positive_canonical_c, dtype=np.float64),
+        positive_saddlepoint_deviance=_readonly_copy(
+            positive_saddlepoint_deviance,
+            dtype=np.float64,
+        ),
+        positive_saddlepoint_log_base=_readonly_copy(
+            positive_saddlepoint_log_base,
+            dtype=np.float64,
+        ),
+        positive_log_t_phi_independent=_readonly_copy(
+            positive_log_t_phi_independent,
+            dtype=np.float64,
+        ),
+    )
+
+
+def _evaluate_tweedie_density(
+    prepared: _PreparedTweedieDensity,
+    phi: float,
+    *,
+    compute_score: bool = False,
+) -> _TweedieDensityEvaluation:
+    """Evaluate a prepared density and its optional mean-NLL log-phi score."""
+    phi = _validate_tweedie_phi(phi)
+    log_phi = float(np.log(phi))
+    inverse_phi_eff = prepared.weights / phi
+    log_phi_eff = log_phi - prepared.log_weight
+
+    logpdf = np.empty(len(prepared.y), dtype=np.float64)
+    log_phi_score = np.empty(len(prepared.y), dtype=np.float64) if compute_score else None
+
+    zero = prepared.zero_mask
+    if np.any(zero):
+        zero_logpdf = -prepared.zero_rate_numerator[zero] * inverse_phi_eff[zero]
+        logpdf[zero] = zero_logpdf
+        if log_phi_score is not None:
+            log_phi_score[zero] = zero_logpdf
+
+    n_saddlepoint = 0
+    positive = prepared.positive_mask
+    if np.any(positive):
+        inverse_phi_positive = inverse_phi_eff[positive]
+        log_phi_eff_positive = log_phi_eff[positive]
+        log_t = prepared.positive_log_t_phi_independent - (prepared.a + 1.0) * log_phi
+
+        # Select the numerical branch in log space. In particular, do not
+        # clip log(t): clipping can move an observation across t_arg_limit.
+        try_exact = log_t < prepared.log_t_arg_limit
+        exact = np.zeros(len(log_t), dtype=np.bool_)
+        t_positive = np.full(len(log_t), np.nan, dtype=np.float64)
+        wright_a_plus_one = np.full(len(log_t), np.nan, dtype=np.float64)
+        positive_logpdf = np.empty(len(log_t), dtype=np.float64)
+
+        if np.any(try_exact):
+            try_exact_indices = np.flatnonzero(try_exact)
+            with np.errstate(all="ignore"):
+                t_exact = np.exp(log_t[try_exact])
+                wright_recurrence = wright_bessel(
+                    prepared.a,
+                    prepared.a + 1.0,
+                    t_exact,
+                )
+                candidate_logpdf = (
+                    np.log(prepared.a)
+                    + log_t[try_exact]
+                    + np.log(wright_recurrence)
+                    - prepared.positive_log_y[try_exact]
+                    + prepared.positive_canonical_c[try_exact] * inverse_phi_positive[try_exact]
+                )
+
+            density_valid = (
+                np.isfinite(wright_recurrence)
+                & (wright_recurrence > 0.0)
+                & np.isfinite(candidate_logpdf)
+            )
+            valid_indices = try_exact_indices[density_valid]
+            exact[valid_indices] = True
+            t_positive[valid_indices] = t_exact[density_valid]
+            wright_a_plus_one[valid_indices] = wright_recurrence[density_valid]
+            positive_logpdf[valid_indices] = candidate_logpdf[density_valid]
+
+        # This assignment is intentionally independent of np.any(exact): an
+        # all-invalid Wright batch still needs every saddlepoint fallback.
+        saddlepoint = ~exact
+        n_saddlepoint = int(np.count_nonzero(saddlepoint))
+        if np.any(saddlepoint):
+            positive_logpdf[saddlepoint] = (
+                -0.5
+                * (
+                    prepared.positive_saddlepoint_log_base[saddlepoint]
+                    + log_phi_eff_positive[saddlepoint]
+                )
+                - 0.5
+                * prepared.positive_saddlepoint_deviance[saddlepoint]
+                * inverse_phi_positive[saddlepoint]
+            )
+        logpdf[positive] = positive_logpdf
+
+        if log_phi_score is not None:
+            positive_score = np.full(len(log_t), np.nan, dtype=np.float64)
+            if np.any(saddlepoint):
+                positive_score[saddlepoint] = (
+                    0.5
+                    - 0.5
+                    * prepared.positive_saddlepoint_deviance[saddlepoint]
+                    * inverse_phi_positive[saddlepoint]
+                )
+
+            if np.any(exact):
+                with np.errstate(all="ignore"):
+                    wright_a = wright_bessel(
+                        prepared.a,
+                        prepared.a,
+                        t_positive[exact],
+                    )
+                    ratio = wright_a / (prepared.a * wright_a_plus_one[exact])
+
+                ratio_tolerance = 64.0 * np.finfo(np.float64).eps
+                ratio_valid = (
+                    np.isfinite(wright_a)
+                    & (wright_a > 0.0)
+                    & np.isfinite(ratio)
+                    & (ratio >= 1.0 - ratio_tolerance)
+                )
+                exact_indices = np.flatnonzero(exact)
+                valid_score_indices = exact_indices[ratio_valid]
+                if np.any(ratio_valid):
+                    stable_ratio = np.maximum(ratio[ratio_valid], 1.0)
+                    exact_score = (
+                        stable_ratio / (prepared.p - 1.0)
+                        + prepared.positive_canonical_c[valid_score_indices]
+                        * inverse_phi_positive[valid_score_indices]
+                    )
+                    finite_score = np.isfinite(exact_score)
+                    positive_score[valid_score_indices[finite_score]] = exact_score[finite_score]
+
+            log_phi_score[positive] = positive_score
+
+    diagnostics = _TweedieLogpdfDiagnostics(
+        n_positive=int(np.count_nonzero(positive)),
+        n_saddlepoint=n_saddlepoint,
+    )
+    score_valid = log_phi_score is not None and bool(np.all(np.isfinite(log_phi_score)))
+    return _TweedieDensityEvaluation(
+        logpdf=_readonly_copy(logpdf, dtype=np.float64),
+        log_phi_score=(
+            _readonly_copy(log_phi_score, dtype=np.float64) if log_phi_score is not None else None
+        ),
+        diagnostics=diagnostics,
+        score_valid=score_valid,
+    )
+
+
 def _tweedie_logpdf_impl(
     y: NDArray,
     mu: NDArray,
@@ -175,85 +442,16 @@ def _tweedie_logpdf_impl(
     weights: NDArray | None = None,
     t_arg_limit: float = 1e14,
 ) -> tuple[NDArray, _TweedieLogpdfDiagnostics]:
-    """Shared Tweedie log-density implementation with diagnostics."""
-    y, mu, p, weights = _validate_tweedie_inputs(y, mu, p, weights)
-    phi = _validate_tweedie_phi(phi)
-    n = len(y)
-
-    phi_eff = np.full(n, phi, dtype=np.float64)
-    if weights is not None:
-        phi_eff = phi / weights
-
-    logpdf = np.zeros(n, dtype=np.float64)
-    n_saddlepoint = 0
-
-    # --- Case 1: y = 0 (point mass) ---
-    zero = y == 0
-    if np.any(zero):
-        # P(Y=0) = exp(-lambda) where lambda = mu^(2-p) / ((2-p) * phi_eff)
-        logpdf[zero] = -np.power(mu[zero], 2 - p) / ((2 - p) * phi_eff[zero])
-
-    # --- Case 2: y > 0 (continuous density via wright_bessel) ---
-    pos = y > 0
-    if np.any(pos):
-        y_p = y[pos]
-        mu_p = mu[pos]
-        phi_p = phi_eff[pos]
-
-        # EDM cumulant terms
-        theta = np.power(mu_p, 1 - p) / (1 - p)
-        kappa = np.power(mu_p, 2 - p) / (2 - p)
-
-        alpha = (2 - p) / (1 - p)  # < 0 for p in (1,2)
-
-        # Wright-Bessel argument: t = ((p-1)*phi/y)^alpha / ((2-p)*phi)
-        log_base = np.log((p - 1) * phi_p) - np.log(y_p)
-        log_t = alpha * log_base - np.log((2 - p) * phi_p)
-        t = np.exp(np.clip(log_t, -700, 700))
-
-        # Partition into wright_bessel-safe vs saddlepoint
-        use_wb = t < t_arg_limit
-        results = np.zeros(len(y_p), dtype=np.float64)
-
-        if np.any(use_wb):
-            t_wb = t[use_wb]
-            y_wb = y_p[use_wb]
-            mu_wb = mu_p[use_wb]
-            phi_wb = phi_p[use_wb]
-            theta_wb = theta[use_wb]
-            kappa_wb = kappa[use_wb]
-
-            with np.errstate(all="ignore"):
-                wb = wright_bessel(-alpha, 0.0, t_wb)
-
-            valid = np.isfinite(wb) & (wb > 1e-300)
-            n_saddlepoint += int(np.count_nonzero(~valid))
-            if np.any(valid):
-                log_a = np.log(wb[valid]) - np.log(y_wb[valid])
-                results_wb = np.full(len(t_wb), -np.inf, dtype=np.float64)
-                results_wb[valid] = (
-                    log_a + (y_wb[valid] * theta_wb[valid] - kappa_wb[valid]) / phi_wb[valid]
-                )
-                # Fallback for invalid wb within the wb branch
-                invalid = ~valid
-                if np.any(invalid):
-                    results_wb[invalid] = _saddlepoint(
-                        y_wb[invalid], mu_wb[invalid], phi_wb[invalid], p
-                    )
-                results[use_wb] = results_wb
-
-        use_sp = ~use_wb
-        n_saddlepoint += int(np.count_nonzero(use_sp))
-        if np.any(use_sp):
-            results[use_sp] = _saddlepoint(y_p[use_sp], mu_p[use_sp], phi_p[use_sp], p)
-
-        logpdf[pos] = results
-
-    diagnostics = _TweedieLogpdfDiagnostics(
-        n_positive=int(np.count_nonzero(pos)),
-        n_saddlepoint=n_saddlepoint,
+    """Compatibility wrapper over the prepared Tweedie density evaluator."""
+    prepared = _prepare_tweedie_density(
+        y,
+        mu,
+        p,
+        weights=weights,
+        t_arg_limit=t_arg_limit,
     )
-    return logpdf, diagnostics
+    evaluation = _evaluate_tweedie_density(prepared, phi)
+    return evaluation.logpdf.copy(), evaluation.diagnostics
 
 
 def tweedie_logpdf(
