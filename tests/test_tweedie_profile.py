@@ -17,6 +17,7 @@ from superglm.distributions import Tweedie as TweedieDistribution
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.links import LogLink
+from superglm.penalties.base import penalty_has_targets
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.profiling.tweedie import (
     TweedieProfileResult,
@@ -2557,25 +2558,25 @@ class TestProfileFitParity:
             return _profile_solver_result(kwargs["X"])
 
         monkeypatch.setattr(tweedie_module, "fit_pirls", fake_fit_pirls)
-        model = SuperGLM(
-            family=TweedieDistribution(p=1.5),
-            selection_penalty=0.2,
-            spline_penalty=7.5,
-            active_set=True,
-            tol=2e-5,
-            max_iter=17,
-            convergence="deviance",
-            features={"x": Numeric()},
-        )
-
-        ctx = tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
+        with pytest.warns(UserWarning, match="convergence='coefficients' is experimental"):
+            model = SuperGLM(
+                family=TweedieDistribution(p=1.5),
+                selection_penalty=0.2,
+                spline_penalty=7.5,
+                active_set=True,
+                tol=2e-5,
+                max_iter=17,
+                convergence="coefficients",
+                features={"x": Numeric()},
+            )
+            ctx = tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
         ctx.evaluate(1.5, source="one_point")
 
         assert captured["lambda2"] == 7.5
         assert captured["max_iter_outer"] == 17
         assert captured["tol"] == pytest.approx(2e-5)
         assert captured["active_set"] is True
-        assert captured["convergence"] == "deviance"
+        assert captured["convergence"] == "coefficients"
         assert captured["penalty"] is ctx.penalty
 
     def test_direct_profile_forwards_model_controls_and_lambda2(self, monkeypatch):
@@ -2588,25 +2589,54 @@ class TestProfileFitParity:
             return _profile_solver_result(kwargs["X"]), None
 
         monkeypatch.setattr(tweedie_module, "fit_irls_direct", fake_fit_irls_direct)
-        model = SuperGLM(
-            family=TweedieDistribution(p=1.5),
-            selection_penalty=0,
-            spline_penalty=8.5,
-            direct_solve="qr",
-            tol=3e-5,
-            max_iter=19,
-            convergence="deviance",
-            features={"x": Numeric()},
-        )
-
-        ctx = tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
+        with pytest.warns(UserWarning, match="convergence='coefficients' is experimental"):
+            model = SuperGLM(
+                family=TweedieDistribution(p=1.5),
+                selection_penalty=0,
+                spline_penalty=8.5,
+                direct_solve="qr",
+                tol=3e-5,
+                max_iter=19,
+                convergence="coefficients",
+                features={"x": Numeric()},
+            )
+            ctx = tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
         ctx.evaluate(1.5, source="one_point")
 
         assert captured["lambda2"] == 8.5
         assert captured["max_iter"] == 19
         assert captured["tol"] == pytest.approx(3e-5)
         assert captured["direct_solve"] == "qr"
-        assert captured["convergence"] == "deviance"
+        assert captured["convergence"] == "coefficients"
+
+    def test_positive_lambda1_without_targets_dispatches_to_direct(self, monkeypatch):
+        X = pd.DataFrame(index=np.arange(12))
+        y = np.linspace(0.5, 2.0, len(X))
+        direct_calls = []
+
+        def fake_fit_irls_direct(**kwargs):
+            direct_calls.append(kwargs)
+            return _profile_solver_result(kwargs["X"], effective_df=0.0), None
+
+        def fail_pirls(**kwargs):
+            raise AssertionError("no-target profile incorrectly dispatched to PIRLS")
+
+        monkeypatch.setattr(tweedie_module, "fit_irls_direct", fake_fit_irls_direct)
+        monkeypatch.setattr(tweedie_module, "fit_pirls", fail_pirls)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0.25,
+            features={},
+        )
+
+        ctx = tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
+        assert ctx.penalty.lambda1 > 0.0
+        assert not penalty_has_targets(ctx.penalty, ctx.groups)
+
+        ctx.evaluate(1.5, source="one_point")
+
+        assert ctx.use_direct is True
+        assert len(direct_calls) == 1
 
     def test_flexible_spline_profile_matches_independent_fixed_p_fit(self):
         rng = np.random.default_rng(20260716)
