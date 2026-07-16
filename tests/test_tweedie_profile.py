@@ -2762,6 +2762,143 @@ class TestImmutableProfileEvaluations:
 
         self._assert_winning_result(ctx, result, callback_rows, fit_calls, phi_calls)
 
+    @staticmethod
+    def _assert_exact_float_candidates(ctx, first, second, fit_calls, phi_calls, callbacks):
+        first_result = ctx.finalize(first, method="grid", converged=True)
+        second_result = ctx.finalize(second, method="grid", converged=True)
+
+        assert fit_calls == [first, second]
+        assert phi_calls == [first, second]
+        assert len(ctx._evaluation_cache) == len(callbacks) == 2
+        assert list(ctx._evaluation_cache) == [first, second]
+        assert [row["source"] for row in callbacks] == ["near_first", "near_second"]
+        assert first_result.p_hat == first
+        assert first_result.phi_hat == pytest.approx(101.0)
+        assert first_result.nll == pytest.approx(1.01)
+        assert second_result.p_hat == second
+        assert second_result.phi_hat == pytest.approx(202.0)
+        assert second_result.nll == pytest.approx(2.02)
+        assert list(second_result.search_trace["p"]) == [first, second]
+        assert list(second_result.search_trace["source"]) == ["near_first", "near_second"]
+
+    def test_fit_context_preserves_distinct_exact_float_cache_keys(self, monkeypatch):
+        first = 1.5000000000001
+        second = 1.5000000000004
+        y = np.array([0.0, 1.0])
+        fit_calls = []
+        phi_calls = []
+        callbacks = []
+
+        def candidate_index(p):
+            return 1 if p == first else 2
+
+        def fake_fit_irls_direct(**kwargs):
+            p = float(kwargs["family"].p)
+            fit_calls.append(p)
+            index = candidate_index(p)
+            mu = np.full(len(y), float(index))
+            result = SimpleNamespace(
+                beta=np.log(mu),
+                intercept=0.0,
+                effective_df=0.1 * index,
+                n_iter=index,
+                converged=True,
+                iteration_log=[],
+            )
+            return result, None
+
+        def fake_profile_phi(y_arg, mu, p, **kwargs):
+            p = float(p)
+            phi_calls.append(p)
+            index = candidate_index(p)
+            return replace(
+                self._phi_result(1.5),
+                phi=101.0 if index == 1 else 202.0,
+                nll=1.01 if index == 1 else 2.02,
+            )
+
+        monkeypatch.setattr(tweedie_module, "fit_irls_direct", fake_fit_irls_direct)
+        monkeypatch.setattr(tweedie_module, "_profile_phi_detailed", fake_profile_phi)
+        ctx = tweedie_module._ProfileContext(
+            y_arr=y,
+            w_arr=np.ones(len(y)),
+            offset_arr=np.zeros(len(y)),
+            dm=SimpleNamespace(matvec=lambda beta: beta),
+            groups=[],
+            link=LogLink(),
+            penalty=None,
+            use_direct=True,
+            lambda2=None,
+            direct_solve="auto",
+            phi_method="mle",
+            verbose=False,
+            ll_scale=float(len(y)),
+            trace_callback=callbacks.append,
+        )
+
+        assert ctx.evaluate(first, source="near_first") == pytest.approx(1.01)
+        assert ctx.evaluate(second, source="near_second") == pytest.approx(2.02)
+        self._assert_exact_float_candidates(ctx, first, second, fit_calls, phi_calls, callbacks)
+
+    def test_reml_context_preserves_distinct_exact_float_cache_keys(self, monkeypatch):
+        first = 1.5000000000001
+        second = 1.5000000000004
+        y = np.array([0.0, 1.0])
+        fit_calls = []
+        phi_calls = []
+        callbacks = []
+        case = self
+
+        def candidate_index(p):
+            return 1 if p == first else 2
+
+        class FakeREMLModel:
+            family = None
+            result = None
+            _reml_result = None
+
+            def fit_reml(self, X, y_arg, *, sample_weight=None, offset=None):
+                p = float(self.family.p)
+                fit_calls.append(p)
+                index = candidate_index(p)
+                self._mu = np.full(len(y), float(index))
+                self.result = SimpleNamespace(effective_df=0.1 * index, converged=True)
+                self._reml_result = SimpleNamespace(
+                    n_reml_iter=index,
+                    objective_history=[],
+                )
+
+            def predict(self, X):
+                return self._mu
+
+        def fake_profile_phi(y_arg, mu, p, **kwargs):
+            p = float(p)
+            phi_calls.append(p)
+            index = candidate_index(p)
+            return replace(
+                case._phi_result(1.5),
+                phi=101.0 if index == 1 else 202.0,
+                nll=1.01 if index == 1 else 2.02,
+            )
+
+        monkeypatch.setattr(tweedie_module, "_profile_phi_detailed", fake_profile_phi)
+        ctx = tweedie_module._ProfileContextREML(
+            model=FakeREMLModel(),
+            X=np.ones((len(y), 1)),
+            y=y,
+            sample_weight=None,
+            offset=None,
+            w_arr=np.ones(len(y)),
+            phi_method="mle",
+            verbose=False,
+            ll_scale=float(len(y)),
+            trace_callback=callbacks.append,
+        )
+
+        assert ctx.evaluate(first, source="near_first") == pytest.approx(1.01)
+        assert ctx.evaluate(second, source="near_second") == pytest.approx(2.02)
+        self._assert_exact_float_candidates(ctx, first, second, fit_calls, phi_calls, callbacks)
+
 
 class TestSearchMethods:
     """Tests for grid, grid_refine, and profile_opt search methods."""

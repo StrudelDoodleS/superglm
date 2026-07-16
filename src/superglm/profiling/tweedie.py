@@ -2523,7 +2523,7 @@ class _ProfileContext:
 
         from superglm.distributions import Tweedie
 
-        key = round(p, 12)
+        key = float(p)
         if key in self._evaluation_cache:
             return self._evaluation_cache[key].nll
 
@@ -2611,7 +2611,7 @@ class _ProfileContext:
 
     def finalize(self, p_hat: float, method: str, converged: bool) -> TweedieProfileResult:
         """Build result with final phi at p_hat and search_trace DataFrame."""
-        key = round(p_hat, 12)
+        key = float(p_hat)
         if key not in self._evaluation_cache:
             self.evaluate(p_hat, source="final")
         record = self._evaluation_cache[key]
@@ -2735,7 +2735,7 @@ class _ProfileContextREML:
 
         from superglm.distributions import Tweedie
 
-        key = round(p, 12)
+        key = float(p)
         if key in self._evaluation_cache:
             return self._evaluation_cache[key].nll
 
@@ -2797,7 +2797,7 @@ class _ProfileContextREML:
 
     def finalize(self, p_hat: float, method: str, converged: bool) -> TweedieProfileResult:
         """Build result with final phi at p_hat and search_trace DataFrame."""
-        key = round(p_hat, 12)
+        key = float(p_hat)
         if key not in self._evaluation_cache:
             self.evaluate(p_hat, source="final")
         record = self._evaluation_cache[key]
