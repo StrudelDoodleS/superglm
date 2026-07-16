@@ -3156,11 +3156,65 @@ def _evaluate_reported_candidate(
     *,
     source: str,
     bounds: tuple[float, float],
-) -> None:
-    """Evaluate an optimizer-reported in-range candidate if it is usable."""
+) -> tuple[bool, str]:
+    """Evaluate and validate one parsed optimizer-reported candidate."""
     lo, hi = bounds
-    if np.isfinite(candidate) and lo <= candidate <= hi:
+    if not lo <= candidate <= hi:
+        return (
+            False,
+            f"optimizer result.x candidate {candidate:g} is outside applicable bounds "
+            f"{_format_profile_range(bounds)}",
+        )
+    try:
         ctx.evaluate(float(candidate), source=source)
+    except Exception as exc:
+        return False, f"optimizer result.x candidate evaluation failed: {type(exc).__name__}: {exc}"
+    record = ctx._evaluation_cache.get(float(candidate))
+    if record is None:
+        return False, "optimizer result.x candidate evaluation was not cached"
+    if not _profile_record_is_selectable(record):
+        return False, "optimizer result.x candidate evaluation was not finite and valid"
+    return True, ""
+
+
+def _parse_optimizer_result_x(result: Any) -> tuple[float | None, str]:
+    """Safely parse a scalar finite optimizer ``result.x`` value."""
+    if not hasattr(result, "x"):
+        return None, "optimizer result.x is missing"
+    try:
+        values = np.asarray(result.x)
+    except (TypeError, ValueError) as exc:
+        return None, f"optimizer result.x could not be parsed as one scalar: {exc}"
+    if values.size != 1:
+        return None, f"optimizer result.x must contain one scalar, got shape {values.shape}"
+    if np.iscomplexobj(values):
+        return None, "optimizer result.x must contain one real scalar"
+    try:
+        candidate = float(values.reshape(-1)[0])
+    except (TypeError, ValueError, OverflowError) as exc:
+        return None, f"optimizer result.x could not be parsed as one scalar: {exc}"
+    if not np.isfinite(candidate):
+        return None, "optimizer result.x must be finite"
+    return candidate, ""
+
+
+def _explicit_optimizer_success(result: Any) -> tuple[bool, str]:
+    """Require an optimizer to report an explicit boolean success value."""
+    if not hasattr(result, "success"):
+        return False, "optimizer result.success is missing"
+    success = result.success
+    if not isinstance(success, bool | np.bool_):
+        return False, "optimizer result.success must be boolean True"
+    if not bool(success):
+        return False, "optimizer reported success=False"
+    return True, ""
+
+
+def _optimizer_outer_diagnostics(result: Any, *issues: str) -> str:
+    """Combine the backend message with outer-search validation failures."""
+    message = str(getattr(result, "message", "") or "")
+    parts = [part for part in (message, *issues) if part]
+    return "; ".join(parts)
 
 
 def _search_brent(
@@ -3178,14 +3232,22 @@ def _search_brent(
         method="bounded",
         options={"xatol": xatol, "maxiter": maxiter},
     )
-    candidate = float(result.x)
-    _evaluate_reported_candidate(ctx, candidate, source="brent", bounds=p_bounds)
-    converged = bool(result.success) if hasattr(result, "success") else True
+    candidate, candidate_issue = _parse_optimizer_result_x(result)
+    candidate_valid = False
+    if candidate is not None:
+        candidate_valid, candidate_issue = _evaluate_reported_candidate(
+            ctx,
+            candidate,
+            source="brent",
+            bounds=p_bounds,
+        )
+    success, success_issue = _explicit_optimizer_success(result)
+    converged = bool(success and candidate_valid)
     return _finalize_best_profile(
         ctx,
         method="brent",
         outer_converged=converged,
-        outer_message=str(getattr(result, "message", "")),
+        outer_message=_optimizer_outer_diagnostics(result, success_issue, candidate_issue),
         searched_bounds=p_bounds,
     )
 
@@ -3256,19 +3318,22 @@ def _search_grid_refine(
         options={"xatol": xatol, "maxiter": maxiter},
     )
 
-    candidate = float(result.x)
-    _evaluate_reported_candidate(
-        ctx,
-        candidate,
-        source="brent_refine",
-        bounds=(refine_lo, refine_hi),
-    )
-    converged = bool(result.success) if hasattr(result, "success") else True
+    candidate, candidate_issue = _parse_optimizer_result_x(result)
+    candidate_valid = False
+    if candidate is not None:
+        candidate_valid, candidate_issue = _evaluate_reported_candidate(
+            ctx,
+            candidate,
+            source="brent_refine",
+            bounds=(refine_lo, refine_hi),
+        )
+    success, success_issue = _explicit_optimizer_success(result)
+    converged = bool(success and candidate_valid)
     return _finalize_best_profile(
         ctx,
         method="grid_refine",
         outer_converged=converged,
-        outer_message=str(getattr(result, "message", "")),
+        outer_message=_optimizer_outer_diagnostics(result, success_issue, candidate_issue),
         searched_bounds=p_bounds,
     )
 
@@ -3334,16 +3399,24 @@ def _search_profile_opt(
         options=opts,
     )
 
-    reported_t = float(result.x[0])
-    p_hat = t_to_p(reported_t) if np.isfinite(reported_t) else np.nan
-    _evaluate_reported_candidate(ctx, p_hat, source="optimizer", bounds=p_bounds)
-    converged = bool(result.success)
+    reported_t, candidate_issue = _parse_optimizer_result_x(result)
+    candidate_valid = False
+    if reported_t is not None:
+        p_hat = t_to_p(reported_t)
+        candidate_valid, candidate_issue = _evaluate_reported_candidate(
+            ctx,
+            p_hat,
+            source="optimizer",
+            bounds=p_bounds,
+        )
+    success, success_issue = _explicit_optimizer_success(result)
+    converged = bool(success and candidate_valid)
 
     return _finalize_best_profile(
         ctx,
         method="profile_opt",
         outer_converged=converged,
-        outer_message=str(getattr(result, "message", "")),
+        outer_message=_optimizer_outer_diagnostics(result, success_issue, candidate_issue),
         searched_bounds=p_bounds,
     )
 

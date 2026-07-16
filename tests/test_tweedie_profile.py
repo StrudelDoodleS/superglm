@@ -3539,6 +3539,78 @@ def _fake_search_context(objective):
 
 
 class TestOuterSearchHonesty:
+    @pytest.mark.parametrize("method", ["brent", "grid_refine", "profile_opt"])
+    @pytest.mark.parametrize(
+        ("case", "diagnostic"),
+        [
+            ("missing_success", "success"),
+            ("non_boolean_success", "boolean"),
+            ("missing_x", "result.x"),
+            ("malformed_x", "one scalar"),
+            ("nonfinite_x", "finite"),
+            ("infinite_x", "finite"),
+        ],
+    )
+    def test_malformed_optimizer_result_preserves_best_cached_record(
+        self, monkeypatch, method, case, diagnostic
+    ):
+        ctx = _fake_search_context(lambda p: {"nll": (p - 1.5) ** 2})
+        valid_x = 0.0 if method == "profile_opt" else 1.5
+        attributes = {"message": "synthetic malformed result"}
+        if case != "missing_success":
+            attributes["success"] = 1 if case == "non_boolean_success" else True
+        if case != "missing_x":
+            if case == "malformed_x":
+                attributes["x"] = np.array([valid_x, valid_x])
+            elif case == "nonfinite_x":
+                attributes["x"] = np.nan
+            elif case == "infinite_x":
+                attributes["x"] = np.inf
+            else:
+                attributes["x"] = valid_x
+        optimizer_result = SimpleNamespace(**attributes)
+
+        def scalar_optimizer(objective, **kwargs):
+            objective(1.5)
+            return optimizer_result
+
+        def vector_optimizer(objective, **kwargs):
+            objective(np.array([0.0]))
+            return optimizer_result
+
+        monkeypatch.setattr(tweedie_module, "minimize_scalar", scalar_optimizer)
+        monkeypatch.setattr(tweedie_module, "minimize", vector_optimizer)
+
+        if method == "brent":
+            result = tweedie_module._search_brent(ctx, (1.1, 1.9), 1e-3, 30)
+        elif method == "grid_refine":
+            result = tweedie_module._search_grid_refine(ctx, (1.2, 1.8), 3, 1e-3, 30)
+        else:
+            result = tweedie_module._search_profile_opt(ctx, (1.1, 1.9), "L-BFGS-B", 1e-3, 30)
+
+        assert result.p_hat == pytest.approx(1.5)
+        assert not result.outer_converged
+        assert not result.converged
+        assert diagnostic in result.outer_message.lower()
+
+    @pytest.mark.parametrize("method", ["brent", "grid_refine"])
+    def test_out_of_range_scalar_optimizer_candidate_is_not_converged(self, monkeypatch, method):
+        ctx = _fake_search_context(lambda p: {"nll": (p - 1.5) ** 2})
+
+        def out_of_range_optimizer(objective, **kwargs):
+            objective(1.5)
+            return OptimizeResult(x=2.5, fun=0.0, success=True, message="synthetic")
+
+        monkeypatch.setattr(tweedie_module, "minimize_scalar", out_of_range_optimizer)
+        if method == "brent":
+            result = tweedie_module._search_brent(ctx, (1.1, 1.9), 1e-3, 30)
+        else:
+            result = tweedie_module._search_grid_refine(ctx, (1.2, 1.8), 3, 1e-3, 30)
+
+        assert result.p_hat == pytest.approx(1.5)
+        assert not result.outer_converged
+        assert "outside" in result.outer_message.lower()
+
     @pytest.mark.parametrize(
         ("winner", "boundary"),
         [(1.1, "lower"), (1.9, "upper")],
