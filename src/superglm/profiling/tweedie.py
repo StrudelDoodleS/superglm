@@ -2175,9 +2175,121 @@ _TRACE_COLUMNS = [
     "phi_fallback_reason",
     "phi_branch_switch_detected",
     "phi_message",
+    "density_method",
+    "density_exact",
 ]
-_SADDLEPOINT_NOTE_THRESHOLD = 0.10
-_SADDLEPOINT_WARN_THRESHOLD = 0.25
+_SADDLEPOINT_WARN_THRESHOLD = 0.10
+_SADDLEPOINT_HIGH_THRESHOLD = 0.50
+_NEAR_POWER_LOWER = 1.08
+_NEAR_POWER_UPPER = 1.98
+
+_DensityMethod = Literal["exact", "hybrid_exact_saddlepoint", "saddlepoint"]
+_DensityWarningSeverity = Literal["none", "label", "warning", "high"]
+_DENSITY_SEVERITY_RANK: dict[_DensityWarningSeverity, int] = {
+    "none": 0,
+    "label": 1,
+    "warning": 2,
+    "high": 3,
+}
+
+
+@dataclass(frozen=True)
+class _DensitySummary:
+    """Validated classification of one record's density diagnostics."""
+
+    n_positive: int
+    n_saddlepoint: int
+    fraction: float
+    method: _DensityMethod
+    exact: bool
+    saddle_severity: _DensityWarningSeverity
+    severity: _DensityWarningSeverity
+    near_power_boundary: bool
+    inconsistent: bool
+
+
+def _density_count(value: Any) -> int | None:
+    """Return one finite integer count, or ``None`` for malformed diagnostics."""
+    try:
+        values = np.asarray(value)
+        if (
+            values.ndim != 0
+            or np.iscomplexobj(values)
+            or np.issubdtype(values.dtype, np.bool_)
+            or not np.issubdtype(values.dtype, np.number)
+        ):
+            return None
+        parsed = float(values)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not np.isfinite(parsed) or parsed != np.floor(parsed):
+        return None
+    return int(parsed)
+
+
+def _saddlepoint_warning_severity(
+    n_saddlepoint: int,
+    fraction: float,
+) -> _DensityWarningSeverity:
+    """Map one valid record's saddlepoint fraction to the public policy."""
+    if n_saddlepoint == 0:
+        return "none"
+    if fraction >= _SADDLEPOINT_HIGH_THRESHOLD:
+        return "high"
+    if fraction >= _SADDLEPOINT_WARN_THRESHOLD:
+        return "warning"
+    return "label"
+
+
+def _classify_density_diagnostics(p: float, diagnostics: Any) -> _DensitySummary:
+    """Classify exact and saddlepoint terms without trusting malformed counts."""
+    n_positive = _density_count(getattr(diagnostics, "n_positive", None))
+    n_saddlepoint = _density_count(getattr(diagnostics, "n_saddlepoint", None))
+    inconsistent = bool(
+        n_positive is None
+        or n_saddlepoint is None
+        or n_positive < 0
+        or n_saddlepoint < 0
+        or n_saddlepoint > n_positive
+    )
+    if inconsistent:
+        return _DensitySummary(
+            n_positive=-1 if n_positive is None else n_positive,
+            n_saddlepoint=-1 if n_saddlepoint is None else n_saddlepoint,
+            fraction=1.0,
+            method="hybrid_exact_saddlepoint",
+            exact=False,
+            saddle_severity="high",
+            severity="high",
+            near_power_boundary=False,
+            inconsistent=True,
+        )
+
+    assert n_positive is not None
+    assert n_saddlepoint is not None
+    fraction = 0.0 if n_positive == 0 else float(n_saddlepoint) / float(n_positive)
+    if n_saddlepoint == 0:
+        method: _DensityMethod = "exact"
+    elif n_saddlepoint == n_positive:
+        method = "saddlepoint"
+    else:
+        method = "hybrid_exact_saddlepoint"
+    saddle_severity = _saddlepoint_warning_severity(n_saddlepoint, fraction)
+    near_power_boundary = bool(
+        n_saddlepoint > 0 and (p <= _NEAR_POWER_LOWER or p >= _NEAR_POWER_UPPER)
+    )
+    severity: _DensityWarningSeverity = "high" if near_power_boundary else saddle_severity
+    return _DensitySummary(
+        n_positive=n_positive,
+        n_saddlepoint=n_saddlepoint,
+        fraction=fraction,
+        method=method,
+        exact=method == "exact",
+        saddle_severity=saddle_severity,
+        severity=severity,
+        near_power_boundary=near_power_boundary,
+        inconsistent=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -2187,6 +2299,20 @@ class TweedieProfileCIEvaluation:
     p: float
     nll: float
     lr_statistic: float
+
+
+@dataclass(frozen=True)
+class TweedieProfileCIDensityProvenance:
+    """Density method retained for one evaluated point in the connected LR region."""
+
+    p: float
+    source: str
+    n_positive: int
+    n_saddlepoint: int
+    fraction: float
+    method: _DensityMethod
+    lr_statistic: float
+    counts_valid: bool = True
 
 
 @dataclass(frozen=True)
@@ -2201,7 +2327,11 @@ class TweedieProfileCIEndpoint:
 
 @dataclass(frozen=True)
 class TweedieProfileCIDetails:
-    """Immutable evidence and diagnostics for one Tweedie profile CI."""
+    """Immutable evidence and diagnostics for one Tweedie profile CI.
+
+    ``density_provenance`` covers retained, actually evaluated points in the
+    connected LR region; it is not a claim about every unevaluated power value.
+    """
 
     alpha: float
     cutoff: float
@@ -2212,6 +2342,21 @@ class TweedieProfileCIDetails:
     n_new_evaluations: int
     evaluations: tuple[TweedieProfileCIEvaluation, ...]
     warnings: tuple[str, ...]
+    density_provenance: tuple[TweedieProfileCIDensityProvenance, ...] = ()
+    density_method: _DensityMethod | None = None
+    density_exact: bool | None = None
+    density_warning_severity: _DensityWarningSeverity = "none"
+    near_power_boundary: bool = False
+    max_saddlepoint_fraction: float = 0.0
+    max_saddlepoint_p: float | None = None
+    any_saddlepoint: bool = False
+    n_density_records: int = 0
+    n_saddlepoint_records: int = 0
+    n_invalid_density_records: int = 0
+    n_positive: int | None = None
+    n_saddlepoint: int | None = None
+    density_warnings: tuple[str, ...] = ()
+    density_warning_signatures: tuple[str, ...] = ()
 
 
 @dataclass
@@ -2246,6 +2391,14 @@ class TweedieProfileResult:
     saddlepoint_fraction : float
         Fraction of positive density evaluations that used the saddlepoint
         approximation at the final ``(p_hat, phi_hat)``.
+    density_method : {"exact", "hybrid_exact_saddlepoint", "saddlepoint"} or None
+        Density evaluation method in the immutable winning record.
+    density_exact : bool or None
+        Whether every winning-record density term was evaluated exactly.
+    density_warning_severity : {"none", "label", "warning", "high"}
+        Highest density or saddle-qualified near-power diagnostic severity.
+    near_power_boundary : bool
+        Whether saddlepoint terms were used at ``p <= 1.08`` or ``p >= 1.98``.
     outer_converged : bool
         Whether the requested outer search itself converged.
     outer_message : str
@@ -2292,6 +2445,27 @@ class TweedieProfileResult:
     phi_branch_switch_detected: bool = False
     phi_boundary: str = ""
     phi_message: str = ""
+    density_method: _DensityMethod | None = None
+    density_exact: bool | None = None
+    density_warning_severity: _DensityWarningSeverity = "none"
+    near_power_boundary: bool = False
+
+    def __post_init__(self) -> None:
+        """Derive new density fields for legacy positional construction."""
+        if self.density_method is not None and self.density_exact is not None:
+            return
+        summary = _classify_density_diagnostics(
+            self.p_hat,
+            _TweedieLogpdfDiagnostics(
+                n_positive=self.n_positive,
+                n_saddlepoint=self.n_saddlepoint,
+            ),
+        )
+        self.density_method = summary.method
+        self.density_exact = summary.exact
+        if self.density_warning_severity == "none":
+            self.density_warning_severity = summary.severity
+        self.near_power_boundary = bool(self.near_power_boundary or summary.near_power_boundary)
 
     @property
     def cache(self) -> dict[float, float]:
@@ -2320,6 +2494,10 @@ class TweedieProfileResult:
     _ci_seed_points: tuple[float, ...] = field(default=(), repr=False)
     _evaluation_count: Any = field(default=None, repr=False)
     _evaluation_record: Any = field(default=None, repr=False)
+    _emitted_ci_density_warning_signatures: set[str] = field(
+        default_factory=set,
+        repr=False,
+    )
 
     @property
     def n_total_evaluations(self) -> int:
@@ -2376,8 +2554,25 @@ class TweedieProfileResult:
             evaluation_count=self._evaluation_count,
             evaluation_record=self._evaluation_record,
         )
+        density_signatures = dict(
+            zip(
+                getattr(details, "density_warnings", ()),
+                getattr(details, "density_warning_signatures", ()),
+            )
+        )
         for message in details.warnings:
+            signature = density_signatures.get(message)
+            if signature is not None:
+                already_emitted = signature in self._emitted_ci_density_warning_signatures
+                if signature == "saddle:warning":
+                    already_emitted |= "saddle:high" in self._emitted_ci_density_warning_signatures
+                if already_emitted:
+                    continue
             _warnings.warn(message, UserWarning, stacklevel=2)
+            if signature is not None:
+                self._emitted_ci_density_warning_signatures.add(signature)
+                if signature == "saddle:high":
+                    self._emitted_ci_density_warning_signatures.add("saddle:warning")
         # Preserve this exact tuple object for compatibility consumers.
         self._ci_cache[alpha_value] = details.interval
         self._ci_details_cache[alpha_value] = details
@@ -2409,10 +2604,12 @@ class TweedieProfileResult:
         n_points: int = 50,
         ax=None,
     ):
-        """Profile deviance plot for Tweedie power parameter p.
+        """Profile-objective plot for Tweedie power parameter p.
 
         Evaluates the profile objective on a dense grid for the curve, and
-        overlays the search evaluation points from ``search_trace``.
+        overlays the search evaluation points from ``search_trace``. MLE
+        profiles use likelihood-ratio wording; Pearson profiles use neutral
+        objective and interval wording.
 
         Parameters
         ----------
@@ -2434,26 +2631,32 @@ class TweedieProfileResult:
             )
 
         import matplotlib.pyplot as plt
-        from scipy.stats import chi2
 
-        ci_lo, ci_hi = self.ci(alpha=alpha)
-
-        # Grid must cover CI and all search evaluation points
+        is_mle_profile = self.phi_method == "mle"
         trace_ps = self.search_trace["p"].values
-        margin = 0.2 * (ci_hi - ci_lo)
-        grid_lo = max(1.01, ci_lo - margin)
-        grid_hi = min(1.99, ci_hi + margin)
-        if len(trace_ps) > 0:
-            grid_lo = min(grid_lo, float(trace_ps.min()) - 0.005)
-            grid_hi = max(grid_hi, float(trace_ps.max()) + 0.005)
-            grid_lo = max(1.01, grid_lo)
-            grid_hi = min(1.99, grid_hi)
+        details: TweedieProfileCIDetails | None = None
+        if is_mle_profile:
+            details = self.ci_details(alpha=alpha)
+            ci_lo, ci_hi = details.interval
+            margin = 0.2 * (ci_hi - ci_lo)
+            grid_lo = max(1.01, ci_lo - margin)
+            grid_hi = min(1.99, ci_hi + margin)
+            if len(trace_ps) > 0:
+                grid_lo = min(grid_lo, float(trace_ps.min()) - 0.005)
+                grid_hi = max(grid_hi, float(trace_ps.max()) + 0.005)
+                grid_lo = max(1.01, grid_lo)
+                grid_hi = min(1.99, grid_hi)
+        else:
+            support = np.append(np.asarray(trace_ps, dtype=np.float64), self.p_hat)
+            support_lo = float(np.min(support))
+            support_hi = float(np.max(support))
+            margin = max(0.05, 0.2 * (support_hi - support_lo))
+            grid_lo = max(1.01, support_lo - margin)
+            grid_hi = min(1.99, support_hi + margin)
         p_grid = np.linspace(grid_lo, grid_hi, n_points)
 
         nll_values = np.array([self._objective(p) for p in p_grid])
         deviance = 2.0 * self._ll_scale * (nll_values - self.nll)
-
-        cutoff = chi2.ppf(1.0 - alpha, 1)
 
         if ax is None:
             fig, ax = plt.subplots(figsize=(6, 4))
@@ -2477,52 +2680,100 @@ class TweedieProfileResult:
                 label=f"Evaluations ({len(trace_ps)})",
             )
 
-        ax.axhline(
-            cutoff,
-            linestyle="--",
-            color="grey",
-            linewidth=0.8,
-            label=f"{100 * (1 - alpha):.0f}% cutoff",
-        )
+        if not is_mle_profile:
+            estimate_label = f"profile estimate = {self.p_hat:.3f}"
+        elif self.density_exact is None:
+            estimate_label = f"profile estimate (density provenance unavailable) = {self.p_hat:.3f}"
+        elif self.density_exact is False:
+            estimate_label = f"approximation-based profile estimate = {self.p_hat:.3f}"
+        else:
+            estimate_label = f"MLE = {self.p_hat:.3f}"
+
         ax.axvline(
             self.p_hat,
             linestyle=":",
             color="black",
             linewidth=0.8,
-            label=f"MLE = {self.p_hat:.3f}",
+            label=estimate_label,
         )
-        ax.fill_betweenx(
-            [0, cutoff],
-            ci_lo,
-            ci_hi,
-            alpha=0.10,
-            color="firebrick",
-            label=f"{100 * (1 - alpha):.0f}% CI: [{ci_lo:.3f}, {ci_hi:.3f}]",
-        )
+        if details is not None:
+            from scipy.stats import chi2
+
+            cutoff = float(chi2.ppf(1.0 - alpha, 1))
+            ax.axhline(
+                cutoff,
+                linestyle="--",
+                color="grey",
+                linewidth=0.8,
+                label=f"{100 * (1 - alpha):.0f}% cutoff",
+            )
+            if details.density_exact is None:
+                interval_kind = "profile interval (density provenance unavailable)"
+            elif self.density_exact is False or details.density_exact is False:
+                interval_kind = "approximation-based LR interval"
+            else:
+                interval_kind = "LR interval"
+            truncated = [
+                side
+                for side, endpoint in (("lower", details.lower), ("upper", details.upper))
+                if endpoint.status == "truncated"
+            ]
+            truncation_label = ""
+            if truncated:
+                sides = " and ".join(truncated)
+                truncation_label = f"; {sides} truncated at configured bound"
+            ax.fill_betweenx(
+                [0, cutoff],
+                ci_lo,
+                ci_hi,
+                alpha=0.10,
+                color="firebrick",
+                label=(
+                    f"{100 * (1 - alpha):.0f}% {interval_kind}: "
+                    f"[{ci_lo:.3f}, {ci_hi:.3f}]{truncation_label}"
+                ),
+            )
 
         ax.set_xlabel("p")
-        ax.set_ylabel("Profile deviance")
-        ax.set_title("Tweedie p profile likelihood")
+        if self.phi_method == "mle":
+            ax.set_ylabel("Profile deviance")
+            ax.set_title("Tweedie p profile likelihood")
+        else:
+            ax.set_ylabel("Profile objective difference")
+            ax.set_title("Tweedie p profile objective")
         ax.set_ylim(bottom=0)
         ax.legend(fontsize=8, loc="upper right")
         return fig
 
 
-def _build_saddlepoint_messages(p: float, diagnostics: _TweedieLogpdfDiagnostics) -> list[str]:
-    """Build thresholded saddlepoint diagnostics for the final profile result."""
-    frac = diagnostics.saddlepoint_fraction
-    if diagnostics.n_positive == 0 or frac < _SADDLEPOINT_NOTE_THRESHOLD:
-        return []
-
-    message = (
-        "Saddlepoint approximation used for "
-        f"{diagnostics.n_saddlepoint}/{diagnostics.n_positive} positive Tweedie "
-        f"density terms ({frac:.0%}) at p={p:.3f}; profile likelihood may be "
-        "approximation-sensitive near the lower p bound."
-    )
-    if frac >= _SADDLEPOINT_WARN_THRESHOLD:
+def _build_density_messages(p: float, summary: _DensitySummary) -> list[str]:
+    """Build and emit non-duplicated final-record density diagnostics."""
+    messages: list[str] = []
+    if summary.inconsistent:
+        messages.append(
+            "High-severity: inconsistent density diagnostics at "
+            f"p={p:.3f} (n_saddlepoint={summary.n_saddlepoint}, "
+            f"n_positive={summary.n_positive}); exact density evaluation cannot be certified."
+        )
+    elif _DENSITY_SEVERITY_RANK[summary.saddle_severity] >= _DENSITY_SEVERITY_RANK["warning"]:
+        prefix = "High-severity: " if summary.saddle_severity == "high" else ""
+        messages.append(
+            f"{prefix}Saddlepoint approximation used for "
+            f"{summary.n_saddlepoint}/{summary.n_positive} positive Tweedie density "
+            f"terms ({summary.fraction:.0%}) at p={p:.3f}; the profile estimate is "
+            "approximation-based."
+        )
+    if summary.near_power_boundary:
+        side = "lower" if p <= _NEAR_POWER_LOWER else "upper"
+        messages.append(
+            "High-severity: Tweedie saddlepoint use occurs in the documented "
+            f"near-power boundary instability region on the {side} side at p={p:.3f}; "
+            "the inherent boundary instability is separate from numerical optimizer "
+            "convergence."
+        )
+    for message in messages:
         _warnings.warn(message, UserWarning, stacklevel=3)
-    return [message]
+    return messages
 
 
 def _fit_iteration_trace(iteration_log) -> tuple[tuple[int, float], ...]:
@@ -2590,6 +2841,7 @@ def _materialize_profile_trace_row(record: _ProfileEvaluation) -> dict[str, Any]
     """Build a fresh mutable public/callback payload from an immutable record."""
     phi_result = record.phi_result
     diagnostics = phi_result.diagnostics
+    density = _classify_density_diagnostics(record.p, diagnostics)
     return {
         "step": record.step,
         "p": record.p,
@@ -2618,7 +2870,9 @@ def _materialize_profile_trace_row(record: _ProfileEvaluation) -> dict[str, Any]
         "objective_finite": phi_result.objective_finite,
         "n_saddlepoint": diagnostics.n_saddlepoint,
         "n_positive": diagnostics.n_positive,
-        "saddlepoint_fraction": diagnostics.saddlepoint_fraction,
+        "saddlepoint_fraction": density.fraction,
+        "density_method": density.method,
+        "density_exact": density.exact,
         "phi_used_fallback": phi_result.used_fallback,
         "phi_fallback_reason": phi_result.fallback_reason,
         "phi_branch_switch_detected": phi_result.branch_switch_detected,
@@ -3185,8 +3439,9 @@ def _finalize_profile_record(
         )
     phi_result = record.phi_result
     diagnostics = phi_result.diagnostics
+    density = _classify_density_diagnostics(record.p, diagnostics)
     boundary = _outer_boundary_label(record.p, searched_bounds)
-    warnings_list = _build_saddlepoint_messages(record.p, diagnostics)
+    warnings_list = _build_density_messages(record.p, density)
     if boundary:
         bounds_text = (
             _format_profile_range(searched_bounds) if searched_bounds is not None else "the search"
@@ -3225,9 +3480,13 @@ def _finalize_profile_record(
         method=method,
         phi_method=ctx.phi_method,
         search_trace=trace,
-        saddlepoint_fraction=diagnostics.saddlepoint_fraction,
-        n_saddlepoint=diagnostics.n_saddlepoint,
-        n_positive=diagnostics.n_positive,
+        saddlepoint_fraction=density.fraction,
+        n_saddlepoint=density.n_saddlepoint,
+        n_positive=density.n_positive,
+        density_method=density.method,
+        density_exact=density.exact,
+        density_warning_severity=density.severity,
+        near_power_boundary=density.near_power_boundary,
         warnings=warnings_list,
         outer_converged=bool(outer_converged),
         outer_message=outer_message,
@@ -3826,6 +4085,163 @@ def _ci_lr_tolerance(cutoff: float, ll_scale: float, nll: float, nll_hat: float)
     )
 
 
+@dataclass(frozen=True)
+class _CIDensityAggregate:
+    """Density provenance summarized over evaluated points in one LR component."""
+
+    provenance: tuple[TweedieProfileCIDensityProvenance, ...]
+    method: _DensityMethod | None
+    exact: bool | None
+    severity: _DensityWarningSeverity
+    near_power_boundary: bool
+    max_fraction: float
+    max_p: float | None
+    any_saddlepoint: bool
+    n_saddlepoint_records: int
+    n_invalid_density_records: int
+    n_positive: int | None
+    n_saddlepoint: int | None
+    warnings: tuple[str, ...]
+    warning_signatures: tuple[str, ...]
+
+
+def _near_power_side(p: float, summary: _DensitySummary) -> str | None:
+    """Return the affected near-power side only when saddlepoint terms were used."""
+    if not summary.near_power_boundary:
+        return None
+    return "lower" if p <= _NEAR_POWER_LOWER else "upper"
+
+
+def _aggregate_ci_density_provenance(
+    provenance_with_summaries: list[tuple[TweedieProfileCIDensityProvenance, _DensitySummary]],
+    *,
+    p_hat: float,
+) -> _CIDensityAggregate:
+    """Aggregate connected-region records and build only new/escalated warnings."""
+    if not provenance_with_summaries:
+        return _CIDensityAggregate(
+            provenance=(),
+            method=None,
+            exact=None,
+            severity="none",
+            near_power_boundary=False,
+            max_fraction=0.0,
+            max_p=None,
+            any_saddlepoint=False,
+            n_saddlepoint_records=0,
+            n_invalid_density_records=0,
+            n_positive=None,
+            n_saddlepoint=None,
+            warnings=(),
+            warning_signatures=(),
+        )
+
+    items = tuple(item for item, _ in provenance_with_summaries)
+    summaries = tuple(summary for _, summary in provenance_with_summaries)
+    any_saddlepoint = any(summary.n_saddlepoint > 0 for summary in summaries)
+    exact = all(summary.exact for summary in summaries)
+    if exact:
+        method: _DensityMethod = "exact"
+    elif all(summary.method == "saddlepoint" for summary in summaries):
+        method = "saddlepoint"
+    else:
+        method = "hybrid_exact_saddlepoint"
+
+    saddle_items = [
+        (item, summary)
+        for item, summary in provenance_with_summaries
+        if summary.n_saddlepoint > 0 or summary.inconsistent
+    ]
+    if saddle_items:
+        max_item, max_summary = max(saddle_items, key=lambda pair: pair[1].fraction)
+        max_fraction = max_summary.fraction
+        max_p: float | None = max_item.p
+    else:
+        max_summary = _classify_density_diagnostics(
+            p_hat,
+            _TweedieLogpdfDiagnostics(n_positive=0, n_saddlepoint=0),
+        )
+        max_fraction = 0.0
+        max_p = None
+
+    near_sides = {
+        side
+        for item, summary in provenance_with_summaries
+        if (side := _near_power_side(item.p, summary)) is not None
+    }
+    winner_pair = next(
+        ((item, summary) for item, summary in provenance_with_summaries if item.p == p_hat),
+        None,
+    )
+    if winner_pair is None:
+        winner_summary = _classify_density_diagnostics(
+            p_hat,
+            _TweedieLogpdfDiagnostics(n_positive=0, n_saddlepoint=0),
+        )
+        winner_sides: set[str] = set()
+    else:
+        winner_item, winner_summary = winner_pair
+        winner_side = _near_power_side(winner_item.p, winner_summary)
+        winner_sides = set() if winner_side is None else {winner_side}
+
+    severity = max(summaries, key=lambda summary: _DENSITY_SEVERITY_RANK[summary.severity]).severity
+    warning_messages: list[str] = []
+    warning_signatures: list[str] = []
+    if any(summary.inconsistent for summary in summaries) and not winner_summary.inconsistent:
+        warning_messages.append(
+            "High-severity: the evaluated LR region contains inconsistent density diagnostics; "
+            "exact interval density evaluation cannot be certified."
+        )
+        warning_signatures.append("invalid")
+    elif (
+        _DENSITY_SEVERITY_RANK[max_summary.saddle_severity]
+        > _DENSITY_SEVERITY_RANK[winner_summary.saddle_severity]
+        and _DENSITY_SEVERITY_RANK[max_summary.saddle_severity] >= _DENSITY_SEVERITY_RANK["warning"]
+    ):
+        prefix = "High-severity: " if max_summary.saddle_severity == "high" else ""
+        warning_messages.append(
+            f"{prefix}Saddlepoint approximation in the evaluated LR region reaches "
+            f"{max_summary.n_saddlepoint}/{max_summary.n_positive} positive density terms "
+            f"({max_fraction:.0%}) at p={max_p:.3f}; the reported LR interval is "
+            "approximation-based."
+        )
+        warning_signatures.append(f"saddle:{max_summary.saddle_severity}")
+
+    new_sides = near_sides - winner_sides
+    for side in sorted(new_sides):
+        warning_messages.append(
+            "High-severity: the evaluated LR region adds Tweedie saddlepoint use in the "
+            f"documented near-power boundary instability region on the {side} side; "
+            "this is separate from numerical optimizer convergence."
+        )
+        warning_signatures.append(f"boundary:{side}")
+
+    n_invalid_density_records = sum(summary.inconsistent for summary in summaries)
+    if n_invalid_density_records:
+        n_positive: int | None = None
+        n_saddlepoint: int | None = None
+    else:
+        n_positive = sum(summary.n_positive for summary in summaries)
+        n_saddlepoint = sum(summary.n_saddlepoint for summary in summaries)
+
+    return _CIDensityAggregate(
+        provenance=items,
+        method=method,
+        exact=exact,
+        severity=severity,
+        near_power_boundary=bool(near_sides),
+        max_fraction=max_fraction,
+        max_p=max_p,
+        any_saddlepoint=any_saddlepoint,
+        n_saddlepoint_records=sum(summary.n_saddlepoint > 0 for summary in summaries),
+        n_invalid_density_records=n_invalid_density_records,
+        n_positive=n_positive,
+        n_saddlepoint=n_saddlepoint,
+        warnings=tuple(warning_messages),
+        warning_signatures=tuple(warning_signatures),
+    )
+
+
 def _profile_ci_p_detailed(
     objective,
     p_hat: float,
@@ -3861,6 +4277,7 @@ def _profile_ci_p_detailed(
 
     before_count = int(evaluation_count()) if evaluation_count is not None else 0
     evidence: dict[float, TweedieProfileCIEvaluation] = {}
+    evidence_records: dict[float, Any] = {}
 
     def evaluate(p: float) -> TweedieProfileCIEvaluation:
         try:
@@ -3905,6 +4322,7 @@ def _profile_ci_p_detailed(
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
             _validate_ci_profile_record(record, key)
+            evidence_records[key] = record
 
         try:
             lr_statistic = float(2.0 * ll_scale * (nll - nll_hat))
@@ -4088,6 +4506,41 @@ def _profile_ci_p_detailed(
                 "connected interval."
             )
 
+    provenance_with_summaries: list[tuple[TweedieProfileCIDensityProvenance, _DensitySummary]] = []
+    if evaluation_record is not None:
+        p_tolerance = 32.0 * np.finfo(np.float64).eps * max(abs(lower.value), abs(upper.value), 1.0)
+        for point in evidence.values():
+            if not lower.value - p_tolerance <= point.p <= upper.value + p_tolerance:
+                continue
+            lr_tolerance = _ci_lr_tolerance(cutoff, ll_scale, point.nll, nll_hat)
+            if point.lr_statistic > cutoff + lr_tolerance:
+                continue
+            record = evidence_records.get(point.p)
+            if record is None:
+                continue
+            diagnostics = getattr(getattr(record, "phi_result", None), "diagnostics", None)
+            summary = _classify_density_diagnostics(point.p, diagnostics)
+            provenance_with_summaries.append(
+                (
+                    TweedieProfileCIDensityProvenance(
+                        p=point.p,
+                        source=str(getattr(record, "source", "")),
+                        n_positive=summary.n_positive,
+                        n_saddlepoint=summary.n_saddlepoint,
+                        fraction=summary.fraction,
+                        method=summary.method,
+                        lr_statistic=point.lr_statistic,
+                        counts_valid=not summary.inconsistent,
+                    ),
+                    summary,
+                )
+            )
+    density = _aggregate_ci_density_provenance(
+        provenance_with_summaries,
+        p_hat=p_hat,
+    )
+    warning_messages.extend(density.warnings)
+
     if evaluation_count is None:
         n_new_evaluations = len(evidence)
     else:
@@ -4103,6 +4556,21 @@ def _profile_ci_p_detailed(
         n_new_evaluations=n_new_evaluations,
         evaluations=tuple(evidence.values()),
         warnings=tuple(warning_messages),
+        density_provenance=density.provenance,
+        density_method=density.method,
+        density_exact=density.exact,
+        density_warning_severity=density.severity,
+        near_power_boundary=density.near_power_boundary,
+        max_saddlepoint_fraction=density.max_fraction,
+        max_saddlepoint_p=density.max_p,
+        any_saddlepoint=density.any_saddlepoint,
+        n_density_records=len(density.provenance),
+        n_saddlepoint_records=density.n_saddlepoint_records,
+        n_invalid_density_records=density.n_invalid_density_records,
+        n_positive=density.n_positive,
+        n_saddlepoint=density.n_saddlepoint,
+        density_warnings=density.warnings,
+        density_warning_signatures=density.warning_signatures,
     )
 
 

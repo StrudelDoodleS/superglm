@@ -1,6 +1,7 @@
 """Tests for profile likelihood CIs (NB theta and Tweedie p)."""
 
 import warnings
+from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
 import numpy as np
@@ -171,12 +172,14 @@ class TestTweedieProfileCI:
 
     def test_tweedie_ci_detail_records_are_public(self):
         from superglm import (
+            TweedieProfileCIDensityProvenance,
             TweedieProfileCIDetails,
             TweedieProfileCIEndpoint,
             TweedieProfileCIEvaluation,
         )
 
         assert TweedieProfileCIDetails is tweedie_module.TweedieProfileCIDetails
+        assert TweedieProfileCIDensityProvenance is tweedie_module.TweedieProfileCIDensityProvenance
         assert TweedieProfileCIEndpoint is tweedie_module.TweedieProfileCIEndpoint
         assert TweedieProfileCIEvaluation is tweedie_module.TweedieProfileCIEvaluation
 
@@ -253,6 +256,19 @@ class TestTweedieProfileCI:
         assert exact.upper.status == "root_found"
         assert exact.lower.at_range_boundary
         assert exact.upper.at_range_boundary
+
+    def test_ci_without_authoritative_records_marks_density_provenance_unavailable(self):
+        details = tweedie_module._profile_ci_p_detailed(
+            lambda p: 0.01 * (p - 0.5) ** 2,
+            p_hat=0.5,
+            nll_hat=0.0,
+            ll_scale=1.0,
+            p_range=(0.0, 1.0),
+        )
+
+        assert details.density_provenance == ()
+        assert details.density_method is None
+        assert details.density_exact is None
 
     def test_detailed_ci_finds_nearest_connected_crossing_on_both_sides(self):
         cutoff = float(chi2.ppf(0.95, 1))
@@ -808,4 +824,281 @@ class TestTweedieProfileCI:
         ax = fig.axes[0]
         assert ax.get_xlabel() == "p"
         assert len(ax.lines) >= 1
+        plt.close(fig)
+
+
+class TestTweedieDensityCIProvenance:
+    @staticmethod
+    def _profile_fixture():
+        cutoff = float(chi2.ppf(0.95, 1))
+        records = {}
+        objective_calls = []
+        record_calls = []
+
+        def objective(p):
+            key = float(p)
+            objective_calls.append(key)
+            nll = 0.5 * cutoff * ((key - 1.5) / 0.2) ** 2
+            n_saddlepoint = 2 if np.isclose(key, 1.55, rtol=0.0, atol=1e-14) else 0
+            records[key] = SimpleNamespace(
+                p=key,
+                nll=nll,
+                source="ci_fixture",
+                fit_converged=True,
+                phi_result=SimpleNamespace(
+                    objective_finite=True,
+                    converged=True,
+                    diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                        n_positive=10,
+                        n_saddlepoint=n_saddlepoint,
+                    ),
+                ),
+            )
+            return nll
+
+        # A cached remote search record must not taint the connected LR interval.
+        records[1.85] = SimpleNamespace(
+            p=1.85,
+            nll=100.0,
+            source="remote_search",
+            fit_converged=True,
+            phi_result=SimpleNamespace(
+                objective_finite=True,
+                converged=True,
+                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                    n_positive=10,
+                    n_saddlepoint=10,
+                ),
+            ),
+        )
+
+        def record(p):
+            key = float(p)
+            record_calls.append(key)
+            return records.get(key)
+
+        return objective, record, objective_calls, record_calls
+
+    def test_connected_lr_density_provenance_excludes_remote_records(self):
+        objective, record, objective_calls, record_calls = self._profile_fixture()
+
+        details = tweedie_module._profile_ci_p_detailed(
+            objective,
+            p_hat=1.5,
+            nll_hat=0.0,
+            ll_scale=1.0,
+            p_range=(1.1, 1.9),
+            seed_points=(1.5, 1.55, 1.85),
+            evaluation_record=record,
+        )
+
+        assert details.density_method == "hybrid_exact_saddlepoint"
+        assert not details.density_exact
+        assert details.any_saddlepoint
+        assert details.max_saddlepoint_fraction == pytest.approx(0.2)
+        assert details.max_saddlepoint_p == pytest.approx(1.55)
+        assert details.n_density_records == len(details.density_provenance)
+        assert details.n_saddlepoint_records == 1
+        assert details.n_positive == 10 * details.n_density_records
+        assert details.n_saddlepoint == 2
+        assert all(
+            details.lower.value <= item.p <= details.upper.value
+            for item in details.density_provenance
+        )
+        assert all(
+            item.lr_statistic <= details.cutoff + 1e-8 for item in details.density_provenance
+        )
+        assert all(item.p != 1.85 for item in details.density_provenance)
+        hybrid = next(item for item in details.density_provenance if item.p == pytest.approx(1.55))
+        assert hybrid.source == "ci_fixture"
+        assert hybrid.n_positive == 10
+        assert hybrid.n_saddlepoint == 2
+        assert hybrid.method == "hybrid_exact_saddlepoint"
+        with pytest.raises(FrozenInstanceError):
+            hybrid.fraction = 0.0
+
+        # Provenance is derived from records retained by the objective probes;
+        # it does not trigger another fit/profile evaluation.
+        assert len(record_calls) == len(objective_calls)
+
+    def test_invalid_ci_density_counts_are_explicit_and_do_not_report_zero_totals(self):
+        cutoff = float(chi2.ppf(0.95, 1))
+        records = {}
+
+        def objective(p):
+            key = float(p)
+            nll = 0.5 * cutoff * ((key - 0.5) / 0.2) ** 2
+            records[key] = SimpleNamespace(
+                nll=nll,
+                source="invalid_counts" if key == 0.5 else "valid_counts",
+                fit_converged=True,
+                phi_result=SimpleNamespace(
+                    objective_finite=True,
+                    converged=True,
+                    diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                        n_positive="10" if key == 0.5 else 10,
+                        n_saddlepoint=0,
+                    ),
+                ),
+            )
+            return nll
+
+        details = tweedie_module._profile_ci_p_detailed(
+            objective,
+            p_hat=0.5,
+            nll_hat=0.0,
+            ll_scale=1.0,
+            p_range=(0.0, 1.0),
+            evaluation_record=lambda p: records.get(float(p)),
+        )
+
+        assert details.n_invalid_density_records == 1
+        assert details.n_positive is None
+        assert details.n_saddlepoint is None
+        assert details.density_method == "hybrid_exact_saddlepoint"
+        assert details.density_exact is False
+
+    def test_ci_density_warning_is_emitted_once_and_cached(self):
+        objective, record, _, _ = self._profile_fixture()
+        result = TestTweedieProfileCI._bare_result(
+            objective,
+            p_hat=1.5,
+            nll=0.0,
+            ll_scale=1.0,
+        )
+        result._ci_p_range = (1.1, 1.9)
+        result._ci_seed_points = (1.5, 1.55, 1.85)
+        result._evaluation_record = record
+
+        with pytest.warns(UserWarning, match="evaluated LR region"):
+            interval = result.ci()
+
+        details = result.ci_details()
+        assert details.density_warning_severity == "warning"
+        assert sum("evaluated LR region" in message for message in details.warnings) == 1
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert result.ci() is interval
+            assert result.ci_details() is details
+        assert caught == []
+
+    def test_ci_density_warning_is_semantically_deduplicated_across_alpha(self):
+        objective, record, _, _ = self._profile_fixture()
+        result = TestTweedieProfileCI._bare_result(
+            objective,
+            p_hat=1.5,
+            nll=0.0,
+            ll_scale=1.0,
+        )
+        result._ci_p_range = (1.1, 1.9)
+        result._ci_seed_points = (1.5, 1.55, 1.85)
+        result._evaluation_record = record
+
+        with pytest.warns(UserWarning, match="evaluated LR region"):
+            result.ci(alpha=0.05)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result.ci(alpha=0.10)
+
+        assert caught == []
+        assert any("evaluated LR region" in message for message in result.ci_details(0.10).warnings)
+
+
+class TestTweedieProfilePlotLabels:
+    @staticmethod
+    def _result(*, phi_method="mle", final_exact=True, ci_exact=True, truncated=False):
+        interval = (1.4, 1.6)
+        lower = tweedie_module.TweedieProfileCIEndpoint(
+            value=interval[0],
+            status="truncated" if truncated else "root_found",
+            at_range_boundary=truncated,
+            lr_statistic=1.0,
+        )
+        upper = tweedie_module.TweedieProfileCIEndpoint(
+            value=interval[1],
+            status="root_found",
+            at_range_boundary=False,
+            lr_statistic=1.0,
+        )
+        details = tweedie_module.TweedieProfileCIDetails(
+            alpha=0.05,
+            cutoff=float(chi2.ppf(0.95, 1)),
+            p_range=(1.1, 1.9),
+            lower=lower,
+            upper=upper,
+            interval=interval,
+            n_new_evaluations=0,
+            evaluations=(),
+            warnings=(),
+            density_method="exact" if ci_exact else "hybrid_exact_saddlepoint",
+            density_exact=ci_exact,
+        )
+        result = tweedie_module.TweedieProfileResult(
+            p_hat=1.5,
+            phi_hat=1.0,
+            nll=0.0,
+            n_evaluations=1,
+            converged=True,
+            method="brent",
+            phi_method=phi_method,
+            search_trace=pd.DataFrame({"p": [1.5], "nll": [0.0]}),
+            density_method="exact" if final_exact else "hybrid_exact_saddlepoint",
+            density_exact=final_exact,
+            _objective=lambda p: (float(p) - 1.5) ** 2,
+            _ll_scale=1.0,
+        )
+        result._ci_cache[0.05] = interval
+        result._ci_details_cache[0.05] = details
+        return result
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected", "forbidden"),
+        [
+            ({}, ("MLE", "LR interval"), ("approximation-based",)),
+            (
+                {"final_exact": False},
+                ("approximation-based profile estimate", "approximation-based LR interval"),
+                ("MLE =",),
+            ),
+            (
+                {"ci_exact": False},
+                ("MLE", "approximation-based LR interval"),
+                ("approximation-based profile estimate",),
+            ),
+            (
+                {"phi_method": "pearson"},
+                ("profile estimate",),
+                ("MLE", "LR interval", "profile interval", "cutoff"),
+            ),
+            (
+                {"truncated": True},
+                ("truncated at configured bound",),
+                (),
+            ),
+        ],
+    )
+    def test_profile_plot_uses_honest_estimate_and_interval_labels(
+        self, kwargs, expected, forbidden
+    ):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = self._result(**kwargs)
+        if kwargs.get("phi_method") == "pearson":
+            result.ci_details = lambda *args, **kwds: (_ for _ in ()).throw(
+                AssertionError("Pearson profile plot must not compute a likelihood-ratio CI")
+            )
+        fig = result.profile_plot(n_points=3)
+        labels = [text.get_text() for text in fig.axes[0].get_legend().get_texts()]
+        joined = " | ".join(labels)
+        for value in expected:
+            assert value in joined
+        for value in forbidden:
+            assert value not in joined
+        if kwargs.get("phi_method") == "pearson":
+            ax = fig.axes[0]
+            assert "likelihood" not in ax.get_title().lower()
+            assert ax.get_ylabel() == "Profile objective difference"
         plt.close(fig)

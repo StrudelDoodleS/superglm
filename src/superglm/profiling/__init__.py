@@ -5,6 +5,7 @@
 
 from superglm.profiling.nb import NBProfileResult, estimate_nb_theta, profile_ci_theta
 from superglm.profiling.tweedie import (
+    TweedieProfileCIDensityProvenance,
     TweedieProfileCIDetails,
     TweedieProfileCIEndpoint,
     TweedieProfileCIEvaluation,
@@ -19,6 +20,7 @@ from superglm.profiling.tweedie import (
 __all__ = [
     "NBProfileResult",
     "TweedieProfileCIDetails",
+    "TweedieProfileCIDensityProvenance",
     "TweedieProfileCIEndpoint",
     "TweedieProfileCIEvaluation",
     "TweedieProfileResult",

@@ -29,6 +29,65 @@ from superglm.profiling.tweedie import (
 )
 
 
+def _finalized_density_result(
+    *,
+    p: float = 1.5,
+    n_positive: int = 100,
+    n_saddlepoint: int = 0,
+    phi_method: str = "mle",
+):
+    """Finalize one immutable record for density-provenance regressions."""
+    phi_result = tweedie_module._PhiProfileResult(
+        phi=1.0,
+        nll=1.0,
+        converged=True,
+        objective_finite=True,
+        n_evaluations=1,
+        n_score_evaluations=1,
+        n_value_only_evaluations=0,
+        n_fallback_evaluations=0,
+        optimizer="brentq",
+        score=0.0,
+        used_fallback=False,
+        fallback_reason=None,
+        branch_switch_detected=False,
+        lower_boundary=False,
+        upper_boundary=False,
+        diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+            n_positive=n_positive,
+            n_saddlepoint=n_saddlepoint,
+        ),
+        message="",
+    )
+    record = tweedie_module._ProfileEvaluation(
+        step=1,
+        p=p,
+        mu=np.ones(3),
+        edf=1.0,
+        n_iter=1,
+        fit_converged=True,
+        source="fixture",
+        fit_trace=(),
+        fit_trace_kind="solver",
+        phi_result=phi_result,
+    )
+    cache = {p: record}
+    ctx = SimpleNamespace(
+        phi_method=phi_method,
+        ll_scale=3.0,
+        _evaluation_cache=cache,
+        evaluate=lambda value, source="": cache[float(value)].nll,
+        evaluation_count=lambda: len(cache),
+        evaluation_record=lambda value: cache.get(float(value)),
+    )
+    return tweedie_module._finalize_profile_record(
+        ctx,
+        record,
+        method="grid",
+        outer_converged=True,
+    )
+
+
 def _generate_weighted_tweedie(mu, phi, p, weights, rng):
     """Simulate Tweedie responses under the prior-weight convention phi / w."""
     mu = np.asarray(mu, dtype=np.float64)
@@ -2847,6 +2906,7 @@ class TestProfileFitParity:
         assert ctx.model.lambda2 == model.lambda2 == 0.25
 
 
+@pytest.mark.filterwarnings("ignore:Saddlepoint approximation used")
 class TestImmutableProfileEvaluations:
     """Finalization must use the complete cached winning candidate."""
 
@@ -3361,7 +3421,8 @@ class TestSearchMethods:
             features={"x1": Numeric()},
         )
 
-        with pytest.warns(UserWarning, match="Saddlepoint approximation used"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             result = estimate_tweedie_p(
                 model,
                 X,
@@ -3372,6 +3433,9 @@ class TestSearchMethods:
                 phi_method="mle",
             )
 
+        messages = [str(item.message) for item in caught]
+        assert sum("Saddlepoint approximation used" in message for message in messages) == 1
+        assert sum("near-power boundary instability" in message for message in messages) == 1
         assert result.saddlepoint_fraction >= 0.25
         assert result.n_saddlepoint > 0
         assert result.n_positive > 0
@@ -4067,3 +4131,117 @@ class TestDeprecatedCache:
         for p_val, nll_val in cache.items():
             assert isinstance(p_val, float)
             assert isinstance(nll_val, float)
+
+
+class TestDensityProvenance:
+    @pytest.mark.parametrize(
+        ("n_positive", "n_saddlepoint", "method", "exact"),
+        [
+            (0, 0, "exact", True),
+            (10, 0, "exact", True),
+            (10, 1, "hybrid_exact_saddlepoint", False),
+            (10, 10, "saddlepoint", False),
+        ],
+    )
+    def test_final_density_classification(self, n_positive, n_saddlepoint, method, exact):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            result = _finalized_density_result(
+                n_positive=n_positive,
+                n_saddlepoint=n_saddlepoint,
+            )
+
+        assert result.density_method == method
+        assert result.density_exact is exact
+        assert result.converged
+        row = result.search_trace.iloc[0]
+        assert row["density_method"] == method
+        assert bool(row["density_exact"]) is exact
+        assert list(result.search_trace.columns)[-2:] == ["density_method", "density_exact"]
+
+    @pytest.mark.parametrize(
+        ("n_saddlepoint", "severity", "warning_pattern"),
+        [
+            (9, "label", None),
+            (10, "warning", "Saddlepoint approximation used"),
+            (49, "warning", "Saddlepoint approximation used"),
+            (50, "high", "High-severity.*Saddlepoint approximation used"),
+        ],
+    )
+    def test_saddlepoint_warning_thresholds_are_inclusive(
+        self, n_saddlepoint, severity, warning_pattern
+    ):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = _finalized_density_result(
+                n_positive=100,
+                n_saddlepoint=n_saddlepoint,
+            )
+
+        assert result.density_warning_severity == severity
+        if warning_pattern is None:
+            assert caught == []
+            assert result.warnings == []
+        else:
+            assert len(caught) == 1
+            assert len(result.warnings) == 1
+            assert __import__("re").search(warning_pattern, str(caught[0].message))
+
+    @pytest.mark.parametrize("p", [1.08, 1.98])
+    def test_near_power_boundary_is_separate_from_density_approximation(self, p):
+        with pytest.warns(UserWarning, match="near-power boundary instability") as caught:
+            result = _finalized_density_result(p=p, n_positive=100, n_saddlepoint=1)
+
+        assert len(caught) == 1
+        assert result.near_power_boundary
+        assert result.density_method == "hybrid_exact_saddlepoint"
+        assert not result.density_exact
+        assert result.density_warning_severity == "high"
+        assert result.converged
+        assert "inherent boundary instability" in result.warnings[0]
+
+    @pytest.mark.parametrize("p", [1.08, 1.98])
+    def test_exact_density_near_power_boundary_is_not_flagged(self, p):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = _finalized_density_result(p=p, n_positive=10, n_saddlepoint=0)
+
+        assert caught == []
+        assert not result.near_power_boundary
+        assert result.density_method == "exact"
+        assert result.density_exact
+
+    @pytest.mark.parametrize(
+        "counts",
+        [(-1, 0), (10, -1), (10, 11), (0, 1), (True, 0), ("10", 0), ([10], 0)],
+    )
+    def test_inconsistent_density_counts_are_not_certified_exact(self, counts):
+        with pytest.warns(UserWarning, match="inconsistent density diagnostics"):
+            result = _finalized_density_result(
+                n_positive=counts[0],
+                n_saddlepoint=counts[1],
+            )
+
+        assert not result.density_exact
+        assert result.density_warning_severity == "high"
+
+    def test_legacy_positional_result_derives_density_fields_without_shifting_warnings(self):
+        trace = pd.DataFrame({"p": [1.5], "nll": [0.0]})
+        result = tweedie_module.TweedieProfileResult(
+            1.5,
+            1.0,
+            0.0,
+            1,
+            True,
+            "brent",
+            "mle",
+            trace,
+            0.2,
+            2,
+            10,
+            ["legacy warning"],
+        )
+
+        assert result.warnings == ["legacy warning"]
+        assert result.density_method == "hybrid_exact_saddlepoint"
+        assert result.density_exact is False

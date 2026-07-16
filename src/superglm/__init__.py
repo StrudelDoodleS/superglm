@@ -88,6 +88,7 @@ from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.plotting import plot_term_comparison
 from superglm.profiling.nb import NBProfileResult, estimate_nb_theta
 from superglm.profiling.tweedie import (
+    TweedieProfileCIDensityProvenance,
     TweedieProfileCIDetails,
     TweedieProfileCIEndpoint,
     TweedieProfileCIEvaluation,
@@ -183,6 +184,7 @@ __all__ = [
     "estimate_nb_theta",
     "estimate_tweedie_p",
     "TweedieProfileCIDetails",
+    "TweedieProfileCIDensityProvenance",
     "TweedieProfileCIEndpoint",
     "TweedieProfileCIEvaluation",
     "TweedieProfileResult",
