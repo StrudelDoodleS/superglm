@@ -25,7 +25,7 @@ from __future__ import annotations
 import copy
 import logging
 import warnings as _warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 import numpy as np
@@ -2445,27 +2445,52 @@ class TweedieProfileResult:
     phi_branch_switch_detected: bool = False
     phi_boundary: str = ""
     phi_message: str = ""
-    density_method: _DensityMethod | None = None
-    density_exact: bool | None = None
-    density_warning_severity: _DensityWarningSeverity = "none"
-    near_power_boundary: bool = False
+    density_method: _DensityMethod | None = field(default=None, kw_only=True)
+    density_exact: bool | None = field(default=None, kw_only=True)
+    density_warning_severity: _DensityWarningSeverity = field(default="none", kw_only=True)
+    near_power_boundary: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         """Derive new density fields for legacy positional construction."""
-        if self.density_method is not None and self.density_exact is not None:
-            return
+        self._ensure_density_compat_state()
+
+    def _ensure_density_compat_state(self) -> None:
+        """Restore density fields absent from legacy construction or pickle state."""
         summary = _classify_density_diagnostics(
-            self.p_hat,
+            getattr(self, "p_hat", np.nan),
             _TweedieLogpdfDiagnostics(
-                n_positive=self.n_positive,
-                n_saddlepoint=self.n_saddlepoint,
+                n_positive=getattr(self, "n_positive", None),
+                n_saddlepoint=getattr(self, "n_saddlepoint", None),
             ),
         )
-        self.density_method = summary.method
-        self.density_exact = summary.exact
-        if self.density_warning_severity == "none":
+        density_was_derived = bool(
+            self.__dict__.get("density_method") is None
+            or self.__dict__.get("density_exact") is None
+        )
+        if self.__dict__.get("density_method") is None:
+            self.density_method = summary.method
+        if self.__dict__.get("density_exact") is None:
+            self.density_exact = summary.exact
+        if "density_warning_severity" not in self.__dict__ or (
+            density_was_derived and self.density_warning_severity == "none"
+        ):
             self.density_warning_severity = summary.severity
-        self.near_power_boundary = bool(self.near_power_boundary or summary.near_power_boundary)
+        if "near_power_boundary" not in self.__dict__ or density_was_derived:
+            self.near_power_boundary = bool(
+                self.__dict__.get("near_power_boundary", False) or summary.near_power_boundary
+            )
+        signatures = self.__dict__.get("_emitted_ci_density_warning_signatures")
+        if not isinstance(signatures, set):
+            try:
+                signatures = set(()) if signatures is None else set(signatures)
+            except TypeError:
+                signatures = set()
+            self._emitted_ci_density_warning_signatures = signatures
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore results pickled before density provenance fields existed."""
+        self.__dict__.update(state)
+        self._ensure_density_compat_state()
 
     @property
     def cache(self) -> dict[float, float]:
@@ -2496,6 +2521,7 @@ class TweedieProfileResult:
     _evaluation_record: Any = field(default=None, repr=False)
     _emitted_ci_density_warning_signatures: set[str] = field(
         default_factory=set,
+        init=False,
         repr=False,
     )
 
@@ -4136,12 +4162,41 @@ def _aggregate_ci_density_provenance(
             warning_signatures=(),
         )
 
-    items = tuple(item for item, _ in provenance_with_summaries)
     summaries = tuple(summary for _, summary in provenance_with_summaries)
+    winner_index = next(
+        (index for index, (item, _) in enumerate(provenance_with_summaries) if item.p == p_hat),
+        None,
+    )
+    valid_indices = [index for index, summary in enumerate(summaries) if not summary.inconsistent]
+    if winner_index is not None and winner_index in valid_indices:
+        positive_count_reference = summaries[winner_index].n_positive
+    elif valid_indices:
+        positive_count_reference = summaries[valid_indices[0]].n_positive
+    else:
+        positive_count_reference = None
+    mismatched_positive_count_indices = {
+        index
+        for index in valid_indices
+        if (
+            positive_count_reference is not None
+            and summaries[index].n_positive != positive_count_reference
+        )
+    }
+    positive_count_inconsistent = bool(mismatched_positive_count_indices)
+    items = tuple(
+        replace(item, counts_valid=False) if index in mismatched_positive_count_indices else item
+        for index, (item, _) in enumerate(provenance_with_summaries)
+    )
     any_saddlepoint = any(summary.n_saddlepoint > 0 for summary in summaries)
-    exact = all(summary.exact for summary in summaries)
-    if exact:
-        method: _DensityMethod = "exact"
+    exact = bool(
+        not positive_count_inconsistent
+        and all(summary.exact and not summary.inconsistent for summary in summaries)
+    )
+    method: _DensityMethod
+    if positive_count_inconsistent:
+        method = "hybrid_exact_saddlepoint"
+    elif exact:
+        method = "exact"
     elif all(summary.method == "saddlepoint" for summary in summaries):
         method = "saddlepoint"
     else:
@@ -4169,31 +4224,41 @@ def _aggregate_ci_density_provenance(
         for item, summary in provenance_with_summaries
         if (side := _near_power_side(item.p, summary)) is not None
     }
-    winner_pair = next(
-        ((item, summary) for item, summary in provenance_with_summaries if item.p == p_hat),
-        None,
-    )
-    if winner_pair is None:
+    if winner_index is None:
         winner_summary = _classify_density_diagnostics(
             p_hat,
             _TweedieLogpdfDiagnostics(n_positive=0, n_saddlepoint=0),
         )
         winner_sides: set[str] = set()
     else:
-        winner_item, winner_summary = winner_pair
+        winner_item, winner_summary = provenance_with_summaries[winner_index]
         winner_side = _near_power_side(winner_item.p, winner_summary)
         winner_sides = set() if winner_side is None else {winner_side}
 
-    severity = max(summaries, key=lambda summary: _DENSITY_SEVERITY_RANK[summary.severity]).severity
+    severity: _DensityWarningSeverity = (
+        "high"
+        if positive_count_inconsistent
+        else max(
+            summaries,
+            key=lambda summary: _DENSITY_SEVERITY_RANK[summary.severity],
+        ).severity
+    )
     warning_messages: list[str] = []
     warning_signatures: list[str] = []
+    if positive_count_inconsistent:
+        warning_messages.append(
+            "High-severity: the evaluated LR region has inconsistent positive-response "
+            "counts across authoritative fixed-p records; exact interval density evaluation "
+            "cannot be certified."
+        )
+        warning_signatures.append("invalid:positive_count")
     if any(summary.inconsistent for summary in summaries) and not winner_summary.inconsistent:
         warning_messages.append(
             "High-severity: the evaluated LR region contains inconsistent density diagnostics; "
             "exact interval density evaluation cannot be certified."
         )
         warning_signatures.append("invalid")
-    elif (
+    elif not positive_count_inconsistent and (
         _DENSITY_SEVERITY_RANK[max_summary.saddle_severity]
         > _DENSITY_SEVERITY_RANK[winner_summary.saddle_severity]
         and _DENSITY_SEVERITY_RANK[max_summary.saddle_severity] >= _DENSITY_SEVERITY_RANK["warning"]
@@ -4216,7 +4281,9 @@ def _aggregate_ci_density_provenance(
         )
         warning_signatures.append(f"boundary:{side}")
 
-    n_invalid_density_records = sum(summary.inconsistent for summary in summaries)
+    n_invalid_density_records = sum(summary.inconsistent for summary in summaries) + len(
+        mismatched_positive_count_indices
+    )
     if n_invalid_density_records:
         n_positive: int | None = None
         n_saddlepoint: int | None = None

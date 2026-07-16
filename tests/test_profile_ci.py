@@ -958,6 +958,48 @@ class TestTweedieDensityCIProvenance:
         assert details.density_method == "hybrid_exact_saddlepoint"
         assert details.density_exact is False
 
+    def test_ci_rejects_cross_record_positive_count_mismatch(self):
+        cutoff = float(chi2.ppf(0.95, 1))
+        records = {}
+
+        def objective(p):
+            key = float(p)
+            nll = 0.5 * cutoff * ((key - 0.5) / 0.2) ** 2
+            records[key] = SimpleNamespace(
+                nll=nll,
+                source="winner" if key == 0.5 else "mismatched_positive_count",
+                fit_converged=True,
+                phi_result=SimpleNamespace(
+                    objective_finite=True,
+                    converged=True,
+                    diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                        n_positive=10 if key == 0.5 else 11,
+                        n_saddlepoint=0,
+                    ),
+                ),
+            )
+            return nll
+
+        result = TestTweedieProfileCI._bare_result(
+            objective,
+            p_hat=0.5,
+            nll=0.0,
+            ll_scale=1.0,
+        )
+        result._evaluation_record = lambda p: records.get(float(p))
+
+        with pytest.warns(UserWarning, match="positive-response count"):
+            result.ci()
+        details = result.ci_details()
+
+        assert details.density_method == "hybrid_exact_saddlepoint"
+        assert details.density_exact is False
+        assert details.density_warning_severity == "high"
+        assert details.n_positive is None
+        assert details.n_saddlepoint is None
+        assert details.n_invalid_density_records > 0
+        assert any(not item.counts_valid for item in details.density_provenance)
+
     def test_ci_density_warning_is_emitted_once_and_cached(self):
         objective, record, _, _ = self._profile_fixture()
         result = TestTweedieProfileCI._bare_result(

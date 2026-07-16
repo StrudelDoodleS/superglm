@@ -31,6 +31,30 @@ from superglm.profiling.tweedie import (
 _COUNT_DIAGNOSTICS = object()
 
 
+def _legacy_pickle_profile_objective(p):
+    """Pickleable profile objective for pre-density-field result state."""
+    return 100.0 * (float(p) - 1.5) ** 2
+
+
+def _legacy_pickle_evaluation_record(p):
+    """Pickleable authoritative record lookup for legacy-result CI regression."""
+    key = float(p)
+    n_saddlepoint = 2 if np.isclose(key, 1.55, rtol=0.0, atol=1e-14) else 0
+    return SimpleNamespace(
+        nll=_legacy_pickle_profile_objective(key),
+        source="legacy_pickle",
+        fit_converged=True,
+        phi_result=SimpleNamespace(
+            objective_finite=True,
+            converged=True,
+            diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                n_positive=10,
+                n_saddlepoint=n_saddlepoint,
+            ),
+        ),
+    )
+
+
 def _finalized_density_result(
     *,
     p: float = 1.5,
@@ -4273,3 +4297,110 @@ class TestDensityProvenance:
         assert result.warnings == ["legacy warning"]
         assert result.density_method == "hybrid_exact_saddlepoint"
         assert result.density_exact is False
+
+    def test_full_legacy_positional_result_preserves_private_callback_slots(self):
+        trace = pd.DataFrame({"p": [1.5], "nll": [0.0]})
+
+        def objective(p):
+            return float(p)
+
+        def evaluation_count():
+            return 7
+
+        def evaluation_record(p):
+            return "record", float(p)
+
+        ci_cache = {0.05: (1.4, 1.6)}
+        ci_details_cache = {}
+
+        result = tweedie_module.TweedieProfileResult(
+            1.5,
+            1.0,
+            0.0,
+            1,
+            True,
+            "brent",
+            "mle",
+            trace,
+            0.2,
+            2,
+            10,
+            ["legacy warning"],
+            True,
+            "",
+            None,
+            True,
+            True,
+            None,
+            True,
+            True,
+            4,
+            3,
+            1,
+            0,
+            "brentq",
+            0.0,
+            False,
+            None,
+            False,
+            "",
+            "",
+            objective,
+            100.0,
+            ci_cache,
+            ci_details_cache,
+            (1.1, 1.9),
+            (1.3, 1.5, 1.7),
+            evaluation_count,
+            evaluation_record,
+        )
+
+        assert result._objective is objective
+        assert result._ll_scale == 100.0
+        assert result._ci_cache is ci_cache
+        assert result._ci_details_cache is ci_details_cache
+        assert result._ci_p_range == (1.1, 1.9)
+        assert result._ci_seed_points == (1.3, 1.5, 1.7)
+        assert result._evaluation_count is evaluation_count
+        assert result._evaluation_record is evaluation_record
+        assert result.density_method == "hybrid_exact_saddlepoint"
+        assert result.density_exact is False
+
+    def test_pre_density_field_pickle_restores_compatibility_state_for_ci(self):
+        result = tweedie_module.TweedieProfileResult(
+            p_hat=1.5,
+            phi_hat=1.0,
+            nll=0.0,
+            n_evaluations=1,
+            converged=True,
+            method="brent",
+            phi_method="mle",
+            search_trace=pd.DataFrame({"p": [1.5], "nll": [0.0]}),
+            n_positive=10,
+            n_saddlepoint=0,
+            _objective=_legacy_pickle_profile_objective,
+            _ll_scale=1.0,
+            _ci_p_range=(1.1, 1.9),
+            _ci_seed_points=(1.5, 1.55, 1.85),
+            _evaluation_record=_legacy_pickle_evaluation_record,
+        )
+        for name in (
+            "density_method",
+            "density_exact",
+            "density_warning_severity",
+            "near_power_boundary",
+            "_emitted_ci_density_warning_signatures",
+        ):
+            delattr(result, name)
+
+        restored = pickle.loads(pickle.dumps(result))
+
+        assert restored.density_method == "exact"
+        assert restored.density_exact is True
+        assert restored.density_warning_severity == "none"
+        assert restored.near_power_boundary is False
+        assert restored._emitted_ci_density_warning_signatures == set()
+        with pytest.warns(UserWarning, match="evaluated LR region"):
+            interval = restored.ci()
+        assert interval[0] < restored.p_hat < interval[1]
+        assert restored._emitted_ci_density_warning_signatures == {"saddle:warning"}
