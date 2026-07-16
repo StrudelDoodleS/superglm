@@ -31,6 +31,13 @@ def _generate_weighted_tweedie(mu, phi, p, weights, rng):
     return y
 
 
+def _call_tweedie_low_level(function_name, y, mu, *, phi=2.0, p=1.5, weights=None):
+    """Call one of the public low-level Tweedie helpers with shared inputs."""
+    if function_name == "tweedie_logpdf":
+        return tweedie_logpdf(y, mu, phi, p, weights=weights)
+    return estimate_phi(y, mu, p, weights=weights)
+
+
 # =====================================================================
 # TestGenerateTweedieCPG
 # =====================================================================
@@ -145,6 +152,117 @@ class TestTweedieLogpdf:
         ll_direct = float(np.sum(tweedie_logpdf(y, mu, phi, p, weights=weights)))
         ll_dist = dist.log_likelihood(y, mu, weights, phi=phi)
         np.testing.assert_allclose(ll_dist, ll_direct, rtol=1e-10)
+
+    @pytest.mark.parametrize("function_name", ["tweedie_logpdf", "estimate_phi"])
+    @pytest.mark.parametrize(
+        "invalid_weight",
+        [
+            pytest.param(0.0, id="zero"),
+            pytest.param(-1.0, id="negative"),
+            pytest.param(np.nan, id="nan"),
+            pytest.param(np.inf, id="inf"),
+        ],
+    )
+    def test_invalid_weight_value_is_rejected(self, function_name, invalid_weight):
+        y = np.array([0.0, 1.0, 2.0])
+        mu = np.array([1.0, 1.5, 2.5])
+        weights = np.array([1.0, invalid_weight, 1.0])
+
+        with pytest.raises(ValueError, match="weights must be finite and strictly positive"):
+            _call_tweedie_low_level(function_name, y, mu, weights=weights)
+
+    @pytest.mark.parametrize("function_name", ["tweedie_logpdf", "estimate_phi"])
+    @pytest.mark.parametrize(
+        "invalid_weights",
+        [
+            pytest.param(np.ones((3, 1)), id="two-dimensional"),
+            pytest.param(np.ones(2), id="mismatched-length"),
+        ],
+    )
+    def test_invalid_weight_shape_is_rejected(self, function_name, invalid_weights):
+        y = np.array([0.0, 1.0, 2.0])
+        mu = np.array([1.0, 1.5, 2.5])
+
+        with pytest.raises(ValueError, match="weights must be finite and strictly positive"):
+            _call_tweedie_low_level(function_name, y, mu, weights=invalid_weights)
+
+    @pytest.mark.parametrize("function_name", ["tweedie_logpdf", "estimate_phi"])
+    @pytest.mark.parametrize(
+        "invalid_y",
+        [
+            pytest.param(-1.0, id="negative"),
+            pytest.param(np.nan, id="nan"),
+            pytest.param(np.inf, id="inf"),
+        ],
+    )
+    def test_invalid_input_y_is_rejected(self, function_name, invalid_y):
+        y = np.array([0.0, invalid_y, 2.0])
+        mu = np.array([1.0, 1.5, 2.5])
+
+        with pytest.raises(ValueError, match="y must be finite and non-negative"):
+            _call_tweedie_low_level(function_name, y, mu)
+
+    @pytest.mark.parametrize("function_name", ["tweedie_logpdf", "estimate_phi"])
+    @pytest.mark.parametrize(
+        "invalid_mu",
+        [
+            pytest.param(0.0, id="zero"),
+            pytest.param(-1.0, id="negative"),
+            pytest.param(np.nan, id="nan"),
+            pytest.param(np.inf, id="inf"),
+        ],
+    )
+    def test_invalid_input_mu_is_rejected(self, function_name, invalid_mu):
+        y = np.array([0.0, 1.0, 2.0])
+        mu = np.array([1.0, invalid_mu, 2.5])
+
+        with pytest.raises(ValueError, match="mu must be finite and strictly positive"):
+            _call_tweedie_low_level(function_name, y, mu)
+
+    @pytest.mark.parametrize("function_name", ["tweedie_logpdf", "estimate_phi"])
+    @pytest.mark.parametrize(
+        "invalid_p",
+        [
+            pytest.param(1.0, id="lower-bound"),
+            pytest.param(2.0, id="upper-bound"),
+            pytest.param(np.nan, id="nan"),
+            pytest.param(np.inf, id="inf"),
+        ],
+    )
+    def test_invalid_input_p_is_rejected(self, function_name, invalid_p):
+        y = np.array([0.0, 1.0, 2.0])
+        mu = np.array([1.0, 1.5, 2.5])
+
+        with pytest.raises(ValueError, match="p must be finite and in the open interval"):
+            _call_tweedie_low_level(function_name, y, mu, p=invalid_p)
+
+    @pytest.mark.parametrize("function_name", ["tweedie_logpdf", "estimate_phi"])
+    @pytest.mark.parametrize(
+        ("y", "mu"),
+        [
+            pytest.param(np.array([0.0, 1.0, 2.0]), np.ones(2), id="different-lengths"),
+            pytest.param(np.array([[0.0], [1.0]]), np.ones((2, 1)), id="two-dimensional"),
+        ],
+    )
+    def test_invalid_input_y_mu_shape_is_rejected(self, function_name, y, mu):
+        with pytest.raises(ValueError, match="y and mu must be one-dimensional arrays"):
+            _call_tweedie_low_level(function_name, y, mu)
+
+    @pytest.mark.parametrize(
+        "invalid_phi",
+        [
+            pytest.param(0.0, id="zero"),
+            pytest.param(-1.0, id="negative"),
+            pytest.param(np.nan, id="nan"),
+            pytest.param(np.inf, id="inf"),
+        ],
+    )
+    def test_invalid_input_phi_is_rejected(self, invalid_phi):
+        y = np.array([0.0, 1.0, 2.0])
+        mu = np.array([1.0, 1.5, 2.5])
+
+        with pytest.raises(ValueError, match="phi must be finite and strictly positive"):
+            tweedie_logpdf(y, mu, invalid_phi, 1.5)
 
 
 # =====================================================================
@@ -538,6 +656,93 @@ def _tweedie_data(n=3000, p_true=1.6, seed=42):
 
 
 class TestEstimatePFitMode:
+    @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
+    def test_invalid_weight_is_rejected_before_feature_auto_detection(self, fit_mode):
+        X, y, _ = _tweedie_data(n=24, seed=20260716)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            splines=[],
+        )
+        invalid_weights = np.ones(len(y) - 1)
+        family_before = model.family
+        result_before = model._result
+        distribution_before = model._distribution
+        specs_before = dict(model._specs)
+        feature_order_before = list(model._feature_order)
+
+        with pytest.raises(ValueError, match="weights must be finite and strictly positive"):
+            model.estimate_p(
+                X,
+                y,
+                sample_weight=invalid_weights,
+                fit_mode=fit_mode,
+                method="grid",
+                grid=np.array([1.5]),
+            )
+
+        assert model.family is family_before
+        assert model._result is result_before
+        assert model._distribution is distribution_before
+        assert model._specs == specs_before
+        assert model._feature_order == feature_order_before
+
+    @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
+    def test_invalid_weight_preserves_existing_profile_model_state(self, fit_mode):
+        X, y, _ = _tweedie_data(n=80, seed=20260717)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        model.fit(X, y)
+        invalid_weights = np.ones(len(y) - 1)
+        family_before = model.family
+        result_before = model._result
+        distribution_before = model._distribution
+        profile_result_before = model._tweedie_profile_result
+        prediction_before = model.predict(X)
+
+        with pytest.raises(ValueError, match="weights must be finite and strictly positive"):
+            model.estimate_p(
+                X,
+                y,
+                sample_weight=invalid_weights,
+                fit_mode=fit_mode,
+                method="grid",
+                grid=np.array([1.5]),
+            )
+
+        assert model.family is family_before
+        assert model._result is result_before
+        assert model._distribution is distribution_before
+        assert model._tweedie_profile_result is profile_result_before
+        np.testing.assert_allclose(model.predict(X), prediction_before)
+
+    def test_invalid_zero_weight_is_rejected_by_ordinary_tweedie_fit(self):
+        X, y, _ = _tweedie_data(n=40, seed=20260718)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        weights = np.ones(len(y))
+        weights[5] = 0.0
+
+        with pytest.raises(ValueError, match="weights must be finite and strictly positive"):
+            model.fit(X, y, sample_weight=weights)
+
+    def test_invalid_tweedie_weight_rule_does_not_reject_poisson_zero_weight(self):
+        X = pd.DataFrame({"x1": np.linspace(-1.0, 1.0, 12)})
+        y = np.array([0.0, 1.0, 0.0, 2.0, 1.0, 3.0, 0.0, 1.0, 2.0, 1.0, 0.0, 2.0])
+        weights = np.ones(len(y))
+        weights[5] = 0.0
+        model = SuperGLM(family="poisson", selection_penalty=0, features={"x1": Numeric()})
+
+        model.fit(X, y, sample_weight=weights)
+
+        assert np.all(np.isfinite(model.predict(X)))
+
     def test_fit_mode_fit_recovers_p(self):
         """fit_mode='fit' (default) should recover p."""
         X, y, p_true = _tweedie_data()

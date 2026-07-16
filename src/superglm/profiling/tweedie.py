@@ -33,6 +33,7 @@ from numpy.typing import NDArray
 from scipy.optimize import minimize, minimize_scalar
 from scipy.special import expit, logit, wright_bessel
 
+from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.penalties.base import penalty_has_targets
@@ -113,6 +114,52 @@ class _TweedieLogpdfDiagnostics:
         return float(self.n_saddlepoint) / float(self.n_positive)
 
 
+def _validate_tweedie_inputs(
+    y: NDArray,
+    mu: NDArray,
+    p: float,
+    weights: NDArray | None,
+) -> tuple[NDArray, NDArray, float, NDArray | None]:
+    """Validate and convert common Tweedie density and dispersion inputs."""
+    y_arr = np.asarray(y, dtype=np.float64)
+    mu_arr = np.asarray(mu, dtype=np.float64)
+    if y_arr.ndim != 1 or mu_arr.ndim != 1 or y_arr.shape != mu_arr.shape:
+        raise ValueError("y and mu must be one-dimensional arrays with the same shape")
+    if not np.all(np.isfinite(y_arr)) or np.any(y_arr < 0.0):
+        raise ValueError("y must be finite and non-negative")
+    if not np.all(np.isfinite(mu_arr)) or np.any(mu_arr <= 0.0):
+        raise ValueError("mu must be finite and strictly positive")
+
+    p_arr = np.asarray(p)
+    if p_arr.ndim != 0:
+        raise ValueError("p must be finite and in the open interval (1, 2)")
+    try:
+        p_float = float(p_arr)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("p must be finite and in the open interval (1, 2)") from exc
+    if not np.isfinite(p_float) or not 1.0 < p_float < 2.0:
+        raise ValueError("p must be finite and in the open interval (1, 2)")
+
+    validated_weights = None
+    if weights is not None:
+        validated_weights = _validate_strict_prior_weights(weights, len(y_arr))
+    return y_arr, mu_arr, p_float, validated_weights
+
+
+def _validate_tweedie_phi(phi: float) -> float:
+    """Validate and convert a scalar Tweedie dispersion parameter."""
+    phi_arr = np.asarray(phi)
+    if phi_arr.ndim != 0:
+        raise ValueError("phi must be finite and strictly positive")
+    try:
+        phi_float = float(phi_arr)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("phi must be finite and strictly positive") from exc
+    if not np.isfinite(phi_float) or phi_float <= 0.0:
+        raise ValueError("phi must be finite and strictly positive")
+    return phi_float
+
+
 def _tweedie_logpdf_impl(
     y: NDArray,
     mu: NDArray,
@@ -123,13 +170,12 @@ def _tweedie_logpdf_impl(
     t_arg_limit: float = 1e14,
 ) -> tuple[NDArray, _TweedieLogpdfDiagnostics]:
     """Shared Tweedie log-density implementation with diagnostics."""
-    y = np.asarray(y, dtype=np.float64)
-    mu = np.asarray(mu, dtype=np.float64)
+    y, mu, p, weights = _validate_tweedie_inputs(y, mu, p, weights)
+    phi = _validate_tweedie_phi(phi)
     n = len(y)
 
     phi_eff = np.full(n, phi, dtype=np.float64)
     if weights is not None:
-        weights = np.asarray(weights, dtype=np.float64)
         phi_eff = phi / weights
 
     logpdf = np.zeros(n, dtype=np.float64)
@@ -284,15 +330,13 @@ def estimate_phi(
     callers should pass the residual observation count
     ``df_resid = n_obs - edf``.
     """
-    y = np.asarray(y, dtype=np.float64)
-    mu = np.asarray(mu, dtype=np.float64)
+    y, mu, p, weights = _validate_tweedie_inputs(y, mu, p, weights)
     mu_safe = np.maximum(mu, 1e-10)
     variance_fn = np.power(mu_safe, p)
     pearson = (y - mu) ** 2 / variance_fn
 
     denom = float(df_resid if df_resid is not None else len(y))
     if weights is not None:
-        weights = np.asarray(weights, dtype=np.float64)
         numer = float(np.sum(weights * pearson))
     else:
         numer = float(np.sum(pearson))
@@ -1236,6 +1280,10 @@ def estimate_tweedie_p(
     TweedieProfileResult
     """
     from superglm.distributions import Tweedie
+
+    y_arr = np.asarray(y)
+    if sample_weight is not None:
+        sample_weight = _validate_strict_prior_weights(sample_weight, len(y_arr))
 
     # Validate family
     family = model.family
