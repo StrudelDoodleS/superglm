@@ -1741,6 +1741,182 @@ class TestTweedieProfileSummary:
         changed_search = model.summary()
         assert changed_search is not changed_method
 
+    def test_model_summary_refreshes_for_equal_valued_ci_tuple_replacement(self, fitted_poisson):
+        model, _, _, _ = fitted_poisson
+        first_interval = tuple([1.4, 1.7])
+        profile = self._profile_result(ci_cache={0.05: first_interval})
+        model._tweedie_profile_result = profile
+        model._summary_cache = None
+
+        first_summary = model.summary()
+        replacement_interval = tuple([1.4, 1.7])
+        assert replacement_interval is not first_interval
+        profile._ci_cache[0.05] = replacement_interval
+        replacement_summary = model.summary()
+
+        assert replacement_summary is not first_summary
+        assert replacement_summary._info["tweedie_p_ci"] is replacement_interval
+        assert replacement_summary._info["tweedie_p_ci_status"] == "available"
+
+    def test_model_summary_refreshes_after_ci_cache_clear_and_recompute(self, fitted_poisson):
+        model, _, _, _ = fitted_poisson
+        first_interval = tuple([1.4, 1.7])
+        profile = self._profile_result(ci_cache={0.05: first_interval})
+        model._tweedie_profile_result = profile
+        model._summary_cache = None
+
+        cached_summary = model.summary()
+        assert cached_summary._info["tweedie_p_ci"] is first_interval
+
+        profile._ci_cache.clear()
+        cleared_summary = model.summary()
+        assert cleared_summary is not cached_summary
+        assert cleared_summary._info["tweedie_p_ci"] is None
+
+        recomputed_interval = tuple([1.4, 1.7])
+        profile._ci_cache[0.05] = recomputed_interval
+        recomputed_summary = model.summary()
+
+        assert recomputed_summary is not cleared_summary
+        assert recomputed_summary._info["tweedie_p_ci"] is recomputed_interval
+        assert recomputed_summary._info["tweedie_p_ci_status"] == "available"
+
+    @pytest.mark.parametrize(
+        ("attribute", "new_value", "info_key", "expected"),
+        [
+            ("p_hat", 1.62, "tweedie_p", 1.62),
+            ("phi_hat", 0.91, "tweedie_phi", 0.91),
+            ("nll", 9.75, "tweedie_profile_nll", 9.75),
+            ("method", "grid_refine", "tweedie_p_method", "Profile MLE (Grid Refine)"),
+            (
+                "density_exact",
+                False,
+                "tweedie_p_method",
+                "Profile MLE (Brent; density approximation)",
+            ),
+        ],
+    )
+    def test_model_summary_refreshes_when_rendered_profile_state_changes(
+        self,
+        fitted_poisson,
+        attribute,
+        new_value,
+        info_key,
+        expected,
+    ):
+        model, _, _, _ = fitted_poisson
+        interval = tuple([1.4, 1.7])
+        profile = self._profile_result(ci_cache={0.05: interval})
+        model._tweedie_profile_result = profile
+        model._summary_cache = None
+
+        before = model.summary()
+        setattr(profile, attribute, new_value)
+        after = model.summary()
+
+        assert after is not before
+        assert after._info[info_key] == expected
+        assert after._info["tweedie_p_ci"] is interval
+
+    def test_model_summary_refreshes_when_phi_method_becomes_exact_mle(self, fitted_poisson):
+        model, _, _, _ = fitted_poisson
+        interval = tuple([1.4, 1.7])
+        profile = self._profile_result(phi_method="unknown", ci_cache={0.05: interval})
+        model._tweedie_profile_result = profile
+        model._summary_cache = None
+
+        before = model.summary()
+        profile.phi_method = "mle"
+        after = model.summary()
+
+        assert after is not before
+        assert after._info["tweedie_p_method"] == "Profile MLE (Brent)"
+        assert after._info["tweedie_p_ci"] is interval
+
+    def test_summary_rejects_str_subclass_spoofing_exact_mle(self, fitted_poisson):
+        class SpoofedMethod(str):
+            def __eq__(self, other):
+                return other == "mle"
+
+        model, _, _, _ = fitted_poisson
+        profile = self._profile_result(
+            phi_method=SpoofedMethod("not-mle"),
+            ci_cache={0.05: (1.4, 1.7)},
+        )
+        model._tweedie_profile_result = profile
+        model._summary_cache = None
+
+        summary = model.summary()
+
+        assert summary._info["tweedie_p_ci"] is None
+        assert summary._info["tweedie_p_ci_status"] == "not computed"
+        assert summary._info["tweedie_p_method"] == "Profile (Brent)"
+
+    def test_summary_rejects_dict_subclass_without_calling_overridden_get(self, fitted_poisson):
+        calls = []
+
+        class HostileCache(dict):
+            def get(self, key, default=None):
+                calls.append((key, default))
+                return super().get(key, default)
+
+        model, _, _, _ = fitted_poisson
+        profile = self._profile_result()
+        profile._ci_cache = HostileCache({0.05: (1.4, 1.7)})
+        model._tweedie_profile_result = profile
+        model._summary_cache = None
+
+        summary = model.summary()
+
+        assert calls == []
+        assert summary._info["tweedie_p_ci"] is None
+        assert summary._info["tweedie_p_ci_status"] == "not computed"
+
+    def test_summary_rejects_tuple_subclass_without_calling_overridden_access(self, fitted_poisson):
+        calls = []
+
+        class HostileInterval(tuple):
+            def __len__(self):
+                calls.append("len")
+                return super().__len__()
+
+            def __iter__(self):
+                calls.append("iter")
+                return super().__iter__()
+
+            def __getitem__(self, index):
+                calls.append(("getitem", index))
+                return super().__getitem__(index)
+
+        model, _, _, _ = fitted_poisson
+        profile = self._profile_result()
+        profile._ci_cache[0.05] = HostileInterval((1.4, 1.7))
+        model._tweedie_profile_result = profile
+        model._summary_cache = None
+
+        summary = model.summary()
+
+        assert calls == []
+        assert summary._info["tweedie_p_ci"] is None
+        assert summary._info["tweedie_p_ci_status"] == "not computed"
+
+    def test_profile_report_identity_stays_hashable_for_unhashable_legacy_metadata(self):
+        from superglm.profiling._reporting import tweedie_profile_report_identity
+
+        result = SimpleNamespace(
+            p_hat=[],
+            phi_hat={},
+            nll=set(),
+            method=[],
+            phi_method={},
+            density_exact=[],
+            _ci_cache={},
+        )
+
+        identity = tweedie_profile_report_identity(result, 0.05)
+
+        assert isinstance(hash(identity), int)
+
     def test_summary_qualifies_approximation_based_density(self, fitted_poisson):
         model, _, _, _ = fitted_poisson
         model._tweedie_profile_result = self._profile_result(

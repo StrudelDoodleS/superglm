@@ -37,9 +37,9 @@ def cached_tweedie_profile_ci(
     except (TypeError, ValueError, OverflowError):
         return None, _CI_NOT_COMPUTED
     cache = getattr(result, "_ci_cache", None)
-    if not isinstance(cache, dict):
+    if type(cache) is not dict:
         return None, _CI_NOT_COMPUTED
-    interval = cache.get(alpha_value, _MISSING)
+    interval = dict.get(cache, alpha_value, _MISSING)
     if interval is _MISSING or not _is_finite_interval_tuple(interval):
         return None, _CI_NOT_COMPUTED
     return interval, _CI_AVAILABLE
@@ -70,12 +70,15 @@ def tweedie_profile_method_label(result: Any) -> str:
 def tweedie_profile_report_identity(result: Any, alpha: float) -> tuple[Any, ...]:
     """Return hashable state that invalidates summaries after explicit CI work."""
     interval, status = cached_tweedie_profile_ci(result, alpha)
-    interval_key = None if interval is None else (float(interval[0]), float(interval[1]))
+    interval_key = None if interval is None else _interval_report_identity(interval)
     return (
         id(result),
-        str(getattr(result, "method", "")),
-        repr(getattr(result, "phi_method", None)),
-        _density_identity(result),
+        _report_value_identity(getattr(result, "p_hat", _MISSING)),
+        _report_value_identity(getattr(result, "phi_hat", _MISSING)),
+        _report_value_identity(getattr(result, "nll", _MISSING)),
+        _report_value_identity(getattr(result, "method", _MISSING)),
+        _report_value_identity(getattr(result, "phi_method", _MISSING)),
+        _report_value_identity(getattr(result, "density_exact", _MISSING)),
         status,
         interval_key,
     )
@@ -83,7 +86,7 @@ def tweedie_profile_report_identity(result: Any, alpha: float) -> tuple[Any, ...
 
 def _has_exact_phi_method(result: Any, expected: str) -> bool:
     value = getattr(result, "phi_method", None)
-    return isinstance(value, str) and value == expected
+    return type(value) is str and value == expected
 
 
 def _search_method_label(value: Any) -> str:
@@ -100,12 +103,37 @@ def _search_method_label(value: Any) -> str:
 
 
 def _is_finite_interval_tuple(value: Any) -> bool:
-    if not isinstance(value, tuple) or len(value) != 2:
+    if type(value) is not tuple or tuple.__len__(value) != 2:
         return False
     try:
-        return all(math.isfinite(float(endpoint)) for endpoint in value)
+        return all(math.isfinite(float(tuple.__getitem__(value, index))) for index in range(2))
     except (TypeError, ValueError, OverflowError):
         return False
+
+
+def _interval_report_identity(interval: tuple[Any, Any]) -> tuple[Any, ...]:
+    """Fingerprint an already validated exact tuple without subclass dispatch."""
+    return (
+        id(interval),
+        float.hex(float(tuple.__getitem__(interval, 0))),
+        float.hex(float(tuple.__getitem__(interval, 1))),
+    )
+
+
+def _report_value_identity(value: Any) -> tuple[Any, ...]:
+    """Return a hashable identity without hashing or formatting arbitrary values."""
+    value_type = type(value)
+    if value is None:
+        return ("none",)
+    if value_type is bool:
+        return ("bool", value)
+    if value_type is int:
+        return ("int", value)
+    if value_type is float:
+        return ("float", float.hex(value))
+    if value_type is str:
+        return ("str", value)
+    return ("object", id(value_type), id(value))
 
 
 def _uses_density_approximation(result: Any) -> bool:
@@ -116,16 +144,6 @@ def _uses_density_approximation(result: Any) -> bool:
         return not bool(density_exact)
     except (TypeError, ValueError):
         return False
-
-
-def _density_identity(result: Any) -> bool | None:
-    density_exact = getattr(result, "density_exact", None)
-    if density_exact is None:
-        return None
-    try:
-        return bool(density_exact)
-    except (TypeError, ValueError):
-        return None
 
 
 __all__ = [
