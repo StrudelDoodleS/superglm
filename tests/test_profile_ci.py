@@ -424,6 +424,26 @@ class TestTweedieProfileCI:
         assert result._ci_cache == {}
         assert result._ci_details_cache == {}
 
+    @pytest.mark.parametrize(
+        ("center_nll", "match"),
+        [(0.01, "inconsistent.*nll_hat"), (-0.01, "better profile value")],
+    )
+    def test_ci_rejects_center_objective_mismatch_and_caches_nothing(self, center_nll, match):
+        calls = []
+
+        def objective(p):
+            calls.append(float(p))
+            return center_nll if p == 0.5 else 0.0
+
+        result = self._bare_result(objective)
+
+        with pytest.raises(RuntimeError, match=match):
+            result.ci()
+
+        assert calls == [0.5]
+        assert result._ci_cache == {}
+        assert result._ci_details_cache == {}
+
     def test_ci_ignores_only_immaterial_better_profile_difference(self):
         def objective(p):
             if p == 0.25:
@@ -532,6 +552,19 @@ class TestTweedieProfileCI:
         with pytest.raises(RuntimeError, match=field):
             result.ci()
 
+    def test_cached_ci_cannot_bypass_invalid_winning_record(self):
+        calls = []
+        result = self._bare_result(lambda p: calls.append(float(p)) or 0.0)
+        cached = (0.25, 0.75)
+        result._ci_cache[0.05] = cached
+        result.phi_converged = False
+
+        with pytest.raises(RuntimeError, match="phi_converged"):
+            result.ci(alpha=0.05)
+
+        assert calls == []
+        assert result._ci_cache[0.05] is cached
+
     @pytest.mark.parametrize(
         "invalid_field",
         ["objective_finite", "fit_converged", "phi_converged"],
@@ -576,6 +609,147 @@ class TestTweedieProfileCI:
             warnings.simplefilter("always")
             assert result.ci() is interval
         assert caught == []
+
+    def test_ci_rejects_discontinuous_false_root(self):
+        cutoff = float(chi2.ppf(0.95, 1))
+
+        def discontinuous_profile(p):
+            lr_statistic = 0.0 if 0.35 < p < 0.65 else 5.0
+            return lr_statistic / 2.0
+
+        with pytest.raises(RuntimeError, match="unresolved or discontinuous LR cutoff"):
+            tweedie_module._profile_ci_p_detailed(
+                discontinuous_profile,
+                p_hat=0.5,
+                nll_hat=0.0,
+                ll_scale=1.0,
+                p_range=(0.0, 1.0),
+            )
+
+        assert cutoff < 5.0
+
+    def test_ci_refines_a_steep_continuous_root(self):
+        cutoff = float(chi2.ppf(0.95, 1))
+        root_distance = 0.147321
+
+        def steep_continuous_profile(p):
+            lr_statistic = cutoff * np.exp(500.0 * (abs(p - 0.5) - root_distance))
+            return lr_statistic / 2.0
+
+        details = tweedie_module._profile_ci_p_detailed(
+            steep_continuous_profile,
+            p_hat=0.5,
+            nll_hat=steep_continuous_profile(0.5),
+            ll_scale=1.0,
+            p_range=(0.0, 1.0),
+        )
+
+        assert details.lower.value == pytest.approx(0.5 - root_distance, abs=2e-6)
+        assert details.upper.value == pytest.approx(0.5 + root_distance, abs=2e-6)
+        assert details.lower.status == details.upper.status == "root_found"
+
+    @pytest.mark.parametrize(
+        ("root", "converged", "match"),
+        [
+            (np.nan, True, "finite"),
+            (1.5, True, "bracket"),
+            (0.3, False, "converge"),
+        ],
+    )
+    def test_ci_validates_root_candidate_before_objective_evaluation(
+        self, monkeypatch, root, converged, match
+    ):
+        cutoff = float(chi2.ppf(0.95, 1))
+        calls = []
+
+        def objective(p):
+            calls.append(float(p))
+            return 0.5 * cutoff * ((p - 0.5) / 0.23) ** 2
+
+        monkeypatch.setattr(
+            tweedie_module,
+            "brentq",
+            lambda *args, **kwargs: (root, SimpleNamespace(converged=converged)),
+        )
+
+        with pytest.raises(RuntimeError, match=match):
+            tweedie_module._profile_ci_p_detailed(
+                objective,
+                0.5,
+                0.0,
+                1.0,
+                p_range=(0.0, 1.0),
+            )
+
+        assert not any(
+            (not np.isfinite(p)) or p == 1.5 or (not converged and p == root) for p in calls
+        )
+
+    @pytest.mark.parametrize(
+        ("failure_kind", "public_error"),
+        [
+            ("invalid_scalar", ValueError),
+            ("nonfinite", ValueError),
+            ("nonfinite_lr", ValueError),
+            ("invalid_record", RuntimeError),
+            ("malformed_record", RuntimeError),
+            ("better_basin", RuntimeError),
+        ],
+    )
+    def test_ci_evaluation_failures_inside_brent_are_not_relabelled(
+        self, monkeypatch, failure_kind, public_error
+    ):
+        cutoff = float(chi2.ppf(0.95, 1))
+
+        def objective(p):
+            if p == 0.37:
+                if failure_kind == "invalid_scalar":
+                    return np.array([1.0, 2.0])
+                if failure_kind == "nonfinite":
+                    return np.nan
+                if failure_kind == "nonfinite_lr":
+                    return np.finfo(np.float64).max
+                if failure_kind == "better_basin":
+                    return -0.01
+            return 0.5 * cutoff * ((p - 0.5) / 0.23) ** 2
+
+        def evaluation_record(p):
+            valid = not (failure_kind == "invalid_record" and p == 0.37)
+            return SimpleNamespace(
+                nll=np.array([0.0, 1.0])
+                if failure_kind == "malformed_record" and p == 0.37
+                else 0.0,
+                fit_converged=True,
+                phi_result=SimpleNamespace(objective_finite=True, converged=valid),
+            )
+
+        def probe_failure(function, *args, **kwargs):
+            function(0.37)
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(tweedie_module, "brentq", probe_failure)
+
+        with pytest.raises(public_error) as caught:
+            tweedie_module._profile_ci_p_detailed(
+                objective,
+                0.5,
+                0.0,
+                1.0,
+                p_range=(0.0, 1.0),
+                evaluation_record=evaluation_record,
+            )
+
+        assert isinstance(caught.value, tweedie_module._TweedieProfileCIEvaluationError)
+        assert "p=0.37" in str(caught.value)
+        assert "numerical CI root" not in str(caught.value)
+
+    def test_public_ci_docs_disclose_finite_connected_scan_limitation(self):
+        result_doc = tweedie_module.TweedieProfileResult.ci.__doc__ or ""
+        function_doc = tweedie_module.profile_ci_p.__doc__ or ""
+
+        for doc in (result_doc, function_doc):
+            assert "nearest detected connected" in doc
+            assert "narrower unsampled" in doc
 
     def test_ci_works(self):
         """Tweedie profile CI should produce a valid interval."""

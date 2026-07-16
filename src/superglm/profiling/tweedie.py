@@ -2347,6 +2347,8 @@ class TweedieProfileResult:
 
         Requires that the result was produced by ``estimate_tweedie_p``.
         Results are cached so repeated calls (e.g. from summary()) are free.
+        The interval targets the nearest detected connected LR component.
+        Its finite max-gap scan can miss a narrower unsampled LR island.
         """
         alpha_value, _, _, _, _ = _validate_profile_ci_inputs(
             self.p_hat,
@@ -2355,6 +2357,7 @@ class TweedieProfileResult:
             alpha,
             self._ci_p_range,
         )
+        self._validate_ci_winner()
         if alpha_value in self._ci_cache:
             return self._ci_cache[alpha_value]
         if self._objective is None:
@@ -2362,7 +2365,6 @@ class TweedieProfileResult:
                 "Profile CI requires the objective function. Use "
                 "estimate_tweedie_p() to produce this result."
             )
-        self._validate_ci_winner()
         details = _profile_ci_p_detailed(
             self._objective,
             self.p_hat,
@@ -2390,6 +2392,7 @@ class TweedieProfileResult:
             alpha,
             self._ci_p_range,
         )
+        self._validate_ci_winner()
         if alpha_value in self._ci_cache and alpha_value not in self._ci_details_cache:
             raise RuntimeError(
                 "Tweedie profile CI details are unavailable for a pre-populated "
@@ -3712,12 +3715,22 @@ _CI_ZERO_ATOL = 1e-10
 _CI_BETTER_LR_ATOL = 1e-6
 
 
-class _TweedieProfileCIObjectiveValueError(ValueError):
-    """Contextualized value failure raised by the profile-CI objective."""
+class _TweedieProfileCIEvaluationError(Exception):
+    """Common base for failures caused by one fixed-p CI evaluation."""
 
 
-class _TweedieProfileCIObjectiveError(RuntimeError):
-    """Contextualized non-value failure raised by the profile-CI objective."""
+class _TweedieProfileCIEvaluationValueError(
+    _TweedieProfileCIEvaluationError,
+    ValueError,
+):
+    """ValueError-compatible fixed-p CI evaluation failure."""
+
+
+class _TweedieProfileCIEvaluationRuntimeError(
+    _TweedieProfileCIEvaluationError,
+    RuntimeError,
+):
+    """RuntimeError-compatible fixed-p CI evaluation failure."""
 
 
 def _validate_profile_ci_inputs(
@@ -3773,15 +3786,25 @@ def _validate_profile_ci_inputs(
 def _validate_ci_profile_record(record: Any, p: float) -> None:
     """Require an authoritative completed fixed-p record to be CI-usable."""
     if record is None:
-        raise RuntimeError(
+        raise _TweedieProfileCIEvaluationRuntimeError(
             f"Tweedie profile CI did not retain a completed fixed-p record at p={p:g}."
         )
-    phi_result = getattr(record, "phi_result", None)
-    objective_finite = bool(
-        phi_result is not None
-        and getattr(phi_result, "objective_finite", False)
-        and np.isfinite(getattr(record, "nll", np.nan))
-    )
+    try:
+        phi_result = getattr(record, "phi_result", None)
+        nll_values = np.asarray(getattr(record, "nll", np.nan))
+        nll_finite = bool(
+            nll_values.size == 1
+            and not np.iscomplexobj(nll_values)
+            and np.isfinite(float(nll_values.reshape(-1)[0]))
+        )
+        objective_finite = bool(
+            phi_result is not None and getattr(phi_result, "objective_finite", False) and nll_finite
+        )
+    except Exception as exc:
+        raise _TweedieProfileCIEvaluationRuntimeError(
+            f"Tweedie profile CI candidate record is invalid at p={p:g}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     checks = (
         ("objective_finite", objective_finite),
         ("fit_converged", bool(getattr(record, "fit_converged", False))),
@@ -3789,7 +3812,18 @@ def _validate_ci_profile_record(record: Any, p: float) -> None:
     )
     for name, valid in checks:
         if not valid:
-            raise RuntimeError(f"Tweedie profile CI candidate has {name}=False at p={p:g}.")
+            raise _TweedieProfileCIEvaluationRuntimeError(
+                f"Tweedie profile CI candidate has {name}=False at p={p:g}."
+            )
+
+
+def _ci_lr_tolerance(cutoff: float, ll_scale: float, nll: float, nll_hat: float) -> float:
+    """Tolerance for profile-minimum and LR-cutoff consistency, in LR units."""
+    return max(
+        _CI_BETTER_LR_ATOL,
+        1e-3 * cutoff,
+        128.0 * np.finfo(np.float64).eps * ll_scale * max(abs(nll), abs(nll_hat), 1.0),
+    )
 
 
 def _profile_ci_p_detailed(
@@ -3829,17 +3863,22 @@ def _profile_ci_p_detailed(
     evidence: dict[float, TweedieProfileCIEvaluation] = {}
 
     def evaluate(p: float) -> TweedieProfileCIEvaluation:
-        key = float(p)
+        try:
+            key = float(p)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise _TweedieProfileCIEvaluationValueError(
+                f"Tweedie profile CI received an invalid p probe {p!r}: {exc}"
+            ) from exc
         if key in evidence:
             return evidence[key]
         try:
             raw_nll = objective(key)
         except ValueError as exc:
-            raise _TweedieProfileCIObjectiveValueError(
+            raise _TweedieProfileCIEvaluationValueError(
                 f"Tweedie profile CI objective failed at p={key:g}: {exc}"
             ) from exc
         except Exception as exc:
-            raise _TweedieProfileCIObjectiveError(
+            raise _TweedieProfileCIEvaluationRuntimeError(
                 f"Tweedie profile CI objective failed at p={key:g}: {type(exc).__name__}: {exc}"
             ) from exc
         try:
@@ -3848,28 +3887,43 @@ def _profile_ci_p_detailed(
                 raise ValueError("objective did not return one real scalar")
             nll = float(values.reshape(-1)[0])
         except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(
+            raise _TweedieProfileCIEvaluationValueError(
                 f"Tweedie profile CI objective returned an invalid value at p={key:g}: {exc}"
             ) from exc
         if not np.isfinite(nll):
-            raise ValueError(f"Tweedie profile CI objective returned non-finite NLL at p={key:g}.")
+            raise _TweedieProfileCIEvaluationValueError(
+                f"Tweedie profile CI objective returned non-finite NLL at p={key:g}."
+            )
         if evaluation_record is not None:
-            _validate_ci_profile_record(evaluation_record(key), key)
+            try:
+                record = evaluation_record(key)
+            except _TweedieProfileCIEvaluationError:
+                raise
+            except Exception as exc:
+                raise _TweedieProfileCIEvaluationRuntimeError(
+                    f"Tweedie profile CI record lookup failed at p={key:g}: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            _validate_ci_profile_record(record, key)
 
-        lr_statistic = float(2.0 * ll_scale * (nll - nll_hat))
+        try:
+            lr_statistic = float(2.0 * ll_scale * (nll - nll_hat))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise _TweedieProfileCIEvaluationValueError(
+                f"Tweedie profile CI could not compute the LR statistic at p={key:g}: {exc}"
+            ) from exc
         if not np.isfinite(lr_statistic):
-            raise ValueError(f"Tweedie profile CI produced a non-finite LR statistic at p={key:g}.")
-        # This tolerance is in total LR-statistic units: one-thousandth of
-        # the requested cutoff ignores harmless outer-profile optimization
-        # error while still treating a substantively better basin as a search
-        # failure. The final term covers unusually large floating-point scale.
-        better_tolerance = max(
-            _CI_BETTER_LR_ATOL,
-            1e-3 * cutoff,
-            128.0 * np.finfo(np.float64).eps * ll_scale * max(abs(nll), abs(nll_hat), 1.0),
+            raise _TweedieProfileCIEvaluationValueError(
+                f"Tweedie profile CI produced a non-finite LR statistic at p={key:g}."
+            )
+        better_tolerance = _ci_lr_tolerance(
+            cutoff,
+            ll_scale,
+            nll,
+            nll_hat,
         )
         if lr_statistic < -better_tolerance:
-            raise RuntimeError(
+            raise _TweedieProfileCIEvaluationRuntimeError(
                 f"Tweedie profile CI found a better profile value; rerun/expand search "
                 f"(p={key:g}, LR={lr_statistic:.6g})."
             )
@@ -3893,9 +3947,12 @@ def _profile_ci_p_detailed(
     # later only when the outward scan reaches it without an earlier root.
     center = evaluate(p_hat)
     center_criterion = criterion(center)
-    if center_criterion > _CI_ZERO_ATOL * max(1.0, cutoff):
-        raise RuntimeError(
-            f"Tweedie profile CI estimate at p={p_hat:g} lies outside its own LR region."
+    center_tolerance = _ci_lr_tolerance(cutoff, ll_scale, center.nll, nll_hat)
+    if abs(center.lr_statistic) > center_tolerance:
+        raise _TweedieProfileCIEvaluationRuntimeError(
+            f"Tweedie profile CI objective(p_hat) is inconsistent with nll_hat "
+            f"at p={p_hat:g} (LR={center.lr_statistic:.6g}, "
+            f"tolerance={center_tolerance:.6g})."
         )
 
     finite_seeds: set[float] = set()
@@ -3940,33 +3997,68 @@ def _profile_ci_p_detailed(
                 )
             if previous_value < 0.0 < current_value:
                 bracket = tuple(sorted((previous.p, current.p)))
-                try:
-                    root_value, root_result = brentq(
-                        lambda p: criterion(evaluate(p)),
-                        bracket[0],
-                        bracket[1],
-                        xtol=_CI_ROOT_XTOL,
-                        rtol=4.0 * np.finfo(np.float64).eps,
-                        full_output=True,
-                        disp=False,
+                root = np.nan
+                root_point = None
+                root_residual = np.inf
+                root_tolerance = np.nan
+                for attempt, xtol in enumerate((_CI_ROOT_XTOL, 1e-10), start=1):
+                    try:
+                        root_value, root_result = brentq(
+                            lambda p: criterion(evaluate(p)),
+                            bracket[0],
+                            bracket[1],
+                            xtol=xtol,
+                            rtol=4.0 * np.finfo(np.float64).eps,
+                            full_output=True,
+                            disp=False,
+                        )
+                    except _TweedieProfileCIEvaluationError:
+                        raise
+                    except (ValueError, RuntimeError) as exc:
+                        raise RuntimeError(
+                            f"Tweedie numerical CI root failed on {side} bracket "
+                            f"[{bracket[0]:g}, {bracket[1]:g}]: {exc}"
+                        ) from exc
+
+                    converged = getattr(root_result, "converged", None)
+                    if not isinstance(converged, bool | np.bool_) or not bool(converged):
+                        raise RuntimeError(
+                            f"Tweedie numerical CI root did not converge on the {side} side."
+                        )
+                    try:
+                        root = float(root_value)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise RuntimeError(
+                            f"Tweedie numerical CI root was not a finite scalar on the {side} side."
+                        ) from exc
+                    if not np.isfinite(root):
+                        raise RuntimeError(
+                            f"Tweedie numerical CI root was not finite on the {side} side."
+                        )
+                    if not bracket[0] <= root <= bracket[1]:
+                        raise RuntimeError(
+                            f"Tweedie numerical CI root p={root:g} lies outside bracket "
+                            f"[{bracket[0]:g}, {bracket[1]:g}] on the {side} side."
+                        )
+
+                    root_point = evaluate(root)
+                    root_residual = abs(criterion(root_point))
+                    root_tolerance = _ci_lr_tolerance(
+                        cutoff,
+                        ll_scale,
+                        root_point.nll,
+                        nll_hat,
                     )
-                    root = float(root_value)
-                except (
-                    _TweedieProfileCIObjectiveValueError,
-                    _TweedieProfileCIObjectiveError,
-                ):
-                    raise
-                except (ValueError, RuntimeError) as exc:
-                    raise RuntimeError(
-                        f"Tweedie numerical CI root failed on {side} bracket "
-                        f"[{bracket[0]:g}, {bracket[1]:g}]: {exc}"
-                    ) from exc
-                root_point = evaluate(root)
-                if not bool(root_result.converged) or not bracket[0] <= root <= bracket[1]:
-                    raise RuntimeError(
-                        f"Tweedie numerical CI root validation failed at p={root:g} "
-                        f"on the {side} side."
-                    )
+                    if root_residual <= root_tolerance:
+                        break
+                    if attempt == 2:
+                        raise RuntimeError(
+                            f"Tweedie profile CI has an unresolved or discontinuous LR cutoff "
+                            f"on the {side} side at p={root:g} "
+                            f"(residual={root_residual:.6g}, "
+                            f"tolerance={root_tolerance:.6g})."
+                        )
+                assert root_point is not None
                 return TweedieProfileCIEndpoint(
                     value=root,
                     status="root_found",
@@ -4026,7 +4118,9 @@ def profile_ci_p(
     """Return the connected profile likelihood confidence interval for p.
 
     Use :meth:`TweedieProfileResult.ci_details` for root/truncation status and
-    the immutable fixed-p evidence behind a result-owned interval.
+    the immutable fixed-p evidence behind a result-owned interval. The interval
+    targets the nearest detected connected LR component. Its finite max-gap
+    scan can miss a narrower unsampled LR island.
     """
     details = _profile_ci_p_detailed(
         objective,
