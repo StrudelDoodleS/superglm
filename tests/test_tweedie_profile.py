@@ -15,9 +15,11 @@ from scipy.optimize import minimize_scalar as scipy_minimize_scalar
 import superglm.profiling.tweedie as tweedie_module
 from superglm import SuperGLM
 from superglm.distributions import Tweedie as TweedieDistribution
+from superglm.distributions import clip_mu
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
-from superglm.links import LogLink
+from superglm.links import LogLink, stabilize_eta
+from superglm.model import fit_ops as fit_ops_module
 from superglm.model import profile_ops as profile_ops_module
 from superglm.penalties.base import penalty_has_targets
 from superglm.penalties.group_lasso import GroupLasso
@@ -29,6 +31,7 @@ from superglm.profiling.tweedie import (
     generate_tweedie_cpg,
     tweedie_logpdf,
 )
+from superglm.solvers.pirls import PIRLSResult
 
 _COUNT_DIAGNOSTICS = object()
 
@@ -2341,6 +2344,30 @@ def _tweedie_data(n=3000, p_true=1.6, seed=42):
     return X, y, p_true
 
 
+def _offset_spline_tweedie_data(n=72, seed=20260720):
+    """Small offset-aware Tweedie sample for final-refit state tests."""
+    rng = np.random.default_rng(seed)
+    x1 = np.linspace(-1.0, 1.0, n)
+    offset = 0.25 * np.sin(np.pi * x1)
+    mu = np.exp(0.6 + 0.35 * x1 + offset)
+    y = generate_tweedie_cpg(n, mu=mu, phi=0.8, p=1.47, rng=rng)
+    sample_weight = rng.uniform(0.75, 1.25, n)
+    return pd.DataFrame({"x1": x1}), y, sample_weight, offset
+
+
+def _deterministic_profile_result():
+    return TweedieProfileResult(
+        p_hat=1.47,
+        phi_hat=7.25,
+        nll=0.0,
+        n_evaluations=1,
+        converged=True,
+        method="brent",
+        phi_method="mle",
+        search_trace=pd.DataFrame({"p": [1.47], "phi": [7.25], "nll": [0.0]}),
+    )
+
+
 @pytest.mark.parametrize(
     "function",
     [SuperGLM.estimate_p, profile_ops_module.estimate_p, estimate_tweedie_p],
@@ -2353,6 +2380,220 @@ def test_public_tweedie_profile_entry_points_default_to_mle_and_brent(function):
 
 
 class TestEstimatePFitMode:
+    @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
+    @pytest.mark.parametrize("retain_fit_state", [True, False])
+    def test_final_profile_refit_atomically_synchronizes_model_state(
+        self, monkeypatch, fit_mode, retain_fit_state
+    ):
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            retain_fit_state=retain_fit_state,
+            features={"x1": Spline(n_knots=5, penalty="ssp")},
+        )
+        result = _deterministic_profile_result()
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", lambda *args, **kwargs: result)
+
+        fit_name = "fit_reml" if fit_mode == "reml" else "fit"
+        real_final_fit = getattr(model, fit_name)
+        captured = {}
+
+        def final_fit_with_primed_caches(*args, **kwargs):
+            captured["retain_during_fit"] = model._retain_fit_state
+            if fit_mode == "reml":
+                kwargs["max_reml_iter"] = 3
+            fitted = real_final_fit(*args, **kwargs)
+            captured["public_result"] = model.result
+            captured["solver_result"] = model._solver_pirls_result()
+            captured["reml_result"] = model._reml_result
+            captured["reml_lambdas"] = model._reml_lambdas
+            captured["reml_penalties"] = model._reml_penalties
+            captured["fit_meta"] = model._last_fit_meta
+            captured["runtime_state"] = model._runtime_canonical_state
+            captured["prediction_plan"] = model._prediction_plan
+            captured["fast_prediction_state"] = model._fast_prediction_state
+            # Before the fix, retain=False has already released these rows.  Skip
+            # cache priming so the regression fails at the production access.
+            if model._dm is None:
+                return fitted
+
+            solver = captured["solver_result"]
+            eta = model._dm.matvec(solver.beta) + solver.intercept + model._fit_offset
+            eta = stabilize_eta(eta, model._link)
+            captured["solver_mu"] = clip_mu(model._link.inverse(eta), model._distribution)
+            captured["old_covariance"] = model._coef_covariance
+            captured["old_active_info"] = model._fit_active_info
+            captured["old_inference_info"] = model._fit_inference_info
+            captured["old_group_edf"] = model._group_edf
+            captured["old_metrics"] = model.metrics(
+                X, y, sample_weight=sample_weight, offset=offset
+            )
+            captured["old_summary"] = model.summary()
+            return fitted
+
+        monkeypatch.setattr(model, fit_name, final_fit_with_primed_caches)
+        real_release = fit_ops_module._maybe_release_fit_state
+        release_events = []
+
+        def release_spy(candidate):
+            release_events.append((candidate._retain_fit_state, candidate._tweedie_profile_result))
+            return real_release(candidate)
+
+        monkeypatch.setattr(fit_ops_module, "_maybe_release_fit_state", release_spy)
+
+        returned = model.estimate_p(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode=fit_mode,
+        )
+
+        assert returned is result
+        assert captured["retain_during_fit"] is True
+        assert model._retain_fit_state is retain_fit_state
+        assert model._tweedie_profile_result is result
+        assert all(profile_result is None for _, profile_result in release_events)
+        expected_release_flags = [True] if retain_fit_state else [True, False]
+        assert [flag for flag, _ in release_events] == expected_release_flags
+
+        assert model.family is model._distribution
+        assert model.family.p == pytest.approx(result.p_hat)
+        assert model.result.phi == pytest.approx(result.phi_hat)
+        assert model._solver_pirls_result().phi == pytest.approx(result.phi_hat)
+        assert model.result is not captured["public_result"]
+        assert model._solver_pirls_result() is not captured["solver_result"]
+        assert model.result.beta is captured["public_result"].beta
+        assert model._solver_pirls_result().beta is captured["solver_result"].beta
+        assert captured["public_result"].phi != pytest.approx(result.phi_hat)
+        assert captured["solver_result"].phi != pytest.approx(result.phi_hat)
+
+        assert model._last_fit_meta is captured["fit_meta"]
+        assert model._runtime_canonical_state is captured["runtime_state"]
+        assert model._prediction_plan is captured["prediction_plan"]
+        assert model._fast_prediction_state is captured["fast_prediction_state"]
+        if fit_mode == "reml":
+            assert model._reml_result is not captured["reml_result"]
+            assert model._reml_result.pirls_result is model._solver_pirls_result()
+            assert model._reml_result.pirls_result.phi == pytest.approx(result.phi_hat)
+            assert model._reml_result.lambdas == captured["reml_result"].lambdas
+            assert model._reml_result.lambda_history is captured["reml_result"].lambda_history
+            assert model._reml_lambdas is captured["reml_lambdas"]
+            assert model._reml_penalties is captured["reml_penalties"]
+        else:
+            assert model._reml_result is None
+
+        np.testing.assert_allclose(
+            model.predict(X, offset=offset), captured["solver_mu"], rtol=1e-10, atol=1e-10
+        )
+        expected_ll = model._distribution.log_likelihood(
+            y, captured["solver_mu"], sample_weight, result.phi_hat
+        )
+        assert model._fit_stats.log_likelihood == pytest.approx(expected_ll)
+
+        if retain_fit_state:
+            np.testing.assert_allclose(model._fit_mu, captured["solver_mu"])
+            assert model._fit_null_mu is not None
+            for cache_name in (
+                "_coef_covariance",
+                "_fit_active_info",
+                "_fit_inference_info",
+                "_group_edf",
+            ):
+                assert cache_name not in model.__dict__
+            expected_covariance = (
+                result.phi_hat / captured["solver_result"].phi * captured["old_covariance"][0]
+            )
+            np.testing.assert_allclose(model._coef_covariance[0], expected_covariance)
+        else:
+            for released_name in (
+                "_dm",
+                "_fit_weights",
+                "_fit_offset",
+                "_fit_mu",
+                "_fit_null_mu",
+                "_fit_X_ref",
+                "_fit_y_ref",
+                "_fit_sample_weight_ref",
+                "_fit_offset_ref",
+            ):
+                assert getattr(model, released_name) is None
+            assert model.__dict__["_fit_inference_info"] is not captured["old_inference_info"]
+            expected_covariance = (
+                result.phi_hat * captured["old_inference_info"]["XtWX_inv_aug"][1:, 1:]
+            )
+            np.testing.assert_allclose(model._coef_covariance[0], expected_covariance)
+
+        assert model._fit_metrics_cache is None
+        assert model._fit_metrics_cache_signature is None
+        assert model._summary_cache is None
+        fresh_metrics = model.metrics(X, y, sample_weight=sample_weight, offset=offset)
+        assert fresh_metrics is not captured["old_metrics"]
+        assert np.isfinite(fresh_metrics.log_likelihood)
+        assert model.summary() is not captured["old_summary"]
+
+    @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
+    @pytest.mark.parametrize("retain_fit_state", [True, False])
+    def test_final_profile_refit_failure_restores_retention_without_installing_result(
+        self, monkeypatch, fit_mode, retain_fit_state
+    ):
+        X, y, sample_weight, offset = _offset_spline_tweedie_data(n=24)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            retain_fit_state=retain_fit_state,
+            features={"x1": Spline(n_knots=5, penalty="ssp")},
+        )
+        result = _deterministic_profile_result()
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", lambda *args, **kwargs: result)
+        seen_retain_flags = []
+
+        def failing_final_fit(*args, **kwargs):
+            seen_retain_flags.append(model._retain_fit_state)
+            raise RuntimeError("final refit failed")
+
+        fit_name = "fit_reml" if fit_mode == "reml" else "fit"
+        monkeypatch.setattr(model, fit_name, failing_final_fit)
+
+        with pytest.raises(RuntimeError, match="final refit failed"):
+            model.estimate_p(
+                X,
+                y,
+                sample_weight=sample_weight,
+                offset=offset,
+                fit_mode=fit_mode,
+            )
+
+        assert seen_retain_flags == [True]
+        assert model._retain_fit_state is retain_fit_state
+        assert model._tweedie_profile_result is None
+
+    def test_pirls_phi_replacement_preserves_declared_and_dynamic_state(self):
+        beta = np.array([0.25, -0.5])
+        original = PIRLSResult(
+            beta=beta,
+            intercept=1.25,
+            n_iter=4,
+            deviance=3.5,
+            converged=True,
+            phi=0.75,
+            effective_df=2.0,
+            iteration_log=[],
+        )
+        original.scop_states = {"smooth": np.array([1.0, 2.0])}
+        original.future_metadata = np.array([3.0, 4.0])
+
+        replacement = profile_ops_module._replace_pirls_phi(original, 7.25)
+
+        assert replacement is not original
+        assert replacement.phi == pytest.approx(7.25)
+        assert original.phi == pytest.approx(0.75)
+        assert replacement.beta is beta
+        assert replacement.iteration_log is original.iteration_log
+        assert replacement.scop_states is original.scop_states
+        assert replacement.future_metadata is original.future_metadata
+
     def test_public_estimate_is_lazy_about_ci_and_profile_evaluations(self, monkeypatch):
         X, y, _ = _tweedie_data(n=48, seed=20260804)
         model = SuperGLM(
