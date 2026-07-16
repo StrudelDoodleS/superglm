@@ -3131,6 +3131,9 @@ def _clone_profile_model(model, X, sample_weight):
         set(),
         lambda2=copy.deepcopy(model.lambda2),
     )
+    profile_model._interaction_specs = copy.deepcopy(model._interaction_specs)
+    profile_model._interaction_order = list(model._interaction_order)
+    profile_model._pending_interactions = copy.deepcopy(model._pending_interactions)
     if model._splines is not None and not model._specs:
         # clone_without_features() normally clones resolved specs. Preserve
         # unresolved shorthand metadata and resolve it only on the scratch model.

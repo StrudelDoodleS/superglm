@@ -16,6 +16,7 @@ import superglm.profiling.tweedie as tweedie_module
 from superglm import SuperGLM
 from superglm.distributions import Tweedie as TweedieDistribution
 from superglm.distributions import clip_mu
+from superglm.features.interaction import TensorInteraction
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.links import LogLink, stabilize_eta
@@ -3031,6 +3032,257 @@ class TestEstimatePFitMode:
 
 class TestProfileFitParity:
     """Fixed-p profile fits must be identical to the ordinary fit regimes."""
+
+    @staticmethod
+    def _custom_tensor_problem():
+        rng = np.random.default_rng(20260717)
+        n = 40
+        t = np.linspace(0.0, 1.0, n)
+        x1 = np.linspace(-1.0, 1.0, n)
+        x2 = np.sin(4.0 * np.pi * t) + 0.35 * np.cos(9.0 * np.pi * t) + 0.1 * t
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        mu = np.exp(0.6 + 0.25 * x1 - 0.2 * x2 + 0.3 * x1 * x2)
+        y = generate_tweedie_cpg(n, mu=mu, phi=0.8, p=1.5, rng=rng)
+        return X, y
+
+    @staticmethod
+    def _custom_tensor_model():
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            spline_penalty=2.0,
+            features={
+                "x1": Spline(n_knots=5, penalty="ssp"),
+                "x2": Spline(n_knots=6, penalty="ssp"),
+            },
+        )
+        model._add_interaction(
+            "x1",
+            "x2",
+            name="custom_surface",
+            n_knots=(3, 4),
+            decompose=True,
+        )
+        return model
+
+    @staticmethod
+    def _group_signature(groups):
+        return [(group.name, group.end - group.start) for group in groups]
+
+    @staticmethod
+    def _fixed_p_metrics(model, y):
+        assert model._fit_mu is not None
+        mu = np.asarray(model._fit_mu, dtype=np.float64)
+        edf = float(model.result.effective_df)
+        phi = estimate_phi(y, mu, 1.5, df_resid=float(len(y)) - edf)
+        nll = -float(np.mean(tweedie_logpdf(y, mu, phi, 1.5)))
+        return edf, phi, nll
+
+    @classmethod
+    def _resolved_custom_tensor_model(cls):
+        X, y = cls._custom_tensor_problem()
+        model = cls._custom_tensor_model()
+        model._build_design_matrix(X, y, None, None)
+        return model, X
+
+    def test_profile_clone_preserves_resolved_custom_tensor_interaction(self):
+        model, X = self._resolved_custom_tensor_model()
+        original = model._interaction_specs["custom_surface"]
+
+        clone = tweedie_module._clone_profile_model(model, X, None)
+
+        assert clone._interaction_order == ["custom_surface"]
+        assert clone._pending_interactions == []
+        cloned = clone._interaction_specs["custom_surface"]
+        assert isinstance(cloned, TensorInteraction)
+        assert cloned.parent_names == ("x1", "x2")
+        assert cloned._n_knots == (3, 4)
+        assert cloned._decompose is True
+        assert (cloned._p1, cloned._p2) == (original._p1, original._p2)
+        assert cloned._marginal1 is not None
+        assert cloned._marginal2 is not None
+        assert cloned._R_inv is not None
+
+    def test_profile_clone_deep_copies_resolved_custom_tensor_state(self):
+        model, X = self._resolved_custom_tensor_model()
+        original = model._interaction_specs["custom_surface"]
+        assert original._marginal1 is not None
+        assert original._marginal2 is not None
+        assert original._R_inv is not None
+
+        clone = tweedie_module._clone_profile_model(model, X, None)
+
+        cloned = clone._interaction_specs["custom_surface"]
+        assert cloned is not original
+        assert cloned._marginal1 is not original._marginal1
+        assert cloned._marginal2 is not original._marginal2
+        assert cloned._R_inv is not original._R_inv
+        np.testing.assert_allclose(cloned._marginal1.basis, original._marginal1.basis)
+        np.testing.assert_allclose(cloned._marginal2.basis, original._marginal2.basis)
+        np.testing.assert_allclose(cloned._R_inv, original._R_inv)
+
+        original_basis = original._marginal1.basis.copy()
+        original_R_inv = original._R_inv.copy()
+        cloned._marginal1.basis[0, 0] += 1.0
+        cloned._R_inv[0, 0] += 1.0
+        cloned._n_knots = (8, 9)
+        cloned._decompose = False
+
+        np.testing.assert_array_equal(original._marginal1.basis, original_basis)
+        np.testing.assert_array_equal(original._R_inv, original_R_inv)
+        assert original._n_knots == (3, 4)
+        assert original._decompose is True
+
+    def test_fit_profile_custom_tensor_matches_independent_fixed_p_fit(self):
+        X, y = self._custom_tensor_problem()
+        independent = self._custom_tensor_model()
+        independent.fit(X, y)
+        independent_edf, independent_phi, independent_nll = self._fixed_p_metrics(
+            independent,
+            y,
+        )
+        expected_groups = [
+            ("x1", 8),
+            ("x2", 9),
+            ("custom_surface:bilinear", 1),
+            ("custom_surface:wiggly", 41),
+        ]
+        assert self._group_signature(independent._groups) == expected_groups
+
+        ctx = tweedie_module._build_profile_context(
+            self._custom_tensor_model(),
+            X,
+            y,
+            None,
+            None,
+            "pearson",
+            False,
+        )
+
+        assert self._group_signature(ctx.groups) == expected_groups
+        ctx.evaluate(1.5, source="one_point")
+        profiled = ctx.finalize(1.5, method="grid", converged=True)
+
+        assert profiled.search_trace.iloc[0]["edf"] == pytest.approx(
+            independent_edf,
+            rel=1e-10,
+            abs=1e-10,
+        )
+        assert profiled.phi_hat == pytest.approx(independent_phi, rel=1e-10, abs=1e-10)
+        assert profiled.nll == pytest.approx(independent_nll, rel=1e-10, abs=1e-10)
+
+    @pytest.mark.slow
+    def test_reml_profile_custom_tensor_matches_independent_fixed_p_fit(self):
+        X, y = self._custom_tensor_problem()
+        independent = self._custom_tensor_model()
+        independent.fit_reml(X, y)
+        independent_edf, independent_phi, independent_nll = self._fixed_p_metrics(
+            independent,
+            y,
+        )
+        expected_groups = [
+            ("x1", 8),
+            ("x2", 9),
+            ("custom_surface:bilinear", 1),
+            ("custom_surface:wiggly", 41),
+        ]
+        assert self._group_signature(independent._groups) == expected_groups
+
+        ctx = tweedie_module._build_profile_context_reml(
+            self._custom_tensor_model(),
+            X,
+            y,
+            None,
+            None,
+            "pearson",
+            False,
+        )
+
+        assert ctx.model._interaction_order == ["custom_surface"]
+        ctx.evaluate(1.5, source="one_point")
+        profiled = ctx.finalize(1.5, method="grid", converged=True)
+
+        assert self._group_signature(ctx.model._groups) == expected_groups
+        assert profiled.search_trace.iloc[0]["edf"] == pytest.approx(
+            independent_edf,
+            rel=1e-8,
+            abs=1e-8,
+        )
+        assert profiled.phi_hat == pytest.approx(independent_phi, rel=1e-8, abs=1e-8)
+        assert profiled.nll == pytest.approx(independent_nll, rel=1e-8, abs=1e-8)
+
+    @pytest.mark.parametrize(
+        ("fit_mode", "fit_method"),
+        [
+            pytest.param("fit", "fit", id="fit"),
+            pytest.param(
+                "fit_reml",
+                "fit_reml",
+                id="fit_reml",
+                marks=pytest.mark.slow,
+            ),
+        ],
+    )
+    def test_custom_tensor_profile_and_later_probe_leave_caller_unchanged(
+        self,
+        fit_mode,
+        fit_method,
+    ):
+        X, y = self._custom_tensor_problem()
+        model = self._custom_tensor_model()
+        getattr(model, fit_method)(X, y)
+        snapshot = _snapshot_fitted_model(model, X)
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            fit_mode=fit_mode,
+            method="grid",
+            grid=np.array([1.5]),
+            phi_method="pearson",
+        )
+        result._objective(1.6, source="later_probe")
+
+        _assert_fitted_model_unchanged(model, X, snapshot)
+
+    def test_profile_clone_keeps_shorthand_interaction_pending_until_build(self):
+        X, y = self._custom_tensor_problem()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            spline_penalty=2.0,
+            splines=["x1", "x2"],
+            n_knots=[5, 6],
+            interactions=[("x1", "x2")],
+        )
+        caller_state = pickle.dumps(model.__dict__, protocol=5)
+        assert model._specs == {}
+        assert model._interaction_specs == {}
+        assert model._pending_interactions == [("x1", "x2")]
+
+        clone = tweedie_module._clone_profile_model(model, X, None)
+
+        assert clone._interaction_specs == {}
+        assert clone._interaction_order == []
+        assert clone._pending_interactions == [("x1", "x2")]
+        assert list(clone._specs) == ["x1", "x2"]
+        clone._build_design_matrix(X, y, None, None)
+        assert clone._pending_interactions == []
+        assert clone._interaction_order == ["x1:x2"]
+        assert isinstance(clone._interaction_specs["x1:x2"], TensorInteraction)
+
+        profiled = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="grid",
+            grid=np.array([1.5]),
+            phi_method="pearson",
+        )
+
+        assert np.isfinite(profiled.nll)
+        assert pickle.dumps(model.__dict__, protocol=5) == caller_state
 
     def test_pirls_profile_forwards_model_controls_and_lambda2(self, monkeypatch):
         X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 12)})
