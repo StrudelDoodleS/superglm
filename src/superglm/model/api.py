@@ -685,12 +685,25 @@ class SuperGLM:
 
         Parameters
         ----------
+        X : DataFrame
+            Feature matrix.
+        y : array-like
+            Response variable.
+        sample_weight : array-like, optional
+            Finite, strictly positive EDM prior weights, not replication or frequency weights.
+            The Tweedie variance convention is
+            ``Var(Y_i | x_i) = phi * mu_i**p / w_i``.
+            Remove zero-weight rows consistently from ``X``, ``y``, ``sample_weight``,
+            and ``offset`` before calling this method.
+        offset : array-like, optional
+            Offset added to the linear predictor.
         fit_mode : {"fit", "reml", "inherit"}
             Fitting regime for each candidate ``p`` evaluation.
         phi_method : {"pearson", "mle"}
             How to profile out Tweedie dispersion ``phi`` at each candidate ``p``.
-            ``"pearson"`` uses the weighted Pearson moment estimate, while
-            ``"mle"`` runs a nested 1D likelihood optimization in ``phi``.
+            ``"mle"`` (default) runs a nested 1D likelihood optimization in
+            ``phi``. ``"pearson"`` is an explicit faster plug-in estimate and
+            does not support likelihood-ratio confidence intervals.
         method : {"brent", "grid", "grid_refine", "profile_opt"}
             Search strategy. ``"brent"`` (default) uses bounded scalar
             optimisation. ``"grid"`` does exhaustive grid search.

@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from superglm import SuperGLM
+from superglm.profiling.tweedie import estimate_tweedie_p
+
 _ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -46,3 +49,13 @@ def test_tweedie_notebook_removes_stale_pearson_default_claims():
     assert "REML selects spline smoothing penalties" in source
     assert "saddlepoint fallback" in source
     assert "near `p=1` and `p=2`" in source
+
+
+def test_tweedie_profile_api_docstrings_use_prior_weight_convention():
+    for function in (SuperGLM.estimate_p, estimate_tweedie_p):
+        docstring = function.__doc__ or ""
+        assert "EDM prior weights" in docstring
+        assert "Var(Y_i | x_i) = phi * mu_i**p / w_i" in docstring
+        assert "not replication or frequency weights" in docstring
+        assert "Remove zero-weight rows consistently" in docstring
+        assert "Frequency weights. Must be frequency weights" not in docstring

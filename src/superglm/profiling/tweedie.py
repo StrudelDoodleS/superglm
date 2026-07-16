@@ -3904,7 +3904,11 @@ def estimate_tweedie_p(
     y : array-like
         Response variable.
     sample_weight : array-like, optional
-        Frequency weights. Must be frequency weights, not variance weights.
+        Finite, strictly positive EDM prior weights, not replication or frequency weights.
+        The Tweedie variance convention is
+        ``Var(Y_i | x_i) = phi * mu_i**p / w_i``.
+        Remove zero-weight rows consistently from ``X``, ``y``, ``sample_weight``,
+        and ``offset`` before calling this function.
     offset : array-like, optional
         Offset added to the linear predictor.
     p_bounds : tuple
@@ -3918,7 +3922,9 @@ def estimate_tweedie_p(
     fit_mode : {"fit", "fit_reml"}
         Fitting regime for each candidate p evaluation.
     phi_method : {"pearson", "mle"}
-        How to profile out ``phi`` at each candidate ``p``.
+        How to profile out ``phi`` at each candidate ``p``. ``"mle"`` is the
+        default; ``"pearson"`` is an explicit faster plug-in that does not
+        support likelihood-ratio confidence intervals.
     method : {"brent", "grid", "grid_refine", "profile_opt", "joint_ml", "integrated"}
         Search strategy. ``"brent"`` (default) uses bounded scalar
         optimisation. ``"grid"`` does exhaustive grid search.
