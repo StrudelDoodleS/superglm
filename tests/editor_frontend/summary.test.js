@@ -51,6 +51,33 @@ function profileTraceNodes() {
   };
 }
 
+/** @param {string} tweedieMethod */
+function compactTweedieSummaryMarkup(tweedieMethod) {
+  const nodes = {
+    summaryStatus: { textContent: "" },
+    summaryNote: { textContent: "" },
+    summaryFrame: { innerHTML: "" }
+  };
+  renderSummary({
+    available: true,
+    label: "Summary",
+    html: "",
+    compact: {
+      model: {
+        family: "Tweedie",
+        link: "Log",
+        method: "PIRLS",
+        tweedie_p: 1.55,
+        tweedie_p_ci: null,
+        tweedie_p_ci_status: "not computed",
+        tweedie_p_method: tweedieMethod
+      },
+      rows: []
+    }
+  }, nodes);
+  return nodes.summaryFrame.innerHTML;
+}
+
 /** @param {string | undefined} ciStatus @param {string} [parameter] */
 async function completedProfileLegend(ciStatus, parameter = "tweedie_p") {
   const nodes = profileTraceNodes();
@@ -137,6 +164,19 @@ test("rendering unchanged summary markup preserves the existing table DOM", () =
 
   assert.equal(writes, 1);
 });
+
+for (const method of [
+  "Profile MLE (Brent)",
+  "Approximate profile (Brent; Pearson plug-in)",
+  "Profile MLE (Brent; density approximation)"
+]) {
+  test(`compact Tweedie summary renders the profile method: ${method}`, () => {
+    const markup = compactTweedieSummaryMarkup(method);
+
+    assert.match(markup, /Tweedie p method/);
+    assert.ok(markup.includes(method));
+  });
+}
 
 test("profile completion is accepted before the caller schedules new-revision evidence", async () => {
   /** @type {string[]} */

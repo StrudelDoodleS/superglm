@@ -606,6 +606,9 @@ function renderCompactSummary(payload) {
   ];
   if (model.tweedie_p !== null && model.tweedie_p !== undefined) {
     facts.push(["Tweedie p", model.tweedie_p]);
+    if (model.tweedie_p_method) {
+      facts.push(["Tweedie p method", model.tweedie_p_method]);
+    }
     const ci = Array.isArray(model.tweedie_p_ci) ? model.tweedie_p_ci : null;
     const ciText = model.tweedie_p_ci_status === "unavailable for Pearson plug-in"
       ? model.tweedie_p_ci_status
