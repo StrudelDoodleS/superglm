@@ -30,7 +30,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
-from scipy.optimize import minimize, minimize_scalar
+from scipy.optimize import brentq, minimize, minimize_scalar
 from scipy.special import expit, logit, wright_bessel
 
 from superglm._utils import _validate_strict_prior_weights
@@ -143,6 +143,7 @@ class _TweedieDensityEvaluation:
 
     logpdf: NDArray
     log_phi_score: NDArray | None
+    positive_saddlepoint_mask: NDArray
     diagnostics: _TweedieLogpdfDiagnostics
     score_valid: bool
 
@@ -400,6 +401,10 @@ def _evaluate_tweedie_density(
             log_phi_score[zero] = zero_logpdf
 
     n_saddlepoint = 0
+    positive_saddlepoint_mask = np.zeros(
+        prepared.positive_indices.size,
+        dtype=np.bool_,
+    )
     positive = prepared.positive_mask
     if np.any(positive):
         inverse_phi_positive = inverse_phi_eff[positive]
@@ -445,6 +450,7 @@ def _evaluate_tweedie_density(
         # This assignment is intentionally independent of np.any(exact): an
         # all-invalid Wright batch still needs every saddlepoint fallback.
         saddlepoint = ~exact
+        positive_saddlepoint_mask = saddlepoint
         n_saddlepoint = int(np.count_nonzero(saddlepoint))
         if np.any(saddlepoint):
             positive_logpdf[saddlepoint] = (
@@ -514,6 +520,10 @@ def _evaluate_tweedie_density(
         logpdf=_readonly_copy(logpdf, dtype=np.float64),
         log_phi_score=(
             _readonly_copy(log_phi_score, dtype=np.float64) if log_phi_score is not None else None
+        ),
+        positive_saddlepoint_mask=_readonly_copy(
+            positive_saddlepoint_mask,
+            dtype=np.bool_,
         ),
         diagnostics=diagnostics,
         score_valid=score_valid,
@@ -632,6 +642,1118 @@ def estimate_phi(
     return numer / denom
 
 
+_PHI_LOWER_BOUND = 1e-12
+_PHI_UPPER_BOUND = 1e12
+_LOG_PHI_LOWER_BOUND = float(np.log(_PHI_LOWER_BOUND))
+_LOG_PHI_UPPER_BOUND = float(np.log(_PHI_UPPER_BOUND))
+_PHI_SCORE_TOLERANCE = 1e-6
+_PHI_ROOT_PROBE = 1e-5
+_PHI_BOUNDED_XATOL = 1e-8
+_PHI_FALLBACK_GRID_STEP = 0.5
+_PHI_BRANCH_XTOL = 1e-12
+_PHI_MAX_ANALYTIC_BRANCH_EDGES = 64
+_PHI_MAX_NUMERIC_BRANCH_PROBES = 128
+_PHI_MAX_FALLBACK_REFINEMENTS = 8
+_PHI_NLL_ATOL = 1e-10
+_PHI_NLL_RTOL = 1e-10
+
+
+@dataclass(frozen=True)
+class _PhiProfileResult:
+    """Detailed result from profiling Tweedie dispersion at fixed ``(mu, p)``."""
+
+    phi: float
+    nll: float
+    converged: bool
+    objective_finite: bool
+    n_evaluations: int
+    n_score_evaluations: int
+    n_value_only_evaluations: int
+    n_fallback_evaluations: int
+    optimizer: str
+    score: float | None
+    used_fallback: bool
+    fallback_reason: str | None
+    branch_switch_detected: bool
+    lower_boundary: bool
+    upper_boundary: bool
+    diagnostics: _TweedieLogpdfDiagnostics
+    message: str
+
+
+@dataclass(frozen=True)
+class _PhiProfilePoint:
+    """One cached exact objective point, keyed by its exact float ``u``."""
+
+    u: float
+    phi: float
+    nll: float
+    objective_finite: bool
+    score: float | None
+    score_attempted: bool
+    score_valid: bool
+    positive_saddlepoint_mask: NDArray
+    branch_signature: tuple[int, bytes]
+    diagnostics: _TweedieLogpdfDiagnostics
+
+
+@dataclass(frozen=True)
+class _PhiCandidate:
+    """A finite cached point and the method that established it."""
+
+    point: _PhiProfilePoint
+    source: str
+    validated: bool = False
+
+
+@dataclass(frozen=True)
+class _PhiScoreSearchResult:
+    """Candidates and safeguards discovered by analytic-score searching."""
+
+    seed_candidates: tuple[_PhiCandidate, ...]
+    root_candidates: tuple[_PhiCandidate, ...]
+    fallback_reasons: tuple[str, ...]
+    branch_switch_detected: bool
+
+
+@dataclass(frozen=True)
+class _PhiBoundedResult:
+    """Outcome of the exact value-only safeguard."""
+
+    candidate: _PhiCandidate | None
+    success: bool
+    message: str
+    branch_switch_detected: bool = False
+
+
+class _PhiRootAbortError(RuntimeError):
+    """Abort a score root as soon as its analytic branch becomes untrustworthy."""
+
+
+class _PhiEvaluationCache:
+    """Cache exact value/score passes and account for actual density evaluations."""
+
+    def __init__(self, prepared: _PreparedTweedieDensity):
+        self.prepared = prepared
+        self.points: dict[float, _PhiProfilePoint] = {}
+        self.n_evaluations = 0
+        self.n_score_evaluations = 0
+        self.n_value_only_evaluations = 0
+        self.n_fallback_evaluations = 0
+
+    def evaluate(
+        self,
+        u: float,
+        *,
+        compute_score: bool,
+        fallback: bool = False,
+        phi_override: float | None = None,
+    ) -> _PhiProfilePoint:
+        key = float(u)
+        cached = self.points.get(key)
+        if cached is not None and (not compute_score or cached.score_attempted):
+            return cached
+
+        if phi_override is not None:
+            phi = float(phi_override)
+        elif key == _LOG_PHI_LOWER_BOUND:
+            phi = _PHI_LOWER_BOUND
+        elif key == _LOG_PHI_UPPER_BOUND:
+            phi = _PHI_UPPER_BOUND
+        else:
+            phi = float(np.exp(key))
+        evaluation = _evaluate_tweedie_density(
+            self.prepared,
+            phi,
+            compute_score=compute_score,
+        )
+        self.n_evaluations += 1
+        if compute_score:
+            self.n_score_evaluations += 1
+        else:
+            self.n_value_only_evaluations += 1
+        if fallback:
+            self.n_fallback_evaluations += 1
+
+        with np.errstate(all="ignore"):
+            nll = -float(np.mean(evaluation.logpdf))
+        objective_finite = bool(np.isfinite(nll))
+        score: float | None = None
+        score_valid = False
+        if compute_score and evaluation.score_valid and evaluation.log_phi_score is not None:
+            with np.errstate(all="ignore"):
+                candidate_score = float(np.mean(evaluation.log_phi_score))
+            if np.isfinite(candidate_score):
+                score = candidate_score
+                score_valid = True
+
+        mask = _readonly_copy(evaluation.positive_saddlepoint_mask, dtype=np.bool_)
+        point = _PhiProfilePoint(
+            u=key,
+            phi=phi,
+            nll=nll if objective_finite else np.inf,
+            objective_finite=objective_finite,
+            score=score,
+            score_attempted=compute_score,
+            score_valid=score_valid,
+            positive_saddlepoint_mask=mask,
+            branch_signature=(mask.size, mask.tobytes()),
+            diagnostics=evaluation.diagnostics,
+        )
+        self.points[key] = point
+        return point
+
+
+def _phi_nll_no_worse(candidate: float, reference: float) -> bool:
+    """Return whether an exact NLL is no worse within the profiling tolerance."""
+    tolerance = _PHI_NLL_ATOL + _PHI_NLL_RTOL * abs(reference)
+    return bool(candidate <= reference + tolerance)
+
+
+def _phi_profile_denominator(
+    prepared: _PreparedTweedieDensity,
+    df_resid: float | None,
+) -> float:
+    """Validate and return the observation-count denominator used for seeds."""
+    if df_resid is None:
+        return float(len(prepared.y))
+    df_array = np.asarray(df_resid)
+    if df_array.ndim != 0:
+        raise ValueError("df_resid must be finite and strictly positive")
+    try:
+        denominator = float(df_array)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("df_resid must be finite and strictly positive") from exc
+    if not np.isfinite(denominator) or denominator <= 0.0:
+        raise ValueError("df_resid must be finite and strictly positive")
+    return denominator
+
+
+def _pearson_phi_from_prepared(
+    prepared: _PreparedTweedieDensity,
+    denominator: float,
+) -> float:
+    """Compute the Pearson dispersion seed from already validated arrays."""
+    with np.errstate(all="ignore"):
+        numerator = float(
+            np.sum(
+                prepared.weights
+                * (prepared.y - prepared.mu) ** 2
+                / np.power(np.maximum(prepared.mu, 1e-10), prepared.p)
+            )
+        )
+    return numerator / denominator
+
+
+def _phi_profile_seeds(
+    prepared: _PreparedTweedieDensity,
+    denominator: float,
+    pearson_phi: float,
+    phi_start: float | None,
+) -> list[tuple[float, str]]:
+    """Build distinct clipped warm, Pearson, and stable data seeds in priority order."""
+    seeds: list[tuple[float, str]] = []
+
+    def add(candidate_phi: Any, source: str) -> bool:
+        candidate_array = np.asarray(candidate_phi)
+        if candidate_array.ndim != 0:
+            return False
+        try:
+            candidate = float(candidate_array)
+        except (TypeError, ValueError):
+            return False
+        if not np.isfinite(candidate) or candidate <= 0.0:
+            return False
+        u = float(np.clip(np.log(candidate), _LOG_PHI_LOWER_BOUND, _LOG_PHI_UPPER_BOUND))
+        if any(abs(u - existing_u) <= _PHI_BOUNDED_XATOL for existing_u, _ in seeds):
+            return False
+        seeds.append((u, source))
+        return True
+
+    add(phi_start, "warm start")
+    pearson_usable = add(pearson_phi, "Pearson seed")
+    if not pearson_usable:
+        deviance = np.empty(len(prepared.y), dtype=np.float64)
+        deviance[prepared.zero_mask] = 2.0 * prepared.zero_rate_numerator[prepared.zero_mask]
+        deviance[prepared.positive_mask] = prepared.positive_saddlepoint_deviance
+        with np.errstate(all="ignore"):
+            data_phi = float(np.sum(prepared.weights * deviance)) / denominator
+        add(data_phi, "mean-deviance seed")
+    if not seeds:
+        add(1.0, "unit seed")
+    return seeds
+
+
+def _record_phi_fallback(reasons: list[str], reason: str) -> None:
+    """Append a fallback diagnosis once while retaining discovery order."""
+    if reason not in reasons:
+        reasons.append(reason)
+
+
+def _better_phi_branch_edge_probes(
+    cache: _PhiEvaluationCache,
+    root_candidates: list[_PhiCandidate],
+) -> tuple[list[_PhiCandidate], bool]:
+    """Probe the nearest analytic branch edge on each side of accepted roots."""
+    prepared = cache.prepared
+    with np.errstate(all="ignore"):
+        thresholds = (prepared.positive_log_t_phi_independent - prepared.log_t_arg_limit) / (
+            prepared.a + 1.0
+        )
+    thresholds = thresholds[
+        np.isfinite(thresholds)
+        & (thresholds > _LOG_PHI_LOWER_BOUND + _PHI_BRANCH_XTOL)
+        & (thresholds < _LOG_PHI_UPPER_BOUND - _PHI_BRANCH_XTOL)
+    ]
+    if thresholds.size == 0:
+        return [], False
+
+    selected_thresholds: set[float] = set()
+    for candidate in root_candidates:
+        below = thresholds[thresholds < candidate.point.u]
+        above = thresholds[thresholds > candidate.point.u]
+        if below.size:
+            selected_thresholds.add(float(np.max(below)))
+        if above.size:
+            selected_thresholds.add(float(np.min(above)))
+
+    best_root_nll = min(candidate.point.nll for candidate in root_candidates)
+    better_candidates: list[_PhiCandidate] = []
+    branch_switch_detected = False
+    for threshold in sorted(selected_thresholds):
+        left = cache.evaluate(
+            threshold - _PHI_BRANCH_XTOL,
+            compute_score=False,
+        )
+        right = cache.evaluate(
+            threshold + _PHI_BRANCH_XTOL,
+            compute_score=False,
+        )
+        finite_sides = [point for point in (left, right) if point.objective_finite]
+        if not finite_sides:
+            continue
+        better_side = min(finite_sides, key=lambda point: point.nll)
+        if _phi_nll_no_worse(best_root_nll, better_side.nll):
+            continue
+        better_candidates.append(_PhiCandidate(better_side, "seed"))
+        branch_switch_detected |= left.branch_signature != right.branch_signature
+    return better_candidates, branch_switch_detected
+
+
+def _search_phi_score_candidates(
+    cache: _PhiEvaluationCache,
+    seeds: list[tuple[float, str]],
+) -> _PhiScoreSearchResult:
+    """Bracket, solve, and validate every trustworthy score minimum from the seeds."""
+    fallback_reasons: list[str] = []
+    branch_switch_detected = False
+    seed_candidates: list[_PhiCandidate] = []
+    seed_points: list[_PhiProfilePoint] = []
+    brackets: list[tuple[_PhiProfilePoint, _PhiProfilePoint]] = []
+
+    def add_bracket(left: _PhiProfilePoint, right: _PhiProfilePoint) -> None:
+        key = (left.u, right.u)
+        if not any(
+            (existing_left.u, existing_right.u) == key for existing_left, existing_right in brackets
+        ):
+            brackets.append((left, right))
+
+    for seed_u, _ in seeds:
+        seed_point = cache.evaluate(seed_u, compute_score=True)
+        seed_points.append(seed_point)
+        if seed_point.objective_finite:
+            seed_candidates.append(_PhiCandidate(seed_point, "seed"))
+        if not seed_point.score_valid or seed_point.score is None:
+            _record_phi_fallback(
+                fallback_reasons,
+                "analytic derivative unavailable at a profiling seed",
+            )
+            continue
+
+        found_local_bracket = False
+        if (
+            abs(seed_point.score) <= _PHI_SCORE_TOLERANCE
+            and seed_u - _PHI_ROOT_PROBE > _LOG_PHI_LOWER_BOUND
+            and seed_u + _PHI_ROOT_PROBE < _LOG_PHI_UPPER_BOUND
+        ):
+            left_probe = cache.evaluate(seed_u - _PHI_ROOT_PROBE, compute_score=True)
+            right_probe = cache.evaluate(seed_u + _PHI_ROOT_PROBE, compute_score=True)
+            if (
+                seed_point.objective_finite
+                and left_probe.objective_finite
+                and right_probe.objective_finite
+                and left_probe.score_valid
+                and right_probe.score_valid
+                and left_probe.branch_signature
+                == seed_point.branch_signature
+                == right_probe.branch_signature
+                and left_probe.score is not None
+                and right_probe.score is not None
+                and left_probe.score < 0.0 < right_probe.score
+            ):
+                add_bracket(left_probe, right_probe)
+                found_local_bracket = True
+            elif (
+                left_probe.branch_signature != seed_point.branch_signature
+                or right_probe.branch_signature != seed_point.branch_signature
+            ):
+                branch_switch_detected = True
+                _record_phi_fallback(
+                    fallback_reasons,
+                    "density branch switched around a near-zero score",
+                )
+            else:
+                _record_phi_fallback(
+                    fallback_reasons,
+                    "near-zero score failed local minimum orientation",
+                )
+
+        if found_local_bracket:
+            continue
+
+        direction = 1.0 if seed_point.score < 0.0 else -1.0
+        previous = seed_point
+        distance = 1.0
+        while True:
+            target_u = float(
+                np.clip(
+                    seed_u + direction * distance,
+                    _LOG_PHI_LOWER_BOUND,
+                    _LOG_PHI_UPPER_BOUND,
+                )
+            )
+            if target_u == previous.u:
+                break
+            current = cache.evaluate(target_u, compute_score=True)
+            if not current.score_valid or current.score is None:
+                _record_phi_fallback(
+                    fallback_reasons,
+                    "analytic derivative unavailable during score bracketing",
+                )
+                break
+            if not previous.objective_finite or not current.objective_finite:
+                _record_phi_fallback(
+                    fallback_reasons,
+                    "exact objective became non-finite during score bracketing",
+                )
+                break
+            left, right = (previous, current) if previous.u < current.u else (current, previous)
+            if left.branch_signature != right.branch_signature:
+                branch_switch_detected = True
+                _record_phi_fallback(
+                    fallback_reasons,
+                    "density branch switched during score bracketing",
+                )
+                break
+            if left.score is not None and right.score is not None:
+                if left.score < 0.0 < right.score:
+                    add_bracket(left, right)
+                    break
+                if left.score > 0.0 > right.score:
+                    _record_phi_fallback(
+                        fallback_reasons,
+                        "score bracket has maximum rather than minimum orientation",
+                    )
+                    break
+            previous = current
+            if target_u in {_LOG_PHI_LOWER_BOUND, _LOG_PHI_UPPER_BOUND}:
+                break
+            distance *= 2.0
+
+    if not brackets:
+        _record_phi_fallback(fallback_reasons, "no trustworthy minimum score bracket")
+
+    finite_seed_points = [point for point in seed_points if point.objective_finite]
+    best_seed_nll = min(point.nll for point in finite_seed_points) if finite_seed_points else np.inf
+    root_candidates: list[_PhiCandidate] = []
+
+    for left, right in brackets:
+        expected_signature = left.branch_signature
+
+        def score_callback(u: float) -> float:
+            nonlocal branch_switch_detected
+            point = cache.evaluate(float(u), compute_score=True)
+            if not point.objective_finite:
+                raise _PhiRootAbortError("exact objective became non-finite inside brentq")
+            if not point.score_valid or point.score is None:
+                raise _PhiRootAbortError("analytic derivative became unavailable inside brentq")
+            if point.branch_signature != expected_signature:
+                branch_switch_detected = True
+                raise _PhiRootAbortError("density branch switched inside brentq")
+            return point.score
+
+        try:
+            root_u, root_info = brentq(
+                score_callback,
+                left.u,
+                right.u,
+                full_output=True,
+                disp=False,
+                xtol=1e-10,
+                rtol=8.0 * np.finfo(np.float64).eps,
+                maxiter=100,
+            )
+        except _PhiRootAbortError as exc:
+            _record_phi_fallback(fallback_reasons, str(exc))
+            continue
+        except (RuntimeError, ValueError) as exc:
+            _record_phi_fallback(fallback_reasons, f"brentq failed: {exc}")
+            continue
+
+        root_point = cache.evaluate(float(root_u), compute_score=True)
+        valid_root = bool(root_info.converged)
+        valid_root &= root_point.objective_finite
+        valid_root &= root_point.score_valid and root_point.score is not None
+        valid_root &= root_point.branch_signature == expected_signature
+        valid_root &= root_point.score is not None and abs(root_point.score) <= _PHI_SCORE_TOLERANCE
+        valid_root &= _phi_nll_no_worse(root_point.nll, left.nll)
+        valid_root &= _phi_nll_no_worse(root_point.nll, right.nll)
+        if np.isfinite(best_seed_nll):
+            valid_root &= _phi_nll_no_worse(root_point.nll, best_seed_nll)
+
+        if valid_root:
+            probe_left_u = root_point.u - _PHI_ROOT_PROBE
+            probe_right_u = root_point.u + _PHI_ROOT_PROBE
+            if probe_left_u <= _LOG_PHI_LOWER_BOUND or probe_right_u >= _LOG_PHI_UPPER_BOUND:
+                valid_root = False
+            else:
+                probe_left = cache.evaluate(probe_left_u, compute_score=True)
+                probe_right = cache.evaluate(probe_right_u, compute_score=True)
+                if (
+                    probe_left.branch_signature != expected_signature
+                    or probe_right.branch_signature != expected_signature
+                ):
+                    branch_switch_detected = True
+                    valid_root = False
+                valid_root &= probe_left.score_valid and probe_right.score_valid
+                valid_root &= probe_left.score is not None and probe_right.score is not None
+                valid_root &= (
+                    probe_left.score is not None
+                    and probe_right.score is not None
+                    and probe_left.score < 0.0 < probe_right.score
+                )
+                valid_root &= probe_left.objective_finite and probe_right.objective_finite
+                valid_root &= _phi_nll_no_worse(root_point.nll, probe_left.nll)
+                valid_root &= _phi_nll_no_worse(root_point.nll, probe_right.nll)
+
+        if not valid_root:
+            _record_phi_fallback(
+                fallback_reasons,
+                "score root failed exact local-minimum validation",
+            )
+            continue
+        if not any(abs(root_point.u - candidate.point.u) <= 1e-8 for candidate in root_candidates):
+            root_candidates.append(_PhiCandidate(root_point, "brentq", validated=True))
+
+    if len(root_candidates) > 1:
+        _record_phi_fallback(
+            fallback_reasons,
+            "multiple distinct score minima require exact candidate comparison",
+        )
+    if root_candidates and not fallback_reasons:
+        edge_candidates, edge_switch = _better_phi_branch_edge_probes(
+            cache,
+            root_candidates,
+        )
+        if edge_candidates:
+            seed_candidates.extend(edge_candidates)
+            branch_switch_detected |= edge_switch
+            _record_phi_fallback(
+                fallback_reasons,
+                "sparse branch-edge value probe improves on the analytic score root",
+            )
+    return _PhiScoreSearchResult(
+        seed_candidates=tuple(seed_candidates),
+        root_candidates=tuple(root_candidates),
+        fallback_reasons=tuple(fallback_reasons),
+        branch_switch_detected=branch_switch_detected,
+    )
+
+
+def _run_phi_bounded_interval(
+    cache: _PhiEvaluationCache,
+    bounds: tuple[float, float],
+) -> _PhiBoundedResult:
+    """Run one exact bounded refinement and validate SciPy's returned value."""
+
+    def value_objective(u: float) -> float:
+        point = cache.evaluate(float(u), compute_score=False, fallback=True)
+        return point.nll if point.objective_finite else np.inf
+
+    try:
+        bounded_result = minimize_scalar(
+            value_objective,
+            bounds=bounds,
+            method="bounded",
+            options={"xatol": _PHI_BOUNDED_XATOL, "maxiter": 200},
+        )
+        message = str(getattr(bounded_result, "message", ""))
+        bounded_u = float(bounded_result.x)
+        in_bounds = bool(np.isfinite(bounded_u) and bounds[0] <= bounded_u <= bounds[1])
+        candidate = None
+        fun_consistent = False
+        if in_bounds:
+            point = cache.evaluate(
+                bounded_u,
+                compute_score=False,
+                fallback=True,
+            )
+            fun_consistent = bool(
+                point.objective_finite
+                and np.isfinite(float(bounded_result.fun))
+                and np.isclose(
+                    point.nll,
+                    float(bounded_result.fun),
+                    rtol=_PHI_NLL_RTOL,
+                    atol=_PHI_NLL_ATOL,
+                )
+            )
+            if fun_consistent:
+                candidate = _PhiCandidate(point, "bounded", validated=True)
+        success = bool(getattr(bounded_result, "success", False) and in_bounds and fun_consistent)
+        return _PhiBoundedResult(candidate=candidate, success=success, message=message)
+    except (RuntimeError, ValueError, FloatingPointError, OverflowError) as exc:
+        return _PhiBoundedResult(candidate=None, success=False, message=str(exc))
+
+
+def _phi_analytic_branch_thresholds(prepared: _PreparedTweedieDensity) -> NDArray:
+    """Return each positive observation's known exact/saddle log-phi threshold."""
+    with np.errstate(all="ignore"):
+        thresholds = (prepared.positive_log_t_phi_independent - prepared.log_t_arg_limit) / (
+            prepared.a + 1.0
+        )
+    return np.asarray(thresholds, dtype=np.float64)
+
+
+def _select_phi_branch_thresholds(
+    thresholds_by_observation: NDArray,
+    anchors: list[float],
+) -> tuple[NDArray, bool, int]:
+    """Select a bounded, range-covering set of known analytic branch edges."""
+    in_range = thresholds_by_observation[
+        np.isfinite(thresholds_by_observation)
+        & (thresholds_by_observation > _LOG_PHI_LOWER_BOUND + _PHI_BRANCH_XTOL)
+        & (thresholds_by_observation < _LOG_PHI_UPPER_BOUND - _PHI_BRANCH_XTOL)
+    ]
+    unique = np.unique(in_range)
+    n_unique = int(unique.size)
+    if n_unique <= _PHI_MAX_ANALYTIC_BRANCH_EDGES:
+        return unique, True, n_unique
+
+    n_cover = _PHI_MAX_ANALYTIC_BRANCH_EDGES // 2
+    cover_indices = np.unique(np.rint(np.linspace(0, n_unique - 1, n_cover)).astype(np.intp))
+    selected_indices = set(int(index) for index in cover_indices)
+    finite_anchors = np.asarray([anchor for anchor in anchors if np.isfinite(anchor)])
+    if finite_anchors.size:
+        distances = np.min(np.abs(unique[:, None] - finite_anchors[None, :]), axis=1)
+        priority = np.argsort(distances, kind="stable")
+    else:
+        priority = np.arange(n_unique, dtype=np.intp)
+    for index in priority:
+        selected_indices.add(int(index))
+        if len(selected_indices) >= _PHI_MAX_ANALYTIC_BRANCH_EDGES:
+            break
+    selected = unique[np.asarray(sorted(selected_indices), dtype=np.intp)]
+    return selected, False, n_unique
+
+
+def _phi_branch_edge_points(
+    cache: _PhiEvaluationCache,
+    thresholds: NDArray,
+) -> list[tuple[_PhiProfilePoint, _PhiProfilePoint]]:
+    """Evaluate controlled exact points immediately around analytic branch edges."""
+    sides: list[tuple[_PhiProfilePoint, _PhiProfilePoint]] = []
+    for threshold in thresholds:
+        scale = max(1.0, abs(float(threshold)))
+        delta = max(_PHI_BRANCH_XTOL, 16.0 * np.finfo(np.float64).eps * scale)
+        left_u = float(max(_LOG_PHI_LOWER_BOUND, float(threshold) - delta))
+        right_u = float(min(_LOG_PHI_UPPER_BOUND, float(threshold) + delta))
+        left = cache.evaluate(left_u, compute_score=False, fallback=True)
+        right = cache.evaluate(right_u, compute_score=False, fallback=True)
+        sides.append((left, right))
+    return sides
+
+
+def _phi_branch_change_is_unexplained(
+    left: _PhiProfilePoint,
+    right: _PhiProfilePoint,
+    thresholds_by_observation: NDArray,
+) -> bool:
+    """Return whether an observed mask change is not explained by ``t_arg_limit``."""
+    changed = left.positive_saddlepoint_mask != right.positive_saddlepoint_mask
+    if not np.any(changed):
+        return False
+    changed_thresholds = thresholds_by_observation[changed]
+    explained = (
+        np.isfinite(changed_thresholds)
+        & (changed_thresholds >= left.u - _PHI_BRANCH_XTOL)
+        & (changed_thresholds <= right.u + _PHI_BRANCH_XTOL)
+    )
+    return bool(np.any(~explained))
+
+
+def _locate_unexplained_phi_branch_sides(
+    cache: _PhiEvaluationCache,
+    left: _PhiProfilePoint,
+    right: _PhiProfilePoint,
+    thresholds_by_observation: NDArray,
+    remaining_probes: int,
+) -> tuple[list[tuple[_PhiProfilePoint, _PhiProfilePoint]], int, bool]:
+    """Boundedly bisect numerical Wright-validity transitions not known analytically."""
+    pending = [(left, right)]
+    sides: list[tuple[_PhiProfilePoint, _PhiProfilePoint]] = []
+    completed = True
+    while pending:
+        interval_left, interval_right = pending.pop()
+        if not _phi_branch_change_is_unexplained(
+            interval_left,
+            interval_right,
+            thresholds_by_observation,
+        ):
+            continue
+        if interval_right.u - interval_left.u <= _PHI_BRANCH_XTOL:
+            sides.append((interval_left, interval_right))
+            continue
+        if remaining_probes <= 0:
+            completed = False
+            continue
+        midpoint_u = float(0.5 * (interval_left.u + interval_right.u))
+        if midpoint_u in {interval_left.u, interval_right.u}:
+            sides.append((interval_left, interval_right))
+            continue
+        midpoint = cache.evaluate(midpoint_u, compute_score=False, fallback=True)
+        remaining_probes -= 1
+        pending.append((midpoint, interval_right))
+        pending.append((interval_left, midpoint))
+    return sides, remaining_probes, completed
+
+
+def _finite_phi_fallback_segments(
+    points: list[_PhiProfilePoint],
+) -> list[list[_PhiProfilePoint]]:
+    """Partition ordered finite points by full density-branch signature."""
+    segments: list[list[_PhiProfilePoint]] = []
+    current: list[_PhiProfilePoint] = []
+    for point in points:
+        if not point.objective_finite:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        if current and point.branch_signature != current[-1].branch_signature:
+            segments.append(current)
+            current = []
+        current.append(point)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _run_phi_bounded_fallback(
+    cache: _PhiEvaluationCache,
+    *,
+    required: bool,
+) -> _PhiBoundedResult:
+    """Globally safeguard fallback profiles with a branch-partitioned exact scan."""
+    if not required:
+        return _PhiBoundedResult(candidate=None, success=True, message="")
+
+    full_range = _run_phi_bounded_interval(
+        cache,
+        (_LOG_PHI_LOWER_BOUND, _LOG_PHI_UPPER_BOUND),
+    )
+    n_intervals = int(
+        np.ceil((_LOG_PHI_UPPER_BOUND - _LOG_PHI_LOWER_BOUND) / _PHI_FALLBACK_GRID_STEP)
+    )
+    grid = np.linspace(
+        _LOG_PHI_LOWER_BOUND,
+        _LOG_PHI_UPPER_BOUND,
+        n_intervals + 1,
+    )
+    grid_points = [cache.evaluate(float(u), compute_score=False, fallback=True) for u in grid]
+    all_points = {point.u: point for point in grid_points}
+    finite_grid_points = [point for point in grid_points if point.objective_finite]
+    anchors = [point.u for point in finite_grid_points]
+    if full_range.candidate is not None:
+        anchors.append(full_range.candidate.point.u)
+    if finite_grid_points:
+        anchors.append(min(finite_grid_points, key=lambda point: point.nll).u)
+
+    thresholds_by_observation = _phi_analytic_branch_thresholds(cache.prepared)
+    selected_thresholds, analytic_scan_completed, n_analytic_thresholds = (
+        _select_phi_branch_thresholds(thresholds_by_observation, anchors)
+    )
+    branch_switch_detected = any(
+        left.branch_signature != right.branch_signature
+        for left, right in zip(grid_points[:-1], grid_points[1:])
+    )
+    for side_left, side_right in _phi_branch_edge_points(cache, selected_thresholds):
+        all_points[side_left.u] = side_left
+        all_points[side_right.u] = side_right
+        branch_switch_detected |= side_left.branch_signature != side_right.branch_signature
+
+    remaining_numeric_probes = _PHI_MAX_NUMERIC_BRANCH_PROBES
+    numeric_scan_completed = True
+    initially_ordered = sorted(all_points.values(), key=lambda point: point.u)
+    for left, right in zip(initially_ordered[:-1], initially_ordered[1:]):
+        if left.branch_signature == right.branch_signature:
+            continue
+        branch_switch_detected = True
+        sides, remaining_numeric_probes, interval_completed = _locate_unexplained_phi_branch_sides(
+            cache,
+            left,
+            right,
+            thresholds_by_observation,
+            remaining_numeric_probes,
+        )
+        numeric_scan_completed &= interval_completed
+        for side_left, side_right in sides:
+            all_points[side_left.u] = side_left
+            all_points[side_right.u] = side_right
+
+    ordered_points = sorted(all_points.values(), key=lambda point: point.u)
+    segments = _finite_phi_fallback_segments(ordered_points)
+    candidates = [
+        _PhiCandidate(point, "bounded", validated=True)
+        for point in ordered_points
+        if point.objective_finite
+    ]
+    if full_range.candidate is not None:
+        candidates.append(full_range.candidate)
+
+    refinement_priorities: dict[tuple[float, float], float] = {}
+
+    def add_refinement(bounds: tuple[float, float], priority: float) -> None:
+        if bounds[1] - bounds[0] <= _PHI_BOUNDED_XATOL:
+            return
+        existing = refinement_priorities.get(bounds, np.inf)
+        refinement_priorities[bounds] = min(existing, priority)
+
+    for segment in segments:
+        if len(segment) < 2:
+            continue
+        segment_bounds_before = len(refinement_priorities)
+        for index, point in enumerate(segment):
+            left_nll = segment[index - 1].nll if index > 0 else np.inf
+            right_nll = segment[index + 1].nll if index + 1 < len(segment) else np.inf
+            if point.nll <= left_nll and point.nll <= right_nll:
+                lower = segment[max(0, index - 1)].u
+                upper = segment[min(len(segment) - 1, index + 1)].u
+                add_refinement((lower, upper), point.nll)
+        if len(refinement_priorities) == segment_bounds_before:
+            lower, upper = segment[0].u, segment[-1].u
+            add_refinement((lower, upper), min(point.nll for point in segment))
+
+    ordered_refinements = sorted(
+        refinement_priorities,
+        key=lambda bounds: (refinement_priorities[bounds], bounds),
+    )
+    refinement_scan_completed = len(ordered_refinements) <= _PHI_MAX_FALLBACK_REFINEMENTS
+    selected_refinements = ordered_refinements[:_PHI_MAX_FALLBACK_REFINEMENTS]
+
+    refinement_results = [
+        _run_phi_bounded_interval(cache, bounds) for bounds in selected_refinements
+    ]
+    for refinement in refinement_results:
+        if refinement.candidate is not None:
+            candidates.append(refinement.candidate)
+
+    finite_grid_indices = [
+        index for index, point in enumerate(grid_points) if point.objective_finite
+    ]
+    finite_gap = False
+    if finite_grid_indices:
+        first_finite = finite_grid_indices[0]
+        last_finite = finite_grid_indices[-1]
+        finite_gap = any(
+            not point.objective_finite for point in grid_points[first_finite : last_finite + 1]
+        )
+    scan_completed = bool(
+        candidates
+        and full_range.success
+        and all(result.success for result in refinement_results)
+        and not finite_gap
+        and analytic_scan_completed
+        and numeric_scan_completed
+        and refinement_scan_completed
+    )
+    best_candidate = (
+        min(candidates, key=lambda candidate: candidate.point.nll) if candidates else None
+    )
+    messages = [message for message in [full_range.message] if message]
+    failed_messages = {
+        result.message for result in refinement_results if not result.success and result.message
+    }
+    messages.extend(sorted(failed_messages))
+    messages.append(
+        f"Global fallback scan covered {len(ordered_points)} exact points "
+        f"in {len(segments)} finite branch segments; probed "
+        f"{len(selected_thresholds)} of {n_analytic_thresholds} analytic branch edges "
+        f"and refined {len(selected_refinements)} of {len(ordered_refinements)} basins."
+    )
+    return _PhiBoundedResult(
+        candidate=best_candidate,
+        success=scan_completed,
+        message=" ".join(messages),
+        branch_switch_detected=branch_switch_detected,
+    )
+
+
+def _finalize_phi_mle_result(
+    cache: _PhiEvaluationCache,
+    score_search: _PhiScoreSearchResult,
+    bounded: _PhiBoundedResult,
+    default_diagnostics: _TweedieLogpdfDiagnostics,
+) -> _PhiProfileResult:
+    """Compare exact candidates and propagate convergence and boundary diagnostics."""
+    fallback_reasons = list(score_search.fallback_reasons)
+    branch_switch_detected = bool(
+        score_search.branch_switch_detected or bounded.branch_switch_detected
+    )
+    if bounded.branch_switch_detected and not score_search.branch_switch_detected:
+        _record_phi_fallback(
+            fallback_reasons,
+            "density branch switched during value-only fallback scan",
+        )
+    need_fallback = bool(fallback_reasons)
+    lower_point = cache.evaluate(_LOG_PHI_LOWER_BOUND, compute_score=False)
+    upper_point = cache.evaluate(_LOG_PHI_UPPER_BOUND, compute_score=False)
+    candidates = [*score_search.seed_candidates, *score_search.root_candidates]
+    if bounded.candidate is not None:
+        candidates.append(bounded.candidate)
+    if lower_point.objective_finite:
+        candidates.append(_PhiCandidate(lower_point, "lower boundary", validated=True))
+    if upper_point.objective_finite:
+        candidates.append(_PhiCandidate(upper_point, "upper boundary", validated=True))
+    finite_candidates = [candidate for candidate in candidates if candidate.point.objective_finite]
+
+    if not finite_candidates:
+        diagnostics = next(
+            (point.diagnostics for point in cache.points.values()),
+            default_diagnostics,
+        )
+        return _PhiProfileResult(
+            phi=np.nan,
+            nll=np.inf,
+            converged=False,
+            objective_finite=False,
+            n_evaluations=cache.n_evaluations,
+            n_score_evaluations=cache.n_score_evaluations,
+            n_value_only_evaluations=cache.n_value_only_evaluations,
+            n_fallback_evaluations=cache.n_fallback_evaluations,
+            optimizer="bounded" if need_fallback else "brentq",
+            score=None,
+            used_fallback=need_fallback,
+            fallback_reason="; ".join(fallback_reasons) if fallback_reasons else None,
+            branch_switch_detected=branch_switch_detected,
+            lower_boundary=False,
+            upper_boundary=False,
+            diagnostics=diagnostics,
+            message=bounded.message or "No finite exact phi-profile objective was found.",
+        )
+
+    raw_best = min(finite_candidates, key=lambda candidate: candidate.point.nll)
+    minimum_nll = raw_best.point.nll
+    equivalent_best = [
+        candidate
+        for candidate in finite_candidates
+        if _phi_nll_no_worse(candidate.point.nll, minimum_nll)
+    ]
+    source_priority = {
+        "brentq": 0,
+        "bounded": 1,
+        "seed": 2,
+    }
+    if raw_best.source in {"lower boundary", "upper boundary"}:
+        best = raw_best
+    else:
+        equivalent_interior = [
+            candidate
+            for candidate in equivalent_best
+            if candidate.source not in {"lower boundary", "upper boundary"}
+        ]
+        best = min(
+            equivalent_interior,
+            key=lambda candidate: (source_priority[candidate.source], candidate.point.nll),
+        )
+    if (
+        best.point.u - _LOG_PHI_LOWER_BOUND <= 4.0 * _PHI_BOUNDED_XATOL
+        and lower_point.objective_finite
+        and _phi_nll_no_worse(lower_point.nll, best.point.nll)
+    ):
+        best = _PhiCandidate(lower_point, "lower boundary", validated=True)
+    elif (
+        _LOG_PHI_UPPER_BOUND - best.point.u <= 4.0 * _PHI_BOUNDED_XATOL
+        and upper_point.objective_finite
+        and _phi_nll_no_worse(upper_point.nll, best.point.nll)
+    ):
+        best = _PhiCandidate(upper_point, "upper boundary", validated=True)
+
+    lower_boundary = best.point.u == _LOG_PHI_LOWER_BOUND
+    upper_boundary = best.point.u == _LOG_PHI_UPPER_BOUND
+    final_point = best.point
+    boundary_kkt = not (lower_boundary or upper_boundary)
+    if lower_boundary or upper_boundary:
+        final_point = cache.evaluate(final_point.u, compute_score=True)
+        if final_point.score_valid and final_point.score is not None:
+            if lower_boundary:
+                boundary_kkt = final_point.score >= -_PHI_SCORE_TOLERANCE
+            else:
+                boundary_kkt = final_point.score <= _PHI_SCORE_TOLERANCE
+        else:
+            inward_u = (
+                final_point.u + _PHI_ROOT_PROBE
+                if lower_boundary
+                else final_point.u - _PHI_ROOT_PROBE
+            )
+            inward_point = cache.evaluate(inward_u, compute_score=False)
+            boundary_kkt = bool(
+                inward_point.objective_finite
+                and _phi_nll_no_worse(final_point.nll, inward_point.nll)
+            )
+
+    if lower_boundary or upper_boundary:
+        candidate_converged = best.validated and boundary_kkt
+    elif best.source == "brentq":
+        candidate_converged = best.validated
+    elif best.source == "bounded":
+        # A deterministic scan is a strong global safeguard, but it cannot
+        # prove that a narrow switch-and-back was not hidden between two
+        # equal-signature grid points. Preserve the best exact value without
+        # claiming global convergence for an interior value-only fallback.
+        candidate_converged = False
+    else:
+        candidate_converged = False
+    converged = bool(
+        final_point.objective_finite
+        and candidate_converged
+        and (bounded.success if need_fallback else True)
+    )
+
+    if best.source == "brentq":
+        optimizer = "brentq"
+    elif need_fallback or best.source == "bounded" or lower_boundary or upper_boundary:
+        optimizer = "bounded"
+    else:
+        optimizer = "brentq"
+    message_parts = []
+    if fallback_reasons:
+        message_parts.append("Fallback: " + "; ".join(fallback_reasons))
+    if bounded.message:
+        message_parts.append(bounded.message)
+    if lower_boundary:
+        message_parts.append("Selected the exact hard lower phi boundary.")
+    if upper_boundary:
+        message_parts.append("Selected the exact hard upper phi boundary.")
+    if not message_parts:
+        message_parts.append("Analytic score root passed exact local-minimum validation.")
+
+    return _PhiProfileResult(
+        phi=final_point.phi,
+        nll=final_point.nll,
+        converged=converged,
+        objective_finite=final_point.objective_finite,
+        n_evaluations=cache.n_evaluations,
+        n_score_evaluations=cache.n_score_evaluations,
+        n_value_only_evaluations=cache.n_value_only_evaluations,
+        n_fallback_evaluations=cache.n_fallback_evaluations,
+        optimizer=optimizer,
+        score=final_point.score if final_point.score_valid else None,
+        used_fallback=need_fallback,
+        fallback_reason="; ".join(fallback_reasons) if fallback_reasons else None,
+        branch_switch_detected=branch_switch_detected,
+        lower_boundary=lower_boundary,
+        upper_boundary=upper_boundary,
+        diagnostics=final_point.diagnostics,
+        message=" ".join(message_parts),
+    )
+
+
+def _profile_phi_detailed(
+    y: NDArray,
+    mu: NDArray,
+    p: float,
+    *,
+    weights: NDArray | None = None,
+    df_resid: float | None = None,
+    phi_method: str = "pearson",
+    phi_start: float | None = None,
+) -> _PhiProfileResult:
+    """Profile Tweedie dispersion with cached exact values and analytic scores."""
+    if phi_method not in {"mle", "pearson"}:
+        raise ValueError(
+            f"phi_method={phi_method!r} is not valid, expected one of ['mle', 'pearson']"
+        )
+
+    prepared = _prepare_tweedie_density(y, mu, p, weights=weights)
+    denominator = _phi_profile_denominator(prepared, df_resid)
+    pearson_phi = _pearson_phi_from_prepared(prepared, denominator)
+
+    cache = _PhiEvaluationCache(prepared)
+    default_diagnostics = _TweedieLogpdfDiagnostics(
+        n_positive=int(prepared.positive_indices.size),
+        n_saddlepoint=0,
+    )
+
+    if phi_method == "pearson":
+        phi_hat = max(pearson_phi, 1e-10)
+        if not np.isfinite(phi_hat) or phi_hat <= 0.0:
+            return _PhiProfileResult(
+                phi=float(phi_hat),
+                nll=np.inf,
+                converged=False,
+                objective_finite=False,
+                n_evaluations=0,
+                n_score_evaluations=0,
+                n_value_only_evaluations=0,
+                n_fallback_evaluations=0,
+                optimizer="pearson",
+                score=None,
+                used_fallback=False,
+                fallback_reason=None,
+                branch_switch_detected=False,
+                lower_boundary=False,
+                upper_boundary=False,
+                diagnostics=default_diagnostics,
+                message="Pearson plug-in dispersion is not finite.",
+            )
+        point = cache.evaluate(
+            float(np.log(phi_hat)),
+            compute_score=False,
+            phi_override=phi_hat,
+        )
+        return _PhiProfileResult(
+            phi=point.phi,
+            nll=point.nll,
+            converged=point.objective_finite,
+            objective_finite=point.objective_finite,
+            n_evaluations=cache.n_evaluations,
+            n_score_evaluations=cache.n_score_evaluations,
+            n_value_only_evaluations=cache.n_value_only_evaluations,
+            n_fallback_evaluations=cache.n_fallback_evaluations,
+            optimizer="pearson",
+            score=None,
+            used_fallback=False,
+            fallback_reason=None,
+            branch_switch_detected=False,
+            lower_boundary=False,
+            upper_boundary=False,
+            diagnostics=point.diagnostics,
+            message="Pearson plug-in dispersion evaluated with the exact objective.",
+        )
+
+    seeds = _phi_profile_seeds(prepared, denominator, pearson_phi, phi_start)
+    score_search = _search_phi_score_candidates(cache, seeds)
+    need_fallback = bool(score_search.fallback_reasons)
+    bounded = _run_phi_bounded_fallback(cache, required=need_fallback)
+    return _finalize_phi_mle_result(
+        cache,
+        score_search,
+        bounded,
+        default_diagnostics,
+    )
+
+
 def _profile_phi(
     y: NDArray,
     mu: NDArray,
@@ -642,33 +1764,15 @@ def _profile_phi(
     phi_method: str = "pearson",
 ) -> tuple[float, float]:
     """Profile out phi and return ``(phi_hat, mean_nll)`` for fixed ``(mu, p)``."""
-    if phi_method == "pearson":
-        phi_hat = max(estimate_phi(y, mu, p, weights=weights, df_resid=df_resid), 1e-10)
-        ll = tweedie_logpdf(y, mu, phi_hat, p, weights=weights)
-        return phi_hat, float(-np.mean(ll))
-
-    if phi_method != "mle":
-        raise ValueError(
-            f"phi_method={phi_method!r} is not valid, expected one of ['mle', 'pearson']"
-        )
-
-    phi_init = max(estimate_phi(y, mu, p, weights=weights, df_resid=df_resid), 1e-10)
-    log_phi_init = float(np.log(phi_init))
-    log_lo = max(np.log(1e-12), log_phi_init - 8.0)
-    log_hi = min(np.log(1e12), log_phi_init + 8.0)
-
-    def objective(log_phi: float) -> float:
-        ll = tweedie_logpdf(y, mu, float(np.exp(log_phi)), p, weights=weights)
-        return float(-np.mean(ll))
-
-    opt = minimize_scalar(
-        objective,
-        bounds=(log_lo, log_hi),
-        method="bounded",
-        options={"xatol": 1e-3, "maxiter": 50},
+    result = _profile_phi_detailed(
+        y,
+        mu,
+        p,
+        weights=weights,
+        df_resid=df_resid,
+        phi_method=phi_method,
     )
-    phi_hat = float(np.exp(opt.x))
-    return phi_hat, float(opt.fun)
+    return result.phi, result.nll
 
 
 # ---------------------------------------------------------------------------
