@@ -28,6 +28,8 @@ from superglm.profiling.tweedie import (
     tweedie_logpdf,
 )
 
+_COUNT_DIAGNOSTICS = object()
+
 
 def _finalized_density_result(
     *,
@@ -35,8 +37,17 @@ def _finalized_density_result(
     n_positive: int = 100,
     n_saddlepoint: int = 0,
     phi_method: str = "mle",
+    diagnostics_override=_COUNT_DIAGNOSTICS,
 ):
     """Finalize one immutable record for density-provenance regressions."""
+    diagnostics = (
+        tweedie_module._TweedieLogpdfDiagnostics(
+            n_positive=n_positive,
+            n_saddlepoint=n_saddlepoint,
+        )
+        if diagnostics_override is _COUNT_DIAGNOSTICS
+        else diagnostics_override
+    )
     phi_result = tweedie_module._PhiProfileResult(
         phi=1.0,
         nll=1.0,
@@ -53,10 +64,7 @@ def _finalized_density_result(
         branch_switch_detected=False,
         lower_boundary=False,
         upper_boundary=False,
-        diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
-            n_positive=n_positive,
-            n_saddlepoint=n_saddlepoint,
-        ),
+        diagnostics=diagnostics,
         message="",
     )
     record = tweedie_module._ProfileEvaluation(
@@ -4224,6 +4232,26 @@ class TestDensityProvenance:
 
         assert not result.density_exact
         assert result.density_warning_severity == "high"
+
+    @pytest.mark.parametrize(
+        "diagnostics",
+        [
+            None,
+            SimpleNamespace(n_positive="10", n_saddlepoint=[1]),
+        ],
+        ids=["missing", "malformed"],
+    )
+    def test_invalid_winning_diagnostics_finalize_with_normalized_trace_counts(self, diagnostics):
+        with pytest.warns(UserWarning, match="inconsistent density diagnostics"):
+            result = _finalized_density_result(diagnostics_override=diagnostics)
+
+        row = result.search_trace.iloc[0]
+        assert result.n_positive == row["n_positive"] == -1
+        assert result.n_saddlepoint == row["n_saddlepoint"] == -1
+        assert isinstance(row["n_positive"], int | np.integer)
+        assert isinstance(row["n_saddlepoint"], int | np.integer)
+        assert row["density_method"] == result.density_method == "hybrid_exact_saddlepoint"
+        assert bool(row["density_exact"]) is result.density_exact is False
 
     def test_legacy_positional_result_derives_density_fields_without_shifting_warnings(self):
         trace = pd.DataFrame({"p": [1.5], "nll": [0.0]})
