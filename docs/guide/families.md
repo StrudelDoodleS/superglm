@@ -112,9 +112,9 @@ optimizer convergence alone does not make such an estimate reliable.
 
 `sample_weight` follows the exponential-dispersion-model prior-weight convention:
 `Var(Yᵢ | xᵢ) = φ μᵢᵖ / wᵢ` (equivalently, observation-specific dispersion
-φ / wᵢ). These are prior weights, not replication counts. Zero-weight observations are removed
-consistently from `X`, `y`, `sample_weight`, and `offset` before
-profiling.
+φ / wᵢ). These are prior weights, not replication counts. Zero-weight observations must be removed
+consistently from `X`, `y`, `sample_weight`, and `offset` before profiling; the
+profiler rejects non-positive prior weights.
 
 With `fit_mode="reml"`, REML selects spline smoothing penalties within each
 candidate fit. The *p*/φ profile is then evaluated conditionally; it does not jointly estimate *p* and φ

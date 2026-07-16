@@ -27,7 +27,7 @@ def test_tweedie_family_guide_documents_current_profile_contract():
     assert '`phi_method="pearson"` is an explicit fast plug-in' in tweedie
     assert "`result.ci()` is explicit and potentially expensive" in tweedie
     assert "φ / wᵢ" in tweedie
-    assert "Zero-weight observations are removed" in tweedie
+    assert "Zero-weight observations must be removed" in tweedie
     assert "REML selects spline smoothing penalties" in tweedie
     assert "does not jointly estimate *p* and φ" in tweedie
     assert "saddlepoint fallback" in tweedie
@@ -42,7 +42,7 @@ def test_tweedie_notebook_removes_stale_pearson_default_claims():
     assert "Nested MLE is the default" in source
     assert "Pearson plug-in is explicit" in source
     assert "`result.ci()`" in source
-    assert "Zero-weight observations are removed" in source
+    assert "Zero-weight observations must be removed" in source
     assert "REML selects spline smoothing penalties" in source
     assert "saddlepoint fallback" in source
     assert "near `p=1` and `p=2`" in source
