@@ -2153,19 +2153,28 @@ _TRACE_COLUMNS = [
     "nll",
     "n_iter",
     "fit_converged",
+    "solver_converged",
+    "reml_converged",
     "source",
     "fit_trace",
     "fit_trace_kind",
     "edf",
     "phi_converged",
     "phi_n_evaluations",
+    "phi_n_score_evaluations",
+    "phi_n_value_only_evaluations",
+    "phi_n_fallback_evaluations",
     "phi_boundary",
     "phi_optimizer",
+    "phi_score",
     "objective_finite",
     "n_saddlepoint",
     "n_positive",
     "saddlepoint_fraction",
     "phi_used_fallback",
+    "phi_fallback_reason",
+    "phi_branch_switch_detected",
+    "phi_message",
 ]
 _SADDLEPOINT_NOTE_THRESHOLD = 0.10
 _SADDLEPOINT_WARN_THRESHOLD = 0.25
@@ -2197,6 +2206,19 @@ class TweedieProfileResult:
     saddlepoint_fraction : float
         Fraction of positive density evaluations that used the saddlepoint
         approximation at the final ``(p_hat, phi_hat)``.
+    outer_converged : bool
+        Whether the requested outer search itself converged.
+    outer_message : str
+        Diagnostic message returned by the outer optimizer.
+    outer_boundary : {"lower", "upper"} or None
+        Configured search endpoint selected as the winning record, if any.
+    fit_converged : bool
+        Whether the winning fixed-p fit converged, including both REML and
+        final solver convergence for ``fit_mode="fit_reml"``.
+    objective_finite : bool
+        Whether the winning profiled objective is finite and valid.
+    phi_converged : bool
+        Whether the winning inner dispersion profile converged.
     """
 
     p_hat: float
@@ -2211,6 +2233,25 @@ class TweedieProfileResult:
     n_saddlepoint: int = 0
     n_positive: int = 0
     warnings: list[str] = field(default_factory=list)
+    outer_converged: bool = True
+    outer_message: str = ""
+    outer_boundary: str | None = None
+    fit_converged: bool = True
+    solver_converged: bool = True
+    reml_converged: bool | None = None
+    objective_finite: bool = True
+    phi_converged: bool = True
+    phi_n_evaluations: int = 0
+    phi_n_score_evaluations: int = 0
+    phi_n_value_only_evaluations: int = 0
+    phi_n_fallback_evaluations: int = 0
+    phi_optimizer: str = ""
+    phi_score: float | None = None
+    phi_used_fallback: bool = False
+    phi_fallback_reason: str | None = None
+    phi_branch_switch_detected: bool = False
+    phi_boundary: str = ""
+    phi_message: str = ""
 
     @property
     def cache(self) -> dict[float, float]:
@@ -2402,6 +2443,8 @@ class _ProfileEvaluation:
     fit_trace: tuple[tuple[int, float], ...]
     fit_trace_kind: str
     phi_result: _PhiProfileResult
+    solver_converged: bool | None = None
+    reml_converged: bool | None = None
 
     @property
     def phi(self) -> float:
@@ -2443,6 +2486,10 @@ def _materialize_profile_trace_row(record: _ProfileEvaluation) -> dict[str, Any]
         "nll": record.nll,
         "n_iter": record.n_iter,
         "fit_converged": record.fit_converged,
+        "solver_converged": (
+            record.fit_converged if record.solver_converged is None else record.solver_converged
+        ),
+        "reml_converged": record.reml_converged,
         "source": record.source,
         "fit_trace": [
             {"iteration": iteration, "loss": loss} for iteration, loss in record.fit_trace
@@ -2451,13 +2498,20 @@ def _materialize_profile_trace_row(record: _ProfileEvaluation) -> dict[str, Any]
         "edf": record.edf,
         "phi_converged": phi_result.converged,
         "phi_n_evaluations": phi_result.n_evaluations,
+        "phi_n_score_evaluations": phi_result.n_score_evaluations,
+        "phi_n_value_only_evaluations": phi_result.n_value_only_evaluations,
+        "phi_n_fallback_evaluations": phi_result.n_fallback_evaluations,
         "phi_boundary": _phi_boundary_label(phi_result),
         "phi_optimizer": phi_result.optimizer,
+        "phi_score": phi_result.score,
         "objective_finite": phi_result.objective_finite,
         "n_saddlepoint": diagnostics.n_saddlepoint,
         "n_positive": diagnostics.n_positive,
         "saddlepoint_fraction": diagnostics.saddlepoint_fraction,
         "phi_used_fallback": phi_result.used_fallback,
+        "phi_fallback_reason": phi_result.fallback_reason,
+        "phi_branch_switch_detected": phi_result.branch_switch_detected,
+        "phi_message": phi_result.message,
     }
 
 
@@ -2599,6 +2653,8 @@ class _ProfileContext:
             fit_trace=(_fit_iteration_trace(result.iteration_log) if self.trace_iterations else ()),
             fit_trace_kind="weighted deviance" if self.trace_iterations else "",
             phi_result=phi_result,
+            solver_converged=bool(result.converged),
+            reml_converged=None,
         )
         self._evaluation_cache[key] = record
 
@@ -2628,25 +2684,11 @@ class _ProfileContext:
         if key not in self._evaluation_cache:
             self.evaluate(p_hat, source="final")
         record = self._evaluation_cache[key]
-        diagnostics = record.phi_result.diagnostics
-        warnings_list = _build_saddlepoint_messages(record.p, diagnostics)
-        trace = _profile_trace_frame(self._evaluation_cache)
-
-        return TweedieProfileResult(
-            p_hat=record.p,
-            phi_hat=record.phi,
-            nll=record.nll,
-            n_evaluations=self.n_evals,
-            converged=converged,
+        return _finalize_profile_record(
+            self,
+            record,
             method=method,
-            phi_method=self.phi_method,
-            search_trace=trace,
-            saddlepoint_fraction=diagnostics.saddlepoint_fraction,
-            n_saddlepoint=diagnostics.n_saddlepoint,
-            n_positive=diagnostics.n_positive,
-            warnings=warnings_list,
-            _objective=self.evaluate,
-            _ll_scale=self.ll_scale,
+            outer_converged=converged,
         )
 
 
@@ -2839,10 +2881,14 @@ class _ProfileContextREML:
             phi_start=_previous_finite_phi(self._evaluation_cache),
         )
 
-        n_iter = (
-            self.model._reml_result.n_reml_iter
-            if hasattr(self.model, "_reml_result") and self.model._reml_result is not None
-            else 0
+        reml_result = getattr(self.model, "_reml_result", None)
+        n_iter = reml_result.n_reml_iter if reml_result is not None else 0
+        solver_converged = bool(getattr(self.model.result, "converged", False))
+        reml_converged = (
+            None if reml_result is None else bool(getattr(reml_result, "converged", False))
+        )
+        fit_converged = solver_converged and (
+            reml_converged if reml_converged is not None else True
         )
 
         record = _ProfileEvaluation(
@@ -2851,7 +2897,7 @@ class _ProfileContextREML:
             mu=_owned_readonly_array(mu),
             edf=float(self.model.result.effective_df),
             n_iter=int(n_iter),
-            fit_converged=bool(self.model.result.converged),
+            fit_converged=fit_converged,
             source=source,
             fit_trace=(
                 _reml_iteration_trace(getattr(self.model, "_reml_result", None))
@@ -2860,6 +2906,8 @@ class _ProfileContextREML:
             ),
             fit_trace_kind="REML objective" if self.trace_iterations else "",
             phi_result=phi_result,
+            solver_converged=solver_converged,
+            reml_converged=reml_converged,
         )
         self._evaluation_cache[key] = record
 
@@ -2885,25 +2933,11 @@ class _ProfileContextREML:
         if key not in self._evaluation_cache:
             self.evaluate(p_hat, source="final")
         record = self._evaluation_cache[key]
-        diagnostics = record.phi_result.diagnostics
-        warnings_list = _build_saddlepoint_messages(record.p, diagnostics)
-        trace = _profile_trace_frame(self._evaluation_cache)
-
-        return TweedieProfileResult(
-            p_hat=record.p,
-            phi_hat=record.phi,
-            nll=record.nll,
-            n_evaluations=self.n_evals,
-            converged=converged,
+        return _finalize_profile_record(
+            self,
+            record,
             method=method,
-            phi_method=self.phi_method,
-            search_trace=trace,
-            saddlepoint_fraction=diagnostics.saddlepoint_fraction,
-            n_saddlepoint=diagnostics.n_saddlepoint,
-            n_positive=diagnostics.n_positive,
-            warnings=warnings_list,
-            _objective=self.evaluate,
-            _ll_scale=self.ll_scale,
+            outer_converged=converged,
         )
 
 
@@ -2952,6 +2986,183 @@ def _build_profile_context_reml(
 # ---------------------------------------------------------------------------
 
 
+def _profile_record_is_selectable(record: _ProfileEvaluation) -> bool:
+    """Whether a cached record is a usable finite profile estimate."""
+    return bool(
+        np.isfinite(record.p)
+        and np.isfinite(record.nll)
+        and np.isfinite(record.phi)
+        and record.phi > 0.0
+        and record.phi_result.objective_finite
+    )
+
+
+def _format_profile_range(bounds: tuple[float, float]) -> str:
+    """Format effective search bounds for diagnostics."""
+    return f"[{bounds[0]:g}, {bounds[1]:g}]"
+
+
+def _best_finite_profile_record(
+    ctx: _ProfileContext | _ProfileContextREML,
+    *,
+    method: str,
+    searched_bounds: tuple[float, float],
+) -> _ProfileEvaluation:
+    """Return the earliest best valid cached record, or fail descriptively."""
+    selectable = [
+        record for record in ctx._evaluation_cache.values() if _profile_record_is_selectable(record)
+    ]
+    if not selectable:
+        raise RuntimeError(
+            f"Tweedie profile method={method!r} produced no valid result from "
+            f"{len(ctx._evaluation_cache)} evaluations over p range "
+            f"{_format_profile_range(searched_bounds)}; candidates require finite p/NLL, "
+            "finite positive phi, and objective_finite=True."
+        )
+    return min(selectable, key=lambda record: record.nll)
+
+
+def _outer_boundary_label(p: float, bounds: tuple[float, float] | None) -> str | None:
+    """Classify an exact winning search endpoint."""
+    if bounds is None:
+        return None
+    lo, hi = bounds
+    scale = max(abs(lo), abs(hi), 1.0)
+    atol = 16.0 * np.finfo(np.float64).eps * scale
+    if np.isclose(lo, hi, rtol=0.0, atol=atol):
+        return None
+    lower = bool(np.isclose(p, lo, rtol=0.0, atol=atol))
+    upper = bool(np.isclose(p, hi, rtol=0.0, atol=atol))
+    if lower:
+        return "lower"
+    if upper:
+        return "upper"
+    return None
+
+
+def _finalize_profile_record(
+    ctx: _ProfileContext | _ProfileContextREML,
+    record: _ProfileEvaluation,
+    *,
+    method: str,
+    outer_converged: bool,
+    outer_message: str = "",
+    searched_bounds: tuple[float, float] | None = None,
+) -> TweedieProfileResult:
+    """Materialize a result directly from its immutable winning record."""
+    if not _profile_record_is_selectable(record):
+        raise RuntimeError(
+            f"Tweedie profile method={method!r} cannot finalize invalid cached record "
+            f"at p={record.p:g}; candidates require finite p/NLL, finite positive phi, "
+            "and objective_finite=True."
+        )
+    phi_result = record.phi_result
+    diagnostics = phi_result.diagnostics
+    boundary = _outer_boundary_label(record.p, searched_bounds)
+    warnings_list = _build_saddlepoint_messages(record.p, diagnostics)
+    if boundary:
+        bounds_text = (
+            _format_profile_range(searched_bounds) if searched_bounds is not None else "the search"
+        )
+        warnings_list.append(
+            f"Profile optimum is at the {boundary} boundary of {bounds_text}; "
+            "the optimum may lie outside the configured search range."
+        )
+    if not outer_converged:
+        detail = f" ({outer_message})" if outer_message else ""
+        warnings_list.append(f"Outer p search did not converge{detail}.")
+    if not record.fit_converged:
+        warnings_list.append("Winning fixed-p model fit did not converge.")
+    if not phi_result.converged:
+        warnings_list.append("Winning inner phi profile did not converge.")
+    phi_boundary = _phi_boundary_label(phi_result)
+    if phi_boundary:
+        warnings_list.append(f"Winning phi estimate is at the {phi_boundary} dispersion boundary.")
+    trace = _profile_trace_frame(ctx._evaluation_cache)
+    solver_converged = (
+        record.fit_converged if record.solver_converged is None else record.solver_converged
+    )
+    aggregate_converged = bool(
+        phi_result.objective_finite
+        and outer_converged
+        and record.fit_converged
+        and phi_result.converged
+    )
+
+    return TweedieProfileResult(
+        p_hat=record.p,
+        phi_hat=record.phi,
+        nll=record.nll,
+        n_evaluations=len(trace),
+        converged=aggregate_converged,
+        method=method,
+        phi_method=ctx.phi_method,
+        search_trace=trace,
+        saddlepoint_fraction=diagnostics.saddlepoint_fraction,
+        n_saddlepoint=diagnostics.n_saddlepoint,
+        n_positive=diagnostics.n_positive,
+        warnings=warnings_list,
+        outer_converged=bool(outer_converged),
+        outer_message=outer_message,
+        outer_boundary=boundary,
+        fit_converged=record.fit_converged,
+        solver_converged=solver_converged,
+        reml_converged=record.reml_converged,
+        objective_finite=phi_result.objective_finite,
+        phi_converged=phi_result.converged,
+        phi_n_evaluations=phi_result.n_evaluations,
+        phi_n_score_evaluations=phi_result.n_score_evaluations,
+        phi_n_value_only_evaluations=phi_result.n_value_only_evaluations,
+        phi_n_fallback_evaluations=phi_result.n_fallback_evaluations,
+        phi_optimizer=phi_result.optimizer,
+        phi_score=phi_result.score,
+        phi_used_fallback=phi_result.used_fallback,
+        phi_fallback_reason=phi_result.fallback_reason,
+        phi_branch_switch_detected=phi_result.branch_switch_detected,
+        phi_boundary=phi_boundary,
+        phi_message=phi_result.message,
+        _objective=ctx.evaluate,
+        _ll_scale=ctx.ll_scale,
+    )
+
+
+def _finalize_best_profile(
+    ctx: _ProfileContext | _ProfileContextREML,
+    *,
+    method: str,
+    outer_converged: bool,
+    outer_message: str,
+    searched_bounds: tuple[float, float],
+) -> TweedieProfileResult:
+    """Select and finalize the global best valid record in the search cache."""
+    record = _best_finite_profile_record(
+        ctx,
+        method=method,
+        searched_bounds=searched_bounds,
+    )
+    return _finalize_profile_record(
+        ctx,
+        record,
+        method=method,
+        outer_converged=outer_converged,
+        outer_message=outer_message,
+        searched_bounds=searched_bounds,
+    )
+
+
+def _evaluate_reported_candidate(
+    ctx: _ProfileContext | _ProfileContextREML,
+    candidate: float,
+    *,
+    source: str,
+    bounds: tuple[float, float],
+) -> None:
+    """Evaluate an optimizer-reported in-range candidate if it is usable."""
+    lo, hi = bounds
+    if np.isfinite(candidate) and lo <= candidate <= hi:
+        ctx.evaluate(float(candidate), source=source)
+
+
 def _search_brent(
     ctx: _ProfileContext | _ProfileContextREML,
     p_bounds: tuple[float, float],
@@ -2959,14 +3170,24 @@ def _search_brent(
     maxiter: int,
 ) -> TweedieProfileResult:
     """Bounded scalar Brent search over p."""
+    ctx.evaluate(p_bounds[0], source="brent")
+    ctx.evaluate(p_bounds[1], source="brent")
     result = minimize_scalar(
         lambda p: ctx.evaluate(p, source="brent"),
         bounds=p_bounds,
         method="bounded",
         options={"xatol": xatol, "maxiter": maxiter},
     )
-    converged = result.success if hasattr(result, "success") else True
-    return ctx.finalize(result.x, method="brent", converged=converged)
+    candidate = float(result.x)
+    _evaluate_reported_candidate(ctx, candidate, source="brent", bounds=p_bounds)
+    converged = bool(result.success) if hasattr(result, "success") else True
+    return _finalize_best_profile(
+        ctx,
+        method="brent",
+        outer_converged=converged,
+        outer_message=str(getattr(result, "message", "")),
+        searched_bounds=p_bounds,
+    )
 
 
 def _search_grid(
@@ -2981,11 +3202,20 @@ def _search_grid(
     else:
         p_grid = np.linspace(p_bounds[0], p_bounds[1], n_grid)
 
-    nll_values = np.array([ctx.evaluate(p, source="grid") for p in p_grid])
-    best_idx = int(np.argmin(nll_values))
-    p_hat = float(p_grid[best_idx])
+    for p in p_grid:
+        ctx.evaluate(p, source="grid")
+    finite_grid = p_grid[np.isfinite(p_grid)]
+    searched_bounds = (
+        (float(np.min(finite_grid)), float(np.max(finite_grid))) if finite_grid.size else p_bounds
+    )
 
-    return ctx.finalize(p_hat, method="grid", converged=True)
+    return _finalize_best_profile(
+        ctx,
+        method="grid",
+        outer_converged=True,
+        outer_message="Grid search completed.",
+        searched_bounds=searched_bounds,
+    )
 
 
 def _search_grid_refine(
@@ -2998,9 +3228,21 @@ def _search_grid_refine(
     """Coarse grid search + local Brent refinement."""
     # Stage 1: coarse grid
     p_coarse = np.linspace(p_bounds[0], p_bounds[1], n_grid_coarse)
-    nll_coarse = np.array([ctx.evaluate(p, source="grid_coarse") for p in p_coarse])
-    best_idx = int(np.argmin(nll_coarse))
-    p_best = float(p_coarse[best_idx])
+    for p in p_coarse:
+        ctx.evaluate(p, source="grid_coarse")
+    coarse_records = [ctx._evaluation_cache[float(p)] for p in p_coarse]
+    selectable = [record for record in coarse_records if _profile_record_is_selectable(record)]
+    if selectable:
+        p_best = min(selectable, key=lambda record: record.nll).p
+    else:
+        finite_nll = [
+            record for record in coarse_records if np.isfinite(record.p) and np.isfinite(record.nll)
+        ]
+        p_best = (
+            min(finite_nll, key=lambda record: record.nll).p
+            if finite_nll
+            else float(p_coarse[len(p_coarse) // 2])
+        )
 
     # Stage 2: refine around best region
     step = (p_bounds[1] - p_bounds[0]) / max(n_grid_coarse - 1, 1)
@@ -3014,8 +3256,21 @@ def _search_grid_refine(
         options={"xatol": xatol, "maxiter": maxiter},
     )
 
-    converged = result.success if hasattr(result, "success") else True
-    return ctx.finalize(result.x, method="grid_refine", converged=converged)
+    candidate = float(result.x)
+    _evaluate_reported_candidate(
+        ctx,
+        candidate,
+        source="brent_refine",
+        bounds=(refine_lo, refine_hi),
+    )
+    converged = bool(result.success) if hasattr(result, "success") else True
+    return _finalize_best_profile(
+        ctx,
+        method="grid_refine",
+        outer_converged=converged,
+        outer_message=str(getattr(result, "message", "")),
+        searched_bounds=p_bounds,
+    )
 
 
 def _search_profile_opt(
@@ -3044,8 +3299,19 @@ def _search_profile_opt(
 
     # 3-point initialization grid to pick starting point
     init_ps = [lo + 0.1 * (hi - lo), 0.5 * (lo + hi), hi - 0.1 * (hi - lo)]
-    init_nlls = [ctx.evaluate(p, source="init") for p in init_ps]
-    best_init = init_ps[int(np.argmin(init_nlls))]
+    for p in init_ps:
+        ctx.evaluate(p, source="init")
+    init_records = [ctx._evaluation_cache[float(p)] for p in init_ps]
+    selectable = [record for record in init_records if _profile_record_is_selectable(record)]
+    if selectable:
+        best_init = min(selectable, key=lambda record: record.nll).p
+    else:
+        finite_nll = [
+            record for record in init_records if np.isfinite(record.p) and np.isfinite(record.nll)
+        ]
+        best_init = (
+            min(finite_nll, key=lambda record: record.nll).p if finite_nll else 0.5 * (lo + hi)
+        )
     t0 = p_to_t(best_init)
 
     def objective(t_arr):
@@ -3068,10 +3334,18 @@ def _search_profile_opt(
         options=opts,
     )
 
-    p_hat = t_to_p(float(result.x[0]))
+    reported_t = float(result.x[0])
+    p_hat = t_to_p(reported_t) if np.isfinite(reported_t) else np.nan
+    _evaluate_reported_candidate(ctx, p_hat, source="optimizer", bounds=p_bounds)
     converged = bool(result.success)
 
-    return ctx.finalize(p_hat, method="profile_opt", converged=converged)
+    return _finalize_best_profile(
+        ctx,
+        method="profile_opt",
+        outer_converged=converged,
+        outer_message=str(getattr(result, "message", "")),
+        searched_bounds=p_bounds,
+    )
 
 
 # ---------------------------------------------------------------------------

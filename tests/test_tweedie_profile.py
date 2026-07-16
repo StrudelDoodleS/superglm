@@ -3375,7 +3375,9 @@ class TestSearchMethods:
         assert result.saddlepoint_fraction >= 0.25
         assert result.n_saddlepoint > 0
         assert result.n_positive > 0
-        assert len(result.warnings) == 1
+        assert any("Saddlepoint approximation used" in message for message in result.warnings)
+        assert any("inner phi profile did not converge" in message for message in result.warnings)
+        assert not result.converged
 
     def test_regular_profile_has_no_saddlepoint_warning(self):
         """Typical interior fits should not warn about saddlepoint usage."""
@@ -3473,6 +3475,366 @@ class TestSearchMethods:
         )
         with pytest.raises(NotImplementedError, match="integrated"):
             estimate_tweedie_p(model, X, y, method="integrated")
+
+
+def _fake_search_context(objective):
+    """Build a cheap real profile context whose evaluations are synthetic."""
+    ctx = tweedie_module._ProfileContext(
+        y_arr=np.ones(1),
+        w_arr=np.ones(1),
+        offset_arr=np.zeros(1),
+        dm=SimpleNamespace(),
+        groups=[],
+        link=LogLink(),
+        penalty=None,
+        use_direct=True,
+        lambda2=None,
+        direct_solve="auto",
+        phi_method="mle",
+        verbose=False,
+        ll_scale=1.0,
+    )
+
+    def evaluate(p, source=""):
+        key = float(p)
+        if key in ctx._evaluation_cache:
+            return ctx._evaluation_cache[key].nll
+        spec = objective(key)
+        phi_result = tweedie_module._PhiProfileResult(
+            phi=float(spec.get("phi", 1.0)),
+            nll=float(spec.get("nll", np.inf)),
+            converged=bool(spec.get("phi_converged", True)),
+            objective_finite=bool(spec.get("objective_finite", True)),
+            n_evaluations=7,
+            n_score_evaluations=5,
+            n_value_only_evaluations=2,
+            n_fallback_evaluations=1,
+            optimizer="brentq",
+            score=0.0,
+            used_fallback=True,
+            fallback_reason="synthetic",
+            branch_switch_detected=True,
+            lower_boundary=bool(spec.get("phi_lower_boundary", False)),
+            upper_boundary=bool(spec.get("phi_upper_boundary", False)),
+            diagnostics=tweedie_module._TweedieLogpdfDiagnostics(),
+            message="synthetic phi profile",
+        )
+        record = tweedie_module._ProfileEvaluation(
+            step=len(ctx._evaluation_cache),
+            p=float(spec.get("p", key)),
+            mu=np.ones(1),
+            edf=1.0,
+            n_iter=1,
+            fit_converged=bool(spec.get("fit_converged", True)),
+            source=source,
+            fit_trace=(),
+            fit_trace_kind="",
+            phi_result=phi_result,
+        )
+        ctx._evaluation_cache[key] = record
+        return record.nll
+
+    ctx.evaluate = evaluate
+    return ctx
+
+
+class TestOuterSearchHonesty:
+    @pytest.mark.parametrize(
+        ("winner", "boundary"),
+        [(1.1, "lower"), (1.9, "upper")],
+    )
+    def test_brent_evaluates_and_can_select_endpoint(self, monkeypatch, winner, boundary):
+        ctx = _fake_search_context(lambda p: {"nll": (p - winner) ** 2})
+
+        def bounded(objective, **kwargs):
+            objective(1.5)
+            return OptimizeResult(x=1.5, fun=objective(1.5), success=True, message="ok")
+
+        monkeypatch.setattr(tweedie_module, "minimize_scalar", bounded)
+        result = tweedie_module._search_brent(ctx, (1.1, 1.9), 1e-3, 30)
+
+        assert result.p_hat == pytest.approx(winner)
+        assert result.outer_boundary == boundary
+        assert result.outer_converged
+        assert result.converged
+        assert set(result.search_trace["p"]) == {1.1, 1.5, 1.9}
+
+    def test_brent_evaluates_optimizer_reported_candidate(self, monkeypatch):
+        ctx = _fake_search_context(lambda p: {"nll": (p - 1.4) ** 2})
+
+        def bounded_without_objective_call(objective, **kwargs):
+            return OptimizeResult(x=1.4, fun=0.0, success=True, message="ok")
+
+        monkeypatch.setattr(tweedie_module, "minimize_scalar", bounded_without_objective_call)
+        result = tweedie_module._search_brent(ctx, (1.1, 1.9), 1e-3, 30)
+
+        assert result.p_hat == pytest.approx(1.4)
+        assert 1.4 in set(result.search_trace["p"])
+
+    @pytest.mark.parametrize(
+        ("fit_converged", "phi_converged"),
+        [(False, True), (True, False)],
+    )
+    def test_aggregate_convergence_includes_winning_fit_and_phi(
+        self, monkeypatch, fit_converged, phi_converged
+    ):
+        def objective(p):
+            return {
+                "nll": (p - 1.5) ** 2,
+                "fit_converged": fit_converged if p == 1.5 else True,
+                "phi_converged": phi_converged if p == 1.5 else True,
+            }
+
+        ctx = _fake_search_context(objective)
+
+        def bounded(fn, **kwargs):
+            return OptimizeResult(x=1.5, fun=fn(1.5), success=True, message="ok")
+
+        monkeypatch.setattr(tweedie_module, "minimize_scalar", bounded)
+        result = tweedie_module._search_brent(ctx, (1.1, 1.9), 1e-3, 30)
+
+        assert result.p_hat == pytest.approx(1.5)
+        assert result.outer_converged
+        assert result.fit_converged is fit_converged
+        assert result.phi_converged is phi_converged
+        assert not result.converged
+        assert result.objective_finite
+        assert result.phi_n_evaluations == 7
+        assert result.phi_n_score_evaluations == 5
+        assert result.phi_n_value_only_evaluations == 2
+        assert result.phi_n_fallback_evaluations == 1
+        assert result.phi_optimizer == "brentq"
+        assert result.phi_score == pytest.approx(0.0)
+        assert result.phi_used_fallback
+        assert result.phi_fallback_reason == "synthetic"
+        assert result.phi_branch_switch_detected
+        assert result.phi_message == "synthetic phi profile"
+        winning_row = result.search_trace.loc[result.search_trace["p"] == 1.5].iloc[0]
+        assert winning_row["phi_n_score_evaluations"] == 5
+        assert winning_row["phi_n_value_only_evaluations"] == 2
+        assert winning_row["phi_n_fallback_evaluations"] == 1
+        assert winning_row["phi_fallback_reason"] == "synthetic"
+        assert bool(winning_row["phi_branch_switch_detected"])
+        failure_text = " ".join(result.warnings).lower()
+        if not fit_converged:
+            assert "fit" in failure_text and "converge" in failure_text
+        if not phi_converged:
+            assert "phi" in failure_text and "converge" in failure_text
+
+    def test_grid_refine_keeps_better_coarse_record(self, monkeypatch):
+        ctx = _fake_search_context(lambda p: {"nll": 0.0 if p == 1.5 else 1.0})
+
+        def worse_refinement(objective, **kwargs):
+            return OptimizeResult(x=1.6, fun=objective(1.6), success=True, message="ok")
+
+        monkeypatch.setattr(tweedie_module, "minimize_scalar", worse_refinement)
+        result = tweedie_module._search_grid_refine(ctx, (1.2, 1.8), 3, 1e-3, 30)
+
+        assert result.p_hat == pytest.approx(1.5)
+        assert result.nll == pytest.approx(0.0)
+
+    def test_failed_profile_optimizer_returns_best_valid_cached_record(self, monkeypatch):
+        ctx = _fake_search_context(lambda p: {"nll": 0.0 if p == 1.5 else 1.0})
+
+        def failed_optimizer(objective, **kwargs):
+            q = (1.6 - 1.1) / (1.9 - 1.1)
+            t = np.log(q / (1.0 - q))
+            objective(np.array([t]))
+            return OptimizeResult(
+                x=np.array([t]), fun=1.0, success=False, message="forced optimizer failure"
+            )
+
+        monkeypatch.setattr(tweedie_module, "minimize", failed_optimizer)
+        result = tweedie_module._search_profile_opt(ctx, (1.1, 1.9), "L-BFGS-B", 1e-3, 30)
+
+        assert result.p_hat == pytest.approx(1.5)
+        assert np.isfinite(result.nll)
+        assert not result.outer_converged
+        assert "forced optimizer failure" in result.outer_message
+        assert not result.converged
+        assert any("outer" in warning.lower() for warning in result.warnings)
+
+    def test_explicit_grid_defines_effective_boundary_and_ties_keep_first(self):
+        ctx = _fake_search_context(lambda p: {"nll": 0.0})
+        grid = np.array([1.6, 1.4, 1.2])
+
+        result = tweedie_module._search_grid(ctx, (1.05, 1.95), len(grid), grid)
+
+        assert result.p_hat == pytest.approx(1.6)
+        assert result.outer_boundary == "upper"
+
+    def test_one_point_grid_has_no_directional_outer_boundary(self):
+        ctx = _fake_search_context(lambda p: {"nll": 0.0})
+
+        result = tweedie_module._search_grid(ctx, (1.05, 1.95), 1, np.array([1.5]))
+
+        assert result.outer_boundary is None
+        assert not any("outside" in warning.lower() for warning in result.warnings)
+
+    def test_winning_phi_boundary_is_reported(self):
+        ctx = _fake_search_context(
+            lambda p: {"nll": (p - 1.5) ** 2, "phi_lower_boundary": p == 1.5}
+        )
+
+        result = tweedie_module._search_grid(ctx, (1.1, 1.9), 3, np.array([1.3, 1.5, 1.7]))
+
+        assert result.phi_boundary == "lower"
+        assert any(
+            "phi" in warning.lower() and "boundary" in warning.lower()
+            for warning in result.warnings
+        )
+
+    def test_context_finalize_rejects_an_invalid_cached_record(self):
+        ctx = _fake_search_context(lambda p: {"nll": 0.0, "objective_finite": False})
+        ctx.evaluate(1.5, source="grid")
+
+        with pytest.raises(RuntimeError, match=r"grid.*invalid.*1\.5"):
+            ctx.finalize(1.5, method="grid", converged=True)
+
+    def test_all_invalid_records_raise_descriptive_error(self):
+        def invalid(p):
+            if p == 1.2:
+                return {"nll": np.nan}
+            if p == 1.3:
+                return {"nll": 0.0, "phi": np.nan}
+            if p == 1.4:
+                return {"nll": 0.0, "phi": 0.0}
+            if p == 1.5:
+                return {"nll": 0.0, "objective_finite": False}
+            return {"p": np.inf, "nll": 0.0}
+
+        ctx = _fake_search_context(invalid)
+        grid = np.array([1.2, 1.3, 1.4, 1.5, 1.6])
+
+        with pytest.raises(RuntimeError, match=r"grid.*5.*1\.2.*1\.6"):
+            tweedie_module._search_grid(ctx, (1.05, 1.95), len(grid), grid)
+
+    @pytest.mark.parametrize("method", ["brent", "grid_refine", "profile_opt"])
+    def test_each_optimizer_search_rejects_all_invalid_records(self, monkeypatch, method):
+        ctx = _fake_search_context(lambda p: {"nll": 0.0, "phi": 0.0})
+
+        def bounded(objective, **kwargs):
+            return OptimizeResult(x=1.5, fun=objective(1.5), success=False, message="failed")
+
+        def general(objective, **kwargs):
+            return OptimizeResult(
+                x=np.array([0.0]), fun=objective(np.array([0.0])), success=False, message="failed"
+            )
+
+        monkeypatch.setattr(tweedie_module, "minimize_scalar", bounded)
+        monkeypatch.setattr(tweedie_module, "minimize", general)
+
+        with pytest.raises(RuntimeError, match=rf"{method}.*evaluations.*1\.1.*1\.9"):
+            if method == "brent":
+                tweedie_module._search_brent(ctx, (1.1, 1.9), 1e-3, 30)
+            elif method == "grid_refine":
+                tweedie_module._search_grid_refine(ctx, (1.1, 1.9), 3, 1e-3, 30)
+            else:
+                tweedie_module._search_profile_opt(ctx, (1.1, 1.9), "L-BFGS-B", 1e-3, 30)
+
+    @pytest.mark.parametrize(
+        ("reml_converged", "solver_converged", "expected_fit"),
+        [(False, True, False), (True, False, False), (None, True, True)],
+    )
+    def test_reml_fit_convergence_combines_outer_reml_and_final_solver(
+        self, monkeypatch, reml_converged, solver_converged, expected_fit
+    ):
+        class FakeREMLModel:
+            family = None
+            result = None
+            _reml_result = None
+
+            def fit_reml(self, X, y, *, sample_weight=None, offset=None):
+                self._fit_mu = np.ones(len(y))
+                self.result = SimpleNamespace(effective_df=1.0, converged=solver_converged)
+                self._reml_result = (
+                    None
+                    if reml_converged is None
+                    else SimpleNamespace(
+                        n_reml_iter=2,
+                        objective_history=[],
+                        converged=reml_converged,
+                    )
+                )
+
+        phi_result = tweedie_module._PhiProfileResult(
+            phi=1.0,
+            nll=0.0,
+            converged=True,
+            objective_finite=True,
+            n_evaluations=1,
+            n_score_evaluations=1,
+            n_value_only_evaluations=0,
+            n_fallback_evaluations=0,
+            optimizer="brentq",
+            score=0.0,
+            used_fallback=False,
+            fallback_reason=None,
+            branch_switch_detected=False,
+            lower_boundary=False,
+            upper_boundary=False,
+            diagnostics=tweedie_module._TweedieLogpdfDiagnostics(),
+            message="ok",
+        )
+        monkeypatch.setattr(tweedie_module, "_profile_phi_detailed", lambda *a, **k: phi_result)
+        ctx = tweedie_module._ProfileContextREML(
+            model=FakeREMLModel(),
+            X=np.ones((3, 1)),
+            y=np.ones(3),
+            sample_weight=None,
+            offset=None,
+            w_arr=np.ones(3),
+            phi_method="mle",
+            verbose=False,
+            ll_scale=3.0,
+        )
+
+        result = tweedie_module._search_grid(ctx, (1.1, 1.9), 1, np.array([1.5]))
+
+        assert result.solver_converged is solver_converged
+        assert result.reml_converged is reml_converged
+        assert result.fit_converged is expected_fit
+        row = result.search_trace.iloc[0]
+        assert bool(row["solver_converged"]) is solver_converged
+        if reml_converged is None:
+            assert row["reml_converged"] is None
+        else:
+            assert bool(row["reml_converged"]) is reml_converged
+
+    def test_partial_reml_results_are_not_certified_converged(self, monkeypatch):
+        template = _fake_search_context(lambda p: {"nll": 0.0})
+        template.evaluate(1.5)
+        phi_result = template._evaluation_cache[1.5].phi_result
+
+        class PartialREMLModel:
+            family = None
+            result = None
+            _reml_result = None
+
+            def fit_reml(self, X, y, *, sample_weight=None, offset=None):
+                self._fit_mu = np.ones(len(y))
+                self.result = SimpleNamespace(effective_df=1.0)
+                self._reml_result = SimpleNamespace(n_reml_iter=1, objective_history=[])
+
+        monkeypatch.setattr(tweedie_module, "_profile_phi_detailed", lambda *a, **k: phi_result)
+        ctx = tweedie_module._ProfileContextREML(
+            model=PartialREMLModel(),
+            X=np.ones((3, 1)),
+            y=np.ones(3),
+            sample_weight=None,
+            offset=None,
+            w_arr=np.ones(3),
+            phi_method="mle",
+            verbose=False,
+            ll_scale=3.0,
+        )
+
+        result = tweedie_module._search_grid(ctx, (1.1, 1.9), 1, np.array([1.5]))
+
+        assert not result.solver_converged
+        assert result.reml_converged is False
+        assert not result.fit_converged
+        assert not result.converged
 
 
 # =====================================================================
