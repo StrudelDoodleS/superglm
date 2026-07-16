@@ -216,7 +216,9 @@ def _tweedie_positive_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArra
         np.asarray(y, dtype=np.float64),
         np.asarray(mu, dtype=np.float64),
     )
-    delta = (y_array - mu_array) / mu_array
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        delta = (y_array - mu_array) / mu_array
+    extreme_positive = np.isposinf(delta)
     near = np.abs(delta) <= _TWEEDIE_DEVIANCE_SERIES_THRESHOLD
     g = np.empty_like(delta)
 
@@ -232,7 +234,7 @@ def _tweedie_positive_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArra
             series += term
         g[near] = delta_near**2 * series
 
-    regular = ~near & (delta > -1.0)
+    regular = ~near & ~extreme_positive & (delta > -1.0)
     if np.any(regular):
         delta_regular = delta[regular]
         with np.errstate(all="ignore"):
@@ -244,7 +246,7 @@ def _tweedie_positive_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArra
     # For a positive y many orders below mu, delta can round to exactly -1.
     # Recover log(y / mu) from the original values; this branch is far from
     # the cancellation region, so the power-scale formula is well-conditioned.
-    rounded_to_minus_one = ~near & ~regular
+    rounded_to_minus_one = ~near & ~regular & ~extreme_positive
     if np.any(rounded_to_minus_one):
         with np.errstate(all="ignore"):
             log_ratio = np.log(y_array[rounded_to_minus_one]) - np.log(
@@ -256,8 +258,29 @@ def _tweedie_positive_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArra
             second = (ratio_two_minus_p - 1.0) / (2.0 - p)
         g[rounded_to_minus_one] = first - second
 
+    deviance = np.empty_like(delta)
+    ordinary_ratio = ~extreme_positive
     with np.errstate(all="ignore"):
-        deviance = 2.0 * np.power(mu_array, 2.0 - p) * g
+        deviance[ordinary_ratio] = (
+            2.0 * np.power(mu_array[ordinary_ratio], 2.0 - p) * g[ordinary_ratio]
+        )
+
+    if np.any(extreme_positive):
+        # For y >> mu, factor the expanded positive half-deviance by
+        # A = y * mu**(1-p) / (p-1). The remaining ratios use mu/y and
+        # cannot create inf-inf or 0*inf. -expm1 keeps 1 - B/A accurate
+        # when p is itself very close to one.
+        with np.errstate(all="ignore"):
+            log_y = np.log(y_array[extreme_positive])
+            log_mu = np.log(mu_array[extreme_positive])
+            log_mu_over_y = log_mu - log_y
+            log_b_over_a = (p - 1.0) * log_mu_over_y - np.log(2.0 - p)
+            log_c_over_a = np.log(p - 1.0) - np.log(2.0 - p) + log_mu_over_y
+            correction = -np.expm1(log_b_over_a) + np.exp(log_c_over_a)
+            log_deviance = (
+                np.log(2.0) + log_y + (1.0 - p) * log_mu - np.log(p - 1.0) + np.log(correction)
+            )
+            deviance[extreme_positive] = np.exp(log_deviance)
     negative_roundoff = np.isfinite(deviance) & (deviance < 0.0)
     if np.any(negative_roundoff):
         deviance = deviance.copy()
@@ -564,7 +587,7 @@ def _saddlepoint(y: NDArray, mu: NDArray, phi: NDArray, p: float) -> NDArray:
     """Saddlepoint approximation to the Tweedie log-density."""
     y_safe = np.maximum(y, 1e-300)
     deviance = _tweedie_positive_unit_deviance(y_safe, mu, p)
-    return -0.5 * np.log(2 * np.pi * phi * np.power(y_safe, p)) - deviance / (2 * phi)
+    return -0.5 * (np.log(2.0 * np.pi) + np.log(phi) + p * np.log(y_safe)) - deviance / (2.0 * phi)
 
 
 # ---------------------------------------------------------------------------

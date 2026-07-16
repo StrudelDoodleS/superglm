@@ -46,6 +46,12 @@ def _stable_p_one_half_deviance(y, mu):
     return 4.0 * np.sqrt(mu) * root_difference**2
 
 
+def _stable_p_one_half_extreme_deviance(y, mu):
+    """Closed-form p=1.5 deviance for ratios too large to form directly."""
+    with np.errstate(over="ignore"):
+        return 4.0 * (np.sqrt(y) - np.sqrt(mu)) ** 2 / np.sqrt(mu)
+
+
 # =====================================================================
 # TestGenerateTweedieCPG
 # =====================================================================
@@ -150,6 +156,32 @@ class TestTweedieLogpdf:
         actual = tweedie_module._saddlepoint(y, mu, phi, p)
 
         np.testing.assert_allclose(actual, expected, rtol=1e-13, atol=1e-12)
+
+    def test_saddlepoint_extreme_positive_ratio_is_stable(self):
+        """The compatibility helper must avoid inf-inf for finite y >> mu."""
+        y = np.array([1.0])
+        mu = np.array([1e-320])
+        phi = np.array([1e-8])
+        p = 1.5
+        deviance = _stable_p_one_half_extreme_deviance(y, mu)
+        expected = -0.5 * (np.log(2.0 * np.pi) + np.log(phi) + p * np.log(y)) - deviance / (
+            2.0 * phi
+        )
+
+        actual = tweedie_module._saddlepoint(y, mu, phi, p)
+
+        assert np.all(np.isfinite(deviance))
+        np.testing.assert_allclose(actual, expected, rtol=1e-13)
+
+    def test_saddlepoint_overflowing_positive_ratio_returns_negative_infinity(self):
+        """A truly overflowing deviance is extended-real, not NaN."""
+        y = np.array([1e308])
+        mu = np.array([1e-320])
+        phi = np.array([1e-8])
+
+        actual = tweedie_module._saddlepoint(y, mu, phi, 1.5)
+
+        assert np.all(np.isneginf(actual))
 
     def test_all_invalid_wright_terms_use_saddlepoint(self, monkeypatch):
         """Every invalid Wright term must be populated by the fallback."""
@@ -537,6 +569,71 @@ class TestTweedieLogPhiScore:
             rtol=1e-8,
             atol=1e-9,
         )
+
+    def test_log_phi_score_forced_saddlepoint_extreme_positive_ratio_is_stable(self):
+        """A representable y >> mu deviance must produce a finite value and score."""
+        y = np.array([1.0])
+        mu = np.array([1e-320])
+        phi, p = 1e-8, 1.5
+        expected_deviance = _stable_p_one_half_extreme_deviance(y, mu)
+        prepared = tweedie_module._prepare_tweedie_density(
+            y,
+            mu,
+            p,
+            t_arg_limit=0.0,
+        )
+
+        assert np.all(np.isfinite(prepared.positive_saddlepoint_deviance))
+        np.testing.assert_allclose(
+            prepared.positive_saddlepoint_deviance,
+            expected_deviance,
+            rtol=1e-13,
+        )
+
+        evaluation = tweedie_module._evaluate_tweedie_density(
+            prepared,
+            phi,
+            compute_score=True,
+        )
+        expected_logpdf = -0.5 * (
+            np.log(2.0 * np.pi) + np.log(phi) + p * np.log(y)
+        ) - expected_deviance / (2.0 * phi)
+        expected_score = 0.5 - expected_deviance / (2.0 * phi)
+
+        assert evaluation.score_valid
+        assert not np.any(np.isnan(evaluation.logpdf))
+        assert not np.any(np.isnan(evaluation.log_phi_score))
+        np.testing.assert_allclose(evaluation.logpdf, expected_logpdf, rtol=1e-13)
+        np.testing.assert_allclose(evaluation.log_phi_score, expected_score, rtol=1e-13)
+        finite_difference = self._finite_difference_score(prepared, phi)
+        np.testing.assert_allclose(
+            float(np.mean(evaluation.log_phi_score)),
+            finite_difference,
+            rtol=1e-8,
+        )
+
+    def test_log_phi_score_overflowing_positive_ratio_uses_extended_real_values(self):
+        """An overflowing deviance must yield +inf deviance and -inf value/score."""
+        y = np.array([1e308])
+        mu = np.array([1e-320])
+        prepared = tweedie_module._prepare_tweedie_density(
+            y,
+            mu,
+            1.5,
+            t_arg_limit=0.0,
+        )
+
+        evaluation = tweedie_module._evaluate_tweedie_density(
+            prepared,
+            1e-8,
+            compute_score=True,
+        )
+
+        assert np.all(np.isposinf(prepared.positive_saddlepoint_deviance))
+        assert np.all(np.isneginf(evaluation.logpdf))
+        assert evaluation.log_phi_score is not None
+        assert np.all(np.isneginf(evaluation.log_phi_score))
+        assert not evaluation.score_valid
 
     def test_log_phi_score_accepts_scaled_ratio_roundoff_near_one(self):
         """An O(a*eps) ratio deficit is numerical noise, not score failure."""
