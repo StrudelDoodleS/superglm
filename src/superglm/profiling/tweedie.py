@@ -121,10 +121,16 @@ def _validate_tweedie_inputs(
     weights: NDArray | None,
 ) -> tuple[NDArray, NDArray, float, NDArray | None]:
     """Validate and convert common Tweedie density and dispersion inputs."""
-    y_arr = np.asarray(y, dtype=np.float64)
-    mu_arr = np.asarray(mu, dtype=np.float64)
-    if y_arr.ndim != 1 or mu_arr.ndim != 1 or y_arr.shape != mu_arr.shape:
-        raise ValueError("y and mu must be one-dimensional arrays with the same shape")
+    y_raw = np.asarray(y)
+    if np.iscomplexobj(y_raw):
+        raise ValueError("y must be finite and non-negative")
+    mu_raw = np.asarray(mu)
+    if np.iscomplexobj(mu_raw):
+        raise ValueError("mu must be finite and strictly positive")
+    y_arr = np.asarray(y_raw, dtype=np.float64)
+    mu_arr = np.asarray(mu_raw, dtype=np.float64)
+    if y_arr.ndim != 1 or mu_arr.ndim != 1 or y_arr.shape != mu_arr.shape or y_arr.size == 0:
+        raise ValueError("y and mu must be one-dimensional arrays with the same non-empty shape")
     if not np.all(np.isfinite(y_arr)) or np.any(y_arr < 0.0):
         raise ValueError("y must be finite and non-negative")
     if not np.all(np.isfinite(mu_arr)) or np.any(mu_arr <= 0.0):

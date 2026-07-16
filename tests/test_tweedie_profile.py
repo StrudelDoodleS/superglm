@@ -161,6 +161,7 @@ class TestTweedieLogpdf:
             pytest.param(-1.0, id="negative"),
             pytest.param(np.nan, id="nan"),
             pytest.param(np.inf, id="inf"),
+            pytest.param(1.0 + 1.0j, id="complex"),
         ],
     )
     def test_invalid_weight_value_is_rejected(self, function_name, invalid_weight):
@@ -177,6 +178,7 @@ class TestTweedieLogpdf:
         [
             pytest.param(np.ones((3, 1)), id="two-dimensional"),
             pytest.param(np.ones(2), id="mismatched-length"),
+            pytest.param([[1.0], [1.0, 2.0]], id="ragged"),
         ],
     )
     def test_invalid_weight_shape_is_rejected(self, function_name, invalid_weights):
@@ -193,6 +195,7 @@ class TestTweedieLogpdf:
             pytest.param(-1.0, id="negative"),
             pytest.param(np.nan, id="nan"),
             pytest.param(np.inf, id="inf"),
+            pytest.param(1.0 + 1.0j, id="complex"),
         ],
     )
     def test_invalid_input_y_is_rejected(self, function_name, invalid_y):
@@ -210,6 +213,7 @@ class TestTweedieLogpdf:
             pytest.param(-1.0, id="negative"),
             pytest.param(np.nan, id="nan"),
             pytest.param(np.inf, id="inf"),
+            pytest.param(1.0 + 1.0j, id="complex"),
         ],
     )
     def test_invalid_input_mu_is_rejected(self, function_name, invalid_mu):
@@ -247,6 +251,11 @@ class TestTweedieLogpdf:
     def test_invalid_input_y_mu_shape_is_rejected(self, function_name, y, mu):
         with pytest.raises(ValueError, match="y and mu must be one-dimensional arrays"):
             _call_tweedie_low_level(function_name, y, mu)
+
+    @pytest.mark.parametrize("function_name", ["tweedie_logpdf", "estimate_phi"])
+    def test_invalid_input_empty_y_mu_is_rejected(self, function_name):
+        with pytest.raises(ValueError, match="non-empty"):
+            _call_tweedie_low_level(function_name, np.array([]), np.array([]))
 
     @pytest.mark.parametrize(
         "invalid_phi",
@@ -656,6 +665,24 @@ def _tweedie_data(n=3000, p_true=1.6, seed=42):
 
 
 class TestEstimatePFitMode:
+    def test_invalid_complex_weight_is_rejected_before_feature_auto_detection(self):
+        X, y, _ = _tweedie_data(n=24, seed=20260719)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            splines=[],
+        )
+        invalid_weights = np.ones(len(y), dtype=np.complex128)
+        invalid_weights[3] = 1.0 + 1.0j
+        family_before = model.family
+
+        with pytest.raises(ValueError, match="weights must be finite and strictly positive"):
+            model.estimate_p(X, y, sample_weight=invalid_weights, fit_mode="fit")
+
+        assert model.family is family_before
+        assert model._specs == {}
+        assert model._feature_order == []
+
     @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
     def test_invalid_weight_is_rejected_before_feature_auto_detection(self, fit_mode):
         X, y, _ = _tweedie_data(n=24, seed=20260716)
