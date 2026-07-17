@@ -210,6 +210,7 @@ def test_invalid_sample_count_is_rejected_before_sampler_use(n, error_type):
         pytest.param(np.inf, id="infinity"),
         pytest.param(1.5 + 0.0j, id="complex-zero-imaginary"),
         pytest.param("1.5", id="numeric-string"),
+        pytest.param(np.array(1.5, dtype=object), id="numeric-object-scalar"),
         pytest.param(np.array([1.5]), id="shape-one-array"),
     ],
 )
@@ -231,6 +232,8 @@ _INVALID_POSITIVE_PARAMETERS = [
     pytest.param(np.inf, id="infinity"),
     pytest.param(1.0 + 0.0j, id="complex-zero-imaginary"),
     pytest.param("1.0", id="numeric-string"),
+    pytest.param(np.array(1.0, dtype=object), id="numeric-object-scalar"),
+    pytest.param(np.array([1.0, 2.0], dtype=object), id="numeric-object-vector"),
     pytest.param(np.ones(1), id="wrong-length"),
     pytest.param(np.ones((2, 1)), id="column-vector"),
     pytest.param(np.ones((1, 2)), id="row-vector"),
