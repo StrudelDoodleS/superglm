@@ -21,3 +21,21 @@ def _default_weights(w, n: int) -> NDArray:
     if w is None:
         return np.ones(n, dtype=np.float64)
     return np.asarray(w, dtype=np.float64)
+
+
+def _validate_strict_prior_weights(weights, n: int) -> NDArray:
+    """Return one-dimensional, finite, strictly positive float64 prior weights."""
+    message = f"weights must be finite and strictly positive, one-dimensional, and have length {n}"
+    try:
+        raw = np.asarray(weights)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(message) from exc
+    if raw.ndim != 1 or raw.shape[0] != n or np.iscomplexobj(raw):
+        raise ValueError(message)
+    try:
+        validated = np.asarray(raw, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(message) from exc
+    if not np.all(np.isfinite(validated)) or np.any(validated <= 0.0):
+        raise ValueError(message)
+    return validated

@@ -80,6 +80,9 @@ result.profile_plot()  # profile deviance curve + CI region
 
 ## Tweedie: estimating the power parameter
 
+The examples below assume `y` is a per-exposure response, such as pure premium
+per unit of exposure.
+
 Fit with a fixed Tweedie power:
 
 ```python
@@ -93,11 +96,34 @@ Or estimate the power via profile likelihood:
 
 ```python
 model = SuperGLM(family=Tweedie(p=1.5), selection_penalty=0.01)
-result = model.estimate_p(df, y, sample_weight=exposure, p_range=(1.1, 1.9))
+result = model.estimate_p(df, y, sample_weight=exposure, p_bounds=(1.1, 1.9))
 print(result.p_hat)  # estimated Tweedie power
 ```
 
-`estimate_p()` profiles over the power parameter *p*: for each candidate *p*, it fits the GLM, estimates the dispersion φ via Pearson, and evaluates the exact Tweedie log-likelihood (Wright-Bessel + saddlepoint fallback). Brent's method finds the maximiser.
+`phi_method="mle"` and `method="brent"` are the defaults. For each candidate
+*p*, `estimate_p()` fits the GLM, profiles φ by nested maximum likelihood, and
+evaluates the Tweedie log-likelihood. `phi_method="pearson"` is an explicit fast plug-in
+option when exploratory speed matters, but it is not a likelihood profile
+and cannot support a likelihood-ratio confidence interval.
+
+Positive densities normally use the Wright–Bessel series. A diagnosed
+saddlepoint fallback is used only when that exact evaluation is not finite or
+certifiable. Inspect `density_method`, `density_exact`, `saddlepoint_fraction`,
+`near_power_boundary`, `outer_boundary`, and `warnings` on the result. Profiles
+at a search bound, and especially near *p*=1 and *p*=2, are naturally unstable;
+optimizer convergence alone does not make such an estimate reliable.
+
+`sample_weight` follows the exponential-dispersion-model prior-weight convention:
+`Var(Yᵢ | xᵢ) = φ μᵢᵖ / wᵢ` (equivalently, observation-specific dispersion
+φ / wᵢ). These are prior weights, not replication counts. Zero-weight observations must be removed
+consistently from `X`, `y`, `sample_weight`, and `offset` before profiling; the
+profiler rejects non-positive prior weights.
+`sample_weight` does not enter the linear predictor or automatically scale the
+conditional mean. Use an explicit offset when exposure should also enter the mean.
+
+With `fit_mode="reml"`, REML selects spline smoothing penalties within each
+candidate fit. The *p*/φ profile is then evaluated conditionally; it does not jointly estimate *p* and φ
+using an mgcv-style REML objective.
 
 ### Profile confidence interval
 
@@ -106,10 +132,13 @@ ci = result.ci(alpha=0.05)  # (lower, upper) via profile LRT
 ```
 
 !!! note
-    Tweedie profile CIs are more expensive than NB2 because each boundary evaluation requires a full model refit.
+    `result.ci()` is explicit and potentially expensive: each new boundary probe
+    can require a full model refit. It is available only for MLE dispersion
+    profiles. The interval is cached, so summaries and exports display it after
+    this explicit call without evaluating the profile again.
 
 ### Profile plot
 
 ```python
-result.profile_plot()  # profile deviance curve + CI region + MLE line
+result.profile_plot()  # adds the LR cutoff/region only when result.ci() is cached
 ```

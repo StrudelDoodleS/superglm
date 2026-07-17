@@ -20,7 +20,8 @@ import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution, resolve_distribution
+from superglm._utils import _validate_strict_prior_weights
+from superglm.distributions import Distribution, Tweedie, resolve_distribution
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -615,12 +616,15 @@ def build_design_matrix(
     """
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
-    sample_weight = (
-        np.ones(n) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
-    )
+    distribution = resolve_distribution(family)
+    if sample_weight is None:
+        sample_weight = np.ones(n, dtype=np.float64)
+    elif isinstance(distribution, Tweedie):
+        sample_weight = _validate_strict_prior_weights(sample_weight, n)
+    else:
+        sample_weight = np.asarray(sample_weight, dtype=np.float64)
     if offset is not None:
         offset = np.asarray(offset, dtype=np.float64)
-    distribution = resolve_distribution(family)
     link = resolve_link(link_spec, distribution)
 
     group_matrices: list[GroupMatrix] = []

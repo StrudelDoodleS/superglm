@@ -206,6 +206,11 @@ def _overview_rows(source: _CompactSummarySource) -> tuple[SummaryOverviewRow, .
                 SummaryOverviewRow("Distribution Profile", "Tweedie p CI Lower", ci_lower),
                 SummaryOverviewRow("Distribution Profile", "Tweedie p CI Upper", ci_upper),
                 SummaryOverviewRow(
+                    "Distribution Profile",
+                    "Tweedie p CI Status",
+                    str(info.get("tweedie_p_ci_status", "")),
+                ),
+                SummaryOverviewRow(
                     "Distribution Profile", "Tweedie phi", _finite_float(info.get("tweedie_phi"))
                 ),
                 SummaryOverviewRow(

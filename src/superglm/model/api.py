@@ -243,32 +243,23 @@ class SuperGLM:
         y : array-like
             Response variable.
         sample_weight : array-like, optional
-            **Frequency weights** (prior weights), typically policy exposure
-            in insurance applications. Defaults to 1 for all observations.
+            Observation weights. Their likelihood interpretation is family-specific.
+            Defaults to 1 for all observations.
 
-            This is a frequency weight: it represents the amount of risk
-            observed, not observation precision. A policy with sample_weight=0.5
-            (6 months on risk) contributes half as much information as one with
-            sample_weight=1.0 (12 months). The standard assumption is that the
-            expected response scales linearly with sample_weight:
-            ``E[Y_i] = sample_weight_i * lambda_i``.
+            For Tweedie, these are finite, strictly positive EDM prior weights:
+            ``Y_i ~ Tw_p(mu_i, phi / w_i)``, so
+            ``Var(Y_i | x_i) = phi * mu_i**p / w_i``. They are not replication counts;
+            zero or non-finite weights are rejected. Non-Tweedie families retain their
+            existing weighting behavior.
 
-            For Poisson and Gamma models this only affects dispersion and
-            standard errors. For Negative Binomial and Tweedie, sample_weight
-            enters the profile likelihood for theta/p estimation, so the
-            distinction between frequency and variance weights matters.
-
-            Do **not** pass variance weights (e.g. credibility weights,
-            inverse-variance weights) via this parameter — those require a
-            different variance scaling that is not implemented.
-
-            References: De Jong & Heller (2008) §5.4, §6.1; Ohlsson &
-            Johansson (2010) Ch. 2; CAS Monograph No. 5 (Goldburd et al.,
-            2016); Renshaw (1994) ASTIN Bulletin 24(2).
+            Weights affect fitting but do not enter the linear predictor or
+            automatically scale the conditional mean. The model mean is
+            ``mu_i = g**-1(x_i.T @ beta + offset_i)``.
         offset : array-like, optional
-            Offset added to the linear predictor. For count models with
-            sample_weight, use ``offset=np.log(sample_weight)`` so that the model
-            estimates a rate rather than a raw count.
+            Offset added to the linear predictor. ``sample_weight`` does not supply an
+            offset. To make a raw-count mean scale with exposure, pass
+            ``offset=np.log(exposure)``. For a per-exposure response, pass exposure as
+            ``sample_weight`` without adding it again to the linear predictor.
         record_diagnostics : bool
             If True, record per-iteration IRLS diagnostics (W range,
             mu/eta range, step halvings, worst-observation indices) on
@@ -369,7 +360,12 @@ class SuperGLM:
         y : array-like
             Response variable.
         sample_weight : array-like, optional
-            Frequency weights.
+            Observation weights. Their likelihood interpretation is family-specific.
+            For Tweedie, these are finite, strictly positive EDM prior weights with
+            ``Var(Y_i | x_i) = phi * mu_i**p / w_i``; they are not replication counts.
+            Weights affect fitting but do not enter the linear predictor or
+            automatically scale the conditional mean. Non-Tweedie families retain their
+            existing weighting behavior.
         offset : array-like, optional
             Offset term.
         max_reml_iter : int
@@ -677,7 +673,7 @@ class SuperGLM:
         offset: NDArray | None = None,
         *,
         fit_mode: str = "fit",
-        phi_method: str = "pearson",
+        phi_method: str = "mle",
         method: str = "brent",
         **kwargs,
     ):
@@ -685,12 +681,25 @@ class SuperGLM:
 
         Parameters
         ----------
+        X : DataFrame
+            Feature matrix.
+        y : array-like
+            Response variable.
+        sample_weight : array-like, optional
+            Finite, strictly positive EDM prior weights, not replication or frequency weights.
+            The Tweedie variance convention is
+            ``Var(Y_i | x_i) = phi * mu_i**p / w_i``.
+            Remove zero-weight rows consistently from ``X``, ``y``, ``sample_weight``,
+            and ``offset`` before calling this method.
+        offset : array-like, optional
+            Offset added to the linear predictor.
         fit_mode : {"fit", "reml", "inherit"}
             Fitting regime for each candidate ``p`` evaluation.
         phi_method : {"pearson", "mle"}
             How to profile out Tweedie dispersion ``phi`` at each candidate ``p``.
-            ``"pearson"`` uses the weighted Pearson moment estimate, while
-            ``"mle"`` runs a nested 1D likelihood optimization in ``phi``.
+            ``"mle"`` (default) runs a nested 1D likelihood optimization in
+            ``phi``. ``"pearson"`` is an explicit faster plug-in estimate and
+            does not support likelihood-ratio confidence intervals.
         method : {"brent", "grid", "grid_refine", "profile_opt"}
             Search strategy. ``"brent"`` (default) uses bounded scalar
             optimisation. ``"grid"`` does exhaustive grid search.
