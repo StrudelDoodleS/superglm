@@ -253,6 +253,19 @@ def test_invalid_positive_parameter_is_rejected_before_sampler_use(name, value):
     _assert_no_sampler_calls(rng)
 
 
+@pytest.mark.parametrize("name", ["mu", "phi"])
+def test_scalar_parameter_domain_error_has_no_chained_cause(name):
+    rng = _rng_that_must_not_be_used()
+    arguments = {"mu": 1.0, "phi": 1.0}
+    arguments[name] = 0.0
+
+    with pytest.raises(ValueError, match=rf"\b{name}\b") as exc_info:
+        generate_tweedie_cpg(2, p=1.5, rng=rng, **arguments)
+
+    assert exc_info.value.__cause__ is None
+    _assert_no_sampler_calls(rng)
+
+
 @pytest.mark.parametrize(
     "rng",
     [

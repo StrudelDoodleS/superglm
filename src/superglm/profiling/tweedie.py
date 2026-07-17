@@ -27,7 +27,7 @@ import logging
 import operator
 import warnings as _warnings
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import numpy as np
 import pandas as pd
@@ -47,6 +47,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Compound Poisson-Gamma simulation
 # ---------------------------------------------------------------------------
+
+
+class _CPGRNG(Protocol):
+    """Structural type for the random sampling calls used by the CPG generator."""
+
+    def poisson(self, lam: NDArray) -> Any: ...
+
+    def gamma(self, shape: NDArray, *, scale: NDArray) -> Any: ...
 
 
 def _normalize_cpg_size(n: int) -> int:
@@ -91,22 +99,26 @@ def _normalize_cpg_parameter(name: str, value: float | NDArray, n: int) -> NDArr
         raise ValueError(message) from exc
     if raw.dtype.kind not in "iuf" or (raw.ndim != 0 and (raw.ndim != 1 or raw.shape != (n,))):
         raise ValueError(message)
-    try:
-        if raw.ndim == 0:
+    normalized: NDArray
+    if raw.ndim == 0:
+        try:
             scalar = float(raw)
-            if not np.isfinite(scalar) or scalar <= 0.0:
-                raise ValueError(message)
-            normalized = np.full(n, scalar, dtype=np.float64)
-        else:
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(message) from exc
+        if not np.isfinite(scalar) or scalar <= 0.0:
+            raise ValueError(message)
+        normalized = np.full(n, scalar, dtype=np.float64)
+    else:
+        try:
             normalized = np.array(raw, dtype=np.float64, copy=True)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(message) from exc
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(message) from exc
     if not np.all(np.isfinite(normalized)) or np.any(normalized <= 0.0):
         raise ValueError(message)
     return normalized
 
 
-def _resolve_cpg_rng(rng: np.random.Generator | None):
+def _resolve_cpg_rng(rng: _CPGRNG | None) -> _CPGRNG:
     """Return a generator-like object with both required sampling methods."""
     if rng is None:
         return np.random.default_rng()
@@ -120,7 +132,7 @@ def generate_tweedie_cpg(
     mu: float | NDArray,
     phi: float | NDArray,
     p: float,
-    rng: np.random.Generator | None = None,
+    rng: _CPGRNG | None = None,
 ) -> NDArray:
     """Simulate Tweedie(mu, phi, p) via compound Poisson-Gamma.
 
