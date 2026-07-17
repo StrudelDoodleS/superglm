@@ -2844,6 +2844,74 @@ class TweedieProfileResult:
             self.ci(alpha=alpha_value)
         return self._ci_details_cache[alpha_value]
 
+    def trace_plot(self, *, ax=None):
+        """Plot cached Tweedie p-search evaluations without fitting new models."""
+        import matplotlib.pyplot as plt
+
+        from superglm.plotting.common import (
+            _LINE_COLOR,
+            _LINE_WIDTH,
+            _PW_FILL,
+            _REF_COLOR,
+            _REF_LW,
+        )
+
+        try:
+            trace_p = np.asarray(self.search_trace["p"], dtype=np.float64)
+            trace_nll = np.asarray(self.search_trace["nll"], dtype=np.float64)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise RuntimeError("Tweedie search trace must contain numeric p/nll columns") from exc
+        if trace_p.ndim != 1 or trace_nll.ndim != 1 or trace_p.shape != trace_nll.shape:
+            raise RuntimeError(
+                "Tweedie search trace must contain one-dimensional numeric p/nll columns "
+                "of equal length"
+            )
+
+        finite = np.isfinite(trace_p) & np.isfinite(trace_nll)
+        if not np.any(finite):
+            raise RuntimeError("Tweedie search trace contains no finite p/nll evaluations")
+
+        finite_p = trace_p[finite]
+        finite_nll = trace_nll[finite]
+        order = np.argsort(finite_p, kind="stable")
+        plotted_p = finite_p[order]
+        plotted_difference = 2.0 * self._ll_scale * (finite_nll[order] - self.nll)
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(7, 4.5))
+        else:
+            fig = ax.get_figure()
+
+        ax.plot(
+            plotted_p,
+            plotted_difference,
+            color=_LINE_COLOR,
+            linewidth=_LINE_WIDTH,
+            marker="o",
+            markersize=5.5,
+            markerfacecolor=_PW_FILL,
+            markeredgecolor="white",
+            markeredgewidth=0.6,
+            label=f"Search evaluations ({len(plotted_p)})",
+            zorder=4,
+        )
+        ax.axvline(
+            self.p_hat,
+            linestyle=":",
+            color=_REF_COLOR,
+            linewidth=_REF_LW,
+            label=rf"$\hat{{p}}$ = {self.p_hat:.3f}",
+        )
+        ax.set_xlabel("p")
+        ax.set_ylabel(
+            "Profile deviance" if self.phi_method == "mle" else "Profile objective difference"
+        )
+        ax.set_title("Tweedie p profile search trace")
+        ax.set_ylim(bottom=0.0)
+        ax.grid(alpha=0.22)
+        ax.legend(fontsize=8, loc="upper right")
+        return fig
+
     def profile_plot(
         self,
         *,
