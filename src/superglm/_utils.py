@@ -28,13 +28,18 @@ def _validate_strict_prior_weights(weights, n: int) -> NDArray:
     message = f"weights must be finite and strictly positive, one-dimensional, and have length {n}"
     try:
         raw = np.asarray(weights)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(message) from exc
-    if raw.ndim != 1 or raw.shape[0] != n or np.iscomplexobj(raw):
+    if (
+        raw.ndim != 1
+        or raw.shape[0] != n
+        or np.iscomplexobj(raw)
+        or getattr(raw.dtype, "kind", None) in {"M", "m"}
+    ):
         raise ValueError(message)
     try:
         validated = np.asarray(raw, dtype=np.float64)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(message) from exc
     if not np.all(np.isfinite(validated)) or np.any(validated <= 0.0):
         raise ValueError(message)
