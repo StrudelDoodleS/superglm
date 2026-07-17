@@ -51,6 +51,9 @@ unrepresentable inputs before they can silently generate the wrong distribution.
 Python scalars and zero-dimensional NumPy arrays count as scalars. A one-element vector
 does not count as a scalar when `n != 1`. Arrays such as `(n, 1)`, `(1, n)`, and other
 broadcastable multidimensional shapes are rejected rather than expanded implicitly.
+Booleans, complex values (even with zero imaginary part), numeric strings, and
+object-dtype numeric containers are not accepted as real numeric inputs for `p`, `mu`,
+or `phi`; callers must supply an ordinary real numeric dtype.
 
 For `n == 0`, scalar `mu`/`phi` or empty vectors are valid and the function returns an
 empty `float64` vector without a random draw. Scalar values and `p` still undergo their
@@ -87,9 +90,10 @@ the inputs:
    ```
 
    Reject `lambda > lambda_max`; NumPy accepts the endpoint itself.
-6. Draw `N_i ~ Poisson(lambda_i)`. Require an integer, non-negative result of exact
-   shape `(n,)`. Before the Gamma draw, require the positive-event shapes
-   `alpha * N_i` to be finite and strictly positive.
+6. Draw `N_i ~ Poisson(lambda_i)`. Require an integer, non-negative result no greater
+   than the signed 64-bit Poisson output limit and of exact shape `(n,)`. Before the
+   Gamma draw, require the positive-event shapes `alpha * N_i` to be finite and
+   strictly positive.
 7. Draw positive observations with `Gamma(alpha * N_i, scale=beta_i)`. Validate the
    raw Gamma result before assigning it into `y`: it must be real, have exact shape
    `(count_nonzero(N),)`, and be finite and strictly positive. Exact zero here is a
@@ -98,7 +102,9 @@ the inputs:
 
 Invalid pre-draw inputs must not advance the supplied RNG. A failure depending on the
 realized Poisson counts can occur only after that Poisson draw; no Gamma draw occurs in
-that case.
+that case. A zero or non-finite realized Gamma value is necessarily detected after both
+draws have advanced the RNG; the function does not clip or resample because either
+response would change the requested distribution.
 
 ## Errors
 
@@ -143,6 +149,8 @@ Implementation follows red-green TDD. Focused tests will cover:
 - the exact NumPy Poisson-limit endpoint and derived Gamma-shape representability;
 - a real NumPy regression near `p=2` where positive-count Gamma draws otherwise
   underflow to zero and catastrophically inflate the structural-zero mass;
+- a real NumPy regression near `p=1` where an unbounded Gamma realization can overflow
+  even though every input and derived parameter is finite;
 - malformed Generator-compatible outputs;
 - the existing ordinary and near-boundary CPG moment characterizations.
 
