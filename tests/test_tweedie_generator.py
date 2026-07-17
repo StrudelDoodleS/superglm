@@ -357,12 +357,16 @@ def test_poisson_rate_accepts_exact_numpy_limit_and_rejects_next_rate():
     assert accepted_rng.poisson_calls[0][0] == poisson_lam_max
     assert accepted_rng.gamma_calls == []
 
+    next_rate = np.nextafter(poisson_lam_max, np.inf)
+    next_mu = (next_rate / 2.0) ** 2
+    assert np.sqrt(next_mu) / 0.5 == next_rate
+
     rejected_rng = _rng_that_must_not_be_used()
     with pytest.raises(ValueError, match="Poisson rate"):
         generate_tweedie_cpg(
             1,
-            mu=1.0,
-            phi=np.nextafter(endpoint_phi, 0.0),
+            mu=next_mu,
+            phi=1.0,
             p=1.5,
             rng=rejected_rng,
         )
@@ -470,6 +474,12 @@ def test_malformed_poisson_output_is_rejected_before_gamma(counts, message):
         pytest.param(np.array(["1.0"]), RuntimeError, "real numeric", id="numeric-string"),
         pytest.param(np.array([True]), RuntimeError, "real numeric", id="bool-dtype"),
         pytest.param(np.array([-1.0]), RuntimeError, "negative", id="negative"),
+        pytest.param(
+            np.array([-np.inf]),
+            RuntimeError,
+            "negative",
+            id="negative-infinity",
+        ),
         pytest.param(np.array([0.0]), ValueError, "underflow", id="zero"),
         pytest.param(np.array([np.nan]), ValueError, "finite", id="nan"),
         pytest.param(np.array([np.inf]), ValueError, "overflow", id="infinity"),

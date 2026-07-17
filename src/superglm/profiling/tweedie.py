@@ -214,12 +214,12 @@ def _draw_cpg_positive_values(
         )
     if raw.dtype.kind not in "iuf":
         raise RuntimeError("Gamma sampler output must have a real numeric dtype excluding bool")
+    if np.any(raw < 0.0):
+        raise RuntimeError("Gamma sampler output must not contain negative values")
     if not np.all(np.isfinite(raw)):
         raise ValueError(
             "Gamma sampler output must be finite; non-finite values indicate numerical overflow"
         )
-    if np.any(raw < 0.0):
-        raise RuntimeError("Gamma sampler output must not contain negative values")
 
     try:
         with np.errstate(over="ignore", under="ignore", invalid="ignore"):
