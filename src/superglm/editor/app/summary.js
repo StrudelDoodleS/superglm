@@ -251,18 +251,13 @@ function profileStatusLabel(job, traceCount) {
       ? `final refit · ${estimateText}`
       : `final refit · ${traceCount} evals`;
   }
-  if (job.phase === "profile_ci") {
-    return estimateText
-      ? `profile CI · ${estimateText}`
-      : `profile CI · ${traceCount} evals`;
-  }
   if (job.phase === "finalizing") return `updating summary · ${traceCount} evals`;
   if (traceCount > 0) return `profiling · ${traceCount} evals`;
   return "starting";
 }
 
 function isPostSearchPhase(phase) {
-  return ["best_found", "final_refit", "profile_ci", "finalizing"].includes(phase);
+  return ["best_found", "final_refit", "finalizing"].includes(phase);
 }
 
 function profileEstimate(job) {
@@ -462,7 +457,12 @@ function profileTraceLegendHTML(trace, estimate, label) {
 function profileEstimateCIText(estimate) {
   const low = formatProfileNumber(estimate.ci_low);
   const high = formatProfileNumber(estimate.ci_high);
-  if (!low || !high) return "CI pending";
+  if (estimate.ci_status === "unavailable for Pearson plug-in") {
+    return "CI unavailable for Pearson plug-in";
+  }
+  if (!low || !high) {
+    return estimate.ci_status === "not computed" ? "CI not computed" : "CI pending";
+  }
   return `CI [${low}, ${high}]`;
 }
 
@@ -604,7 +604,19 @@ function renderCompactSummary(payload) {
     ["BIC", model.bic],
     ["Log lik", model.log_likelihood]
   ];
-  if (model.tweedie_p !== null && model.tweedie_p !== undefined) facts.push(["Tweedie p", model.tweedie_p]);
+  if (model.tweedie_p !== null && model.tweedie_p !== undefined) {
+    facts.push(["Tweedie p", model.tweedie_p]);
+    if (model.tweedie_p_method) {
+      facts.push(["Tweedie p method", model.tweedie_p_method]);
+    }
+    const ci = Array.isArray(model.tweedie_p_ci) ? model.tweedie_p_ci : null;
+    const ciText = model.tweedie_p_ci_status === "unavailable for Pearson plug-in"
+      ? model.tweedie_p_ci_status
+      : ci && ci.length >= 2
+        ? `[${formatProfileNumber(ci[0])}, ${formatProfileNumber(ci[1])}]`
+        : model.tweedie_p_ci_status || "not computed";
+    facts.push(["Tweedie p CI", ciText]);
+  }
   if (model.nb_theta !== null && model.nb_theta !== undefined) facts.push(["NB2 theta", model.nb_theta]);
   return `
     <div class="compact-summary">

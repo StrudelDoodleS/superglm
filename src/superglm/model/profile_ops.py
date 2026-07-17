@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import fields, replace
+
+import numpy as np
 
 from superglm.distributions import NegativeBinomial, Tweedie
+from superglm.profiling._reporting import cached_tweedie_profile_ci
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +21,7 @@ def estimate_p(
     offset=None,
     *,
     fit_mode="fit",
-    phi_method="pearson",
+    phi_method="mle",
     method="brent",
     progress_callback=None,
     **kwargs,
@@ -45,44 +49,108 @@ def estimate_p(
     # Refit with the same regime used for profiling (clears stale profile results)
     if progress_callback is not None:
         progress_callback("final_refit", {"profile_estimate": _tweedie_estimate_payload(result)})
-    if resolved_mode == "fit_reml":
-        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
-    else:
-        model.fit(X, y, sample_weight=sample_weight, offset=offset)
+    retain_fit_state = model._retain_fit_state
+    try:
+        model._retain_fit_state = True
+        if resolved_mode == "fit_reml":
+            model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
+        else:
+            model.fit(X, y, sample_weight=sample_weight, offset=offset)
+        _synchronize_tweedie_profile_refit(model, y, result)
+    finally:
+        model._retain_fit_state = retain_fit_state
 
-    # Set after refit so the clear in fit() doesn't wipe it
+    if not retain_fit_state:
+        from superglm.model import fit_ops
+
+        fit_ops._maybe_release_fit_state(model)
+
+    # Install last: a model advertising this result has fully synchronized state.
     model._tweedie_profile_result = result
 
-    # Use the profiler's phi so summary LL/AIC/BIC are consistent with
-    # the profile NLL (both evaluate the density at the same dispersion).
+    return result
+
+
+def _replace_dataclass_preserving_dynamic_attributes(instance, **changes):
+    """Replace dataclass fields without dropping solver-added attributes."""
+    replacement = replace(instance, **changes)
+    declared_names = {field.name for field in fields(instance)}
+    for name, value in vars(instance).items():
+        if name not in declared_names:
+            setattr(replacement, name, value)
+    return replacement
+
+
+def _replace_pirls_phi(result, phi):
+    """Return a phi-adjusted PIRLS result with all runtime metadata intact."""
+    return _replace_dataclass_preserving_dynamic_attributes(result, phi=float(phi))
+
+
+def _synchronize_tweedie_profile_refit(model, y, profile_result) -> None:
+    """Atomically synchronize a retained final refit to the profiled dispersion."""
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
-    from superglm.model.fit_ops import _compute_fit_stats
+    from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
 
-    model._result.phi = result.phi_hat
-    # Recompute fit stats (LL, AIC inputs) at the profiler's phi
-    eta = model._dm.matvec(model._result.beta) + model._result.intercept
+    distribution = model._distribution
+    if not isinstance(distribution, Tweedie) or distribution.p != profile_result.p_hat:
+        raise RuntimeError("Final Tweedie refit does not match the profiled power parameter")
+    if model._dm is None or model._fit_weights is None:
+        raise RuntimeError("Final Tweedie refit state was released before synchronization")
+
+    public_result = model.result
+    solver_result = model._solver_pirls_result()
+    weights = model._fit_weights
     offset_arr = model._fit_offset
+    y_arr = np.asarray(y, dtype=np.float64)
+
+    eta = model._dm.matvec(solver_result.beta) + solver_result.intercept
     if offset_arr is not None:
         eta = eta + offset_arr
     eta = stabilize_eta(eta, model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution)
-    weights = model._fit_weights
-    model._fit_stats = _compute_fit_stats(
-        y, mu, weights, offset_arr, model._distribution, model._link, result.phi_hat
+    mu = clip_mu(model._link.inverse(eta), distribution)
+    null_mu = _compute_null_mu(y_arr, weights, offset_arr, distribution, model._link)
+    fit_stats = _compute_fit_stats(
+        y_arr,
+        mu,
+        weights,
+        offset_arr,
+        distribution,
+        model._link,
+        profile_result.phi_hat,
+        null_mu=null_mu,
     )
 
-    # Eagerly compute the default CI so summary() doesn't trigger expensive
-    # profile refits on first access. REML profile objectives evaluate against
-    # an isolated scratch model, so CI probes cannot mutate this fitted model.
-    if result._objective is not None:
-        if progress_callback is not None:
-            progress_callback("profile_ci", {"profile_estimate": _tweedie_estimate_payload(result)})
-        result.ci(alpha=0.05)
-        if progress_callback is not None:
-            progress_callback("profile_ci", {"profile_estimate": _tweedie_estimate_payload(result)})
+    replacement_public = _replace_pirls_phi(public_result, profile_result.phi_hat)
+    replacement_solver = _replace_pirls_phi(solver_result, profile_result.phi_hat)
+    reml_result = getattr(model, "_reml_result", None)
+    replacement_reml = (
+        None
+        if reml_result is None
+        else _replace_dataclass_preserving_dynamic_attributes(
+            reml_result, pirls_result=replacement_solver
+        )
+    )
 
-    return result
+    model.family = distribution
+    model._result = replacement_public
+    model._solver_result = replacement_solver
+    if reml_result is not None:
+        model._reml_result = replacement_reml
+    model._fit_mu = mu
+    model._fit_null_mu = null_mu
+    model._fit_stats = fit_stats
+
+    for cache_name in (
+        "_coef_covariance",
+        "_fit_active_info",
+        "_fit_inference_info",
+        "_group_edf",
+    ):
+        model.__dict__.pop(cache_name, None)
+    model._fit_metrics_cache = None
+    model._fit_metrics_cache_signature = None
+    model._summary_cache = None
 
 
 def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fit", **kwargs):
@@ -123,12 +191,15 @@ def _resolve_profile_fit_mode(model, fit_mode: str) -> str:
 
 
 def _tweedie_estimate_payload(result):
+    ci, ci_status = cached_tweedie_profile_ci(result, 0.05)
+    ci_low, ci_high = (None, None) if ci is None else ci
     return {
         "parameter": "p",
         "label": "p_hat",
         "value": getattr(result, "p_hat", None),
-        "ci_low": _cached_ci(result)[0],
-        "ci_high": _cached_ci(result)[1],
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "ci_status": ci_status,
         "objective": getattr(result, "nll", None),
         "objective_label": "loss",
         "lower_is_better": True,

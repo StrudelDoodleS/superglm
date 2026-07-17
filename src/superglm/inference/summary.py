@@ -89,6 +89,23 @@ def _display_method(method: Any) -> str:
     return "MLE" if method_str == "ML" else method_str
 
 
+def _format_profile_estimate(
+    estimate: Any,
+    ci: Any,
+    ci_status: Any,
+) -> str:
+    """Format a profile estimate without assuming an interval was computed."""
+    status = str(ci_status or "not computed")
+    if status == "unavailable for Pearson plug-in":
+        return f"{float(estimate):.3f} [CI unavailable for Pearson plug-in]"
+    if isinstance(ci, tuple | list) and len(ci) >= 2:
+        try:
+            return f"{float(estimate):.3f} [{float(ci[0]):.3f}, {float(ci[1]):.3f}]"
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return f"{float(estimate):.3f} [CI not computed]"
+
+
 _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
 _QS_NOTE = (
     "QS: quasi-complete separation — a predictor perfectly or nearly predicts\n"
@@ -233,8 +250,11 @@ class ModelSummary:
 
         # Tweedie p profile row
         if "tweedie_p" in info:
-            ci = info["tweedie_p_ci"]
-            p_str = f"{info['tweedie_p']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+            p_str = _format_profile_estimate(
+                info["tweedie_p"],
+                info.get("tweedie_p_ci"),
+                info.get("tweedie_p_ci_status"),
+            )
             method = info["tweedie_p_method"]
             if "tweedie_profile_nll" in info:
                 method = f"{method}  NLL: {info['tweedie_profile_nll']:.4f}"
@@ -575,8 +595,11 @@ class ModelSummary:
 
         # Tweedie p profile row
         if "tweedie_p" in info:
-            ci = info["tweedie_p_ci"]
-            p_str = f"{info['tweedie_p']:.3f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+            p_str = _format_profile_estimate(
+                info["tweedie_p"],
+                info.get("tweedie_p_ci"),
+                info.get("tweedie_p_ci_status"),
+            )
             method = info["tweedie_p_method"]
             if "tweedie_profile_nll" in info:
                 method = f"{method}  NLL: {info['tweedie_profile_nll']:.4f}"

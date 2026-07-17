@@ -30,6 +30,10 @@ from superglm.model.state_ops import (
     _rank_augmented_covariance,
     _solver_space_working_weights,
 )
+from superglm.profiling._reporting import (
+    cached_tweedie_profile_ci,
+    tweedie_profile_method_label,
+)
 from superglm.solvers.centered_system import penalty_factor
 from superglm.solvers.rank import (
     decompose_factor,
@@ -1232,11 +1236,12 @@ class ModelMetrics:
         # Tweedie p profile info
         tw_pr = getattr(self._model, "_tweedie_profile_result", None)
         if tw_pr is not None:
-            ci = tw_pr.ci(alpha=alpha)
+            ci, ci_status = cached_tweedie_profile_ci(tw_pr, alpha)
             model_info["tweedie_p"] = tw_pr.p_hat
             model_info["tweedie_p_ci"] = ci
+            model_info["tweedie_p_ci_status"] = ci_status
             model_info["tweedie_phi"] = tw_pr.phi_hat
-            model_info["tweedie_p_method"] = f"Profile ({tw_pr.method}, phi={tw_pr.phi_method})"
+            model_info["tweedie_p_method"] = tweedie_profile_method_label(tw_pr)
 
         coef_rows = self._build_coef_rows(alpha=alpha)
 
