@@ -170,6 +170,126 @@ class TestTweedieProfileCI:
         result._ci_seed_points = (p_hat,)
         return result
 
+    @staticmethod
+    def _trace_plot_result(*, phi_method="mle"):
+        def unexpected_objective(p):
+            raise AssertionError(f"trace_plot must not evaluate the objective at p={p}")
+
+        return tweedie_module.TweedieProfileResult(
+            p_hat=1.5,
+            phi_hat=1.0,
+            nll=2.0,
+            n_evaluations=3,
+            converged=True,
+            method="brent",
+            phi_method=phi_method,
+            search_trace=pd.DataFrame(
+                {
+                    "p": [1.8, 1.2, 1.5],
+                    "nll": [2.1, 2.2, 2.0],
+                }
+            ),
+            _objective=unexpected_objective,
+            _ll_scale=10.0,
+            _evaluation_count=lambda: 3,
+        )
+
+    @staticmethod
+    def _trace_curve(ax):
+        curves = [line for line in ax.lines if line.get_label().startswith("Search evaluations")]
+        assert len(curves) == 1
+        return curves[0]
+
+    def test_trace_plot_uses_sorted_cached_trace_without_side_effects(self):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = self._trace_plot_result()
+        result._ci_cache[0.05] = (1.4, 1.6)
+        result._ci_details_cache[0.05] = SimpleNamespace(source="sentinel")
+        trace = result.search_trace
+        trace_snapshot = trace.copy(deep=True)
+        ci_cache = result._ci_cache
+        ci_cache_snapshot = ci_cache.copy()
+        ci_details_cache = result._ci_details_cache
+        ci_details_cache_snapshot = ci_details_cache.copy()
+        n_total_evaluations = result.n_total_evaluations
+
+        fig = result.trace_plot()
+
+        assert isinstance(fig, plt.Figure)
+        ax = fig.axes[0]
+        curve = self._trace_curve(ax)
+        np.testing.assert_allclose(curve.get_xdata(), [1.2, 1.5, 1.8])
+        np.testing.assert_allclose(curve.get_ydata(), [4.0, 0.0, 2.0])
+        assert ax.get_xlabel() == "p"
+        assert ax.get_ylabel() == "Profile deviance"
+        assert result.n_total_evaluations == n_total_evaluations
+        assert result.search_trace is trace
+        pd.testing.assert_frame_equal(result.search_trace, trace_snapshot)
+        assert result._ci_cache is ci_cache
+        assert result._ci_cache == ci_cache_snapshot
+        assert result._ci_details_cache is ci_details_cache
+        assert result._ci_details_cache == ci_details_cache_snapshot
+        plt.close(fig)
+
+    def test_trace_plot_uses_supplied_axes_and_neutral_pearson_wording(self):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = self._trace_plot_result(phi_method="pearson")
+        fig, ax = plt.subplots()
+
+        returned_fig = result.trace_plot(ax=ax)
+
+        assert returned_fig is fig
+        assert ax.get_ylabel() == "Profile objective difference"
+        assert ax.get_title()
+        assert "likelihood" not in ax.get_title().lower()
+        plt.close(fig)
+
+    @pytest.mark.parametrize(
+        "nonfinite_column",
+        ["p", "nll"],
+        ids=["nonfinite-p", "nonfinite-nll"],
+    )
+    def test_trace_plot_filters_nonfinite_trace_rows(self, nonfinite_column):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = self._trace_plot_result()
+        result.search_trace.loc[1, nonfinite_column] = np.nan
+        trace_snapshot = result.search_trace.copy(deep=True)
+
+        fig = result.trace_plot()
+
+        curve = self._trace_curve(fig.axes[0])
+        np.testing.assert_allclose(curve.get_xdata(), [1.5, 1.8])
+        np.testing.assert_allclose(curve.get_ydata(), [0.0, 2.0])
+        pd.testing.assert_frame_equal(result.search_trace, trace_snapshot)
+        plt.close(fig)
+
+    @pytest.mark.parametrize(
+        "trace",
+        [
+            pd.DataFrame({"p": pd.Series(dtype=float), "nll": pd.Series(dtype=float)}),
+            pd.DataFrame({"p": [np.nan, np.inf], "nll": [np.inf, np.nan]}),
+        ],
+        ids=["empty", "all-nonfinite"],
+    )
+    def test_trace_plot_requires_finite_p_and_nll(self, trace):
+        result = self._trace_plot_result()
+        result.search_trace = trace
+
+        with pytest.raises(RuntimeError, match="finite p/nll"):
+            result.trace_plot()
+
     def test_tweedie_ci_detail_records_are_public(self):
         from superglm import (
             TweedieProfileCIDensityProvenance,
