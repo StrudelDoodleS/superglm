@@ -80,6 +80,9 @@ result.profile_plot()  # profile deviance curve + CI region
 
 ## Tweedie: estimating the power parameter
 
+The examples below assume `y` is a per-exposure response, such as pure premium
+per unit of exposure.
+
 Fit with a fixed Tweedie power:
 
 ```python
@@ -115,6 +118,8 @@ optimizer convergence alone does not make such an estimate reliable.
 φ / wᵢ). These are prior weights, not replication counts. Zero-weight observations must be removed
 consistently from `X`, `y`, `sample_weight`, and `offset` before profiling; the
 profiler rejects non-positive prior weights.
+`sample_weight` does not enter the linear predictor or automatically scale the
+conditional mean. Use an explicit offset when exposure should also enter the mean.
 
 With `fit_mode="reml"`, REML selects spline smoothing penalties within each
 candidate fit. The *p*/φ profile is then evaluated conditionally; it does not jointly estimate *p* and φ

@@ -77,9 +77,12 @@ model.fit(df, y, sample_weight=exposure)
 
 ## Weights And Offsets
 
-`sample_weight=` is interpreted as exposure / frequency weight in insurance
-settings, not inverse-variance weight. The `exposure=` fit alias has been
-removed.
+For the Poisson frequency examples on this page, `sample_weight=exposure`
+weights a per-exposure rate response by exposure. It does not enter the linear
+predictor or automatically multiply the mean. Weight semantics are
+family-specific. In particular, Tweedie uses finite, strictly positive EDM prior
+weights with `Var(Y_i | x_i) = phi * mu_i**p / w_i`, not replication counts.
+The `exposure=` fit alias has been removed.
 
 Two common patterns for count models:
 
