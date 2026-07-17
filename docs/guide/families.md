@@ -141,10 +141,10 @@ ci = result.ci(alpha=0.05)  # (lower, upper) via profile LRT
 
 ```python
 result.trace_plot()    # cached search evaluations; performs no new fits
-result.profile_plot()  # dense profile curve; performs additional fixed-p fits
+result.profile_plot()  # dense profile curve; may fit additional uncached p values
 ```
 
 `trace_plot()` sorts by *p* and connects only evaluations already cached by
 `estimate_p()`, making it the cheap diagnostic. `profile_plot()` evaluates a dense
-grid of additional fixed-*p* fits and can be substantially expensive when
+grid and fits any uncached *p* values, so it can be substantially expensive when
 `phi_method="mle"`.
