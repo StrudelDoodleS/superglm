@@ -135,6 +135,9 @@ public `SuperGLM.estimate_p()` path propagates that failure and does not refit o
 The profile result will expose an explicit inference kind:
 
 - `exact_mle` for regular unpenalized likelihood profiling;
+- `constrained_profile` when shape or coefficient constraints make ordinary regular likelihood
+  asymptotics unavailable;
+- `pearson_plugin` when dispersion uses the Pearson estimate;
 - `penalized_plugin` when nuisance means use a selection or ridge penalty;
 - `reml_plugin` for the REML-based nuisance path; and
 - `approximate` only for explicitly requested diagnostic evaluation.
