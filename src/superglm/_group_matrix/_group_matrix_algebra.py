@@ -17,6 +17,7 @@ from ._group_matrix_kernels import (
     _fused_2d_bincount_2,
     _weighted_bincount_2d,
 )
+from ._group_matrix_tabmat import _tabmat_vector
 
 if TYPE_CHECKING:
     from ..group_matrix import (
@@ -942,7 +943,7 @@ def _block_xtwx(
     _profile_count(profile, "block_calls")
     if tabmat_split is not None:
         t0 = perf_counter() if profile is not None else 0.0
-        result = np.asarray(tabmat_split.sandwich(W))
+        result = np.asarray(tabmat_split.sandwich(_tabmat_vector(W)))
         _profile_elapsed(profile, "block_tabmat_s", t0)
         return result
     p_total = sum(g.end - g.start for g in groups)
@@ -1019,9 +1020,11 @@ def _block_xtwx_rhs(
     _profile_count(profile, "block_calls")
     if tabmat_split is not None:
         t0 = perf_counter() if profile is not None else 0.0
-        XtWX = np.asarray(tabmat_split.sandwich(W))
-        XtW1 = np.asarray(tabmat_split.transpose_matvec(W))
-        XtWz_out = np.asarray(tabmat_split.transpose_matvec(Wz))
+        tabmat_W = _tabmat_vector(W)
+        tabmat_Wz = _tabmat_vector(Wz)
+        XtWX = np.asarray(tabmat_split.sandwich(tabmat_W))
+        XtW1 = np.asarray(tabmat_split.transpose_matvec(tabmat_W))
+        XtWz_out = np.asarray(tabmat_split.transpose_matvec(tabmat_Wz))
         _profile_elapsed(profile, "block_tabmat_s", t0)
         return XtWX, XtW1, XtWz_out
     p_total = sum(g.end - g.start for g in groups)
@@ -1091,7 +1094,7 @@ def _block_xtwx_signed(
     _profile_count(profile, "block_calls")
     if tabmat_split is not None:
         t0 = perf_counter() if profile is not None else 0.0
-        result = np.asarray(tabmat_split.sandwich(W))
+        result = np.asarray(tabmat_split.sandwich(_tabmat_vector(W)))
         _profile_elapsed(profile, "block_tabmat_s", t0)
         return result
     p_total = sum(g.end - g.start for g in groups)

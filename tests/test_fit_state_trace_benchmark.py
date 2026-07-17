@@ -112,6 +112,88 @@ def test_tabmat_kernel_counter_records_actual_split_calls() -> None:
     assert calls == {"sandwich": 1, "transpose_matvec": 1}
 
 
+def test_categorical_fit_dispatches_prepared_tabmat_kernels() -> None:
+    prepared = CASES["categorical_fit"](0.02)
+
+    with _count_tabmat_kernel_calls() as calls:
+        prepared.model.fit(prepared.X, prepared.y)
+
+    assert calls["sandwich"] > 0
+    assert calls["sandwich"] <= calls["transpose_matvec"] <= 2 * calls["sandwich"]
+    assert prepared.model._dm._tabmat_centering_candidate is True
+
+
+def test_dense_fit_does_not_build_an_unused_tabmat_split() -> None:
+    prepared = CASES["dense_fit"](0.02)
+
+    prepared.model.fit(prepared.X, prepared.y)
+
+    assert prepared.model._dm._tabmat_built is False
+    assert prepared.model._dm._tabmat_centering_candidate is False
+
+
+def test_low_cardinality_categorical_fit_does_not_build_dense_tabmat_duplicate() -> None:
+    rng = np.random.default_rng(160)
+    n = 400
+    codes = np.resize(np.arange(20), n)
+    rng.shuffle(codes)
+    X = benchmark_module.pd.DataFrame(
+        {
+            "x": rng.normal(size=n),
+            "category": np.asarray([f"level_{code:02d}" for code in codes], dtype=object),
+        }
+    )
+    y = rng.poisson(1.0, size=n).astype(np.float64)
+    model = benchmark_module.SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={
+            "x": benchmark_module.Numeric(),
+            "category": benchmark_module.Categorical(base="first"),
+        },
+        direct_solve="gram",
+    )
+
+    model.fit(X, y)
+
+    assert model._dm._tabmat_built is False
+    assert model._dm._tabmat_centering_candidate is False
+
+
+def test_categorical_only_fit_keeps_compact_path_without_building_tabmat() -> None:
+    rng = np.random.default_rng(161)
+    n = 640
+    codes = np.resize(np.arange(120), n)
+    rng.shuffle(codes)
+    X = benchmark_module.pd.DataFrame(
+        {"category": np.asarray([f"level_{code:03d}" for code in codes], dtype=object)}
+    )
+    y = rng.poisson(1.0, size=n).astype(np.float64)
+    model = benchmark_module.SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"category": benchmark_module.Categorical(base="first")},
+        direct_solve="gram",
+    )
+
+    model.fit(X, y)
+
+    assert model._dm._tabmat_built is False
+    assert model._dm._tabmat_centering_candidate is False
+
+
+def test_categorical_tabmat_fit_is_numerically_deterministic() -> None:
+    first = CASES["categorical_fit"](0.02)
+    second = CASES["categorical_fit"](0.02)
+
+    first.model.fit(first.X, first.y)
+    second.model.fit(second.X, second.y)
+
+    np.testing.assert_allclose(first.model.result.beta, second.model.result.beta, atol=1e-12)
+    assert first.model.result.intercept == pytest.approx(second.model.result.intercept, abs=1e-12)
+    assert first.model.result.deviance == pytest.approx(second.model.result.deviance, rel=1e-12)
+
+
 def test_execution_order_alternates_deterministically() -> None:
     names = ("dense_fit", "categorical_fit", "spline_fit")
 

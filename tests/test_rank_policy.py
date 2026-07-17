@@ -26,7 +26,11 @@ from superglm.model import state_ops
 from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
-from superglm.solvers.centered_system import build_centered_system, refresh_centered_rhs
+from superglm.solvers.centered_system import (
+    TabmatCenteringState,
+    build_centered_system,
+    refresh_centered_rhs,
+)
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 from superglm.solvers.rank import (
@@ -41,6 +45,32 @@ from superglm.types import GroupSlice
 
 def _dense_design_matrix(X: np.ndarray) -> DesignMatrix:
     return DesignMatrix([DenseGroupMatrix(X)], n=X.shape[0], p=X.shape[1])
+
+
+def _count_tabmat_split_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    import tabmat
+
+    calls = {"standardize": 0, "sandwich": 0, "transpose_matvec": 0}
+    original_standardize = tabmat.SplitMatrix.standardize
+    original_sandwich = tabmat.SplitMatrix.sandwich
+    original_transpose_matvec = tabmat.SplitMatrix.transpose_matvec
+
+    def counted_standardize(self, *args, **kwargs):
+        calls["standardize"] += 1
+        return original_standardize(self, *args, **kwargs)
+
+    def counted_sandwich(self, *args, **kwargs):
+        calls["sandwich"] += 1
+        return original_sandwich(self, *args, **kwargs)
+
+    def counted_transpose_matvec(self, *args, **kwargs):
+        calls["transpose_matvec"] += 1
+        return original_transpose_matvec(self, *args, **kwargs)
+
+    monkeypatch.setattr(tabmat.SplitMatrix, "standardize", counted_standardize)
+    monkeypatch.setattr(tabmat.SplitMatrix, "sandwich", counted_sandwich)
+    monkeypatch.setattr(tabmat.SplitMatrix, "transpose_matvec", counted_transpose_matvec)
+    return calls
 
 
 def _fitted_discrete_tensor_state():
@@ -153,6 +183,254 @@ def test_centered_rhs_is_stable_with_large_feature_and_response_means() -> None:
         system.hessian,
     ):
         assert not values.flags.writeable
+
+
+def test_mixed_categorical_centering_uses_tabmat_without_materializing_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(154)
+    n = 600
+    n_levels = 120
+    dense = rng.normal(size=(n, 2))
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    rng.shuffle(codes)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(dense), categorical],
+        n=n,
+        p=dense.shape[1] + n_levels,
+    )
+    W = rng.uniform(0.25, 2.0, size=n)
+    z = rng.normal(size=n)
+    X = np.column_stack((dense, categorical.toarray()))
+    mean_x = np.average(X, axis=0, weights=W)
+    mean_z = float(np.average(z, weights=W))
+    X_centered = X - mean_x
+    calls = _count_tabmat_split_calls(monkeypatch)
+
+    monkeypatch.setattr(
+        dm,
+        "row_subset",
+        lambda _rows: pytest.fail("certified Tabmat centering must not materialize rows"),
+    )
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=np.zeros((dm.p, dm.p)),
+        tabmat_split=dm.tabmat_split,
+    )
+
+    assert calls == {"standardize": 1, "sandwich": 1, "transpose_matvec": 1}
+    np.testing.assert_allclose(system.mean_x, mean_x, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(
+        system.data_gram,
+        X_centered.T @ (W[:, None] * X_centered),
+        rtol=1e-12,
+        atol=1e-11,
+    )
+    np.testing.assert_allclose(
+        system.rhs,
+        X_centered.T @ (W * (z - mean_z)),
+        rtol=1e-12,
+        atol=1e-11,
+    )
+
+
+def test_unsafe_mixed_tabmat_centering_falls_back_to_stable_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(155)
+    n = 600
+    n_levels = 120
+    dense = np.column_stack((1e12 + np.arange(n, dtype=float), rng.normal(size=n)))
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    rng.shuffle(codes)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(dense), categorical],
+        n=n,
+        p=dense.shape[1] + n_levels,
+    )
+    W = rng.uniform(0.25, 2.0, size=n)
+    z = rng.normal(size=n)
+    penalty = np.zeros((dm.p, dm.p))
+    expected = build_centered_system(dm=dm, W=W, z_off=z, penalty=penalty)
+    calls = _count_tabmat_split_calls(monkeypatch)
+    tabmat_state = TabmatCenteringState()
+    original_row_subset = dm.row_subset
+    row_subset_calls = 0
+
+    def counted_row_subset(rows):
+        nonlocal row_subset_calls
+        row_subset_calls += 1
+        return original_row_subset(rows)
+
+    monkeypatch.setattr(dm, "row_subset", counted_row_subset)
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=penalty,
+        tabmat_split=dm.tabmat_split,
+        tabmat_state=tabmat_state,
+    )
+    second = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=penalty,
+        tabmat_split=dm.tabmat_split,
+        tabmat_state=tabmat_state,
+    )
+
+    assert calls == {"standardize": 1, "sandwich": 0, "transpose_matvec": 0}
+    assert tabmat_state.eligible is False
+    assert row_subset_calls == 2
+    np.testing.assert_array_equal(system.mean_x, expected.mean_x)
+    np.testing.assert_array_equal(system.data_gram, expected.data_gram)
+    np.testing.assert_array_equal(system.rhs, expected.rhs)
+    np.testing.assert_array_equal(second.data_gram, expected.data_gram)
+
+
+def test_categorical_only_centering_keeps_packed_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(156)
+    n = 600
+    n_levels = 120
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    rng.shuffle(codes)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix([categorical], n=n, p=n_levels)
+    calls = _count_tabmat_split_calls(monkeypatch)
+
+    monkeypatch.setattr(
+        dm,
+        "row_subset",
+        lambda _rows: pytest.fail("packed categorical centering must not materialize rows"),
+    )
+    system = build_centered_system(
+        dm=dm,
+        W=np.ones(n),
+        z_off=rng.normal(size=n),
+        penalty=np.zeros((dm.p, dm.p)),
+        tabmat_split=dm.tabmat_split,
+    )
+
+    assert calls == {"standardize": 0, "sandwich": 0, "transpose_matvec": 0}
+    assert np.all(np.isfinite(system.data_gram))
+
+
+@pytest.mark.parametrize("weight_layout", ["strided", "readonly"])
+def test_tabmat_centering_normalizes_weight_buffers(
+    weight_layout: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(157)
+    n = 600
+    n_levels = 120
+    dense = rng.normal(size=(n, 2))
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    rng.shuffle(codes)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(dense), categorical],
+        n=n,
+        p=dense.shape[1] + n_levels,
+    )
+    base_weights = rng.uniform(0.25, 2.0, size=n)
+    if weight_layout == "strided":
+        storage = np.empty(2 * n)
+        storage[::2] = base_weights
+        W = storage[::2]
+        assert not W.flags.c_contiguous
+    else:
+        W = base_weights.copy()
+        W.setflags(write=False)
+        assert not W.flags.writeable
+    z = rng.normal(size=n)
+    penalty = np.zeros((dm.p, dm.p))
+    expected = build_centered_system(dm=dm, W=base_weights, z_off=z, penalty=penalty)
+    calls = _count_tabmat_split_calls(monkeypatch)
+
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=penalty,
+        tabmat_split=dm.tabmat_split,
+    )
+
+    assert calls == {"standardize": 1, "sandwich": 1, "transpose_matvec": 1}
+    np.testing.assert_allclose(system.mean_x, expected.mean_x, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(system.data_gram, expected.data_gram, rtol=1e-12, atol=1e-11)
+    np.testing.assert_allclose(system.rhs, expected.rhs, rtol=1e-12, atol=1e-11)
+
+
+def test_tabmat_split_uses_uniform_float64_solver_dtype() -> None:
+    rng = np.random.default_rng(158)
+    n = 600
+    n_levels = 120
+    dense = rng.normal(size=(n, 2)).astype(np.float32)
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(dense), categorical],
+        n=n,
+        p=dense.shape[1] + n_levels,
+    )
+    W = rng.uniform(0.25, 2.0, size=n)
+    z = rng.normal(size=n)
+    penalty = np.zeros((dm.p, dm.p))
+    expected = build_centered_system(dm=dm, W=W, z_off=z, penalty=penalty)
+    split = dm.tabmat_split
+
+    assert split is not None
+    assert all(component.dtype == np.dtype(np.float64) for component in split.matrices)
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=penalty,
+        tabmat_split=split,
+    )
+    np.testing.assert_allclose(system.data_gram, expected.data_gram, rtol=1e-12, atol=1e-11)
+    np.testing.assert_allclose(system.rhs, expected.rhs, rtol=1e-12, atol=1e-11)
+
+
+def test_nonfinite_tabmat_raw_moments_fall_back_without_floating_point_error() -> None:
+    rng = np.random.default_rng(159)
+    n = 600
+    n_levels = 120
+    dense = (1e155 + 1e145 * rng.normal(size=n))[:, None]
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(dense), categorical],
+        n=n,
+        p=dense.shape[1] + n_levels,
+    )
+    W = np.ones(n)
+    z = rng.normal(size=n)
+    penalty = np.zeros((dm.p, dm.p))
+    expected = build_centered_system(dm=dm, W=W, z_off=z, penalty=penalty)
+    tabmat_state = TabmatCenteringState(eligible=True)
+
+    with np.errstate(over="raise", invalid="raise"):
+        system = build_centered_system(
+            dm=dm,
+            W=W,
+            z_off=z,
+            penalty=penalty,
+            tabmat_split=dm.tabmat_split,
+            tabmat_state=tabmat_state,
+        )
+
+    assert tabmat_state.eligible is False
+    assert np.all(np.isfinite(system.data_gram))
+    np.testing.assert_array_equal(system.data_gram, expected.data_gram)
+    np.testing.assert_array_equal(system.rhs, expected.rhs)
 
 
 def test_packed_centering_avoids_materializing_discrete_and_categorical_rows(
