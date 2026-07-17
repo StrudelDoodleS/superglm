@@ -3030,6 +3030,89 @@ class TestEstimatePFitMode:
 # =====================================================================
 
 
+class TestProfileContextInputOwnership:
+    """Lazy profile probes must use the data supplied when estimation began."""
+
+    @staticmethod
+    def _problem():
+        x = np.linspace(-1.0, 1.0, 12)
+        X = pd.DataFrame({"x": x})
+        y = np.exp(0.4 + 0.2 * x)
+        sample_weight = np.linspace(0.5, 1.5, len(x))
+        offset = 0.1 * x
+        return X, y, sample_weight, offset
+
+    @staticmethod
+    def _model():
+        return SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x": Numeric()},
+        )
+
+    def test_fit_context_owns_arrays_used_by_lazy_profile_probes(self):
+        X, y, sample_weight, offset = self._problem()
+        ctx = tweedie_module._build_profile_context(
+            self._model(),
+            X,
+            y,
+            sample_weight,
+            offset,
+            "pearson",
+            False,
+        )
+        expected_design = ctx.dm.toarray().copy()
+        expected_y = ctx.y_arr.copy()
+        expected_weight = ctx.w_arr.copy()
+        expected_offset = ctx.offset_arr.copy()
+
+        assert not np.shares_memory(ctx.y_arr, y)
+        assert not np.shares_memory(ctx.w_arr, sample_weight)
+        assert not np.shares_memory(ctx.offset_arr, offset)
+
+        X.iloc[:, 0] = 99.0
+        y[:] = 101.0
+        sample_weight[:] = 103.0
+        offset[:] = 107.0
+
+        np.testing.assert_array_equal(ctx.dm.toarray(), expected_design)
+        np.testing.assert_array_equal(ctx.y_arr, expected_y)
+        np.testing.assert_array_equal(ctx.w_arr, expected_weight)
+        np.testing.assert_array_equal(ctx.offset_arr, expected_offset)
+
+    def test_reml_context_owns_all_inputs_used_by_lazy_profile_probes(self):
+        X, y, sample_weight, offset = self._problem()
+        ctx = tweedie_module._build_profile_context_reml(
+            self._model(),
+            X,
+            y,
+            sample_weight,
+            offset,
+            "pearson",
+            False,
+        )
+        expected_X = ctx.X.copy(deep=True)
+        expected_y = ctx.y.copy()
+        expected_weight = np.asarray(ctx.sample_weight).copy()
+        expected_offset = np.asarray(ctx.offset).copy()
+
+        assert ctx.X is not X
+        assert not np.shares_memory(ctx.X["x"].to_numpy(), X["x"].to_numpy())
+        assert not np.shares_memory(ctx.y, y)
+        assert not np.shares_memory(ctx.sample_weight, sample_weight)
+        assert not np.shares_memory(ctx.offset, offset)
+
+        X.iloc[:, 0] = 99.0
+        y[:] = 101.0
+        sample_weight[:] = 103.0
+        offset[:] = 107.0
+
+        pd.testing.assert_frame_equal(ctx.X, expected_X)
+        np.testing.assert_array_equal(ctx.y, expected_y)
+        np.testing.assert_array_equal(ctx.sample_weight, expected_weight)
+        np.testing.assert_array_equal(ctx.offset, expected_offset)
+
+
 class TestProfileFitParity:
     """Fixed-p profile fits must be identical to the ordinary fit regimes."""
 

@@ -3350,6 +3350,16 @@ def _clone_profile_model(model, X, sample_weight):
     return profile_model
 
 
+def _snapshot_profile_inputs(X, y, sample_weight, offset):
+    """Own the inputs retained by profile contexts and their lazy probes."""
+    return (
+        copy.deepcopy(X),
+        np.array(y, dtype=np.float64, copy=True),
+        (None if sample_weight is None else np.array(sample_weight, dtype=np.float64, copy=True)),
+        None if offset is None else np.array(offset, dtype=np.float64, copy=True),
+    )
+
+
 def _build_profile_context(
     model,
     X,
@@ -3364,11 +3374,16 @@ def _build_profile_context(
     """One-time setup: build design matrix, calibrate lambda, create context."""
     from superglm.distributions import Tweedie, validate_response
 
-    y_arr = np.asarray(y, dtype=np.float64)
+    X_snapshot, y_arr, weight_snapshot, offset_snapshot = _snapshot_profile_inputs(
+        X,
+        y,
+        sample_weight,
+        offset,
+    )
 
     # Profile fits and later CI probes must not rewrite the caller's fitted
     # design, resolved family/link, penalty, groups, or inference caches.
-    profile_model = _clone_profile_model(model, X, sample_weight)
+    profile_model = _clone_profile_model(model, X_snapshot, weight_snapshot)
 
     # Match fit()'s fit-only lambda-policy guard before building the design.
     for name, spec in profile_model._specs.items():
@@ -3385,7 +3400,10 @@ def _build_profile_context(
     profile_model.family = Tweedie(p=1.5)
     try:
         y_arr, w_arr, offset_arr = profile_model._build_design_matrix(
-            X, y_arr, sample_weight, offset
+            X_snapshot,
+            y_arr,
+            weight_snapshot,
+            offset_snapshot,
         )
     finally:
         profile_model.family = saved_family
@@ -3602,29 +3620,31 @@ def _build_profile_context_reml(
     trace_iterations: bool = False,
 ) -> _ProfileContextREML:
     """Build context for REML-based profile estimation."""
+    X_snapshot, y_snapshot, weight_snapshot, offset_snapshot = _snapshot_profile_inputs(
+        X,
+        y,
+        sample_weight,
+        offset,
+    )
+
     # REML profile evaluations call fit_reml(), which rewrites the fitted model
     # state. Keep that mutation inside an isolated scratch model so result.ci()
     # and profile plots cannot leave the caller's model at a probe p.
-    profile_model = _clone_profile_model(model, X, sample_weight)
+    profile_model = _clone_profile_model(model, X_snapshot, weight_snapshot)
     if getattr(model, "_last_fit_meta", None) is not None:
         profile_model._last_fit_meta = dict(model._last_fit_meta)
 
-    y_np = np.asarray(y, dtype=np.float64)
-    w_arr = (
-        np.asarray(sample_weight, dtype=np.float64)
-        if sample_weight is not None
-        else np.ones(len(y_np))
-    )
+    w_arr = weight_snapshot if weight_snapshot is not None else np.ones(len(y_snapshot))
     return _ProfileContextREML(
         model=profile_model,
-        X=X,
-        y=y_np,
-        sample_weight=sample_weight,
-        offset=offset,
+        X=X_snapshot,
+        y=y_snapshot,
+        sample_weight=weight_snapshot,
+        offset=offset_snapshot,
         w_arr=w_arr,
         phi_method=phi_method,
         verbose=verbose,
-        ll_scale=float(len(y_np)),
+        ll_scale=float(len(y_snapshot)),
         trace_callback=trace_callback,
         trace_iterations=trace_iterations,
     )
