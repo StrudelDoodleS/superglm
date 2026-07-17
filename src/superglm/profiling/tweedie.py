@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 # Compound Poisson-Gamma simulation
 # ---------------------------------------------------------------------------
 
+_POISSON_LAM_MAX = float(np.iinfo(np.int64).max) - 10.0 * np.sqrt(float(np.iinfo(np.int64).max))
+
 
 class _CPGRNG(Protocol):
     """Structural type for the random sampling calls used by the CPG generator."""
@@ -127,6 +129,112 @@ def _resolve_cpg_rng(rng: _CPGRNG | None) -> _CPGRNG:
     return rng
 
 
+def _prepare_cpg_parameters(
+    mu: NDArray,
+    phi: NDArray,
+    p: float,
+) -> tuple[NDArray, float, NDArray]:
+    """Return finite, representable compound Poisson-Gamma parameters."""
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        lam = np.power(mu, 2 - p) / ((2 - p) * phi)  # Poisson rate
+        alpha = (2 - p) / (p - 1)  # Gamma shape per claim
+        beta = phi * (p - 1.0) * np.power(mu, p - 1.0)  # Gamma scale per claim
+
+    if not np.all(np.isfinite(lam)) or np.any(lam <= 0.0) or np.any(lam > _POISSON_LAM_MAX):
+        raise ValueError(
+            "Poisson rate must be finite, strictly positive, and within NumPy's int64-safe limit"
+        )
+    if not np.isfinite(alpha) or alpha <= 0.0:
+        raise ValueError("Gamma shape must be finite and strictly positive")
+    if not np.all(np.isfinite(beta)) or np.any(beta <= 0.0):
+        raise ValueError("Gamma scale must be finite and strictly positive")
+    return lam, alpha, beta
+
+
+def _draw_cpg_counts(rng: _CPGRNG, lam: NDArray) -> NDArray:
+    """Draw and structurally validate one Poisson count per rate."""
+    try:
+        raw_counts = rng.poisson(lam)
+    except TypeError as exc:
+        raise TypeError(
+            "Poisson sampler call to poisson(lam) has an incompatible signature"
+        ) from exc
+    except (ValueError, OverflowError, FloatingPointError) as exc:
+        raise ValueError("Poisson sampler failed for validated Poisson rate parameters") from exc
+
+    try:
+        counts = np.asarray(raw_counts)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("Poisson sampler output must be an integer array") from exc
+    if counts.shape != lam.shape:
+        raise RuntimeError(
+            f"Poisson sampler output must have shape {lam.shape}; got {counts.shape}"
+        )
+    if counts.dtype.kind not in "iu":
+        raise RuntimeError("Poisson sampler output must have an integer dtype excluding bool")
+    if np.any(counts < 0):
+        raise RuntimeError("Poisson sampler output must be non-negative")
+    if np.any(counts > np.iinfo(np.int64).max):
+        raise RuntimeError("Poisson sampler output must fit within int64")
+    return np.array(counts, dtype=np.int64, copy=True)
+
+
+def _draw_cpg_positive_values(
+    rng: _CPGRNG,
+    counts: NDArray,
+    positive: NDArray,
+    alpha: float,
+    beta: NDArray,
+) -> NDArray:
+    """Draw and validate Gamma totals for strictly positive Poisson counts."""
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        shapes = alpha * counts[positive]
+    if not np.all(np.isfinite(shapes)) or np.any(shapes <= 0.0):
+        raise ValueError("Gamma shape for positive events must be finite and strictly positive")
+
+    try:
+        raw_values = rng.gamma(shapes, scale=beta[positive])
+    except TypeError as exc:
+        raise TypeError(
+            "Gamma sampler call to gamma(shape, scale=...) has an incompatible signature"
+        ) from exc
+    except (ValueError, OverflowError, FloatingPointError) as exc:
+        raise ValueError(
+            "Gamma sampler failed for validated Gamma shape and scale parameters"
+        ) from exc
+
+    try:
+        raw = np.asarray(raw_values)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("Gamma sampler output must be a real numeric array") from exc
+    expected_shape = (int(np.count_nonzero(positive)),)
+    if raw.shape != expected_shape:
+        raise RuntimeError(
+            f"Gamma sampler output must have shape {expected_shape}; got {raw.shape}"
+        )
+    if raw.dtype.kind not in "iuf":
+        raise RuntimeError("Gamma sampler output must have a real numeric dtype excluding bool")
+    if not np.all(np.isfinite(raw)):
+        raise ValueError(
+            "Gamma sampler output must be finite; non-finite values indicate numerical overflow"
+        )
+    if np.any(raw < 0.0):
+        raise RuntimeError("Gamma sampler output must not contain negative values")
+
+    try:
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            values = np.array(raw, dtype=np.float64, copy=True)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Gamma sampler output could not be represented as finite float64") from exc
+    if not np.all(np.isfinite(values)):
+        raise ValueError(
+            "Gamma sampler output must be finite; non-finite values indicate numerical overflow"
+        )
+    if np.any(values == 0.0):
+        raise ValueError("Gamma sampler output underflowed to zero for a positive event")
+    return values
+
+
 def generate_tweedie_cpg(
     n: int,
     mu: float | NDArray,
@@ -161,23 +269,33 @@ def generate_tweedie_cpg(
     phi = _normalize_cpg_parameter("phi", phi, n)
     rng = _resolve_cpg_rng(rng)
 
-    # CPG parameters (Jørgensen 1997)
-    with np.errstate(all="ignore"):
-        lam = np.power(mu, 2 - p) / ((2 - p) * phi)  # Poisson rate
-        alpha = (2 - p) / (p - 1)  # Gamma shape per claim
-        beta = phi * (p - 1) * np.power(mu, p - 1)  # Gamma scale per claim
+    lam, alpha, beta = _prepare_cpg_parameters(mu, phi, p)
 
     if n == 0:
         return np.empty(0, dtype=np.float64)
 
     # Vectorised: draw N ~ Poisson(lam), then Y|N ~ Gamma(alpha*N, beta)
-    N = rng.poisson(lam)
+    counts = _draw_cpg_counts(rng, lam)
     y = np.zeros(n, dtype=np.float64)
-    pos = N > 0
-    if np.any(pos):
+    positive = counts > 0
+    if np.any(positive):
         # Gamma additive property: sum of N iid Gamma(alpha, beta) = Gamma(N*alpha, beta)
-        y[pos] = rng.gamma(alpha * N[pos], scale=beta[pos])
+        y[positive] = _draw_cpg_positive_values(
+            rng,
+            counts,
+            positive,
+            alpha,
+            beta,
+        )
 
+    if y.shape != (n,) or y.dtype != np.dtype(np.float64):
+        raise RuntimeError("Tweedie generator output must have shape (n,) and float64 dtype")
+    if not np.all(np.isfinite(y)) or np.any(y < 0.0):
+        raise RuntimeError("Tweedie generator output must be finite and non-negative")
+    if np.any((y == 0.0) != (counts == 0)):
+        raise RuntimeError(
+            "Tweedie structural zeros must correspond exactly to zero Poisson counts"
+        )
     return y
 
 

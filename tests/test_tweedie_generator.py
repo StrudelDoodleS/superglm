@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from superglm.profiling import tweedie as tweedie_module
 from superglm.profiling.tweedie import generate_tweedie_cpg
 
 
@@ -311,3 +312,208 @@ def test_wrong_poisson_signature_raises_a_useful_type_error():
 
     with pytest.raises(TypeError, match=r"\bpoisson\b"):
         generate_tweedie_cpg(1, mu=1.0, phi=1.0, p=1.5, rng=rng)
+
+
+def test_underflowed_poisson_rate_is_rejected_before_sampler_use():
+    rng = _rng_that_must_not_be_used()
+
+    with pytest.raises(ValueError, match="Poisson rate"):
+        generate_tweedie_cpg(
+            1,
+            mu=np.finfo(np.float64).tiny,
+            phi=np.finfo(np.float64).max,
+            p=1.5,
+            rng=rng,
+        )
+
+    _assert_no_sampler_calls(rng)
+
+
+def test_overflowed_gamma_scale_is_rejected_before_sampler_use():
+    rng = _rng_that_must_not_be_used()
+
+    with pytest.raises(ValueError, match="Gamma scale"):
+        generate_tweedie_cpg(
+            1,
+            mu=np.finfo(np.float64).max,
+            phi=np.finfo(np.float64).max,
+            p=1.5,
+            rng=rng,
+        )
+
+    _assert_no_sampler_calls(rng)
+
+
+def test_poisson_rate_accepts_exact_numpy_limit_and_rejects_next_rate():
+    int64_max = float(np.iinfo(np.int64).max)
+    poisson_lam_max = int64_max - 10.0 * np.sqrt(int64_max)
+    endpoint_phi = 2.0 / poisson_lam_max
+    accepted_rng = _RecordingRNG(counts=[0])
+
+    y = generate_tweedie_cpg(1, mu=1.0, phi=endpoint_phi, p=1.5, rng=accepted_rng)
+
+    np.testing.assert_array_equal(y, np.array([0.0]))
+    assert len(accepted_rng.poisson_calls) == 1
+    assert accepted_rng.poisson_calls[0][0] == poisson_lam_max
+    assert accepted_rng.gamma_calls == []
+
+    rejected_rng = _rng_that_must_not_be_used()
+    with pytest.raises(ValueError, match="Poisson rate"):
+        generate_tweedie_cpg(
+            1,
+            mu=1.0,
+            phi=np.nextafter(endpoint_phi, 0.0),
+            p=1.5,
+            rng=rejected_rng,
+        )
+
+    _assert_no_sampler_calls(rejected_rng)
+
+
+def test_overflowed_positive_event_gamma_shape_is_rejected_before_gamma(
+    monkeypatch,
+):
+    def fake_prepare_cpg_parameters(mu, phi, p):
+        return np.ones_like(mu), float(np.finfo(np.float64).max), np.ones_like(phi)
+
+    monkeypatch.setattr(
+        tweedie_module,
+        "_prepare_cpg_parameters",
+        fake_prepare_cpg_parameters,
+        raising=False,
+    )
+    rng = _RecordingRNG(counts=[2], gamma_values=[1.0])
+
+    with pytest.raises(ValueError, match="Gamma shape"):
+        generate_tweedie_cpg(1, mu=1.0, phi=1.0, p=1.5, rng=rng)
+
+    assert len(rng.poisson_calls) == 1
+    assert rng.gamma_calls == []
+
+
+def test_poisson_sampler_value_error_is_wrapped_with_original_cause():
+    sampler_error = ValueError("configured Poisson failure")
+    rng = _RecordingRNG(poisson_exception=sampler_error)
+
+    with pytest.raises(ValueError, match="Poisson sampler") as exc_info:
+        generate_tweedie_cpg(1, mu=1.0, phi=1.0, p=1.5, rng=rng)
+
+    assert exc_info.value.__cause__ is sampler_error
+    assert len(rng.poisson_calls) == 1
+    assert rng.gamma_calls == []
+
+
+def test_gamma_sampler_value_error_is_wrapped_with_original_cause():
+    sampler_error = ValueError("configured Gamma failure")
+    rng = _RecordingRNG(counts=[1], gamma_exception=sampler_error)
+
+    with pytest.raises(ValueError, match="Gamma sampler") as exc_info:
+        generate_tweedie_cpg(1, mu=1.0, phi=1.0, p=1.5, rng=rng)
+
+    assert exc_info.value.__cause__ is sampler_error
+    assert len(rng.poisson_calls) == 1
+    assert len(rng.gamma_calls) == 1
+
+
+class _WrongGammaSignatureRNG(_RecordingRNG):
+    def gamma(self, shape):
+        return np.ones_like(shape, dtype=np.float64)
+
+
+def test_wrong_gamma_signature_raises_a_contextual_type_error():
+    rng = _WrongGammaSignatureRNG(counts=[1])
+
+    with pytest.raises(TypeError, match=r"\bgamma\b") as exc_info:
+        generate_tweedie_cpg(1, mu=1.0, phi=1.0, p=1.5, rng=rng)
+
+    assert isinstance(exc_info.value.__cause__, TypeError)
+    assert len(rng.poisson_calls) == 1
+    assert rng.gamma_calls == []
+
+
+@pytest.mark.parametrize(
+    ("counts", "message"),
+    [
+        pytest.param(np.array(1), "shape", id="scalar"),
+        pytest.param(np.array([[1]]), "shape", id="matrix"),
+        pytest.param(np.array([1.0]), "integer", id="float-dtype"),
+        pytest.param(np.array([-1]), "non-negative", id="negative"),
+        pytest.param(np.array([True]), "integer", id="bool-dtype"),
+        pytest.param(
+            np.array([np.iinfo(np.uint64).max], dtype=np.uint64),
+            "int64",
+            id="above-int64-max",
+        ),
+    ],
+)
+def test_malformed_poisson_output_is_rejected_before_gamma(counts, message):
+    rng = _RecordingRNG(counts=counts, gamma_values=[1.0])
+
+    with pytest.raises(RuntimeError, match=message):
+        generate_tweedie_cpg(1, mu=1.0, phi=1.0, p=1.5, rng=rng)
+
+    assert len(rng.poisson_calls) == 1
+    assert rng.gamma_calls == []
+
+
+@pytest.mark.parametrize(
+    ("gamma_values", "error_type", "message"),
+    [
+        pytest.param(np.array(1.0), RuntimeError, "shape", id="scalar"),
+        pytest.param(np.array([[1.0]]), RuntimeError, "shape", id="matrix"),
+        pytest.param(
+            np.array([1.0 + 0.0j]),
+            RuntimeError,
+            "real numeric",
+            id="complex-zero-imaginary",
+        ),
+        pytest.param(np.array(["1.0"]), RuntimeError, "real numeric", id="numeric-string"),
+        pytest.param(np.array([True]), RuntimeError, "real numeric", id="bool-dtype"),
+        pytest.param(np.array([-1.0]), RuntimeError, "negative", id="negative"),
+        pytest.param(np.array([0.0]), ValueError, "underflow", id="zero"),
+        pytest.param(np.array([np.nan]), ValueError, "finite", id="nan"),
+        pytest.param(np.array([np.inf]), ValueError, "overflow", id="infinity"),
+    ],
+)
+def test_malformed_gamma_output_is_rejected_before_assignment(
+    gamma_values,
+    error_type,
+    message,
+):
+    rng = _RecordingRNG(counts=[1], gamma_values=gamma_values)
+
+    with pytest.raises(error_type, match=message):
+        generate_tweedie_cpg(1, mu=1.0, phi=1.0, p=1.5, rng=rng)
+
+    assert len(rng.poisson_calls) == 1
+    assert len(rng.gamma_calls) == 1
+
+
+def test_numpy_gamma_underflow_near_two_is_not_treated_as_a_structural_zero():
+    p = np.nextafter(2.0, 1.0)
+    phi = 1.0 / (2.0 - p)
+
+    with pytest.raises(ValueError, match="underflow"):
+        generate_tweedie_cpg(
+            10_000,
+            mu=1.0,
+            phi=phi,
+            p=p,
+            rng=np.random.default_rng(20260717),
+        )
+
+
+def test_numpy_gamma_overflow_near_one_is_rejected_without_clipping_or_resampling():
+    p = np.nextafter(1.0, 2.0)
+    mu = 0.75 * np.finfo(np.float64).max
+    phi = np.power(mu, 2.0 - p) / (2.0 - p)
+    assert np.isfinite(phi)
+
+    with pytest.raises(ValueError, match="finite|overflow"):
+        generate_tweedie_cpg(
+            10_000,
+            mu=mu,
+            phi=phi,
+            p=p,
+            rng=np.random.default_rng(20260717),
+        )
