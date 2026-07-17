@@ -12,6 +12,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import gammaln
 
+from superglm._tweedie_numerics import normalize_tweedie_power, tweedie_unit_deviance
+
 # ── Numerical guard constants for positive-mean families ─────────
 _POSITIVE_INIT_MIN = 1e-12  # floor for initial_mean (replaces 0.1 pseudo-response)
 _POSITIVE_MU_MIN = 1e-50  # clip_mu lower bound (log → eta ≈ -115)
@@ -276,9 +278,7 @@ class Tweedie:
     """
 
     def __init__(self, p: float):
-        if not 1 < p < 2:
-            raise ValueError(f"Tweedie p must be in (1, 2), got {p}")
-        self.p = p
+        self.p = normalize_tweedie_power(p)
 
     @property
     def scale_known(self) -> bool:
@@ -302,11 +302,7 @@ class Tweedie:
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Tweedie unit deviance."""
-        p = self.p
-        t1 = np.where(y > 0, np.power(y, 2 - p) / ((1 - p) * (2 - p)), 0.0)
-        t2 = y * np.power(mu, 1 - p) / (1 - p)
-        t3 = np.power(mu, 2 - p) / (2 - p)
-        return 2 * (t1 - t2 + t3)
+        return tweedie_unit_deviance(y, mu, self.p)
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Tweedie log-likelihood via exact Wright-Bessel evaluation."""

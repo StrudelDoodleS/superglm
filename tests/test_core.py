@@ -36,6 +36,63 @@ class TestDistributions:
         with pytest.raises(ValueError):
             Tweedie(p=0.5)
 
+    @pytest.mark.parametrize("p", [np.array([1.5]), np.array(1.5, dtype=object), True, "1.5"])
+    def test_tweedie_constructor_rejects_unsupported_power_objects(self, p):
+        with pytest.raises(TypeError):
+            Tweedie(p)
+
+    @pytest.mark.parametrize("p", [1.5, np.float32(1.5), np.float64(1.5)])
+    def test_tweedie_constructor_stores_builtin_float(self, p):
+        assert type(Tweedie(p).p) is float
+
+    @pytest.mark.parametrize("p", [np.nextafter(1.0, 2.0), 1.5, np.nextafter(2.0, 1.0)])
+    def test_tweedie_public_deviance_is_exactly_zero_at_equal_values(self, p):
+        values = np.array([1e-300, 1.0, 1e300])
+
+        result = Tweedie(p).deviance_unit(values, values.copy())
+
+        np.testing.assert_array_equal(result, np.zeros_like(values))
+
+    def test_tweedie_public_deviance_preserves_close_ratio_remainder(self):
+        mu = np.array([1e-12, 1.0, 1e12])
+        y = mu * (1.0 + 1e-8)
+        delta = (y - mu) / mu
+        root_difference = delta / (np.sqrt(1.0 + delta) + 1.0)
+        expected = 4.0 * np.sqrt(mu) * root_difference**2
+
+        result = Tweedie(1.5).deviance_unit(y, mu)
+
+        np.testing.assert_allclose(result, expected, rtol=2e-12, atol=0.0)
+
+    @pytest.mark.parametrize(
+        ("p", "expected"),
+        [
+            pytest.param(
+                np.nextafter(1.0, 2.0),
+                2.0 * (2.0 * np.log(2.0) - 1.0),
+                id="lower",
+            ),
+            pytest.param(
+                np.nextafter(2.0, 1.0),
+                2.0 * (1.0 - np.log(2.0)),
+                id="upper",
+            ),
+        ],
+    )
+    def test_tweedie_public_deviance_is_stable_at_power_boundaries(self, p, expected):
+        result = Tweedie(p).deviance_unit(np.array([2.0]), np.array([1.0]))
+
+        np.testing.assert_allclose(result, [expected], rtol=2e-15, atol=0.0)
+
+    def test_tweedie_public_deviance_raises_typed_error_when_unrepresentable(self):
+        from superglm._tweedie_numerics import TweedieNumericalError
+
+        with pytest.raises(TweedieNumericalError, match="represented"):
+            Tweedie(np.nextafter(1.0, 2.0)).deviance_unit(
+                np.array([0.0]),
+                np.array([np.finfo(np.float64).max]),
+            )
+
     def test_deviance_zero_at_y_equals_mu(self):
         for dist in [Poisson(), Gamma(), Tweedie(p=1.5)]:
             y = np.array([1.0, 3.0, 5.0])

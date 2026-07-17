@@ -2,16 +2,34 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from decimal import (
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    Context,
+    Decimal,
+    DecimalException,
+    Inexact,
+    localcontext,
+)
 from numbers import Real
-from typing import SupportsFloat
+from typing import Literal, SupportsFloat
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.special import logsumexp
 
 PHI_LOWER_BOUND = 1e-12
 _DEVIANCE_DTYPE = np.dtype(np.longdouble)
 _LOWER_POWER_BOUNDARY = 1e-3
 _SERIES_LOG_RATIO_BOUNDARY = 1.0
+_PEARSON_MIN_CERTIFICATION_PRECISION = 80
+# Positive float64 Pearson terms span fewer than 3,200 decimal orders over the
+# full input range. This cap leaves room for outward-rounding guard digits.
+_PEARSON_MAX_CERTIFICATION_PRECISION = 4096
+_PEARSON_CERTIFICATION_GUARD_DIGITS = 32
+_DECIMAL_CERTIFICATION_EMAX = 999_999
+_DECIMAL_CERTIFICATION_EMIN = -999_999
 
 
 class TweedieNumericalError(RuntimeError):
@@ -23,6 +41,24 @@ class CompoundPoissonGammaParameters:
     rate: NDArray[np.float64]
     shape: float
     scale: NDArray[np.float64]
+
+
+@dataclass(frozen=True)
+class _DecimalInterval:
+    lower: Decimal
+    upper: Decimal
+
+
+def _configure_decimal_certification_context(
+    context: Context,
+    precision: int,
+    rounding: str = ROUND_HALF_EVEN,
+) -> None:
+    context.prec = precision
+    context.Emax = _DECIMAL_CERTIFICATION_EMAX
+    context.Emin = _DECIMAL_CERTIFICATION_EMIN
+    context.clamp = 0
+    context.rounding = rounding
 
 
 def normalize_real_scalar(name: str, value: object) -> float:
@@ -62,6 +98,619 @@ def _as_real_float64_array(name: str, value: object) -> NDArray[np.float64]:
     with np.errstate(over="ignore", invalid="ignore"):
         result: NDArray[np.float64] = np.asarray(raw, dtype=np.float64)
     return result
+
+
+def _required_exact_decimal_precision(left: Decimal, right: Decimal) -> int:
+    lowest_exponent = min(
+        int(left.as_tuple().exponent),
+        int(right.as_tuple().exponent),
+    )
+    highest_adjusted = max(left.adjusted(), right.adjusted())
+    return max(1, highest_adjusted - lowest_exponent + 2)
+
+
+def _exact_decimal_add(left: Decimal, right: Decimal) -> Decimal:
+    precision = _required_exact_decimal_precision(left, right)
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision)
+        context.clear_flags()
+        result = context.add(left, right)
+        if context.flags[Inexact]:
+            raise TweedieNumericalError("Pearson boundary arithmetic could not be exact")
+    return result
+
+
+def _exact_decimal_difference(left: float, right: float) -> Decimal:
+    """Subtract two finite float64 values exactly in Decimal arithmetic."""
+    decimal_left = Decimal.from_float(left)
+    decimal_right = Decimal.from_float(right)
+    precision = _required_exact_decimal_precision(decimal_left, decimal_right)
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision)
+        context.clear_flags()
+        result = abs(context.subtract(decimal_left, decimal_right))
+        if context.flags[Inexact]:
+            raise TweedieNumericalError("Pearson residual could not be represented exactly")
+    return result
+
+
+def _exact_decimal_midpoint(left: Decimal, right: Decimal) -> Decimal:
+    total = _exact_decimal_add(left, right)
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, len(total.as_tuple().digits) + 2)
+        context.clear_flags()
+        result = context.divide(total, Decimal(2))
+        if context.flags[Inexact]:
+            raise TweedieNumericalError("Pearson rounding boundary could not be exact")
+    return result
+
+
+def _float64_rounding_bin_contains(interval: _DecimalInterval, candidate: float) -> bool:
+    """Return whether an interval is strictly inside one binary64 rounding bin."""
+    if not math.isfinite(candidate) or candidate <= 0.0:
+        return False
+    candidate_decimal = Decimal.from_float(candidate)
+    previous = float(np.nextafter(candidate, -np.inf))
+    lower_boundary = _exact_decimal_midpoint(Decimal.from_float(previous), candidate_decimal)
+    if candidate == float(np.finfo(np.float64).max):
+        spacing = _exact_decimal_difference(candidate, previous)
+        upper_boundary = _exact_decimal_midpoint(
+            candidate_decimal,
+            _exact_decimal_add(candidate_decimal, spacing),
+        )
+    else:
+        following = float(np.nextafter(candidate, np.inf))
+        upper_boundary = _exact_decimal_midpoint(candidate_decimal, Decimal.from_float(following))
+    return interval.lower > lower_boundary and interval.upper < upper_boundary
+
+
+def _add_decimal_intervals(
+    left: _DecimalInterval,
+    right: _DecimalInterval,
+    precision: int,
+) -> _DecimalInterval:
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision, ROUND_FLOOR)
+        lower = context.add(left.lower, right.lower)
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision, ROUND_CEILING)
+        upper = context.add(left.upper, right.upper)
+    return _DecimalInterval(lower, upper)
+
+
+def _subtract_decimal_intervals(
+    left: _DecimalInterval,
+    right: _DecimalInterval,
+    precision: int,
+) -> _DecimalInterval:
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision, ROUND_FLOOR)
+        lower = context.subtract(left.lower, right.upper)
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision, ROUND_CEILING)
+        upper = context.subtract(left.upper, right.lower)
+    return _DecimalInterval(lower, upper)
+
+
+def _scale_decimal_interval(
+    interval: _DecimalInterval,
+    positive_scale: Decimal,
+    precision: int,
+) -> _DecimalInterval:
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision, ROUND_FLOOR)
+        lower = context.multiply(interval.lower, positive_scale)
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision, ROUND_CEILING)
+        upper = context.multiply(interval.upper, positive_scale)
+    return _DecimalInterval(lower, upper)
+
+
+def _divide_decimal_interval(
+    interval: _DecimalInterval,
+    positive_divisor: Decimal,
+    precision: int,
+) -> _DecimalInterval:
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision, ROUND_FLOOR)
+        lower = context.divide(interval.lower, positive_divisor)
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision, ROUND_CEILING)
+        upper = context.divide(interval.upper, positive_divisor)
+    return _DecimalInterval(lower, upper)
+
+
+def _decimal_log_interval(value: Decimal, precision: int) -> _DecimalInterval:
+    """Enclose a positive Decimal logarithm using its correctly rounded value."""
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision)
+        context.clear_flags()
+        midpoint = context.ln(value)
+        if not context.flags[Inexact]:
+            return _DecimalInterval(midpoint, midpoint)
+        return _DecimalInterval(
+            context.next_minus(midpoint),
+            context.next_plus(midpoint),
+        )
+
+
+def _decimal_exp_interval(interval: _DecimalInterval, precision: int) -> _DecimalInterval:
+    """Exponentiate an interval and round both endpoints outwards."""
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision)
+        context.clear_flags()
+        lower_midpoint = context.exp(interval.lower)
+        lower = context.next_minus(lower_midpoint) if context.flags[Inexact] else lower_midpoint
+        context.clear_flags()
+        upper_midpoint = context.exp(interval.upper)
+        upper = context.next_plus(upper_midpoint) if context.flags[Inexact] else upper_midpoint
+    return _DecimalInterval(lower, upper)
+
+
+def _decimal_pearson_interval(
+    y: NDArray[np.float64],
+    mus: NDArray[np.float64],
+    power: Decimal,
+    weights: NDArray[np.float64],
+    denominator: Decimal,
+    precision: int,
+    *,
+    multiplicity: int = 1,
+) -> _DecimalInterval:
+    numerator = _DecimalInterval(Decimal(0), Decimal(0))
+    two = Decimal(2)
+    decimal_multiplicity = Decimal(multiplicity)
+    for y_value, mu_value, weight_value in zip(y, mus, weights, strict=True):
+        residual = _exact_decimal_difference(float(y_value), float(mu_value))
+        mu = Decimal.from_float(float(mu_value))
+        weight = Decimal.from_float(float(weight_value))
+        log_term = _add_decimal_intervals(
+            _decimal_log_interval(weight, precision),
+            _scale_decimal_interval(_decimal_log_interval(residual, precision), two, precision),
+            precision,
+        )
+        log_term = _subtract_decimal_intervals(
+            log_term,
+            _scale_decimal_interval(_decimal_log_interval(mu, precision), power, precision),
+            precision,
+        )
+        term = _decimal_exp_interval(log_term, precision)
+        if multiplicity != 1:
+            term = _scale_decimal_interval(term, decimal_multiplicity, precision)
+        numerator = _add_decimal_intervals(numerator, term, precision)
+    return _divide_decimal_interval(numerator, denominator, precision)
+
+
+def _exact_dyadic_power_pearson_candidate(
+    y: NDArray[np.float64],
+    mus: NDArray[np.float64],
+    power_numerator: int,
+    power_denominator: int,
+    weights: NDArray[np.float64],
+    denominator: Decimal,
+    precision: int,
+    *,
+    multiplicity: int = 1,
+) -> tuple[Decimal, bool]:
+    """Return an exact candidate when the dyadic powers and arithmetic terminate."""
+    root_count = power_denominator.bit_length() - 1
+    if power_denominator != 1 << root_count:
+        return Decimal(0), False
+    with localcontext() as context:
+        _configure_decimal_certification_context(context, precision)
+        context.clear_flags()
+        numerator = Decimal(0)
+        decimal_multiplicity = Decimal(multiplicity)
+        for y_value, mu_value, weight_value in zip(y, mus, weights, strict=True):
+            residual = _exact_decimal_difference(float(y_value), float(mu_value))
+            mu = Decimal.from_float(float(mu_value))
+            weight = Decimal.from_float(float(weight_value))
+            mu_root = mu
+            for _ in range(root_count):
+                mu_root = context.sqrt(mu_root)
+                if context.flags[Inexact]:
+                    return Decimal(0), False
+            mu_power = context.power(mu_root, Decimal(power_numerator))
+            if context.flags[Inexact]:
+                return Decimal(0), False
+            squared_residual = context.multiply(residual, residual)
+            weighted_residual = context.multiply(weight, squared_residual)
+            term = context.divide(weighted_residual, mu_power)
+            if multiplicity != 1:
+                term = context.multiply(term, decimal_multiplicity)
+            numerator = context.add(numerator, term)
+        result = context.divide(numerator, denominator)
+        return result, not context.flags[Inexact]
+
+
+def _pearson_float64_range_route(
+    residuals: NDArray[np.float64],
+    mus: NDArray[np.float64],
+    power: float,
+    weights: NDArray[np.float64],
+    denominator: float,
+) -> Literal["ordinary", "certify", "overflow"]:
+    """Route an exact Pearson result using conservative binary exponent bounds.
+
+    This is a conservative exponent-only router, independent of the approximate
+    logarithms used by the ordinary path. For ``x = m * 2**e`` returned by
+    ``frexp``, ``2**(e - 1) <= x < 2**e``. The next float above each rounded
+    residual strictly bounds the exact float-input subtraction. Combining the
+    weight and residual upper bounds with the mean and denominator lower bounds,
+    then multiplying the largest term bound by the next power of two above the
+    term count, gives a strict upper bound for the exact dispersion.
+
+    The matching lower bound uses one rounded residual binade of slack, the
+    weight's lower binade edge, the mean's upper edge, and the denominator's
+    upper edge. It can reject an individual term proved above ``2**1024``
+    without invoking expensive Decimal transcendental arithmetic.
+
+    ``"ordinary"`` proves that the exact result is below ``2**1023``. Every
+    result that could occupy the top binary64 binade is sent to the certified
+    Decimal path, unless ``"overflow"`` already proves it exceeds float64.
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        residual_upper = np.nextafter(residuals, np.inf)
+    finite_residual_upper = np.isfinite(residual_upper)
+    residual_exponents = np.full(
+        residuals.shape,
+        np.finfo(np.float64).maxexp,
+        dtype=np.int64,
+    )
+    if np.any(finite_residual_upper):
+        _, finite_exponents = np.frexp(residual_upper[finite_residual_upper])
+        residual_exponents[finite_residual_upper] = finite_exponents
+
+    _, weight_exponents = np.frexp(weights)
+    _, mean_exponents = np.frexp(mus)
+    mean_power_lower_exponents = np.nextafter(
+        power * (mean_exponents.astype(np.float64) - 1.0),
+        -np.inf,
+    )
+    term_upper_exponents = np.nextafter(
+        weight_exponents.astype(np.float64)
+        + 2.0 * residual_exponents.astype(np.float64)
+        - mean_power_lower_exponents,
+        np.inf,
+    )
+
+    term_count_exponent = (len(residuals) - 1).bit_length()
+    denominator_exponent = math.frexp(denominator)[1]
+    dispersion_upper_exponent = math.nextafter(
+        float(np.max(term_upper_exponents)) + term_count_exponent - (denominator_exponent - 1),
+        math.inf,
+    )
+
+    _, rounded_residual_exponents = np.frexp(residuals)
+    mean_power_upper_exponents = np.nextafter(
+        power * mean_exponents.astype(np.float64),
+        np.inf,
+    )
+    term_lower_exponents = np.nextafter(
+        weight_exponents.astype(np.float64)
+        - 1.0
+        + 2.0 * (rounded_residual_exponents.astype(np.float64) - 2.0)
+        - mean_power_upper_exponents,
+        -np.inf,
+    )
+    dispersion_lower_exponent = math.nextafter(
+        float(np.max(term_lower_exponents)) - denominator_exponent,
+        -math.inf,
+    )
+    float64_limit_exponent = np.finfo(np.float64).maxexp
+    if dispersion_lower_exponent >= float64_limit_exponent:
+        return "overflow"
+    if dispersion_upper_exponent > float64_limit_exponent - 1:
+        return "certify"
+    return "ordinary"
+
+
+def _pearson_rows_are_identical(
+    y: NDArray[np.float64],
+    mu: NDArray[np.float64],
+    weights: NDArray[np.float64],
+) -> bool:
+    """Return whether two or more Pearson rows have identical inputs."""
+    return bool(
+        len(y) > 1 and np.all(y == y[0]) and np.all(mu == mu[0]) and np.all(weights == weights[0])
+    )
+
+
+def _pearson_boundary_result(
+    y: NDArray[np.float64],
+    mu: NDArray[np.float64],
+    power: float,
+    weights: NDArray[np.float64],
+    denominator: float,
+    log_terms: NDArray[np.float64],
+) -> float:
+    """Certify a Pearson result with exact or interval Decimal arithmetic."""
+    multiplicity = 1
+    if _pearson_rows_are_identical(y, mu, weights):
+        multiplicity = len(y)
+        y = y[:1]
+        mu = mu[:1]
+        weights = weights[:1]
+        log_terms = log_terms[:1]
+
+    decimal_power = Decimal.from_float(power)
+    power_numerator, power_denominator = power.as_integer_ratio()
+    decimal_denominator = Decimal.from_float(denominator)
+    decimal_floor = Decimal.from_float(PHI_LOWER_BOUND)
+    float_max = Decimal.from_float(float(np.finfo(np.float64).max))
+
+    term_span_digits = math.ceil(float(np.ptp(log_terms)) / math.log(10.0))
+    term_count_digits = math.ceil(math.log10(max(1, len(log_terms) * multiplicity)))
+    precision = min(
+        _PEARSON_MAX_CERTIFICATION_PRECISION,
+        max(
+            _PEARSON_MIN_CERTIFICATION_PRECISION,
+            term_span_digits + term_count_digits + _PEARSON_CERTIFICATION_GUARD_DIGITS,
+        ),
+    )
+    try:
+        while True:
+            exact_result, is_exact = _exact_dyadic_power_pearson_candidate(
+                y,
+                mu,
+                power_numerator,
+                power_denominator,
+                weights,
+                decimal_denominator,
+                precision,
+                multiplicity=multiplicity,
+            )
+            if is_exact:
+                if Decimal(0) <= exact_result <= decimal_floor:
+                    return PHI_LOWER_BOUND
+                if exact_result > float_max:
+                    raise TweedieNumericalError("Pearson dispersion exceeds float64 range")
+                return max(float(exact_result), PHI_LOWER_BOUND)
+
+            result_interval = _decimal_pearson_interval(
+                y,
+                mu,
+                decimal_power,
+                weights,
+                decimal_denominator,
+                precision,
+                multiplicity=multiplicity,
+            )
+            if Decimal(0) <= result_interval.lower and result_interval.upper <= decimal_floor:
+                return PHI_LOWER_BOUND
+            if result_interval.lower > float_max:
+                raise TweedieNumericalError("Pearson dispersion exceeds float64 range")
+            if result_interval.upper <= float_max:
+                lower_float = float(result_interval.lower)
+                upper_float = float(result_interval.upper)
+                if lower_float == upper_float and _float64_rounding_bin_contains(
+                    result_interval, lower_float
+                ):
+                    return max(lower_float, PHI_LOWER_BOUND)
+            if precision == _PEARSON_MAX_CERTIFICATION_PRECISION:
+                break
+            precision = min(_PEARSON_MAX_CERTIFICATION_PRECISION, 2 * precision)
+    except DecimalException as exc:
+        raise TweedieNumericalError(
+            "Pearson dispersion could not be certified near float64 range"
+        ) from exc
+    raise TweedieNumericalError("Pearson dispersion could not be certified near float64 range")
+
+
+def _pearson_scalar_upper_exponent(
+    *,
+    weight_exponent: int,
+    residual_exponent: int,
+    mean_exponent: int,
+    power: float,
+    term_count_exponent: int,
+    denominator_exponent: int,
+) -> float:
+    """Return an outward-rounded upper exponent for the exact Pearson result."""
+    mean_power_lower_exponent = math.nextafter(
+        power * float(mean_exponent - 1),
+        -math.inf,
+    )
+    integer_term_exponent = weight_exponent + 2 * residual_exponent
+    term_upper_exponent = math.nextafter(
+        float(integer_term_exponent) - mean_power_lower_exponent,
+        math.inf,
+    )
+    numerator_upper_exponent = math.nextafter(
+        term_upper_exponent + float(term_count_exponent),
+        math.inf,
+    )
+    return math.nextafter(
+        numerator_upper_exponent - float(denominator_exponent - 1),
+        math.inf,
+    )
+
+
+def _pearson_scalar_range_is_ordinary(
+    residuals: NDArray[np.float64],
+    mus: NDArray[np.float64],
+    power: float,
+    weights: NDArray[np.float64] | None,
+    denominator: float,
+    nonzero_count: int,
+) -> bool:
+    """Prove from scalar extrema that the exact result is below ``2**1023``."""
+    minimum_residual = float(np.min(residuals))
+    maximum_residual = float(np.max(residuals))
+    maximum_absolute_residual = max(abs(minimum_residual), abs(maximum_residual))
+    residual_upper = math.nextafter(maximum_absolute_residual, math.inf)
+    if math.isfinite(residual_upper):
+        residual_exponent = math.frexp(residual_upper)[1]
+    else:
+        residual_exponent = np.finfo(np.float64).maxexp
+
+    maximum_weight = 1.0 if weights is None else float(np.max(weights))
+    weight_exponent = math.frexp(maximum_weight)[1]
+    minimum_mean = float(np.min(mus))
+    mean_exponent = math.frexp(minimum_mean)[1]
+
+    term_count_exponent = (nonzero_count - 1).bit_length()
+    denominator_exponent = math.frexp(denominator)[1]
+    dispersion_upper_exponent = _pearson_scalar_upper_exponent(
+        weight_exponent=weight_exponent,
+        residual_exponent=residual_exponent,
+        mean_exponent=mean_exponent,
+        power=power,
+        term_count_exponent=term_count_exponent,
+        denominator_exponent=denominator_exponent,
+    )
+    return dispersion_upper_exponent <= np.finfo(np.float64).maxexp - 1
+
+
+def _all_nonzero_values_are_normal(
+    values: NDArray[np.float64],
+    expected_nonzero_count: int,
+) -> bool:
+    """Return whether each expected nonzero value is finite and normal."""
+    if np.count_nonzero(values) != expected_nonzero_count:
+        return False
+    if np.any(~np.isfinite(values)) or np.any(values < 0.0):
+        return False
+    minimum_positive = float(
+        np.min(
+            values,
+            where=values > 0.0,
+            initial=np.inf,
+        )
+    )
+    return minimum_positive >= float(np.finfo(np.float64).tiny)
+
+
+def _direct_pearson_dispersion_if_safe(
+    residuals: NDArray[np.float64],
+    mus: NDArray[np.float64],
+    power: float,
+    weights: NDArray[np.float64] | None,
+    denominator: float,
+    nonzero_count: int,
+) -> float | None:
+    """Return a direct Pearson result only when range and accuracy are guarded."""
+    if 8 * nonzero_count < len(residuals):
+        return None
+    if not _pearson_scalar_range_is_ordinary(
+        residuals,
+        mus,
+        power,
+        weights,
+        denominator,
+        nonzero_count,
+    ):
+        return None
+
+    terms = np.empty_like(residuals)
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        np.square(residuals, out=terms)
+    if not _all_nonzero_values_are_normal(terms, nonzero_count):
+        return None
+
+    if weights is not None:
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            np.multiply(terms, weights, out=terms)
+        if not _all_nonzero_values_are_normal(terms, nonzero_count):
+            return None
+
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        np.power(mus, power, out=residuals)
+    if not _all_nonzero_values_are_normal(residuals, len(residuals)):
+        return None
+
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        np.divide(terms, residuals, out=terms)
+    if not _all_nonzero_values_are_normal(terms, nonzero_count):
+        return None
+
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        numerator = float(np.sum(terms))
+    if not math.isfinite(numerator) or numerator < np.finfo(np.float64).tiny:
+        return None
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        result = float(np.divide(numerator, denominator))
+    top_binade = math.ldexp(1.0, np.finfo(np.float64).maxexp - 1)
+    if not math.isfinite(result) or result < np.finfo(np.float64).tiny or result >= top_binade:
+        return None
+    return max(result, PHI_LOWER_BOUND)
+
+
+def pearson_dispersion(
+    y: object,
+    mu: object,
+    p: object,
+    weights: object | None,
+    df_resid: object,
+) -> float:
+    """Return the weighted Pearson estimate of Tweedie dispersion."""
+    power = normalize_tweedie_power(p)
+    denominator = normalize_positive_scalar("df_resid", df_resid)
+    y_arr = _as_real_float64_array("y", y)
+    mu_arr = _as_real_float64_array("mu", mu)
+    weight_arr = None if weights is None else _as_real_float64_array("weights", weights)
+    if (
+        y_arr.ndim != 1
+        or mu_arr.shape != y_arr.shape
+        or (weight_arr is not None and weight_arr.shape != y_arr.shape)
+    ):
+        raise ValueError("y, mu, and weights must be matching one-dimensional arrays")
+    if np.any(~np.isfinite(y_arr)) or np.any(y_arr < 0.0):
+        raise ValueError("y must be finite and nonnegative")
+    if np.any(~np.isfinite(mu_arr)) or np.any(mu_arr <= 0.0):
+        raise ValueError("mu must be finite and strictly positive")
+    if weight_arr is not None and (np.any(~np.isfinite(weight_arr)) or np.any(weight_arr <= 0.0)):
+        raise ValueError("weights must be finite and strictly positive")
+    residual = np.subtract(y_arr, mu_arr)
+    nonzero_count = int(np.count_nonzero(residual))
+    if nonzero_count == 0:
+        return PHI_LOWER_BOUND
+
+    direct_result = _direct_pearson_dispersion_if_safe(
+        residual,
+        mu_arr,
+        power,
+        weight_arr,
+        denominator,
+        nonzero_count,
+    )
+    if direct_result is not None:
+        return direct_result
+
+    np.subtract(y_arr, mu_arr, out=residual)
+    np.abs(residual, out=residual)
+    nonzero = residual > 0.0
+    nonzero_weights = (
+        np.ones(nonzero_count, dtype=np.float64) if weight_arr is None else weight_arr[nonzero]
+    )
+    range_route = _pearson_float64_range_route(
+        residual[nonzero],
+        mu_arr[nonzero],
+        power,
+        nonzero_weights,
+        denominator,
+    )
+    if range_route == "overflow":
+        raise TweedieNumericalError("Pearson dispersion exceeds float64 range")
+    log_terms = (
+        np.log(nonzero_weights) + 2.0 * np.log(residual[nonzero]) - power * np.log(mu_arr[nonzero])
+    )
+    if range_route == "certify" or _pearson_rows_are_identical(
+        y_arr[nonzero], mu_arr[nonzero], nonzero_weights
+    ):
+        return _pearson_boundary_result(
+            y_arr[nonzero],
+            mu_arr[nonzero],
+            power,
+            nonzero_weights,
+            denominator,
+            log_terms,
+        )
+    log_phi = float(logsumexp(log_terms) - math.log(denominator))
+    log_float_max = math.log(float(np.finfo(np.float64).max))
+    if log_phi > log_float_max:
+        raise TweedieNumericalError("Pearson dispersion float64 path exceeded its proven range")
+    return max(float(math.exp(log_phi)), PHI_LOWER_BOUND)
 
 
 def _scaled_positive_ratio(
