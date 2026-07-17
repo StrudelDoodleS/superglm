@@ -194,6 +194,12 @@ class TestTweedieProfileCI:
             _evaluation_count=lambda: 3,
         )
 
+    @staticmethod
+    def _trace_curve(ax):
+        curves = [line for line in ax.lines if line.get_label().startswith("Search evaluations")]
+        assert len(curves) == 1
+        return curves[0]
+
     def test_trace_plot_uses_sorted_cached_trace_without_side_effects(self):
         import matplotlib
 
@@ -215,7 +221,7 @@ class TestTweedieProfileCI:
 
         assert isinstance(fig, plt.Figure)
         ax = fig.axes[0]
-        curve = ax.lines[0]
+        curve = self._trace_curve(ax)
         np.testing.assert_allclose(curve.get_xdata(), [1.2, 1.5, 1.8])
         np.testing.assert_allclose(curve.get_ydata(), [4.0, 0.0, 2.0])
         assert ax.get_xlabel() == "p"
@@ -246,19 +252,24 @@ class TestTweedieProfileCI:
         assert "likelihood" not in ax.get_title().lower()
         plt.close(fig)
 
-    def test_trace_plot_filters_nonfinite_trace_rows(self):
+    @pytest.mark.parametrize(
+        "nonfinite_column",
+        ["p", "nll"],
+        ids=["nonfinite-p", "nonfinite-nll"],
+    )
+    def test_trace_plot_filters_nonfinite_trace_rows(self, nonfinite_column):
         import matplotlib
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
         result = self._trace_plot_result()
-        result.search_trace.loc[1, "nll"] = np.nan
+        result.search_trace.loc[1, nonfinite_column] = np.nan
         trace_snapshot = result.search_trace.copy(deep=True)
 
         fig = result.trace_plot()
 
-        curve = fig.axes[0].lines[0]
+        curve = self._trace_curve(fig.axes[0])
         np.testing.assert_allclose(curve.get_xdata(), [1.5, 1.8])
         np.testing.assert_allclose(curve.get_ydata(), [0.0, 2.0])
         pd.testing.assert_frame_equal(result.search_trace, trace_snapshot)
