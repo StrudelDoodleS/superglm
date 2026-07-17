@@ -29,12 +29,6 @@ class _CenteredSupport:
 
 
 @dataclass(frozen=True)
-class _BlockSpan:
-    start: int
-    end: int
-
-
-@dataclass(frozen=True)
 class _PatternPlan:
     unique_codes: NDArray
     row_patterns: NDArray
@@ -75,6 +69,7 @@ def _certify_raw_centering(
     raw_rhs: NDArray,
     weighted_z: NDArray,
     sum_w: float,
+    sum_weighted_z: float | None = None,
 ) -> tuple[NDArray, NDArray, NDArray] | None:
     # Raw moments can overflow even when the anchor-centered fallback remains
     # finite (for example, a large finite location plus modest variation).
@@ -98,7 +93,8 @@ def _certify_raw_centering(
         return None
 
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
+        if sum_weighted_z is None:
+            sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
         centered_rhs = raw_rhs - mean_x * sum_weighted_z
     if not np.isfinite(sum_weighted_z) or not np.all(np.isfinite(centered_rhs)):
         return None
@@ -189,23 +185,25 @@ def _try_factored_tensor_centering(
     square-root-epsilon boundary.  Ill-scaled inputs fall through to the
     anchor-centered support implementation below.
     """
-    from ._group_matrix_algebra import _block_xtwx_rhs
+    with np.errstate(over="ignore", invalid="ignore"):
+        sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
+    if not np.isfinite(sum_weighted_z):
+        return None
 
-    widths = [gm.shape[1] for gm in dm.group_matrices]
-    starts = np.cumsum([0, *widths])
-    spans = [_BlockSpan(int(starts[i]), int(starts[i + 1])) for i in range(len(widths))]
-    raw_gram, xtw, raw_rhs = _block_xtwx_rhs(
-        dm.group_matrices,
-        spans,
+    moments = dm.execution_plan._moments_prevalidated(
         W,
-        weighted_z,
+        rhs=(weighted_z,),
+        include_xtw=True,
     )
+    if moments.xtw is None:  # pragma: no cover - guaranteed by include_xtw
+        raise RuntimeError("execution plan did not return X'W")
     return _certify_raw_centering(
-        raw_gram=raw_gram,
-        xtw=xtw,
-        raw_rhs=raw_rhs,
+        raw_gram=moments.gram,
+        xtw=moments.xtw,
+        raw_rhs=moments.xt_rhs[0],
         weighted_z=weighted_z,
         sum_w=sum_w,
+        sum_weighted_z=sum_weighted_z,
     )
 
 

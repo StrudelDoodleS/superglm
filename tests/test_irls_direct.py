@@ -54,6 +54,16 @@ class _LevelTwoRecorder:
 
 # ── Basic solver tests ─────────────────────────────────────────
 class TestDirectSolverBasic:
+    def test_working_sums_reject_nonfinite_inputs_before_moment_assembly(self):
+        from superglm.solvers.irls_direct import _working_sums
+
+        with pytest.raises(ValueError, match="working weights"):
+            _working_sums(np.array([1.0, np.inf]), np.array([1.0, 2.0]))
+        with pytest.raises(ValueError, match="working response"):
+            _working_sums(np.array([1.0, 2.0]), np.array([1.0, np.nan]))
+
+        assert _working_sums(np.array([1.0, 2.0]), np.array([3.0, 4.0])) == (3.0, 7.0)
+
     def test_state_evaluation_accepts_in_place_custom_link(self):
         """Custom link methods may mutate writable arrays supplied by the solver."""
         from superglm.distributions import Poisson
@@ -460,22 +470,14 @@ class TestDirectSolverBasic:
         dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
         groups = [GroupSlice(name="x", start=0, end=2)]
 
-        original_raw = irls_direct._block_xtwx_rhs
         original_centered = irls_direct.build_centered_system
-        raw_calls = 0
         centered_calls = 0
-
-        def counting_block_xtwx_rhs(*args, **kwargs):
-            nonlocal raw_calls
-            raw_calls += 1
-            return original_raw(*args, **kwargs)
 
         def counting_centered_system(*args, **kwargs):
             nonlocal centered_calls
             centered_calls += 1
             return original_centered(*args, **kwargs)
 
-        monkeypatch.setattr(irls_direct, "_block_xtwx_rhs", counting_block_xtwx_rhs)
         monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
 
         result, _ = irls_direct.fit_irls_direct(
@@ -492,7 +494,6 @@ class TestDirectSolverBasic:
 
         assert result.n_iter > 1
         assert centered_calls == 1
-        assert raw_calls == 0
 
     def test_constant_weight_cache_preserves_solution(self, monkeypatch):
         """Reusing X'WX does not change the fitted coefficients."""
@@ -584,6 +585,7 @@ class TestDirectSolverBasic:
     def test_qp_constraints_are_assembled_once_across_iterations(self, monkeypatch):
         """QP constraint blocks are fixed for a fit and should not be rebuilt per IRLS step."""
         import superglm.solvers.irls_direct as irls_direct
+        from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -605,13 +607,20 @@ class TestDirectSolverBasic:
         ]
 
         original_qp = irls_direct.solve_constrained_qp
+        original_moments = MatrixExecutionPlan._moments_prevalidated
         constraint_matrices = []
+        moment_plan_ids = []
 
         def recording_qp(H, g, A, b, *args, **kwargs):
             constraint_matrices.append(A)
             return original_qp(H, g, A, b, *args, **kwargs)
 
+        def recording_moments(self, *args, **kwargs):
+            moment_plan_ids.append(id(self))
+            return original_moments(self, *args, **kwargs)
+
         monkeypatch.setattr(irls_direct, "solve_constrained_qp", recording_qp)
+        monkeypatch.setattr(MatrixExecutionPlan, "_moments_prevalidated", recording_moments)
 
         result, _ = irls_direct.fit_irls_direct(
             X=dm,
@@ -627,6 +636,8 @@ class TestDirectSolverBasic:
 
         assert result.n_iter == 3
         assert len({id(A) for A in constraint_matrices}) == 1
+        assert moment_plan_ids
+        assert set(moment_plan_ids) == {id(dm.execution_plan)}
 
     def test_variable_weight_fit_rebuilds_weighted_gram(self, monkeypatch):
         """Poisson log fits do not reuse X'WX because W changes with mu."""
@@ -648,22 +659,14 @@ class TestDirectSolverBasic:
         dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
         groups = [GroupSlice(name="x", start=0, end=2)]
 
-        original_raw = irls_direct._block_xtwx_rhs
         original_centered = irls_direct.build_centered_system
-        raw_calls = 0
         centered_calls = 0
-
-        def counting_block_xtwx_rhs(*args, **kwargs):
-            nonlocal raw_calls
-            raw_calls += 1
-            return original_raw(*args, **kwargs)
 
         def counting_centered_system(*args, **kwargs):
             nonlocal centered_calls
             centered_calls += 1
             return original_centered(*args, **kwargs)
 
-        monkeypatch.setattr(irls_direct, "_block_xtwx_rhs", counting_block_xtwx_rhs)
         monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
 
         result, _ = irls_direct.fit_irls_direct(
@@ -680,7 +683,6 @@ class TestDirectSolverBasic:
 
         assert result.n_iter > 1
         assert centered_calls == result.n_iter + 1
-        assert raw_calls == 0
 
     def test_matches_bcd_ridge(self, poisson_data):
         """Direct solver with selection_penalty=0 should give similar deviance as BCD with tiny lambda1."""

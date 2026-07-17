@@ -56,12 +56,12 @@ fallback.
 - Modify `src/superglm/group_matrix.py`.
 - Modify algebra and REML tests.
 
-- [ ] Make `_block_xtwx`, `_block_xtwx_rhs`, and `_block_xtwx_signed` compatibility wrappers over
+- [x] Make `_block_xtwx`, `_block_xtwx_rhs`, and `_block_xtwx_signed` compatibility wrappers over
   `MatrixExecutionPlan` rather than three separate assembly loops.
-- [ ] Reuse `DesignMatrix.execution_plan` in hot callers; allow an ephemeral plan only for legacy
+- [x] Reuse `DesignMatrix.execution_plan` in hot callers; allow an ephemeral plan only for legacy
   list-based internal calls.
-- [ ] Preserve profiling counters and tensor/discrete cache sharing.
-- [ ] Verify all algebra, tensor, SCOP, EFS, and REML derivative tests.
+- [x] Preserve profiling counters and tensor/discrete cache sharing.
+- [x] Verify all algebra, tensor, SCOP, EFS, and REML derivative tests.
 
 ## Task 3: Route certified mixed discrete centering
 

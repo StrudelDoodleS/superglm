@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import pickle
+import weakref
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import scipy.sparse as sp
 import tabmat
 
-from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
+from superglm._group_matrix import _group_matrix_algebra as algebra
+from superglm._group_matrix._group_matrix_execution import GroupSpan, MatrixExecutionPlan
+from superglm._group_matrix._group_matrix_tabmat import _build_tabmat_split
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -217,7 +223,7 @@ def test_execution_plan_never_materializes_sparse_support_rows(
     np.testing.assert_allclose(moments.xt_rhs[0], X.T @ rhs, atol=2e-11)
 
 
-def test_execution_plan_scatters_interleaved_ordinary_columns_and_auto_accepts_ordinary(
+def test_execution_plan_scatters_interleaved_columns_and_auto_rejects_small_ordinary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rng, groups, _X = _mixed_groups(seed=176)
@@ -241,7 +247,64 @@ def test_execution_plan_scatters_interleaved_ordinary_columns_and_auto_accepts_o
     calls.update(sandwich=0, transpose_matvec=0)
     ordinary = [groups[index] for index in (0, 2, 1)]
     MatrixExecutionPlan(ordinary, n=X.shape[0]).moments(W, rhs=(rhs,), include_xtw=True)
+    assert calls == {"sandwich": 0, "transpose_matvec": 0}
+
+
+def test_execution_plan_auto_accepts_large_measured_tabmat_moment_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(182)
+    n = 50_000
+    dense = DenseGroupMatrix(rng.normal(size=(n, 3)))
+    categorical = CategoricalGroupMatrix(np.resize(np.arange(120), n), n_levels=120)
+    W = rng.uniform(0.1, 2.0, size=n)
+    rhs = rng.normal(size=n)
+    calls = _count_tabmat_calls(monkeypatch)
+
+    MatrixExecutionPlan([dense, categorical], n=n).moments(
+        W,
+        rhs=(rhs,),
+        include_xtw=True,
+    )
+
     assert calls == {"sandwich": 1, "transpose_matvec": 2}
+
+
+def test_execution_plan_auto_rejects_single_dense_column_even_at_large_n(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(183)
+    n = 50_000
+    dense = DenseGroupMatrix(rng.normal(size=(n, 1)))
+    categorical = CategoricalGroupMatrix(np.resize(np.arange(120), n), n_levels=120)
+    calls = _count_tabmat_calls(monkeypatch)
+
+    MatrixExecutionPlan([dense, categorical], n=n).moments(
+        np.ones(n),
+        rhs=(np.ones(n),),
+        include_xtw=True,
+    )
+
+    assert calls == {"sandwich": 0, "transpose_matvec": 0}
+
+
+def test_execution_plan_auto_rejects_additional_categorical_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(184)
+    n = 50_000
+    dense = DenseGroupMatrix(rng.normal(size=(n, 3)))
+    high = CategoricalGroupMatrix(np.resize(np.arange(120), n), n_levels=120)
+    low = CategoricalGroupMatrix(np.resize(np.arange(20), n), n_levels=20)
+    calls = _count_tabmat_calls(monkeypatch)
+
+    MatrixExecutionPlan([dense, high, low], n=n).moments(
+        np.ones(n),
+        rhs=(np.ones(n),),
+        include_xtw=True,
+    )
+
+    assert calls == {"sandwich": 0, "transpose_matvec": 0}
 
 
 def test_design_matrix_caches_one_immutable_execution_plan() -> None:
@@ -260,3 +323,369 @@ def test_design_matrix_caches_one_immutable_execution_plan() -> None:
         first.shape = (0, 0)
     with pytest.raises(AttributeError):
         first.group_matrices = ()
+
+
+def test_design_matrix_pickle_round_trip_rebuilds_execution_plan() -> None:
+    rng = np.random.default_rng(185)
+    n = 80
+    groups = [
+        DenseGroupMatrix(rng.normal(size=(n, 2))),
+        CategoricalGroupMatrix(np.resize(np.arange(7), n), n_levels=7),
+    ]
+    X = np.column_stack([group.toarray() for group in groups])
+    dm = DesignMatrix(groups, n=X.shape[0], p=X.shape[1])
+    original_plan = dm.execution_plan
+    original_split = dm.tabmat_split
+
+    restored = pickle.loads(pickle.dumps(dm, protocol=pickle.HIGHEST_PROTOCOL))
+
+    assert restored._execution_plan is None
+    assert isinstance(restored.group_matrices, tuple)
+    assert restored._tabmat_built
+    assert restored.tabmat_split is restored._tabmat_holder.split
+    assert restored.tabmat_split is not original_split
+    rebuilt_plan = restored.execution_plan
+    assert rebuilt_plan is not original_plan
+    assert rebuilt_plan.shape == dm.shape
+    np.testing.assert_allclose(restored.toarray(), X)
+
+
+@pytest.mark.parametrize("split_built", [False, True])
+def test_design_matrix_restores_legacy_tabmat_pickle_state(split_built: bool) -> None:
+    rng = np.random.default_rng(186)
+    n = 50
+    groups = [
+        DenseGroupMatrix(rng.normal(size=(n, 2))),
+        CategoricalGroupMatrix(np.resize(np.arange(7), n), n_levels=7),
+    ]
+    legacy = DesignMatrix.__new__(DesignMatrix)
+    legacy.__dict__.update(
+        {
+            "group_matrices": list(groups),
+            "n": n,
+            "p": 9,
+            "shape": (n, 9),
+            "_tabmat_split": _build_tabmat_split(groups) if split_built else None,
+            "_tabmat_built": split_built,
+            "_tabmat_centering_candidate": None,
+            "_execution_plan": None,
+            "_centered_pattern_plan": None,
+            "_centered_solver_supports": None,
+        }
+    )
+
+    restored = pickle.loads(pickle.dumps(legacy, protocol=pickle.HIGHEST_PROTOCOL))
+
+    assert isinstance(restored.group_matrices, tuple)
+    assert "_tabmat_split" not in restored.__dict__
+    assert "_tabmat_built" not in restored.__dict__
+    assert restored._tabmat_built is split_built
+    if split_built:
+        assert restored.tabmat_split is restored._tabmat_holder.split
+    else:
+        assert restored._tabmat_split is None
+        assert restored.tabmat_split is not None
+        assert restored._tabmat_built
+    assert restored.execution_plan.shape == restored.shape
+    np.testing.assert_allclose(restored.toarray(), np.column_stack([g.toarray() for g in groups]))
+
+
+def test_design_matrix_execution_plan_rejects_declared_width_mismatch() -> None:
+    _rng, groups, X = _mixed_groups(seed=173)
+    dm = DesignMatrix(groups, n=X.shape[0], p=X.shape[1] + 1)
+
+    with pytest.raises(ValueError, match="declared design shape"):
+        _ = dm.execution_plan
+
+
+def test_design_matrix_execution_plan_reuses_existing_tabmat_split() -> None:
+    rng = np.random.default_rng(174)
+    n = 50_000
+    dense = DenseGroupMatrix(rng.normal(size=(n, 3)))
+    categorical = CategoricalGroupMatrix(np.resize(np.arange(120), n), n_levels=120)
+    dm = DesignMatrix([dense, categorical], n=n, p=123)
+
+    split = dm.tabmat_split
+    plan = dm.execution_plan
+    plan.moments(np.ones(n))
+
+    assert split is not None
+    assert plan._ordinary_split is split
+
+
+def test_design_matrix_execution_plan_publishes_lazily_built_tabmat_split() -> None:
+    rng = np.random.default_rng(175)
+    n = 50_000
+    dense = DenseGroupMatrix(rng.normal(size=(n, 3)))
+    categorical = CategoricalGroupMatrix(np.resize(np.arange(120), n), n_levels=120)
+    dm = DesignMatrix([dense, categorical], n=n, p=123)
+    plan = dm.execution_plan
+
+    plan.moments(np.ones(n))
+
+    assert plan._ordinary_split is not None
+    assert dm.tabmat_split is plan._ordinary_split
+
+
+def test_execution_plan_split_factory_does_not_retain_design_matrix_owner() -> None:
+    rng = np.random.default_rng(181)
+    n = 50_000
+    dense = DenseGroupMatrix(rng.normal(size=(n, 3)))
+    categorical = CategoricalGroupMatrix(np.resize(np.arange(120), n), n_levels=120)
+    dm = DesignMatrix([dense, categorical], n=n, p=123)
+    owner_ref = weakref.ref(dm)
+    plan = dm.execution_plan
+
+    del dm
+
+    assert owner_ref() is None
+    assert plan.moments(np.ones(n)).gram.shape == (123, 123)
+
+
+@pytest.mark.parametrize("split_first", [False, True])
+def test_prebuilt_tabmat_storage_does_not_change_dense_only_auto_policy(split_first: bool) -> None:
+    rng = np.random.default_rng(176)
+    n = 100
+    dense = DenseGroupMatrix(rng.normal(size=(n, 3)))
+    dm = DesignMatrix([dense], n=n, p=3)
+    if split_first:
+        assert dm.tabmat_split is not None
+
+    plan = dm.execution_plan
+    plan.moments(np.ones(n))
+
+    assert plan._ordinary_indices == frozenset()
+    assert plan._ordinary_split is None
+
+
+def test_legacy_weighted_moment_entry_points_delegate_to_one_execution_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng, groups, _X = _mixed_groups(seed=177)
+    n = groups[0].shape[0]
+    starts = np.cumsum([0, *[group.shape[1] for group in groups]])
+    spans = [
+        SimpleNamespace(start=int(starts[i]), end=int(starts[i + 1])) for i in range(len(groups))
+    ]
+    W = rng.uniform(0.0, 2.0, size=n)
+    Wz = rng.normal(size=n)
+    signed_W = rng.normal(size=n)
+    calls: list[tuple[bool, bool, int]] = []
+    original = MatrixExecutionPlan.moments
+
+    def counted(self, weights, *, rhs=(), include_xtw=False, signed=False, **kwargs):
+        calls.append((signed, include_xtw, len(rhs)))
+        return original(
+            self,
+            weights,
+            rhs=rhs,
+            include_xtw=include_xtw,
+            signed=signed,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(MatrixExecutionPlan, "moments", counted)
+
+    algebra._block_xtwx(groups, spans, W)
+    algebra._block_xtwx_rhs(groups, spans, W, Wz)
+    algebra._block_xtwx_signed(groups, spans, signed_W)
+
+    assert calls == [
+        (False, False, 0),
+        (False, True, 1),
+        (True, False, 0),
+    ]
+
+
+def test_legacy_entry_points_keep_validation_and_span_contracts() -> None:
+    rng = np.random.default_rng(180)
+    n = 30
+    group = DenseGroupMatrix(rng.normal(size=(n, 2)))
+    spans = [SimpleNamespace(start=0, end=2)]
+    W = rng.uniform(0.1, 2.0, size=n)
+    Wz = rng.normal(size=n)
+
+    with pytest.raises(ValueError, match="row count"):
+        algebra._block_xtwx([group], spans, W[:-1])
+    with pytest.raises(ValueError, match="row count"):
+        algebra._block_xtwx_rhs([group], spans, W, Wz[:-1])
+
+    nonfinite = W.copy()
+    nonfinite[0] = np.inf
+    with pytest.raises(ValueError, match="must be finite"):
+        algebra._block_xtwx([group], spans, nonfinite)
+    with pytest.raises(ValueError, match="must be finite"):
+        algebra._block_xtwx_signed([group], spans, nonfinite)
+
+    negative = W.copy()
+    negative[1] = -0.5
+    with pytest.raises(ValueError, match="negative weights"):
+        algebra._block_xtwx([group], spans, negative)
+    np.testing.assert_allclose(
+        algebra._block_xtwx_signed([group], spans, negative),
+        group.toarray().T @ (negative[:, None] * group.toarray()),
+    )
+
+    nonfinite_rhs = Wz.copy()
+    nonfinite_rhs[2] = np.nan
+    with pytest.raises(ValueError, match="must be finite"):
+        algebra._block_xtwx_rhs([group], spans, W, nonfinite_rhs)
+
+    wrong_spans = [SimpleNamespace(start=1, end=3)]
+    with pytest.raises(ValueError, match="group slices must be contiguous"):
+        algebra._block_xtwx([group], wrong_spans, W)
+
+
+def test_execution_plan_public_moments_reject_invalid_vectors() -> None:
+    rng, groups, _X = _mixed_groups(seed=178)
+    n = groups[0].shape[0]
+    plan = MatrixExecutionPlan(groups, n=n, ordinary_tabmat=False)
+    nonfinite = rng.uniform(0.0, 2.0, size=n)
+    nonfinite[3] = np.nan
+    negative = rng.uniform(0.0, 2.0, size=n)
+    negative[4] = -1.0
+
+    with pytest.raises(ValueError, match="must be finite"):
+        plan.moments(nonfinite)
+    with pytest.raises(ValueError, match="negative weights"):
+        plan.moments(negative)
+
+
+def test_prevalidated_signed_compressed_moments_use_gram_only_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng, groups, _X = _mixed_groups(seed=184)
+    compressed_groups = [groups[0], groups[3], groups[4]]
+    plan = MatrixExecutionPlan(
+        compressed_groups,
+        n=compressed_groups[0].shape[0],
+        ordinary_tabmat=False,
+    )
+    W = rng.normal(size=plan.n)
+    expected = np.full((plan.p, plan.p), 7.0)
+    calls: list[tuple[np.ndarray, object]] = []
+
+    def gram_only(self, weights, *, profile):
+        calls.append((weights, profile))
+        return expected
+
+    monkeypatch.setattr(
+        MatrixExecutionPlan,
+        "_compressed_signed_gram",
+        gram_only,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        MatrixExecutionPlan,
+        "_moments_impl",
+        lambda *_args, **_kwargs: pytest.fail(
+            "prevalidated signed Gram must bypass general moment dispatch"
+        ),
+    )
+
+    moments = plan._moments_prevalidated(W, signed=True)
+
+    assert calls == [(W, None)]
+    assert moments.gram is expected
+    assert moments.xtw is None
+    assert moments.xt_rhs == ()
+
+
+def test_prevalidated_signed_compressed_fast_path_matches_dense_and_profiles_once() -> None:
+    rng, groups, _X = _mixed_groups(seed=187)
+    compressed_groups = [groups[0], groups[3]]
+    X = np.column_stack([group.toarray() for group in compressed_groups])
+    plan = MatrixExecutionPlan(
+        compressed_groups,
+        n=X.shape[0],
+        ordinary_tabmat=False,
+    )
+    W = rng.normal(size=plan.n)
+    profile: dict[str, float | int] = {}
+
+    moments = plan._moments_prevalidated(W, signed=True, profile=profile)
+
+    np.testing.assert_allclose(moments.gram, X.T @ (W[:, None] * X), rtol=2e-12, atol=2e-10)
+    assert moments.xtw is None
+    assert moments.xt_rhs == ()
+    assert profile["block_calls"] == 1
+    assert set(profile) == {
+        "block_calls",
+        "block_diag_discrete_ssp_s",
+        "block_diag_other_s",
+        "block_cross_disc_other_s",
+    }
+    for key in set(profile) - {"block_calls"}:
+        assert profile[key] > 0.0
+
+
+def test_public_signed_compressed_moments_validate_before_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng, groups, _X = _mixed_groups(seed=188)
+    compressed_groups = [groups[0], groups[3]]
+    plan = MatrixExecutionPlan(
+        compressed_groups,
+        n=compressed_groups[0].shape[0],
+        ordinary_tabmat=False,
+    )
+    W = rng.normal(size=plan.n)
+    W[3] = np.nan
+
+    monkeypatch.setattr(
+        MatrixExecutionPlan,
+        "_compressed_signed_gram",
+        lambda *_args, **_kwargs: pytest.fail("public moments must validate before assembly"),
+    )
+
+    with pytest.raises(ValueError, match="must be finite"):
+        plan.moments(W, signed=True)
+
+
+def test_compressed_signed_gram_reuses_planned_column_slices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng, groups, _X = _mixed_groups(seed=185)
+    compressed_groups = [groups[0], groups[3], groups[4]]
+    plan = MatrixExecutionPlan(
+        compressed_groups,
+        n=compressed_groups[0].shape[0],
+        ordinary_tabmat=False,
+    )
+    W = rng.normal(size=plan.n)
+
+    monkeypatch.setattr(
+        GroupSpan,
+        "columns",
+        property(lambda _self: pytest.fail("signed Gram must reuse planned slices")),
+    )
+
+    gram = plan._compressed_signed_gram(W, profile=None)
+
+    assert gram.shape == (plan.p, plan.p)
+
+
+def test_full_ordinary_tabmat_plan_returns_before_group_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(179)
+    n = 200
+    groups = [DenseGroupMatrix(rng.normal(size=(n, 2))) for _ in range(12)]
+    split = _build_tabmat_split(groups)
+    plan = MatrixExecutionPlan(
+        groups,
+        n=n,
+        ordinary_tabmat=True,
+        prepared_ordinary_split=split,
+    )
+    W = rng.uniform(0.1, 2.0, size=n)
+
+    monkeypatch.setattr(
+        "superglm._group_matrix._group_matrix_execution._runtime_group_matrix_types",
+        lambda: pytest.fail("a full Tabmat result must not enter grouped dispatch"),
+    )
+
+    moments = plan.moments(W, include_xtw=True)
+
+    assert moments.gram.shape == (plan.p, plan.p)
+    assert moments.xtw is not None

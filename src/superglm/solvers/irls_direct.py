@@ -26,6 +26,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 import superglm.solvers.scop_exact_support as scop_exact_support
+from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.distributions import _VARIANCE_FLOOR, Distribution, initial_mean
 from superglm.group_matrix import (
     DesignMatrix,
@@ -33,7 +34,6 @@ from superglm.group_matrix import (
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     GroupMatrix,
-    _block_xtwx_rhs,
 )
 from superglm.links import Link
 from superglm.solvers.centered_system import (
@@ -159,6 +159,18 @@ def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
     return (isinstance(family, Gaussian) and isinstance(link, IdentityLink)) or (
         isinstance(family, Gamma) and isinstance(link, LogLink)
     )
+
+
+def _working_sums(W: NDArray, Wz: NDArray) -> tuple[float, float]:
+    """Validate the already-required intercept sums before moment kernels."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        sum_w = float(np.sum(W, dtype=np.float64))
+        sum_wz = float(np.sum(Wz, dtype=np.float64))
+    if not np.isfinite(sum_w) or sum_w <= 0.0:
+        raise ValueError("working weights must have a positive finite sum")
+    if not np.isfinite(sum_wz):
+        raise ValueError("weighted working response must have a finite sum")
+    return sum_w, sum_wz
 
 
 def _robust_solve(
@@ -372,6 +384,14 @@ def fit_irls_direct(
     p = dm.p
     gms = dm.group_matrices
 
+    weights = np.asarray(weights, dtype=np.float64)
+    if weights.shape != (n,):
+        raise ValueError("weights must match the design row count")
+    if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
+        raise ValueError("weights must be finite and non-negative")
+    if not np.any(weights > 0.0):
+        raise ValueError("weights must contain at least one positive value")
+
     if offset is None:
         offset = np.zeros(n)
 
@@ -500,28 +520,10 @@ def fit_irls_direct(
         _S_reduced = S[np.ix_(_non_scop_cols, _non_scop_cols)]
         # Build mapping from reduced beta index to full beta index
         _reduced_to_full = _non_scop_cols
-        # Build reduced group slices (re-indexed for reduced system)
-        _reduced_groups: list[GroupSlice] = []
         _reduced_gms = []
-        col_offset_r = 0
         for gi in _non_scop_groups_idx:
-            g = groups[gi]
-            sz = g.size
-            _reduced_groups.append(
-                GroupSlice(
-                    name=g.name,
-                    start=col_offset_r,
-                    end=col_offset_r + sz,
-                    weight=g.weight,
-                    penalized=g.penalized,
-                    feature_name=g.feature_name,
-                    subgroup_type=g.subgroup_type,
-                    constraints=g.constraints,
-                    monotone_engine=g.monotone_engine,
-                )
-            )
             _reduced_gms.append(gms[gi])
-            col_offset_r += sz
+        _reduced_execution_plan = MatrixExecutionPlan(_reduced_gms, n=n)
 
         _scop_specs = {
             gi: _SCOPGroupSpec(
@@ -598,13 +600,14 @@ def fit_irls_direct(
     if _use_qr:
         _tabmat_split = None
     elif has_constraints:
-        # The constrained raw-moment path can use any eligible SplitMatrix.
-        _tabmat_split = dm.tabmat_split
+        # The constrained raw-moment path uses the cached execution plan.
+        _tabmat_split = None
     else:
         # Ordinary intercept profiling currently benefits only when the split
         # contains a native high-cardinality categorical component. Avoid
         # materializing an unused dense duplicate for numeric and low-cardinality fits.
         _tabmat_split = dm.tabmat_centering_split
+    dm.execution_plan.validate_group_spans(groups)
     _tabmat_centering_state = TabmatCenteringState()
     _can_reuse_weighted_gram = _has_constant_irls_weights(family, link) and not _has_scop
     _constant_w_gram_cache: tuple[NDArray, NDArray, float] | None = None
@@ -767,17 +770,20 @@ def fit_irls_direct(
                 # Step 2: Adjust working response by removing SCOP contribution
                 z_adj = z_off - eta_scop
                 Wz_adj = W * z_adj
-                sum_W = float(np.sum(W))
+                sum_W, sum_Wz_adj = _working_sums(W, Wz_adj)
 
                 # Step 3: Build reduced Gram system (non-SCOP columns only)
-                XtWX_r, XtW1_r, XtWz_r = _block_xtwx_rhs(
-                    _reduced_gms,
-                    _reduced_groups,
+                reduced_moments = _reduced_execution_plan._moments_prevalidated(
                     W,
-                    Wz_adj,
-                    tabmat_split=None,
+                    rhs=(Wz_adj,),
+                    include_xtw=True,
                     profile=profile,
                 )
+                if reduced_moments.xtw is None:  # pragma: no cover - requested above
+                    raise RuntimeError("execution plan did not return X'W")
+                XtWX_r = reduced_moments.gram
+                XtW1_r = reduced_moments.xtw
+                XtWz_r = reduced_moments.xt_rhs[0]
 
                 # Build augmented (p_reduced+1, p_reduced+1) system
                 M_aug_r = np.empty((_p_reduced + 1, _p_reduced + 1))
@@ -787,7 +793,7 @@ def fit_irls_direct(
                 M_aug_r[1:, 1:] = XtWX_r + _S_reduced
 
                 rhs_r = np.empty(_p_reduced + 1)
-                rhs_r[0] = float(np.sum(Wz_adj))
+                rhs_r[0] = sum_Wz_adj
                 rhs_r[1:] = XtWz_r
                 _t_gram += time.perf_counter() - _t0
 
@@ -894,21 +900,24 @@ def fit_irls_direct(
                 _t_solve += time.perf_counter() - _t0
             else:
                 Wz = W * z_off
-                sum_W = float(np.sum(W))
+                sum_W, sum_Wz = _working_sums(W, Wz)
 
                 if _can_reuse_weighted_gram and _constant_w_gram_cache is not None:
                     XtWX, XtW1, sum_W = _constant_w_gram_cache
                     XtWz = dm.rmatvec(Wz)
                 else:
                     # Combined gram + rmatvec: shares O(n) bincount for discretized groups
-                    XtWX, XtW1, XtWz = _block_xtwx_rhs(
-                        gms,
-                        groups,
+                    moments = dm.execution_plan._moments_prevalidated(
                         W,
-                        Wz,
-                        tabmat_split=_tabmat_split,
+                        rhs=(Wz,),
+                        include_xtw=True,
                         profile=profile,
                     )
+                    if moments.xtw is None:  # pragma: no cover - requested above
+                        raise RuntimeError("execution plan did not return X'W")
+                    XtWX = moments.gram
+                    XtW1 = moments.xtw
+                    XtWz = moments.xt_rhs[0]
                     if _can_reuse_weighted_gram:
                         _constant_w_gram_cache = (XtWX, XtW1, sum_W)
 
@@ -921,7 +930,7 @@ def fit_irls_direct(
 
                 # RHS: X_aug' W (z - offset)
                 rhs = np.empty(p + 1)
-                rhs[0] = float(np.sum(Wz))
+                rhs[0] = sum_Wz
                 rhs[1:] = XtWz
                 _t_gram += time.perf_counter() - _t0
 

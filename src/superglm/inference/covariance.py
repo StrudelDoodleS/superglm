@@ -10,12 +10,12 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.group_matrix import (
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
-    _block_xtwx,
 )
 from superglm.solvers.rank import decompose_factor, decompose_gram
 from superglm.types import GroupSlice
@@ -317,9 +317,12 @@ def _penalised_xtwx_inv_gram(
         aug_inv = np.array([[1.0 / w_sum]]) if w_sum > 0 else np.array([[0.0]])
         return np.empty((0, 0)), aug_inv, [], None, None
 
-    # Build X'WX block-by-block: gram for diagonal, cross_gram for off-diagonal.
-    # For discretized groups this is O(n_bins) per block instead of O(n·p²).
-    XtWX = _block_xtwx(active_gms, active_groups_out, W)
+    # The active group subset has its own solver coordinates, so use one
+    # ephemeral plan and fuse X'W with its Gram when the augmented covariance
+    # is requested.
+    active_plan = MatrixExecutionPlan(active_gms, n=len(W))
+    active_moments = active_plan.moments(W, include_xtw=compute_augmented)
+    XtWX = active_moments.gram
 
     S = _active_penalty_matrix(
         group_matrices,
@@ -337,10 +340,9 @@ def _penalised_xtwx_inv_gram(
         return XtWX_S_inv, np.empty((0, 0)), active_groups_out, XtWX, S
 
     # Augmented (p+1)×(p+1) inverse including intercept row/column.
-    # Build X'W1 via per-group rmatvec (avoids materializing dense X_a).
-    XtW1 = np.empty(p_a)
-    for gm, ag in zip(active_gms, active_groups_out):
-        XtW1[ag.sl] = gm.rmatvec(W)
+    XtW1 = active_moments.xtw
+    if XtW1 is None:  # pragma: no cover - guaranteed by compute_augmented
+        raise RuntimeError("execution plan did not return X'W")
     sum_W = float(np.sum(W))
 
     M_aug = np.empty((p_a + 1, p_a + 1))
