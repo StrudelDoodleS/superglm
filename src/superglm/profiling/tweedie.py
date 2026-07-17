@@ -2696,9 +2696,11 @@ class TweedieProfileResult:
             self._emitted_ci_density_warning_signatures = signatures
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore results pickled before density provenance fields existed."""
+        """Restore compatibility fields absent from legacy pickle state."""
         self.__dict__.update(state)
         self._ensure_density_compat_state()
+        if "_ci_details_cache" not in self.__dict__:
+            self._ci_details_cache = {}
 
     @property
     def cache(self) -> dict[float, float]:

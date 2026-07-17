@@ -5181,3 +5181,44 @@ class TestDensityProvenance:
             interval = restored.ci()
         assert interval[0] < restored.p_hat < interval[1]
         assert restored._emitted_ci_density_warning_signatures == {"saddle:warning"}
+
+    def test_origin_master_pickle_restores_missing_ci_details_cache(self):
+        result = tweedie_module.TweedieProfileResult(
+            p_hat=1.5,
+            phi_hat=1.0,
+            nll=0.0,
+            n_evaluations=1,
+            converged=True,
+            method="brent",
+            phi_method="mle",
+            search_trace=pd.DataFrame({"p": [1.5], "nll": [0.0]}),
+            n_positive=10,
+            n_saddlepoint=0,
+            _objective=_legacy_pickle_profile_objective,
+            _ll_scale=1.0,
+        )
+        origin_master_fields = {
+            "p_hat",
+            "phi_hat",
+            "nll",
+            "n_evaluations",
+            "converged",
+            "method",
+            "phi_method",
+            "search_trace",
+            "saddlepoint_fraction",
+            "n_saddlepoint",
+            "n_positive",
+            "warnings",
+            "_objective",
+            "_ll_scale",
+            "_ci_cache",
+        }
+        for name in set(vars(result)) - origin_master_fields:
+            del result.__dict__[name]
+
+        restored = pickle.loads(pickle.dumps(result))
+
+        interval = restored.ci()
+        assert restored._ci_cache[0.05] is interval
+        assert restored._ci_details_cache[0.05].interval is interval
