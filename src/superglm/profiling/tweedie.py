@@ -35,7 +35,15 @@ from numpy.typing import NDArray
 from scipy.optimize import brentq, minimize, minimize_scalar
 from scipy.special import expit, logit, wright_bessel
 
-from superglm._tweedie_numerics import TweedieNumericalError, compound_poisson_gamma_parameters
+from superglm._tweedie_numerics import (
+    PHI_LOWER_BOUND,
+    TweedieNumericalError,
+    _as_real_float64_array,
+    compound_poisson_gamma_parameters,
+    normalize_tweedie_power,
+    pearson_dispersion,
+    tweedie_unit_deviance,
+)
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
@@ -402,6 +410,28 @@ def _validate_tweedie_inputs(
     return y_arr, mu_arr, p_float, validated_weights
 
 
+class _TweediePearsonArrayTypeError(TypeError, ValueError):
+    """Strict Pearson array type error compatible with legacy value checks."""
+
+
+def _validate_strict_pearson_array(
+    value: object,
+    *,
+    name: str,
+    legacy_message: str,
+) -> NDArray[np.float64]:
+    """Reject coercive public Pearson inputs before shared density validation."""
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(legacy_message) from exc
+    if raw.dtype.kind not in "iuf":
+        raise _TweediePearsonArrayTypeError(
+            f"{legacy_message}; {name} must be a real numeric array"
+        )
+    return _as_real_float64_array(name, raw)
+
+
 def _validate_tweedie_phi(phi: float) -> float:
     """Validate and convert a scalar Tweedie dispersion parameter."""
     phi_arr = np.asarray(phi)
@@ -416,86 +446,33 @@ def _validate_tweedie_phi(phi: float) -> float:
     return phi_float
 
 
-_TWEEDIE_DEVIANCE_SERIES_THRESHOLD = 1e-3
-_TWEEDIE_DEVIANCE_SERIES_TERMS = 8
-
-
-def _tweedie_positive_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
-    """Compute positive-response unit deviance without close-mean cancellation."""
-    y_array, mu_array = np.broadcast_arrays(
-        np.asarray(y, dtype=np.float64),
-        np.asarray(mu, dtype=np.float64),
-    )
-    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        delta = (y_array - mu_array) / mu_array
-    extreme_positive = np.isposinf(delta)
-    near = np.abs(delta) <= _TWEEDIE_DEVIANCE_SERIES_THRESHOLD
-    g = np.empty_like(delta)
-
-    if np.any(near):
-        delta_near = delta[near]
-        term = np.full_like(delta_near, 0.5)
-        series = term.copy()
-        # The recurrence adds k=1,...,8 from the integral expansion. At the
-        # 1e-3 threshold, the first omitted term is O(1e-27), below binary64
-        # rounding even for the largest coefficient over 1 < p < 2.
-        for k in range(_TWEEDIE_DEVIANCE_SERIES_TERMS):
-            term *= -delta_near * (p + k) / (k + 3.0)
-            series += term
-        g[near] = delta_near**2 * series
-
-    regular = ~near & ~extreme_positive & (delta > -1.0)
-    if np.any(regular):
-        delta_regular = delta[regular]
-        with np.errstate(all="ignore"):
-            log_ratio = np.log1p(delta_regular)
-            first = (1.0 + delta_regular) * np.expm1((1.0 - p) * log_ratio) / (1.0 - p)
-            second = np.expm1((2.0 - p) * log_ratio) / (2.0 - p)
-        g[regular] = first - second
-
-    # For a positive y many orders below mu, delta can round to exactly -1.
-    # Recover log(y / mu) from the original values; this branch is far from
-    # the cancellation region, so the power-scale formula is well-conditioned.
-    rounded_to_minus_one = ~near & ~regular & ~extreme_positive
-    if np.any(rounded_to_minus_one):
-        with np.errstate(all="ignore"):
-            log_ratio = np.log(y_array[rounded_to_minus_one]) - np.log(
-                mu_array[rounded_to_minus_one]
-            )
-            ratio = np.exp(log_ratio)
-            ratio_two_minus_p = np.exp((2.0 - p) * log_ratio)
-            first = (ratio_two_minus_p - ratio) / (1.0 - p)
-            second = (ratio_two_minus_p - 1.0) / (2.0 - p)
-        g[rounded_to_minus_one] = first - second
-
-    deviance = np.empty_like(delta)
-    ordinary_ratio = ~extreme_positive
-    with np.errstate(all="ignore"):
-        deviance[ordinary_ratio] = (
-            2.0 * np.power(mu_array[ordinary_ratio], 2.0 - p) * g[ordinary_ratio]
-        )
-
-    if np.any(extreme_positive):
-        # For y >> mu, factor the expanded positive half-deviance by
-        # A = y * mu**(1-p) / (p-1). The remaining ratios use mu/y and
-        # cannot create inf-inf or 0*inf. -expm1 keeps 1 - B/A accurate
-        # when p is itself very close to one.
-        with np.errstate(all="ignore"):
-            log_y = np.log(y_array[extreme_positive])
-            log_mu = np.log(mu_array[extreme_positive])
-            log_mu_over_y = log_mu - log_y
-            log_b_over_a = (p - 1.0) * log_mu_over_y - np.log(2.0 - p)
-            log_c_over_a = np.log(p - 1.0) - np.log(2.0 - p) + log_mu_over_y
-            correction = -np.expm1(log_b_over_a) + np.exp(log_c_over_a)
-            log_deviance = (
-                np.log(2.0) + log_y + (1.0 - p) * log_mu - np.log(p - 1.0) + np.log(correction)
-            )
-            deviance[extreme_positive] = np.exp(log_deviance)
-    negative_roundoff = np.isfinite(deviance) & (deviance < 0.0)
-    if np.any(negative_roundoff):
-        deviance = deviance.copy()
-        deviance[negative_roundoff] = 0.0
-    return deviance
+def _shared_tweedie_unit_deviance_or_inf(
+    y: NDArray,
+    mu: NDArray,
+    p: float,
+) -> NDArray[np.float64]:
+    """Evaluate shared deviance, isolating rare unrepresentable observations."""
+    y_array, mu_array = np.broadcast_arrays(y, mu)
+    try:
+        return tweedie_unit_deviance(y_array, mu_array, p)
+    except TweedieNumericalError as batch_error:
+        result = np.empty(y_array.shape, dtype=np.float64)
+        found_unrepresentable = False
+        for index in np.ndindex(y_array.shape):
+            try:
+                result[index] = tweedie_unit_deviance(
+                    y_array[index],
+                    mu_array[index],
+                    p,
+                ).item()
+            except TweedieNumericalError as exc:
+                if str(exc) != "unit deviance could not be represented as finite":
+                    raise
+                result[index] = np.inf
+                found_unrepresentable = True
+        if not found_unrepresentable:
+            raise batch_error
+        return result
 
 
 def _prepare_tweedie_density(
@@ -543,7 +520,7 @@ def _prepare_tweedie_density(
         positive_canonical_c = y_positive * mu_one_minus_p[positive_mask] / (
             1.0 - p
         ) - mu_two_minus_p[positive_mask] / (2.0 - p)
-        positive_saddlepoint_deviance = _tweedie_positive_unit_deviance(
+        positive_saddlepoint_deviance = _shared_tweedie_unit_deviance_or_inf(
             y_positive,
             mu[positive_mask],
             p,
@@ -808,7 +785,7 @@ def tweedie_logpdf(
 def _saddlepoint(y: NDArray, mu: NDArray, phi: NDArray, p: float) -> NDArray:
     """Saddlepoint approximation to the Tweedie log-density."""
     y_safe = np.maximum(y, 1e-300)
-    deviance = _tweedie_positive_unit_deviance(y_safe, mu, p)
+    deviance = _shared_tweedie_unit_deviance_or_inf(y_safe, mu, p)
     return -0.5 * (np.log(2.0 * np.pi) + np.log(phi) + p * np.log(y_safe)) - deviance / (2.0 * phi)
 
 
@@ -841,20 +818,40 @@ def estimate_phi(
     callers should pass the residual observation count
     ``df_resid = n_obs - edf``.
     """
-    y, mu, p, weights = _validate_tweedie_inputs(y, mu, p, weights)
-    mu_safe = np.maximum(mu, 1e-10)
-    variance_fn = np.power(mu_safe, p)
-    pearson = (y - mu) ** 2 / variance_fn
+    try:
+        strict_p = normalize_tweedie_power(p)
+    except ValueError as exc:
+        raise ValueError("p must be finite and in the open interval (1, 2)") from exc
+    strict_y = _validate_strict_pearson_array(
+        y,
+        name="y",
+        legacy_message="y must be finite and non-negative",
+    )
+    strict_mu = _validate_strict_pearson_array(
+        mu,
+        name="mu",
+        legacy_message="mu must be finite and strictly positive",
+    )
+    strict_weights = (
+        None
+        if weights is None
+        else _validate_strict_pearson_array(
+            weights,
+            name="weights",
+            legacy_message="weights must be finite and strictly positive",
+        )
+    )
+    y, mu, p, weights = _validate_tweedie_inputs(
+        strict_y,
+        strict_mu,
+        strict_p,
+        strict_weights,
+    )
+    denominator = len(y) if df_resid is None else df_resid
+    return pearson_dispersion(y, mu, p, weights, denominator)
 
-    denom = float(df_resid if df_resid is not None else len(y))
-    if weights is not None:
-        numer = float(np.sum(weights * pearson))
-    else:
-        numer = float(np.sum(pearson))
-    return numer / denom
 
-
-_PHI_LOWER_BOUND = 1e-12
+_PHI_LOWER_BOUND = PHI_LOWER_BOUND
 _PHI_UPPER_BOUND = 1e12
 _LOG_PHI_LOWER_BOUND = float(np.log(_PHI_LOWER_BOUND))
 _LOG_PHI_UPPER_BOUND = float(np.log(_PHI_UPPER_BOUND))
@@ -1095,15 +1092,13 @@ def _pearson_phi_from_prepared(
     denominator: float,
 ) -> float:
     """Compute the Pearson dispersion seed from already validated arrays."""
-    with np.errstate(all="ignore"):
-        numerator = float(
-            np.sum(
-                prepared.weights
-                * (prepared.y - prepared.mu) ** 2
-                / np.power(np.maximum(prepared.mu, 1e-10), prepared.p)
-            )
-        )
-    return numerator / denominator
+    return pearson_dispersion(
+        prepared.y,
+        prepared.mu,
+        prepared.p,
+        prepared.weights,
+        denominator,
+    )
 
 
 def _phi_profile_seeds(
@@ -2274,7 +2269,7 @@ def _profile_phi_detailed(
     )
 
     if phi_method == "pearson":
-        phi_hat = max(pearson_phi, 1e-10)
+        phi_hat = max(pearson_phi, PHI_LOWER_BOUND)
         if not np.isfinite(phi_hat) or phi_hat <= 0.0:
             return _PhiProfileResult(
                 phi=float(phi_hat),
