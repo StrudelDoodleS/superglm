@@ -200,7 +200,17 @@ def _required_fit_columns(model) -> tuple[str, ...]:
     names = [*model._feature_order, *(model._splines or [])]
     for interaction_name in model._interaction_order:
         names.extend(model._interaction_specs[interaction_name].parent_names)
+    # Preserve the interaction API's more specific configuration error before
+    # treating a parent name as merely a missing input column.  In fully
+    # auto-detected models there is no configured feature universe yet, so the
+    # builder remains responsible for resolving parents after detection.
+    configured_features = set(model._feature_order) | set(model._splines or ())
     for left, right in model._pending_interactions:
+        if configured_features:
+            if left not in configured_features:
+                raise ValueError(f"Parent feature not found: {left}")
+            if right not in configured_features:
+                raise ValueError(f"Parent feature not found: {right}")
         names.extend((left, right))
     return tuple(dict.fromkeys(names))
 
