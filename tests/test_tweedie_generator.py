@@ -136,6 +136,33 @@ def test_vector_parameters_preserve_exact_sampler_calls_and_owned_output():
     assert not np.shares_memory(y, rng.gamma_returns[0])
 
 
+def test_vector_phi_over_prior_weights_has_expected_group_distributions():
+    n_per_group = 20_000
+    weights = np.repeat(np.array([0.5, 1.0, 2.0, 4.0]), n_per_group)
+    mu = 3.0
+    base_phi = 1.2
+    power = 1.5
+    phi = base_phi / weights
+
+    y = generate_tweedie_cpg(
+        len(weights),
+        mu=mu,
+        phi=phi,
+        p=power,
+        rng=np.random.default_rng(8675309),
+    )
+
+    for weight in np.unique(weights):
+        group = y[weights == weight]
+        effective_phi = base_phi / weight
+        expected_variance = effective_phi * mu**power
+        lam = mu ** (2 - power) / ((2 - power) * effective_phi)
+
+        np.testing.assert_allclose(group.mean(), mu, rtol=0.04)
+        np.testing.assert_allclose(group.var(), expected_variance, rtol=0.12)
+        np.testing.assert_allclose(np.mean(group == 0), np.exp(-lam), atol=0.015)
+
+
 @pytest.mark.parametrize(
     ("mu", "phi", "p"),
     [
