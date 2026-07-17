@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from superglm._tweedie_numerics import compound_poisson_gamma_parameters
 from superglm.profiling import tweedie as tweedie_module
 from superglm.profiling.tweedie import generate_tweedie_cpg
 
@@ -113,6 +114,89 @@ def test_python_float_and_numpy_float64_scalars_match_legacy_output_and_rng_stat
         legacy_rng.bit_generator.state,
         protocol=5,
     )
+
+
+def test_shared_parameter_route_preserves_real_rng_draw_order(monkeypatch):
+    calls = []
+
+    def recording_parameters(mu, phi, p, *, weights=None):
+        recorded_weights = None if weights is None else np.array(weights, copy=True)
+        calls.append((np.array(mu, copy=True), phi, p, recorded_weights))
+        return compound_poisson_gamma_parameters(mu, phi, p, weights=weights)
+
+    monkeypatch.setattr(
+        tweedie_module,
+        "compound_poisson_gamma_parameters",
+        recording_parameters,
+    )
+    mu = np.array([1.0, 4.0, 9.0])
+    phi = 0.8
+    power = 1.5
+    actual_rng = np.random.default_rng(271828)
+    expected_rng = np.random.default_rng(271828)
+
+    actual = generate_tweedie_cpg(3, mu=mu, phi=phi, p=power, rng=actual_rng)
+
+    parameters = compound_poisson_gamma_parameters(mu, phi, power)
+    counts = expected_rng.poisson(parameters.rate)
+    expected = np.zeros(3, dtype=np.float64)
+    positive = counts > 0
+    assert np.any(positive)
+    expected[positive] = expected_rng.gamma(
+        parameters.shape * counts[positive],
+        scale=parameters.scale[positive],
+    )
+
+    assert len(calls) == 1
+    shared_mu, shared_phi, shared_power, shared_weights = calls[0]
+    np.testing.assert_array_equal(shared_mu, mu)
+    np.testing.assert_array_equal(shared_phi, np.full_like(mu, phi))
+    assert shared_power == power
+    assert shared_weights is None
+    np.testing.assert_array_equal(actual, expected)
+    assert pickle.dumps(actual_rng.bit_generator.state, protocol=5) == pickle.dumps(
+        expected_rng.bit_generator.state,
+        protocol=5,
+    )
+
+
+def test_continuous_vector_phi_uses_one_unsorted_parameter_call(monkeypatch):
+    calls = []
+
+    def recording_parameters(mu, phi, p, *, weights=None):
+        calls.append(
+            (
+                np.array(mu, copy=True),
+                np.array(phi, copy=True),
+                p,
+                None if weights is None else np.array(weights, copy=True),
+            )
+        )
+        return compound_poisson_gamma_parameters(mu, phi, p, weights=weights)
+
+    def unexpected_argsort(*args, **kwargs):
+        raise AssertionError("continuous vector phi must not be sorted or grouped")
+
+    monkeypatch.setattr(
+        tweedie_module,
+        "compound_poisson_gamma_parameters",
+        recording_parameters,
+    )
+    monkeypatch.setattr(tweedie_module.np, "argsort", unexpected_argsort)
+    mu = np.array([1.0, 2.0, 4.0, 8.0])
+    phi = np.array([0.5, 0.75, 1.0, 1.25])
+    rng = _RecordingRNG(counts=np.zeros(4, dtype=np.int64))
+
+    generate_tweedie_cpg(4, mu=mu, phi=phi, p=1.5, rng=rng)
+
+    assert len(calls) == 1
+    called_mu, called_phi, called_power, called_weights = calls[0]
+    np.testing.assert_array_equal(called_mu, mu)
+    np.testing.assert_array_equal(called_phi, phi)
+    assert called_power == 1.5
+    assert called_weights is None
+    assert len(rng.poisson_calls) == 1
+    assert rng.gamma_calls == []
 
 
 @pytest.mark.parametrize("dtype", [np.float16, np.float32], ids=["float16", "float32"])

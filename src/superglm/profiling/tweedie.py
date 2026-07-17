@@ -35,6 +35,7 @@ from numpy.typing import NDArray
 from scipy.optimize import brentq, minimize, minimize_scalar
 from scipy.special import expit, logit, wright_bessel
 
+from superglm._tweedie_numerics import TweedieNumericalError, compound_poisson_gamma_parameters
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
@@ -136,9 +137,13 @@ def _prepare_cpg_parameters(
 ) -> tuple[NDArray, float, NDArray]:
     """Return finite, representable compound Poisson-Gamma parameters."""
     with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
-        lam = np.power(mu, 2 - p) / ((2 - p) * phi)  # Poisson rate
-        alpha = (2 - p) / (p - 1)  # Gamma shape per claim
-        beta = phi * (p - 1.0) * np.power(mu, p - 1.0)  # Gamma scale per claim
+        try:
+            parameters = compound_poisson_gamma_parameters(mu, phi, p)
+        except TweedieNumericalError as exc:
+            raise ValueError(str(exc)) from exc
+        lam = parameters.rate
+        alpha = parameters.shape
+        beta = parameters.scale
 
     if not np.all(np.isfinite(lam)) or np.any(lam <= 0.0) or np.any(lam > _POISSON_LAM_MAX):
         raise ValueError(
