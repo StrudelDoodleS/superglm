@@ -83,28 +83,69 @@ def _assert_no_sampler_calls(rng):
     assert rng.gamma_calls == []
 
 
-def test_seeded_generation_matches_legacy_output_and_rng_consumption():
+@pytest.mark.parametrize(
+    "scalar_type",
+    [pytest.param(float, id="python-float"), pytest.param(np.float64, id="numpy-float64")],
+)
+def test_python_float_and_numpy_float64_scalars_match_legacy_output_and_rng_state(
+    scalar_type,
+):
     hardened_rng = np.random.default_rng(271828)
     legacy_rng = np.random.default_rng(271828)
 
     actual = generate_tweedie_cpg(
         128,
-        mu=2.75,
-        phi=0.8,
-        p=1.45,
+        mu=scalar_type(2.75),
+        phi=scalar_type(0.8),
+        p=scalar_type(1.45),
         rng=hardened_rng,
     )
     expected = _legacy_generate_tweedie_cpg(
         128,
-        mu=2.75,
-        phi=0.8,
-        p=1.45,
+        mu=scalar_type(2.75),
+        phi=scalar_type(0.8),
+        p=scalar_type(1.45),
         rng=legacy_rng,
     )
 
     np.testing.assert_array_equal(actual, expected)
     assert pickle.dumps(hardened_rng.bit_generator.state, protocol=5) == pickle.dumps(
         legacy_rng.bit_generator.state,
+        protocol=5,
+    )
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32], ids=["float16", "float32"])
+@pytest.mark.parametrize("zero_dimensional", [False, True], ids=["scalar", "zero-dimensional"])
+def test_lower_precision_scalars_match_explicit_float_normalization(dtype, zero_dimensional):
+    p = dtype(1.45)
+    phi = dtype(0.8)
+    if zero_dimensional:
+        p = np.array(p)
+        phi = np.array(phi)
+    normalized_p = float(p)
+    normalized_phi = float(phi)
+    lower_precision_rng = np.random.default_rng(161803)
+    normalized_rng = np.random.default_rng(161803)
+
+    actual = generate_tweedie_cpg(
+        64,
+        mu=2.75,
+        phi=phi,
+        p=p,
+        rng=lower_precision_rng,
+    )
+    expected = generate_tweedie_cpg(
+        64,
+        mu=2.75,
+        phi=normalized_phi,
+        p=normalized_p,
+        rng=normalized_rng,
+    )
+
+    np.testing.assert_array_equal(actual, expected)
+    assert pickle.dumps(lower_precision_rng.bit_generator.state, protocol=5) == pickle.dumps(
+        normalized_rng.bit_generator.state,
         protocol=5,
     )
 

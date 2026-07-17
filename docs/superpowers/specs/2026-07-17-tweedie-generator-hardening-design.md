@@ -16,7 +16,8 @@ unrepresentable inputs before they can silently generate the wrong distribution.
 
 ## Goals
 
-- Preserve scalar-generator results and RNG reproducibility for existing valid calls.
+- Preserve scalar-generator results and RNG reproducibility for existing valid calls
+  using ordinary Python `float` or NumPy `float64` inputs.
 - Formally support per-observation dispersion for weighted simulations.
 - Reject invalid shapes, domains, complex values, NaNs, infinities, and derived
   parameters that NumPy cannot represent safely.
@@ -127,8 +128,13 @@ contract; tests assert useful message fragments rather than entire strings.
 
 ## Compatibility
 
-- A valid scalar call with the same NumPy seed must remain bit-for-bit identical to the
-  pre-hardening implementation.
+- A valid scalar call using ordinary Python `float` or NumPy `float64` inputs with the
+  same NumPy seed must remain bit-for-bit identical to the pre-hardening implementation.
+- Lower-precision NumPy scalars and zero-dimensional NumPy arrays remain accepted, but
+  are intentionally normalized before parameter arithmetic: `p` becomes a Python
+  `float`, while `mu` and `phi` become `float64` values. Their compatibility guarantee
+  is therefore exact output and RNG-state equivalence to those explicit normalized
+  inputs, not to the pre-hardening dtype-sensitive arithmetic path.
 - Existing exact shape-`(n,)` `mu` behavior remains supported.
 - Existing exact shape-`(n,)` `phi` behavior becomes documented and tested, enabling
   correct weighted generation with `phi / w` in one vectorized call.
@@ -140,7 +146,8 @@ contract; tests assert useful message fragments rather than entire strings.
 Implementation follows red-green TDD. Focused tests will cover:
 
 - scalar and exact-vector `mu`/`phi`, including per-observation formula parameters;
-- bit-for-bit scalar seeded compatibility;
+- bit-for-bit Python-`float`/NumPy-`float64` scalar seeded compatibility and exact
+  lower-precision/zero-dimensional equivalence to explicit normalization;
 - weighted `phi / w` moments and zero probabilities;
 - `n == 0`;
 - invalid `n`, `p`, `mu`, and `phi` types, shapes, domains, complex values, NaNs, and
