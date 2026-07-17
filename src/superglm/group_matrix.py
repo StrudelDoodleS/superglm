@@ -12,7 +12,7 @@ DesignMatrix holds the list and provides full-matrix matvec/rmatvec.
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -123,7 +123,11 @@ def _block_xtwx(
 ) -> NDArray:
     """Compatibility wrapper for block XtWX assembly."""
     return _group_matrix_algebra._block_xtwx(
-        gms, groups, W, tabmat_split=tabmat_split, profile=profile
+        gms,
+        groups,
+        W,
+        tabmat_split=tabmat_split,
+        profile=profile,
     )
 
 
@@ -168,6 +172,23 @@ def _block_xtwx_signed(
     )
 
 
+class _LazyTabmatSplit:
+    """One shared lazy split without a back-reference to its DesignMatrix."""
+
+    __slots__ = ("built", "group_matrices", "split")
+
+    def __init__(self, group_matrices) -> None:
+        self.group_matrices = group_matrices
+        self.split = None
+        self.built = False
+
+    def get(self):
+        if not self.built:
+            self.split = _build_tabmat_split(self.group_matrices)
+            self.built = True
+        return self.split
+
+
 class DesignMatrix:
     """Container for per-group matrices. Provides full-matrix operations."""
 
@@ -176,20 +197,59 @@ class DesignMatrix:
         self.n = n
         self.p = p
         self.shape = (n, p)
-        self._tabmat_split = None  # lazily built
-        self._tabmat_built = False
+        self._tabmat_holder = _LazyTabmatSplit(self.group_matrices)
         self._tabmat_centering_candidate = None
         self._execution_plan: MatrixExecutionPlan | None = None
         self._centered_pattern_plan = None
         self._centered_solver_supports = None
 
+    def __getstate__(self) -> dict[str, Any]:
+        """Serialize durable matrix state without the rebuildable execution plan."""
+        state = self.__dict__.copy()
+        state["_execution_plan"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore current and pre-shared-Tabmat-holder pickle state."""
+        state = state.copy()
+        legacy_split = state.pop("_tabmat_split", None)
+        legacy_built = bool(state.pop("_tabmat_built", False))
+        group_matrices = tuple(state["group_matrices"])
+        state["group_matrices"] = group_matrices
+
+        holder = state.get("_tabmat_holder")
+        if not isinstance(holder, _LazyTabmatSplit):
+            holder = _LazyTabmatSplit(group_matrices)
+            holder.split = legacy_split
+            holder.built = legacy_built
+        else:
+            holder.group_matrices = group_matrices
+        state["_tabmat_holder"] = holder
+
+        state["_execution_plan"] = None
+        state.setdefault("_tabmat_centering_candidate", None)
+        state.setdefault("_centered_pattern_plan", None)
+        state.setdefault("_centered_solver_supports", None)
+        self.__dict__.update(state)
+
+    def _get_or_build_tabmat_split(self):
+        """Return the single DesignMatrix-owned Tabmat split, building it once."""
+        return self._tabmat_holder.get()
+
+    @property
+    def _tabmat_split(self):
+        """Compatibility view of the shared lazy split."""
+        return self._tabmat_holder.split
+
+    @property
+    def _tabmat_built(self) -> bool:
+        """Compatibility view of whether split construction was attempted."""
+        return self._tabmat_holder.built
+
     @property
     def tabmat_split(self):
         """Lazily build a tabmat SplitMatrix for non-discrete paths."""
-        if not self._tabmat_built:
-            self._tabmat_split = _build_tabmat_split(self.group_matrices)
-            self._tabmat_built = True
-        return self._tabmat_split
+        return self._get_or_build_tabmat_split()
 
     @property
     def tabmat_centering_split(self):
@@ -205,7 +265,15 @@ class DesignMatrix:
         """Return the cached backend-neutral matrix execution plan."""
         plan = self._execution_plan
         if plan is None:
-            plan = MatrixExecutionPlan(self.group_matrices, n=self.n)
+            plan = MatrixExecutionPlan(
+                self.group_matrices,
+                n=self.n,
+                ordinary_split_factory=self._tabmat_holder.get,
+            )
+            if plan.shape != self.shape:
+                raise ValueError(
+                    f"declared design shape {self.shape} does not match grouped shape {plan.shape}"
+                )
             self._execution_plan = plan
         return plan
 

@@ -16,10 +16,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR, clip_mu
-from superglm.group_matrix import (
-    DesignMatrix,
-    _block_xtwx_signed,
-)
+from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import coerce_reml_penalties
 from superglm.solvers.pirls import PIRLSResult
@@ -260,7 +257,10 @@ def reml_w_correction(
         a_j = dW_deta * deta_j
 
         # C_j = X'diag(a_j)X -- dW contribution to dH/drho_j
-        C_j = _block_xtwx_signed(gms, groups, a_j, tabmat_split=dm.tabmat_split)
+        C_j = dm.execution_plan.moments(
+            a_j,
+            signed=True,
+        ).gram
 
         # Gradient correction: 0.5 tr(H^{-1} C_j)
         grad_correction[i] = 0.5 * float(np.sum(XtWX_S_inv * C_j))
@@ -319,7 +319,10 @@ def reml_w_correction(
                 d2w_drho_ij = d2W_deta2 * deta_vectors[i] * deta_vectors[j] + dW_deta * d2eta_ij
 
                 # Hessian correction: 0.5 * tr(H^{-1} X' diag(d2w_drho_ij) X)
-                C_ij = _block_xtwx_signed(gms, groups, d2w_drho_ij, tabmat_split=dm.tabmat_split)
+                C_ij = dm.execution_plan.moments(
+                    d2w_drho_ij,
+                    signed=True,
+                ).gram
                 val = 0.5 * float(np.sum(XtWX_S_inv * C_ij))
                 dH2_cross[i, j] = val
                 dH2_cross[j, i] = val

@@ -20,10 +20,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR, clip_mu
-from superglm.group_matrix import (
-    DesignMatrix,
-    _block_xtwx,
-)
+from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.objective import reml_laml_objective
 from superglm.reml.penalty_algebra import (
@@ -118,7 +115,7 @@ def optimize_efs_reml(
     boot_V = distribution.variance(boot_mu)
     boot_dmu = link.deriv_inverse(boot_eta)
     boot_W = sample_weight * boot_dmu**2 / np.maximum(boot_V, _VARIANCE_FLOOR)
-    boot_xtwx = _block_xtwx(dm.group_matrices, groups, boot_W, tabmat_split=dm.tabmat_split)
+    boot_xtwx = dm.execution_plan.moments(boot_W).gram
 
     # Estimate phi for estimated-scale families
     boot_inv_phi = 1.0
@@ -213,7 +210,7 @@ def optimize_efs_reml(
             dmu_deta = link.deriv_inverse(eta)
             W = sample_weight * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
-            cached_xtwx = _block_xtwx(dm.group_matrices, groups, W, tabmat_split=dm.tabmat_split)
+            cached_xtwx = dm.execution_plan.moments(W).gram
 
         # -- Compute H^{-1} = (X'WX + S)^{-1} --
         p = dm.p

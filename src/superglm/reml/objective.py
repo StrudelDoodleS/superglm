@@ -12,10 +12,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR, Poisson, clip_mu
-from superglm.group_matrix import (
-    DesignMatrix,
-    _block_xtwx,
-)
+from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import (
     build_penalty_matrix,
@@ -68,7 +65,7 @@ def reml_laml_objective(
         V = distribution.variance(mu)
         dmu_deta = link.deriv_inverse(eta)
         W = sample_weight * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
-        XtWX = _block_xtwx(dm.group_matrices, groups, W, tabmat_split=dm.tabmat_split)
+        XtWX = dm.execution_plan.moments(W).gram
 
     p = XtWX.shape[0]
     if S_override is not None:

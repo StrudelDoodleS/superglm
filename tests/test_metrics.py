@@ -623,6 +623,7 @@ class TestMetricsCaching:
         """Reweighted inference decomposes only the raw and profiled systems it consumes."""
         import superglm.inference.covariance as covariance_module
         import superglm.inference.metrics as metrics_module
+        from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 
         rng = np.random.default_rng(20260718)
         X = pd.DataFrame({"x": rng.normal(size=180), "z": rng.normal(size=180)})
@@ -655,8 +656,8 @@ class TestMetricsCaching:
             counted_covariance_decomposition,
         )
         monkeypatch.setattr(
-            covariance_module,
-            "_block_xtwx",
+            MatrixExecutionPlan,
+            "moments",
             lambda *_args, **_kwargs: pytest.fail("rebuilt the grouped raw Gram"),
         )
         monkeypatch.setattr(metrics_module, "decompose_gram", counted_metrics_decomposition)

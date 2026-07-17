@@ -11,7 +11,7 @@ from superglm.distributions import NegativeBinomial
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
-from superglm.group_matrix import SparseSSPGroupMatrix
+from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
 from superglm.inference.covariance import (
     _penalised_xtwx_inv,
     _penalised_xtwx_inv_gram,
@@ -19,6 +19,7 @@ from superglm.inference.covariance import (
 )
 from superglm.reml import REMLResult, _map_beta_between_bases
 from superglm.stats.wood_pvalue import wood_test_smooth
+from superglm.types import GroupSlice
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -257,6 +258,51 @@ class TestPenalisedXtwxInvOmega:
         assert len(groups_qr) == len(groups_gram)
         np.testing.assert_allclose(inv_qr, inv_gram, atol=1e-8)
         np.testing.assert_allclose(aug_qr, aug_gram, atol=1e-8)
+
+    def test_gram_covariance_fuses_discrete_gram_and_intercept_product(self, monkeypatch):
+        """The active covariance plan must not make separate compressed passes."""
+        rng = np.random.default_rng(20260719)
+        n = 240
+        n_bins = 24
+        bin_idx = np.resize(np.arange(n_bins, dtype=np.intp), n)
+        B_unique = rng.normal(size=(n_bins, 4))
+        gm = DiscretizedSSPGroupMatrix(B_unique, np.eye(4), bin_idx)
+        group = GroupSlice(name="x", start=0, end=4, penalized=False)
+        beta = np.ones(4)
+        W = rng.uniform(0.2, 2.0, size=n)
+        X = gm.toarray()
+
+        monkeypatch.setattr(
+            DiscretizedSSPGroupMatrix,
+            "gram",
+            lambda *_args, **_kwargs: pytest.fail("covariance must use gram_rmatvec"),
+        )
+        monkeypatch.setattr(
+            DiscretizedSSPGroupMatrix,
+            "rmatvec",
+            lambda *_args, **_kwargs: pytest.fail("covariance must use gram_rmatvec"),
+        )
+
+        inverse, augmented, active_groups, gram, penalty = _penalised_xtwx_inv_gram(
+            beta,
+            W,
+            [gm],
+            [group],
+            0.0,
+        )
+
+        expected_gram = X.T @ (W[:, None] * X)
+        expected_augmented = np.block(
+            [
+                [np.array([[np.sum(W)]]), (X.T @ W)[None, :]],
+                [(X.T @ W)[:, None], expected_gram],
+            ]
+        )
+        np.testing.assert_allclose(gram, expected_gram, rtol=2e-12, atol=2e-10)
+        np.testing.assert_allclose(inverse, np.linalg.pinv(expected_gram), atol=2e-10)
+        np.testing.assert_allclose(augmented, np.linalg.pinv(expected_augmented), atol=2e-10)
+        assert [active.name for active in active_groups] == ["x"]
+        np.testing.assert_array_equal(penalty, np.zeros((4, 4)))
 
 
 # ── _compute_R_inv override ──────────────────────────────────────
@@ -1229,6 +1275,87 @@ class TestREMLObjectiveFastPath:
         )
         expected = 0.5 * result.deviance + 0.5 * np.log(2.0)
         np.testing.assert_allclose(val, expected, rtol=1e-12, atol=1e-12)
+
+    def test_objective_rejects_overflowed_working_weights_before_gram(self):
+        from superglm.distributions import Poisson
+        from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+        from superglm.links import LogLink
+        from superglm.reml.objective import reml_laml_objective
+        from superglm.solvers.pirls import PIRLSResult
+
+        dm = DesignMatrix([DenseGroupMatrix(np.ones((2, 1)))], n=2, p=1)
+        result = PIRLSResult(
+            beta=np.array([0.0]),
+            intercept=80.0,
+            n_iter=1,
+            deviance=1.0,
+            converged=True,
+            phi=1.0,
+            effective_df=1.0,
+        )
+
+        with np.errstate(over="ignore", invalid="ignore"):
+            with pytest.raises(ValueError, match="must be finite"):
+                reml_laml_objective(
+                    dm,
+                    Poisson(),
+                    LogLink(),
+                    [GroupSlice(name="x", start=0, end=1, penalized=False)],
+                    y=np.ones(2),
+                    result=result,
+                    lambdas={},
+                    sample_weight=np.array([np.finfo(np.float64).max, 1.0]),
+                    offset_arr=np.zeros(2),
+                )
+
+    def test_weight_derivative_correction_rejects_nonfinite_signed_weights(self, monkeypatch):
+        import superglm.reml.w_derivatives as w_derivatives
+        from superglm.distributions import Poisson
+        from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+        from superglm.links import LogLink
+        from superglm.solvers.pirls import PIRLSResult
+        from superglm.types import PenaltyComponent
+
+        n = 6
+        dm = DesignMatrix([DenseGroupMatrix(np.ones((n, 1)))], n=n, p=1)
+        group = GroupSlice(name="x", start=0, end=1)
+        component = PenaltyComponent(
+            name="x",
+            group_name="x",
+            group_index=0,
+            group_sl=slice(0, 1),
+            omega_raw=np.ones((1, 1)),
+            omega_ssp=np.ones((1, 1)),
+            rank=1.0,
+        )
+        result = PIRLSResult(
+            beta=np.ones(1),
+            intercept=0.0,
+            n_iter=1,
+            deviance=1.0,
+            converged=True,
+            phi=1.0,
+            effective_df=1.0,
+        )
+        monkeypatch.setattr(
+            w_derivatives,
+            "compute_dW_deta",
+            lambda *_args, **_kwargs: np.full(n, np.inf),
+        )
+
+        with pytest.raises(ValueError, match="must be finite"):
+            w_derivatives.reml_w_correction(
+                dm,
+                LogLink(),
+                [group],
+                result,
+                np.eye(1),
+                {"x": 1.0},
+                sample_weight=np.ones(n),
+                offset_arr=np.zeros(n),
+                distribution=Poisson(),
+                reml_penalties=[component],
+            )
 
 
 class TestDiscreteCachedSolve:

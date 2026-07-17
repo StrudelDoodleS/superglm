@@ -68,6 +68,13 @@ accepting an unrelated Context7 match.
 8. Never infer real Tabmat use from construction alone. Regression tests and benchmarks must count
    `sandwich` and `transpose_matvec` calls on the timed fit.
 
+For repeated raw weighted moments, automatic Tabmat dispatch is narrower than centered-system
+dispatch. The currently certified layout is a wholly ordinary design with exactly one native
+categorical block wider than 100 levels, no sparse block, at least three dense columns in total,
+and at least 50,000 rows. Explicit internal forcing remains available for controlled experiments.
+The narrow rule matters: one dense column, two separately stored dense columns, sparse mixtures,
+and multiple categorical blocks all produced repeatable counterexamples.
+
 `discrete=True` remains a hybrid path. BAM-style `B_unique`, bin indices, tensor grids, and
 coefficient transforms stay compressed and use specialized aggregation kernels. A future partial
 plan can put eligible observation-level dense/sparse/categorical blocks in Tabmat and assemble
@@ -87,6 +94,18 @@ fallback materializes a 6,000 by 160 design. A controlled Tabmat substitution pr
 
 Maximum coefficient and prediction differences were `3.21e-14` and `1.71e-14`; deviance and
 iteration count were unchanged.
+
+The unified weighted-moment execution plan was also measured against the former specialized loops
+with one thread, CPU affinity, counterbalanced ordering, and five rounds per cell. Specialized-loop
+comparisons were bit-exact; Tabmat's different summation order stayed within `1.9e-10`. For three
+dense columns plus a 120/160-level categorical block, Tabmat reduced raw-moment
+time at 50,000 rows by 35% for Gram-plus-RHS, 42% for Gram alone, and 39% for signed Gram. At
+100,000 rows the reductions were 42%, 47%, and 44%, respectively. The non-Tabmat compressed
+execution path stayed within 1.3% of the former loops in every prevalidated RHS and signed-Gram
+cell from 2,000 by 19 through 60,000 by 179. Full-vector validation remains on untrusted and
+derived REML inputs; closely timed end-to-end runs showed no numerical drift and no non-categorical
+case outside the 3% routine-fit noise gate, while the categorical fit retained its large time and
+memory reduction.
 
 ## Follow-up experiments
 
