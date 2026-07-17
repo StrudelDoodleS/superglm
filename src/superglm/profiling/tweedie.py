@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import operator
 import warnings as _warnings
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
@@ -48,10 +49,76 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _normalize_cpg_size(n: int) -> int:
+    """Return a non-negative integer sample count, excluding booleans."""
+    if isinstance(n, bool | np.bool_):
+        raise TypeError("n must be a non-negative integer")
+    try:
+        normalized = operator.index(n)
+    except TypeError as exc:
+        raise TypeError("n must be a non-negative integer") from exc
+    if normalized < 0:
+        raise ValueError("n must be non-negative")
+    return normalized
+
+
+def _normalize_cpg_power(p: float) -> float:
+    """Return a finite real scalar power in the open interval (1, 2)."""
+    try:
+        raw = np.asarray(p)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("p must be a finite real numeric scalar in (1, 2)") from exc
+    if raw.ndim != 0 or raw.dtype.kind not in "iuf":
+        raise ValueError("p must be a finite real numeric scalar in (1, 2)")
+    try:
+        normalized = float(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("p must be a finite real numeric scalar in (1, 2)") from exc
+    if not np.isfinite(normalized) or not 1.0 < normalized < 2.0:
+        raise ValueError("p must be a finite real numeric scalar in (1, 2)")
+    return normalized
+
+
+def _normalize_cpg_parameter(name: str, value: float | NDArray, n: int) -> NDArray:
+    """Return an owned positive float64 vector with exact shape ``(n,)``."""
+    message = (
+        f"{name} must be finite, strictly positive, and either a real numeric scalar "
+        f"or an array with shape ({n},)"
+    )
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(message) from exc
+    if raw.dtype.kind not in "iuf" or (raw.ndim != 0 and (raw.ndim != 1 or raw.shape != (n,))):
+        raise ValueError(message)
+    try:
+        if raw.ndim == 0:
+            scalar = float(raw)
+            if not np.isfinite(scalar) or scalar <= 0.0:
+                raise ValueError(message)
+            normalized = np.full(n, scalar, dtype=np.float64)
+        else:
+            normalized = np.array(raw, dtype=np.float64, copy=True)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(message) from exc
+    if not np.all(np.isfinite(normalized)) or np.any(normalized <= 0.0):
+        raise ValueError(message)
+    return normalized
+
+
+def _resolve_cpg_rng(rng: np.random.Generator | None):
+    """Return a generator-like object with both required sampling methods."""
+    if rng is None:
+        return np.random.default_rng()
+    if not callable(getattr(rng, "poisson", None)) or not callable(getattr(rng, "gamma", None)):
+        raise TypeError("rng must provide callable poisson and gamma methods")
+    return rng
+
+
 def generate_tweedie_cpg(
     n: int,
     mu: float | NDArray,
-    phi: float,
+    phi: float | NDArray,
     p: float,
     rng: np.random.Generator | None = None,
 ) -> NDArray:
@@ -60,30 +127,36 @@ def generate_tweedie_cpg(
     Parameters
     ----------
     n : int
-        Number of samples.
+        Non-negative number of samples. Booleans are not accepted.
     mu : float or array of shape (n,)
-        Mean parameter.
-    phi : float
-        Dispersion parameter (>0).
+        Finite, strictly positive mean parameter. Arrays must have exact shape ``(n,)``.
+    phi : float or array of shape (n,)
+        Finite, strictly positive dispersion parameter. Arrays must have exact shape ``(n,)``.
     p : float
-        Power parameter, must be in (1, 2).
+        Finite real scalar power parameter in the open interval ``(1, 2)``.
     rng : numpy Generator, optional
-        Random number generator for reproducibility.
+        Random number generator for reproducibility. A supplied object must provide callable
+        ``poisson`` and ``gamma`` methods.
 
     Returns
     -------
     y : ndarray of shape (n,)
-        Simulated responses (non-negative, with exact zeros).
+        Newly allocated float64 responses (non-negative, with exact zeros).
     """
-    if rng is None:
-        rng = np.random.default_rng()
-
-    mu = np.broadcast_to(np.asarray(mu, dtype=np.float64), (n,)).copy()
+    n = _normalize_cpg_size(n)
+    p = _normalize_cpg_power(p)
+    mu = _normalize_cpg_parameter("mu", mu, n)
+    phi = _normalize_cpg_parameter("phi", phi, n)
+    rng = _resolve_cpg_rng(rng)
 
     # CPG parameters (Jørgensen 1997)
-    lam = np.power(mu, 2 - p) / ((2 - p) * phi)  # Poisson rate
-    alpha = (2 - p) / (p - 1)  # Gamma shape per claim
-    beta = phi * (p - 1) * np.power(mu, p - 1)  # Gamma scale per claim
+    with np.errstate(all="ignore"):
+        lam = np.power(mu, 2 - p) / ((2 - p) * phi)  # Poisson rate
+        alpha = (2 - p) / (p - 1)  # Gamma shape per claim
+        beta = phi * (p - 1) * np.power(mu, p - 1)  # Gamma scale per claim
+
+    if n == 0:
+        return np.empty(0, dtype=np.float64)
 
     # Vectorised: draw N ~ Poisson(lam), then Y|N ~ Gamma(alpha*N, beta)
     N = rng.poisson(lam)
