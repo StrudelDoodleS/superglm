@@ -38,6 +38,7 @@ from superglm.group_matrix import (
 from superglm.links import Link
 from superglm.solvers.centered_system import (
     CenteredSystem,
+    TabmatCenteringState,
     build_centered_system,
     grouped_augmented_factor,
     grouped_weighted_factor,
@@ -594,7 +595,17 @@ def fit_irls_direct(
     # tabmat acceleration: build SplitMatrix once for non-discrete paths.
     # R_inv is constant within a single fit_irls_direct call, so the
     # materialized X is valid for all IRLS iterations.
-    _tabmat_split = dm.tabmat_split if not _use_qr else None
+    if _use_qr:
+        _tabmat_split = None
+    elif has_constraints:
+        # The constrained raw-moment path can use any eligible SplitMatrix.
+        _tabmat_split = dm.tabmat_split
+    else:
+        # Ordinary intercept profiling currently benefits only when the split
+        # contains a native high-cardinality categorical component. Avoid
+        # materializing an unused dense duplicate for numeric and low-cardinality fits.
+        _tabmat_split = dm.tabmat_centering_split
+    _tabmat_centering_state = TabmatCenteringState()
     _can_reuse_weighted_gram = _has_constant_irls_weights(family, link) and not _has_scop
     _constant_w_gram_cache: tuple[NDArray, NDArray, float] | None = None
     _constant_centered_cache: CenteredSystem | None = None
@@ -622,6 +633,8 @@ def fit_irls_direct(
             W=W_current,
             z_off=z_off_current,
             penalty=S,
+            tabmat_split=_tabmat_split,
+            tabmat_state=_tabmat_centering_state,
         )
         if _can_reuse_weighted_gram:
             _constant_centered_cache = system

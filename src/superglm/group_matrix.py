@@ -35,7 +35,10 @@ from ._group_matrix._group_matrix_discretized import (
 from ._group_matrix._group_matrix_kernels import (
     _disc_disc_2d_hist as _kernel_disc_disc_2d_hist,
 )
-from ._group_matrix._group_matrix_tabmat import _build_tabmat_split
+from ._group_matrix._group_matrix_tabmat import (
+    _build_tabmat_split,
+    _is_tabmat_centering_candidate,
+)
 
 DenseGroupMatrix.__module__ = __name__
 SparseGroupMatrix.__module__ = __name__
@@ -171,6 +174,7 @@ class DesignMatrix:
         self.shape = (n, p)
         self._tabmat_split = None  # lazily built
         self._tabmat_built = False
+        self._tabmat_centering_candidate = None
         self._centered_pattern_plan = None
         self._centered_solver_supports = None
 
@@ -181,6 +185,15 @@ class DesignMatrix:
             self._tabmat_split = _build_tabmat_split(self.group_matrices)
             self._tabmat_built = True
         return self._tabmat_split
+
+    @property
+    def tabmat_centering_split(self):
+        """Build Tabmat only when the centered solver can dispatch to it."""
+        if self._tabmat_centering_candidate is None:
+            self._tabmat_centering_candidate = _is_tabmat_centering_candidate(self.group_matrices)
+        if not self._tabmat_centering_candidate:
+            return None
+        return self.tabmat_split
 
     def matvec(self, beta: NDArray) -> NDArray:
         """X @ beta via per-group matvecs."""

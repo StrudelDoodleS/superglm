@@ -9,6 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_centered import (
+    _try_tabmat_centering,
     centered_gram_rhs,
     centered_rhs,
     packed_centered_gram_rhs,
@@ -44,6 +45,13 @@ class CenteredSystem:
         gram = self.data_gram + self.sum_w * np.outer(self.mean_x, self.mean_x)
         xtwz = self.rhs + self.mean_x * sum_wz
         return gram, xtw1, xtwz, sum_wz
+
+
+@dataclass
+class TabmatCenteringState:
+    """Fit-local safety decision for raw-moment Tabmat centering."""
+
+    eligible: bool | None = None
 
 
 def iter_grouped_design_chunks(dm: DesignMatrix) -> Iterator[tuple[int, int, NDArray]]:
@@ -133,6 +141,8 @@ def build_centered_system(
     W: NDArray,
     z_off: NDArray,
     penalty: NDArray,
+    tabmat_split=None,
+    tabmat_state: TabmatCenteringState | None = None,
 ) -> CenteredSystem:
     """Build a stably centered data Gram, RHS, and penalized Hessian."""
     n, p = dm.shape
@@ -152,6 +162,23 @@ def build_centered_system(
     mean_z = float(np.dot(W, z_off) / sum_w)
     z_centered = z_off - mean_z
     packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
+    if (
+        packed is None
+        and tabmat_split is not None
+        and (tabmat_state is None or tabmat_state.eligible is not False)
+    ):
+        packed = _try_tabmat_centering(
+            tabmat_split=tabmat_split,
+            W=W,
+            z_centered=z_centered,
+            sum_w=sum_w,
+            preflight=tabmat_state is None or tabmat_state.eligible is None,
+        )
+        if tabmat_state is not None:
+            # A rejection is permanent for this fit.  Later IRLS weights can
+            # change the centering ratio, but the stable path remains correct
+            # and avoids repeating rejected raw work.
+            tabmat_state.eligible = packed is not None
     if packed is None:
         mean_x = dm.rmatvec(W) / sum_w
         data_gram, rhs = centered_gram_rhs(

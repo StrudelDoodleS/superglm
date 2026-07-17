@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import tabmat  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from ._group_matrix_kernels import (
@@ -12,6 +13,7 @@ from ._group_matrix_kernels import (
     _fused_bincount_2,
     _pattern_support_summaries,
 )
+from ._group_matrix_tabmat import _tabmat_vector
 
 _MAX_PACKED_HIST_CELLS = 5_000_000
 _MAX_PATTERN_SUMMARY_CELLS = 5_000_000
@@ -74,30 +76,101 @@ def _certify_raw_centering(
     weighted_z: NDArray,
     sum_w: float,
 ) -> tuple[NDArray, NDArray, NDArray] | None:
-    mean_x = xtw / sum_w
-    centered_gram = raw_gram - np.outer(xtw, mean_x)
-    centered_gram = 0.5 * (centered_gram + centered_gram.T)
-    centered_diagonal = np.diag(centered_gram)
-    if np.any(centered_diagonal < 0.0):
+    # Raw moments can overflow even when the anchor-centered fallback remains
+    # finite (for example, a large finite location plus modest variation).
+    # Keep that implementation detail independent of the caller's errstate and
+    # reject non-finite intermediates before they reach rank calculations.
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        mean_x = xtw / sum_w
+        centered_gram = raw_gram - np.outer(xtw, mean_x)
+        centered_gram = 0.5 * (centered_gram + centered_gram.T)
+        centered_diagonal = np.diag(centered_gram)
+        if (
+            not np.all(np.isfinite(mean_x))
+            or not np.all(np.isfinite(centered_gram))
+            or not np.all(np.isfinite(centered_diagonal))
+            or np.any(centered_diagonal < 0.0)
+        ):
+            return None
+        centered_scale = np.sqrt(centered_diagonal / sum_w)
+
+    if not _raw_centering_well_scaled(mean_x, centered_scale):
         return None
 
-    centered_scale = np.sqrt(centered_diagonal / sum_w)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
+        centered_rhs = raw_rhs - mean_x * sum_weighted_z
+    if not np.isfinite(sum_weighted_z) or not np.all(np.isfinite(centered_rhs)):
+        return None
+    return mean_x, centered_gram, centered_rhs
+
+
+def _raw_centering_well_scaled(mean_x: NDArray, centered_scale: NDArray) -> bool:
+    """Return whether raw-moment subtraction stays in its rounding envelope."""
+    mean_x = np.asarray(mean_x, dtype=np.float64)
+    centered_scale = np.asarray(centered_scale, dtype=np.float64)
+    if not np.all(np.isfinite(mean_x)) or not np.all(np.isfinite(centered_scale)):
+        return False
     # Keep intercept profiling within the ordinary rounding envelope of a
     # Gram calculation.  Allowing a larger mean than centered RMS amplifies
     # raw-moment subtraction error beyond that envelope and can erase a
     # near-collinear direction that the shared normal-equation rank policy
     # would otherwise retain.
-    max_safe_mean_ratio = 1.0
-    well_scaled = np.all(
-        (np.abs(mean_x) <= max_safe_mean_ratio * centered_scale)
-        | ((mean_x == 0.0) & (centered_scale == 0.0))
+    return bool(
+        np.all((np.abs(mean_x) <= centered_scale) | ((mean_x == 0.0) & (centered_scale == 0.0)))
     )
-    if not well_scaled:
+
+
+def _try_tabmat_centering(
+    *,
+    tabmat_split,
+    W: NDArray,
+    z_centered: NDArray,
+    sum_w: float,
+    preflight: bool,
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """Use native categorical Tabmat kernels when raw centering is safe."""
+    if tabmat_split is None or not any(
+        isinstance(component, tabmat.CategoricalMatrix) for component in tabmat_split.matrices
+    ):
+        return None
+    if any(
+        np.dtype(component.dtype) != np.dtype(np.float64) for component in tabmat_split.matrices
+    ):
         return None
 
-    sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
-    centered_rhs = raw_rhs - mean_x * sum_weighted_z
-    return mean_x, centered_gram, centered_rhs
+    # Tabmat 4.2.1's compiled weighted kernels require a writable contiguous
+    # weight buffer. In particular, strided weights can otherwise compute an
+    # incorrect result without raising, while read-only weights are rejected.
+    tabmat_weights = _tabmat_vector(W)
+
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        if preflight:
+            # MatrixBase.standardize expects probability weights; it does not
+            # normalize arbitrary working weights itself.  We use only its
+            # cheap location/scale summary, never its raw centered sandwich.
+            normalized_weights = tabmat_weights / sum_w
+            _standardized, mean_x, centered_scale = tabmat_split.standardize(
+                normalized_weights,
+                center_predictors=True,
+                scale_predictors=True,
+            )
+            if centered_scale is None or not _raw_centering_well_scaled(mean_x, centered_scale):
+                return None
+            xtw = np.asarray(mean_x, dtype=np.float64) * sum_w
+        else:
+            xtw = np.asarray(tabmat_split.transpose_matvec(tabmat_weights), dtype=np.float64)
+
+        weighted_z = _tabmat_vector(tabmat_weights * z_centered)
+        raw_gram = np.asarray(tabmat_split.sandwich(tabmat_weights), dtype=np.float64)
+        raw_rhs = np.asarray(tabmat_split.transpose_matvec(weighted_z), dtype=np.float64)
+    return _certify_raw_centering(
+        raw_gram=raw_gram,
+        xtw=xtw,
+        raw_rhs=raw_rhs,
+        weighted_z=weighted_z,
+        sum_w=sum_w,
+    )
 
 
 def _try_factored_tensor_centering(
