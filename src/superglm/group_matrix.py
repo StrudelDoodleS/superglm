@@ -32,6 +32,7 @@ from ._group_matrix._group_matrix_discretized import (
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
 )
+from ._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from ._group_matrix._group_matrix_kernels import (
     _disc_disc_2d_hist as _kernel_disc_disc_2d_hist,
 )
@@ -86,7 +87,10 @@ def _disc_disc_2d_hist(
     bin_idx_i: NDArray, bin_idx_j: NDArray, W: NDArray, n_bins_i: int, n_bins_j: int
 ) -> NDArray:
     """Compatibility wrapper for the fused discretized 2D histogram kernel."""
-    return _kernel_disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j)
+    return cast(
+        NDArray,
+        _kernel_disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j),
+    )
 
 
 def _cross_gram_tensor_main(gm_tensor, gm_main, W: NDArray) -> NDArray:
@@ -168,13 +172,14 @@ class DesignMatrix:
     """Container for per-group matrices. Provides full-matrix operations."""
 
     def __init__(self, group_matrices: list[GroupMatrix], n: int, p: int):
-        self.group_matrices = group_matrices
+        self.group_matrices = tuple(group_matrices)
         self.n = n
         self.p = p
         self.shape = (n, p)
         self._tabmat_split = None  # lazily built
         self._tabmat_built = False
         self._tabmat_centering_candidate = None
+        self._execution_plan: MatrixExecutionPlan | None = None
         self._centered_pattern_plan = None
         self._centered_solver_supports = None
 
@@ -194,6 +199,15 @@ class DesignMatrix:
         if not self._tabmat_centering_candidate:
             return None
         return self.tabmat_split
+
+    @property
+    def execution_plan(self) -> MatrixExecutionPlan:
+        """Return the cached backend-neutral matrix execution plan."""
+        plan = self._execution_plan
+        if plan is None:
+            plan = MatrixExecutionPlan(self.group_matrices, n=self.n)
+            self._execution_plan = plan
+        return plan
 
     def matvec(self, beta: NDArray) -> NDArray:
         """X @ beta via per-group matvecs."""

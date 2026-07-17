@@ -655,6 +655,33 @@ def _cross_gram_discrete_spline_categorical(
     return gm_disc.R_inv.T @ raw @ gm_spline_cat.R_inv
 
 
+def _cross_gram_by_columns(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
+    """Form a cross-product one generated column at a time.
+
+    This is the bounded-memory fallback for factored support-space groups.
+    It preserves the same smaller-width loop count as the generic fallback
+    without materializing either effective observation-level design block.
+    """
+    p_i = gm_i.shape[1]
+    p_j = gm_j.shape[1]
+    if p_i <= p_j:
+        result = np.empty((p_i, p_j), dtype=np.float64)
+        unit = np.zeros(p_i, dtype=np.float64)
+        for column in range(p_i):
+            unit[column] = 1.0
+            result[column] = gm_j.rmatvec(W * gm_i.matvec(unit))
+            unit[column] = 0.0
+        return result
+
+    result = np.empty((p_i, p_j), dtype=np.float64)
+    unit = np.zeros(p_j, dtype=np.float64)
+    for column in range(p_j):
+        unit[column] = 1.0
+        result[:, column] = gm_i.rmatvec(W * gm_j.matvec(unit))
+        unit[column] = 0.0
+    return result
+
+
 def _cross_gram(
     gm_i: GroupMatrix,
     gm_j: GroupMatrix,
@@ -875,6 +902,16 @@ def _cross_gram(
         t0 = perf_counter() if profile is not None else 0.0
         result = _cat_cat_weighted_crosstab(gm_i.codes, gm_j.codes, W, gm_i.n_levels, gm_j.n_levels)
         _profile_elapsed(profile, "block_cross_cat_cat_s", t0)
+        return result
+
+    # Factored support-space groups must never be selected for the generic
+    # observation-matrix materialization below. Generate the narrower side a
+    # column at a time and retain O(n) working memory instead.
+    support_space_types = (_SparseSSPGroupMatrix, *SplineCatTypes)
+    if isinstance(gm_i, support_space_types) or isinstance(gm_j, support_space_types):
+        t0 = perf_counter() if profile is not None else 0.0
+        result = _cross_gram_by_columns(gm_i, gm_j, W)
+        _profile_elapsed(profile, "block_cross_fallback_s", t0)
         return result
 
     # Non-disc × non-disc: materialize smaller side, rmatvec larger side.

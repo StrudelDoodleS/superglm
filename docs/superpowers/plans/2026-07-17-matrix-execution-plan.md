@@ -37,16 +37,16 @@ fallback.
 - Modify `src/superglm/group_matrix.py`.
 - Create `tests/test_matrix_execution_plan.py`.
 
-- [ ] Write dense-reference parity tests for Dense + Sparse + high-cardinality Categorical +
+- [x] Write dense-reference parity tests for Dense + Sparse + high-cardinality Categorical +
   DiscretizedSSP + DiscretizedTensor designs.
-- [ ] Cover positive and signed weights, `X'W`, multiple RHS vectors, global column ordering,
+- [x] Cover positive and signed weights, `X'W`, multiple RHS vectors, global column ordering,
   base-category rows, empty bins, and zero weights.
-- [ ] Require exactly one Tabmat sandwich and the expected transpose calls.
-- [ ] Monkeypatch compressed `toarray()` methods to fail.
-- [ ] Cover strided and read-only vector buffers.
-- [ ] Implement immutable group spans, lazy ordinary partition construction, scatter/gather, and
+- [x] Require exactly one Tabmat sandwich and the expected transpose calls.
+- [x] Monkeypatch compressed `toarray()` methods to fail.
+- [x] Cover strided and read-only vector buffers.
+- [x] Implement immutable group spans, lazy ordinary partition construction, scatter/gather, and
   call-local workspace.
-- [ ] Run the new tests plus theory/rank tests before any caller migration.
+- [x] Run the new tests plus theory/rank tests before any caller migration.
 
 ## Task 2: Make the plan the one weighted-moment assembler
 
