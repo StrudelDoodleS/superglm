@@ -137,8 +137,14 @@ ci = result.ci(alpha=0.05)  # (lower, upper) via profile LRT
     profiles. The interval is cached, so summaries and exports display it after
     this explicit call without evaluating the profile again.
 
-### Profile plot
+### Search trace and profile plots
 
 ```python
-result.profile_plot()  # adds the LR cutoff/region only when result.ci() is cached
+result.trace_plot()    # cached search evaluations; performs no new fits
+result.profile_plot()  # dense profile curve; performs additional fixed-p fits
 ```
+
+`trace_plot()` sorts by *p* and connects only evaluations already cached by
+`estimate_p()`, making it the cheap diagnostic. `profile_plot()` evaluates a dense
+grid of additional fixed-*p* fits and can be substantially expensive when
+`phi_method="mle"`.
