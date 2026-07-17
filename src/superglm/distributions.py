@@ -360,6 +360,8 @@ def validate_response(y: NDArray, family: Distribution) -> None:
     Raises ValueError for invalid responses (e.g. non-binary for binomial,
     negative for Poisson/Gamma).
     """
+    if not np.all(np.isfinite(y)):
+        raise ValueError("Response y must contain only finite values")
     if isinstance(family, Binomial):
         bad = ~np.isin(y, [0, 1])
         if np.any(bad):
@@ -369,6 +371,23 @@ def validate_response(y: NDArray, family: Distribution) -> None:
                 f"Binomial family requires y in {{0, 1}}, "
                 f"but found {n_bad} invalid values (e.g. {vals})."
             )
+    elif isinstance(family, Poisson):
+        if np.any(y < 0.0):
+            raise ValueError("Poisson family requires nonnegative y")
+    elif isinstance(family, NegativeBinomial):
+        if np.any(y < 0.0):
+            raise ValueError("NegativeBinomial family requires nonnegative y")
+    elif isinstance(family, Gamma):
+        if np.any(y <= 0.0):
+            raise ValueError("Gamma family requires strictly positive y")
+    elif isinstance(family, Tweedie):
+        if np.any(y < 0.0):
+            raise ValueError("Tweedie family requires nonnegative y")
+
+    custom_hook = getattr(family, "validate_response", None)
+    hook_function = getattr(custom_hook, "__func__", custom_hook)
+    if callable(custom_hook) and hook_function is not validate_response:
+        custom_hook(y)
 
 
 def initial_mean(y: NDArray, weights: NDArray, family: Distribution) -> float:

@@ -12,9 +12,15 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution, NegativeBinomial, clip_mu
+from superglm.distributions import (
+    Distribution,
+    NegativeBinomial,
+    clip_mu,
+    resolve_distribution,
+)
 from superglm.links import Link, stabilize_eta
 from superglm.model import path_ops, runtime_canonicalize
+from superglm.model.input_validation import validate_fit_input
 from superglm.model.reml_execute import (
     optimize_reml_best,
     run_fixed_monotone_reml,
@@ -187,6 +193,30 @@ def _auto_detect_specs_if_needed(model, X, sample_weight) -> None:
         from superglm.model.base import auto_detect
 
         auto_detect(model, X, sample_weight)
+
+
+def _required_fit_columns(model) -> tuple[str, ...]:
+    """Return configured columns that must exist before feature construction."""
+    names = [*model._feature_order, *(model._splines or [])]
+    for interaction_name in model._interaction_order:
+        names.extend(model._interaction_specs[interaction_name].parent_names)
+    for left, right in model._pending_interactions:
+        names.extend((left, right))
+    return tuple(dict.fromkeys(names))
+
+
+def _validate_entrypoint_input(model, X, y, sample_weight, offset):
+    distribution = resolve_distribution(model.family)
+    validated = validate_fit_input(
+        X,
+        y,
+        sample_weight,
+        offset,
+        family=distribution,
+        required_columns=_required_fit_columns(model),
+        check_all_columns=model._splines is not None and not model._specs,
+    )
+    return validated.X, validated.y, validated.sample_weight, validated.offset
 
 
 def _clear_profile_results(model) -> None:
@@ -450,6 +480,7 @@ def fit(
     y_ref = y
     sample_weight_ref = sample_weight
     offset_ref = offset
+    X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
     # Resolve fit controls: explicit kwargs > constructor fallback
     tol = tol if tol is not None else model._tol
     max_iter = max_iter if max_iter is not None else model._max_iter
@@ -464,7 +495,7 @@ def fit(
                 f"fit_reml(), not fit(). Use fit_reml() or remove lambda_policy."
             )
 
-    _auto_detect_specs_if_needed(model, X, sample_weight)
+    _auto_detect_specs_if_needed(model, X, sample_weight_ref)
     _clear_profile_results(model)
 
     _clear_reml_state(model)
@@ -478,11 +509,6 @@ def fit(
     )
 
     y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
-
-    # Validate response for the resolved distribution
-    from superglm.distributions import validate_response
-
-    validate_response(y, model._distribution)
 
     sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
 
@@ -611,12 +637,14 @@ def fit_path(
     y_ref = y
     sample_weight_ref = sample_weight
     offset_ref = offset
+    X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
     from superglm.model.base import (
         compute_lambda_max,
         model_build_design_matrix,
         model_has_lambda1_targets,
     )
 
+    _auto_detect_specs_if_needed(model, X, sample_weight_ref)
     y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
     sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
     _clear_fit_inference_caches(model)
@@ -716,12 +744,13 @@ def fit_reml(
     y_ref = y
     sample_weight_ref = sample_weight
     offset_ref = offset
+    X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
     from superglm.model.base import (
         model_build_design_matrix,
         model_has_lambda1_targets,
     )
 
-    _auto_detect_specs_if_needed(model, X, sample_weight)
+    _auto_detect_specs_if_needed(model, X, sample_weight_ref)
 
     # Clear stale results from previous fit
     _clear_profile_results(model)
