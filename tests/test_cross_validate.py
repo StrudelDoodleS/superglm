@@ -915,6 +915,15 @@ class TestGiniScorer:
 
         assert score == pytest.approx(1.0)
 
+    def test_gini_weighted_constant_positive_target_is_zero(self):
+        y = np.ones(3)
+        sample_weight = np.array([0.1, 0.2, 10.1])
+        model = self._PredictionOnlyModel(y)
+
+        score = _score_gini(model, None, y, sample_weight=sample_weight)
+
+        assert score == 0.0
+
     def test_gini_all_zero_response(self, poisson_data, base_model):
         """Gini scorer returns 0.0 when all y=0 (no division by zero)."""
         df, y, _ = poisson_data

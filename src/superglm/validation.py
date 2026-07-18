@@ -165,6 +165,8 @@ def _normalized_gini(y_obs, y_pred, sample_weight=None) -> float:
     y_obs = _ensure_array(y_obs)
     y_pred = _ensure_array(y_pred)
     weights = _default_weights(sample_weight, len(y_obs))
+    if y_obs.size == 0 or np.all(y_obs == y_obs[0]):
+        return 0.0
     losses = weights * y_obs
     total_weight = float(weights.sum())
     total_loss = float(losses.sum())
