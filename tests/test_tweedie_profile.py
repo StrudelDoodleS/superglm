@@ -2351,6 +2351,41 @@ def test_public_tweedie_profile_entry_points_default_to_mle_and_brent(function):
 
 
 class TestEstimatePFitMode:
+    @pytest.mark.parametrize("already_fitted", [False, True])
+    def test_profile_publication_preserves_subclass_configuration_aliases(
+        self, monkeypatch, already_fitted
+    ):
+        class ConfigAliasedSuperGLM(SuperGLM):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.config_alias = self._config
+                self.family_alias = self._family_config
+
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = ConfigAliasedSuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = _deterministic_profile_result()
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", lambda *args, **kwargs: result)
+        if already_fitted:
+            model.fit(X, y, sample_weight=sample_weight, offset=offset)
+        config_revision = model._config_revision
+
+        model.estimate_p(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode="fit",
+        )
+
+        assert model.config_alias is model._config
+        assert model.family_alias is model._family_config
+        assert model._config_revision == config_revision + 1
+        assert model.family.p == pytest.approx(result.p_hat)
+
     @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
     @pytest.mark.parametrize("retain_fit_state", [True, False])
     def test_final_profile_refit_atomically_synchronizes_model_state(
