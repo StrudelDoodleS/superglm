@@ -18,6 +18,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ._group_matrix import _group_matrix_algebra
+from ._group_matrix._group_matrix_bin_space import (
+    MixedBinSpaceCenteringPlan,
+    build_mixed_bin_space_centering_plan,
+)
 from ._group_matrix._group_matrix_bins import discretize_column
 from ._group_matrix._group_matrix_core import (
     CategoricalGroupMatrix,
@@ -200,6 +204,8 @@ class DesignMatrix:
         self._tabmat_holder = _LazyTabmatSplit(self.group_matrices)
         self._tabmat_centering_candidate = None
         self._execution_plan: MatrixExecutionPlan | None = None
+        self._mixed_bin_space_centering_plan: MixedBinSpaceCenteringPlan | None = None
+        self._mixed_bin_space_centering_plan_attempted = False
         self._centered_pattern_plan = None
         self._centered_solver_supports = None
 
@@ -207,6 +213,9 @@ class DesignMatrix:
         """Serialize durable matrix state without the rebuildable execution plan."""
         state = self.__dict__.copy()
         state["_execution_plan"] = None
+        state.pop("_mixed_centering_execution_plan", None)
+        state["_mixed_bin_space_centering_plan"] = None
+        state["_mixed_bin_space_centering_plan_attempted"] = False
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -227,6 +236,9 @@ class DesignMatrix:
         state["_tabmat_holder"] = holder
 
         state["_execution_plan"] = None
+        state.pop("_mixed_centering_execution_plan", None)
+        state["_mixed_bin_space_centering_plan"] = None
+        state["_mixed_bin_space_centering_plan_attempted"] = False
         state.setdefault("_tabmat_centering_candidate", None)
         state.setdefault("_centered_pattern_plan", None)
         state.setdefault("_centered_solver_supports", None)
@@ -275,6 +287,25 @@ class DesignMatrix:
                     f"declared design shape {self.shape} does not match grouped shape {plan.shape}"
                 )
             self._execution_plan = plan
+        return plan
+
+    @property
+    def mixed_bin_space_centering_plan(self) -> MixedBinSpaceCenteringPlan | None:
+        """Return the one cached augmented Tabmat plan for supported mixed layouts."""
+        plan = self._mixed_bin_space_centering_plan
+        if plan is None and not self._mixed_bin_space_centering_plan_attempted:
+            plan = build_mixed_bin_space_centering_plan(
+                self.group_matrices,
+                n=self.n,
+                p=self.p,
+            )
+            self._mixed_bin_space_centering_plan = plan
+            self._mixed_bin_space_centering_plan_attempted = True
+        if plan is not None and plan.shape != self.shape:
+            raise ValueError(
+                f"cached bin-space plan shape {plan.shape} does not match "
+                f"declared design shape {self.shape}"
+            )
         return plan
 
     def matvec(self, beta: NDArray) -> NDArray:

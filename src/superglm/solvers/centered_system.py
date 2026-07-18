@@ -9,6 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_centered import (
+    _try_mixed_discrete_centering,
     _try_tabmat_centering,
     centered_gram_rhs,
     centered_rhs,
@@ -49,7 +50,7 @@ class CenteredSystem:
 
 @dataclass
 class TabmatCenteringState:
-    """Fit-local safety decision for raw-moment Tabmat centering."""
+    """Fit-local safety decision for accelerated raw-moment centering."""
 
     eligible: bool | None = None
 
@@ -162,6 +163,22 @@ def build_centered_system(
     mean_z = float(np.dot(W, z_off) / sum_w)
     z_centered = z_off - mean_z
     packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
+    if packed is None and (tabmat_state is None or tabmat_state.eligible is not False):
+        mixed_attempted, mixed = _try_mixed_discrete_centering(
+            dm=dm,
+            W=W,
+            z_centered=z_centered,
+            sum_w=sum_w,
+            preflight=tabmat_state is None or tabmat_state.eligible is None,
+        )
+        if mixed_attempted:
+            packed = mixed
+            if tabmat_state is not None:
+                # Only the first call pays for Tabmat's location/scale
+                # preflight. Every changed weight vector still receives the
+                # authoritative full-moment certificate, and a rejection
+                # permanently selects stable chunks for this inner fit.
+                tabmat_state.eligible = mixed is not None
     if (
         packed is None
         and tabmat_split is not None

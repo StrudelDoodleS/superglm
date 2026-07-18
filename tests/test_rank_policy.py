@@ -433,6 +433,101 @@ def test_nonfinite_tabmat_raw_moments_fall_back_without_floating_point_error() -
     np.testing.assert_array_equal(system.rhs, expected.rhs)
 
 
+def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw-rounding rank ambiguity is repaired by the shared observation-factor policy."""
+    import superglm.solvers.centered_system as centered_system_module
+    import superglm.solvers.irls_direct as irls_direct_module
+
+    rng = np.random.default_rng(20260809)
+    n_bins = 64
+    n_cycles = 316
+    n = n_bins * n_cycles
+    support = rng.normal(size=(64, 3))
+    support -= np.mean(support, axis=0)
+    bin_idx = np.arange(n, dtype=np.intp) % n_bins
+    cycle = np.arange(n, dtype=np.intp) // n_bins
+    # These balanced patterns are exactly centered and orthogonal within
+    # every bin. The separation lies just above the factor-rank boundary but
+    # inside the Gram-resolution band, without depending on random BLAS sums.
+    x = np.where(cycle % 2, 1.0, -1.0)
+    orthogonal_direction = np.where(cycle % 4 < 2, 1.0, -1.0)
+    x_alias = x + 3.03e-8 * orthogonal_direction
+    weights = np.ones(n)
+    discrete = DiscretizedSSPGroupMatrix(
+        support,
+        np.eye(3),
+        bin_idx,
+    )
+    dm = DesignMatrix(
+        [DenseGroupMatrix(x), DenseGroupMatrix(x_alias), discrete],
+        n=n,
+        p=5,
+    )
+    groups = [
+        GroupSlice(name="x", start=0, end=1),
+        GroupSlice(name="x_alias", start=1, end=2),
+        GroupSlice(name="s", start=2, end=5),
+    ]
+    y = 0.4 + 1.7 * x + discrete.matvec(np.array([0.3, -0.2, 0.1]))
+    preliminary = build_centered_system(
+        dm=dm,
+        W=weights,
+        z_off=y,
+        penalty=np.zeros((dm.p, dm.p)),
+        tabmat_state=TabmatCenteringState(),
+    )
+    preliminary_rank = decompose_gram(preliminary.data_gram)
+    assert preliminary_rank.rank == 4
+    assert preliminary_rank.resolution_limited
+    assert needs_factor_certification(preliminary_rank)
+    factor_calls = 0
+    original_factor = irls_direct_module.grouped_augmented_factor
+
+    def counted_factor(*args, **kwargs):
+        nonlocal factor_calls
+        factor_calls += 1
+        return original_factor(*args, **kwargs)
+
+    monkeypatch.setattr(irls_direct_module, "grouped_augmented_factor", counted_factor)
+
+    hybrid, _ = fit_irls_direct(
+        dm,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        tol=1e-12,
+    )
+    assert factor_calls >= 1
+    monkeypatch.setattr(
+        centered_system_module,
+        "_try_mixed_discrete_centering",
+        lambda **_kwargs: (False, None),
+    )
+    stable, _ = fit_irls_direct(
+        dm,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        tol=1e-12,
+    )
+
+    assert hybrid.rank_info is not None
+    assert stable.rank_info is not None
+    assert hybrid.rank_info.data.rank == stable.rank_info.data.rank == 5
+    hybrid_prediction = hybrid.intercept + dm.matvec(hybrid.beta)
+    stable_prediction = stable.intercept + dm.matvec(stable.beta)
+    np.testing.assert_allclose(hybrid_prediction, stable_prediction, rtol=2e-12, atol=2e-11)
+    assert hybrid.deviance == pytest.approx(stable.deviance, rel=2e-12, abs=2e-11)
+
+
 def test_packed_centering_avoids_materializing_discrete_and_categorical_rows(
     monkeypatch,
 ) -> None:
