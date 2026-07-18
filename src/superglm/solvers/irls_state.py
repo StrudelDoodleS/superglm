@@ -32,6 +32,7 @@ class _IRLSStepDecision:
     alpha: float
     step_halvings: int
     step_rejected: bool
+    trials_attempted: int = 1
 
 
 def _immutable_array(values: NDArray) -> NDArray:
@@ -130,12 +131,12 @@ def _select_irls_trial(
     if max_halving < 1:
         raise ValueError("max_halving must be at least 1")
     if not _irls_trial_is_unsafe(proposal, committed, invalid_state):
-        return _IRLSStepDecision(1.0, 0, False)
+        return _IRLSStepDecision(1.0, 0, False, trials_attempted=1)
 
     for depth in range(1, max_halving + 1):
         alpha = 2.0**-depth
         candidate = evaluate_state(alpha)
         if not _irls_trial_is_unsafe(candidate, committed, invalid_state):
-            return _IRLSStepDecision(alpha, depth, False)
+            return _IRLSStepDecision(alpha, depth, False, trials_attempted=depth + 1)
 
-    return _IRLSStepDecision(0.0, 0, True)
+    return _IRLSStepDecision(0.0, 0, True, trials_attempted=max_halving + 1)
