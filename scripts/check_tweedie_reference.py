@@ -353,17 +353,23 @@ def load_reference_fixture(path: Path) -> ReferenceFixture:
 
 
 def _local_logpdf(fixture: ReferenceFixture) -> tuple[float, ...]:
+    from superglm._tweedie_density import TweedieDensityError
     from superglm.profiling.tweedie import tweedie_logpdf
 
     values = []
     for case in fixture.density_cases:
-        result = tweedie_logpdf(
-            np.array([case.y]),
-            np.array([case.mu]),
-            case.phi,
-            case.p,
-            weights=np.array([case.weight]),
-        )
+        try:
+            result = tweedie_logpdf(
+                np.array([case.y]),
+                np.array([case.mu]),
+                case.phi,
+                case.p,
+                weights=np.array([case.weight]),
+            )
+        except TweedieDensityError as exc:
+            raise ReferenceComparisonError(
+                f"local exact density case={case.case} could not certify: {exc}"
+            ) from exc
         value = float(result[0])
         if not math.isfinite(value):
             raise ReferenceComparisonError(
