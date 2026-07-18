@@ -73,7 +73,7 @@ def test_select_irls_trial_accepts_safe_full_without_evaluating_callback() -> No
         evaluate_state=lambda alpha: pytest.fail(f"unexpected trial at {alpha}"),
     )
 
-    assert decision == _IRLSStepDecision(1.0, 0, False)
+    assert decision == _IRLSStepDecision(1.0, 0, False, trials_attempted=1)
 
 
 def test_select_irls_trial_stops_at_largest_safe_fraction() -> None:
@@ -91,7 +91,7 @@ def test_select_irls_trial_stops_at_largest_safe_fraction() -> None:
         evaluate_state=evaluate,
     )
 
-    assert decision == _IRLSStepDecision(0.5, 1, False)
+    assert decision == _IRLSStepDecision(0.5, 1, False, trials_attempted=2)
     assert visited == [0.5]
 
 
@@ -109,7 +109,7 @@ def test_nonfinite_proposal_coefficients_can_select_safe_half_step() -> None:
         evaluate_state=evaluate,
     )
 
-    assert decision == _IRLSStepDecision(0.5, 1, False)
+    assert decision == _IRLSStepDecision(0.5, 1, False, trials_attempted=2)
     assert visited == [0.5]
 
 
@@ -128,7 +128,7 @@ def test_legacy_accepted_then_rejected_sequence_restores_committed_state() -> No
         max_halving=5,
     )
 
-    assert decision == _IRLSStepDecision(0.0, 0, True)
+    assert decision == _IRLSStepDecision(0.0, 0, True, trials_attempted=6)
     assert visited == [0.5, 0.25, 0.125, 0.0625, 0.03125]
 
 
@@ -156,7 +156,7 @@ def test_custom_invalid_state_callback_triggers_halving() -> None:
         invalid_state=lambda state: bool(state.eta[0] > 5.0),
     )
 
-    assert decision == _IRLSStepDecision(0.5, 1, False)
+    assert decision == _IRLSStepDecision(0.5, 1, False, trials_attempted=2)
     assert visited == [0.5]
 
 
