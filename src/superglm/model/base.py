@@ -469,9 +469,9 @@ def init_model(
         )
     # Constructor inputs become model-owned immediately.  Learned fit state is
     # built from a second private template, never by mutating caller objects.
-    model.family = copy.deepcopy(family)
-    model.link = copy.deepcopy(link)
-    model.penalty = copy.deepcopy(resolve_penalty(penalty, lambda1, penalty_features))
+    model.family = family
+    model.link = link
+    model.penalty = resolve_penalty(penalty, lambda1, penalty_features)
     model.lambda2 = lambda2
     model._splines = None if splines is None else list(splines)
     model._n_knots = copy.deepcopy(n_knots)
