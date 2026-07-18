@@ -29,6 +29,8 @@ def estimate_p(
     """Estimate Tweedie p via profile likelihood, refit, and return result."""
     from superglm.profiling.tweedie import estimate_tweedie_p
 
+    if progress_callback is not None and not callable(progress_callback):
+        raise TypeError("progress_callback must be callable or None")
     resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
 
     result = estimate_tweedie_p(
@@ -177,7 +179,7 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
 def _resolve_profile_fit_mode(model, fit_mode: str) -> str:
     """Resolve public profile fit mode to an internal final-refit method."""
     valid_fit_modes = {"fit", "reml", "inherit"}
-    if fit_mode not in valid_fit_modes:
+    if type(fit_mode) is not str or fit_mode not in valid_fit_modes:
         raise ValueError(
             f"fit_mode={fit_mode!r} is not valid, expected one of {sorted(valid_fit_modes)}"
         )

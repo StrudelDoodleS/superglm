@@ -66,7 +66,7 @@ def normalize_real_scalar(name: str, value: object) -> float:
         raise TypeError(f"{name} must be one finite real scalar")
     try:
         result = float(value)
-    except OverflowError as exc:
+    except Exception as exc:
         raise ValueError(f"{name} must be finite") from exc
     if not math.isfinite(result):
         raise ValueError(f"{name} must be finite")
@@ -85,6 +85,106 @@ def normalize_positive_scalar(name: str, value: object) -> float:
     if result <= 0.0:
         raise ValueError(f"{name} must be strictly positive")
     return result
+
+
+def normalize_numeric_vector(
+    value: object,
+    *,
+    name: str,
+    length: int | None = None,
+    positive: bool = False,
+    nonnegative: bool = False,
+) -> NDArray[np.float64]:
+    """Return an owning float64 copy of one strict real numeric vector."""
+    if np.ma.isMaskedArray(value):
+        raise TypeError(f"{name} must be a one-dimensional real numeric array without a mask")
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError(f"{name} must be a one-dimensional real numeric array") from exc
+    if raw.ndim != 1 or raw.dtype.kind not in "fiu":
+        raise TypeError(f"{name} must be a one-dimensional real numeric array")
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            result = np.array(raw, dtype=np.float64, copy=True)
+    except Exception as exc:
+        raise TypeError(f"{name} must be a one-dimensional real numeric array") from exc
+    if length is not None and result.size != length:
+        raise ValueError(f"{name} must have length {length}, got {result.size}")
+    if np.any(~np.isfinite(result)):
+        raise ValueError(f"{name} must contain only finite values")
+    if positive and np.any(result <= 0.0):
+        raise ValueError(f"{name} must be strictly positive")
+    if nonnegative and np.any(result < 0.0):
+        raise ValueError(f"{name} must be nonnegative")
+    return result
+
+
+def normalize_positive_int(
+    value: object,
+    *,
+    name: str,
+    minimum: int = 1,
+    maximum: int | None = None,
+) -> int:
+    """Return an integer control at or above ``minimum``, excluding booleans."""
+    if isinstance(value, bool | np.bool_) or not isinstance(value, int | np.integer):
+        raise TypeError(f"{name} must be an integer")
+    try:
+        result = int(value)
+    except Exception as exc:
+        raise ValueError(f"{name} must be a representable integer") from exc
+    if result < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    if maximum is not None and result > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return result
+
+
+def normalize_boolean(value: object, *, name: str) -> bool:
+    """Return a strict Python boolean without accepting integer coercions."""
+    if not isinstance(value, bool | np.bool_):
+        raise TypeError(f"{name} must be a boolean")
+    return bool(value)
+
+
+def normalize_optional_callable(value: object, *, name: str):
+    """Return ``None`` or a callable, rejecting deferred raw call failures."""
+    if value is not None and not callable(value):
+        raise TypeError(f"{name} must be callable or None")
+    return value
+
+
+def normalize_tweedie_bounds(
+    value: object,
+    *,
+    name: str = "p_bounds",
+) -> tuple[float, float]:
+    """Validate two ordered Tweedie power-search bounds inside ``(1, 2)``."""
+    bounds = normalize_numeric_vector(value, name=name)
+    if bounds.size != 2:
+        raise ValueError(f"{name} must contain exactly two bounds")
+    lower, upper = float(bounds[0]), float(bounds[1])
+    if not 1.0 < lower < upper < 2.0:
+        raise ValueError(f"{name} must satisfy 1 < lower < upper < 2")
+    return lower, upper
+
+
+def normalize_tweedie_grid(
+    value: object,
+    *,
+    name: str = "grid",
+    maximum: int | None = None,
+) -> NDArray[np.float64]:
+    """Validate an explicit nonempty one-dimensional Tweedie power grid."""
+    grid = normalize_numeric_vector(value, name=name)
+    if grid.size == 0:
+        raise ValueError(f"{name} must contain at least one point")
+    if maximum is not None and grid.size > maximum:
+        raise ValueError(f"{name} must contain at most {maximum} points")
+    if np.any((grid <= 1.0) | (grid >= 2.0)):
+        raise ValueError(f"{name} values must be strictly inside (1, 2)")
+    return grid
 
 
 def _as_real_float64_array(name: str, value: object) -> NDArray[np.float64]:
