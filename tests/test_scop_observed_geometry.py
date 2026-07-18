@@ -259,6 +259,106 @@ def test_scop_latent_mode_score_certifies_the_penalized_root():
     assert stationary.relative_max < 2e-15
 
 
+def test_scop_latent_mode_score_treats_nullspace_roundoff_as_zero():
+    """A suppressed SCOP null-space must not fail KKT certification on cancellation."""
+    from types import SimpleNamespace
+
+    from superglm.distributions import Gaussian
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.links import IdentityLink
+    from superglm.reml.scop_geometry import scop_penalized_mode_score
+
+    # Wider than the former fixed 64-epsilon guard so the regression exercises
+    # the dimension-aware dot-product bound.
+    q = 384
+    n = 12
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(n, q))
+    dm = DesignMatrix([DenseGroupMatrix(X)], n=n, p=q)
+
+    null = np.ones(q) / np.sqrt(q)
+    complement = rng.normal(size=(q, q - 1))
+    complement -= null[:, None] * (null @ complement)[None, :]
+    complement = np.linalg.qr(complement)[0][:, : q - 1]
+    penalty = complement @ np.diag(np.arange(1.0, q)) @ complement.T * 1.0e-4
+
+    beta_eff = np.full(q, -49.0)
+    mapped = np.exp(beta_eff)
+    result = SimpleNamespace(beta=mapped.copy(), intercept=0.0)
+    mu = X @ mapped
+    fisher_mean = X.mean(axis=0)
+    centered = X - fisher_mean
+    score = scop_penalized_mode_score(
+        dm=dm,
+        distribution=Gaussian(),
+        link=IdentityLink(),
+        y=mu,
+        sample_weight=np.ones(n),
+        offset_arr=np.zeros(n),
+        result=result,
+        latent_penalty=penalty,
+        scop_states={
+            0: {
+                "group_sl": slice(0, q),
+                "group_name": "mono",
+                "beta_eff": beta_eff,
+                "gamma_eff": mapped,
+            }
+        },
+        centered_fisher_gram=centered.T @ centered,
+        fisher_mean_x=fisher_mean,
+        fisher_sum_w=float(n),
+    )
+
+    assert score.max_abs < 1.0e-10
+    assert score.relative_max < 1.0e-9
+
+
+def test_scop_latent_mode_score_does_not_hide_real_data_score_with_null_penalty():
+    """Penalty-matvec uncertainty must not erase an independent data residual."""
+    from types import SimpleNamespace
+
+    from superglm.distributions import Gaussian
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.links import IdentityLink
+    from superglm.reml.scop_geometry import scop_penalized_mode_score
+
+    X = np.eye(2)
+    dm = DesignMatrix([DenseGroupMatrix(X)], n=2, p=2)
+    beta_eff = np.ones(2)
+    gamma_eff = np.exp(beta_eff)
+    penalty = 1.0e10 * np.array([[1.0, -1.0], [-1.0, 1.0]])
+    residual = np.array([1.0e-6, -1.0e-6])
+    mu = X @ gamma_eff
+    fisher_mean = X.mean(axis=0)
+    centered = X - fisher_mean
+
+    score = scop_penalized_mode_score(
+        dm=dm,
+        distribution=Gaussian(),
+        link=IdentityLink(),
+        y=mu + residual,
+        sample_weight=np.ones(2),
+        offset_arr=np.zeros(2),
+        result=SimpleNamespace(beta=gamma_eff.copy(), intercept=0.0),
+        latent_penalty=penalty,
+        scop_states={
+            0: {
+                "group_sl": slice(0, 2),
+                "group_name": "mono",
+                "beta_eff": beta_eff,
+                "gamma_eff": gamma_eff,
+            }
+        },
+        centered_fisher_gram=centered.T @ centered,
+        fisher_mean_x=fisher_mean,
+        fisher_sum_w=2.0,
+    )
+
+    assert score.max_abs == pytest.approx(np.e * 1.0e-6)
+    assert score.relative_max == pytest.approx(1.0)
+
+
 @pytest.mark.parametrize("family_name", ["nb2", "tweedie"])
 def test_noncanonical_log_scop_fit_installs_observed_geometry(family_name):
     """The production direct path must not silently label Fisher rows as Newton rows."""

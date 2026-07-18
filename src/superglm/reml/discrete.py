@@ -1156,4 +1156,5 @@ def optimize_discrete_reml_cached_w(
         converged=converged,
         lambda_history=lambda_history,
         objective=float(best_obj),
+        curvature_source="fisher",
     )

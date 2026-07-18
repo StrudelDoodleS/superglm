@@ -119,38 +119,42 @@ def test_empty_cleanup_path_uses_legacy_plateau_convergence(monkeypatch):
             {"term": float(np.exp(0.015))},
         ]
     )
-    objective_values = iter(
-        [
-            1.0,
-            1.0,
-            1.0000005,
-            1.0000005,
-            1.0000009,
-            1.0000009,
-            1.0000009,
-        ]
-    )
+    penalties = [SimpleNamespace(name="term")]
+
+    def make_mode(lambdas):
+        return SimpleNamespace(
+            lambdas=lambdas.copy(),
+            result=pirls_result,
+            scop_states={},
+            penalty_components=penalties,
+            hessian_inverse=np.eye(1),
+            evaluation=SimpleNamespace(value=1.0),
+            objective=1.0,
+            curvature_source="fisher",
+        )
 
     monkeypatch.setattr(
-        scop_efs, "fit_irls_direct", lambda **kwargs: (pirls_result, None, np.eye(1), {})
-    )
-    monkeypatch.setattr(scop_efs, "build_penalty_matrix", lambda *args, **kwargs: np.zeros((1, 1)))
-    monkeypatch.setattr(scop_efs, "build_scop_penalty_components", lambda *args, **kwargs: [])
-    monkeypatch.setattr(
-        scop_efs, "assemble_joint_hessian", lambda *args, **kwargs: (np.eye(1), None)
+        scop_efs,
+        "_fit_scop_reml_mode",
+        lambda context, lambdas, **kwargs: make_mode(lambdas),
     )
     monkeypatch.setattr(
         scop_efs,
-        "_safe_decompose_H",
-        lambda *args, **kwargs: (np.eye(1), 0.0, np.array([1.0])),
+        "_backtrack_scop_efs_candidate",
+        lambda context, current, proposed_lambdas, **kwargs: (
+            make_mode(proposed_lambdas),
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        scop_efs,
+        "_finalize_scop_reml_mode",
+        lambda context, mode: mode.result,
     )
     monkeypatch.setattr(
         scop_efs,
         "_joint_efs_lambda_step",
         lambda *args, **kwargs: (next(lambda_updates), {}, {}),
-    )
-    monkeypatch.setattr(
-        scop_efs, "reml_laml_objective", lambda *args, **kwargs: next(objective_values)
     )
     monkeypatch.setattr(scop_efs, "_multi_scop_discrete_cleanup_names", lambda **kwargs: set())
 
@@ -174,7 +178,7 @@ def test_empty_cleanup_path_uses_legacy_plateau_convergence(monkeypatch):
         lambdas={"term": 2.0},
         estimated_names={"term"},
         max_reml_iter=5,
-        reml_penalties=[SimpleNamespace(name="term")],
+        reml_penalties=penalties,
     )
 
     assert result.converged

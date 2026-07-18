@@ -11,7 +11,7 @@ from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.links import IdentityLink, SqrtLink
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
-from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.irls_direct import _stable_penalized_deviance_delta, fit_irls_direct
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
     _immutable_array,
@@ -206,6 +206,51 @@ def test_penalty_improving_trial_uses_penalized_deviance_merit() -> None:
     proposal = _synthetic_state(9.831, penalized_deviance=17.401)
 
     assert not _irls_trial_is_unsafe(proposal, committed)
+
+
+def test_stable_composite_merit_accepts_ill_conditioned_penalty_plateau() -> None:
+    """Penalty-quadratic cancellation must not manufacture a rejected IRLS step."""
+    penalty = np.array(
+        [
+            [500000.49999999994, 499999.49999999994],
+            [499999.49999999994, 500000.49999999994],
+        ]
+    )
+    beta_committed = np.array([0.7071067882576153, -0.7071067741154796])
+    beta_proposal = np.array([0.707106788257686, -0.7071067741154089])
+    deviance_committed = 31.358012850845732
+    deviance_proposal = 31.35801285084573
+
+    def state(beta: np.ndarray, deviance: float) -> _IRLSState:
+        eta = _immutable_array(np.zeros(1))
+        return _IRLSState(
+            beta=_immutable_array(beta),
+            intercept=0.0,
+            eta_unclipped=eta,
+            eta=eta,
+            mu=eta,
+            deviance=deviance,
+            penalized_deviance=float(deviance + beta @ penalty @ beta),
+        )
+
+    committed = state(beta_committed, deviance_committed)
+    proposal = state(beta_proposal, deviance_proposal)
+    assert _irls_trial_is_unsafe(proposal, committed)
+
+    stable_delta = _stable_penalized_deviance_delta(proposal, committed, penalty)
+    assert abs(stable_delta) < 1.0e-13
+    decision = _select_irls_trial(
+        committed=committed,
+        proposal=proposal,
+        evaluate_state=lambda alpha: pytest.fail(f"unexpected trial at {alpha}"),
+        merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
+            candidate,
+            base,
+            penalty,
+        ),
+    )
+
+    assert decision == _IRLSStepDecision(1.0, 0, False, trials_attempted=1)
 
 
 @pytest.mark.parametrize(

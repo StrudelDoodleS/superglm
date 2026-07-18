@@ -41,6 +41,14 @@ def _readonly(values: NDArray) -> NDArray:
     return result
 
 
+def _dot_product_roundoff_factor(length: int) -> float:
+    """Return Higham's ``gamma_k`` bound for a length-``k`` dot product."""
+    scaled_epsilon = float(length) * np.finfo(np.float64).eps
+    if scaled_epsilon >= 1.0:  # pragma: no cover - impossible for resident arrays
+        return float("inf")
+    return scaled_epsilon / (1.0 - scaled_epsilon)
+
+
 SCOPCurvatureSource = Literal["observed", "fisher", "mixed"]
 
 
@@ -208,9 +216,32 @@ def scop_penalized_mode_score(
         tiny,
         row_mass * latent_scale + np.abs(penalty_score),
     )
+    # At a suppressed SCOP boundary, both the mapped data scale and the exact
+    # penalty score can be zero.  A matrix-vector product through the
+    # semidefinite penalty can still leave cancellation noise of order
+    # eps * |S| |beta|; dividing that noise by ``tiny`` turns a numerical zero
+    # into a unit relative KKT residual.  Classify only residuals covered by a
+    # dimension-aware floating-point accumulation bound as zero.
+    row_roundoff_factor = _dot_product_roundoff_factor(dm.n)
+    intercept_ratio = abs(intercept_score) / row_mass
+    if abs(intercept_score) <= row_roundoff_factor * row_mass:
+        intercept_ratio = 0.0
+    slope_ratio = np.abs(slope_score) / slope_scale
+    data_roundoff = row_roundoff_factor * row_mass * latent_scale
+    penalty_roundoff = _dot_product_roundoff_factor(dm.p) * (
+        np.abs(latent_penalty) @ np.abs(beta_latent)
+    )
+    # A large semidefinite penalty can have a large multiplication-error bound
+    # in an exact null direction.  That uncertainty must never erase an
+    # independent data residual.  Classify a coordinate as numerical zero only
+    # when each score contribution is itself within its own accumulation bound.
+    roundoff_only = (np.abs(data_score) <= data_roundoff) & (
+        np.abs(penalty_score) <= penalty_roundoff
+    )
+    slope_ratio[roundoff_only] = 0.0
     relative_max = max(
-        abs(intercept_score) / row_mass,
-        float(np.max(np.abs(slope_score) / slope_scale, initial=0.0)),
+        intercept_ratio,
+        float(np.max(slope_ratio, initial=0.0)),
     )
     return SCOPModeScore(
         intercept=float(intercept_score),
@@ -299,6 +330,28 @@ def _decompose_with_factor_certification(
         if certified.rank != decomposition.rank:
             return certified
     return decomposition
+
+
+def _decompose_on_certified_range(
+    matrix: NDArray,
+    certified: RankDecomposition,
+) -> tuple[NDArray, NDArray, float, int]:
+    """Decompose observed curvature on a factor-certified estimable range."""
+    width = matrix.shape[0]
+    null_basis = np.asarray(certified.parameter_null_basis, dtype=np.float64)
+    nullity = width - certified.rank
+    if null_basis.shape != (width, nullity) or nullity <= 0:
+        raise ValueError("factor certification did not provide the expected null space")
+    orthogonal, _ = np.linalg.qr(null_basis, mode="complete")
+    estimable_basis = orthogonal[:, nullity:]
+    reduced = estimable_basis.T @ matrix @ estimable_basis
+    reduced = 0.5 * (reduced + reduced.T)
+    decomposition = decompose_gram(reduced)
+    if decomposition.rank != certified.rank:
+        raise ValueError("observed curvature is singular inside the certified estimable range")
+    projected = estimable_basis @ reduced @ estimable_basis.T
+    inverse = estimable_basis @ decomposition.pseudo_inverse() @ estimable_basis.T
+    return projected, inverse, decomposition.log_pdet, decomposition.rank
 
 
 def build_scop_postfit_inference(
@@ -543,12 +596,29 @@ def build_cached_scop_joint_geometry(
         jacobian=jacobian,
         latent_penalty=latent_penalty,
     )
+    restricted_decomposition: tuple[NDArray, NDArray, float, int] | None = None
     try:
         decomposition = _decompose_with_factor_certification(
             centered,
             certifier=certifier if curvature_source == "fisher" else None,
             center=fisher_mean_x,
         )
+        if (
+            curvature_source != "fisher"
+            and certifier is not None
+            and needs_factor_certification(decomposition)
+        ):
+            certified = certifier(fisher_mean_x)
+            if certified.rank != decomposition.rank:
+                # Near a suppressed shape boundary, roundoff can lift the
+                # exact penalty null direction just enough for Cholesky to
+                # report a discontinuous full rank.  Use the row/penalty
+                # factor only to certify the estimable range, then retain the
+                # observed curvature and determinant on that range.
+                restricted_decomposition = _decompose_on_certified_range(
+                    centered,
+                    certified,
+                )
     except ValueError:
         centered = expected_centered
         decomposition = _decompose_with_factor_certification(
@@ -557,13 +627,20 @@ def build_cached_scop_joint_geometry(
             center=fisher_mean_x,
         )
         curvature_source = "fisher"
+        restricted_decomposition = None
+    if restricted_decomposition is None:
+        hessian_inverse = decomposition.pseudo_inverse()
+        log_pdet = decomposition.log_pdet
+        hessian_rank = decomposition.rank
+    else:
+        centered, hessian_inverse, log_pdet, hessian_rank = restricted_decomposition
     return SCOPJointGeometry(
         centered_hessian=_readonly(centered),
-        hessian_inverse=_readonly(decomposition.pseudo_inverse()),
+        hessian_inverse=_readonly(hessian_inverse),
         transformed_intercept_cross=_readonly(transformed_cross),
         sum_w=float(fisher_sum_w),
-        log_det_H=float(np.log(fisher_sum_w) + decomposition.log_pdet),
-        hessian_rank=1 + decomposition.rank,
+        log_det_H=float(np.log(fisher_sum_w) + log_pdet),
+        hessian_rank=1 + hessian_rank,
         curvature_source=curvature_source,
         transformed_mean_x=_readonly(transformed_mean),
     )

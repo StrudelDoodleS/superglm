@@ -1684,6 +1684,202 @@ def test_fit_reml_terminal_observed_state_owns_objective_rank_and_scale() -> Non
     assert result.phi == evaluation.profiled_scale.phi
 
 
+def test_qp_passthrough_terminal_state_owns_fisher_objective_and_scale() -> None:
+    """A constrained terminal refit must replace unconstrained LAML provenance."""
+    import pandas as pd
+
+    from superglm import Constraint, SuperGLM
+    from superglm.features.spline import BSplineSmooth
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    rng = np.random.default_rng(303)
+    n = 160
+    x = np.sort(rng.uniform(0.1, 1.0, n))
+    mu = np.exp(0.2 + 0.7 * x)
+    y = rng.gamma(shape=4.0, scale=mu / 4.0)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gamma",
+        selection_penalty=0,
+        features={
+            "x": BSplineSmooth(
+                n_knots=7,
+                constraint=Constraint.fit.increasing,
+            )
+        },
+    )
+
+    model.fit_reml(frame, y, max_reml_iter=5)
+
+    result = model._solver_result
+    penalty = build_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        model._reml_lambdas,
+        model._dm.p,
+        reml_penalties=model._reml_penalties,
+    )
+    evaluation = reml_laml_objective(
+        model._dm,
+        model._distribution,
+        model._link,
+        model._groups,
+        y,
+        result,
+        model._reml_lambdas,
+        np.ones(n),
+        np.zeros(n),
+        log_det_H=result.log_det_H,
+        hessian_rank=result.reml_hessian_rank,
+        S_override=penalty,
+        reml_penalties=model._reml_penalties,
+        return_evaluation=True,
+    )
+
+    assert model._last_fit_meta["lambda_strategy"] == "qp_passthrough"
+    assert model._reml_result.curvature_source == "fisher"
+    assert model._reml_result.objective == pytest.approx(evaluation.value, rel=2e-12)
+    assert evaluation.profiled_scale is not None
+    assert result.phi == pytest.approx(evaluation.profiled_scale.phi, rel=2e-12)
+
+
+def test_qp_passthrough_tweedie_scale_uses_terminal_penalty_nullity() -> None:
+    """Reduced Tweedie phi must use the same identified rank as terminal LAML."""
+    import pandas as pd
+
+    from superglm import Constraint, SuperGLM
+    from superglm.features.spline import BSplineSmooth
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    rng = np.random.default_rng(914)
+    n = 120
+    x = np.sort(rng.uniform(0.1, 1.0, n))
+    offset = 0.1 * np.sin(np.arange(n) / 9.0)
+    mu = np.exp(0.2 + 0.6 * x + offset)
+    y = np.maximum(mu * (1.0 + 0.08 * rng.normal(size=n)), 0.03)
+    sample_weight = np.resize(np.array([1.0, 3.0, 2.0, 4.0]), n)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0,
+        features={
+            "x": BSplineSmooth(
+                n_knots=7,
+                constraint=Constraint.fit.increasing,
+            )
+        },
+    )
+
+    model.fit_reml(
+        frame,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+        max_reml_iter=5,
+    )
+
+    result = model._solver_result
+    penalty = build_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        model._reml_lambdas,
+        model._dm.p,
+        reml_penalties=model._reml_penalties,
+    )
+    evaluation = reml_laml_objective(
+        model._dm,
+        model._distribution,
+        model._link,
+        model._groups,
+        y,
+        result,
+        model._reml_lambdas,
+        sample_weight,
+        offset,
+        log_det_H=result.log_det_H,
+        hessian_rank=result.reml_hessian_rank,
+        S_override=penalty,
+        reml_penalties=model._reml_penalties,
+        return_evaluation=True,
+    )
+    assert isinstance(evaluation, REMLObjectiveEvaluation)
+    assert evaluation.profiled_scale is None
+    assert evaluation.penalty_nullity is not None
+    expected_phi = evaluation.penalized_deviance / (n - evaluation.penalty_nullity)
+
+    assert model._last_fit_meta["lambda_strategy"] == "qp_passthrough"
+    assert model._reml_result.curvature_source == "fisher"
+    assert model._reml_result.objective == pytest.approx(evaluation.value, rel=2e-12)
+    assert result.phi == pytest.approx(expected_phi, rel=2e-12)
+
+
+def test_qp_passthrough_poisson_fast_objective_keeps_deviance_scale() -> None:
+    """Retained-geometry fast evaluation must keep Poisson's deviance convention."""
+    import pandas as pd
+
+    from superglm import Constraint, SuperGLM
+    from superglm.features.spline import BSplineSmooth
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    rng = np.random.default_rng(812)
+    n = 100
+    x = np.sort(rng.uniform(0.1, 1.0, n))
+    offset = 0.12 * np.sin(np.arange(n) / 9.0)
+    mu = np.exp(0.2 + 0.7 * x + offset)
+    y = rng.poisson(mu).astype(float)
+    sample_weight = np.resize(np.array([1.0, 2.0, 3.0]), n)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        features={
+            "x": BSplineSmooth(
+                n_knots=7,
+                constraint=Constraint.fit.increasing,
+            )
+        },
+    )
+
+    model.fit_reml(
+        frame,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+        max_reml_iter=4,
+    )
+
+    result = model._solver_result
+    penalty = build_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        model._reml_lambdas,
+        model._dm.p,
+        reml_penalties=model._reml_penalties,
+    )
+    shared = dict(
+        dm=model._dm,
+        distribution=model._distribution,
+        link=model._link,
+        groups=model._groups,
+        y=y,
+        result=result,
+        lambdas=model._reml_lambdas,
+        sample_weight=sample_weight,
+        offset_arr=offset,
+        log_det_H=result.log_det_H,
+        hessian_rank=result.reml_hessian_rank,
+        reml_penalties=model._reml_penalties,
+        return_evaluation=True,
+    )
+    fast = reml_laml_objective(**shared, S_override=penalty)
+    full = reml_laml_objective(**shared)
+
+    assert isinstance(fast, REMLObjectiveEvaluation)
+    assert isinstance(full, REMLObjectiveEvaluation)
+    assert fast.value == pytest.approx(full.value, rel=2e-12, abs=2e-12)
+    assert model._reml_result.objective == pytest.approx(fast.value, rel=2e-12)
+
+
 def test_observed_laml_backtracks_after_invalid_trial_geometry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

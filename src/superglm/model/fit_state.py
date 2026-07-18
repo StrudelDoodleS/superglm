@@ -137,6 +137,43 @@ class ModelConfig:
         """Return a configuration revision with owned replacement values."""
         return replace(self, **{name: copy.deepcopy(value) for name, value in changes.items()})
 
+    def constructor_kwargs(self) -> dict[str, object]:
+        """Return an owned, exhaustive ``SuperGLM`` constructor configuration.
+
+        Selection strength and feature targeting live on the resolved penalty
+        template.  Passing them again as separate constructor arguments would
+        conflict with the penalty-object API, so those slots are explicitly
+        represented by ``None`` while the copied penalty carries their values.
+        """
+        return {
+            "family": copy.deepcopy(self.family),
+            "link": copy.deepcopy(self.link),
+            "penalty": copy.deepcopy(self.penalty),
+            "selection_penalty": None,
+            "spline_penalty": copy.deepcopy(self.lambda2),
+            "penalty_features": None,
+            "features": (
+                {name: copy.deepcopy(spec) for name, spec in self.feature_templates}
+                if self.feature_templates
+                else None
+            ),
+            "splines": (
+                None if self.feature_templates or self.splines is None else list(self.splines)
+            ),
+            "n_knots": self.n_knots if isinstance(self.n_knots, int) else list(self.n_knots),
+            "degree": self.degree,
+            "categorical_base": self.categorical_base,
+            "interactions": list(self.interactions) if self.interactions else None,
+            "active_set": self.active_set,
+            "direct_solve": self.direct_solve,
+            "discrete": self.discrete,
+            "n_bins": copy.deepcopy(self.n_bins),
+            "tol": self.tol,
+            "max_iter": self.max_iter,
+            "convergence": self.convergence,
+            "retain_fit_state": self.retain_fit_state,
+        }
+
     def materialize(self, model_type):
         """Create a fresh unfitted model from intent, never from prior fit state."""
         work_model = model_type.__new__(model_type)
@@ -197,8 +234,8 @@ class ModelConfig:
             "_selection_penalty_fitted": None,
             "_distribution_fitted": None,
             "_resolved_penalty": None,
-            "_config": self,
         }
+        work_model._config = type(self).capture(work_model)
         return work_model
 
 
@@ -483,6 +520,57 @@ def _freeze_candidate_arrays(work_model, *, auxiliary: bool = True) -> None:
         _freeze_array(getattr(work_model, name, None))
 
 
+def _publish_workspace_extension_state(work_model, public_model, prepared) -> None:
+    """Detach tracked extension state and rebind workspace self-references."""
+    from superglm.model.fit_workspace import _SUBCLASS_STATE_NAMES
+
+    tracked_names = tuple(getattr(work_model, _SUBCLASS_STATE_NAMES, ()))
+    if not tracked_names:
+        return
+
+    # A second, shared deepcopy makes the published extension graph independent
+    # of the private attempt while preserving aliases. Self-references and
+    # stored bound methods must resolve to the durable public model, not to the
+    # workspace whose dictionary is about to be transferred.
+    memo = {
+        id(work_model): public_model,
+        id(public_model): public_model,
+    }
+    tracked = set(tracked_names)
+    for name, source_value in work_model.__dict__.items():
+        if name in tracked:
+            continue
+        published_value = prepared.get(name)
+        if source_value is published_value:
+            memo[id(source_value)] = published_value
+
+    # Configuration identities are intentionally restored from the caller at
+    # publication. Preserve direct aliases from extension state to those
+    # model-owned objects without mapping scalar singleton identities.
+    scalar_types = (type(None), bool, int, float, complex, str, bytes)
+    for name in (
+        "_config",
+        "_penalty_config",
+        "_link_config",
+        "_family_config",
+        "_lambda2_config",
+    ):
+        source_value = work_model.__dict__.get(name)
+        published_value = prepared.get(name)
+        if not isinstance(source_value, scalar_types) and published_value is not None:
+            memo[id(source_value)] = published_value
+
+    for name in tracked_names:
+        if name not in work_model.__dict__:
+            raise RuntimeError(f"tracked subclass fit state {name!r} is missing")
+        try:
+            prepared[name] = copy.deepcopy(work_model.__dict__[name], memo)
+        except Exception as exc:  # pragma: no cover - depends on extension object
+            raise TypeError(
+                f"subclass fit state {name!r} must support deepcopy for transactional fitting"
+            ) from exc
+
+
 def _capture_model_state(
     work_model,
     public_model,
@@ -541,6 +629,7 @@ def _capture_model_state(
     prepared["_distribution_fitted"] = work_model._distribution
     prepared["_fit_revision"] = int(revision)
     prepared["_fit_state"] = state
+    _publish_workspace_extension_state(work_model, public_model, prepared)
     return FitCandidate(state=state, prepared_model_dict=prepared)
 
 

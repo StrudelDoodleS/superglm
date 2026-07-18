@@ -103,7 +103,8 @@ def reml_laml_objective(
     objective then computes the required reduction for that evaluation.
     """
     mu = None
-    if XtWX is None:
+    retained_geometry_complete = XtWX is None and log_det_H is not None and S_override is not None
+    if XtWX is None and not retained_geometry_complete:
         eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
         mu = clip_mu(link.inverse(eta), distribution)
         V = distribution.variance(mu)
@@ -114,7 +115,7 @@ def reml_laml_objective(
         XtW1 = moments.xtw
         sum_W = float(np.sum(W, dtype=np.float64))
 
-    if XtW1 is None and sum_W is None and result.rank_info is not None:
+    if XtWX is not None and XtW1 is None and sum_W is None and result.rank_info is not None:
         rank_mean = np.asarray(result.rank_info.mean_x, dtype=np.float64)
         if rank_mean.shape == (XtWX.shape[0],):
             sum_W = float(result.rank_info.sum_w)
@@ -130,13 +131,18 @@ def reml_laml_objective(
         if not np.isfinite(sum_W) or sum_W <= 0.0:
             raise ValueError("sum_W must be positive and finite")
 
-    p = XtWX.shape[0]
     if S_override is not None:
-        S = S_override
+        S = np.asarray(S_override, dtype=np.float64)
+        p = S.shape[0]
     else:
+        if XtWX is None:  # pragma: no cover - excluded by retained-geometry guard
+            raise RuntimeError("REML objective is missing both data and penalty geometry")
+        p = XtWX.shape[0]
         S = build_penalty_matrix(
             dm.group_matrices, groups, lambdas, p, reml_penalties=reml_penalties
         )
+    if S.shape != (p, p):
+        raise ValueError("REML penalty must be square")
     if scop_states:
         from superglm.reml.scop_efs import compute_scop_aware_penalty_quad
 
@@ -266,7 +272,7 @@ def reml_laml_objective(
         )
         return evaluation if return_evaluation else evaluation.value
 
-    if isinstance(distribution, Poisson) and XtWX is not None:
+    if isinstance(distribution, Poisson) and (XtWX is not None or retained_geometry_complete):
         # Up to additive constants, Poisson negative log-likelihood is deviance / 2.
         nll = 0.5 * result.deviance
     else:

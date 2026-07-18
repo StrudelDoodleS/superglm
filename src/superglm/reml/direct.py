@@ -864,4 +864,5 @@ def optimize_direct_reml(
         lambda_history=lambda_history,
         objective=float(best_obj),
         objective_history=objective_history,
+        curvature_source="observed" if use_observed_geometry else "fisher",
     )

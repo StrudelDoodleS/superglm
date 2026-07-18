@@ -3416,6 +3416,12 @@ def _clone_profile_model(model, X, sample_weight):
         profile_model._degree = model._degree
         profile_model._categorical_base = model._categorical_base
         profile_model._auto_detect_features(X, sample_weight)
+    # Fit attempts rematerialize immutable constructor intent.  The private
+    # runtime copies above therefore need one matching configuration snapshot;
+    # otherwise a resolved custom interaction falls back to its shorthand when
+    # the profile model enters a transactional fit workspace.
+    profile_model._config = type(profile_model._config).capture(profile_model)
+    profile_model._config_revision += 1
     return profile_model
 
 

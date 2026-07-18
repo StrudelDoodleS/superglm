@@ -95,11 +95,19 @@ def compute_profiled_phi(
             M_p,
         ).phi
 
-    # Preserve the historical reduced profile for estimated-scale families
-    # without an explicit Wood Eq. (4) profiler (notably Tweedie).
-    from superglm.reml.penalty_algebra import compute_total_penalty_rank
-
-    M_p = compute_total_penalty_rank(reml_penalties)
+    # Reduced profile for estimated-scale families without an explicit Wood
+    # Eq. (4) profiler (notably Tweedie). The residual likelihood dimension is
+    # governed by the penalty *nullity* on the identified coefficient range,
+    # not by the total penalty rank.
+    hessian_rank = pirls_result.reml_hessian_rank
+    if hessian_rank is None:
+        hessian_rank = 1 + p_dim
+    M_p = compute_penalty_nullity(
+        S_final,
+        hessian_rank=hessian_rank,
+        penalties=reml_penalties,
+        lambdas=lambdas,
+    )
     return float(max(penalized_deviance / max(len(y) - M_p, 1.0), 1e-10))
 
 
@@ -181,11 +189,13 @@ def finalize_reml_fit(
     final_xtwx = None
     terminal_curvature = None
     if use_direct:
-        terminal_curvature = (
-            "fisher"
-            if model._discrete
-            else classify_reml_curvature(model._distribution, model._link)
-        )
+        terminal_curvature = best.curvature_source
+        if terminal_curvature is None:
+            terminal_curvature = (
+                "fisher"
+                if model._discrete
+                else classify_reml_curvature(model._distribution, model._link)
+            )
         best.curvature_source = terminal_curvature
     if use_direct:
         old_gms = model._dm.group_matrices
@@ -241,6 +251,44 @@ def finalize_reml_fit(
     )
 
     terminal_evaluation: REMLObjectiveEvaluation | None = None
+    if qp_passthrough:
+        # Lambda selection ran on the unconstrained surrogate, but the state
+        # published below is the constrained Fisher/QP refit. Its determinant,
+        # rank, scale profile, objective, and curvature label must therefore be
+        # recomputed as one coherent terminal evaluation. Retaining the
+        # optimizer's observed label/objective would describe coefficients that
+        # are no longer installed.
+        terminal_curvature = "fisher"
+        best.curvature_source = terminal_curvature
+        if final_pirls.log_det_H is None or final_pirls.reml_hessian_rank is None:
+            raise RuntimeError("terminal QP REML refit omitted its Fisher geometry")
+        S_final = build_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            lambdas,
+            model._dm.p,
+            reml_penalties=reml_penalties,
+        )
+        terminal_value = reml_laml_objective(
+            model._dm,
+            model._distribution,
+            model._link,
+            model._groups,
+            y,
+            final_pirls,
+            lambdas,
+            sample_weight,
+            offset_arr,
+            log_det_H=final_pirls.log_det_H,
+            hessian_rank=final_pirls.reml_hessian_rank,
+            S_override=S_final,
+            reml_penalties=reml_penalties,
+            return_evaluation=True,
+        )
+        if not isinstance(terminal_value, REMLObjectiveEvaluation):  # pragma: no cover
+            raise RuntimeError("terminal QP REML evaluation omitted its scale state")
+        terminal_evaluation = terminal_value
+        best.objective = terminal_evaluation.value
     if terminal_curvature == "observed" and not qp_passthrough:
         if not final_pirls.converged:
             raise RuntimeError("terminal observed REML refit did not converge")
@@ -317,6 +365,17 @@ def finalize_reml_fit(
     # constrained QP passthrough refit can change both beta'S beta and deviance.
     if terminal_evaluation is not None and terminal_evaluation.profiled_scale is not None:
         phi_fixed = terminal_evaluation.profiled_scale.phi
+    elif terminal_evaluation is not None and not getattr(
+        model._distribution,
+        "scale_known",
+        True,
+    ):
+        penalty_nullity = float(terminal_evaluation.penalty_nullity or 0.0)
+        phi_fixed = max(
+            float(terminal_evaluation.penalized_deviance)
+            / max(float(len(y)) - penalty_nullity, 1.0),
+            1.0e-10,
+        )
     else:
         phi_fixed = compute_profiled_phi(
             model,
