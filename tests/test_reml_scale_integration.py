@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from superglm.distributions import Gamma, Gaussian
+from superglm.distributions import Gamma, Gaussian, Tweedie
 from superglm.links import IdentityLink, LogLink
 from superglm.model import reml_finalize
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
@@ -188,8 +188,6 @@ def test_finalize_profiles_phi_from_post_qp_state(monkeypatch: pytest.MonkeyPatc
         _discrete=False,
         _direct_solve="auto",
     )
-    captured = {}
-
     monkeypatch.setattr(
         reml_finalize,
         "build_penalty_context",
@@ -201,12 +199,13 @@ def test_finalize_profiles_phi_from_post_qp_state(monkeypatch: pytest.MonkeyPatc
         lambda *args, **kwargs: post_qp,
     )
 
-    def fake_profiled_phi(model, **kwargs):
-        del model
-        captured.update(kwargs)
-        return 0.37
-
-    monkeypatch.setattr(reml_finalize, "compute_profiled_phi", fake_profiled_phi)
+    monkeypatch.setattr(
+        reml_finalize,
+        "compute_profiled_phi",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("coherent QP evaluation must own its profiled scale")
+        ),
+    )
     monkeypatch.setattr(reml_finalize, "update_reml_r_inv", lambda *args, **kwargs: None)
     monkeypatch.setattr(reml_finalize, "restore_qp_group_state", lambda *args, **kwargs: None)
 
@@ -229,9 +228,68 @@ def test_finalize_profiles_phi_from_post_qp_state(monkeypatch: pytest.MonkeyPatc
         compute_fit_stats=lambda *args: {},
     )
 
-    assert captured["pirls_result"] is post_qp
-    np.testing.assert_array_equal(captured["sample_weight"], np.ones(3))
-    assert model._result.phi == pytest.approx(0.37)
+    evaluation = reml_laml_objective(
+        dm,
+        model._distribution,
+        model._link,
+        [],
+        np.array([0.5, 1.0, 1.5]),
+        post_qp,
+        best.lambdas,
+        np.ones(3),
+        np.zeros(3),
+        log_det_H=post_qp.log_det_H,
+        hessian_rank=post_qp.reml_hessian_rank,
+        S_override=np.zeros((1, 1)),
+        reml_penalties=[],
+        return_evaluation=True,
+    )
+    assert isinstance(evaluation, REMLObjectiveEvaluation)
+    assert evaluation.profiled_scale is not None
+    assert best.curvature_source == "fisher"
+    assert best.objective == pytest.approx(evaluation.value)
+    assert model._result.phi == pytest.approx(evaluation.profiled_scale.phi)
+
+
+def test_reduced_tweedie_phi_uses_penalty_nullity_not_penalty_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    penalty_matrix = np.diag([2.0, 0.0])
+    penalty = PenaltyComponent(
+        name="smooth",
+        group_name="smooth",
+        group_index=0,
+        group_sl=slice(0, 2),
+        omega_raw=penalty_matrix,
+        omega_ssp=penalty_matrix,
+        rank=1.0,
+    )
+    result = _result(beta=np.array([0.5, 0.25]), deviance=4.0, hessian_rank=3)
+    model = SimpleNamespace(
+        _distribution=Tweedie(p=1.5),
+        _dm=SimpleNamespace(p=2, group_matrices=[]),
+        _groups=[],
+    )
+    monkeypatch.setattr(
+        reml_finalize,
+        "build_penalty_matrix",
+        lambda *args, **kwargs: penalty_matrix,
+    )
+    y = np.ones(10)
+
+    phi = reml_finalize.compute_profiled_phi(
+        model,
+        y=y,
+        sample_weight=np.ones_like(y),
+        lambdas={"smooth": 1.0},
+        reml_penalties=[penalty],
+        pirls_result=result,
+    )
+
+    penalized_deviance = result.deviance + float(result.beta @ penalty_matrix @ result.beta)
+    # Full coefficient rank 3 minus penalty rank 1 leaves intercept plus one
+    # unpenalized slope: M_p=2, not the penalty rank of one.
+    assert phi == pytest.approx(penalized_deviance / (len(y) - 2.0))
 
 
 def test_direct_gamma_prepares_rows_once_and_reuses_reduced_stats(

@@ -19,6 +19,7 @@ shared B matrices between select=True subgroups vanishes entirely.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, replace
 
@@ -85,6 +86,39 @@ from superglm.solvers.working_rows import (
 from superglm.types import GroupSlice, PenaltyComponent
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_penalized_deviance_delta(
+    candidate: _IRLSState,
+    committed: _IRLSState,
+    penalty: NDArray,
+) -> float:
+    """Compare ``D + beta' S beta`` without subtracting two quadratics.
+
+    In an ill-conditioned smooth basis, the two penalty quadratics can each be
+    accurately evaluated while their tiny difference loses enough digits to
+    reverse the sign of an otherwise safe terminal step.  The polarization
+    identity evaluates that difference directly from the coefficient update.
+    """
+    delta_beta = candidate.beta - committed.beta
+    penalty_direction = penalty @ (candidate.beta + committed.beta)
+    penalty_delta = math.fsum(
+        float(delta_value * direction_value)
+        for delta_value, direction_value in zip(
+            delta_beta,
+            penalty_direction,
+            strict=True,
+        )
+    )
+    return float(
+        math.fsum(
+            (
+                float(candidate.deviance),
+                -float(committed.deviance),
+                penalty_delta,
+            )
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -1468,6 +1502,11 @@ def fit_irls_direct(
                 proposal=proposal,
                 evaluate_state=evaluate_trial,
                 max_halving=max_halving,
+                merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
+                    candidate,
+                    base,
+                    S,
+                ),
             )
             retained = committed if decision.step_rejected else trial_cache[decision.alpha]
             evaluation_elapsed = time.perf_counter() - _t0
@@ -1505,6 +1544,21 @@ def fit_irls_direct(
                     coef_change,
                     abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
                 )
+                if _has_scop:
+                    latent_change = max(
+                        float(
+                            np.max(
+                                np.abs(retained_group.beta_eff - committed_group.beta_eff)
+                                / np.maximum(1.0, np.abs(retained_group.beta_eff))
+                            )
+                        )
+                        for retained_group, committed_group in zip(
+                            retained_scop.groups,
+                            scop_committed.groups,
+                            strict=True,
+                        )
+                    )
+                    coef_change = max(coef_change, latent_change)
                 converged_this_iter = coef_change < tol
                 convergence_value = coef_change
             else:

@@ -1822,9 +1822,151 @@ class TestSCOPEFSOuterLoop:
         assert retained is current
         np.testing.assert_allclose(
             [trial["x"] for trial in attempted_lambdas],
-            [16.0, 4.0, 2.0, np.sqrt(2.0)],
+            [
+                16.0,
+                4.0,
+                2.0,
+                np.sqrt(2.0),
+                1.0 / 16.0,
+                1.0 / 4.0,
+                1.0 / 2.0,
+                1.0 / np.sqrt(2.0),
+            ],
             rtol=1e-15,
         )
+
+    def test_candidate_guard_reflects_an_uphill_efs_direction(self, monkeypatch):
+        """A reversed EFS direction may be accepted, but only after objective evaluation."""
+        current = SimpleNamespace(
+            lambdas={"x": 1.0},
+            objective=10.0,
+            result=SimpleNamespace(beta=np.array([0.0]), intercept=0.0),
+            scop_states={},
+        )
+        attempted_lambdas = []
+
+        def fake_fit(context, trial_lambdas, **kwargs):
+            del context, kwargs
+            attempted_lambdas.append(trial_lambdas.copy())
+            objective = 9.0 if trial_lambdas["x"] < 1.0 else 11.0
+            return SimpleNamespace(
+                lambdas=trial_lambdas.copy(),
+                objective=objective,
+                result=SimpleNamespace(beta=np.array([objective]), intercept=objective),
+                scop_states={},
+            )
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fake_fit)
+
+        accepted, moved = scop_efs_module._backtrack_scop_efs_candidate(
+            SimpleNamespace(),
+            current,
+            {"x": 16.0},
+            reml_iteration=1,
+            max_attempts=2,
+        )
+
+        assert moved is True
+        assert accepted.lambdas == {"x": 1.0 / 16.0}
+        np.testing.assert_allclose(
+            [trial["x"] for trial in attempted_lambdas],
+            [16.0, 4.0, 1.0 / 16.0],
+            rtol=1e-15,
+        )
+
+    def test_mode_certificate_uses_retained_range_newton_correction(self):
+        """A tiny raw score must not hide a large weak-curvature correction."""
+        mode = SimpleNamespace(
+            result=SimpleNamespace(beta=np.array([0.0]), intercept=0.0),
+            fisher_mean_x=np.array([0.0]),
+            scop_states={},
+            mode_score=SimpleNamespace(
+                intercept=0.0,
+                slopes=np.array([1.0e-12]),
+                max_abs=1.0e-12,
+                relative_max=1.0e-12,
+            ),
+            joint_geometry=SimpleNamespace(
+                hessian_inverse=np.array([[1.0e12]]),
+                transformed_intercept_cross=np.array([0.0]),
+                transformed_mean_x=np.array([0.0]),
+                sum_w=1.0,
+            ),
+        )
+
+        assert scop_efs_module._scop_mode_newton_relative(mode) == pytest.approx(1.0)
+
+    def test_candidate_guard_requires_reflected_direction_to_be_downhill(self, monkeypatch):
+        """The forward numerical tie tolerance must not admit an uphill reflection."""
+        current = SimpleNamespace(
+            lambdas={"x": 1.0},
+            objective=10.0,
+            result=SimpleNamespace(beta=np.array([0.0]), intercept=0.0),
+            scop_states={},
+        )
+
+        def fake_fit(context, trial_lambdas, **kwargs):
+            del context, kwargs
+            objective = 11.0 if trial_lambdas["x"] > 1.0 else 10.0 + 1.0e-9
+            return SimpleNamespace(
+                lambdas=trial_lambdas.copy(),
+                objective=objective,
+                result=SimpleNamespace(beta=np.array([objective]), intercept=objective),
+                scop_states={},
+            )
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fake_fit)
+
+        retained, moved = scop_efs_module._backtrack_scop_efs_candidate(
+            SimpleNamespace(),
+            current,
+            {"x": 16.0},
+            reml_iteration=1,
+            max_attempts=1,
+        )
+
+        assert moved is False
+        assert retained is current
+
+    def test_candidate_guard_keeps_deep_forward_backtracking_before_reflection(
+        self,
+        monkeypatch,
+    ):
+        """A valid 1/16 forward step must be tried before the reflected fallback."""
+        current = SimpleNamespace(
+            lambdas={"x": 1.0},
+            objective=10.0,
+            result=SimpleNamespace(beta=np.array([0.0]), intercept=0.0),
+            scop_states={},
+        )
+        attempted_lambdas = []
+        deepest_accepted = 16.0 ** (1.0 / 16.0)
+
+        def fake_fit(context, trial_lambdas, **kwargs):
+            del context, kwargs
+            attempted_lambdas.append(trial_lambdas.copy())
+            trial_lambda = trial_lambdas["x"]
+            objective = 9.0 if 1.0 < trial_lambda <= deepest_accepted else 11.0
+            return SimpleNamespace(
+                lambdas=trial_lambdas.copy(),
+                objective=objective,
+                result=SimpleNamespace(beta=np.array([objective]), intercept=objective),
+                scop_states={},
+            )
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fake_fit)
+
+        accepted, moved = scop_efs_module._backtrack_scop_efs_candidate(
+            SimpleNamespace(),
+            current,
+            {"x": 16.0},
+            reml_iteration=1,
+        )
+
+        assert moved is True
+        assert accepted.lambdas["x"] == pytest.approx(deepest_accepted)
+        assert all(trial["x"] > 1.0 for trial in attempted_lambdas)
+        assert len(attempted_lambdas) == 5
 
     def test_candidate_objective_receives_trial_fit_and_fresh_geometry(self, monkeypatch):
         """A trial lambda is scored only with the state fitted at that lambda."""
@@ -2579,6 +2721,32 @@ class TestSCOPEFSRegression:
             assert v == pytest.approx(1.0)
 
     @pytest.mark.slow
+    def test_fixed_scop_large_lambda_constant_response_converges(self):
+        """A valid penalty-null boundary must pass latent mode certification."""
+        x = np.linspace(0.0, 1.0, 200)
+        df = pd.DataFrame({"x": x})
+        y = np.ones_like(x)
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            discrete=True,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    constraint=Constraint.fit.increasing,
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0e6),
+                ),
+            },
+        )
+
+        model.fit_reml(df, y, max_pirls_iter=100)
+
+        assert model._result.converged
+        assert np.all(np.isfinite(model._result.beta))
+        assert np.isfinite(model._result.intercept)
+        assert model._reml_lambdas == {"x": pytest.approx(1.0e6)}
+
+    @pytest.mark.slow
     def test_efs_only_model_unchanged(self):
         """fit_reml() rejects selection_penalty > 0 even without monotone terms."""
         rng = np.random.default_rng(42)
@@ -3232,8 +3400,11 @@ class TestMultiSCOPIntegration:
         """
         rng = np.random.default_rng(42)
         n = 500
-        x1 = np.sort(rng.uniform(0, 1, n))
-        x2 = np.sort(rng.uniform(0, 1, n))
+        # Keep the terms independently ordered. Sorting both columns makes
+        # them almost collinear, so their individual smoothing parameters can
+        # trade off even when the aggregate smoothness response is sensible.
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
 
         lambdas_by_noise = {}
         for sigma in [0.1, 1.0]:

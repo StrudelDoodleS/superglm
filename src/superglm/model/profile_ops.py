@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import logging
-from dataclasses import fields, replace
+from dataclasses import fields, is_dataclass, replace
 
 import numpy as np
 
@@ -26,13 +27,36 @@ def estimate_p(
     progress_callback=None,
     **kwargs,
 ):
-    """Estimate Tweedie p via profile likelihood, refit, and return result."""
+    """Estimate Tweedie p and atomically publish one profiled final fit."""
+    from superglm.model import fit_ops
+    from superglm.model.fit_state import _install_fit_state, capture_fit_state
+    from superglm.model.fit_workspace import FitWorkspace
     from superglm.profiling.tweedie import estimate_tweedie_p
 
     resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
 
-    result = estimate_tweedie_p(
+    X_ref = X
+    y_ref = y
+    sample_weight_ref = sample_weight
+    offset_ref = offset
+    X, y, sample_weight, offset = fit_ops._validate_entrypoint_input(
         model,
+        X,
+        y,
+        sample_weight,
+        offset,
+    )
+    validated_inputs = (X, y, sample_weight, offset)
+
+    # Profiling is attempt-local too: lazy CI closures may retain this model,
+    # but can never retain or mutate the caller's installed fitted revision.
+    profile_workspace = FitWorkspace.start(
+        model,
+        mode="estimate_p_profile",
+        validated_inputs=validated_inputs,
+    )
+    result = estimate_tweedie_p(
+        profile_workspace.model,
         X,
         y,
         sample_weight=sample_weight,
@@ -42,33 +66,110 @@ def estimate_p(
         method=method,
         **kwargs,
     )
+    del profile_workspace
     if progress_callback is not None:
         progress_callback("best_found", {"profile_estimate": _tweedie_estimate_payload(result)})
-    model.family = Tweedie(p=result.p_hat)
 
-    # Refit with the same regime used for profiling (clears stale profile results)
     if progress_callback is not None:
         progress_callback("final_refit", {"profile_estimate": _tweedie_estimate_payload(result)})
-    retain_fit_state = model._retain_fit_state
-    try:
-        model._retain_fit_state = True
-        if resolved_mode == "fit_reml":
-            model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
-        else:
-            model.fit(X, y, sample_weight=sample_weight, offset=offset)
-        _synchronize_tweedie_profile_refit(model, y, result)
-    finally:
-        model._retain_fit_state = retain_fit_state
 
-    if not retain_fit_state:
-        from superglm.model import fit_ops
+    selected_family = Tweedie(p=result.p_hat)
+    selected_config = model._config.with_value(family=selected_family)
+    final_workspace = FitWorkspace.start(
+        model,
+        mode=resolved_mode,
+        validated_inputs=validated_inputs,
+        config_overrides={
+            "family": selected_family,
+            # Synchronization needs fitted rows even when the durable public
+            # state is compact. Release them only after phi and fit statistics
+            # have been revised on this private candidate.
+            "retain_fit_state": True,
+        },
+    )
+    debug_recorder = None
+    if resolved_mode == "fit_reml":
+        debug_recorder = fit_ops._fit_reml_in_workspace(
+            final_workspace.model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+            pirls_tol=final_workspace.model._tol,
+            max_pirls_iter=final_workspace.model._max_iter,
+        )
+    else:
+        fit_ops._fit_in_workspace(
+            final_workspace.model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+        )
 
-        fit_ops._maybe_release_fit_state(model)
+    final_model = final_workspace.model
+    _synchronize_tweedie_profile_refit(final_model, y, result)
+    if not model._retain_fit_state:
+        final_model._retain_fit_state = False
+        fit_ops._maybe_release_fit_state(final_model)
+    # Install last on the private candidate too: any state carrying this
+    # result has already been synchronized and, if requested, compacted.
+    installed_result = _installed_tweedie_profile_copy(result)
+    final_model._tweedie_profile_result = installed_result
 
-    # Install last: a model advertising this result has fully synchronized state.
-    model._tweedie_profile_result = result
+    candidate = capture_fit_state(
+        final_workspace,
+        model,
+        revision=model._fit_revision + 1,
+    )
+    # A successful public estimate_p() historically stages the selected p for
+    # future fits. Prepare that configuration revision before the single
+    # dictionary-swap commit; failures above leave every caller identity intact.
+    candidate.prepared_model_dict["_config"] = selected_config
+    candidate.prepared_model_dict["_family_config"] = final_model._family_config
+    candidate.prepared_model_dict["_config_revision"] = model._config_revision + 1
+    _install_fit_state(model, candidate)
+    if resolved_mode == "fit_reml":
+        fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
 
     return result
+
+
+_TWEEDIE_PROFILE_SHARED_RUNTIME_FIELDS = frozenset(
+    {
+        "_objective",
+        "_evaluation_count",
+        "_evaluation_record",
+    }
+)
+
+
+def _installed_tweedie_profile_copy(result):
+    """Detach published estimates while retaining lazy-CI runtime caches.
+
+    The public result remains usable for later lazy likelihood-ratio inference.
+    Its objective/evaluation registry is shared, but estimate-dependent CI
+    caches are independently owned: mutating a returned estimate and then
+    calling ``ci()`` must not poison the installed model's connected profile
+    component. Core estimates and reporting containers are independent too.
+    """
+    installed = copy.copy(result)
+    field_names = (
+        (field.name for field in fields(result)) if is_dataclass(result) else iter(vars(result))
+    )
+    for field_name in field_names:
+        if field_name in _TWEEDIE_PROFILE_SHARED_RUNTIME_FIELDS:
+            continue
+        setattr(installed, field_name, copy.deepcopy(getattr(result, field_name)))
+    return installed
 
 
 def _replace_dataclass_preserving_dynamic_attributes(instance, **changes):
@@ -132,7 +233,6 @@ def _synchronize_tweedie_profile_refit(model, y, profile_result) -> None:
         )
     )
 
-    model.family = distribution
     model._result = replacement_public
     model._solver_result = replacement_solver
     if reml_result is not None:

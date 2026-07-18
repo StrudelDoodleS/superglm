@@ -403,7 +403,13 @@ def test_summary_export_marks_selected_away_parametric_and_level_rows_inactive()
 def test_summary_export_does_not_make_nonfinite_selected_away_row_active():
     model = _fit_selected_away_export_model()
     assert tuple(model.result.rank_info.selected_group_names) == ()
-    model.result.beta[0] = np.nan
+    # Deliberately inject an invalid private candidate to exercise the exporter's
+    # defensive handling.  Published results correctly reject in-place mutation.
+    private_result = model.result._mutable_copy()
+    private_result.beta[0] = np.nan
+    model._result = private_result
+    model._solver_result = private_result
+    model._summary_cache = None
 
     row = next(row for row in build_summary_export_payload(model).terms if row.term == "x")
 

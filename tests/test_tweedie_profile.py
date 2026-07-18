@@ -2366,51 +2366,54 @@ class TestEstimatePFitMode:
         result = _deterministic_profile_result()
         monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", lambda *args, **kwargs: result)
 
-        fit_name = "fit_reml" if fit_mode == "reml" else "fit"
-        real_final_fit = getattr(model, fit_name)
+        fit_name = "_fit_reml_in_workspace" if fit_mode == "reml" else "_fit_in_workspace"
+        real_final_fit = getattr(fit_ops_module, fit_name)
         captured = {}
 
-        def final_fit_with_primed_caches(*args, **kwargs):
-            captured["retain_during_fit"] = model._retain_fit_state
+        def final_fit_with_primed_caches(candidate, *args, **kwargs):
+            captured["retain_during_fit"] = candidate._retain_fit_state
             if fit_mode == "reml":
                 kwargs["max_reml_iter"] = 3
-            fitted = real_final_fit(*args, **kwargs)
-            captured["public_result"] = model.result
-            captured["solver_result"] = model._solver_pirls_result()
-            captured["reml_result"] = model._reml_result
-            captured["reml_lambdas"] = model._reml_lambdas
-            captured["reml_penalties"] = model._reml_penalties
-            captured["fit_meta"] = model._last_fit_meta
-            captured["runtime_state"] = model._runtime_canonical_state
-            captured["prediction_plan"] = model._prediction_plan
-            captured["fast_prediction_state"] = model._fast_prediction_state
+            fitted = real_final_fit(candidate, *args, **kwargs)
+            captured["public_result"] = candidate.result
+            captured["solver_result"] = candidate._solver_pirls_result()
+            captured["reml_result"] = candidate._reml_result
+            captured["reml_lambdas"] = candidate._reml_lambdas
+            captured["reml_penalties"] = candidate._reml_penalties
+            captured["fit_meta"] = candidate._last_fit_meta
+            captured["runtime_state"] = candidate._runtime_canonical_state
+            captured["prediction_plan"] = candidate._prediction_plan
+            captured["fast_prediction_state"] = candidate._fast_prediction_state
             # Before the fix, retain=False has already released these rows.  Skip
             # cache priming so the regression fails at the production access.
-            if model._dm is None:
+            if candidate._dm is None:
                 return fitted
 
             solver = captured["solver_result"]
-            captured["public_dynamic_metadata"] = object()
-            captured["solver_dynamic_metadata"] = np.array([1.0, 2.0])
-            model.result.profile_sync_metadata = captured["public_dynamic_metadata"]
+            # Keep the metadata comparison independent of publication's
+            # intentional ownership copy; the unit test below checks that the
+            # phi-only replacement itself preserves dynamic values by identity.
+            captured["public_dynamic_metadata"] = ("public-profile-metadata",)
+            captured["solver_dynamic_metadata"] = (1.0, 2.0)
+            candidate.result.profile_sync_metadata = captured["public_dynamic_metadata"]
             solver.profile_sync_metadata = captured["solver_dynamic_metadata"]
-            if model._reml_result is not None:
-                captured["reml_dynamic_metadata"] = {"future": np.array([3.0, 4.0])}
-                model._reml_result.profile_sync_metadata = captured["reml_dynamic_metadata"]
-            eta = model._dm.matvec(solver.beta) + solver.intercept + model._fit_offset
-            eta = stabilize_eta(eta, model._link)
-            captured["solver_mu"] = clip_mu(model._link.inverse(eta), model._distribution)
-            captured["old_covariance"] = model._coef_covariance
-            captured["old_active_info"] = model._fit_active_info
-            captured["old_inference_info"] = model._fit_inference_info
-            captured["old_group_edf"] = model._group_edf
-            captured["old_metrics"] = model.metrics(
+            if candidate._reml_result is not None:
+                captured["reml_dynamic_metadata"] = ("reml-profile-metadata",)
+                candidate._reml_result.profile_sync_metadata = captured["reml_dynamic_metadata"]
+            eta = candidate._dm.matvec(solver.beta) + solver.intercept + candidate._fit_offset
+            eta = stabilize_eta(eta, candidate._link)
+            captured["solver_mu"] = clip_mu(candidate._link.inverse(eta), candidate._distribution)
+            captured["old_covariance"] = candidate._coef_covariance
+            captured["old_active_info"] = candidate._fit_active_info
+            captured["old_inference_info"] = candidate._fit_inference_info
+            captured["old_group_edf"] = candidate._group_edf
+            captured["old_metrics"] = candidate.metrics(
                 X, y, sample_weight=sample_weight, offset=offset
             )
-            captured["old_summary"] = model.summary()
+            captured["old_summary"] = candidate.summary()
             return fitted
 
-        monkeypatch.setattr(model, fit_name, final_fit_with_primed_caches)
+        monkeypatch.setattr(fit_ops_module, fit_name, final_fit_with_primed_caches)
         real_release = fit_ops_module._maybe_release_fit_state
         release_events = []
 
@@ -2435,23 +2438,32 @@ class TestEstimatePFitMode:
         assert returned is result
         assert captured["retain_during_fit"] is True
         assert model._retain_fit_state is retain_fit_state
-        assert model._tweedie_profile_result is result
+        assert model._tweedie_profile_result is not result
+        assert model._tweedie_profile_result._ci_cache is not result._ci_cache
+        assert model._tweedie_profile_result._ci_details_cache is not result._ci_details_cache
         assert all(profile_result is None for _, profile_result in release_events)
         expected_release_flags = [True] if retain_fit_state else [True, False]
         assert [flag for flag, _ in release_events] == expected_release_flags
 
-        assert model.family is model._distribution
         assert model.family.p == pytest.approx(result.p_hat)
+        assert model.distribution_.p == pytest.approx(result.p_hat)
+        assert model._fit_state.distribution is model._distribution
         assert model.result.phi == pytest.approx(result.phi_hat)
         assert model._solver_pirls_result().phi == pytest.approx(result.phi_hat)
         assert model.result is not captured["public_result"]
         assert model._solver_pirls_result() is not captured["solver_result"]
-        assert model.result.beta is captured["public_result"].beta
-        assert model._solver_pirls_result().beta is captured["solver_result"].beta
-        assert model.result.profile_sync_metadata is captured["public_dynamic_metadata"]
+        np.testing.assert_array_equal(model.result.beta, captured["public_result"].beta)
+        np.testing.assert_array_equal(
+            model._solver_pirls_result().beta, captured["solver_result"].beta
+        )
+        assert not np.shares_memory(model.result.beta, captured["public_result"].beta)
+        assert not np.shares_memory(
+            model._solver_pirls_result().beta, captured["solver_result"].beta
+        )
+        assert model.result.profile_sync_metadata == captured["public_dynamic_metadata"]
         assert (
             model._solver_pirls_result().profile_sync_metadata
-            is captured["solver_dynamic_metadata"]
+            == captured["solver_dynamic_metadata"]
         )
         assert captured["public_result"].phi != pytest.approx(result.phi_hat)
         assert captured["solver_result"].phi != pytest.approx(result.phi_hat)
@@ -2468,7 +2480,7 @@ class TestEstimatePFitMode:
             assert model._reml_result.lambda_history is captured["reml_result"].lambda_history
             assert model._reml_lambdas is captured["reml_lambdas"]
             assert model._reml_penalties is captured["reml_penalties"]
-            assert model._reml_result.profile_sync_metadata is captured["reml_dynamic_metadata"]
+            assert model._reml_result.profile_sync_metadata == captured["reml_dynamic_metadata"]
         else:
             assert model._reml_result is None
 
@@ -2561,6 +2573,20 @@ class TestEstimatePFitMode:
             expected_explained_deviance
         )
 
+        # The returned handle may remain convenient and cache-compatible, but
+        # mutating its public estimate fields must not rewrite installed fit
+        # provenance or the model's reporting state.
+        returned.p_hat = 1.91
+        returned.phi_hat = 91.0
+        returned._ci_cache[0.05] = (1.85, 1.95)
+        assert model._tweedie_profile_result.p_hat == pytest.approx(1.47)
+        assert model._tweedie_profile_result.phi_hat == pytest.approx(7.25)
+        assert model._tweedie_profile_result._ci_cache == {}
+        immutable_summary = model.summary()
+        assert immutable_summary._info["tweedie_p"] == pytest.approx(1.47)
+        assert immutable_summary._info["tweedie_phi"] == pytest.approx(7.25)
+        assert immutable_summary._info["tweedie_p_ci_status"] == "not computed"
+
     @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
     @pytest.mark.parametrize("retain_fit_state", [True, False])
     def test_final_profile_refit_failure_restores_retention_without_installing_result(
@@ -2576,13 +2602,17 @@ class TestEstimatePFitMode:
         result = _deterministic_profile_result()
         monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", lambda *args, **kwargs: result)
         seen_retain_flags = []
+        config_before = model._config
+        family_before = model._family_config
+        config_revision_before = model._config_revision
+        fit_revision_before = model._fit_revision
 
-        def failing_final_fit(*args, **kwargs):
-            seen_retain_flags.append(model._retain_fit_state)
+        def failing_final_fit(candidate, *args, **kwargs):
+            seen_retain_flags.append(candidate._retain_fit_state)
             raise RuntimeError("final refit failed")
 
-        fit_name = "fit_reml" if fit_mode == "reml" else "fit"
-        monkeypatch.setattr(model, fit_name, failing_final_fit)
+        fit_name = "_fit_reml_in_workspace" if fit_mode == "reml" else "_fit_in_workspace"
+        monkeypatch.setattr(fit_ops_module, fit_name, failing_final_fit)
 
         with pytest.raises(RuntimeError, match="final refit failed"):
             model.estimate_p(
@@ -2596,6 +2626,10 @@ class TestEstimatePFitMode:
         assert seen_retain_flags == [True]
         assert model._retain_fit_state is retain_fit_state
         assert model._tweedie_profile_result is None
+        assert model._config is config_before
+        assert model._family_config is family_before
+        assert model._config_revision == config_revision_before
+        assert model._fit_revision == fit_revision_before
 
     def test_pirls_phi_replacement_preserves_declared_and_dynamic_state(self):
         beta = np.array([0.25, -0.5])
@@ -2685,7 +2719,17 @@ class TestEstimatePFitMode:
         assert result._ci_cache[0.05] is interval
 
         summary = model.summary(alpha=0.05)
-        assert summary._info["tweedie_p_ci"] is interval
+        assert summary._info["tweedie_p_ci"] is None
+        assert summary._info["tweedie_p_ci_status"] == "not computed"
+
+        installed_interval = TweedieProfileResult.ci(
+            model._tweedie_profile_result,
+            alpha=0.05,
+        )
+        assert installed_interval == pytest.approx(interval)
+        assert installed_interval is not interval
+        summary = model.summary(alpha=0.05)
+        assert summary._info["tweedie_p_ci"] is installed_interval
         assert summary._info["tweedie_p_ci_status"] == "available"
 
     def test_progress_payload_ignores_stale_pearson_lr_cache(self):
@@ -2711,7 +2755,8 @@ class TestEstimatePFitMode:
         )
         invalid_weights = np.ones(len(y), dtype=np.complex128)
         invalid_weights[3] = 1.0 + 1.0j
-        family_before = model.family
+        family_before = model._family_config
+        config_before = model._config
 
         with pytest.raises(ValueError, match="weights must be finite and strictly positive"):
             model.estimate_p(
@@ -2722,7 +2767,8 @@ class TestEstimatePFitMode:
                 phi_method="pearson",
             )
 
-        assert model.family is family_before
+        assert model._family_config is family_before
+        assert model._config is config_before
         assert model._specs == {}
         assert model._feature_order == []
 
@@ -2735,7 +2781,8 @@ class TestEstimatePFitMode:
             splines=[],
         )
         invalid_weights = np.ones(len(y) - 1)
-        family_before = model.family
+        family_before = model._family_config
+        config_before = model._config
         result_before = model._result
         distribution_before = model._distribution
         specs_before = dict(model._specs)
@@ -2752,7 +2799,8 @@ class TestEstimatePFitMode:
                 grid=np.array([1.5]),
             )
 
-        assert model.family is family_before
+        assert model._family_config is family_before
+        assert model._config is config_before
         assert model._result is result_before
         assert model._distribution is distribution_before
         assert model._specs == specs_before
@@ -2768,7 +2816,8 @@ class TestEstimatePFitMode:
         )
         model.fit(X, y)
         invalid_weights = np.ones(len(y) - 1)
-        family_before = model.family
+        family_before = model._family_config
+        config_before = model._config
         result_before = model._result
         distribution_before = model._distribution
         profile_result_before = model._tweedie_profile_result
@@ -2785,7 +2834,8 @@ class TestEstimatePFitMode:
                 grid=np.array([1.5]),
             )
 
-        assert model.family is family_before
+        assert model._family_config is family_before
+        assert model._config is config_before
         assert model._result is result_before
         assert model._distribution is distribution_before
         assert model._tweedie_profile_result is profile_result_before
@@ -3185,6 +3235,14 @@ class TestProfileFitParity:
         assert cloned._marginal1 is not None
         assert cloned._marginal2 is not None
         assert cloned._R_inv is not None
+
+        rematerialized = clone._config.materialize(type(clone))
+        assert rematerialized._interaction_order == ["custom_surface"]
+        assert rematerialized._pending_interactions == ()
+        configured = rematerialized._interaction_specs["custom_surface"]
+        assert configured.parent_names == ("x1", "x2")
+        assert configured._n_knots == (3, 4)
+        assert configured._decompose is True
 
     def test_profile_clone_deep_copies_resolved_custom_tensor_state(self):
         model, X = self._resolved_custom_tensor_model()

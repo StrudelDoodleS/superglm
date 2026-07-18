@@ -65,6 +65,7 @@ _MULTI_SCOP_DISCRETE_MIN_STABLE_ITERS = 3
 _MULTI_SCOP_DISCRETE_ACTIVE_PLATEAU_TOL = 5.0e-3
 _MULTI_SCOP_DISCRETE_OBJ_REL_TOL = 1.0e-6
 _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS = 8
+_SCOP_EFS_MAX_REFLECTED_ATTEMPTS = 4
 
 
 @dataclass(frozen=True)
@@ -684,6 +685,54 @@ def _evaluate_scop_reml_mode(
     )
 
 
+def _scop_mode_newton_relative(mode: _SCOPREMLMode) -> float:
+    """Return the estimable-range Newton correction for mode certification.
+
+    Componentwise relative scores are deliberately retained as a diagnostic,
+    but they are not a sufficient convergence test at a flat SCOP boundary.
+    There the exponential Jacobian and the exact penalty score both vanish,
+    so harmless penalty-matvec noise can have an order-one *relative* score.
+    The factor-certified pseudoinverse instead measures the coefficient
+    correction on the estimable range, as required for the rank-deficient
+    latent geometry described by Pya and Wood.
+    """
+    geometry = mode.joint_geometry
+    score = mode.mode_score
+    latent_beta = np.asarray(mode.result.beta, dtype=np.float64).copy()
+    fisher_transformed_mean = np.asarray(mode.fisher_mean_x, dtype=np.float64).copy()
+    for state in mode.scop_states.values():
+        group_slice = state["group_sl"]
+        latent_beta[group_slice] = np.asarray(state["beta_eff"], dtype=np.float64)
+        fisher_transformed_mean[group_slice] *= _scop_jacobian_diag(state)
+
+    geometry_mean = geometry.transformed_mean_x
+    if geometry_mean is None:
+        geometry_mean = geometry.transformed_intercept_cross / geometry.sum_w
+    geometry_mean = np.asarray(geometry_mean, dtype=np.float64)
+
+    # ``score.slopes`` is profiled with the retained Fisher mean. Reconstruct
+    # the raw slope score, then profile it with the curvature actually used by
+    # this mode (observed or Fisher) before applying that same pseudoinverse.
+    raw_slope_score = score.slopes + fisher_transformed_mean * score.intercept
+    profiled_score = raw_slope_score - geometry_mean * score.intercept
+    slope_correction = geometry.hessian_inverse @ profiled_score
+    intercept_correction = (
+        score.intercept - float(geometry.transformed_intercept_cross @ slope_correction)
+    ) / geometry.sum_w
+
+    slope_relative = float(
+        np.max(
+            np.abs(slope_correction) / np.maximum(1.0, np.abs(latent_beta)),
+            initial=0.0,
+        )
+    )
+    intercept_relative = abs(intercept_correction) / max(
+        1.0,
+        abs(float(mode.result.intercept)),
+    )
+    return max(slope_relative, intercept_relative)
+
+
 def _fit_scop_reml_mode(
     context: _SCOPREMLFitContext,
     lambdas: dict[str, float],
@@ -823,35 +872,6 @@ def _fit_scop_reml_mode(
             max_abs=0.0,
             relative_max=0.0,
         )
-    mode_tolerance = max(
-        10.0 * min(context.pirls_tol, 1.0e-8),
-        100.0 * np.finfo(np.float64).eps,
-    )
-    if mode_score.relative_max > mode_tolerance:
-        if _certification_retry == 0:
-            retry_context = replace(context, pirls_tol=min(context.pirls_tol, 1.0e-10))
-            centered_scale = np.sqrt(np.maximum(np.diag(centered_xtwx), 0.0) / sum_w)
-            warm_retry = _raw_centering_well_scaled(fisher_mean_x, centered_scale)
-            return _fit_scop_reml_mode(
-                retry_context,
-                lambdas,
-                beta_init=result.beta.copy() if warm_retry else None,
-                intercept_init=float(result.intercept) if warm_retry else None,
-                scop_state_init=(scop_states if scop_states and warm_retry else None),
-                phase=phase,
-                reml_iteration=reml_iteration,
-                line_search_iteration=line_search_iteration,
-                trial_alpha=trial_alpha,
-                require_converged=require_converged,
-                _certification_retry=1,
-            )
-        if require_converged:
-            return None
-        raise RuntimeError(
-            "SCOP coefficient mode failed latent penalized-score certification "
-            f"(relative score={mode_score.relative_max:.3e}, "
-            f"tolerance={mode_tolerance:.3e})"
-        )
     mode = _evaluate_scop_reml_mode(
         context,
         lambdas,
@@ -866,6 +886,41 @@ def _fit_scop_reml_mode(
         mode_score=mode_score,
         eta_unclipped=working_cache.get("eta_unclipped"),
     )
+    mode_newton_relative = _scop_mode_newton_relative(mode)
+    mode_tolerance = max(
+        10.0 * min(context.pirls_tol, 1.0e-10),
+        np.sqrt(np.finfo(np.float64).eps),
+    )
+    if mode_newton_relative > mode_tolerance:
+        if _certification_retry < 2:
+            retry_tolerance = 10.0 ** (-10 - _certification_retry)
+            retry_context = replace(
+                context,
+                pirls_tol=min(context.pirls_tol, retry_tolerance),
+            )
+            centered_scale = np.sqrt(np.maximum(np.diag(centered_xtwx), 0.0) / sum_w)
+            warm_retry = _raw_centering_well_scaled(fisher_mean_x, centered_scale)
+            return _fit_scop_reml_mode(
+                retry_context,
+                lambdas,
+                beta_init=result.beta.copy() if warm_retry else None,
+                intercept_init=float(result.intercept) if warm_retry else None,
+                scop_state_init=(scop_states if scop_states and warm_retry else None),
+                phase=phase,
+                reml_iteration=reml_iteration,
+                line_search_iteration=line_search_iteration,
+                trial_alpha=trial_alpha,
+                require_converged=require_converged,
+                _certification_retry=_certification_retry + 1,
+            )
+        if require_converged:
+            return None
+        raise RuntimeError(
+            "SCOP coefficient mode failed latent penalized-score certification "
+            f"(relative score={mode_score.relative_max:.3e}, "
+            f"relative Newton correction={mode_newton_relative:.3e}, "
+            f"tolerance={mode_tolerance:.3e})"
+        )
     if trace_run is not None and trace_run.enabled:
         if result.state_id is None:  # pragma: no cover - trace contract
             raise RuntimeError("traced SCOP REML evaluation is missing its coefficient state ID")
@@ -1043,8 +1098,11 @@ def _backtrack_scop_efs_candidate(
     """Fit and score repeatedly damped log-lambda trials.
 
     The returned boolean is false only when every attempted converged candidate
-    is uphill (or every inner solve fails).  In that case the exact current
-    fitted mode is returned, so callers cannot accidentally publish an
+    in both the proposed and reflected directions is uphill (or every inner
+    solve fails).  Reflection is a safeguarded fallback for EFS directions,
+    whose expected-curvature update need not remain a descent direction for
+    the exact LAML objective near a mode.  In the failure case the exact
+    current fitted mode is returned, so callers cannot accidentally publish an
     unevaluated lambda movement.
     """
     if max_attempts < 1:
@@ -1058,37 +1116,51 @@ def _backtrack_scop_efs_candidate(
     if not changed_names:
         return current, True
 
-    for attempt in range(max_attempts):
-        alpha = 0.5**attempt
-        trial_lambdas = current.lambdas.copy()
-        for name in changed_names:
-            old = float(current.lambdas[name])
-            proposed = float(proposed_lambdas[name])
-            if old <= 0.0 or proposed <= 0.0 or not np.isfinite(old + proposed):
-                raise ValueError("SCOP EFS lambda trials must be positive and finite")
-            log_trial = np.log(old) + alpha * (np.log(proposed) - np.log(old))
-            trial_lambdas[name] = float(np.clip(np.exp(log_trial), 1.0e-6, 1.0e10))
+    log_directions: dict[str, float] = {}
+    for name in changed_names:
+        old = float(current.lambdas[name])
+        proposed = float(proposed_lambdas[name])
+        if old <= 0.0 or proposed <= 0.0 or not np.isfinite(old + proposed):
+            raise ValueError("SCOP EFS lambda trials must be positive and finite")
+        log_directions[name] = float(np.log(proposed) - np.log(old))
 
-        candidate = _fit_scop_reml_mode(
-            context,
-            trial_lambdas,
-            beta_init=current.result.beta,
-            intercept_init=float(current.result.intercept),
-            scop_state_init=current.scop_states if current.scop_states else None,
-            phase="line_search",
-            reml_iteration=reml_iteration,
-            line_search_iteration=attempt + 1,
-            trial_alpha=alpha,
-            require_converged=True,
+    trial_number = 0
+    for direction_sign in (1.0, -1.0):
+        direction_attempts = (
+            max_attempts
+            if direction_sign > 0.0
+            else min(max_attempts, _SCOP_EFS_MAX_REFLECTED_ATTEMPTS)
         )
-        if candidate is None:
-            continue
-        tolerance = 1.0e-8 * max(abs(current.objective), 1.0)
-        if (
-            np.isfinite(candidate.objective)
-            and candidate.objective <= current.objective + tolerance
-        ):
-            return candidate, True
+        for attempt in range(direction_attempts):
+            alpha = direction_sign * 0.5**attempt
+            trial_lambdas = current.lambdas.copy()
+            for name in changed_names:
+                log_trial = np.log(current.lambdas[name]) + alpha * log_directions[name]
+                trial_lambdas[name] = float(np.clip(np.exp(log_trial), 1.0e-6, 1.0e10))
+
+            trial_number += 1
+            candidate = _fit_scop_reml_mode(
+                context,
+                trial_lambdas,
+                beta_init=current.result.beta,
+                intercept_init=float(current.result.intercept),
+                scop_state_init=current.scop_states if current.scop_states else None,
+                phase="line_search",
+                reml_iteration=reml_iteration,
+                line_search_iteration=trial_number,
+                trial_alpha=alpha,
+                require_converged=True,
+            )
+            if candidate is None:
+                continue
+            tolerance = 1.0e-8 * max(abs(current.objective), 1.0)
+            candidate_is_acceptable = (
+                candidate.objective <= current.objective + tolerance
+                if direction_sign > 0.0
+                else candidate.objective < current.objective
+            )
+            if np.isfinite(candidate.objective) and candidate_is_acceptable:
+                return candidate, True
 
     return current, False
 

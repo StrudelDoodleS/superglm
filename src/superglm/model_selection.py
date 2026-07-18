@@ -102,7 +102,7 @@ class CrossValidationResult:
 
 def _clone_model(model):
     """Create a fresh (unfitted) copy of *model* preserving constructor config."""
-    return model._config.materialize(type(model))
+    return model.clone_unfitted()
 
 
 # ── Built-in scorers ─────────────────────────────────────────────

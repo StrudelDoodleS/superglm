@@ -116,6 +116,7 @@ def _evaluate_irls_state(
 
 
 StateInvalid = Callable[[_IRLSState], bool]
+MeritDelta = Callable[[_IRLSState, _IRLSState], float]
 
 
 def _state_is_finite(state: _IRLSState) -> bool:
@@ -141,6 +142,7 @@ def _irls_trial_is_unsafe(
     candidate: _IRLSState,
     committed: _IRLSState,
     invalid_state: StateInvalid | None = None,
+    merit_delta: MeritDelta | None = None,
 ) -> bool:
     """Reject invalid states or a material increase in the fitted objective."""
     if not _state_is_finite(candidate):
@@ -163,6 +165,9 @@ def _irls_trial_is_unsafe(
             abs(committed_merit),
         )
     )
+    if merit_delta is not None:
+        delta = float(merit_delta(candidate, committed))
+        return not np.isfinite(delta) or bool(delta > roundoff)
     return bool(candidate_merit > committed_merit + roundoff)
 
 
@@ -173,17 +178,18 @@ def _select_irls_trial(
     evaluate_state: Callable[[float], _IRLSState],
     invalid_state: StateInvalid | None = None,
     max_halving: int = 20,
+    merit_delta: MeritDelta | None = None,
 ) -> _IRLSStepDecision:
     """Return the largest safe fixed-endpoint trial, or reject atomically."""
     if max_halving < 1:
         raise ValueError("max_halving must be at least 1")
-    if not _irls_trial_is_unsafe(proposal, committed, invalid_state):
+    if not _irls_trial_is_unsafe(proposal, committed, invalid_state, merit_delta):
         return _IRLSStepDecision(1.0, 0, False, trials_attempted=1)
 
     for depth in range(1, max_halving + 1):
         alpha = 2.0**-depth
         candidate = evaluate_state(alpha)
-        if not _irls_trial_is_unsafe(candidate, committed, invalid_state):
+        if not _irls_trial_is_unsafe(candidate, committed, invalid_state, merit_delta):
             return _IRLSStepDecision(alpha, depth, False, trials_attempted=depth + 1)
 
     return _IRLSStepDecision(0.0, 0, True, trials_attempted=max_halving + 1)

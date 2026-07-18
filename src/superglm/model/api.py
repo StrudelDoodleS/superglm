@@ -189,6 +189,58 @@ class SuperGLM:
         n_features = len(self._specs) if self._specs else "?"
         return f"SuperGLM(family={family}, fitted=False, {n_features} features)"
 
+    def clone_unfitted(self) -> SuperGLM:
+        """Return an independent unfitted model with the same constructor intent.
+
+        The inherited implementation owns the :class:`SuperGLM` constructor
+        contract. Subclasses that add constructor parameters must override this
+        method so their additional configuration cannot be silently reset.
+        """
+        if type(self) is SuperGLM:
+            return self._config.materialize(SuperGLM)
+
+        import inspect
+        import warnings
+
+        base_parameters = set(inspect.signature(SuperGLM.__init__).parameters) - {"self"}
+        subclass_parameters = inspect.signature(type(self).__init__).parameters
+        additional_parameters = {
+            name
+            for name, parameter in subclass_parameters.items()
+            if name != "self"
+            and parameter.kind
+            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            and name not in base_parameters
+        }
+        if additional_parameters:
+            raise TypeError(
+                f"{type(self).__name__} adds constructor configuration "
+                f"{sorted(additional_parameters)!r}; override clone_unfitted() "
+                "to preserve it explicitly"
+            )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="convergence='coefficients' is experimental",
+                category=UserWarning,
+            )
+            try:
+                cloned = type(self)(**self._config.constructor_kwargs())
+            except TypeError as exc:
+                raise TypeError(
+                    f"{type(self).__name__} cannot be reconstructed from the "
+                    "SuperGLM constructor contract; override clone_unfitted()"
+                ) from exc
+
+        cloned._interaction_specs = {
+            name: copy.deepcopy(spec) for name, spec in self._config.interaction_templates
+        }
+        cloned._interaction_order = list(self._config.interaction_order)
+        cloned._pending_interactions = tuple(self._config.interactions)
+        cloned._config = type(self._config).capture(cloned)
+        return cloned
+
     @property
     def features(self) -> dict:
         """Defensive fitted/configured feature-spec view."""
