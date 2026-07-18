@@ -56,6 +56,7 @@ def test_tweedie_family_guide_documents_current_profile_contract():
     assert "REML selects spline smoothing penalties" in tweedie
     assert "does not jointly estimate *p* and φ" in tweedie
     assert "certified compound-Poisson/Gamma series" in tweedie
+    assert "certified exact modified-Bessel resummation" in tweedie
     assert "never select a saddlepoint approximation" in tweedie
     assert "near *p*=1 and *p*=2" in tweedie
 
@@ -71,6 +72,7 @@ def test_tweedie_notebook_removes_stale_pearson_default_claims():
     assert "Zero-weight observations must be removed" in source
     assert "REML selects spline smoothing penalties" in source
     assert "certified compound-Poisson/Gamma series" in source
+    assert "exact modified-Bessel" in source
     assert "never selects a saddlepoint approximation" in source
     assert "near `p=1` and `p=2`" in source
 

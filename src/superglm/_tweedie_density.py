@@ -29,6 +29,8 @@ _LONGDOUBLE_EPS = np.finfo(np.longdouble).eps
 _FLOAT_MAX = np.finfo(np.float64).max
 _DECIMAL_PARAMETER_PRECISION = 96
 _DIRECT_REANCHOR_INTERVAL = 4
+_BESSEL_ASYMPTOTIC_MIN_ARGUMENT = Decimal("1000")
+_BESSEL_ASYMPTOTIC_TERMS = 12
 _DECIMAL_LOG_TWO_PI = Decimal(
     "1.8378770664093454835606594728112352797227949472755668256343030809655313918545"
 )
@@ -109,6 +111,7 @@ class _SeriesResult:
     log_phi_score: float
     term_count: int
     relative_error: float
+    method: str = "compound_poisson_series"
 
 
 _LogTerm = tuple[np.longdouble, float]
@@ -798,6 +801,134 @@ def _alpha_one_term_budget_is_provably_insufficient(
     return binomial_lower_bound > max_terms * Fraction.from_float(requested_rtol)
 
 
+def _bessel_asymptotic_interval(
+    order: int,
+    argument: Decimal,
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Bound ``exp(-x) * sqrt(2*pi*x) * I_order(x)`` for large ``x``.
+
+    The finite sum is Hankel's large-argument expansion.  The remainder bound
+    follows by applying the DLMF 10.40.10--12 bound to ``K_order(-x)`` and the
+    exact integer-order continuation identity relating that value to
+    ``I_order(x)``.  Only orders zero and one are needed by the alpha-one
+    Tweedie score.  The deliberately loose ``terms + 1`` bound for
+    ``chi(terms)`` keeps the implementation small while remaining far below
+    the requested tolerance in this branch.
+    """
+    coefficient = Decimal(1)
+    inverse_power = Decimal(1)
+    dominant_sum = Decimal(1)
+    dominant_correction = Decimal(0)
+    recessive_sum = Decimal(1)
+    next_term = Decimal(0)
+
+    for index in range(1, _BESSEL_ASYMPTOTIC_TERMS + 1):
+        odd = 2 * index - 1
+        coefficient *= Decimal(4 * order * order - odd * odd) / Decimal(8 * index)
+        inverse_power /= argument
+        term = coefficient * inverse_power
+        if index < _BESSEL_ASYMPTOTIC_TERMS:
+            signed_term = term if index % 2 == 0 else -term
+            dominant_sum += signed_term
+            dominant_correction += signed_term
+            recessive_sum += term
+        else:
+            next_term = abs(term)
+
+    # On the negative real ray the K remainder contributes at most
+    # 4*chi(l)*|a_l|/x**l*exp(3*pi/(4*x)).  Here chi(l) < l + 1 and
+    # 3*pi/4 < 4.  The positive-ray K term is exponentially recessive;
+    # x >= 1000 makes exp(-2000) a conservative bound for exp(-2*x).
+    continuation_radius = (
+        Decimal(4 * (_BESSEL_ASYMPTOTIC_TERMS + 1)) * next_term * (Decimal(4) / argument).exp()
+    )
+    recessive_radius = Decimal(-2000).exp() * (abs(recessive_sum) + next_term)
+    decimal_rounding_radius = Decimal(64).scaleb(-_DECIMAL_PARAMETER_PRECISION + 4)
+    radius = continuation_radius + recessive_radius + decimal_rounding_radius
+    return dominant_sum, dominant_correction, radius
+
+
+def _certified_alpha_one_bessel(
+    parameters: _CompoundParameters,
+    *,
+    requested_rtol: float,
+    max_terms: int,
+) -> _SeriesResult | None:
+    """Return the exact alpha-one Bessel resummation when it certifies cheaply."""
+    if parameters.power_input != 1.5 or max_terms < _BESSEL_ASYMPTOTIC_TERMS:
+        return None
+
+    try:
+        with localcontext() as context:
+            context.prec = _DECIMAL_PARAMETER_PRECISION
+            y = Decimal.from_float(parameters.y_input)
+            mu = Decimal.from_float(parameters.mu_input)
+            effective_phi = Decimal.from_float(parameters.phi_input) / Decimal.from_float(
+                parameters.weight_input
+            )
+            root_y = y.sqrt()
+            root_mu = mu.sqrt()
+            product = Decimal(4) * y / (effective_phi * effective_phi)
+            argument = Decimal(4) * root_y / effective_phi
+            if argument < _BESSEL_ASYMPTOTIC_MIN_ARGUMENT:
+                return None
+
+            scaled_i0, correction_i0, radius_i0 = _bessel_asymptotic_interval(0, argument)
+            scaled_i1, correction_i1, radius_i1 = _bessel_asymptotic_interval(1, argument)
+            lower_i0 = scaled_i0 - radius_i0
+            lower_i1 = scaled_i1 - radius_i1
+            upper_i1 = scaled_i1 + radius_i1
+            if lower_i0 <= 0 or lower_i1 <= 0:
+                return None
+
+            root_difference = (y - mu) / (root_y + root_mu)
+            squared_difference = root_difference * root_difference
+            squared_difference *= Decimal(2) / (effective_phi * root_mu)
+            correction_difference = correction_i1 - correction_i0
+            score = squared_difference + argument * correction_difference / scaled_i1
+
+            total_radius = radius_i0 + radius_i1
+            # Preserve the shared I1 perturbation: q = 1 - I0 / I1 decreases
+            # with I0 and increases with I1, so these paired endpoints bound q.
+            score_lower = (
+                squared_difference + argument * (correction_difference - total_radius) / lower_i1
+            )
+            score_upper = (
+                squared_difference + argument * (correction_difference + total_radius) / upper_i1
+            )
+            score_radius = max(abs(score - score_lower), abs(score_upper - score))
+            score_scale = max(Decimal(1), abs(score))
+            score_relative_error = score_radius / score_scale
+            density_relative_error = radius_i1 / lower_i1
+            binary64_rounding = Decimal.from_float(8.0 * _FLOAT_EPS)
+            relative_error = max(density_relative_error, score_relative_error) + binary64_rounding
+            if relative_error > Decimal.from_float(requested_rtol):
+                return None
+
+            log_four_pi = _DECIMAL_LOG_TWO_PI + Decimal(2).ln()
+            logpdf = (
+                -squared_difference
+                + Decimal("0.25") * product.ln()
+                - Decimal("0.5") * log_four_pi
+                + scaled_i1.ln()
+                - parameters.log_y_decimal
+            )
+            logpdf_float = float(logpdf)
+            score_float = float(score)
+    except (DecimalException, OverflowError, ValueError):
+        return None
+
+    if not math.isfinite(logpdf_float) or not math.isfinite(score_float):
+        return None
+    return _SeriesResult(
+        logpdf=logpdf_float,
+        log_phi_score=score_float,
+        term_count=_BESSEL_ASYMPTOTIC_TERMS,
+        relative_error=float(relative_error),
+        method="compound_poisson_bessel",
+    )
+
+
 def _certified_series(
     parameters: _CompoundParameters,
     *,
@@ -1078,9 +1209,11 @@ def evaluate_tweedie_density(
     """Evaluate the exact compound-Poisson/Gamma density for ``1 < p < 2``.
 
     ``rtol`` bounds omitted series mass, the first moment used by the dispersion
-    score, and score arithmetic.  The returned log-density is rounded on its
-    natural log scale to float64; ``rtol`` is not a relative-error promise for
-    exponentiating that rounded value.
+    score, and score arithmetic.  At ``p == 1.5``, sufficiently large series
+    modes use the exact modified-Bessel resummation with explicit asymptotic
+    remainder intervals for both density and score.  The returned log-density
+    is rounded on its natural log scale to float64; ``rtol`` is not a
+    relative-error promise for exponentiating that rounded value.
     """
     y_arr, mu_arr, weight_arr = _validate_density_arrays(y, mu, weights)
     dispersion = normalize_positive_scalar("phi", phi)
@@ -1093,6 +1226,7 @@ def evaluate_tweedie_density(
     max_terms_used = 0
     max_relative_error = 0.0
     n_positive = 0
+    exact_methods: set[str] = set()
 
     for index, (y_value, mu_value, weight_value) in enumerate(
         zip(y_arr, mu_arr, weight_arr, strict=True)
@@ -1127,18 +1261,32 @@ def evaluate_tweedie_density(
             observation_index=index,
             requested_rtol=tolerance,
         )
-        result = _certified_series(
+        result = _certified_alpha_one_bessel(
             parameters,
-            observation_index=index,
-            power=power,
-            dispersion=dispersion,
             requested_rtol=tolerance,
             max_terms=term_limit,
         )
+        if result is None:
+            result = _certified_series(
+                parameters,
+                observation_index=index,
+                power=power,
+                dispersion=dispersion,
+                requested_rtol=tolerance,
+                max_terms=term_limit,
+            )
         logpdf[index] = result.logpdf
         score[index] = result.log_phi_score
         max_terms_used = max(max_terms_used, result.term_count)
         max_relative_error = max(max_relative_error, result.relative_error)
+        exact_methods.add(result.method)
+
+    if exact_methods == {"compound_poisson_bessel"}:
+        method = "compound_poisson_bessel"
+    elif len(exact_methods) > 1:
+        method = "hybrid_compound_poisson_exact"
+    else:
+        method = "compound_poisson_series"
 
     return TweedieDensityEvaluation(
         logpdf=_readonly(logpdf),
@@ -1152,6 +1300,7 @@ def evaluate_tweedie_density(
             certified=True,
             requested_rtol=tolerance,
             max_relative_tail_error=max_relative_error,
+            method=method,
         ),
     )
 
