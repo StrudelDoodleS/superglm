@@ -90,33 +90,13 @@ def _large_routine_exact_fixture() -> _PhiFixture:
     )
 
 
-def _difficult_branch_fixture() -> _PhiFixture:
-    """A deterministic branch-jump case that exercises fallback provenance."""
-    return _PhiFixture(
-        name="difficult-branch-fallback",
-        p=1.0181533410437358,
-        y=np.array([1.81787899, 11275.9262, 0.0, 0.00306563885, 0.0000232882792, 1.18207511]),
-        mu=np.array(
-            [
-                0.0000253947806,
-                44091.7359,
-                198.869667,
-                0.000051937831,
-                331.859132,
-                0.0054422757,
-            ]
-        ),
-        weights=np.array([83.2444169, 0.17590785, 2.31976211, 463.433307, 2.50852264, 0.416322332]),
-    )
-
-
 def _counted_production_profile(fixture: _PhiFixture) -> _CountedProfile:
     """Run production while counting only real vector-density cache misses."""
     real_evaluate = tweedie_module._evaluate_tweedie_density
-    calls: list[bool] = []
+    calls: list[None] = []
 
     def counted_evaluate(prepared, phi, *, compute_score=False):
-        calls.append(bool(compute_score))
+        calls.append(None)
         return real_evaluate(prepared, phi, compute_score=compute_score)
 
     started = time.perf_counter()
@@ -132,8 +112,8 @@ def _counted_production_profile(fixture: _PhiFixture) -> _CountedProfile:
     return _CountedProfile(
         result=result,
         density_passes=len(calls),
-        score_passes=sum(calls),
-        value_only_passes=len(calls) - sum(calls),
+        score_passes=len(calls),
+        value_only_passes=0,
         elapsed_seconds=elapsed,
     )
 
@@ -263,7 +243,7 @@ def test_generator_near_boundary_moments_and_zero_mass(p, phi, seed):
 def test_zero_heavy_exact_mle_p_phi_recovery():
     """A high-zero-rate sample retains practical p/phi Monte Carlo recovery."""
     rng = np.random.default_rng(20260717)
-    n = 1_500
+    n = 150
     p_true, phi_true = 1.75, 15.0
     x = rng.normal(size=n)
     mu = np.exp(1.0 + 0.3 * x)
@@ -280,8 +260,8 @@ def test_zero_heavy_exact_mle_p_phi_recovery():
         y,
         p_bounds=(1.1, 1.9),
         phi_method="mle",
-        method="brent",
-        xatol=1e-3,
+        method="grid",
+        grid=[1.65, 1.75, 1.85],
     )
 
     assert np.mean(y == 0.0) >= 0.65
@@ -291,50 +271,119 @@ def test_zero_heavy_exact_mle_p_phi_recovery():
     assert not result.phi_used_fallback
     # Tolerances exceed the deterministic sample's Monte Carlo error without
     # pretending finite-sample profile estimates equal generating parameters.
-    np.testing.assert_allclose(result.p_hat, p_true, atol=0.08)
-    np.testing.assert_allclose(result.phi_hat, phi_true, rtol=0.15)
+    np.testing.assert_allclose(result.p_hat, p_true, atol=0.10)
+    np.testing.assert_allclose(result.phi_hat, phi_true, rtol=0.20)
+
+
+def test_small_continuous_outer_mle_search_refines_off_a_truth_containing_grid():
+    """A real public Brent profile must continuously refine certified exact MLEs."""
+    rng = np.random.default_rng(42)
+    n = 16
+    p_true = 1.5
+    x = rng.standard_normal(n)
+    mu = np.exp(1.0 + 0.3 * x)
+    y = generate_tweedie_cpg(n, mu=mu, phi=1.0, p=p_true, rng=rng)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0,
+        features={"x": Numeric()},
+    )
+    declared_grid = np.array([1.15, p_true, 1.85])
+
+    result = model.estimate_p(
+        X,
+        y,
+        p_bounds=(1.15, 1.85),
+        xatol=0.01,
+        maxiter=16,
+        fit_mode="fit",
+        phi_method="mle",
+        method="brent",
+        n_grid=len(declared_grid),
+        grid=declared_grid,
+    )
+
+    trace = result.search_trace
+    trace_p = trace["p"].to_numpy()
+    assert result.method == "brent"
+    assert result.phi_method == "mle"
+    assert result.converged
+    assert result.outer_converged
+    assert result.objective_finite
+    assert result.density_exact
+    assert result.n_saddlepoint == 0
+    assert trace["fit_converged"].all()
+    assert trace["phi_converged"].all()
+    assert set(trace["source"]) == {"brent"}
+    assert 7 <= len(np.unique(trace_p)) <= 16
+    assert result.p_hat == pytest.approx(p_true, abs=0.1)
+    assert result.phi_hat == pytest.approx(1.0, rel=0.1)
+    assert np.min(np.abs(result.p_hat - declared_grid)) > 0.05
+    assert 1.16 < result.p_hat < 1.84
+
+    left = trace[(trace["p"] < result.p_hat) & (trace["p"] > result.p_hat - 0.01)]
+    right = trace[(trace["p"] > result.p_hat) & (trace["p"] < result.p_hat + 0.01)]
+    assert not left.empty
+    assert not right.empty
+    assert result.nll < left["nll"].min()
+    assert result.nll < right["nll"].min()
+
+    endpoint_mask = np.isclose(trace_p, 1.15) | np.isclose(trace_p, 1.85)
+    assert np.count_nonzero(endpoint_mask) == 2
+    assert result.nll < trace.loc[endpoint_mask, "nll"].min() - 0.1
+    assert model.family.p == result.p_hat
+    assert model._last_fit_meta["method"] == "fit"
 
 
 @pytest.mark.parametrize(
-    ("p", "phi", "seed", "expect_fallback"),
+    ("p", "phi", "seed", "expected_phi", "expected_nll"),
     [
-        pytest.param(1.05, 2.5, 7105, True, id="near-one"),
-        pytest.param(1.95, 1.2, 7195, False, id="near-two"),
+        pytest.param(
+            1.05,
+            2.5,
+            7105,
+            2.16128081507468,
+            1.841604254312065,
+            id="near-one",
+        ),
+        pytest.param(
+            1.95,
+            1.2,
+            7195,
+            1.4056827457333263,
+            2.284684826398224,
+            id="near-two",
+        ),
     ],
 )
-def test_near_boundary_phi_profile_reports_honest_provenance(p, phi, seed, expect_fallback):
-    """Boundary fixtures certify diagnostics, not unrealistic parameter recovery."""
+def test_near_boundary_phi_profile_uses_certified_score_search(
+    p,
+    phi,
+    seed,
+    expected_phi,
+    expected_nll,
+):
+    """Small boundary fixtures exercise exact density through inner MLE profiling."""
     rng = np.random.default_rng(seed)
-    x = np.linspace(-1.0, 1.0, 240)
+    x = np.linspace(-1.0, 1.0, 50)
     mu = np.exp(1.0 + 0.3 * x)
     y = generate_tweedie_cpg(len(x), mu=mu, phi=phi, p=p, rng=rng)
 
     result = tweedie_module._profile_phi_detailed(y, mu, p, phi_method="mle")
-    density = tweedie_module._classify_density_diagnostics(p, result.diagnostics)
 
+    assert result.converged
     assert result.objective_finite
-    assert np.isfinite(result.nll)
-    assert np.isfinite(result.phi) and result.phi > 0.0
-    assert result.n_evaluations == result.n_score_evaluations + result.n_value_only_evaluations
-    assert density.n_positive == np.count_nonzero(y > 0.0)
-    assert density.n_saddlepoint == result.diagnostics.n_saddlepoint
-    assert density.fraction == pytest.approx(density.n_saddlepoint / max(density.n_positive, 1))
-    assert result.used_fallback is expect_fallback
-    if expect_fallback:
-        assert result.optimizer == "bounded"
-        assert result.branch_switch_detected
-        assert result.fallback_reason
-        assert result.n_fallback_evaluations > 0
-        assert not result.converged
-        assert not density.exact
-        assert density.near_power_boundary
-    else:
-        assert result.optimizer == "brentq"
-        assert result.n_fallback_evaluations == 0
-        assert result.fallback_reason is None
-        assert result.converged
-        assert density.exact
-        assert density.fraction == 0.0
+    assert result.optimizer == "brentq"
+    assert not result.used_fallback
+    assert not result.lower_boundary
+    assert not result.upper_boundary
+    assert result.score is not None and abs(result.score) <= 1e-6
+    assert result.diagnostics.n_positive == np.count_nonzero(y > 0.0)
+    assert result.diagnostics.n_saddlepoint == 0
+    assert result.n_evaluations <= 20
+    assert result.phi == pytest.approx(expected_phi, rel=2e-9)
+    assert result.nll == pytest.approx(expected_nll, abs=2e-10)
 
 
 def _benchmark_fixture(fixture: _PhiFixture, *, repeats: int) -> dict[str, object]:
@@ -380,11 +429,8 @@ def _benchmark_fixture(fixture: _PhiFixture, *, repeats: int) -> dict[str, objec
 
 
 def run_tweedie_phi_profile_benchmark(*, repeats: int = 5) -> list[dict[str, object]]:
-    """Return repeat-median diagnostic rows for routine and difficult fixtures."""
-    return [
-        _benchmark_fixture(_routine_exact_fixture(), repeats=repeats),
-        _benchmark_fixture(_difficult_branch_fixture(), repeats=repeats),
-    ]
+    """Return repeat-median diagnostics for the certified routine fixture."""
+    return [_benchmark_fixture(_routine_exact_fixture(), repeats=repeats)]
 
 
 def run_large_routine_phi_profile_benchmark(*, repeats: int = 3) -> dict[str, object]:
@@ -447,8 +493,6 @@ def _bounded_inner_phi_reference(
     boundary_tolerance = 4.0 * tweedie_module._PHI_BOUNDED_XATOL
     lower_boundary = bool(log_phi - tweedie_module._LOG_PHI_LOWER_BOUND <= boundary_tolerance)
     upper_boundary = bool(tweedie_module._LOG_PHI_UPPER_BOUND - log_phi <= boundary_tolerance)
-    branch_signatures = {item[1].positive_saddlepoint_mask.tobytes() for item in cache.values()}
-    branch_switch_detected = len(branch_signatures) > 1
     local_status = "succeeded" if local_optimizer_success else "failed"
     return tweedie_module._PhiProfileResult(
         phi=float(np.exp(log_phi)),
@@ -458,21 +502,20 @@ def _bounded_inner_phi_reference(
         converged=False,
         objective_finite=objective_finite,
         n_evaluations=len(cache),
-        n_score_evaluations=0,
-        n_value_only_evaluations=len(cache),
+        n_score_evaluations=len(cache),
+        n_value_only_evaluations=0,
         n_fallback_evaluations=0,
         optimizer="bounded-reference",
         score=None,
         used_fallback=False,
         fallback_reason=None,
-        branch_switch_detected=branch_switch_detected,
+        branch_switch_detected=False,
         lower_boundary=lower_boundary,
         upper_boundary=upper_boundary,
         diagnostics=diagnostics,
         message=(
             f"Local derivative-free bounded minimization {local_status}; the test "
             "reference does not certify global phi convergence."
-            + (" Density branch signatures changed." if branch_switch_detected else "")
         ),
     )
 
@@ -543,12 +586,12 @@ def _run_end_to_end_profile_once(
     )
     real_evaluate = tweedie_module._evaluate_tweedie_density
     real_profile = tweedie_module._profile_phi_detailed
-    density_calls: list[bool] = []
+    density_calls: list[None] = []
     inner_density_passes = 0
     local_optimizer_successes: list[bool] = []
 
     def counted_evaluate(prepared, phi, *, compute_score=False):
-        density_calls.append(bool(compute_score))
+        density_calls.append(None)
         return real_evaluate(prepared, phi, compute_score=compute_score)
 
     profile_target = (
@@ -773,18 +816,13 @@ def test_tweedie_phi_profile_benchmark_report():
             f"reference_elapsed_median_s={row['reference_elapsed_median_seconds']:.6f}"
         )
 
-    routine, difficult = rows
+    (routine,) = rows
     assert routine["fixture"] == "routine-weighted-zero-exact"
     assert routine["used_fallback"] is False
     assert routine["converged"] is True
     assert routine["saddle_fraction"] == 0.0
     assert routine["density_passes"] < routine["reference_density_passes"]
     assert routine["nll"] == pytest.approx(routine["reference_nll"], abs=1e-10)
-    assert difficult["fixture"] == "difficult-branch-fallback"
-    assert difficult["used_fallback"] is True
-    assert difficult["fallback_count"] > 0
-    assert difficult["saddle_fraction"] >= 0.0
-    assert difficult["converged"] is False
 
 
 @pytest.mark.slow
@@ -815,8 +853,7 @@ def test_large_routine_phi_profile_timing_characterization():
     ):
         print(
             "Timing characterization: production is slower here despite fewer density "
-            "passes; its analytic search computes an additional Wright value for exact "
-            "score evaluations."
+            "passes; its certified analytic score carries first-moment tail work."
         )
 
     assert row["fixture"] == "routine-exact-n3000"

@@ -236,20 +236,64 @@ def test_pearson_dispersion_returns_lower_bound_for_exact_zero_numerator():
     assert result == PHI_LOWER_BOUND
 
 
-def test_profile_pearson_preserves_shared_lower_bound_for_exact_zero_numerator():
+@pytest.mark.parametrize("response_kind", ["equal", "nextafter"])
+def test_profile_pearson_preserves_shared_lower_bound_without_uncertifiable_density(
+    monkeypatch, response_kind
+):
+    import superglm._tweedie_density as density_module
     from superglm._tweedie_numerics import PHI_LOWER_BOUND
     from superglm.profiling.tweedie import _profile_phi_detailed
 
+    def unexpected_density(*args, **kwargs):
+        raise AssertionError("degenerate lower-bound density must not be evaluated")
+
+    monkeypatch.setattr(density_module, "evaluate_tweedie_density", unexpected_density)
+
     values = np.array([1.0, 2.0])
+    response = (
+        values.copy()
+        if response_kind == "equal"
+        else np.nextafter(values, np.full_like(values, np.inf))
+    )
     result = _profile_phi_detailed(
+        response,
         values,
-        values.copy(),
         1.5,
         phi_method="pearson",
     )
 
     assert result.phi == PHI_LOWER_BOUND
     assert result.optimizer == "pearson"
+    assert np.isinf(result.nll)
+    assert not result.objective_finite
+    assert not result.converged
+    assert result.n_evaluations == 0
+
+
+def test_mle_phi_seeds_do_not_eagerly_probe_floored_boundary_values():
+    from superglm._tweedie_numerics import PHI_LOWER_BOUND
+    from superglm.profiling.tweedie import (
+        _LOG_PHI_LOWER_BOUND,
+        _LOG_PHI_UPPER_BOUND,
+        _pearson_phi_from_prepared,
+        _phi_profile_seeds,
+        _prepare_tweedie_density,
+    )
+
+    mu = np.array([1.0, 2.0])
+    y = np.nextafter(mu, np.full_like(mu, np.inf))
+    prepared = _prepare_tweedie_density(y, mu, 1.5)
+    pearson_phi = _pearson_phi_from_prepared(prepared, 2.0)
+    seeds = _phi_profile_seeds(
+        prepared,
+        2.0,
+        pearson_phi,
+        PHI_LOWER_BOUND,
+    )
+
+    assert pearson_phi == PHI_LOWER_BOUND
+    assert seeds
+    assert all(_LOG_PHI_LOWER_BOUND < u < _LOG_PHI_UPPER_BOUND for u, _ in seeds)
 
 
 def test_pearson_dispersion_applies_prior_weights_once():
@@ -947,72 +991,33 @@ def test_pearson_dispersion_uses_exact_input_difference_to_accept_boundary_resul
         (1.000001, 1415.2947790683888),
     ],
 )
-def test_internal_saddlepoint_uses_shared_representable_extreme_deviance(p, expected_deviance):
-    from superglm.profiling.tweedie import _saddlepoint
-
-    y = np.array([1.0])
-    mu = np.array([np.finfo(np.float64).tiny])
-    phi = np.array([1.0])
-    expected = -0.5 * (np.log(2.0 * np.pi) + expected_deviance)
-
-    actual = _saddlepoint(y, mu, phi, p)
-
-    assert np.all(np.isfinite(actual))
-    np.testing.assert_allclose(actual, expected, rtol=2e-15, atol=0.0)
-
-
-@pytest.mark.parametrize(
-    ("p", "expected_deviance"),
-    [
-        (np.nextafter(1.0, 2.0), 1414.79283706464),
-        (1.000001, 1415.2947790683888),
-    ],
-)
-def test_public_logpdf_forced_saddlepoint_uses_shared_representable_extreme_deviance(
-    p, expected_deviance
-):
-    from superglm.profiling.tweedie import tweedie_logpdf
+def test_explicit_saddlepoint_uses_shared_representable_extreme_deviance(p, expected_deviance):
+    from superglm._tweedie_density import approximate_tweedie_logpdf
 
     y = np.array([1.0])
     mu = np.array([np.finfo(np.float64).tiny])
     expected = -0.5 * (np.log(2.0 * np.pi) + expected_deviance)
 
-    actual = tweedie_logpdf(y, mu, 1.0, p, t_arg_limit=0.0)
+    actual = approximate_tweedie_logpdf(y, mu, 1.0, p).logpdf
 
     assert np.all(np.isfinite(actual))
     np.testing.assert_allclose(actual, expected, rtol=2e-15, atol=0.0)
 
 
-def test_public_saddlepoint_isolates_an_unrepresentable_deviance_row():
-    from superglm.profiling.tweedie import tweedie_logpdf
+def test_explicit_saddlepoint_fails_closed_for_unrepresentable_deviance_row():
+    from superglm._tweedie_density import TweedieDensityError, approximate_tweedie_logpdf
 
     y = np.array([1.0, 1e308])
     mu = np.array([np.finfo(np.float64).tiny, 1e-320])
     p = 1.000001
     expected_first = -0.5 * (np.log(2.0 * np.pi) + 1415.2947790683888)
 
-    actual = tweedie_logpdf(y, mu, 1.0, p, t_arg_limit=0.0)
+    representable = approximate_tweedie_logpdf(y[:1], mu[:1], 1.0, p).logpdf
 
-    assert np.isfinite(actual[0])
-    assert np.isneginf(actual[1])
-    np.testing.assert_allclose(actual[0], expected_first, rtol=2e-15, atol=0.0)
-
-
-def test_saddlepoint_does_not_mask_other_shared_deviance_errors(monkeypatch):
-    from superglm.profiling import tweedie as tweedie_profile
-
-    def materially_negative(*_arguments):
-        raise TweedieNumericalError("unit deviance ratio became materially negative")
-
-    monkeypatch.setattr(tweedie_profile, "tweedie_unit_deviance", materially_negative)
-
-    with pytest.raises(TweedieNumericalError, match="materially negative"):
-        tweedie_profile._saddlepoint(
-            np.array([1.0]),
-            np.array([1.0]),
-            np.array([1.0]),
-            1.5,
-        )
+    assert np.isfinite(representable[0])
+    np.testing.assert_allclose(representable[0], expected_first, rtol=2e-15, atol=0.0)
+    with pytest.raises(TweedieDensityError, match="saddlepoint arithmetic"):
+        approximate_tweedie_logpdf(y[1:], mu[1:], 1.0, p)
 
 
 @pytest.mark.parametrize(

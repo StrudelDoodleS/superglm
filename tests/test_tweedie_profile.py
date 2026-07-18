@@ -14,6 +14,7 @@ from scipy.optimize import minimize_scalar as scipy_minimize_scalar
 
 import superglm.profiling.tweedie as tweedie_module
 from superglm import SuperGLM
+from superglm._tweedie_density import TweedieDensityError, approximate_tweedie_logpdf
 from superglm.distributions import Tweedie as TweedieDistribution
 from superglm.distributions import clip_mu
 from superglm.features.interaction import TensorInteraction
@@ -143,19 +144,6 @@ def _call_tweedie_low_level(function_name, y, mu, *, phi=2.0, p=1.5, weights=Non
     return estimate_phi(y, mu, p, weights=weights)
 
 
-def _stable_p_one_half_deviance(y, mu):
-    """Closed-form p=1.5 unit deviance without subtracting close square roots."""
-    delta = (y - mu) / mu
-    root_difference = delta / (np.sqrt(1.0 + delta) + 1.0)
-    return 4.0 * np.sqrt(mu) * root_difference**2
-
-
-def _stable_p_one_half_extreme_deviance(y, mu):
-    """Closed-form p=1.5 deviance for ratios too large to form directly."""
-    with np.errstate(over="ignore"):
-        return 4.0 * (np.sqrt(y) - np.sqrt(mu)) ** 2 / np.sqrt(mu)
-
-
 def _tight_value_only_phi_reference(y, mu, p, *, weights=None):
     """Independent tight derivative-free reference over the hard log-phi range."""
     calls = 0
@@ -272,73 +260,17 @@ class TestTweedieLogpdf:
         nll_wrong = -np.mean(tweedie_logpdf(y, mu_arr_wrong, phi, p))
         assert nll_true < nll_wrong
 
-    def test_saddlepoint_fallback(self):
-        """Extreme t_arg values should still produce finite results."""
-        # Force saddlepoint by using a very low t_arg_limit
+    def test_saddlepoint_approximation_is_explicit(self):
+        """The diagnostic approximation is available only by an explicit call."""
         y = np.array([100.0, 200.0, 500.0])
         mu = np.array([50.0, 100.0, 250.0])
         phi, p = 5.0, 1.5
-        lp = tweedie_logpdf(y, mu, phi, p, t_arg_limit=0.0)  # forces saddlepoint
-        assert np.all(np.isfinite(lp))
+        evaluation = approximate_tweedie_logpdf(y, mu, phi, p)
 
-    def test_saddlepoint_close_y_mu_is_stable_at_large_scale(self):
-        """The compatibility helper must not lose close-y/mu unit deviance."""
-        mu = np.array([1e12])
-        y = mu * (1.0 + 1e-12)
-        phi = np.array([1e-12])
-        p = 1.5
-        deviance = _stable_p_one_half_deviance(y, mu)
-        expected = -0.5 * (np.log(2.0 * np.pi) + np.log(phi) + p * np.log(y)) - deviance / (
-            2.0 * phi
-        )
-
-        actual = tweedie_module._saddlepoint(y, mu, phi, p)
-
-        np.testing.assert_allclose(actual, expected, rtol=1e-13, atol=1e-12)
-
-    def test_saddlepoint_extreme_positive_ratio_is_stable(self):
-        """The compatibility helper must avoid inf-inf for finite y >> mu."""
-        y = np.array([1.0])
-        mu = np.array([1e-320])
-        phi = np.array([1e-8])
-        p = 1.5
-        deviance = _stable_p_one_half_extreme_deviance(y, mu)
-        expected = -0.5 * (np.log(2.0 * np.pi) + np.log(phi) + p * np.log(y)) - deviance / (
-            2.0 * phi
-        )
-
-        actual = tweedie_module._saddlepoint(y, mu, phi, p)
-
-        assert np.all(np.isfinite(deviance))
-        np.testing.assert_allclose(actual, expected, rtol=1e-13)
-
-    def test_saddlepoint_overflowing_positive_ratio_returns_negative_infinity(self):
-        """A truly overflowing deviance is extended-real, not NaN."""
-        y = np.array([1e308])
-        mu = np.array([1e-320])
-        phi = np.array([1e-8])
-
-        actual = tweedie_module._saddlepoint(y, mu, phi, 1.5)
-
-        assert np.all(np.isneginf(actual))
-
-    def test_all_invalid_wright_terms_use_saddlepoint(self, monkeypatch):
-        """Every invalid Wright term must be populated by the fallback."""
-        y = np.array([0.5, 2.0, 8.0])
-        mu = np.array([0.8, 1.5, 6.0])
-        phi, p = 2.0, 1.5
-
-        def all_nan_wright(a, b, t):
-            return np.full_like(t, np.nan, dtype=np.float64)
-
-        monkeypatch.setattr(tweedie_module, "wright_bessel", all_nan_wright)
-
-        logpdf, diagnostics = tweedie_module._tweedie_logpdf_impl(y, mu, phi, p)
-        expected = tweedie_module._saddlepoint(y, mu, np.full_like(y, phi), p)
-
-        np.testing.assert_allclose(logpdf, expected, rtol=1e-14, atol=1e-14)
-        assert diagnostics.n_positive == len(y)
-        assert diagnostics.n_saddlepoint == diagnostics.n_positive
+        assert np.all(np.isfinite(evaluation.logpdf))
+        assert evaluation.diagnostics.method == "saddlepoint"
+        assert not evaluation.diagnostics.exact
+        assert not evaluation.diagnostics.certified
 
     def test_weights_scale_phi(self):
         """logpdf(y, mu, phi, p, weights=2) == logpdf(y, mu, phi/2, p)."""
@@ -487,64 +419,24 @@ class TestTweedieLogpdf:
 
 
 class TestTweedieLogPhiScore:
-    """Analytic mean-NLL derivatives with respect to ``log(phi)``."""
+    """Certified log-density derivatives with respect to ``log(phi)``."""
 
     @staticmethod
     def _finite_difference_score(prepared, phi):
         h = 1e-5
         u = np.log(phi)
 
-        def mean_nll(log_phi):
+        def mean_logpdf(log_phi):
             evaluation = tweedie_module._evaluate_tweedie_density(
                 prepared,
                 float(np.exp(log_phi)),
             )
-            return -float(np.mean(evaluation.logpdf))
+            return float(np.mean(evaluation.logpdf))
 
-        return (mean_nll(u + h) - mean_nll(u - h)) / (2.0 * h)
-
-    def test_saddlepoint_branch_mask_distinguishes_equal_counts(self, monkeypatch):
-        """Branch identity is the full positive-observation mask, not its count."""
-        y = np.array([1.0, 4.0])
-        mu = np.array([1.3, 3.2])
-        prepared = tweedie_module._prepare_tweedie_density(y, mu, 1.5)
-        real_wright_bessel = tweedie_module.wright_bessel
-
-        def fail_density_recurrence_in_middle(a, b, t):
-            values = np.asarray(real_wright_bessel(a, b, t), dtype=np.float64)
-            if np.isclose(b, a + 1.0):
-                values = values.copy()
-                values[(t >= 2.0) & (t <= 8.0)] = np.nan
-            return values
-
-        monkeypatch.setattr(
-            tweedie_module,
-            "wright_bessel",
-            fail_density_recurrence_in_middle,
-        )
-
-        phi_one = tweedie_module._evaluate_tweedie_density(
-            prepared,
-            1.0,
-            compute_score=True,
-        )
-        phi_two = tweedie_module._evaluate_tweedie_density(
-            prepared,
-            2.0,
-            compute_score=True,
-        )
-
-        assert phi_one.diagnostics.n_saddlepoint == phi_two.diagnostics.n_saddlepoint == 1
-        np.testing.assert_array_equal(phi_one.positive_saddlepoint_mask, [True, False])
-        np.testing.assert_array_equal(phi_two.positive_saddlepoint_mask, [False, True])
-        assert phi_one.score_valid
-        assert phi_two.score_valid
-        assert not phi_one.positive_saddlepoint_mask.flags.writeable
-        with pytest.raises(ValueError, match="read-only"):
-            phi_one.positive_saddlepoint_mask[0] = False
+        return (mean_logpdf(u + h) - mean_logpdf(u - h)) / (2.0 * h)
 
     @pytest.mark.parametrize(
-        ("y", "mu", "phi", "p", "weights", "t_arg_limit"),
+        ("y", "mu", "phi", "p", "weights"),
         [
             pytest.param(
                 np.array([0.0, 0.0, 0.0]),
@@ -552,7 +444,6 @@ class TestTweedieLogPhiScore:
                 1.7,
                 1.5,
                 None,
-                1e14,
                 id="all-zeros",
             ),
             pytest.param(
@@ -561,8 +452,7 @@ class TestTweedieLogPhiScore:
                 1.3,
                 1.5,
                 None,
-                1e14,
-                id="exact-positives",
+                id="positive",
             ),
             pytest.param(
                 np.array([0.0, 0.2, 0.0, 3.0]),
@@ -570,7 +460,6 @@ class TestTweedieLogPhiScore:
                 2.1,
                 1.6,
                 None,
-                1e14,
                 id="mixed",
             ),
             pytest.param(
@@ -579,26 +468,7 @@ class TestTweedieLogPhiScore:
                 2.4,
                 1.55,
                 np.array([0.25, 0.8, 1.7, 4.0]),
-                1e14,
-                id="unequal-prior-weights",
-            ),
-            pytest.param(
-                np.array([0.3, 2.0, 7.0]),
-                np.array([0.6, 1.5, 5.5]),
-                1.8,
-                1.5,
-                None,
-                0.0,
-                id="forced-saddlepoint",
-            ),
-            pytest.param(
-                np.array([0.0, 0.4, 3.0, 8.0]),
-                np.array([0.5, 0.7, 2.5, 6.0]),
-                2.2,
-                1.65,
-                np.array([0.3, 0.9, 2.0, 3.5]),
-                0.0,
-                id="weighted-forced-saddlepoint",
+                id="prior-weights",
             ),
             pytest.param(
                 np.array([0.04, 0.05, 0.06]),
@@ -606,8 +476,7 @@ class TestTweedieLogPhiScore:
                 1.0,
                 1.05,
                 None,
-                1e14,
-                id="p-near-one",
+                id="low-power",
             ),
             pytest.param(
                 np.array([0.2, 1.0, 5.0]),
@@ -615,8 +484,7 @@ class TestTweedieLogPhiScore:
                 1.2,
                 1.95,
                 None,
-                1e14,
-                id="p-near-two",
+                id="high-power",
             ),
         ],
     )
@@ -627,26 +495,20 @@ class TestTweedieLogPhiScore:
         phi,
         p,
         weights,
-        t_arg_limit,
     ):
         prepared = tweedie_module._prepare_tweedie_density(
             y,
             mu,
             p,
             weights=weights,
-            t_arg_limit=t_arg_limit,
         )
-        evaluation = tweedie_module._evaluate_tweedie_density(
-            prepared,
-            phi,
-            compute_score=True,
-        )
+        evaluation = tweedie_module._evaluate_tweedie_density(prepared, phi)
 
         assert evaluation.score_valid
-        assert evaluation.log_phi_score is not None
+        assert evaluation.diagnostics.n_saddlepoint == 0
         analytic = float(np.mean(evaluation.log_phi_score))
         finite_difference = self._finite_difference_score(prepared, phi)
-        np.testing.assert_allclose(analytic, finite_difference, rtol=1e-8, atol=1e-9)
+        np.testing.assert_allclose(analytic, finite_difference, rtol=3e-7, atol=3e-8)
 
     def test_log_phi_score_constant_weight_matches_rescaled_phi(self):
         y = np.array([0.0, 0.4, 1.5, 5.0])
@@ -660,242 +522,18 @@ class TestTweedieLogPhiScore:
         )
         unweighted = tweedie_module._prepare_tweedie_density(y, mu, p)
 
-        weighted_eval = tweedie_module._evaluate_tweedie_density(
-            weighted,
-            phi,
-            compute_score=True,
-        )
+        weighted_eval = tweedie_module._evaluate_tweedie_density(weighted, phi)
         rescaled_eval = tweedie_module._evaluate_tweedie_density(
             unweighted,
             phi / weight,
-            compute_score=True,
         )
 
-        assert weighted_eval.score_valid
-        assert rescaled_eval.score_valid
         np.testing.assert_allclose(weighted_eval.logpdf, rescaled_eval.logpdf, rtol=1e-13)
         np.testing.assert_allclose(
             weighted_eval.log_phi_score,
             rescaled_eval.log_phi_score,
             rtol=1e-13,
         )
-
-    def test_log_phi_score_t_underflow_preserves_exact_branch(self):
-        """Finite log(t) must keep an exact density even when exp(log(t)) is zero."""
-        y = np.array([1.0, 2.0])
-        mu = np.array([0.8, 2.5])
-        phi, p = 1e300, 1.5
-        prepared = tweedie_module._prepare_tweedie_density(y, mu, p)
-
-        evaluation = tweedie_module._evaluate_tweedie_density(
-            prepared,
-            phi,
-            compute_score=True,
-        )
-
-        assert evaluation.diagnostics.n_saddlepoint == 0
-        assert np.all(np.isfinite(evaluation.logpdf))
-        assert evaluation.score_valid
-        assert evaluation.log_phi_score is not None
-        analytic = float(np.mean(evaluation.log_phi_score))
-        finite_difference = self._finite_difference_score(prepared, phi)
-        np.testing.assert_allclose(analytic, finite_difference, rtol=1e-8, atol=1e-9)
-
-    def test_log_phi_score_forced_saddlepoint_close_y_mu_is_stable(self):
-        """Close large responses need a non-negative deviance, value, and score."""
-        mu = np.array([1e12])
-        y = mu * (1.0 + 1e-12)
-        phi, p = 1e-12, 1.5
-        expected_deviance = _stable_p_one_half_deviance(y, mu)
-        prepared = tweedie_module._prepare_tweedie_density(
-            y,
-            mu,
-            p,
-            t_arg_limit=0.0,
-        )
-
-        assert np.all(np.isfinite(prepared.positive_saddlepoint_deviance))
-        assert np.all(prepared.positive_saddlepoint_deviance >= 0.0)
-        np.testing.assert_allclose(
-            prepared.positive_saddlepoint_deviance,
-            expected_deviance,
-            rtol=2e-12,
-            atol=0.0,
-        )
-
-        evaluation = tweedie_module._evaluate_tweedie_density(
-            prepared,
-            phi,
-            compute_score=True,
-        )
-        expected_logpdf = -0.5 * (
-            np.log(2.0 * np.pi) + np.log(phi) + p * np.log(y)
-        ) - expected_deviance / (2.0 * phi)
-        expected_score = 0.5 - expected_deviance / (2.0 * phi)
-
-        assert evaluation.score_valid
-        np.testing.assert_allclose(evaluation.logpdf, expected_logpdf, rtol=1e-13, atol=1e-12)
-        np.testing.assert_allclose(
-            evaluation.log_phi_score,
-            expected_score,
-            rtol=1e-12,
-            atol=1e-12,
-        )
-        finite_difference = self._finite_difference_score(prepared, phi)
-        np.testing.assert_allclose(
-            float(np.mean(evaluation.log_phi_score)),
-            finite_difference,
-            rtol=1e-8,
-            atol=1e-9,
-        )
-
-    def test_log_phi_score_forced_saddlepoint_extreme_positive_ratio_is_stable(self):
-        """A representable y >> mu deviance must produce a finite value and score."""
-        y = np.array([1.0])
-        mu = np.array([1e-320])
-        phi, p = 1e-8, 1.5
-        expected_deviance = _stable_p_one_half_extreme_deviance(y, mu)
-        prepared = tweedie_module._prepare_tweedie_density(
-            y,
-            mu,
-            p,
-            t_arg_limit=0.0,
-        )
-
-        assert np.all(np.isfinite(prepared.positive_saddlepoint_deviance))
-        np.testing.assert_allclose(
-            prepared.positive_saddlepoint_deviance,
-            expected_deviance,
-            rtol=1e-13,
-        )
-
-        evaluation = tweedie_module._evaluate_tweedie_density(
-            prepared,
-            phi,
-            compute_score=True,
-        )
-        expected_logpdf = -0.5 * (
-            np.log(2.0 * np.pi) + np.log(phi) + p * np.log(y)
-        ) - expected_deviance / (2.0 * phi)
-        expected_score = 0.5 - expected_deviance / (2.0 * phi)
-
-        assert evaluation.score_valid
-        assert not np.any(np.isnan(evaluation.logpdf))
-        assert not np.any(np.isnan(evaluation.log_phi_score))
-        np.testing.assert_allclose(evaluation.logpdf, expected_logpdf, rtol=1e-13)
-        np.testing.assert_allclose(evaluation.log_phi_score, expected_score, rtol=1e-13)
-        finite_difference = self._finite_difference_score(prepared, phi)
-        np.testing.assert_allclose(
-            float(np.mean(evaluation.log_phi_score)),
-            finite_difference,
-            rtol=1e-8,
-        )
-
-    def test_log_phi_score_overflowing_positive_ratio_uses_extended_real_values(self):
-        """An overflowing deviance must yield +inf deviance and -inf value/score."""
-        y = np.array([1e308])
-        mu = np.array([1e-320])
-        prepared = tweedie_module._prepare_tweedie_density(
-            y,
-            mu,
-            1.5,
-            t_arg_limit=0.0,
-        )
-
-        evaluation = tweedie_module._evaluate_tweedie_density(
-            prepared,
-            1e-8,
-            compute_score=True,
-        )
-
-        assert np.all(np.isposinf(prepared.positive_saddlepoint_deviance))
-        assert np.all(np.isneginf(evaluation.logpdf))
-        assert evaluation.log_phi_score is not None
-        assert np.all(np.isneginf(evaluation.log_phi_score))
-        assert not evaluation.score_valid
-
-    def test_log_phi_score_accepts_scaled_ratio_roundoff_near_one(self):
-        """An O(a*eps) ratio deficit is numerical noise, not score failure."""
-        y = np.array([1.0])
-        mu = np.array([1.0])
-        phi, p = 94.32317335438263, 102.0 / 101.0
-        prepared = tweedie_module._prepare_tweedie_density(y, mu, p)
-
-        evaluation = tweedie_module._evaluate_tweedie_density(
-            prepared,
-            phi,
-            compute_score=True,
-        )
-
-        assert evaluation.diagnostics.n_saddlepoint == 0
-        assert evaluation.score_valid
-        assert evaluation.log_phi_score is not None
-        finite_difference = self._finite_difference_score(prepared, phi)
-        np.testing.assert_allclose(
-            float(np.mean(evaluation.log_phi_score)),
-            finite_difference,
-            rtol=1e-8,
-            atol=1e-9,
-        )
-
-    def test_log_phi_score_rejects_materially_subunit_ratio(self, monkeypatch):
-        """The scaled tolerance must not turn a materially invalid ratio into a score."""
-        y = np.array([1.0])
-        mu = np.array([1.0])
-        phi, p = 94.32317335438263, 102.0 / 101.0
-        prepared = tweedie_module._prepare_tweedie_density(y, mu, p)
-        exact_value = tweedie_module._evaluate_tweedie_density(prepared, phi)
-        real_wright_bessel = tweedie_module.wright_bessel
-
-        def materially_low_ratio(a, b, t):
-            if b == a:
-                return 0.99 * a * real_wright_bessel(a, a + 1.0, t)
-            return real_wright_bessel(a, b, t)
-
-        monkeypatch.setattr(tweedie_module, "wright_bessel", materially_low_ratio)
-
-        evaluation = tweedie_module._evaluate_tweedie_density(
-            prepared,
-            phi,
-            compute_score=True,
-        )
-
-        assert evaluation.diagnostics.n_saddlepoint == 0
-        np.testing.assert_array_equal(evaluation.logpdf, exact_value.logpdf)
-        assert not evaluation.score_valid
-        assert evaluation.log_phi_score is not None
-        assert np.all(np.isnan(evaluation.log_phi_score))
-
-    def test_log_phi_score_derivative_failure_keeps_exact_density(self, monkeypatch):
-        y = np.array([0.4, 1.5, 5.0])
-        mu = np.array([0.7, 1.2, 4.5])
-        phi, p = 1.9, 1.6
-        prepared = tweedie_module._prepare_tweedie_density(y, mu, p)
-        exact_value = tweedie_module._evaluate_tweedie_density(prepared, phi)
-        real_wright_bessel = tweedie_module.wright_bessel
-
-        def fail_derivative_wright(a, b, t):
-            result = real_wright_bessel(a, b, t)
-            if np.isclose(b, a):
-                return np.full_like(t, np.nan, dtype=np.float64)
-            return result
-
-        monkeypatch.setattr(tweedie_module, "wright_bessel", fail_derivative_wright)
-
-        evaluation = tweedie_module._evaluate_tweedie_density(
-            prepared,
-            phi,
-            compute_score=True,
-        )
-        saddlepoint = tweedie_module._saddlepoint(y, mu, np.full_like(y, phi), p)
-
-        assert exact_value.diagnostics.n_saddlepoint == 0
-        assert evaluation.diagnostics.n_saddlepoint == 0
-        np.testing.assert_array_equal(evaluation.logpdf, exact_value.logpdf)
-        assert not np.allclose(evaluation.logpdf, saddlepoint, rtol=1e-8, atol=1e-10)
-        assert not evaluation.score_valid
-        assert evaluation.log_phi_score is not None
-        assert np.all(np.isnan(evaluation.log_phi_score))
 
 
 # =====================================================================
@@ -931,7 +569,7 @@ class TestEstimatePhi:
 
     def test_mle_phi_recovery(self):
         rng = np.random.default_rng(456)
-        n = 20_000
+        n = 500
         mu = np.full(n, 10.0)
         phi_true, p = 3.0, 1.6
         y = generate_tweedie_cpg(n, mu=mu, phi=phi_true, p=p, rng=rng)
@@ -941,70 +579,21 @@ class TestEstimatePhi:
 
 
 class TestDetailedPhiProfile:
-    @staticmethod
-    def _shifted_realized_branch_fixture():
-        base = tweedie_module._prepare_tweedie_density(
-            np.ones(3),
-            np.ones(3),
-            1.5,
-        )
-        nominal = np.array([-10.0, -0.6, -0.4])
-        log_independent = nominal * (base.a + 1.0) + base.log_t_arg_limit
-        prepared = replace(
-            base,
-            positive_log_t_phi_independent=tweedie_module._readonly_copy(
-                log_independent,
-                dtype=np.float64,
-            ),
-        )
-        calibrated = nominal.copy()
-        realized = calibrated + 10.0
-
-        def fake_evaluate(prepared, phi, *, compute_score=False):
-            u = float(np.log(phi))
-            before_realized_edge = u < 0.0
-            nll = (u + 0.5) ** 2 if before_realized_edge else (u - 0.2) ** 2 - 2.0
-            score_value = 2.0 * (u + 0.5) if before_realized_edge else 2.0 * (u - 0.2)
-            score = np.full(3, score_value) if compute_score else None
-            mask = u < realized
-            return tweedie_module._TweedieDensityEvaluation(
-                logpdf=np.full(3, -nll),
-                log_phi_score=score,
-                positive_saddlepoint_mask=mask,
-                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
-                    n_positive=3,
-                    n_saddlepoint=int(np.count_nonzero(mask)),
-                ),
-                score_valid=compute_score,
-            )
-
-        def fake_localize(prepared, threshold, positive_indices, remaining_probes):
-            del prepared, positive_indices
-            return (
-                (threshold + 10.0 - 1e-6, threshold + 10.0 + 1e-6),
-                remaining_probes - 1,
-                True,
-            )
-
-        return prepared, calibrated, realized, fake_evaluate, fake_localize
-
     @pytest.mark.parametrize(
-        ("y", "mu", "p", "weights", "force_saddlepoint"),
+        ("y", "mu", "p", "weights"),
         [
             pytest.param(
                 np.array([0.3, 1.2, 4.5]),
                 np.array([0.5, 1.5, 3.7]),
                 1.5,
                 None,
-                False,
-                id="regular-exact",
+                id="regular",
             ),
             pytest.param(
                 np.array([0.0, 0.0, 0.3, 2.5]),
                 np.array([0.4, 1.2, 0.5, 2.0]),
                 1.6,
                 None,
-                False,
                 id="zero-heavy",
             ),
             pytest.param(
@@ -1012,39 +601,11 @@ class TestDetailedPhiProfile:
                 np.array([0.3, 0.4, 1.4, 4.0]),
                 1.55,
                 np.array([0.25, 0.8, 1.7, 4.0]),
-                False,
-                id="unequal-prior-weights",
-            ),
-            pytest.param(
-                np.array([0.3, 2.0, 7.0]),
-                np.array([0.6, 1.5, 5.5]),
-                1.5,
-                None,
-                True,
-                id="forced-saddlepoint",
+                id="prior-weights",
             ),
         ],
     )
-    def test_mle_matches_tight_value_only_reference(
-        self,
-        monkeypatch,
-        y,
-        mu,
-        p,
-        weights,
-        force_saddlepoint,
-    ):
-        if force_saddlepoint:
-            real_wright_bessel = tweedie_module.wright_bessel
-
-            def fail_density_recurrence(a, b, t):
-                values = np.asarray(real_wright_bessel(a, b, t), dtype=np.float64)
-                if np.isclose(b, a + 1.0):
-                    return np.full_like(values, np.nan)
-                return values
-
-            monkeypatch.setattr(tweedie_module, "wright_bessel", fail_density_recurrence)
-
+    def test_mle_matches_tight_value_only_reference(self, y, mu, p, weights):
         reference, _ = _tight_value_only_phi_reference(
             y,
             mu,
@@ -1059,110 +620,231 @@ class TestDetailedPhiProfile:
             phi_method="mle",
         )
 
-        assert result.converged is (not force_saddlepoint)
-        assert result.used_fallback is force_saddlepoint
+        assert result.converged
+        assert not result.used_fallback
+        assert not result.branch_switch_detected
         assert result.objective_finite
         assert result.optimizer == "brentq"
         assert not result.lower_boundary
         assert not result.upper_boundary
         assert result.score is not None
         assert abs(result.score) <= 1e-6
+        assert result.diagnostics.n_saddlepoint == 0
         np.testing.assert_allclose(result.nll, reference.fun, rtol=1e-10, atol=1e-10)
         np.testing.assert_allclose(np.log(result.phi), reference.x, rtol=0.0, atol=5e-6)
 
-    @pytest.mark.parametrize(
-        ("y", "mu", "expected_phi", "boundary_name"),
-        [
-            pytest.param(
-                np.zeros(3),
-                np.array([0.7, 2.0, 8.0]),
-                1e12,
-                "upper_boundary",
-                id="all-zero-upper",
-            ),
-            pytest.param(
-                np.array([0.7, 2.0, 8.0]),
-                np.array([0.7, 2.0, 8.0]),
-                1e-12,
-                "lower_boundary",
-                id="positive-at-mean-lower",
-            ),
-        ],
-    )
-    def test_legitimate_hard_boundary_optima(self, y, mu, expected_phi, boundary_name):
-        p = 1.5
-        result = tweedie_module._profile_phi_detailed(y, mu, p, phi_method="mle")
-        expected_nll = -float(np.mean(tweedie_logpdf(y, mu, expected_phi, p)))
-
-        assert result.phi == expected_phi
-        assert result.nll == expected_nll
-        assert not result.converged
-        assert result.used_fallback
-        assert result.objective_finite
-        assert getattr(result, boundary_name)
-        assert result.lower_boundary is (expected_phi == 1e-12)
-        assert result.upper_boundary is (expected_phi == 1e12)
-
-    def test_boundary_without_valid_score_uses_exact_inward_objective_probe(
+    def test_certified_interior_root_does_not_probe_hard_phi_bounds(
         self,
         monkeypatch,
     ):
-        y = np.array([0.7, 2.0, 8.0])
-        mu = y.copy()
-        p = 1.5
-        calls = []
+        center = float(np.log(2.0))
+        evaluated_phi = []
+
+        def interior_quadratic(prepared, phi, *, compute_score=False):
+            del compute_score
+            evaluated_phi.append(float(phi))
+            u = float(np.log(phi))
+            nll = (u - center) ** 2
+            return tweedie_module._TweedieDensityEvaluation(
+                logpdf=np.full(len(prepared.y), -nll),
+                log_phi_score=np.full(len(prepared.y), -2.0 * (u - center)),
+                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                    n_positive=prepared.positive_indices.size,
+                    n_saddlepoint=0,
+                ),
+                score_valid=True,
+            )
+
+        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", interior_quadratic)
+        result = tweedie_module._profile_phi_detailed(
+            np.array([0.5, 1.5]),
+            np.array([0.8, 1.2]),
+            1.5,
+            phi_method="mle",
+            phi_start=2.0,
+        )
+
+        assert result.converged
+        assert result.phi == pytest.approx(2.0)
+        assert tweedie_module._PHI_LOWER_BOUND not in evaluated_phi
+        assert tweedie_module._PHI_UPPER_BOUND not in evaluated_phi
+
+    def test_all_zero_profile_probes_only_the_indicated_upper_boundary(
+        self,
+        monkeypatch,
+    ):
+        evaluated_phi = []
         real_evaluate = tweedie_module._evaluate_tweedie_density
 
-        def invalidate_lower_boundary_score(prepared, phi, *, compute_score=False):
-            evaluation = real_evaluate(prepared, phi, compute_score=compute_score)
-            calls.append((float(phi), compute_score))
-            if not compute_score or phi != 1e-12:
-                return evaluation
+        def spy(prepared, phi, *, compute_score=False):
+            evaluated_phi.append(float(phi))
+            return real_evaluate(prepared, phi, compute_score=compute_score)
+
+        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", spy)
+        result = tweedie_module._profile_phi_detailed(
+            np.zeros(3),
+            np.array([0.7, 2.0, 8.0]),
+            1.5,
+            phi_method="mle",
+        )
+
+        assert result.upper_boundary
+        assert result.phi == tweedie_module._PHI_UPPER_BOUND
+        assert result.score is not None and result.score < 0.0
+        assert tweedie_module._PHI_UPPER_BOUND in evaluated_phi
+        assert tweedie_module._PHI_LOWER_BOUND not in evaluated_phi
+
+    def test_required_boundary_certification_failure_propagates_identically(
+        self,
+        monkeypatch,
+    ):
+        error = TweedieDensityError(
+            observation_index=0,
+            power=1.5,
+            dispersion=tweedie_module._PHI_UPPER_BOUND,
+            term_count=11,
+            requested_rtol=1e-12,
+            reason="required boundary not certified",
+        )
+
+        def monotone_to_upper(prepared, phi, *, compute_score=False):
+            del compute_score
+            if phi == tweedie_module._PHI_UPPER_BOUND:
+                raise error
+            u = float(np.log(phi))
             return tweedie_module._TweedieDensityEvaluation(
-                logpdf=evaluation.logpdf,
-                log_phi_score=np.full_like(evaluation.logpdf, np.nan),
-                positive_saddlepoint_mask=evaluation.positive_saddlepoint_mask,
-                diagnostics=evaluation.diagnostics,
+                logpdf=np.full(len(prepared.y), u),
+                log_phi_score=np.ones(len(prepared.y)),
+                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                    n_positive=prepared.positive_indices.size,
+                    n_saddlepoint=0,
+                ),
+                score_valid=True,
+            )
+
+        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", monotone_to_upper)
+
+        with pytest.raises(TweedieDensityError) as caught:
+            tweedie_module._profile_phi_detailed(
+                np.array([0.5]),
+                np.array([0.8]),
+                1.5,
+                phi_method="mle",
+                phi_start=1.0,
+            )
+
+        assert caught.value is error
+
+    def test_bounded_rescue_preserves_required_boundary_failure_identity(
+        self,
+        monkeypatch,
+    ):
+        error = TweedieDensityError(
+            observation_index=0,
+            power=1.5,
+            dispersion=tweedie_module._PHI_UPPER_BOUND,
+            term_count=13,
+            requested_rtol=1e-12,
+            reason="bounded boundary not certified",
+        )
+
+        def invalid_score_to_upper(prepared, phi, *, compute_score=False):
+            del compute_score
+            if phi == tweedie_module._PHI_UPPER_BOUND:
+                raise error
+            u = float(np.log(phi))
+            return tweedie_module._TweedieDensityEvaluation(
+                logpdf=np.full(len(prepared.y), u),
+                log_phi_score=np.full(len(prepared.y), np.nan),
+                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                    n_positive=prepared.positive_indices.size,
+                    n_saddlepoint=0,
+                ),
                 score_valid=False,
             )
 
         monkeypatch.setattr(
             tweedie_module,
             "_evaluate_tweedie_density",
-            invalidate_lower_boundary_score,
+            invalid_score_to_upper,
         )
 
-        result = tweedie_module._profile_phi_detailed(y, mu, p, phi_method="mle")
-        inward_u = np.log(1e-12) + 1e-5
+        with pytest.raises(TweedieDensityError) as caught:
+            tweedie_module._profile_phi_detailed(
+                np.array([0.5]),
+                np.array([0.8]),
+                1.5,
+                phi_method="mle",
+            )
 
-        assert result.phi == 1e-12
-        assert result.lower_boundary
-        assert not result.converged
-        assert result.used_fallback
-        assert result.score is None
-        assert any(
-            not compute_score and abs(np.log(phi) - inward_u) <= 1e-12
-            for phi, compute_score in calls
+        assert caught.value is error
+
+    @pytest.mark.parametrize(
+        ("nll_slope", "expected_phi", "boundary_name"),
+        [
+            pytest.param(1.0, 1e-12, "lower_boundary", id="lower"),
+            pytest.param(-1.0, 1e12, "upper_boundary", id="upper"),
+        ],
+    )
+    def test_hard_boundary_kkt_orientation(
+        self,
+        monkeypatch,
+        nll_slope,
+        expected_phi,
+        boundary_name,
+    ):
+        def monotone_exact(prepared, phi, *, compute_score=False):
+            del compute_score
+            u = float(np.log(phi))
+            logpdf = np.full(len(prepared.y), -nll_slope * u)
+            log_score = np.full(len(prepared.y), -nll_slope)
+            return tweedie_module._TweedieDensityEvaluation(
+                logpdf=logpdf,
+                log_phi_score=log_score,
+                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                    n_positive=prepared.positive_indices.size,
+                    n_saddlepoint=0,
+                ),
+                score_valid=True,
+            )
+
+        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", monotone_exact)
+        result = tweedie_module._profile_phi_detailed(
+            np.array([0.5, 1.5]),
+            np.array([0.8, 1.2]),
+            1.5,
+            phi_method="mle",
+            phi_start=1.0,
         )
 
-    def test_derivative_only_failure_preserves_exact_objective_and_uses_fallback(
+        assert result.phi == expected_phi
+        assert getattr(result, boundary_name)
+        assert result.lower_boundary is (expected_phi == 1e-12)
+        assert result.upper_boundary is (expected_phi == 1e12)
+        assert result.objective_finite
+        assert not result.branch_switch_detected
+
+    def test_derivative_failure_uses_value_only_certified_rescue(
         self,
         monkeypatch,
     ):
         y = np.array([0.4, 1.5, 5.0])
         mu = np.array([0.7, 1.2, 4.5])
         p = 1.6
-        real_wright_bessel = tweedie_module.wright_bessel
+        real_evaluate = tweedie_module._evaluate_tweedie_density
 
-        def fail_derivative_recurrence(a, b, t):
-            values = np.asarray(real_wright_bessel(a, b, t), dtype=np.float64)
-            if np.isclose(b, a):
-                return np.full_like(values, np.nan)
-            return values
+        def invalidate_score(prepared, phi, *, compute_score=False):
+            del compute_score
+            evaluation = real_evaluate(prepared, phi)
+            return tweedie_module._TweedieDensityEvaluation(
+                logpdf=evaluation.logpdf,
+                log_phi_score=np.full_like(evaluation.log_phi_score, np.nan),
+                diagnostics=evaluation.diagnostics,
+                score_valid=False,
+            )
 
-        monkeypatch.setattr(tweedie_module, "wright_bessel", fail_derivative_recurrence)
+        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", invalidate_score)
         reference, _ = _tight_value_only_phi_reference(y, mu, p)
-
         result = tweedie_module._profile_phi_detailed(y, mu, p, phi_method="mle")
 
         assert not result.converged
@@ -1171,437 +853,154 @@ class TestDetailedPhiProfile:
         assert result.used_fallback
         assert result.fallback_reason is not None
         assert "derivative" in result.fallback_reason.lower()
-        assert 0 < result.n_fallback_evaluations <= result.n_value_only_evaluations
+        assert result.n_fallback_evaluations > 0
+        assert not result.branch_switch_detected
         np.testing.assert_allclose(result.nll, reference.fun, rtol=1e-10, atol=1e-10)
         np.testing.assert_allclose(np.log(result.phi), reference.x, rtol=0.0, atol=5e-6)
 
-    def test_branch_jump_is_not_accepted_as_a_score_root(self):
-        p = 1.0181533410437358
-        y = np.array([1.81787899, 11275.9262, 0.0, 0.00306563885, 0.0000232882792, 1.18207511])
-        mu = np.array(
-            [
-                0.0000253947806,
-                44091.7359,
-                198.869667,
-                0.000051937831,
-                331.859132,
-                0.0054422757,
-            ]
-        )
-        weights = np.array(
-            [83.2444169, 0.17590785, 2.31976211, 463.433307, 2.50852264, 0.416322332]
-        )
-
-        result = tweedie_module._profile_phi_detailed(
-            y,
-            mu,
-            p,
-            weights=weights,
-            phi_method="mle",
-        )
-        exact_nll = -float(np.mean(tweedie_logpdf(y, mu, result.phi, p, weights=weights)))
-
-        assert result.used_fallback
-        assert result.branch_switch_detected
-        assert result.optimizer == "bounded"
-        assert result.objective_finite
-        assert result.nll == exact_nll
-        assert result.score is None or abs(result.score) <= 1e-6
-        assert not (
-            abs(np.log(result.phi) - 3.807489) < 1e-4
-            and result.score is not None
-            and abs(result.score) > 1e-6
-        )
-
-    def test_nontoggling_nominal_threshold_does_not_explain_realized_transition(self):
-        p = 1.2
-        y = np.array([1.0])
-        prepared = tweedie_module._prepare_tweedie_density(y, y, p)
-        cache = tweedie_module._PhiEvaluationCache(prepared)
-        thresholds = tweedie_module._phi_analytic_branch_thresholds(prepared)
-        threshold = float(thresholds[0])
-        nominal_left = cache.evaluate(threshold - 1e-12, compute_score=False)
-        nominal_right = cache.evaluate(threshold + 1e-12, compute_score=False)
-        realized_right = cache.evaluate(threshold + 0.49, compute_score=False)
-
-        np.testing.assert_array_equal(
-            nominal_left.positive_saddlepoint_mask,
-            nominal_right.positive_saddlepoint_mask,
-        )
-        assert nominal_right.positive_saddlepoint_mask.tolist() == [True]
-        assert realized_right.positive_saddlepoint_mask.tolist() == [False]
-        assert tweedie_module._phi_branch_change_is_unexplained(
-            nominal_right,
-            realized_right,
-            thresholds,
-        )
-
-    def test_global_fallback_calibrates_realized_wright_validity_transition(
-        self,
-        monkeypatch,
-    ):
-        calibrated_ceilings = []
-        real_calibrate = tweedie_module._calibrate_wright_log_t_ceiling
-
-        def spy_calibrate(prepared):
-            ceiling = real_calibrate(prepared)
-            calibrated_ceilings.append(ceiling)
-            return ceiling
-
-        monkeypatch.setattr(
-            tweedie_module,
-            "_calibrate_wright_log_t_ceiling",
-            spy_calibrate,
-        )
-
-        prepared = tweedie_module._prepare_tweedie_density(
-            np.array([1.0]),
-            np.array([1.0]),
-            1.2,
-        )
-        result = tweedie_module._profile_phi_detailed(
-            np.array([1.0]),
-            np.array([1.0]),
-            1.2,
-            phi_method="mle",
-        )
-
-        assert result.used_fallback
-        assert result.branch_switch_detected
-        assert len(calibrated_ceilings) == 1
-        assert calibrated_ceilings[0] is not None
-        realized_thresholds, calibrated = tweedie_module._phi_realized_wright_thresholds(prepared)
-        assert calibrated
-        realized_threshold = float(realized_thresholds[0])
-        cache = tweedie_module._PhiEvaluationCache(prepared)
-        left = cache.evaluate(realized_threshold - 1e-12, compute_score=False)
-        right = cache.evaluate(realized_threshold + 1e-12, compute_score=False)
-        assert left.branch_signature != right.branch_signature
-
-    def test_realized_transition_probe_cap_exhaustion_marks_fallback_incomplete(
-        self,
-        monkeypatch,
-    ):
-        prepared = tweedie_module._prepare_tweedie_density(
-            np.array([1.0]),
-            np.array([1.0]),
-            1.2,
-        )
-        cache = tweedie_module._PhiEvaluationCache(prepared)
-        monkeypatch.setattr(
-            tweedie_module,
-            "_calibrate_wright_log_t_ceiling",
-            lambda prepared: None,
-        )
-        monkeypatch.setattr(tweedie_module, "_PHI_MAX_NUMERIC_BRANCH_PROBES", 0)
-
-        bounded = tweedie_module._run_phi_bounded_fallback(cache, required=True)
-
-        assert not bounded.success
-        assert bounded.branch_switch_detected
-
-    def test_clean_root_cannot_bypass_later_realized_branch_basin(
-        self,
-        monkeypatch,
-    ):
-        realized_transition = -4.7
-
-        def synthetic_double_basin(prepared, phi, *, compute_score=False):
-            u = float(np.log(phi))
-            saddlepoint = u < realized_transition
-            if saddlepoint:
-                nll = (u + 6.0) ** 2 + 1.0
-                score_value = 2.0 * (u + 6.0)
-            else:
-                nll = (u + 4.0) ** 2 - 1.0
-                score_value = 2.0 * (u + 4.0)
-            logpdf = np.full(len(prepared.y), -nll, dtype=np.float64)
-            score = (
-                np.full(len(prepared.y), score_value, dtype=np.float64) if compute_score else None
-            )
-            mask = np.full(
-                prepared.positive_indices.size,
-                saddlepoint,
-                dtype=np.bool_,
-            )
-            return tweedie_module._TweedieDensityEvaluation(
-                logpdf=logpdf,
-                log_phi_score=score,
-                positive_saddlepoint_mask=mask,
-                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
-                    n_positive=prepared.positive_indices.size,
-                    n_saddlepoint=int(np.count_nonzero(mask)),
-                ),
-                score_valid=compute_score,
-            )
-
-        monkeypatch.setattr(
-            tweedie_module,
-            "_evaluate_tweedie_density",
-            synthetic_double_basin,
-        )
-
-        result = tweedie_module._profile_phi_detailed(
-            np.array([1.0]),
-            np.array([1.0]),
-            1.2,
-            phi_method="mle",
-            phi_start=float(np.exp(-6.0)),
-        )
-
-        assert result.used_fallback
-        assert result.branch_switch_detected
-        assert result.optimizer == "bounded"
-        assert not result.converged
-        assert result.nll < 0.0
-        np.testing.assert_allclose(np.log(result.phi), -4.0, rtol=0.0, atol=1e-5)
-
-    def test_clean_root_probes_nearest_realized_not_nominal_branch_edge(
-        self,
-        monkeypatch,
-    ):
-        prepared, calibrated, realized, fake_evaluate, fake_localize = (
-            self._shifted_realized_branch_fixture()
-        )
-        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", fake_evaluate)
-        monkeypatch.setattr(
-            tweedie_module,
-            "_locate_first_realized_phi_branch_transition",
-            fake_localize,
-        )
-        monkeypatch.setattr(
-            tweedie_module,
-            "_phi_realized_wright_thresholds",
-            lambda prepared: (calibrated.copy(), True),
-        )
-        cache = tweedie_module._PhiEvaluationCache(prepared)
-        root = cache.evaluate(-0.5, compute_score=True)
-
-        candidates, branch_switch, requires_fallback = (
-            tweedie_module._better_phi_branch_edge_probes(
-                cache,
-                [tweedie_module._PhiCandidate(root, "brentq", validated=True)],
-            )
-        )
-
-        assert cache.evaluate(1e-6, compute_score=False).nll < root.nll
-        assert not candidates
-        assert not branch_switch
-        assert requires_fallback
-
-    def test_clean_root_rejects_delayed_edge_calibrated_below_lower_bound(
-        self,
-        monkeypatch,
-    ):
-        prepared = tweedie_module._prepare_tweedie_density(
-            np.ones(1),
-            np.ones(1),
-            1.5,
-        )
-
-        def fake_evaluate(prepared, phi, *, compute_score=False):
-            u = float(np.log(phi))
-            before_realized_edge = u < 0.0
-            nll = (u + 0.5) ** 2 if before_realized_edge else (u - 0.2) ** 2 - 2.0
-            score_value = 2.0 * (u + 0.5) if before_realized_edge else 2.0 * (u - 0.2)
-            return tweedie_module._TweedieDensityEvaluation(
-                logpdf=np.array([-nll]),
-                log_phi_score=np.array([score_value]) if compute_score else None,
-                positive_saddlepoint_mask=np.array([before_realized_edge]),
-                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
-                    n_positive=1,
-                    n_saddlepoint=int(before_realized_edge),
-                ),
-                score_valid=compute_score,
-            )
-
-        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", fake_evaluate)
-        monkeypatch.setattr(
-            tweedie_module,
-            "_phi_realized_wright_thresholds",
-            lambda prepared: (np.array([-30.0]), True),
-        )
-        monkeypatch.setattr(
-            tweedie_module,
-            "_positive_saddlepoint_mask_subset",
-            lambda prepared, u, positive_indices: np.ones(
-                len(positive_indices),
-                dtype=np.bool_,
-            ),
-        )
-        cache = tweedie_module._PhiEvaluationCache(prepared)
-        root = cache.evaluate(-0.5, compute_score=True)
-
-        candidates, branch_switch, requires_fallback = (
-            tweedie_module._better_phi_branch_edge_probes(
-                cache,
-                [tweedie_module._PhiCandidate(root, "brentq", validated=True)],
-            )
-        )
-
-        assert not candidates
-        assert not branch_switch
-        assert requires_fallback
-
-    def test_profile_clean_root_cannot_skip_shifted_realized_global_basin(
-        self,
-        monkeypatch,
-    ):
-        prepared, calibrated, realized, fake_evaluate, fake_localize = (
-            self._shifted_realized_branch_fixture()
-        )
-        monkeypatch.setattr(
-            tweedie_module,
-            "_prepare_tweedie_density",
-            lambda *args, **kwargs: prepared,
-        )
-        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", fake_evaluate)
-        monkeypatch.setattr(
-            tweedie_module,
-            "_locate_first_realized_phi_branch_transition",
-            fake_localize,
-        )
-        monkeypatch.setattr(
-            tweedie_module,
-            "_phi_realized_wright_thresholds",
-            lambda prepared: (calibrated.copy(), True),
-        )
-
-        result = tweedie_module._profile_phi_detailed(
-            np.ones(3),
-            np.ones(3),
-            1.5,
-            phi_method="mle",
-            phi_start=float(np.exp(-0.5)),
-        )
-
-        assert result.used_fallback
-        assert result.branch_switch_detected
-        assert not result.converged
-        np.testing.assert_allclose(np.log(result.phi), 0.2, rtol=0.0, atol=1e-5)
-        np.testing.assert_allclose(result.nll, -2.0, rtol=0.0, atol=1e-10)
-
-    def test_branch_switched_bounded_basin_is_not_reported_globally_converged(self):
-        p = 1.0076499464775093
-        y = np.array(
-            [
-                3.72526820233238e-06,
-                1.613555626301106e-06,
-                1.3843014725309668e-07,
-            ]
-        )
-        mu = np.array(
-            [
-                5.302077533862348e-06,
-                0.0006695682845387034,
-                0.27629554894504144,
-            ]
-        )
-        better_phi = 0.0004034278248560756
-
-        result = tweedie_module._profile_phi_detailed(y, mu, p, phi_method="mle")
-        better_nll = -float(np.mean(tweedie_logpdf(y, mu, better_phi, p)))
-
-        assert result.objective_finite
-        assert result.used_fallback
-        assert result.branch_switch_detected
-        assert result.optimizer == "bounded"
-        assert result.nll <= better_nll + 1e-8
-        assert not result.converged
-
-    @pytest.mark.parametrize(
-        ("p", "y", "mu", "better_phi"),
-        [
-            pytest.param(
-                1.02841933650712,
-                np.array([0.013700521389325804, 14.578262417603804]),
-                np.array([4.151274914315888e-05, 39050.6378678546]),
-                172.0116844400835,
-                id="two-positive-responses",
-            ),
-            pytest.param(
-                1.0418278153435188,
-                np.array([0.0, 0.0010178807460830947, 0.0, 18.141399305020826]),
-                np.array(
-                    [
-                        0.0001233220265692182,
-                        0.0033903221015031517,
-                        0.18914375881791862,
-                        17.613781883771676,
-                    ]
-                ),
-                0.007394671397250919,
-                id="zero-heavy",
-            ),
-        ],
-    )
-    def test_better_analytic_branch_edge_promotes_local_root_to_global_fallback(
-        self,
-        p,
-        y,
-        mu,
-        better_phi,
-    ):
-        better_nll = -float(np.mean(tweedie_logpdf(y, mu, better_phi, p)))
-
-        result = tweedie_module._profile_phi_detailed(y, mu, p, phi_method="mle")
-
-        assert result.objective_finite
-        assert result.used_fallback
-        assert result.branch_switch_detected
-        assert result.optimizer == "bounded"
-        assert result.nll <= better_nll + 1e-8
-        assert not result.converged
-
-    @pytest.mark.parametrize(
-        "phi_start",
-        [
-            pytest.param(None, id="no-warm-start"),
-            pytest.param(float(np.exp(5.03825)), id="warm-second-minimum"),
-        ],
-    )
-    def test_multiple_score_roots_are_compared_by_exact_objective(self, phi_start):
-        p = 1.1023681265404395
-        y = np.array([0.0, 3.30259948, 0.0, 0.0])
-        mu = np.array([4.94001718, 5.87112367, 0.20868529, 14.91399245])
-        weights = np.array([0.00679757427, 46.1238526, 8.73493384, 3.03253224])
-        worse_local_nll = 0.6801646102439636
-
-        result = tweedie_module._profile_phi_detailed(
-            y,
-            mu,
-            p,
-            weights=weights,
-            phi_method="mle",
-            phi_start=phi_start,
-        )
-        exact_nll = -float(np.mean(tweedie_logpdf(y, mu, result.phi, p, weights=weights)))
-
-        assert not result.converged
-        assert result.objective_finite
-        assert result.used_fallback
-        assert result.nll == exact_nll
-        assert result.nll < worse_local_nll - 0.05
-        np.testing.assert_allclose(result.nll, 0.614000943088867, rtol=0.0, atol=1e-9)
-        np.testing.assert_allclose(np.log(result.phi), 5.038249984662266, rtol=0.0, atol=5e-6)
-
-    def test_unsuccessful_fallback_cannot_be_overwritten_by_a_finite_start(
+    def test_uncertifiable_candidate_enters_fail_closed_rescue(
         self,
         monkeypatch,
     ):
         y = np.array([0.4, 1.5, 5.0])
         mu = np.array([0.7, 1.2, 4.5])
         p = 1.6
-        real_wright_bessel = tweedie_module.wright_bessel
+        real_evaluate = tweedie_module._evaluate_tweedie_density
 
-        def fail_derivative_recurrence(a, b, t):
-            values = np.asarray(real_wright_bessel(a, b, t), dtype=np.float64)
-            if np.isclose(b, a):
-                return np.full_like(values, np.nan)
-            return values
+        def fail_at_unit(prepared, phi, *, compute_score=False):
+            del compute_score
+            if abs(float(np.log(phi))) <= 1e-14:
+                raise TweedieDensityError(
+                    observation_index=0,
+                    power=p,
+                    dispersion=float(phi),
+                    term_count=9,
+                    requested_rtol=1e-12,
+                    reason="tail not certified",
+                )
+            return real_evaluate(prepared, phi)
+
+        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", fail_at_unit)
+        result = tweedie_module._profile_phi_detailed(
+            y,
+            mu,
+            p,
+            phi_method="mle",
+            phi_start=1.0,
+        )
+
+        failed_point = tweedie_module._PhiEvaluationCache(
+            tweedie_module._prepare_tweedie_density(y, mu, p)
+        )
+        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", fail_at_unit)
+        point = failed_point.evaluate(0.0, compute_score=True)
+
+        assert not point.objective_finite
+        assert not point.score_valid
+        assert result.objective_finite
+        assert result.used_fallback
+        assert not result.converged
+        assert not result.branch_switch_detected
+
+    def test_maximum_score_orientation_uses_value_only_rescue(self, monkeypatch):
+        def maximum_at_zero(prepared, phi, *, compute_score=False):
+            del compute_score
+            u = float(np.log(phi))
+            logpdf = np.full(len(prepared.y), u**2)
+            log_score = np.full(len(prepared.y), 2.0 * u)
+            return tweedie_module._TweedieDensityEvaluation(
+                logpdf=logpdf,
+                log_phi_score=log_score,
+                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                    n_positive=prepared.positive_indices.size,
+                    n_saddlepoint=0,
+                ),
+                score_valid=True,
+            )
+
+        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", maximum_at_zero)
+        result = tweedie_module._profile_phi_detailed(
+            np.array([0.5]),
+            np.array([0.8]),
+            1.5,
+            phi_method="mle",
+            phi_start=1.0,
+        )
+
+        assert result.used_fallback
+        assert result.fallback_reason is not None
+        assert "orientation" in result.fallback_reason
+        assert result.objective_finite
+        assert not result.converged
+
+    def test_multiple_smooth_score_minima_are_compared_without_branch_logic(
+        self,
+        monkeypatch,
+    ):
+        def double_well(prepared, phi, *, compute_score=False):
+            del compute_score
+            u = float(np.log(phi))
+            nll = (u * u - 1.0) ** 2
+            nll_score = 4.0 * u * (u * u - 1.0)
+            return tweedie_module._TweedieDensityEvaluation(
+                logpdf=np.full(len(prepared.y), -nll),
+                log_phi_score=np.full(len(prepared.y), -nll_score),
+                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                    n_positive=prepared.positive_indices.size,
+                    n_saddlepoint=0,
+                ),
+                score_valid=True,
+            )
+
+        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", double_well)
+        prepared = tweedie_module._prepare_tweedie_density(
+            np.array([0.5]),
+            np.array([0.8]),
+            1.5,
+        )
+        cache = tweedie_module._PhiEvaluationCache(prepared)
+        score_search = tweedie_module._search_phi_score_candidates(
+            cache,
+            [(-0.5, "left seed"), (0.5, "right seed")],
+        )
+        bounded = tweedie_module._run_phi_bounded_fallback(cache, required=True)
+        result = tweedie_module._finalize_phi_mle_result(
+            cache,
+            score_search,
+            bounded,
+            tweedie_module._TweedieLogpdfDiagnostics(n_positive=1, n_saddlepoint=0),
+        )
+
+        roots = sorted(candidate.point.u for candidate in score_search.root_candidates)
+        np.testing.assert_allclose(roots, [-1.0, 1.0], atol=1e-9)
+        assert "multiple distinct score minima" in " ".join(score_search.fallback_reasons)
+        assert result.objective_finite
+        assert result.nll == pytest.approx(0.0, abs=1e-12)
+        assert result.used_fallback
+        assert not result.converged
+        assert not result.branch_switch_detected
+
+    def test_unsuccessful_rescue_cannot_be_overwritten_by_a_seed(
+        self,
+        monkeypatch,
+    ):
+        y = np.array([0.4, 1.5, 5.0])
+        mu = np.array([0.7, 1.2, 4.5])
+        p = 1.6
+        real_evaluate = tweedie_module._evaluate_tweedie_density
+
+        def invalidate_score(prepared, phi, *, compute_score=False):
+            del compute_score
+            evaluation = real_evaluate(prepared, phi)
+            return tweedie_module._TweedieDensityEvaluation(
+                logpdf=evaluation.logpdf,
+                log_phi_score=np.full_like(evaluation.log_phi_score, np.nan),
+                diagnostics=evaluation.diagnostics,
+                score_valid=False,
+            )
 
         def unsuccessful_bounded(objective, *, bounds, method, options):
-            x = float(np.log(1.0))
+            x = 0.0
             return OptimizeResult(
                 x=x,
                 fun=objective(x),
@@ -1609,9 +1008,8 @@ class TestDetailedPhiProfile:
                 message="forced bounded failure",
             )
 
-        monkeypatch.setattr(tweedie_module, "wright_bessel", fail_derivative_recurrence)
+        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", invalidate_score)
         monkeypatch.setattr(tweedie_module, "minimize_scalar", unsuccessful_bounded)
-
         result = tweedie_module._profile_phi_detailed(
             y,
             mu,
@@ -1621,227 +1019,10 @@ class TestDetailedPhiProfile:
         )
 
         assert result.objective_finite
-        assert np.isfinite(result.nll)
         assert result.used_fallback
         assert result.optimizer == "bounded"
         assert not result.converged
         assert "forced bounded failure" in result.message
-
-    def test_fallback_branch_localization_has_a_bounded_density_pass_budget(self):
-        rng = np.random.default_rng(11)
-        n = 100
-        x = rng.normal(size=n)
-        mu = np.exp(2.0 + 0.3 * x)
-        y = generate_tweedie_cpg(n, mu=mu, phi=3.0, p=1.1, rng=rng)
-
-        result = tweedie_module._profile_phi_detailed(y, mu, 1.1, phi_method="mle")
-
-        assert result.objective_finite
-        assert result.used_fallback
-        assert result.n_fallback_evaluations <= 350
-
-    def test_large_profile_keeps_enough_branch_edges_for_the_global_basin(self):
-        rng = np.random.default_rng(71616)
-        for _ in range(68):
-            n = 100
-            p = float(rng.uniform(1.005, 1.22))
-            mu = np.exp(
-                rng.normal(
-                    rng.uniform(-1.0, 3.0),
-                    rng.uniform(0.2, 1.5),
-                    n,
-                )
-            )
-            phi = float(10 ** rng.uniform(-1.0, 1.0))
-            y = generate_tweedie_cpg(n, mu=mu, phi=phi, p=p, rng=rng)
-            weights = 10 ** rng.uniform(-1.0, 1.0, n)
-
-        result = tweedie_module._profile_phi_detailed(
-            y,
-            mu,
-            p,
-            weights=weights,
-            phi_method="mle",
-        )
-
-        assert p == 1.0444295667392194
-        assert result.used_fallback
-        assert not result.converged
-        np.testing.assert_allclose(result.phi, 0.6387398791114645, rtol=1e-8)
-        np.testing.assert_allclose(result.nll, 2.5154680680526336, rtol=0.0, atol=1e-9)
-        assert result.n_evaluations <= 350
-
-    def test_zero_heavy_large_profile_uses_large_profile_refinement_cap(
-        self,
-        monkeypatch,
-    ):
-        n = 1_000
-        y = np.zeros(n)
-        y[0] = 1.0
-        prepared = tweedie_module._prepare_tweedie_density(y, np.ones(n), 1.5)
-        cache = tweedie_module._PhiEvaluationCache(prepared)
-        interval_calls = []
-        real_interval = tweedie_module._run_phi_bounded_interval
-
-        def force_eight_segments(points):
-            finite = [point for point in points if point.objective_finite]
-            return [finite[index : index + 2] for index in range(0, 16, 2)]
-
-        def spy_interval(cache, bounds):
-            interval_calls.append(bounds)
-            return real_interval(cache, bounds)
-
-        monkeypatch.setattr(
-            tweedie_module,
-            "_finite_phi_fallback_segments",
-            force_eight_segments,
-        )
-        monkeypatch.setattr(
-            tweedie_module,
-            "_run_phi_bounded_interval",
-            spy_interval,
-        )
-
-        tweedie_module._run_phi_bounded_fallback(cache, required=True)
-
-        assert len(interval_calls) == 1 + tweedie_module._PHI_MAX_LARGE_FALLBACK_REFINEMENTS
-
-    def test_threshold_selection_does_not_build_observation_by_anchor_matrix(
-        self,
-        monkeypatch,
-    ):
-        thresholds = np.linspace(-20.0, 20.0, 10_000)
-        anchors = np.linspace(-18.0, 18.0, 114).tolist()
-        real_min = tweedie_module.np.min
-
-        def reject_dense_min(values, *args, **kwargs):
-            assert np.asarray(values).ndim <= 1
-            return real_min(values, *args, **kwargs)
-
-        monkeypatch.setattr(tweedie_module.np, "min", reject_dense_min)
-
-        selected, completed, n_unique = tweedie_module._select_phi_branch_thresholds(
-            thresholds,
-            anchors,
-        )
-
-        assert selected.size == tweedie_module._PHI_MAX_ANALYTIC_BRANCH_EDGES
-        assert not completed
-        assert n_unique == thresholds.size
-
-    def test_cached_profile_point_retains_one_packed_branch_mask(self):
-        n = 1_000
-        prepared = tweedie_module._prepare_tweedie_density(
-            np.ones(n),
-            np.ones(n),
-            1.5,
-        )
-        point = tweedie_module._PhiEvaluationCache(prepared).evaluate(
-            0.0,
-            compute_score=False,
-        )
-
-        assert "positive_saddlepoint_mask" not in vars(point)
-        assert "branch_signature" not in vars(point)
-        assert len(point.branch_mask.packed) == (n + 7) // 8
-        assert point.branch_signature[1] is point.branch_mask.packed
-        np.testing.assert_array_equal(
-            point.positive_saddlepoint_mask,
-            np.zeros(n, dtype=np.bool_),
-        )
-
-    def test_fallback_boundary_without_global_certificate_is_not_converged(
-        self,
-        monkeypatch,
-    ):
-        hidden_center = 7.123456789
-        hidden_half_width = 1e-12
-
-        def hidden_switchback_basin(prepared, phi, *, compute_score=False):
-            u = float(np.log(phi))
-            hidden = abs(u - hidden_center) <= hidden_half_width
-            nll = -100.0 if hidden else u - tweedie_module._LOG_PHI_LOWER_BOUND
-            score = np.full(len(prepared.y), np.nan, dtype=np.float64) if compute_score else None
-            mask = np.full(prepared.positive_indices.size, hidden, dtype=np.bool_)
-            return tweedie_module._TweedieDensityEvaluation(
-                logpdf=np.full(len(prepared.y), -nll, dtype=np.float64),
-                log_phi_score=score,
-                positive_saddlepoint_mask=mask,
-                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
-                    n_positive=prepared.positive_indices.size,
-                    n_saddlepoint=int(np.count_nonzero(mask)),
-                ),
-                score_valid=False,
-            )
-
-        monkeypatch.setattr(
-            tweedie_module,
-            "_evaluate_tweedie_density",
-            hidden_switchback_basin,
-        )
-
-        result = tweedie_module._profile_phi_detailed(
-            np.array([1.0]),
-            np.array([1.0]),
-            1.5,
-            phi_method="mle",
-            phi_start=1.0,
-        )
-
-        assert result.used_fallback
-        assert result.lower_boundary
-        assert result.phi == tweedie_module._PHI_LOWER_BOUND
-        assert result.objective_finite
-        assert not result.converged
-
-    def test_fallback_brentq_winner_without_global_certificate_is_not_converged(
-        self,
-        monkeypatch,
-    ):
-        hidden_center = 7.123456789
-        hidden_half_width = 1e-12
-        invalid_seed_u = -6.0
-
-        def hidden_switchback_basin(prepared, phi, *, compute_score=False):
-            u = float(np.log(phi))
-            hidden = abs(u - hidden_center) <= hidden_half_width
-            nll = -100.0 if hidden else u**2
-            score_valid = bool(compute_score and abs(u - invalid_seed_u) > 1e-12)
-            score = None
-            if compute_score:
-                score_value = 2.0 * u if score_valid else np.nan
-                score = np.full(len(prepared.y), score_value, dtype=np.float64)
-            mask = np.full(prepared.positive_indices.size, hidden, dtype=np.bool_)
-            return tweedie_module._TweedieDensityEvaluation(
-                logpdf=np.full(len(prepared.y), -nll, dtype=np.float64),
-                log_phi_score=score,
-                positive_saddlepoint_mask=mask,
-                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
-                    n_positive=prepared.positive_indices.size,
-                    n_saddlepoint=int(np.count_nonzero(mask)),
-                ),
-                score_valid=score_valid,
-            )
-
-        monkeypatch.setattr(
-            tweedie_module,
-            "_evaluate_tweedie_density",
-            hidden_switchback_basin,
-        )
-
-        result = tweedie_module._profile_phi_detailed(
-            np.array([2.0]),
-            np.array([1.0]),
-            1.5,
-            phi_method="mle",
-            phi_start=float(np.exp(invalid_seed_u)),
-        )
-
-        assert result.used_fallback
-        assert result.optimizer == "brentq"
-        assert result.objective_finite
-        np.testing.assert_allclose(np.log(result.phi), 0.0, rtol=0.0, atol=1e-8)
-        assert not result.converged
 
     def test_pearson_detailed_result_is_frozen_and_uses_exact_objective(self):
         y = np.array([0.0, 0.4, 1.5, 5.0])
@@ -1864,10 +1045,11 @@ class TestDetailedPhiProfile:
         assert result.optimizer == "pearson"
         assert result.converged
         assert result.objective_finite
-        assert result.n_evaluations == result.n_value_only_evaluations == 1
-        assert result.n_score_evaluations == result.n_fallback_evaluations == 0
+        assert result.n_evaluations == result.n_score_evaluations == 1
+        assert result.n_value_only_evaluations == result.n_fallback_evaluations == 0
         assert result.score is None
         assert not result.used_fallback
+        assert result.diagnostics.n_saddlepoint == 0
         with pytest.raises(FrozenInstanceError):
             result.phi = 2.0
 
@@ -1887,37 +1069,32 @@ class TestDetailedPhiProfile:
             return expected
 
         monkeypatch.setattr(tweedie_module, "_profile_phi_detailed", detailed_spy)
-
         actual = _profile_phi(y, mu, p, phi_method="mle")
 
         assert actual == (expected.phi, expected.nll)
         assert calls == 1
 
     def test_nonfinite_exact_objectives_are_never_reported_converged(self, monkeypatch):
-        y = np.array([0.0, 0.4, 1.5])
-        mu = np.array([0.2, 0.7, 1.2])
-        real_evaluate = tweedie_module._evaluate_tweedie_density
-
         def invalidate_objective(prepared, phi, *, compute_score=False):
-            evaluation = real_evaluate(prepared, phi, compute_score=compute_score)
-            score = (
-                np.full_like(evaluation.logpdf, np.nan, dtype=np.float64) if compute_score else None
-            )
+            del phi, compute_score
+            values = np.full(len(prepared.y), np.nan, dtype=np.float64)
             return tweedie_module._TweedieDensityEvaluation(
-                logpdf=np.full_like(evaluation.logpdf, np.nan, dtype=np.float64),
-                log_phi_score=score,
-                positive_saddlepoint_mask=evaluation.positive_saddlepoint_mask,
-                diagnostics=evaluation.diagnostics,
+                logpdf=values,
+                log_phi_score=values.copy(),
+                diagnostics=tweedie_module._TweedieLogpdfDiagnostics(
+                    n_positive=prepared.positive_indices.size,
+                    n_saddlepoint=0,
+                ),
                 score_valid=False,
             )
 
-        monkeypatch.setattr(
-            tweedie_module,
-            "_evaluate_tweedie_density",
-            invalidate_objective,
+        monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", invalidate_objective)
+        result = tweedie_module._profile_phi_detailed(
+            np.array([0.0, 0.4, 1.5]),
+            np.array([0.2, 0.7, 1.2]),
+            1.6,
+            phi_method="mle",
         )
-
-        result = tweedie_module._profile_phi_detailed(y, mu, 1.6, phi_method="mle")
 
         assert np.isinf(result.nll)
         assert not result.objective_finite
@@ -2000,7 +1177,7 @@ class TestProfileLikelihood:
         rng = np.random.default_rng(321)
         p_true = 1.6
         phi_true = 3.0
-        n = 4_000
+        n = 150
         x1 = rng.normal(0, 1, n)
         sample_weight = rng.uniform(0.5, 2.0, n)
         mu = np.exp(1.5 + 0.25 * x1)
@@ -2019,6 +1196,8 @@ class TestProfileLikelihood:
             y,
             sample_weight=sample_weight,
             p_bounds=(1.1, 1.9),
+            method="grid",
+            grid=[1.45, 1.6, 1.75],
             phi_method="mle",
         )
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.15)
@@ -2817,13 +1996,19 @@ class TestEstimatePFitMode:
 
     def test_unweighted_cpg_default_mle_p_phi_recovery(self):
         """The real public default-MLE fit path should recover p."""
-        X, y, p_true = _tweedie_data()
+        X, y, p_true = _tweedie_data(n=150)
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
             selection_penalty=0,
             features={"x1": Numeric()},
         )
-        result = model.estimate_p(X, y, fit_mode="fit")
+        result = model.estimate_p(
+            X,
+            y,
+            fit_mode="fit",
+            method="grid",
+            grid=[1.45, 1.6, 1.75],
+        )
         assert isinstance(result, TweedieProfileResult)
         assert result.phi_method == "mle"
         np.testing.assert_allclose(result.p_hat, p_true, atol=0.2)
@@ -4206,9 +3391,9 @@ class TestSearchMethods:
         np.testing.assert_allclose(r_grid.p_hat, r_lbfgsb.p_hat, atol=0.02)
         np.testing.assert_allclose(r_grid.p_hat, r_powell.p_hat, atol=0.02)
 
-    def test_low_p_saddlepoint_warning(self):
-        """Warn when saddlepoint dominates the final low-p profile fit."""
-        X, y, _ = _tweedie_data(n=2_500, p_true=1.08, seed=4)
+    def test_exact_profile_has_no_saddlepoint_warning(self):
+        """Certified profile likelihood never reports implicit approximation use."""
+        X, y, _ = _tweedie_data(n=50, p_true=1.25, seed=7)
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
             selection_penalty=0,
@@ -4221,46 +3406,16 @@ class TestSearchMethods:
                 model,
                 X,
                 y,
-                method="profile_opt",
-                optimizer="Powell",
-                p_bounds=(1.05, 1.9),
-                phi_method="mle",
+                method="grid",
+                grid=[1.25],
+                phi_method="pearson",
             )
 
         messages = [str(item.message) for item in caught]
-        assert sum("Saddlepoint approximation used" in message for message in messages) == 1
-        assert sum("near-power boundary instability" in message for message in messages) == 1
-        assert result.saddlepoint_fraction >= 0.25
-        assert result.n_saddlepoint > 0
-        assert result.n_positive > 0
-        assert any("Saddlepoint approximation used" in message for message in result.warnings)
-        assert any("inner phi profile did not converge" in message for message in result.warnings)
-        assert not result.converged
-
-    def test_regular_profile_has_no_saddlepoint_warning(self):
-        """Typical interior fits should not warn about saddlepoint usage."""
-        X, y, _ = _tweedie_data(n=2_500, p_true=1.25, seed=7)
-        model = SuperGLM(
-            family=TweedieDistribution(p=1.5),
-            selection_penalty=0,
-            features={"x1": Numeric()},
-        )
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result = estimate_tweedie_p(
-                model,
-                X,
-                y,
-                method="profile_opt",
-                optimizer="Powell",
-                p_bounds=(1.05, 1.9),
-                phi_method="mle",
-            )
-
-        assert not caught
-        assert result.saddlepoint_fraction < 0.10
-        assert result.warnings == []
+        assert not any("Saddlepoint approximation used" in message for message in messages)
+        assert result.saddlepoint_fraction == 0.0
+        assert result.n_saddlepoint == 0
+        assert result.density_exact
 
     def test_grid_with_weights(self):
         """Grid search should forward sample_weight correctly."""

@@ -305,7 +305,7 @@ class Tweedie:
         return tweedie_unit_deviance(y, mu, self.p)
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
-        """Tweedie log-likelihood via exact Wright-Bessel evaluation."""
+        """Tweedie log-likelihood via the certified exact density kernel."""
         from superglm.profiling.tweedie import tweedie_logpdf
 
         logpdf = tweedie_logpdf(y, mu, phi, self.p, weights=weights)
