@@ -144,6 +144,23 @@ def solve_poisson_log_state(X: NDArray, y: NDArray, slope_penalty: NDArray) -> D
                 break
             alpha *= 0.5
         else:
+            # Near the optimum, the Newton decrement can be smaller than the
+            # rounding error in the summed objective even while the score is
+            # still large enough to benefit from one final full Newton step.
+            # Accept only that roundoff-limited case; the score check below
+            # remains the authoritative convergence witness.
+            trial = coef - step
+            trial_objective = objective(trial)
+            objective_scale = max(abs(current), abs(trial_objective), 1.0)
+            objective_resolution = 64.0 * np.finfo(np.float64).eps * objective_scale
+            newton_decrement = float(gradient @ step)
+            if (
+                np.isfinite(trial_objective)
+                and 0.0 <= newton_decrement <= objective_resolution
+                and trial_objective <= current + objective_resolution
+            ):
+                coef = trial
+                continue
             raise AssertionError("dense Poisson oracle line search failed")
     else:
         raise AssertionError("dense Poisson oracle did not converge")
