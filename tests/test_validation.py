@@ -216,6 +216,22 @@ class TestLorenzCurveGini:
         assert result.gini_model == pytest.approx(0.0, abs=1e-12)
         assert result.gini_ratio == pytest.approx(0.0, abs=1e-12)
 
+    def test_near_constant_target_has_stable_gini_ratio(self):
+        y = np.array([1.0, 1.0, np.nextafter(1.0, 2.0)])
+        exposure = np.array([0.1, 0.2, 10.1])
+
+        constant = lorenz_curve(y, np.ones(3), exposure=exposure)
+        perfect = lorenz_curve(y, y, exposure=exposure)
+        reverse = lorenz_curve(y, -y, exposure=exposure)
+
+        assert constant.gini_ratio == 0.0
+        assert perfect.gini_ratio == pytest.approx(1.0)
+        assert reverse.gini_ratio == pytest.approx(-1.0)
+        assert constant.gini_model == 0.0
+        for result in (perfect, reverse):
+            assert result.gini_perfect > 0.0
+            assert result.gini_ratio == pytest.approx(result.gini_model / result.gini_perfect)
+
     def test_tied_predictions_are_permutation_invariant(self):
         """Rows with identical scores should not depend on input order."""
         y = np.array([10.0, 1.0, 8.0, 2.0, 6.0, 3.0])
