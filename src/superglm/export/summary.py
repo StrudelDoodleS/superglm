@@ -11,6 +11,7 @@ from superglm.features.categorical import Categorical
 from superglm.features.interaction import SplineCategorical, TensorInteraction
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.spline import _SplineBase
+from superglm.model.fit_state import fitted_penalty
 from superglm.solvers.rank import selected_group_name_set
 
 if TYPE_CHECKING:
@@ -294,7 +295,7 @@ def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryT
     selected_names = selected_group_name_set(
         model.result,
         model._groups,
-        penalty=model.penalty,
+        penalty=fitted_penalty(model),
     )
     terms: list[SummaryTermRow] = []
     for row in source.rows:

@@ -193,6 +193,7 @@ def _compute_observed_row_bundle(
     """Return observed rows and exact eta derivatives through the requested order."""
     if derivative_order not in (0, 1, 2):
         raise ValueError("observed row derivative_order must be 0, 1, or 2")
+    validate_observed_derivative_capability(distribution, link, derivative_order)
     y, mu, eta, sample_weight = _validate_rows(y, mu, eta, sample_weight)
 
     if type(link) is LogLink:
@@ -426,6 +427,51 @@ def classify_reml_curvature(distribution: Any, link: Any) -> REMLCurvature:
         "custom family/link combinations require an explicit ordinary REML curvature "
         "protocol; define reml_curvature(counterpart) returning 'fisher' or 'observed'"
     )
+
+
+def validate_observed_derivative_capability(
+    distribution: Any,
+    link: Any,
+    derivative_order: int,
+) -> None:
+    """Fail before fitting when exact observed rows cannot reach ``derivative_order``."""
+    if derivative_order not in (0, 1, 2):
+        raise ValueError("observed row derivative_order must be 0, 1, or 2")
+
+    required = [
+        (link, "deriv_inverse", "link.deriv_inverse"),
+        (link, "deriv2_inverse", "link.deriv2_inverse"),
+        (distribution, "variance", "distribution.variance"),
+        (distribution, "variance_derivative", "distribution.variance_derivative"),
+    ]
+    if derivative_order >= 1:
+        required.extend(
+            [
+                (link, "deriv3_inverse", "link.deriv3_inverse"),
+                (
+                    distribution,
+                    "variance_second_derivative",
+                    "distribution.variance_second_derivative",
+                ),
+            ]
+        )
+
+    missing = [label for owner, name, label in required if not callable(getattr(owner, name, None))]
+    if derivative_order >= 2:
+        if type(link) not in _BUILTIN_REML_LINKS and not callable(
+            getattr(link, "deriv4_inverse", None)
+        ):
+            missing.append("link.deriv4_inverse")
+        if type(distribution) not in _BUILTIN_REML_DISTRIBUTIONS and not callable(
+            getattr(distribution, "variance_third_derivative", None)
+        ):
+            missing.append("distribution.variance_third_derivative")
+
+    if missing:
+        methods = ", ".join(missing)
+        raise NotImplementedError(
+            f"exact order-{derivative_order} observed REML rows require {methods}"
+        )
 
 
 def classify_scop_reml_curvature(distribution: Any, link: Any) -> SCOPREMLCurvature:
@@ -818,7 +864,13 @@ def build_observed_reml_geometry(
         )
         hessian = 0.5 * (data_gram + data_gram.T) + penalty
 
-    decomposition = decompose_gram(hessian)
+    try:
+        decomposition = decompose_gram(hessian)
+    except ValueError as error:
+        raise ValueError(
+            "terminal observed REML coefficient Hessian is indefinite; "
+            "the fitted coefficients do not define a valid Laplace mode"
+        ) from error
     if nonnegative and needs_factor_certification(decomposition):
         factor_certified = decompose_factor(
             grouped_augmented_factor(

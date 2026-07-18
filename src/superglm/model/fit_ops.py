@@ -20,9 +20,18 @@ from superglm.distributions import (
 )
 from superglm.links import Link, stabilize_eta
 from superglm.model import path_ops, runtime_canonicalize
+from superglm.model.fit_state import (
+    _install_fit_state,
+    capture_fit_state,
+    configured_family,
+    configured_lambda2,
+    configured_penalty,
+)
+from superglm.model.fit_workspace import FitWorkspace
 from superglm.model.input_validation import validate_fit_input
 from superglm.model.reml_execute import (
     optimize_reml_best,
+    record_reml_terminal,
     run_fixed_monotone_reml,
     run_scop_efs_reml,
 )
@@ -74,9 +83,15 @@ __all__ = [
 ]
 
 
-@dataclass
+def _immutable_path_array(values, *, dtype) -> NDArray:
+    """Return a contiguous array whose immutable bytes backing cannot be reopened."""
+    array = np.ascontiguousarray(np.asarray(values, dtype=dtype))
+    return np.frombuffer(array.tobytes(order="C"), dtype=array.dtype).reshape(array.shape)
+
+
+@dataclass(frozen=True)
 class PathResult:
-    """Container for regularization path results."""
+    """Immutable container for regularization path results."""
 
     lambda_seq: NDArray  # shape (n_lambda,)
     coef_path: NDArray  # shape (n_lambda, p)
@@ -85,6 +100,38 @@ class PathResult:
     n_iter_path: NDArray  # shape (n_lambda,) — PIRLS iters per lambda
     converged_path: NDArray  # shape (n_lambda,) — bool
     edf_path: NDArray | None = None  # shape (n_lambda,) — effective df
+
+    def __post_init__(self) -> None:
+        normalized = {
+            "lambda_seq": _immutable_path_array(self.lambda_seq, dtype=np.float64),
+            "coef_path": _immutable_path_array(self.coef_path, dtype=np.float64),
+            "intercept_path": _immutable_path_array(self.intercept_path, dtype=np.float64),
+            "deviance_path": _immutable_path_array(self.deviance_path, dtype=np.float64),
+            "n_iter_path": _immutable_path_array(self.n_iter_path, dtype=np.int64),
+            "converged_path": _immutable_path_array(self.converged_path, dtype=np.bool_),
+            "edf_path": (
+                None
+                if self.edf_path is None
+                else _immutable_path_array(self.edf_path, dtype=np.float64)
+            ),
+        }
+        for name, value in normalized.items():
+            object.__setattr__(self, name, value)
+
+    def __reduce__(self):
+        """Route pickle restoration through the immutable constructor boundary."""
+        return (
+            type(self),
+            (
+                self.lambda_seq,
+                self.coef_path,
+                self.intercept_path,
+                self.deviance_path,
+                self.n_iter_path,
+                self.converged_path,
+                self.edf_path,
+            ),
+        )
 
     def to_frame(self):
         """Return path telemetry as a pandas DataFrame."""
@@ -216,7 +263,7 @@ def _required_fit_columns(model) -> tuple[str, ...]:
 
 
 def _validate_entrypoint_input(model, X, y, sample_weight, offset):
-    distribution = resolve_distribution(model.family)
+    distribution = resolve_distribution(configured_family(model))
     validated = validate_fit_input(
         X,
         y,
@@ -251,6 +298,7 @@ def _clear_fit_inference_caches(model) -> None:
     model._fit_y_ref = None
     model._fit_sample_weight_ref = None
     model._fit_offset_ref = None
+    model._fit_data_guard = None
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
@@ -405,6 +453,8 @@ def _prime_fit_caches(
     y_arr: NDArray,
 ) -> None:
     """Store fit-data caches for summary/metrics fast paths."""
+    from superglm.model.fit_data_guard import FitDataGuard
+
     fit_space_result = (
         model._solver_pirls_result() if model._solver_result is not None else model.result
     )
@@ -422,10 +472,22 @@ def _prime_fit_caches(
     )
     model._fit_mu = mu
     model._fit_null_mu = null_mu
+    nb_profile_result = getattr(model, "_nb_profile_result", None)
+    if nb_profile_result is not None:
+        model._nb_profile_result = nb_profile_result._published_with_data(
+            y_arr,
+            mu,
+            model._fit_weights,
+        )
     model._fit_X_ref = X_ref
     model._fit_y_ref = y_ref
     model._fit_sample_weight_ref = sample_weight_ref
     model._fit_offset_ref = offset_ref
+    # Compact fits release every retained row reference immediately below.
+    # Avoid an O(n) content hash that could never be consumed.
+    model._fit_data_guard = (
+        FitDataGuard.capture(X_ref, y_arr) if getattr(model, "_retain_fit_state", True) else None
+    )
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
@@ -457,6 +519,7 @@ def _maybe_release_fit_state(model) -> None:
     model._fit_y_ref = None
     model._fit_sample_weight_ref = None
     model._fit_offset_ref = None
+    model._fit_data_guard = None
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
@@ -464,7 +527,8 @@ def _maybe_release_fit_state(model) -> None:
 
 def _maybe_estimate_nb_theta(model, X, y, sample_weight=None, offset=None) -> None:
     """Resolve auto-theta negative-binomial fits before building the design matrix."""
-    if isinstance(model.family, NegativeBinomial) and model.family.theta == "auto":
+    family = configured_family(model)
+    if isinstance(family, NegativeBinomial) and family.theta == "auto":
         from superglm.profiling.nb import estimate_nb_theta
 
         nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
@@ -485,16 +549,61 @@ def fit(
     convergence=None,
     record_diagnostics=False,
 ):
-    """Fit the model to data."""
+    """Fit through an attempt-local workspace and publish one complete state."""
     X_ref = X
     y_ref = y
     sample_weight_ref = sample_weight
     offset_ref = offset
     X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
+    validated_inputs = (X, y, sample_weight, offset)
+    workspace = FitWorkspace.start(model, mode="fit", validated_inputs=validated_inputs)
+    _fit_in_workspace(
+        workspace.model,
+        X,
+        y,
+        sample_weight,
+        offset,
+        X_ref=X_ref,
+        y_ref=y_ref,
+        sample_weight_ref=sample_weight_ref,
+        offset_ref=offset_ref,
+        tol=tol,
+        max_iter=max_iter,
+        convergence=convergence,
+        record_diagnostics=record_diagnostics,
+    )
+    candidate = capture_fit_state(
+        workspace,
+        model,
+        revision=model._fit_revision + 1,
+    )
+    _install_fit_state(model, candidate)
+    return model
+
+
+def _fit_in_workspace(
+    model,
+    X,
+    y,
+    sample_weight,
+    offset,
+    *,
+    X_ref,
+    y_ref,
+    sample_weight_ref,
+    offset_ref,
+    tol=None,
+    max_iter=None,
+    convergence=None,
+    record_diagnostics=False,
+):
+    """Build, solve, and finalize an ordinary fit on private mutable state."""
     # Resolve fit controls: explicit kwargs > constructor fallback
     tol = tol if tol is not None else model._tol
     max_iter = max_iter if max_iter is not None else model._max_iter
     convergence = convergence if convergence is not None else model._convergence
+    penalty = configured_penalty(model)
+    lambda2 = configured_lambda2(model)
 
     # lambda_policy is only supported in fit_reml(); reject here.
     for name, spec in model._specs.items():
@@ -523,8 +632,8 @@ def fit(
     sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
 
     # Auto-calibrate lambda1 if not set
-    if model.penalty.lambda1 is None:
-        model.penalty.lambda1 = compute_lambda_max(model, y, sample_weight) * 0.1
+    if penalty.lambda1 is None:
+        penalty.lambda1 = compute_lambda_max(model, y, sample_weight) * 0.1
     has_lambda1_targets = model_has_lambda1_targets(model)
 
     # Invalidate cached properties from previous fit
@@ -534,8 +643,8 @@ def fit(
     # The constrained QP solver path ignores lambda1 — reject explicitly.
     if (
         any(g.monotone_engine is not None for g in model._groups)
-        and model.penalty.lambda1 is not None
-        and model.penalty.lambda1 > 0
+        and penalty.lambda1 is not None
+        and penalty.lambda1 > 0
         and has_lambda1_targets
     ):
         raise NotImplementedError(
@@ -555,10 +664,7 @@ def fit(
     if (
         _has_constraints
         or _has_scop
-        or (
-            model.penalty.lambda1 is not None
-            and (model.penalty.lambda1 == 0 or not has_lambda1_targets)
-        )
+        or (penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets))
     ):
         model._result, _ = fit_irls_direct(
             X=model._dm,
@@ -567,7 +673,7 @@ def fit(
             family=model._distribution,
             link=model._link,
             groups=model._groups,
-            lambda2=model.lambda2,
+            lambda2=lambda2,
             offset=offset,
             max_iter=max_iter,
             tol=tol,
@@ -583,12 +689,12 @@ def fit(
             family=model._distribution,
             link=model._link,
             groups=model._groups,
-            penalty=model.penalty,
+            penalty=penalty,
             offset=offset,
             max_iter_outer=max_iter,
             tol=tol,
             active_set=model._active_set,
-            lambda2=model.lambda2,
+            lambda2=lambda2,
             record_diagnostics=record_diagnostics,
             convergence=convergence,
         )
@@ -642,12 +748,58 @@ def fit_path(
     lambda_ratio=1e-3,
     lambda_seq=None,
 ):
-    """Fit a regularization path from lambda_max down to lambda_min."""
+    """Fit a regularization path and atomically publish its final solution."""
+    lambda_seq = path_ops.validate_lambda_path_controls(
+        n_lambda=n_lambda,
+        lambda_ratio=lambda_ratio,
+        lambda_seq=lambda_seq,
+    )
     X_ref = X
     y_ref = y
     sample_weight_ref = sample_weight
     offset_ref = offset
     X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
+    validated_inputs = (X, y, sample_weight, offset)
+    workspace = FitWorkspace.start(model, mode="fit_path", validated_inputs=validated_inputs)
+    path_result = _fit_path_in_workspace(
+        workspace.model,
+        X,
+        y,
+        sample_weight,
+        offset,
+        X_ref=X_ref,
+        y_ref=y_ref,
+        sample_weight_ref=sample_weight_ref,
+        offset_ref=offset_ref,
+        n_lambda=n_lambda,
+        lambda_ratio=lambda_ratio,
+        lambda_seq=lambda_seq,
+    )
+    candidate = capture_fit_state(
+        workspace,
+        model,
+        revision=model._fit_revision + 1,
+    )
+    _install_fit_state(model, candidate)
+    return path_result
+
+
+def _fit_path_in_workspace(
+    model,
+    X,
+    y,
+    sample_weight,
+    offset,
+    *,
+    X_ref,
+    y_ref,
+    sample_weight_ref,
+    offset_ref,
+    n_lambda=50,
+    lambda_ratio=1e-3,
+    lambda_seq=None,
+):
+    """Build and solve a regularization path on private mutable state."""
     from superglm.model.base import (
         compute_lambda_max,
         model_build_design_matrix,
@@ -673,7 +825,6 @@ def fit_path(
         lambda_ratio=lambda_ratio,
         lambda_seq=lambda_seq,
     )
-    n_lambda = len(lambda_seq)
     path_data = path_ops.run_lambda_path(
         model,
         y=y,
@@ -721,8 +872,10 @@ def fit_path(
     intercept_path[-1] = model.result.intercept
     _maybe_release_fit_state(model)
 
-    return PathResult(
-        lambda_seq=lambda_seq,
+    path_result = PathResult(
+        # A custom lambda sequence may be caller-owned.  Copy only this small
+        # vector; all other path buffers were allocated by the attempt.
+        lambda_seq=np.array(lambda_seq, dtype=np.float64, copy=True),
         coef_path=path_data["coef_path"],
         intercept_path=intercept_path,
         deviance_path=path_data["deviance_path"],
@@ -730,6 +883,18 @@ def fit_path(
         converged_path=path_data["converged_path"],
         edf_path=path_data["edf_path"],
     )
+    for values in (
+        path_result.lambda_seq,
+        path_result.coef_path,
+        path_result.intercept_path,
+        path_result.deviance_path,
+        path_result.n_iter_path,
+        path_result.converged_path,
+        path_result.edf_path,
+    ):
+        if values is not None:
+            values.setflags(write=False)
+    return path_result
 
 
 def fit_reml(
@@ -749,12 +914,89 @@ def fit_reml(
     verbose=False,
     w_correction_order=1,
 ):
-    """Fit with REML estimation of per-term smoothing parameters."""
+    """Fit REML in a private workspace and atomically publish success."""
+    from superglm.reml.w_derivatives import validate_w_correction_order
+
+    w_correction_order = validate_w_correction_order(w_correction_order)
     X_ref = X
     y_ref = y
     sample_weight_ref = sample_weight
     offset_ref = offset
     X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
+    validated_inputs = (X, y, sample_weight, offset)
+    workspace = FitWorkspace.start(model, mode="fit_reml", validated_inputs=validated_inputs)
+    debug_recorder = _fit_reml_in_workspace(
+        workspace.model,
+        X,
+        y,
+        sample_weight,
+        offset,
+        X_ref=X_ref,
+        y_ref=y_ref,
+        sample_weight_ref=sample_weight_ref,
+        offset_ref=offset_ref,
+        max_reml_iter=max_reml_iter,
+        reml_tol=reml_tol,
+        pirls_tol=pirls_tol,
+        max_pirls_iter=max_pirls_iter,
+        lambda2_init=lambda2_init,
+        interaction_mode=interaction_mode,
+        runtime_validation=runtime_validation,
+        verbose=verbose,
+        w_correction_order=w_correction_order,
+    )
+    candidate = capture_fit_state(
+        workspace,
+        model,
+        revision=model._fit_revision + 1,
+    )
+    _install_fit_state(model, candidate)
+    _record_reml_terminal_best_effort(model, debug_recorder)
+    return model
+
+
+def _record_reml_terminal_best_effort(model, debug_recorder) -> None:
+    """Emit a post-install terminal without letting diagnostic I/O escape."""
+    try:
+        # The dictionary swap above is the sole public commit point.  Trace
+        # persistence is external diagnostic I/O and cannot be part of that
+        # transaction, so a sink failure must not make a successful fit look
+        # like a failed operation after its state has already been installed.
+        record_reml_terminal(model, debug_recorder)
+    except Exception:
+        try:
+            logger.warning(
+                "fit_reml completed but terminal trace emission failed",
+                exc_info=True,
+            )
+        except Exception:
+            # A custom logging handler is external I/O too. The fitted state
+            # has already been installed and must remain a successful return.
+            pass
+
+
+def _fit_reml_in_workspace(
+    model,
+    X,
+    y,
+    sample_weight,
+    offset,
+    *,
+    X_ref,
+    y_ref,
+    sample_weight_ref,
+    offset_ref,
+    max_reml_iter=20,
+    reml_tol=1e-6,
+    pirls_tol=1e-6,
+    max_pirls_iter=100,
+    lambda2_init=None,
+    interaction_mode="full",
+    runtime_validation="auto",
+    verbose=False,
+    w_correction_order=1,
+):
+    """Run the complete REML attempt on private mutable model state."""
     from superglm.model.base import (
         model_build_design_matrix,
         model_has_lambda1_targets,
@@ -767,7 +1009,14 @@ def fit_reml(
     model._reml_result = None
     model._reml_profile = None
 
+    penalty = configured_penalty(model)
+    # REML has one selection regime: no L1 selection.  Resolve that before
+    # auto-theta profiling so the profile and final refit use identical
+    # optimization geometry.
+    if penalty.lambda1 is None:
+        penalty.lambda1 = 0.0
     _maybe_estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
+    configured_smoothing = configured_lambda2(model)
 
     import time as _time
 
@@ -786,10 +1035,7 @@ def fit_reml(
 
     # lambda1=None means "no L1 selection" in the REML path — default to 0
     # so the direct IRLS optimizer (Newton REML) is used instead of BCD+EFS.
-    if model.penalty.lambda1 is None:
-        model.penalty.lambda1 = 0.0
-
-    if model.penalty.lambda1 > 0 and model_has_lambda1_targets(model):
+    if penalty.lambda1 > 0 and model_has_lambda1_targets(model):
         raise ValueError(
             "fit_reml() requires selection_penalty=0. "
             "Use fit() / fit_path() for sparse selection, or use select=True on spline terms "
@@ -820,10 +1066,10 @@ def fit_reml(
             family=model._distribution,
             link=model._link,
             groups=model._groups,
-            penalty=model.penalty,
+            penalty=penalty,
             offset=offset,
             active_set=model._active_set,
-            lambda2=model.lambda2,
+            lambda2=configured_smoothing,
             tol=pirls_tol,
             max_iter_outer=max_pirls_iter,
         )
@@ -860,7 +1106,7 @@ def fit_reml(
         )
         model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
         _maybe_release_fit_state(model)
-        return model
+        return debug_recorder
 
     # Build penalty components and caches (eigenstructure computed once)
     from superglm.reml.penalty_algebra import build_penalty_context
@@ -872,7 +1118,7 @@ def fit_reml(
 
     # Initialize per-component lambdas (penalty-indexed, not term-indexed)
     # Partition into fixed (policy.mode == "fixed") and estimated components.
-    lam_init = lambda2_init if lambda2_init is not None else model.lambda2
+    lam_init = lambda2_init if lambda2_init is not None else configured_smoothing
     lambdas, estimated_names = initialize_component_lambdas(reml_penalties, lam_init)
     _any_unfixed_scop = inject_fixed_scop_lambdas(model._groups, model._specs, lambdas)
 
@@ -894,7 +1140,7 @@ def fit_reml(
     try:
         # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
         offset_arr = offset if offset is not None else np.zeros(len(y))
-        lam1 = model.penalty.lambda1
+        lam1 = penalty.lambda1
         use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
 
         if _has_monotone and not _any_unfixed_scop and not estimated_names:
@@ -908,6 +1154,8 @@ def fit_reml(
                 lambdas=lambdas,
                 reml_penalties=reml_penalties,
                 compute_fit_stats=_compute_fit_stats,
+                profile=_profile,
+                total_start=_t_total_start,
                 debug_recorder=debug_recorder,
             )
             _prime_fit_caches(
@@ -926,7 +1174,7 @@ def fit_reml(
             )
             logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
             _maybe_release_fit_state(model)
-            return model
+            return debug_recorder
 
         if _any_unfixed_scop or (_has_scop_monotone and estimated_names):
             best = run_scop_efs_reml(
@@ -968,7 +1216,7 @@ def fit_reml(
                 f"lambdas={best.lambdas}"
             )
             _maybe_release_fit_state(model)
-            return model
+            return debug_recorder
 
         best = optimize_reml_best(
             model,
@@ -1010,6 +1258,7 @@ def fit_reml(
             profile=_profile,
             total_start=_t_total_start,
             compute_fit_stats=_compute_fit_stats,
+            trace_run=getattr(debug_recorder, "trace_run", None),
         )
         _t0 = _time.perf_counter()
         _prime_fit_caches(
@@ -1034,7 +1283,7 @@ def fit_reml(
         _maybe_release_fit_state(model)
         _profile["fit_release_state_s"] = _time.perf_counter() - _t0
         _profile["total_s"] = _time.perf_counter() - _t_total_start
-        return model
+        return debug_recorder
     finally:
         # Always restore QP constraints if stripped
         if _qp_stripped:

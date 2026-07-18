@@ -5,8 +5,8 @@ for correlated groups). Zou & Hastie (2005) showed that elastic net fixes the
 lasso's instability with correlated predictors; the same benefit applies at
 the group level.
 
-Proximal operator decomposes into sequential ridge then group soft-threshold
-(Parikh & Boyd, 2014, §2.2).
+Its proximal operator is group soft-thresholding followed by the closed-form
+ridge denominator (Parikh & Boyd, 2014, §2.2).
 """
 
 from __future__ import annotations
@@ -48,20 +48,22 @@ class GroupElasticNet:
         self.features = normalize_penalty_features(features)
 
     def prox_group(self, bg: NDArray, group: GroupSlice, step: float) -> NDArray:
-        """Two-step proximal operator for a single group."""
+        """Closed-form composite proximal operator for a single group."""
         if not penalty_targets_group(self, group):
             return bg
-        # Step 1: ridge shrinkage
-        bg = bg / (1.0 + step * self.lambda1 * (1.0 - self.alpha))
-        # Step 2: group soft-threshold
+        # The prox of tau*||.||_2 + kappa/2*||.||_2^2 is group
+        # soft-thresholding followed by the ridge denominator.  Thresholding a
+        # ridge-shrunk vector with the unadjusted threshold solves a different
+        # objective.
         norm_g = np.linalg.norm(bg)
         thr = step * self.lambda1 * self.alpha * group.weight
         if norm_g <= thr:
             return np.zeros_like(bg)
-        return bg * (1.0 - thr / norm_g)
+        ridge_denom = 1.0 + step * self.lambda1 * (1.0 - self.alpha)
+        return bg * ((1.0 - thr / norm_g) / ridge_denom)
 
     def prox(self, beta: NDArray, groups: list[GroupSlice], step: float) -> NDArray:
-        """Proximal operator: ridge shrinkage then group soft-threshold."""
+        """Apply the closed-form group elastic-net prox to each group."""
         beta = beta.copy()
         for g in groups:
             beta[g.sl] = self.prox_group(beta[g.sl], g, step)

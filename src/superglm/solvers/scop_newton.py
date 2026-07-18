@@ -334,6 +334,7 @@ def scop_newton_step(
 
     # --- Attempt full Newton step ---
     used_fisher = False
+    H_solved = H_full
     step = _solve_step(H_full, grad)
     if step is None:
         used_fisher = True
@@ -344,6 +345,7 @@ def scop_newton_step(
             step = _solve_step(H_fisher, grad)
             if step is None:
                 step = -1e-4 * grad
+        H_solved = H_fisher
 
     # --- Damped step (step halving) ---
     # Non-finite trial states (overflow in exp(beta_eff), residual**2, etc.)
@@ -377,7 +379,7 @@ def scop_newton_step(
         objective_after=float(obj_new),
         step_norm=step_norm,
         used_fisher_fallback=used_fisher,
-        H_penalized=H_full,
+        H_penalized=H_solved,
     )
     _append_scop_trace(
         debug_recorder,
@@ -976,6 +978,7 @@ def scop_joint_newton_step(
 
     # --- Step 4: Solve ---
     used_fisher = False
+    H_solved = H
     step, linear_solver, linear_iterations = _solve_joint_step(
         H,
         grad,
@@ -1020,6 +1023,7 @@ def scop_joint_newton_step(
                 step = -1e-4 * grad
                 linear_solver = "gradient_fallback"
                 linear_iterations = 0
+        H_solved = H_fisher
 
     # --- Step 5: Joint line search ---
     alpha = 1.0
@@ -1060,8 +1064,8 @@ def scop_joint_newton_step(
         else:
             step_norm_i = 0.0
 
-        # Diagonal block of the joint Hessian
-        H_block_i = H[sl_i, sl_i]
+        # Diagonal block of the joint curvature used for the accepted solve.
+        H_block_i = H_solved[sl_i, sl_i]
 
         results[gi] = SCOPNewtonResult(
             beta_new=beta_new_i,

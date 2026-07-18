@@ -23,12 +23,15 @@ from superglm.group_matrix import (
 )
 from superglm.links import IdentityLink
 from superglm.model import state_ops
+from superglm.model.fit_state import FittedStateRevision
 from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.solvers.centered_system import (
     TabmatCenteringState,
     build_centered_system,
+    grouped_augmented_factor_rhs,
+    penalty_factor,
     refresh_centered_rhs,
 )
 from superglm.solvers.irls_direct import fit_irls_direct
@@ -45,6 +48,15 @@ from superglm.types import GroupSlice
 
 def _dense_design_matrix(X: np.ndarray) -> DesignMatrix:
     return DesignMatrix([DenseGroupMatrix(X)], n=X.shape[0], p=X.shape[1])
+
+
+def _publish_result_revision(model, **changes) -> None:
+    revision = FittedStateRevision.start(model)
+    for result_name in ("_result", "_solver_result"):
+        result = getattr(revision.model, result_name)
+        for name, value in changes.items():
+            setattr(result, name, value)
+    revision.commit()
 
 
 def _count_tabmat_split_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
@@ -482,15 +494,27 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
     assert preliminary_rank.rank == 4
     assert preliminary_rank.resolution_limited
     assert needs_factor_certification(preliminary_rank)
+    factor, factor_rhs = grouped_augmented_factor_rhs(
+        dm,
+        weights,
+        np.zeros((dm.p, dm.p)),
+        response=y - preliminary.mean_z,
+        center=preliminary.mean_x,
+    )
+    certified = decompose_factor(factor, retain_factor_solve=True)
+    assert certified.rank == 5
+    certified_beta = certified.solve_factor_rhs(factor_rhs)
+    certified_prediction = preliminary.mean_z + dm.matvec(certified_beta)
+    np.testing.assert_allclose(certified_prediction, y, rtol=2e-12, atol=2e-11)
     factor_calls = 0
-    original_factor = irls_direct_module.grouped_augmented_factor
+    original_factor = irls_direct_module.grouped_augmented_factor_rhs
 
     def counted_factor(*args, **kwargs):
         nonlocal factor_calls
         factor_calls += 1
         return original_factor(*args, **kwargs)
 
-    monkeypatch.setattr(irls_direct_module, "grouped_augmented_factor", counted_factor)
+    monkeypatch.setattr(irls_direct_module, "grouped_augmented_factor_rhs", counted_factor)
 
     hybrid, _ = fit_irls_direct(
         dm,
@@ -525,7 +549,175 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
     hybrid_prediction = hybrid.intercept + dm.matvec(hybrid.beta)
     stable_prediction = stable.intercept + dm.matvec(stable.beta)
     np.testing.assert_allclose(hybrid_prediction, stable_prediction, rtol=2e-12, atol=2e-11)
+    np.testing.assert_allclose(hybrid_prediction, y, rtol=2e-12, atol=2e-11)
+    np.testing.assert_allclose(stable_prediction, y, rtol=2e-12, atol=2e-11)
     assert hybrid.deviance == pytest.approx(stable.deviance, rel=2e-12, abs=2e-11)
+
+
+def test_streamed_factor_rhs_includes_penalty_rows_without_normal_equation_loss() -> None:
+    rng = np.random.default_rng(20260810)
+    n = 384
+    weights = rng.uniform(0.2, 2.0, size=n)
+    X = rng.normal(size=(n, 4))
+    X[:, 1] = X[:, 0] + 4.0e-8 * rng.normal(size=n)
+    dm = _dense_design_matrix(X)
+    mean_x = weights @ X / np.sum(weights)
+    response = rng.normal(size=n)
+    response -= float(weights @ response / np.sum(weights))
+    penalty = np.diag([0.0, 0.0, 0.4, 1.7])
+
+    factor, factor_rhs = grouped_augmented_factor_rhs(
+        dm,
+        weights,
+        penalty,
+        response=response,
+        center=mean_x,
+    )
+    decomposition = decompose_factor(factor, retain_factor_solve=True)
+    actual = decomposition.solve_factor_rhs(factor_rhs)
+
+    dense_factor = np.sqrt(weights)[:, None] * (X - mean_x)
+    smooth_factor = penalty_factor(penalty)
+    augmented_factor = np.vstack((dense_factor, smooth_factor))
+    augmented_rhs = np.concatenate((np.sqrt(weights) * response, np.zeros(smooth_factor.shape[0])))
+    expected = np.linalg.lstsq(
+        augmented_factor,
+        augmented_rhs,
+        rcond=SHARED_RANK_POLICY.factor_rcond,
+    )[0]
+    np.testing.assert_allclose(actual, expected, rtol=2e-9, atol=2e-10)
+    np.testing.assert_allclose(
+        augmented_factor @ actual,
+        augmented_factor @ expected,
+        rtol=2e-10,
+        atol=1e-9,
+    )
+
+
+def test_direct_qr_solves_factor_rhs_without_normal_equation_loss() -> None:
+    """The explicit factor route must not square its accurately formed RHS."""
+    n = 1024
+    row = np.arange(n, dtype=np.intp)
+    x = np.where(row % 2, 1.0, -1.0)
+    orthogonal = np.where(row % 4 < 2, 1.0, -1.0)
+    x_alias = x + 3.03e-8 * orthogonal
+    dm = DesignMatrix(
+        [DenseGroupMatrix(x), DenseGroupMatrix(x_alias)],
+        n=n,
+        p=2,
+    )
+    groups = [
+        GroupSlice(name="x", start=0, end=1),
+        GroupSlice(name="x_alias", start=1, end=2),
+    ]
+    y = 0.4 + 1.7 * x
+
+    result, _ = fit_irls_direct(
+        dm,
+        y,
+        np.ones(n),
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        direct_solve="qr",
+        tol=1e-12,
+    )
+
+    assert result.rank_info is not None
+    assert result.rank_info.augmented.rank == 2
+    prediction = result.intercept + dm.matvec(result.beta)
+    np.testing.assert_allclose(prediction, y, rtol=2e-12, atol=2e-11)
+
+
+def test_direct_qr_solves_from_factor_rhs_at_rank_boundary() -> None:
+    n = 512
+    cycle = np.arange(n, dtype=np.intp)
+    x = np.where(cycle % 2, 1.0, -1.0)
+    orthogonal_direction = np.where(cycle % 4 < 2, 1.0, -1.0)
+    x_alias = x + 3.03e-8 * orthogonal_direction
+    third = np.sin(0.37 * cycle)
+    X = np.column_stack((x, x_alias, third))
+    dm = _dense_design_matrix(X)
+    weights = np.ones(n)
+    groups = [GroupSlice(name="numeric", start=0, end=dm.p)]
+    y = 0.4 + 1.7 * x + 0.3 * third
+
+    mean_x = np.mean(X, axis=0)
+    mean_y = float(np.mean(y))
+    factor_decomposition = decompose_factor(X - mean_x, retain_factor_solve=True)
+    factor_beta = factor_decomposition.solve_factor_rhs(y - mean_y)
+    np.testing.assert_allclose(
+        mean_y + (X - mean_x) @ factor_beta,
+        y,
+        rtol=2e-12,
+        atol=2e-11,
+    )
+
+    result, _ = fit_irls_direct(
+        dm,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        direct_solve="qr",
+        tol=1e-12,
+    )
+
+    assert result.rank_info is not None
+    assert result.rank_info.data.rank == dm.p
+    prediction = result.intercept + dm.matvec(result.beta)
+    np.testing.assert_allclose(prediction, y, rtol=2e-12, atol=2e-11)
+
+
+def test_tall_factor_decomposition_does_not_request_quadratic_left_vectors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import superglm.solvers.rank as rank_module
+
+    rng = np.random.default_rng(20260812)
+    factor = rng.normal(size=(256, 7))
+    original_svd = rank_module.np.linalg.svd
+    full_matrix_requests: list[bool] = []
+
+    def checked_svd(values, *, full_matrices=True):
+        full_matrix_requests.append(full_matrices)
+        return original_svd(values, full_matrices=full_matrices)
+
+    monkeypatch.setattr(rank_module.np.linalg, "svd", checked_svd)
+    decomposition = decompose_factor(factor)
+
+    assert decomposition.rank == factor.shape[1]
+    assert full_matrix_requests == [False]
+
+
+def test_retained_representative_factor_rhs_uses_one_rank_svd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import superglm.solvers.rank as rank_module
+
+    x = np.linspace(-2.0, 2.0, 128)
+    third = np.sin(x)
+    factor = np.column_stack((x, x, third))
+    response = 1.5 * x - 0.4 * third
+    original_svd = rank_module.np.linalg.svd
+    svd_shapes: list[tuple[int, int]] = []
+
+    def counted_svd(values, *, full_matrices=True):
+        svd_shapes.append(values.shape)
+        return original_svd(values, full_matrices=full_matrices)
+
+    monkeypatch.setattr(rank_module.np.linalg, "svd", counted_svd)
+    decomposition = decompose_factor(factor, retain_factor_solve=True)
+    actual = decomposition.solve_factor_rhs(response)
+
+    assert decomposition.rank == 2
+    np.testing.assert_array_equal(decomposition.active_columns, [0, 2])
+    np.testing.assert_allclose(actual, [1.5, 0.0, -0.4], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(factor @ actual, response, rtol=1e-12, atol=1e-12)
+    assert svd_shapes == [factor.shape]
 
 
 def test_packed_centering_avoids_materializing_discrete_and_categorical_rows(
@@ -1213,7 +1405,7 @@ def test_pirls_selection_state_distinguishes_selected_zero_from_zeroed_group() -
     ],
 )
 def test_pirls_pure_l2_penalty_preserves_selected_zero_group(penalty) -> None:
-    """Pure L2 shrinkage cannot deselect an exactly zero fitted group."""
+    """Pure L2 keeps a zero group selected while contributing ridge curvature."""
     x = np.linspace(-1.0, 1.0, 40)[:, None]
     groups = [GroupSlice(name="x", start=0, end=1)]
 
@@ -1231,7 +1423,12 @@ def test_pirls_pure_l2_penalty_preserves_selected_zero_group(penalty) -> None:
     assert result.beta[0] == pytest.approx(0.0, abs=1e-14)
     assert result.rank_info is not None
     assert result.rank_info.selected_group_names == ("x",)
-    assert result.rank_info.group_edf == {"x": pytest.approx(1.0)}
+    data_curvature = float(x[:, 0] @ x[:, 0])
+    expected_inverse = 1.0 / (data_curvature + 1.0)
+    expected_edf = data_curvature * expected_inverse
+    assert result.rank_info.group_edf == {"x": pytest.approx(expected_edf)}
+    assert result.rank_info.augmented.pseudo_inverse()[0, 0] == pytest.approx(expected_inverse)
+    assert result.effective_df == pytest.approx(1.0 + expected_edf)
 
 
 @pytest.mark.parametrize(
@@ -1463,8 +1660,7 @@ def test_scaled_alias_summary_suppresses_both_coefficients(alias_scale: float) -
         assert not rows[name].estimable
         assert np.isnan(rows[name].se)
 
-    model.result.rank_info = None
-    model._solver_pirls_result().rank_info = None
+    _publish_result_revision(model, rank_info=None)
     model._summary_cache = None
     legacy_rows = {row.name: row for row in model.summary()._coef_rows}
     for name in ("x", "scaled_duplicate"):
@@ -1546,8 +1742,7 @@ def test_true_legacy_inference_matches_profiled_rank_state() -> None:
     model.fit(frame, y, sample_weight=weights)
     baseline = state_ops.fit_inference_info(model)
 
-    model.result.rank_info = None
-    model._solver_pirls_result().rank_info = None
+    _publish_result_revision(model, rank_info=None)
     legacy = state_ops.fit_inference_info(model)
 
     np.testing.assert_allclose(legacy["XtWX_inv_aug"], baseline["XtWX_inv_aug"], rtol=1e-9)

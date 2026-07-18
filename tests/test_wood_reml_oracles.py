@@ -10,6 +10,7 @@ import pytest
 from superglm.distributions import Gamma, Poisson
 from superglm.links import IdentityLink, LogLink
 from superglm.reml.objective import reml_laml_objective
+from superglm.reml.penalty_algebra import compute_penalty_nullity
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -51,6 +52,8 @@ def _cached_objective(
     result: PIRLSResult,
     slope_xtwx: np.ndarray,
     slope_penalty: np.ndarray,
+    xtw1: np.ndarray | None = None,
+    sum_w: float | None = None,
 ) -> float:
     return reml_laml_objective(
         _NoMatvecDesign(),
@@ -63,6 +66,8 @@ def _cached_objective(
         np.ones_like(y),
         np.zeros_like(y),
         XtWX=slope_xtwx,
+        XtW1=xtw1,
+        sum_W=sum_w,
         S_override=slope_penalty,
     )
 
@@ -89,6 +94,8 @@ def test_gaussian_reml_uses_full_augmented_hessian_and_penalty_nullity() -> None
         result=_pirls_result(state),
         slope_xtwx=state.slope_xtwx,
         slope_penalty=slope_penalty,
+        xtw1=state.full_hessian[1:, 0],
+        sum_w=float(state.full_hessian[0, 0]),
     )
 
     assert actual == pytest.approx(expected, rel=1e-12, abs=1e-12)
@@ -113,6 +120,8 @@ def test_gaussian_reml_is_invariant_to_translating_penalized_columns() -> None:
         result=_pirls_result(state),
         slope_xtwx=state.slope_xtwx,
         slope_penalty=slope_penalty,
+        xtw1=state.full_hessian[1:, 0],
+        sum_w=float(state.full_hessian[0, 0]),
     )
     shifted_actual = _cached_objective(
         distribution=SimpleNamespace(scale_known=False),
@@ -121,8 +130,114 @@ def test_gaussian_reml_is_invariant_to_translating_penalized_columns() -> None:
         result=_pirls_result(shifted_state),
         slope_xtwx=shifted_state.slope_xtwx,
         slope_penalty=slope_penalty,
+        xtw1=shifted_state.full_hessian[1:, 0],
+        sum_w=float(shifted_state.full_hessian[0, 0]),
     )
     assert shifted_actual == pytest.approx(actual, rel=1e-11, abs=1e-11)
+
+
+def test_gaussian_reml_counts_nullity_only_in_the_identified_subspace() -> None:
+    """An unpenalized exact alias is not an additional fixed-effect dimension."""
+    x = np.linspace(-1.0, 1.0, 12)
+    X = np.column_stack((x, x))
+    y = 0.7 + 1.2 * x + 0.15 * np.cos(2.0 * x)
+    augmented_design = np.column_stack((np.ones(len(y)), X))
+    coefficients = np.linalg.lstsq(augmented_design, y, rcond=None)[0]
+    residual = y - augmented_design @ coefficients
+    deviance = float(residual @ residual)
+    result = PIRLSResult(
+        beta=coefficients[1:],
+        intercept=float(coefficients[0]),
+        n_iter=1,
+        deviance=deviance,
+        converged=True,
+        phi=1.0,
+        effective_df=0.0,
+    )
+    slope_penalty = np.zeros((2, 2))
+    centered = X - np.mean(X, axis=0)
+    centered_eigenvalues = np.linalg.eigvalsh(centered.T @ centered)
+    positive = centered_eigenvalues[centered_eigenvalues > 1e-12]
+    assert positive.size == 1
+    logdet_identified_hessian = float(np.log(len(y)) + np.log(positive[0]))
+    expected = 0.5 * (len(y) - 2) * np.log(deviance) + 0.5 * logdet_identified_hessian
+
+    actual = _cached_objective(
+        distribution=SimpleNamespace(scale_known=False),
+        link=IdentityLink(),
+        y=y,
+        result=result,
+        slope_xtwx=X.T @ X,
+        slope_penalty=slope_penalty,
+        xtw1=np.sum(X, axis=0),
+        sum_w=float(len(y)),
+    )
+
+    assert actual == pytest.approx(expected, rel=1e-11, abs=1e-11)
+
+
+def test_penalty_nullity_ignores_rotated_psd_roundoff_eigenvalues() -> None:
+    """Numerical dust in an exactly rank-deficient S must not reduce M_p."""
+    rng = np.random.default_rng(0)
+    basis, _ = np.linalg.qr(rng.normal(size=(8, 8)))
+    exact_eigenvalues = np.concatenate((np.geomspace(1.0, 1e-4, 6), np.zeros(2)))
+    penalty = (basis * exact_eigenvalues) @ basis.T
+
+    assert compute_penalty_nullity(penalty, hessian_rank=9) == 3.0
+
+
+def test_structural_penalty_nullity_is_invariant_to_positive_lambda_ratios() -> None:
+    """Positive smoothing ratios do not change null(S); exact zeros do."""
+    components = [
+        PenaltyComponent(
+            name="left",
+            group_name="shared",
+            group_index=0,
+            group_sl=slice(0, 2),
+            omega_raw=np.diag([1.0, 0.0]),
+            omega_ssp=np.diag([1.0, 0.0]),
+            rank=1.0,
+        ),
+        PenaltyComponent(
+            name="right",
+            group_name="shared",
+            group_index=0,
+            group_sl=slice(0, 2),
+            omega_raw=np.diag([0.0, 1.0]),
+            omega_ssp=np.diag([0.0, 1.0]),
+            rank=1.0,
+        ),
+    ]
+
+    extreme = {"left": 1e10, "right": 1e-6}
+    extreme_matrix = np.diag([extreme["left"], extreme["right"]])
+    assert (
+        compute_penalty_nullity(
+            extreme_matrix,
+            hessian_rank=3,
+            penalties=components,
+            lambdas=extreme,
+        )
+        == 1.0
+    )
+    assert (
+        compute_penalty_nullity(
+            np.diag([1e-6, 1e10]),
+            hessian_rank=3,
+            penalties=components,
+            lambdas={"left": 1e-6, "right": 1e10},
+        )
+        == 1.0
+    )
+    assert (
+        compute_penalty_nullity(
+            np.diag([1e10, 0.0]),
+            hessian_rank=3,
+            penalties=components,
+            lambdas={"left": 1e10, "right": 0.0},
+        )
+        == 2.0
+    )
 
 
 def test_canonical_poisson_laml_uses_observed_full_hessian() -> None:
@@ -141,6 +256,8 @@ def test_canonical_poisson_laml_uses_observed_full_hessian() -> None:
         result=_pirls_result(state),
         slope_xtwx=state.slope_xtwx,
         slope_penalty=slope_penalty,
+        xtw1=state.full_hessian[1:, 0],
+        sum_w=float(state.full_hessian[0, 0]),
     )
 
     assert actual == pytest.approx(expected, rel=1e-11, abs=1e-11)

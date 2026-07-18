@@ -4,14 +4,18 @@ Part 1: Tests for SCOP state returned from fit_irls_direct.
 Part 2: Tests for build_scop_penalty_components.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
 
+import superglm.reml.scop_efs as scop_efs_module
 from superglm import Constraint, SuperGLM
-from superglm.families import Gaussian
+from superglm.families import Gaussian, Poisson
 from superglm.features.spline import PSpline
 from superglm.model.base import model_build_design_matrix
+from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.reml.scop_efs import (
     assemble_joint_hessian,
     build_scop_penalty_components,
@@ -19,7 +23,7 @@ from superglm.reml.scop_efs import (
     scop_efs_lambda_update,
 )
 from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.types import PenaltyComponent
+from superglm.types import GroupSlice, PenaltyComponent
 
 
 @pytest.fixture
@@ -267,6 +271,94 @@ def _first_diff_penalty(q):
     return D.T @ D
 
 
+class TestBuildSCOPPenaltyMatrixOwnership:
+    """Each SCOP group contributes exactly once to an assembled penalty."""
+
+    @staticmethod
+    def _group_and_component(q=6):
+        omega = _first_diff_penalty(q)
+        reparameterization = SimpleNamespace(penalty_matrix=lambda: omega)
+        group = GroupSlice(
+            name="x",
+            start=0,
+            end=q,
+            penalized=True,
+            monotone_engine="scop",
+            scop_reparameterization=reparameterization,
+        )
+        component = PenaltyComponent(
+            name="x",
+            group_name="x",
+            group_index=0,
+            group_sl=group.sl,
+            omega_raw=omega,
+            omega_ssp=omega,
+        )
+        return omega, group, component
+
+    def test_supplied_scop_component_is_not_added_again_by_group_fallback(self):
+        omega, group, component = self._group_and_component()
+
+        assembled = build_penalty_matrix(
+            [SimpleNamespace(R_inv=np.eye(group.size))],
+            [group],
+            {"x": 3.0},
+            group.size,
+            reml_penalties=[component],
+        )
+
+        np.testing.assert_allclose(assembled, 3.0 * omega, rtol=0.0, atol=0.0)
+
+    def test_scop_group_fallback_remains_when_component_list_omits_group(self):
+        omega, group, _ = self._group_and_component()
+
+        assembled = build_penalty_matrix(
+            [SimpleNamespace(R_inv=np.eye(group.size))],
+            [group],
+            {"x": 3.0},
+            group.size,
+            reml_penalties=[],
+        )
+
+        np.testing.assert_allclose(assembled, 3.0 * omega, rtol=0.0, atol=0.0)
+
+    def test_base_component_list_does_not_suppress_omitted_scop_group(self):
+        q_base = 2
+        q_scop = 6
+        base_omega = np.eye(q_base)
+        scop_omega = _first_diff_penalty(q_scop)
+        base_group = GroupSlice(name="base", start=0, end=q_base, penalized=True)
+        scop_group = GroupSlice(
+            name="x",
+            start=q_base,
+            end=q_base + q_scop,
+            penalized=True,
+            monotone_engine="scop",
+            scop_reparameterization=SimpleNamespace(penalty_matrix=lambda: scop_omega),
+        )
+        base_component = PenaltyComponent(
+            name="base",
+            group_name="base",
+            group_index=0,
+            group_sl=base_group.sl,
+            omega_raw=base_omega,
+            omega_ssp=base_omega,
+        )
+
+        assembled = build_penalty_matrix(
+            [SimpleNamespace(R_inv=np.eye(q_base)), SimpleNamespace(R_inv=np.eye(q_scop))],
+            [base_group, scop_group],
+            {"base": 2.0, "x": 3.0},
+            q_base + q_scop,
+            reml_penalties=[base_component],
+        )
+
+        expected = np.zeros_like(assembled)
+        expected[base_group.sl, base_group.sl] = 2.0 * base_omega
+        expected[scop_group.sl, scop_group.sl] = 3.0 * scop_omega
+        np.testing.assert_allclose(assembled, expected, rtol=0.0, atol=0.0)
+
+
 class TestBuildSCOPPenaltyComponents:
     """Tests for build_scop_penalty_components (pure unit tests, no model fitting)."""
 
@@ -508,6 +600,43 @@ class TestAssembleJointHessian:
         H_joint, mapping = assemble_joint_hessian(XtWX_plus_S, {})
         np.testing.assert_array_equal(H_joint, XtWX_plus_S)
         assert mapping == {}
+
+    def test_intercept_profiled_geometry_matches_augmented_schur_complement(self):
+        """SCOP coordinates must transform the intercept cross-block before profiling."""
+        raw_hessian = np.array(
+            [
+                [5.0, 0.8, 0.3],
+                [0.8, 4.0, 0.4],
+                [0.3, 0.4, 3.0],
+            ]
+        )
+        beta_eff = np.log(np.array([1.5, 0.7]))
+        scop_slice = slice(1, 3)
+        scop_block = np.array([[6.0, 0.5], [0.5, 4.5]])
+        states = {
+            0: {
+                "group_sl": scop_slice,
+                "H_scop_penalized": scop_block,
+                "group_name": "mono",
+                "beta_eff": beta_eff,
+            }
+        }
+        xtw1 = np.array([2.0, 1.2, -0.8])
+        sum_w = 7.0
+
+        raw_joint, _ = assemble_joint_hessian(raw_hessian, states)
+        transformed_cross = xtw1.copy()
+        transformed_cross[scop_slice] *= np.exp(beta_eff)
+        expected = raw_joint - np.outer(transformed_cross, transformed_cross) / sum_w
+
+        actual, _ = assemble_joint_hessian(
+            raw_hessian,
+            states,
+            XtW1=xtw1,
+            sum_W=sum_w,
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-14, atol=1e-14)
 
     def test_scop_block_replaced(self):
         """SCOP block in H_joint should equal H_scop_penalized, not the original."""
@@ -1153,6 +1282,52 @@ class TestSCOPEFSLambdaUpdate:
             lam_new = scop_efs_lambda_update(pc, beta, H_joint_inv, inv_phi, lam_old, {})
             assert lam_new > 0, f"Trial {trial}: lambda={lam_new} is not positive"
 
+    def test_joint_update_uses_generalized_prior_trace_for_overlapping_penalties(self):
+        """Wood--Fasiolo's prior trace is not component rank for shared blocks."""
+        from superglm.reml.scop_efs import _joint_efs_lambda_step
+
+        omegas = (
+            np.diag([1.0, 0.0]),
+            np.diag([0.0, 1.0]),
+            np.ones((2, 2)),
+        )
+        names = ("a", "b", "c")
+        lambdas = {"a": 1.0, "b": 2.0, "c": 3.0}
+        components = [
+            PenaltyComponent(
+                name=name,
+                group_name="shared",
+                group_index=0,
+                group_sl=slice(0, 2),
+                omega_raw=omega,
+                omega_ssp=omega,
+                rank=1.0,
+            )
+            for name, omega in zip(names, omegas, strict=True)
+        ]
+        beta = np.array([1.2, 0.8])
+        hessian_inverse = 0.1 * np.eye(2)
+
+        updated, _, _ = _joint_efs_lambda_step(
+            components,
+            beta,
+            hessian_inverse,
+            1.0,
+            lambdas,
+            {"a"},
+            {},
+            {"a": 1.0},
+            {},
+        )
+
+        total_penalty = sum(lambdas[name] * omega for name, omega in zip(names, omegas))
+        prior_trace = float(np.trace(np.linalg.pinv(total_penalty) @ omegas[0]))
+        posterior_trace = float(np.trace(hessian_inverse @ omegas[0]))
+        residual_edf = lambdas["a"] * (prior_trace - posterior_trace)
+        expected = residual_edf / float(beta @ omegas[0] @ beta)
+        assert abs(np.log(expected / lambdas["a"])) < 4.0
+        assert updated["a"] == pytest.approx(expected, rel=1e-12, abs=1e-12)
+
 
 # ---------------------------------------------------------------------------
 # Part 6: Tests for SCOP-aware REML objective
@@ -1161,6 +1336,69 @@ class TestSCOPEFSLambdaUpdate:
 
 class TestSCOPAwareObjective:
     """Tests for reml_laml_objective with scop_states parameter."""
+
+    @pytest.mark.slow
+    def test_objective_uses_profiled_intercept_joint_geometry(self, scop_model_inputs):
+        """The SCOP objective determinant must match the explicit Schur geometry."""
+        from superglm.reml.objective import reml_laml_objective
+        from superglm.solvers.rank import decompose_gram
+
+        model, y, sample_weight, offset = scop_model_inputs
+        offset_arr = offset if offset is not None else np.zeros_like(y)
+        lambdas = {"x": 1.7}
+        result, _, XtWX, scop_states = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=lambdas,
+            offset=offset,
+            return_xtwx=True,
+            return_scop_state=True,
+        )
+        penalties = build_scop_penalty_components(scop_states)
+        penalty = build_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            lambdas,
+            model._dm.p,
+            reml_penalties=penalties,
+        )
+        rank_info = result.rank_info
+        assert rank_info is not None
+        joint, _ = assemble_joint_hessian(
+            XtWX + penalty,
+            scop_states,
+            XtW1=rank_info.sum_w * rank_info.mean_x,
+            sum_W=rank_info.sum_w,
+        )
+        decomposition = decompose_gram(joint)
+        expected_logdet = float(np.log(rank_info.sum_w) + decomposition.log_pdet)
+
+        common = {
+            "dm": model._dm,
+            "distribution": model._distribution,
+            "link": model._link,
+            "groups": model._groups,
+            "y": y,
+            "result": result,
+            "lambdas": lambdas,
+            "sample_weight": sample_weight,
+            "offset_arr": offset_arr,
+            "XtWX": XtWX,
+            "reml_penalties": penalties,
+            "scop_states": scop_states,
+        }
+        actual = reml_laml_objective(**common)
+        expected = reml_laml_objective(
+            **common,
+            log_det_H=expected_logdet,
+            hessian_rank=1 + decomposition.rank,
+        )
+
+        assert actual == pytest.approx(expected, rel=1e-12, abs=1e-12)
 
     @pytest.mark.slow
     def test_objective_accepts_scop_state(self, scop_model_inputs):
@@ -1201,6 +1439,58 @@ class TestSCOPAwareObjective:
         )
         assert isinstance(val, float)
         assert np.isfinite(val), f"Objective returned non-finite value: {val}"
+
+    @pytest.mark.slow
+    def test_objective_with_scop_components_matches_single_block_override(
+        self,
+        scop_model_inputs,
+    ):
+        """Merged SCOP components and an explicit one-block S define the same objective."""
+        from superglm.reml.objective import reml_laml_objective
+
+        model, y, sample_weight, offset = scop_model_inputs
+        offset_arr = offset if offset is not None else np.zeros_like(y)
+        lambdas = {"x": 3.0}
+        result, _, XtWX, scop_states = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=lambdas,
+            offset=offset,
+            return_xtwx=True,
+            return_scop_state=True,
+        )
+        penalties = build_scop_penalty_components(scop_states)
+        expected_penalty = np.zeros((model._dm.p, model._dm.p))
+        for component in penalties:
+            expected_penalty[component.group_sl, component.group_sl] += (
+                lambdas[component.name] * component.omega_ssp
+            )
+
+        common = {
+            "dm": model._dm,
+            "distribution": model._distribution,
+            "link": model._link,
+            "groups": model._groups,
+            "y": y,
+            "result": result,
+            "lambdas": lambdas,
+            "sample_weight": sample_weight,
+            "offset_arr": offset_arr,
+            "XtWX": XtWX,
+            "reml_penalties": penalties,
+            "scop_states": scop_states,
+        }
+        assembled_objective = reml_laml_objective(**common)
+        explicit_objective = reml_laml_objective(
+            **common,
+            S_override=expected_penalty,
+        )
+
+        assert assembled_objective == pytest.approx(explicit_objective, rel=1e-12, abs=1e-12)
 
     @pytest.mark.slow
     def test_objective_without_scop_state_unchanged(self, scop_model_inputs):
@@ -1272,6 +1562,391 @@ from superglm.reml.scop_efs import optimize_scop_efs_reml  # noqa: E402
 class TestSCOPEFSOuterLoop:
     """Tests for the full SCOP-aware EFS outer loop."""
 
+    def test_candidate_disables_all_generic_terminal_metadata(self, monkeypatch):
+        """A rejected private candidate requests no retained-fit decompositions."""
+        captured = {}
+        rejected = SimpleNamespace(
+            beta=np.array([0.0]),
+            intercept=0.0,
+            converged=False,
+        )
+
+        def fake_solver(**kwargs):
+            captured.update(kwargs)
+            return rejected, None, np.array([[1.0]]), {}
+
+        monkeypatch.setattr(scop_efs_module, "fit_irls_direct", fake_solver)
+        context = scop_efs_module._SCOPREMLFitContext(
+            dm=SimpleNamespace(p=1, group_matrices=[]),
+            distribution=SimpleNamespace(),
+            link=SimpleNamespace(),
+            groups=[],
+            y=np.array([1.0]),
+            sample_weight=np.array([1.0]),
+            offset_arr=np.array([0.0]),
+            pirls_tol=1e-6,
+            max_pirls_iter=10,
+            reml_penalties=[],
+            convergence="coefficients",
+            scop_joint=True,
+            debug_recorder=None,
+            likelihood_size=1.0,
+            gamma_scale_data=None,
+        )
+
+        mode = scop_efs_module._fit_scop_reml_mode(
+            context,
+            {"x": 1.0},
+            beta_init=None,
+            intercept_init=None,
+            scop_state_init=None,
+            phase="candidate",
+            reml_iteration=1,
+            require_converged=True,
+        )
+
+        assert mode is None
+        assert captured["compute_rank_info"] is False
+        assert captured["_compute_fit_statistics"] is False
+        assert captured["_compute_reml_geometry"] is False
+
+    def test_candidate_omits_metadata_then_terminal_hydrates_once(
+        self,
+        scop_model_inputs,
+        monkeypatch,
+    ):
+        """Only the retained SCOP mode receives public rank, EDF, and covariance state."""
+        model, y, sample_weight, offset = scop_model_inputs
+        offset_arr = np.zeros_like(y) if offset is None else np.asarray(offset, dtype=float)
+        context = scop_efs_module._SCOPREMLFitContext(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            sample_weight=np.asarray(sample_weight, dtype=float),
+            offset_arr=offset_arr,
+            pirls_tol=1e-6,
+            max_pirls_iter=100,
+            reml_penalties=None,
+            convergence="coefficients",
+            scop_joint=True,
+            debug_recorder=None,
+            likelihood_size=float(np.sum(sample_weight)),
+            gamma_scale_data=None,
+        )
+        candidate = scop_efs_module._fit_scop_reml_mode(
+            context,
+            {"x": 1.0},
+            beta_init=None,
+            intercept_init=None,
+            scop_state_init=None,
+            phase="candidate",
+            reml_iteration=1,
+            require_converged=True,
+        )
+
+        assert candidate is not None
+        assert candidate.result.rank_info is None
+        assert np.isnan(candidate.result.effective_df)
+        assert np.isnan(candidate.result.phi)
+        assert candidate.result.log_det_H is None
+        assert candidate.result.reml_hessian_rank is None
+
+        calls = 0
+        original = scop_efs_module.install_scop_postfit_inference
+
+        def counted(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "install_scop_postfit_inference", counted)
+        terminal = scop_efs_module._finalize_scop_reml_mode(context, candidate)
+
+        assert terminal is candidate.result
+        assert calls == 1
+        assert terminal.rank_info is not None
+        assert terminal.scop_inference is not None
+        assert terminal.effective_df == pytest.approx(terminal.scop_inference.total_edf)
+        assert terminal.log_det_H == pytest.approx(candidate.log_det_h)
+        assert terminal.reml_hessian_rank == candidate.hessian_rank
+
+    def test_coefficient_change_without_latent_kkt_is_not_a_reml_candidate(self, scop_model_inputs):
+        """A loose coefficient tolerance cannot silently authorize a LAML mode."""
+        model, y, sample_weight, offset = scop_model_inputs
+        offset_arr = np.zeros_like(y) if offset is None else np.asarray(offset, dtype=float)
+        context = scop_efs_module._SCOPREMLFitContext(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            sample_weight=np.asarray(sample_weight, dtype=float),
+            offset_arr=offset_arr,
+            pirls_tol=0.1,
+            max_pirls_iter=1,
+            reml_penalties=None,
+            convergence="coefficients",
+            scop_joint=True,
+            debug_recorder=None,
+            likelihood_size=float(len(y)),
+            gamma_scale_data=None,
+        )
+
+        mode = scop_efs_module._fit_scop_reml_mode(
+            context,
+            {"x": 1.0},
+            beta_init=None,
+            intercept_init=None,
+            scop_state_init=None,
+            phase="candidate",
+            reml_iteration=1,
+            require_converged=True,
+        )
+
+        assert mode is None
+
+    def test_scop_reml_kkt_uses_retained_eta_under_large_translation(self):
+        """A compensating intercept must not manufacture a failed terminal score."""
+        from superglm.features import Numeric
+
+        rng = np.random.default_rng(20260731)
+        n = 100
+        x = np.sort(rng.uniform(0.0, 1.0, size=n))
+        z = rng.normal(size=n)
+        y = 0.2 + 0.6 * z + x + rng.normal(scale=0.04, size=n)
+        fitted = []
+        for shift in (0.0, 1.0e10):
+            frame = pd.DataFrame({"z": z + shift, "x": x})
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0.0,
+                discrete=True,
+                features={
+                    "z": Numeric(),
+                    "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+                },
+            )
+            model.fit_reml(frame, y, max_reml_iter=2, max_pirls_iter=100)
+            fitted.append(model)
+
+        baseline, translated = fitted
+        assert translated._reml_result.curvature_source == "observed"
+        assert translated._reml_result.objective == pytest.approx(
+            baseline._reml_result.objective,
+            rel=3e-6,
+            abs=3e-5,
+        )
+        assert translated._reml_result.lambdas["x"] == pytest.approx(
+            baseline._reml_result.lambdas["x"],
+            rel=3e-5,
+        )
+        assert translated._solver_result.deviance == pytest.approx(
+            baseline._solver_result.deviance,
+            rel=1e-5,
+            abs=1e-7,
+        )
+
+    def test_candidate_guard_backtracks_past_uphill_full_and_half_steps(self, monkeypatch):
+        """A fresh converged mode is required at every log-scale trial."""
+        current = SimpleNamespace(
+            lambdas={"x": 1.0},
+            objective=10.0,
+            result=SimpleNamespace(beta=np.array([0.0]), intercept=0.0),
+            scop_states={},
+        )
+        attempted_lambdas = []
+
+        def fake_fit(context, trial_lambdas, **kwargs):
+            del context, kwargs
+            attempted_lambdas.append(trial_lambdas.copy())
+            trial = trial_lambdas["x"]
+            objective = 12.0 if trial > 8.0 else 11.0 if trial > 3.0 else 9.0
+            return SimpleNamespace(
+                lambdas=trial_lambdas.copy(),
+                objective=objective,
+                result=SimpleNamespace(beta=np.array([objective]), intercept=objective),
+                scop_states={},
+            )
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fake_fit)
+
+        accepted, moved = scop_efs_module._backtrack_scop_efs_candidate(
+            SimpleNamespace(),
+            current,
+            {"x": 16.0},
+            reml_iteration=1,
+            max_attempts=4,
+        )
+
+        assert moved is True
+        assert accepted.lambdas == {"x": 2.0}
+        np.testing.assert_allclose(
+            [trial["x"] for trial in attempted_lambdas],
+            [16.0, 4.0, 2.0],
+            rtol=1e-15,
+        )
+
+    def test_candidate_guard_rejects_without_moving_after_all_trials_are_uphill(self, monkeypatch):
+        """Exhausted backtracking retains the exact current fitted state."""
+        current = SimpleNamespace(
+            lambdas={"x": 1.0},
+            objective=10.0,
+            result=SimpleNamespace(beta=np.array([0.0]), intercept=0.0),
+            scop_states={},
+        )
+        attempted_lambdas = []
+
+        def fake_fit(context, trial_lambdas, **kwargs):
+            del context, kwargs
+            attempted_lambdas.append(trial_lambdas.copy())
+            return SimpleNamespace(
+                lambdas=trial_lambdas.copy(),
+                objective=11.0,
+                result=SimpleNamespace(beta=np.array([1.0]), intercept=1.0),
+                scop_states={},
+            )
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fake_fit)
+
+        retained, moved = scop_efs_module._backtrack_scop_efs_candidate(
+            SimpleNamespace(),
+            current,
+            {"x": 16.0},
+            reml_iteration=1,
+            max_attempts=4,
+        )
+
+        assert moved is False
+        assert retained is current
+        np.testing.assert_allclose(
+            [trial["x"] for trial in attempted_lambdas],
+            [16.0, 4.0, 2.0, np.sqrt(2.0)],
+            rtol=1e-15,
+        )
+
+    def test_candidate_objective_receives_trial_fit_and_fresh_geometry(self, monkeypatch):
+        """A trial lambda is scored only with the state fitted at that lambda."""
+        trial_result = SimpleNamespace(
+            beta=np.array([3.0]),
+            intercept=0.25,
+            converged=True,
+            rank_info=SimpleNamespace(sum_w=4.0, mean_x=np.array([0.0])),
+        )
+        trial_xtwx = np.array([[7.0]])
+        trial_scop_states = {}
+        evaluation = SimpleNamespace(value=8.0)
+        objective_calls = []
+
+        def fake_solver(**kwargs):
+            assert kwargs["lambda2"] == {"x": 4.0}
+            return trial_result, np.array([[1.0]]), trial_xtwx, trial_scop_states
+
+        def fake_objective(*args, **kwargs):
+            objective_calls.append((args, kwargs))
+            return evaluation
+
+        monkeypatch.setattr(scop_efs_module, "fit_irls_direct", fake_solver)
+        monkeypatch.setattr(scop_efs_module, "reml_laml_objective", fake_objective)
+
+        context = scop_efs_module._SCOPREMLFitContext(
+            dm=SimpleNamespace(p=1, group_matrices=[]),
+            distribution=SimpleNamespace(),
+            link=SimpleNamespace(),
+            groups=[],
+            y=np.array([1.0]),
+            sample_weight=np.array([1.0]),
+            offset_arr=np.array([0.0]),
+            pirls_tol=1e-6,
+            max_pirls_iter=10,
+            reml_penalties=[],
+            convergence="deviance",
+            scop_joint=True,
+            debug_recorder=None,
+            likelihood_size=1.0,
+            gamma_scale_data=None,
+        )
+        mode = scop_efs_module._fit_scop_reml_mode(
+            context,
+            {"x": 4.0},
+            beta_init=np.array([0.0]),
+            intercept_init=0.0,
+            scop_state_init=None,
+            phase="line_search",
+            reml_iteration=1,
+            line_search_iteration=1,
+            trial_alpha=1.0,
+            require_converged=True,
+        )
+
+        assert mode is not None
+        assert mode.result is trial_result
+        assert mode.xtwx is trial_xtwx
+        assert mode.scop_states is trial_scop_states
+        assert mode.lambdas == {"x": 4.0}
+        assert mode.evaluation is evaluation
+        assert len(objective_calls) == 1
+        args, kwargs = objective_calls[0]
+        assert args[5] is trial_result
+        assert args[6] == {"x": 4.0}
+        assert kwargs["XtWX"] is trial_xtwx
+        assert kwargs["S_override"].shape == (1, 1)
+        assert kwargs["return_evaluation"] is True
+
+    def test_nonconverged_candidate_never_reaches_laml(self, monkeypatch):
+        """A failed inner solve is backtracked without any objective evaluation."""
+        trial_result = SimpleNamespace(
+            beta=np.array([3.0]),
+            intercept=0.25,
+            converged=False,
+        )
+        objective_calls = []
+
+        monkeypatch.setattr(
+            scop_efs_module,
+            "fit_irls_direct",
+            lambda **kwargs: (trial_result, np.array([[1.0]]), np.array([[7.0]]), {}),
+        )
+        monkeypatch.setattr(
+            scop_efs_module,
+            "reml_laml_objective",
+            lambda *args, **kwargs: objective_calls.append((args, kwargs)),
+        )
+
+        context = scop_efs_module._SCOPREMLFitContext(
+            dm=SimpleNamespace(p=1, group_matrices=[]),
+            distribution=SimpleNamespace(),
+            link=SimpleNamespace(),
+            groups=[],
+            y=np.array([1.0]),
+            sample_weight=np.array([1.0]),
+            offset_arr=np.array([0.0]),
+            pirls_tol=1e-6,
+            max_pirls_iter=10,
+            reml_penalties=[],
+            convergence="deviance",
+            scop_joint=True,
+            debug_recorder=None,
+            likelihood_size=1.0,
+            gamma_scale_data=None,
+        )
+        mode = scop_efs_module._fit_scop_reml_mode(
+            context,
+            {"x": 4.0},
+            beta_init=np.array([0.0]),
+            intercept_init=0.0,
+            scop_state_init=None,
+            phase="line_search",
+            reml_iteration=1,
+            line_search_iteration=1,
+            trial_alpha=1.0,
+            require_converged=True,
+        )
+
+        assert mode is None
+        assert objective_calls == []
+
     @pytest.fixture
     def scop_reml_model(self):
         """Build SCOP model inputs for REML outer loop tests."""
@@ -1290,6 +1965,94 @@ class TestSCOPEFSOuterLoop:
         y_out, sample_weight, offset = model_build_design_matrix(model, df, y, np.ones(n), None)
         offset_arr = np.zeros(n) if offset is None else np.array(offset)
         return model, y_out, np.array(sample_weight), offset_arr, df
+
+    @pytest.mark.slow
+    def test_retained_trial_mode_is_reused_for_terminal_state(self, scop_reml_model, monkeypatch):
+        """The terminal result reuses a coherent retained mode instead of refitting it."""
+        model, y, sample_weight, offset, _ = scop_reml_model
+        real_fit = scop_efs_module.fit_irls_direct
+        fit_calls = []
+
+        def spy_fit(**kwargs):
+            out = real_fit(**kwargs)
+            result = out[0]
+            fit_calls.append(
+                {
+                    "phase": kwargs["debug_context"]["phase"],
+                    "lambdas": kwargs["lambda2"].copy(),
+                    "result": result,
+                }
+            )
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "fit_irls_direct", spy_fit)
+
+        fitted = optimize_scop_efs_reml(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            sample_weight=sample_weight,
+            offset_arr=offset,
+            lambdas={"x": 1.0},
+            estimated_names={"x"},
+            max_reml_iter=1,
+            reml_tol=1e-12,
+        )
+
+        assert any(call["phase"] == "line_search" for call in fit_calls)
+        assert all(call["phase"] != "final" for call in fit_calls)
+        retained = [
+            call
+            for call in fit_calls
+            if call["phase"] in {"reml", "line_search"} and call["lambdas"] == fitted.lambdas
+        ]
+        assert len(retained) == 1
+        assert fitted.pirls_result is retained[0]["result"]
+
+    @pytest.mark.slow
+    def test_final_gaussian_phi_matches_terminal_laml_profile(self, scop_reml_model):
+        """The installed SCOP scale and nullity must come from the terminal Wood profile."""
+        from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
+
+        model, y, sample_weight, offset, _ = scop_reml_model
+        fitted = optimize_scop_efs_reml(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            sample_weight=sample_weight,
+            offset_arr=offset,
+            lambdas={"x": 1.0},
+            estimated_names={"x"},
+            max_reml_iter=8,
+            reml_tol=1e-6,
+        )
+        evaluation = reml_laml_objective(
+            dm=model._dm,
+            distribution=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            y=y,
+            result=fitted.pirls_result,
+            lambdas=fitted.lambdas,
+            sample_weight=sample_weight,
+            offset_arr=offset,
+            reml_penalties=fitted.reml_penalties,
+            scop_states=fitted.scop_states,
+            return_evaluation=True,
+        )
+
+        assert isinstance(evaluation, REMLObjectiveEvaluation)
+        assert evaluation.profiled_scale is not None
+        assert evaluation.penalty_nullity == pytest.approx(2.0)
+        assert fitted.pirls_result.phi == pytest.approx(
+            evaluation.profiled_scale.phi,
+            rel=1e-12,
+            abs=1e-12,
+        )
 
     @pytest.mark.slow
     def test_converges(self, scop_reml_model):
@@ -1536,6 +2299,76 @@ class TestSCOPFitRemlIntegration:
         assert model._reml_lambdas is not None
         for v in model._reml_lambdas.values():
             assert v == 1.0
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("family", [Gaussian(), Poisson()], ids=["gaussian", "poisson"])
+    def test_fixed_scop_reml_publishes_one_coherent_evaluated_mode(self, family):
+        """Fixed smoothing still has a complete REML objective and terminal lifecycle."""
+        from superglm.reml.objective import reml_laml_objective
+
+        rng = np.random.default_rng(20260801)
+        n = 320
+        x = np.sort(rng.uniform(0.0, 1.0, n))
+        if isinstance(family, Gaussian):
+            y = 0.3 + 1.6 * x + rng.normal(0.0, 0.16, n)
+        else:
+            y = rng.poisson(np.exp(-0.3 + 1.1 * x))
+        frame = pd.DataFrame({"x": x})
+        fixed_lambda = 1.7
+        model = SuperGLM(
+            family=family,
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    constraint=Constraint.fit.increasing,
+                    lambda_policy=LambdaPolicy(mode="fixed", value=fixed_lambda),
+                )
+            },
+        )
+
+        model.fit_reml(frame, y)
+
+        fitted = model._reml_result
+        solver = model._solver_result
+        assert isinstance(fitted, REMLResult)
+        assert fitted.pirls_result is solver
+        assert fitted.lambdas == model._reml_lambdas == {"x": fixed_lambda}
+        assert fitted.lambda_history == [{"x": fixed_lambda}]
+        assert fitted.n_reml_iter == 0
+        assert fitted.converged is solver.converged is True
+        assert fitted.termination_reason == "fixed_lambdas"
+        assert fitted.objective is not None and np.isfinite(fitted.objective)
+        assert fitted.scop_states
+        assert fitted.reml_penalties
+        assert model._reml_profile["n_reml_iter"] == 0
+        assert model._reml_profile["converged"] is True
+        assert model._last_fit_meta["lambda_strategy"] == "fixed"
+
+        evaluation = reml_laml_objective(
+            model._dm,
+            model._distribution,
+            model._link,
+            model._groups,
+            y,
+            solver,
+            fitted.lambdas,
+            model._fit_weights,
+            np.zeros(n) if model._fit_offset is None else model._fit_offset,
+            log_det_H=solver.log_det_H,
+            hessian_rank=solver.reml_hessian_rank,
+            reml_penalties=fitted.reml_penalties,
+            scop_states=fitted.scop_states,
+            return_evaluation=True,
+        )
+        assert evaluation.value == pytest.approx(fitted.objective, rel=2e-11, abs=2e-11)
+        if isinstance(family, Gaussian):
+            assert evaluation.profiled_scale is not None
+            assert solver.phi == pytest.approx(evaluation.profiled_scale.phi, rel=2e-11)
+        else:
+            assert evaluation.profiled_scale is None
+            assert solver.phi == 1.0
 
     @pytest.mark.slow
     def test_fit_reml_scop_concave_fixed_lambda_policy(self):
@@ -2178,8 +3011,11 @@ class TestMultiSCOPIntegration:
         model.fit_reml(df[["x1", "x2"]], y)
 
         assert model._result.converged
-        assert model._reml_result.converged, (
-            f"Outer REML did not converge in {model._reml_result.n_reml_iter} iterations"
+        assert model._reml_result.converged or (
+            model._reml_result.termination_reason == "line_search_stalled"
+        ), (
+            "Outer REML neither converged nor retained an honestly stalled mode "
+            f"after {model._reml_result.n_reml_iter} iterations"
         )
         assert model._reml_lambdas is not None
         assert len(model._reml_lambdas) >= 2
@@ -2708,6 +3544,54 @@ class TestJointSCOPNewton:
         np.testing.assert_allclose(
             joint_results[0].objective_after, result_single.objective_after, rtol=1e-8
         )
+
+    def test_fisher_fallback_exports_the_curvature_that_was_actually_solved(self):
+        """An indefinite observed block must not leak into REML after Fisher fallback."""
+        from types import SimpleNamespace
+
+        from superglm.solvers.scop import build_scop_solver_reparam
+        from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
+
+        rng = np.random.default_rng(1801)
+        n, q = 40, 4
+        basis = np.abs(rng.normal(size=(n, q))) + 0.5
+        weights = np.ones(n)
+        beta = np.zeros(q)
+        reparam = build_scop_solver_reparam(q + 1, direction="increasing")
+        penalty = reparam.penalty_matrix()
+        response = basis @ reparam.forward(beta) + 1_000.0
+
+        single = scop_newton_step(
+            basis,
+            weights,
+            response,
+            beta,
+            reparam,
+            penalty,
+            lambda2=1.0,
+        )
+        states = {
+            0: {
+                "B_scop": basis,
+                "S_scop": penalty,
+                "beta_scop": beta,
+                "reparam": reparam,
+                "bin_idx": None,
+                "group_sl": slice(0, q),
+                "group_name": "x",
+            }
+        }
+        joint = scop_joint_newton_step(
+            states,
+            weights,
+            response,
+            {"x": 1.0},
+            [SimpleNamespace(name="x", sl=slice(0, q))],
+        )[0]
+
+        for result in (single, joint):
+            assert result.used_fisher_fallback is True
+            assert np.linalg.eigvalsh(result.H_penalized).min() > 0.0
 
     def test_single_group_discretized_matches(self):
         """Joint step with one discretized group matches sequential."""

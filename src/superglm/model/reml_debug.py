@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from superglm._fit_trace import SCHEMA_VERSION
+from superglm._fit_trace import SCHEMA_VERSION, JSONLTraceSink, TraceRun
 
 TraceRow = dict[str, Any]
 TRACE_SUFFIXES = ("reml", "pirls", "scop")
@@ -65,6 +65,9 @@ class REMLDebugRecorder:
         self.base_dir = base_dir
         self.run_id = run_id
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.trace_run = (
+            TraceRun(run_id, sink=JSONLTraceSink(base_dir, run_id)) if enabled_level >= 2 else None
+        )
 
     def write_run_metadata(self, payload: dict) -> None:
         path = self.base_dir / f"{self.run_id}_run.json"
