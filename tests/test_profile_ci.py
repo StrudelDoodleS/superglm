@@ -309,14 +309,26 @@ class TestTweedieProfileCI:
             ({"alpha": 0.0}, "alpha"),
             ({"alpha": 1.0}, "alpha"),
             ({"alpha": np.nan}, "alpha"),
+            ({"alpha": np.ma.array(0.05, mask=True)}, "alpha"),
             ({"p_hat": np.nan}, "p_hat"),
+            ({"p_hat": np.ma.array(0.5, mask=True)}, "p_hat"),
             ({"nll_hat": np.inf}, "nll_hat"),
+            ({"nll_hat": np.ma.array(0.0, mask=True)}, "nll_hat"),
             ({"ll_scale": 0.0}, "ll_scale"),
             ({"ll_scale": np.inf}, "ll_scale"),
+            ({"ll_scale": np.ma.array(1.0, mask=True)}, "ll_scale"),
             ({"p_range": (0.5, 0.5)}, "p_range"),
             ({"p_range": (0.8, 0.2)}, "p_range"),
             ({"p_range": (np.nan, 1.0)}, "p_range"),
             ({"p_range": (0.0, 0.4)}, "contain p_hat"),
+            (
+                {"p_range": np.ma.array([0.0, 1.0], mask=[True, False])},
+                "p_range",
+            ),
+            (
+                {"p_range": [np.ma.array([0.0, 1.0], mask=[True, False])]},
+                "p_range",
+            ),
         ],
     )
     def test_tweedie_ci_validates_inputs_before_objective(self, overrides, match):
@@ -340,6 +352,92 @@ class TestTweedieProfileCI:
             tweedie_module.profile_ci_p(**kwargs)
 
         assert calls == []
+
+    @pytest.mark.parametrize(
+        "masked_value",
+        [
+            np.ma.array([0.0], mask=[True]),
+            np.ma.masked,
+            [np.ma.array([0.0], mask=[True])],
+        ],
+        ids=["masked-vector", "masked-constant", "nested-masked-vector"],
+    )
+    def test_tweedie_ci_rejects_masked_objective_values(self, masked_value):
+        with pytest.raises(ValueError, match="objective.*mask"):
+            tweedie_module.profile_ci_p(
+                lambda p: masked_value,
+                p_hat=0.5,
+                nll_hat=0.0,
+                ll_scale=1.0,
+                p_range=(0.0, 1.0),
+            )
+
+    @pytest.mark.parametrize("method_name", ["ci", "ci_details"])
+    def test_tweedie_result_ci_methods_reject_masked_alpha_before_objective(self, method_name):
+        calls = []
+
+        def objective(p):
+            calls.append(p)
+            return (p - 0.5) ** 2
+
+        result = self._bare_result(objective)
+
+        with pytest.raises(ValueError, match="alpha"):
+            getattr(result, method_name)(alpha=np.ma.array(0.05, mask=True))
+
+        assert calls == []
+
+    def test_tweedie_profile_plot_rejects_masked_alpha_before_objective(self):
+        calls = []
+
+        def objective(p):
+            calls.append(p)
+            return 0.0
+
+        result = self._bare_result(objective)
+
+        with pytest.raises(ValueError, match="alpha"):
+            result.profile_plot(alpha=np.ma.array(0.05, mask=True), n_points=3)
+
+        assert calls == []
+
+    def test_tweedie_profile_plot_rejects_masked_n_points_before_objective(self):
+        calls = []
+
+        def objective(p):
+            calls.append(p)
+            return 0.0
+
+        result = self._bare_result(objective)
+
+        with pytest.raises(ValueError, match="n_points"):
+            result.profile_plot(n_points=np.ma.array(3, mask=True, dtype=np.int64))
+
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        "masked_value",
+        [
+            np.ma.array([0.0], mask=[True]),
+            [np.ma.array([0.0], mask=[True])],
+        ],
+        ids=["masked-vector", "nested-masked-vector"],
+    )
+    def test_tweedie_profile_plot_rejects_masked_objective_values(self, masked_value):
+        calls = []
+
+        def objective(p):
+            calls.append(p)
+            if len(calls) > 1:
+                raise AssertionError("masked objective output must fail on the first probe")
+            return masked_value
+
+        result = self._bare_result(objective)
+
+        with pytest.raises(ValueError, match="objective.*mask"):
+            result.profile_plot(n_points=3)
+
+        assert len(calls) == 1
 
     def test_detailed_ci_distinguishes_truncation_from_boundary_root(self):
         shallow = tweedie_module._profile_ci_p_detailed(

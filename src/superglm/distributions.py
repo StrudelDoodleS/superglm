@@ -12,7 +12,11 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import gammaln
 
-from superglm._tweedie_numerics import normalize_tweedie_power, tweedie_unit_deviance
+from superglm._tweedie_numerics import (
+    _as_real_float64_array,
+    normalize_tweedie_power,
+    tweedie_unit_deviance,
+)
 
 # ── Numerical guard constants for positive-mean families ─────────
 _POSITIVE_INIT_MIN = 1e-12  # floor for initial_mean (replaces 0.1 pseudo-response)
@@ -290,15 +294,15 @@ class Tweedie:
 
     def variance(self, mu: NDArray) -> NDArray:
         """V(μ) = μᵖ."""
-        return np.power(mu, self.p)
+        return np.power(_as_real_float64_array("mu", mu), self.p)
 
     def variance_derivative(self, mu: NDArray) -> NDArray:
         """V'(μ) = p·μᵖ⁻¹."""
-        return self.p * np.power(mu, self.p - 1)
+        return self.p * np.power(_as_real_float64_array("mu", mu), self.p - 1)
 
     def variance_second_derivative(self, mu: NDArray) -> NDArray:
         """V''(μ) = p(p-1)·μᵖ⁻². Wood (2011) Appendix D."""
-        return self.p * (self.p - 1) * np.power(mu, self.p - 2)
+        return self.p * (self.p - 1) * np.power(_as_real_float64_array("mu", mu), self.p - 2)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Tweedie unit deviance."""

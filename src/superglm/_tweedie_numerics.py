@@ -49,6 +49,38 @@ class _DecimalInterval:
     upper: Decimal
 
 
+def _contains_masked_array(value: object) -> bool:
+    """Return whether a supported nested container contains a masked array.
+
+    ``np.asarray`` deliberately discards ``MaskedArray`` metadata.  Checking
+    only the outer object is insufficient because a list or object array can
+    contain a masked array whose hidden payload would then be consumed.  Walk
+    the container shapes accepted by the numerical APIs before coercion, with
+    cycle protection for adversarial object containers.
+    """
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        item = pending.pop()
+        if np.ma.isMaskedArray(item):
+            return True
+        if isinstance(item, np.ndarray):
+            if not item.dtype.hasobject:
+                continue
+            identity = id(item)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            pending.extend(item.flat)
+        elif isinstance(item, list | tuple):
+            identity = id(item)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            pending.extend(item)
+    return False
+
+
 def _configure_decimal_certification_context(
     context: Context,
     precision: int,
@@ -62,7 +94,11 @@ def _configure_decimal_certification_context(
 
 
 def normalize_real_scalar(name: str, value: object) -> float:
-    if isinstance(value, bool | np.bool_) or not isinstance(value, Real):
+    if (
+        isinstance(value, bool | np.bool_)
+        or _contains_masked_array(value)
+        or not isinstance(value, Real)
+    ):
         raise TypeError(f"{name} must be one finite real scalar")
     try:
         result = float(value)
@@ -96,7 +132,7 @@ def normalize_numeric_vector(
     nonnegative: bool = False,
 ) -> NDArray[np.float64]:
     """Return an owning float64 copy of one strict real numeric vector."""
-    if np.ma.isMaskedArray(value):
+    if _contains_masked_array(value):
         raise TypeError(f"{name} must be a one-dimensional real numeric array without a mask")
     try:
         raw = np.asarray(value)
@@ -189,6 +225,8 @@ def normalize_tweedie_grid(
 
 def _as_real_float64_array(name: str, value: object) -> NDArray[np.float64]:
     """Convert a real numeric array without silently coercing non-real values."""
+    if _contains_masked_array(value):
+        raise TypeError(f"{name} must be a real numeric array without a mask")
     try:
         raw = np.asarray(value)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -919,6 +957,8 @@ def compound_poisson_gamma_parameters(
     weight_arr = (
         np.ones_like(mu_arr) if weights is None else _as_real_float64_array("weights", weights)
     )
+    if _contains_masked_array(phi):
+        raise TypeError("phi must be a real numeric scalar or array without a mask")
     phi_raw = np.asarray(phi)
     if phi_raw.ndim == 0:
         dispersion: float | NDArray[np.float64] = normalize_positive_scalar("phi", phi)

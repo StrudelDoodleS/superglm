@@ -40,6 +40,7 @@ from superglm._tweedie_numerics import (
     PHI_LOWER_BOUND,
     TweedieNumericalError,
     _as_real_float64_array,
+    _contains_masked_array,
     compound_poisson_gamma_parameters,
     normalize_boolean,
     normalize_numeric_vector,
@@ -77,7 +78,7 @@ class _CPGRNG(Protocol):
 
 def _normalize_cpg_size(n: int) -> int:
     """Return a non-negative integer sample count, excluding booleans."""
-    if isinstance(n, bool | np.bool_):
+    if isinstance(n, bool | np.bool_) or _contains_masked_array(n):
         raise TypeError("n must be a non-negative integer")
     try:
         normalized = operator.index(n)
@@ -90,6 +91,8 @@ def _normalize_cpg_size(n: int) -> int:
 
 def _normalize_cpg_power(p: float) -> float:
     """Return a finite real scalar power in the open interval (1, 2)."""
+    if _contains_masked_array(p):
+        raise ValueError("p must be a finite real numeric scalar in (1, 2)")
     try:
         raw = np.asarray(p)
     except (TypeError, ValueError) as exc:
@@ -111,6 +114,8 @@ def _normalize_cpg_parameter(name: str, value: float | NDArray, n: int) -> NDArr
         f"{name} must be finite, strictly positive, and either a real numeric scalar "
         f"or an array with shape ({n},)"
     )
+    if _contains_masked_array(value):
+        raise ValueError(message)
     try:
         raw = np.asarray(value)
     except (TypeError, ValueError) as exc:
@@ -182,6 +187,8 @@ def _draw_cpg_counts(rng: _CPGRNG, lam: NDArray) -> NDArray:
     except (ValueError, OverflowError, FloatingPointError) as exc:
         raise ValueError("Poisson sampler failed for validated Poisson rate parameters") from exc
 
+    if _contains_masked_array(raw_counts):
+        raise RuntimeError("Poisson sampler output must not contain a mask")
     try:
         counts = np.asarray(raw_counts)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -223,6 +230,8 @@ def _draw_cpg_positive_values(
             "Gamma sampler failed for validated Gamma shape and scale parameters"
         ) from exc
 
+    if _contains_masked_array(raw_values):
+        raise RuntimeError("Gamma sampler output must not contain a mask")
     try:
         raw = np.asarray(raw_values)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -379,6 +388,10 @@ def _validate_strict_tweedie_array(
     legacy_message: str,
 ) -> NDArray[np.float64]:
     """Reject coercive public array inputs before shared shape validation."""
+    if _contains_masked_array(value):
+        raise _TweedieArrayTypeError(
+            f"{legacy_message}; {name} must be a real numeric array without a mask"
+        )
     try:
         raw = np.asarray(value)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -2065,8 +2078,13 @@ class TweedieProfileResult:
                 "estimate_tweedie_p() to produce this result."
             )
 
+        if _contains_masked_array(n_points):
+            raise ValueError("n_points must be an unmasked integer")
+
         import matplotlib.pyplot as plt
 
+        if _contains_masked_array(alpha):
+            raise ValueError("alpha must be finite and strictly between 0 and 1")
         try:
             alpha_value = float(alpha)
         except (TypeError, ValueError, OverflowError) as exc:
@@ -2106,7 +2124,13 @@ class TweedieProfileResult:
             grid_hi = min(1.99, support_hi + margin)
         p_grid = np.linspace(grid_lo, grid_hi, n_points)
 
-        nll_values = np.array([self._objective(p) for p in p_grid])
+        raw_nll_values = []
+        for p in p_grid:
+            raw_nll = self._objective(p)
+            if _contains_masked_array(raw_nll):
+                raise ValueError("Tweedie profile plot objective values must not contain a mask")
+            raw_nll_values.append(raw_nll)
+        nll_values = np.array(raw_nll_values)
         deviance = 2.0 * self._ll_scale * (nll_values - self.nll)
 
         if ax is None:
@@ -3571,6 +3595,8 @@ def _validate_profile_ci_inputs(
     p_range: tuple[float, float],
 ) -> tuple[float, float, float, float, tuple[float, float]]:
     """Validate and normalize scalar profile-CI inputs without evaluating it."""
+    if _contains_masked_array(alpha):
+        raise ValueError("alpha must be finite and strictly between 0 and 1")
     try:
         alpha_value = float(alpha)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -3580,6 +3606,8 @@ def _validate_profile_ci_inputs(
 
     normalized: dict[str, float] = {}
     for name, value in (("p_hat", p_hat), ("nll_hat", nll_hat), ("ll_scale", ll_scale)):
+        if _contains_masked_array(value):
+            raise ValueError(f"{name} must be a finite scalar")
         try:
             parsed = float(value)
         except (TypeError, ValueError, OverflowError) as exc:
@@ -3590,6 +3618,8 @@ def _validate_profile_ci_inputs(
     if normalized["ll_scale"] <= 0.0:
         raise ValueError("ll_scale must be finite and strictly positive")
 
+    if _contains_masked_array(p_range):
+        raise ValueError("p_range must be two ordered finite bounds")
     try:
         range_values = np.asarray(p_range)
     except (TypeError, ValueError) as exc:
@@ -3911,6 +3941,8 @@ def _profile_ci_p_detailed(
                 f"Tweedie profile CI objective failed at p={key:g}: {type(exc).__name__}: {exc}"
             ) from exc
         try:
+            if _contains_masked_array(raw_nll):
+                raise ValueError("objective returned a value containing a mask")
             values = np.asarray(raw_nll)
             if values.size != 1 or np.iscomplexobj(values):
                 raise ValueError("objective did not return one real scalar")
