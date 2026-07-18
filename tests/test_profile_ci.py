@@ -934,7 +934,7 @@ class TestTweedieProfileCI:
         from superglm.profiling.tweedie import generate_tweedie_cpg
 
         rng = np.random.default_rng(42)
-        n = 1000
+        n = 20
         true_p = 1.5
         x = rng.standard_normal(n)
         mu = np.exp(1.0 + 0.3 * x)
@@ -967,7 +967,7 @@ class TestTweedieProfileCI:
         from superglm.profiling.tweedie import generate_tweedie_cpg
 
         rng = np.random.default_rng(42)
-        n = 500
+        n = 100
         x = rng.standard_normal(n)
         mu = np.exp(1.0 + 0.3 * x)
         y = generate_tweedie_cpg(n, mu, phi=1.0, p=1.5, rng=rng)

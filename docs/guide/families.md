@@ -106,12 +106,14 @@ evaluates the Tweedie log-likelihood. `phi_method="pearson"` is an explicit fast
 option when exploratory speed matters, but it is not a likelihood profile
 and cannot support a likelihood-ratio confidence interval.
 
-Positive densities normally use the Wright–Bessel series. A diagnosed
-saddlepoint fallback is used only when that exact evaluation is not finite or
-certifiable. Inspect `density_method`, `density_exact`, `saddlepoint_fraction`,
-`near_power_boundary`, `outer_boundary`, and `warnings` on the result. Profiles
-at a search bound, and especially near *p*=1 and *p*=2, are naturally unstable;
-optimizer convergence alone does not make such an estimate reliable.
+Positive densities use a certified compound-Poisson/Gamma series. The evaluator
+bounds both omitted probability mass and the first moment needed by the
+dispersion score. Likelihood and profile calls never select a saddlepoint approximation:
+an evaluation that cannot certify its arithmetic fails closed.
+Inspect `density_method`, `density_exact`, `near_power_boundary`,
+`outer_boundary`, and `warnings` on the result. Profiles at a search bound, and
+especially near *p*=1 and *p*=2, are naturally unstable; optimizer convergence
+alone does not make such an estimate reliable.
 
 `sample_weight` follows the exponential-dispersion-model prior-weight convention:
 `Var(Yᵢ | xᵢ) = φ μᵢᵖ / wᵢ` (equivalently, observation-specific dispersion

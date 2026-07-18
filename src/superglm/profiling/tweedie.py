@@ -2,8 +2,8 @@
 
 For p ∈ (1, 2), the Tweedie distribution is a compound Poisson-Gamma.
 This module provides multiple search strategies for estimating the power
-parameter p via profile likelihood, plus exact Wright-Bessel logpdf
-evaluation and compound Poisson-Gamma simulation.
+parameter p via profile likelihood, plus certified compound-Poisson/Gamma
+log-density evaluation and simulation.
 
 Search methods:
 
@@ -33,13 +33,15 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 from scipy.optimize import brentq, minimize, minimize_scalar
-from scipy.special import expit, logit, wright_bessel
+from scipy.special import expit, logit
 
+import superglm._tweedie_density as _tweedie_density
 from superglm._tweedie_numerics import (
     PHI_LOWER_BOUND,
     TweedieNumericalError,
     _as_real_float64_array,
     compound_poisson_gamma_parameters,
+    normalize_positive_scalar,
     normalize_tweedie_power,
     pearson_dispersion,
     tweedie_unit_deviance,
@@ -339,28 +341,17 @@ class _PreparedTweedieDensity:
     mu: NDArray
     weights: NDArray
     p: float
-    t_arg_limit: float
-    log_t_arg_limit: float
-    a: float
     zero_mask: NDArray
     positive_mask: NDArray
     positive_indices: NDArray
-    zero_rate_numerator: NDArray
-    log_weight: NDArray
-    positive_log_y: NDArray
-    positive_canonical_c: NDArray
-    positive_saddlepoint_deviance: NDArray
-    positive_saddlepoint_log_base: NDArray
-    positive_log_t_phi_independent: NDArray
 
 
 @dataclass(frozen=True)
 class _TweedieDensityEvaluation:
-    """One Tweedie density evaluation, optionally including its NLL score."""
+    """One certified Tweedie density evaluation and its log-likelihood score."""
 
     logpdf: NDArray
-    log_phi_score: NDArray | None
-    positive_saddlepoint_mask: NDArray
+    log_phi_score: NDArray
     diagnostics: _TweedieLogpdfDiagnostics
     score_valid: bool
 
@@ -372,6 +363,28 @@ def _readonly_copy(values: NDArray, *, dtype: Any | None = None) -> NDArray:
     return result
 
 
+class _TweedieArrayTypeError(TypeError, ValueError):
+    """Strict array type error compatible with legacy value-error checks."""
+
+
+def _validate_strict_tweedie_array(
+    value: object,
+    *,
+    name: str,
+    legacy_message: str,
+) -> NDArray[np.float64]:
+    """Reject coercive public array inputs before shared shape validation."""
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _TweedieArrayTypeError(
+            f"{legacy_message}; {name} must be a real numeric array"
+        ) from exc
+    if raw.dtype.kind not in "iuf":
+        raise _TweedieArrayTypeError(f"{legacy_message}; {name} must be a real numeric array")
+    return _as_real_float64_array(name, raw)
+
+
 def _validate_tweedie_inputs(
     y: NDArray,
     mu: NDArray,
@@ -379,14 +392,16 @@ def _validate_tweedie_inputs(
     weights: NDArray | None,
 ) -> tuple[NDArray, NDArray, float, NDArray | None]:
     """Validate and convert common Tweedie density and dispersion inputs."""
-    y_raw = np.asarray(y)
-    if np.iscomplexobj(y_raw):
-        raise ValueError("y must be finite and non-negative")
-    mu_raw = np.asarray(mu)
-    if np.iscomplexobj(mu_raw):
-        raise ValueError("mu must be finite and strictly positive")
-    y_arr = np.asarray(y_raw, dtype=np.float64)
-    mu_arr = np.asarray(mu_raw, dtype=np.float64)
+    y_arr = _validate_strict_tweedie_array(
+        y,
+        name="y",
+        legacy_message="y must be finite and non-negative",
+    )
+    mu_arr = _validate_strict_tweedie_array(
+        mu,
+        name="mu",
+        legacy_message="mu must be finite and strictly positive",
+    )
     if y_arr.ndim != 1 or mu_arr.ndim != 1 or y_arr.shape != mu_arr.shape or y_arr.size == 0:
         raise ValueError("y and mu must be one-dimensional arrays with the same non-empty shape")
     if not np.all(np.isfinite(y_arr)) or np.any(y_arr < 0.0):
@@ -394,85 +409,37 @@ def _validate_tweedie_inputs(
     if not np.all(np.isfinite(mu_arr)) or np.any(mu_arr <= 0.0):
         raise ValueError("mu must be finite and strictly positive")
 
-    p_arr = np.asarray(p)
-    if p_arr.ndim != 0:
-        raise ValueError("p must be finite and in the open interval (1, 2)")
     try:
-        p_float = float(p_arr)
-    except (TypeError, ValueError) as exc:
+        p_float = normalize_tweedie_power(p)
+    except ValueError as exc:
         raise ValueError("p must be finite and in the open interval (1, 2)") from exc
-    if not np.isfinite(p_float) or not 1.0 < p_float < 2.0:
-        raise ValueError("p must be finite and in the open interval (1, 2)")
 
     validated_weights = None
     if weights is not None:
-        validated_weights = _validate_strict_prior_weights(weights, len(y_arr))
-    return y_arr, mu_arr, p_float, validated_weights
-
-
-class _TweediePearsonArrayTypeError(TypeError, ValueError):
-    """Strict Pearson array type error compatible with legacy value checks."""
-
-
-def _validate_strict_pearson_array(
-    value: object,
-    *,
-    name: str,
-    legacy_message: str,
-) -> NDArray[np.float64]:
-    """Reject coercive public Pearson inputs before shared density validation."""
-    try:
-        raw = np.asarray(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(legacy_message) from exc
-    if raw.dtype.kind not in "iuf":
-        raise _TweediePearsonArrayTypeError(
-            f"{legacy_message}; {name} must be a real numeric array"
+        validated_weights = _validate_strict_tweedie_array(
+            weights,
+            name="weights",
+            legacy_message="weights must be finite and strictly positive",
         )
-    return _as_real_float64_array(name, raw)
+        if (
+            validated_weights.ndim != 1
+            or validated_weights.shape != y_arr.shape
+            or not np.all(np.isfinite(validated_weights))
+            or np.any(validated_weights <= 0.0)
+        ):
+            raise ValueError(
+                "weights must be finite and strictly positive, one-dimensional, "
+                f"and have length {len(y_arr)}"
+            )
+    return y_arr, mu_arr, p_float, validated_weights
 
 
 def _validate_tweedie_phi(phi: float) -> float:
     """Validate and convert a scalar Tweedie dispersion parameter."""
-    phi_arr = np.asarray(phi)
-    if phi_arr.ndim != 0:
-        raise ValueError("phi must be finite and strictly positive")
     try:
-        phi_float = float(phi_arr)
-    except (TypeError, ValueError) as exc:
+        return normalize_positive_scalar("phi", phi)
+    except ValueError as exc:
         raise ValueError("phi must be finite and strictly positive") from exc
-    if not np.isfinite(phi_float) or phi_float <= 0.0:
-        raise ValueError("phi must be finite and strictly positive")
-    return phi_float
-
-
-def _shared_tweedie_unit_deviance_or_inf(
-    y: NDArray,
-    mu: NDArray,
-    p: float,
-) -> NDArray[np.float64]:
-    """Evaluate shared deviance, isolating rare unrepresentable observations."""
-    y_array, mu_array = np.broadcast_arrays(y, mu)
-    try:
-        return tweedie_unit_deviance(y_array, mu_array, p)
-    except TweedieNumericalError as batch_error:
-        result = np.empty(y_array.shape, dtype=np.float64)
-        found_unrepresentable = False
-        for index in np.ndindex(y_array.shape):
-            try:
-                result[index] = tweedie_unit_deviance(
-                    y_array[index],
-                    mu_array[index],
-                    p,
-                ).item()
-            except TweedieNumericalError as exc:
-                if str(exc) != "unit deviance could not be represented as finite":
-                    raise
-                result[index] = np.inf
-                found_unrepresentable = True
-        if not found_unrepresentable:
-            raise batch_error
-        return result
 
 
 def _prepare_tweedie_density(
@@ -481,7 +448,6 @@ def _prepare_tweedie_density(
     p: float,
     *,
     weights: NDArray | None = None,
-    t_arg_limit: float = 1e14,
 ) -> _PreparedTweedieDensity:
     """Prepare fixed terms for repeated density evaluations over ``phi``."""
     y, mu, p, validated_weights = _validate_tweedie_inputs(y, mu, p, weights)
@@ -491,77 +457,18 @@ def _prepare_tweedie_density(
     else:
         weights_array = validated_weights
 
-    t_arg_limit_array = np.asarray(t_arg_limit)
-    if t_arg_limit_array.ndim != 0:
-        raise ValueError("t_arg_limit must be a scalar")
-    try:
-        t_arg_limit_float = float(t_arg_limit_array)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("t_arg_limit must be a scalar") from exc
-    if t_arg_limit_float > 0.0:
-        log_t_arg_limit = float(np.log(t_arg_limit_float))
-    else:
-        # A non-positive limit intentionally forces every positive term onto
-        # the saddlepoint branch. NaN retains the old all-saddle behavior.
-        log_t_arg_limit = np.nan if np.isnan(t_arg_limit_float) else -np.inf
-
     zero_mask = y == 0.0
     positive_mask = ~zero_mask
     positive_indices = np.flatnonzero(positive_mask)
-    y_positive = y[positive_mask]
-
-    with np.errstate(all="ignore"):
-        mu_one_minus_p = np.power(mu, 1.0 - p)
-        mu_two_minus_p = np.power(mu, 2.0 - p)
-        zero_rate_numerator = mu_two_minus_p / (2.0 - p)
-        log_weight = np.log(weights_array)
-        positive_log_y = np.log(y_positive)
-
-        positive_canonical_c = y_positive * mu_one_minus_p[positive_mask] / (
-            1.0 - p
-        ) - mu_two_minus_p[positive_mask] / (2.0 - p)
-        positive_saddlepoint_deviance = _shared_tweedie_unit_deviance_or_inf(
-            y_positive,
-            mu[positive_mask],
-            p,
-        )
-        positive_saddlepoint_log_base = np.log(2.0 * np.pi) + p * positive_log_y
-
-        a = (2.0 - p) / (p - 1.0)
-        alpha = -a
-        positive_log_t_phi_independent = (
-            alpha * (np.log(p - 1.0) - positive_log_y)
-            - np.log(2.0 - p)
-            + (a + 1.0) * log_weight[positive_mask]
-        )
 
     return _PreparedTweedieDensity(
         y=_readonly_copy(y, dtype=np.float64),
         mu=_readonly_copy(mu, dtype=np.float64),
         weights=_readonly_copy(weights_array, dtype=np.float64),
         p=p,
-        t_arg_limit=t_arg_limit_float,
-        log_t_arg_limit=log_t_arg_limit,
-        a=a,
         zero_mask=_readonly_copy(zero_mask, dtype=np.bool_),
         positive_mask=_readonly_copy(positive_mask, dtype=np.bool_),
         positive_indices=_readonly_copy(positive_indices, dtype=np.intp),
-        zero_rate_numerator=_readonly_copy(zero_rate_numerator, dtype=np.float64),
-        log_weight=_readonly_copy(log_weight, dtype=np.float64),
-        positive_log_y=_readonly_copy(positive_log_y, dtype=np.float64),
-        positive_canonical_c=_readonly_copy(positive_canonical_c, dtype=np.float64),
-        positive_saddlepoint_deviance=_readonly_copy(
-            positive_saddlepoint_deviance,
-            dtype=np.float64,
-        ),
-        positive_saddlepoint_log_base=_readonly_copy(
-            positive_saddlepoint_log_base,
-            dtype=np.float64,
-        ),
-        positive_log_t_phi_independent=_readonly_copy(
-            positive_log_t_phi_independent,
-            dtype=np.float64,
-        ),
     )
 
 
@@ -571,151 +478,30 @@ def _evaluate_tweedie_density(
     *,
     compute_score: bool = False,
 ) -> _TweedieDensityEvaluation:
-    """Evaluate a prepared density and its optional mean-NLL log-phi score."""
+    """Evaluate the shared certified kernel for prepared inputs.
+
+    ``compute_score`` is retained for private-call compatibility.  The certified
+    kernel always returns the value and score together so cache consumers never
+    perform a second density pass.
+    """
+    del compute_score
     phi = _validate_tweedie_phi(phi)
-    log_phi = float(np.log(phi))
-    inverse_phi_eff = prepared.weights / phi
-    log_phi_eff = log_phi - prepared.log_weight
-
-    logpdf: NDArray[np.float64] = np.empty(len(prepared.y), dtype=np.float64)
-    log_phi_score: NDArray[np.float64] | None = (
-        np.empty(len(prepared.y), dtype=np.float64) if compute_score else None
+    evaluation = _tweedie_density.evaluate_tweedie_density(
+        prepared.y,
+        prepared.mu,
+        phi,
+        prepared.p,
+        weights=prepared.weights,
     )
-
-    zero = prepared.zero_mask
-    if np.any(zero):
-        zero_logpdf = -prepared.zero_rate_numerator[zero] * inverse_phi_eff[zero]
-        logpdf[zero] = zero_logpdf
-        if log_phi_score is not None:
-            log_phi_score[zero] = zero_logpdf
-
-    n_saddlepoint = 0
-    positive_saddlepoint_mask = np.zeros(
-        prepared.positive_indices.size,
-        dtype=np.bool_,
-    )
-    positive = prepared.positive_mask
-    if np.any(positive):
-        inverse_phi_positive = inverse_phi_eff[positive]
-        log_phi_eff_positive = log_phi_eff[positive]
-        log_t = prepared.positive_log_t_phi_independent - (prepared.a + 1.0) * log_phi
-
-        # Select the numerical branch in log space. In particular, do not
-        # clip log(t): clipping can move an observation across t_arg_limit.
-        try_exact = log_t < prepared.log_t_arg_limit
-        exact: NDArray[np.bool_] = np.zeros(len(log_t), dtype=np.bool_)
-        t_positive: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
-        wright_a_plus_one: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
-        positive_logpdf: NDArray[np.float64] = np.empty(len(log_t), dtype=np.float64)
-
-        if np.any(try_exact):
-            try_exact_indices = np.flatnonzero(try_exact)
-            with np.errstate(all="ignore"):
-                t_exact = np.exp(log_t[try_exact])
-                wright_recurrence = wright_bessel(
-                    prepared.a,
-                    prepared.a + 1.0,
-                    t_exact,
-                )
-                candidate_logpdf = (
-                    np.log(prepared.a)
-                    + log_t[try_exact]
-                    + np.log(wright_recurrence)
-                    - prepared.positive_log_y[try_exact]
-                    + prepared.positive_canonical_c[try_exact] * inverse_phi_positive[try_exact]
-                )
-
-            density_valid = (
-                np.isfinite(wright_recurrence)
-                & (wright_recurrence > 0.0)
-                & np.isfinite(candidate_logpdf)
-            )
-            valid_indices = try_exact_indices[density_valid]
-            exact[valid_indices] = True
-            t_positive[valid_indices] = t_exact[density_valid]
-            wright_a_plus_one[valid_indices] = wright_recurrence[density_valid]
-            positive_logpdf[valid_indices] = candidate_logpdf[density_valid]
-
-        # This assignment is intentionally independent of np.any(exact): an
-        # all-invalid Wright batch still needs every saddlepoint fallback.
-        saddlepoint = ~exact
-        positive_saddlepoint_mask = saddlepoint
-        n_saddlepoint = int(np.count_nonzero(saddlepoint))
-        if np.any(saddlepoint):
-            positive_logpdf[saddlepoint] = (
-                -0.5
-                * (
-                    prepared.positive_saddlepoint_log_base[saddlepoint]
-                    + log_phi_eff_positive[saddlepoint]
-                )
-                - 0.5
-                * prepared.positive_saddlepoint_deviance[saddlepoint]
-                * inverse_phi_positive[saddlepoint]
-            )
-        logpdf[positive] = positive_logpdf
-
-        if log_phi_score is not None:
-            positive_score: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
-            if np.any(saddlepoint):
-                positive_score[saddlepoint] = (
-                    0.5
-                    - 0.5
-                    * prepared.positive_saddlepoint_deviance[saddlepoint]
-                    * inverse_phi_positive[saddlepoint]
-                )
-
-            if np.any(exact):
-                with np.errstate(all="ignore"):
-                    wright_a = wright_bessel(
-                        prepared.a,
-                        prepared.a,
-                        t_positive[exact],
-                    )
-                    ratio = wright_a / (prepared.a * wright_a_plus_one[exact])
-
-                # Wright evaluations accumulate parameter-scaled rounding as
-                # a grows near p=1. Cap the allowance so a materially sub-unit
-                # ratio still invalidates the analytic score.
-                ratio_tolerance = min(
-                    1e-10,
-                    64.0 * np.finfo(np.float64).eps * max(1.0, prepared.a),
-                )
-                ratio_valid = (
-                    np.isfinite(wright_a)
-                    & (wright_a > 0.0)
-                    & np.isfinite(ratio)
-                    & (ratio >= 1.0 - ratio_tolerance)
-                )
-                exact_indices = np.flatnonzero(exact)
-                valid_score_indices = exact_indices[ratio_valid]
-                if np.any(ratio_valid):
-                    stable_ratio = np.maximum(ratio[ratio_valid], 1.0)
-                    exact_score = (
-                        stable_ratio / (prepared.p - 1.0)
-                        + prepared.positive_canonical_c[valid_score_indices]
-                        * inverse_phi_positive[valid_score_indices]
-                    )
-                    finite_score = np.isfinite(exact_score)
-                    positive_score[valid_score_indices[finite_score]] = exact_score[finite_score]
-
-            log_phi_score[positive] = positive_score
-
     diagnostics = _TweedieLogpdfDiagnostics(
-        n_positive=int(np.count_nonzero(positive)),
-        n_saddlepoint=n_saddlepoint,
+        n_positive=evaluation.diagnostics.n_positive,
+        n_saddlepoint=evaluation.diagnostics.n_approximate,
     )
-    score_valid = log_phi_score is not None and bool(np.all(np.isfinite(log_phi_score)))
     return _TweedieDensityEvaluation(
-        logpdf=_readonly_copy(logpdf, dtype=np.float64),
-        log_phi_score=(
-            _readonly_copy(log_phi_score, dtype=np.float64) if log_phi_score is not None else None
-        ),
-        positive_saddlepoint_mask=_readonly_copy(
-            positive_saddlepoint_mask,
-            dtype=np.bool_,
-        ),
+        logpdf=evaluation.logpdf,
+        log_phi_score=evaluation.log_phi_score,
         diagnostics=diagnostics,
-        score_valid=score_valid,
+        score_valid=bool(np.all(np.isfinite(evaluation.log_phi_score))),
     )
 
 
@@ -726,15 +512,13 @@ def _tweedie_logpdf_impl(
     p: float,
     *,
     weights: NDArray | None = None,
-    t_arg_limit: float = 1e14,
 ) -> tuple[NDArray, _TweedieLogpdfDiagnostics]:
-    """Compatibility wrapper over the prepared Tweedie density evaluator."""
+    """Compatibility wrapper over the shared certified density evaluator."""
     prepared = _prepare_tweedie_density(
         y,
         mu,
         p,
         weights=weights,
-        t_arg_limit=t_arg_limit,
     )
     evaluation = _evaluate_tweedie_density(prepared, phi)
     return evaluation.logpdf.copy(), evaluation.diagnostics
@@ -747,9 +531,8 @@ def tweedie_logpdf(
     p: float,
     *,
     weights: NDArray | None = None,
-    t_arg_limit: float = 1e14,
 ) -> NDArray:
-    """Exact Tweedie log-density with saddlepoint fallback.
+    """Certified exact Tweedie log-density.
 
     Parameters
     ----------
@@ -761,12 +544,6 @@ def tweedie_logpdf(
         Power parameter in (1, 2).
     weights : array of shape (n,), optional
         Observation weights (e.g. sample_weight). Effective phi = phi / w.
-    t_arg_limit : float
-        Switch to saddlepoint when wright_bessel argument t >= this.
-        A high default keeps the exact Wright-Bessel branch active deeper
-        into the low-p region, where the saddlepoint can be noticeably
-        biased.
-
     Returns
     -------
     logpdf : ndarray of shape (n,)
@@ -777,16 +554,8 @@ def tweedie_logpdf(
         phi,
         p,
         weights=weights,
-        t_arg_limit=t_arg_limit,
     )
     return logpdf
-
-
-def _saddlepoint(y: NDArray, mu: NDArray, phi: NDArray, p: float) -> NDArray:
-    """Saddlepoint approximation to the Tweedie log-density."""
-    y_safe = np.maximum(y, 1e-300)
-    deviance = _shared_tweedie_unit_deviance_or_inf(y_safe, mu, p)
-    return -0.5 * (np.log(2.0 * np.pi) + np.log(phi) + p * np.log(y_safe)) - deviance / (2.0 * phi)
 
 
 # ---------------------------------------------------------------------------
@@ -822,12 +591,12 @@ def estimate_phi(
         strict_p = normalize_tweedie_power(p)
     except ValueError as exc:
         raise ValueError("p must be finite and in the open interval (1, 2)") from exc
-    strict_y = _validate_strict_pearson_array(
+    strict_y = _validate_strict_tweedie_array(
         y,
         name="y",
         legacy_message="y must be finite and non-negative",
     )
-    strict_mu = _validate_strict_pearson_array(
+    strict_mu = _validate_strict_tweedie_array(
         mu,
         name="mu",
         legacy_message="mu must be finite and strictly positive",
@@ -835,7 +604,7 @@ def estimate_phi(
     strict_weights = (
         None
         if weights is None
-        else _validate_strict_pearson_array(
+        else _validate_strict_tweedie_array(
             weights,
             name="weights",
             legacy_message="weights must be finite and strictly positive",
@@ -858,23 +627,21 @@ _LOG_PHI_UPPER_BOUND = float(np.log(_PHI_UPPER_BOUND))
 _PHI_SCORE_TOLERANCE = 1e-6
 _PHI_ROOT_PROBE = 1e-5
 _PHI_BOUNDED_XATOL = 1e-6
-_PHI_FALLBACK_GRID_STEP = 1.0
-_PHI_BRANCH_XTOL = 1e-12
-_PHI_MAX_ANALYTIC_BRANCH_EDGES = 64
-_PHI_MAX_NUMERIC_BRANCH_PROBES = 128
-_PHI_MAX_FALLBACK_REFINEMENTS = 8
-_PHI_MAX_LARGE_FALLBACK_REFINEMENTS = 4
-_PHI_LARGE_PROFILE_THRESHOLD = 64
-_PHI_ROOT_BRANCH_GRID_STEP = 1.0
-_PHI_MAX_ROOT_BRANCH_PROBES = 256
-_PHI_BRANCH_VERIFY_CHUNK_SIZE = 65_536
 _PHI_NLL_ATOL = 1e-10
 _PHI_NLL_RTOL = 1e-10
 
 
 @dataclass(frozen=True)
 class _PhiProfileResult:
-    """Detailed result from profiling Tweedie dispersion at fixed ``(mu, p)``."""
+    """Detailed result from profiling Tweedie dispersion at fixed ``(mu, p)``.
+
+    Evaluation counters describe actual kernel outputs, not which optimizer
+    requested them.  The certified kernel returns a score with every density
+    pass, so current exact profiles report every pass in
+    ``n_score_evaluations`` and none in ``n_value_only_evaluations``.
+    ``n_fallback_evaluations`` separately records value-objective optimizer
+    provenance.
+    """
 
     phi: float
     nll: float
@@ -896,43 +663,6 @@ class _PhiProfileResult:
 
 
 @dataclass(frozen=True)
-class _PhiBranchMask:
-    """Collision-free packed density-branch mask retained by cached points."""
-
-    size: int
-    packed: bytes
-
-    @classmethod
-    def from_array(cls, values: NDArray) -> _PhiBranchMask:
-        mask = np.asarray(values, dtype=np.bool_)
-        packed = np.packbits(mask, bitorder="little").tobytes()
-        return cls(size=int(mask.size), packed=packed)
-
-    def unpack(self) -> NDArray:
-        packed = np.frombuffer(self.packed, dtype=np.uint8)
-        mask: NDArray[np.bool_] = np.unpackbits(
-            packed,
-            count=self.size,
-            bitorder="little",
-        ).astype(np.bool_, copy=False)
-        mask.setflags(write=False)
-        return mask
-
-    def changed_bits(self, other: _PhiBranchMask) -> NDArray:
-        if self.size != other.size:
-            raise ValueError("branch masks must have the same size")
-        left = np.frombuffer(self.packed, dtype=np.uint8)
-        right = np.frombuffer(other.packed, dtype=np.uint8)
-        changed: NDArray[np.bool_] = np.unpackbits(
-            np.bitwise_xor(left, right),
-            count=self.size,
-            bitorder="little",
-        ).astype(np.bool_, copy=False)
-        changed.setflags(write=False)
-        return changed
-
-
-@dataclass(frozen=True)
 class _PhiProfilePoint:
     """One cached exact objective point, keyed by its exact float ``u``."""
 
@@ -943,18 +673,7 @@ class _PhiProfilePoint:
     score: float | None
     score_attempted: bool
     score_valid: bool
-    branch_mask: _PhiBranchMask
     diagnostics: _TweedieLogpdfDiagnostics
-
-    @property
-    def positive_saddlepoint_mask(self) -> NDArray:
-        """Unpack the immutable branch bits only for per-observation comparisons."""
-        return self.branch_mask.unpack()
-
-    @property
-    def branch_signature(self) -> tuple[int, bytes]:
-        """Return the collision-free packed signature without duplicating its bytes."""
-        return self.branch_mask.size, self.branch_mask.packed
 
 
 @dataclass(frozen=True)
@@ -987,11 +706,11 @@ class _PhiBoundedResult:
 
 
 class _PhiRootAbortError(RuntimeError):
-    """Abort a score root as soon as its analytic branch becomes untrustworthy."""
+    """Abort a score root as soon as its analytic score/root becomes untrustworthy."""
 
 
 class _PhiEvaluationCache:
-    """Cache exact value/score passes and account for actual density evaluations."""
+    """Cache exact passes and report the value and score work each pass performs."""
 
     def __init__(self, prepared: _PreparedTweedieDensity):
         self.prepared = prepared
@@ -1000,6 +719,7 @@ class _PhiEvaluationCache:
         self.n_score_evaluations = 0
         self.n_value_only_evaluations = 0
         self.n_fallback_evaluations = 0
+        self.density_errors: dict[float, _tweedie_density.TweedieDensityError] = {}
 
     def evaluate(
         self,
@@ -1011,7 +731,7 @@ class _PhiEvaluationCache:
     ) -> _PhiProfilePoint:
         key = float(u)
         cached = self.points.get(key)
-        if cached is not None and (not compute_score or cached.score_attempted):
+        if cached is not None:
             return cached
 
         if phi_override is not None:
@@ -1022,30 +742,47 @@ class _PhiEvaluationCache:
             phi = _PHI_UPPER_BOUND
         else:
             phi = float(np.exp(key))
-        evaluation = _evaluate_tweedie_density(
-            self.prepared,
-            phi,
-            compute_score=compute_score,
-        )
         self.n_evaluations += 1
-        if compute_score:
-            self.n_score_evaluations += 1
-        else:
-            self.n_value_only_evaluations += 1
+        del compute_score
+        # The certified series always evaluates and certifies both outputs.
+        # Fallback provenance is counted separately below; there is no cheaper
+        # value-only kernel pass to report.
+        self.n_score_evaluations += 1
         if fallback:
             self.n_fallback_evaluations += 1
+
+        try:
+            evaluation = _evaluate_tweedie_density(self.prepared, phi)
+        except _tweedie_density.TweedieDensityError as exc:
+            self.density_errors[key] = exc
+            point = _PhiProfilePoint(
+                u=key,
+                phi=phi,
+                nll=np.inf,
+                objective_finite=False,
+                score=None,
+                score_attempted=True,
+                score_valid=False,
+                diagnostics=_TweedieLogpdfDiagnostics(
+                    n_positive=int(self.prepared.positive_indices.size),
+                    n_saddlepoint=0,
+                ),
+            )
+            self.points[key] = point
+            return point
 
         with np.errstate(all="ignore"):
             nll = -float(np.mean(evaluation.logpdf))
         objective_finite = bool(np.isfinite(nll))
         score: float | None = None
-        score_valid = False
-        if compute_score and evaluation.score_valid and evaluation.log_phi_score is not None:
+        score_valid = evaluation.score_valid
+        if score_valid:
             with np.errstate(all="ignore"):
-                candidate_score = float(np.mean(evaluation.log_phi_score))
+                candidate_score = -float(np.mean(evaluation.log_phi_score))
             if np.isfinite(candidate_score):
                 score = candidate_score
-                score_valid = True
+            else:
+                score_valid = False
 
         point = _PhiProfilePoint(
             u=key,
@@ -1053,9 +790,8 @@ class _PhiEvaluationCache:
             nll=nll if objective_finite else np.inf,
             objective_finite=objective_finite,
             score=score,
-            score_attempted=compute_score,
+            score_attempted=True,
             score_valid=score_valid,
-            branch_mask=_PhiBranchMask.from_array(evaluation.positive_saddlepoint_mask),
             diagnostics=evaluation.diagnostics,
         )
         self.points[key] = point
@@ -1107,7 +843,7 @@ def _phi_profile_seeds(
     pearson_phi: float,
     phi_start: float | None,
 ) -> list[tuple[float, str]]:
-    """Build distinct clipped warm, Pearson, and stable data seeds in priority order."""
+    """Build distinct interior warm, Pearson, and stable data seeds in priority order."""
     seeds: list[tuple[float, str]] = []
 
     def add(candidate_phi: Any, source: str) -> bool:
@@ -1120,7 +856,9 @@ def _phi_profile_seeds(
             return False
         if not np.isfinite(candidate) or candidate <= 0.0:
             return False
-        u = float(np.clip(np.log(candidate), _LOG_PHI_LOWER_BOUND, _LOG_PHI_UPPER_BOUND))
+        u = float(np.log(candidate))
+        if not _LOG_PHI_LOWER_BOUND < u < _LOG_PHI_UPPER_BOUND:
+            return False
         if any(abs(u - existing_u) <= _PHI_BOUNDED_XATOL for existing_u, _ in seeds):
             return False
         seeds.append((u, source))
@@ -1129,9 +867,11 @@ def _phi_profile_seeds(
     add(phi_start, "warm start")
     pearson_usable = add(pearson_phi, "Pearson seed")
     if not pearson_usable:
-        deviance: NDArray[np.float64] = np.empty(len(prepared.y), dtype=np.float64)
-        deviance[prepared.zero_mask] = 2.0 * prepared.zero_rate_numerator[prepared.zero_mask]
-        deviance[prepared.positive_mask] = prepared.positive_saddlepoint_deviance
+        deviance = tweedie_unit_deviance(
+            prepared.y,
+            prepared.mu,
+            prepared.p,
+        )
         with np.errstate(all="ignore"):
             data_phi = float(np.sum(prepared.weights * deviance)) / denominator
         add(data_phi, "mean-deviance seed")
@@ -1144,220 +884,6 @@ def _record_phi_fallback(reasons: list[str], reason: str) -> None:
     """Append a fallback diagnosis once while retaining discovery order."""
     if reason not in reasons:
         reasons.append(reason)
-
-
-def _positive_saddlepoint_mask_at_u_values(
-    prepared: _PreparedTweedieDensity,
-    positive_indices: NDArray,
-    u_values: NDArray,
-) -> NDArray:
-    """Evaluate exact-density validity at one log-phi value per selected observation."""
-    indices = np.asarray(positive_indices, dtype=np.intp)
-    u_array = np.asarray(u_values, dtype=np.float64)
-    if u_array.shape != indices.shape:
-        raise ValueError("u_values must match positive_indices")
-    log_t = prepared.positive_log_t_phi_independent[indices] - (prepared.a + 1.0) * u_array
-    try_exact = log_t < prepared.log_t_arg_limit
-    exact = np.zeros(indices.size, dtype=np.bool_)
-    if np.any(try_exact):
-        local_indices = np.flatnonzero(try_exact)
-        selected_indices = indices[try_exact]
-        with np.errstate(all="ignore"):
-            t_exact = np.exp(log_t[try_exact])
-            recurrence = wright_bessel(
-                prepared.a,
-                prepared.a + 1.0,
-                t_exact,
-            )
-            original_indices = prepared.positive_indices[selected_indices]
-            inverse_phi = prepared.weights[original_indices] / np.exp(u_array[try_exact])
-            candidate_logpdf = (
-                np.log(prepared.a)
-                + log_t[try_exact]
-                + np.log(recurrence)
-                - prepared.positive_log_y[selected_indices]
-                + prepared.positive_canonical_c[selected_indices] * inverse_phi
-            )
-        exact[local_indices] = (
-            np.isfinite(recurrence) & (recurrence > 0.0) & np.isfinite(candidate_logpdf)
-        )
-    return ~exact
-
-
-def _positive_saddlepoint_mask_subset(
-    prepared: _PreparedTweedieDensity,
-    u: float,
-    positive_indices: NDArray,
-) -> NDArray:
-    """Evaluate exact-density validity for a bounded subset without a full density pass."""
-    indices = np.asarray(positive_indices, dtype=np.intp)
-    return _positive_saddlepoint_mask_at_u_values(
-        prepared,
-        indices,
-        np.full(indices.size, u, dtype=np.float64),
-    )
-
-
-def _locate_first_realized_phi_branch_transition(
-    prepared: _PreparedTweedieDensity,
-    threshold: float,
-    positive_indices: NDArray,
-    remaining_probes: int,
-) -> tuple[tuple[float, float] | None, int, bool]:
-    """Locate the first realized transition after a nominal edge with bounded scalar work."""
-    scale = max(1.0, abs(threshold))
-    delta = max(_PHI_BRANCH_XTOL, 16.0 * np.finfo(np.float64).eps * scale)
-    left_u = float(max(_LOG_PHI_LOWER_BOUND, threshold - delta))
-    right_u = float(min(_LOG_PHI_UPPER_BOUND, threshold + delta))
-    if remaining_probes < 2:
-        return None, remaining_probes, False
-    left_mask = _positive_saddlepoint_mask_subset(prepared, left_u, positive_indices)
-    right_mask = _positive_saddlepoint_mask_subset(prepared, right_u, positive_indices)
-    remaining_probes -= 2
-    if not np.array_equal(left_mask, right_mask):
-        return (left_u, right_u), remaining_probes, True
-
-    previous_u = right_u
-    previous_mask = right_mask
-    while previous_u < _LOG_PHI_UPPER_BOUND:
-        if remaining_probes <= 0:
-            return None, remaining_probes, False
-        current_u = float(min(_LOG_PHI_UPPER_BOUND, previous_u + _PHI_ROOT_BRANCH_GRID_STEP))
-        current_mask = _positive_saddlepoint_mask_subset(
-            prepared,
-            current_u,
-            positive_indices,
-        )
-        remaining_probes -= 1
-        if not np.array_equal(previous_mask, current_mask):
-            interval_left_u = previous_u
-            interval_right_u = current_u
-            interval_left_mask = previous_mask
-            while interval_right_u - interval_left_u > _PHI_BRANCH_XTOL:
-                if remaining_probes <= 0:
-                    return (interval_left_u, interval_right_u), remaining_probes, False
-                midpoint_u = float(0.5 * (interval_left_u + interval_right_u))
-                midpoint_mask = _positive_saddlepoint_mask_subset(
-                    prepared,
-                    midpoint_u,
-                    positive_indices,
-                )
-                remaining_probes -= 1
-                if np.array_equal(midpoint_mask, interval_left_mask):
-                    interval_left_u = midpoint_u
-                else:
-                    interval_right_u = midpoint_u
-            return (interval_left_u, interval_right_u), remaining_probes, True
-        previous_u = current_u
-        previous_mask = current_mask
-    return None, remaining_probes, True
-
-
-def _clean_root_phi_branch_edges_verified(
-    prepared: _PreparedTweedieDensity,
-    thresholds_by_observation: NDArray,
-) -> bool:
-    """Verify every calibrated edge before allowing a clean root to certify."""
-    if thresholds_by_observation.size != prepared.positive_indices.size:
-        return False
-    if np.any(np.isnan(thresholds_by_observation)):
-        return False
-
-    in_range = (
-        np.isfinite(thresholds_by_observation)
-        & (thresholds_by_observation > _LOG_PHI_LOWER_BOUND + _PHI_BRANCH_XTOL)
-        & (thresholds_by_observation < _LOG_PHI_UPPER_BOUND - _PHI_BRANCH_XTOL)
-    )
-    verified_transitions = _verified_phi_branch_transitions_at_thresholds(
-        prepared,
-        thresholds_by_observation,
-    )
-    if np.any(verified_transitions[in_range] != -1):
-        return False
-
-    below_lower = thresholds_by_observation <= _LOG_PHI_LOWER_BOUND + _PHI_BRANCH_XTOL
-    if np.any(below_lower):
-        below_indices = np.flatnonzero(below_lower)
-        lower_mask = _positive_saddlepoint_mask_subset(
-            prepared,
-            _LOG_PHI_LOWER_BOUND + _PHI_BRANCH_XTOL,
-            below_indices,
-        )
-        if np.any(lower_mask):
-            return False
-    return True
-
-
-def _better_phi_branch_edge_probes(
-    cache: _PhiEvaluationCache,
-    root_candidates: list[_PhiCandidate],
-) -> tuple[list[_PhiCandidate], bool, bool]:
-    """Probe realized branch edges nearest accepted roots with bounded scalar work."""
-    prepared = cache.prepared
-    thresholds_by_observation, calibrated = _phi_realized_wright_thresholds(prepared)
-    if not calibrated:
-        return [], False, True
-    if not _clean_root_phi_branch_edges_verified(prepared, thresholds_by_observation):
-        return [], False, True
-    thresholds = thresholds_by_observation[
-        np.isfinite(thresholds_by_observation)
-        & (thresholds_by_observation > _LOG_PHI_LOWER_BOUND + _PHI_BRANCH_XTOL)
-        & (thresholds_by_observation < _LOG_PHI_UPPER_BOUND - _PHI_BRANCH_XTOL)
-    ]
-    if thresholds.size == 0:
-        return [], False, False
-
-    selected_thresholds: set[float] = set()
-    for candidate in root_candidates:
-        below = thresholds[thresholds < candidate.point.u]
-        above = thresholds[thresholds > candidate.point.u]
-        if below.size:
-            selected_thresholds.add(float(np.max(below)))
-        if above.size:
-            selected_thresholds.add(float(np.min(above)))
-
-    best_root_nll = min(candidate.point.nll for candidate in root_candidates)
-    better_candidates: list[_PhiCandidate] = []
-    branch_switch_detected = False
-    requires_fallback = False
-    remaining_probes = _PHI_MAX_ROOT_BRANCH_PROBES
-    for threshold in sorted(selected_thresholds):
-        positive_indices = np.flatnonzero(thresholds_by_observation == threshold)
-        scale = max(1.0, abs(threshold))
-        delta = max(_PHI_BRANCH_XTOL, 16.0 * np.finfo(np.float64).eps * scale)
-        left = cache.evaluate(threshold - delta, compute_score=False)
-        right = cache.evaluate(threshold + delta, compute_score=False)
-        targeted_change = left.branch_mask.changed_bits(right.branch_mask)[positive_indices]
-        if not np.any(targeted_change):
-            realized_bounds, remaining_probes, completed = (
-                _locate_first_realized_phi_branch_transition(
-                    prepared,
-                    threshold,
-                    positive_indices,
-                    remaining_probes,
-                )
-            )
-            if not completed:
-                requires_fallback = True
-                continue
-            if realized_bounds is None:
-                continue
-            left = cache.evaluate(realized_bounds[0], compute_score=False)
-            right = cache.evaluate(realized_bounds[1], compute_score=False)
-            targeted_change = left.branch_mask.changed_bits(right.branch_mask)[positive_indices]
-            if not np.any(targeted_change):
-                requires_fallback = True
-                continue
-        branch_switch_detected = True
-        finite_sides = [point for point in (left, right) if point.objective_finite]
-        if not finite_sides:
-            requires_fallback = True
-            continue
-        better_side = min(finite_sides, key=lambda point: point.nll)
-        if _phi_nll_no_worse(best_root_nll, better_side.nll):
-            continue
-        better_candidates.append(_PhiCandidate(better_side, "seed"))
-    return better_candidates, branch_switch_detected, requires_fallback
 
 
 def _search_phi_score_candidates(
@@ -1404,24 +930,12 @@ def _search_phi_score_candidates(
                 and right_probe.objective_finite
                 and left_probe.score_valid
                 and right_probe.score_valid
-                and left_probe.branch_signature
-                == seed_point.branch_signature
-                == right_probe.branch_signature
                 and left_probe.score is not None
                 and right_probe.score is not None
                 and left_probe.score < 0.0 < right_probe.score
             ):
                 add_bracket(left_probe, right_probe)
                 found_local_bracket = True
-            elif (
-                left_probe.branch_signature != seed_point.branch_signature
-                or right_probe.branch_signature != seed_point.branch_signature
-            ):
-                branch_switch_detected = True
-                _record_phi_fallback(
-                    fallback_reasons,
-                    "density branch switched around a near-zero score",
-                )
             else:
                 _record_phi_fallback(
                     fallback_reasons,
@@ -1458,13 +972,6 @@ def _search_phi_score_candidates(
                 )
                 break
             left, right = (previous, current) if previous.u < current.u else (current, previous)
-            if left.branch_signature != right.branch_signature:
-                branch_switch_detected = True
-                _record_phi_fallback(
-                    fallback_reasons,
-                    "density branch switched during score bracketing",
-                )
-                break
             if left.score is not None and right.score is not None:
                 if left.score < 0.0 < right.score:
                     add_bracket(left, right)
@@ -1488,18 +995,13 @@ def _search_phi_score_candidates(
     root_candidates: list[_PhiCandidate] = []
 
     for left, right in brackets:
-        expected_signature = left.branch_signature
 
         def score_callback(u: float) -> float:
-            nonlocal branch_switch_detected
             point = cache.evaluate(float(u), compute_score=True)
             if not point.objective_finite:
                 raise _PhiRootAbortError("exact objective became non-finite inside brentq")
             if not point.score_valid or point.score is None:
                 raise _PhiRootAbortError("analytic derivative became unavailable inside brentq")
-            if point.branch_signature != expected_signature:
-                branch_switch_detected = True
-                raise _PhiRootAbortError("density branch switched inside brentq")
             return point.score
 
         try:
@@ -1516,6 +1018,8 @@ def _search_phi_score_candidates(
         except _PhiRootAbortError as exc:
             _record_phi_fallback(fallback_reasons, str(exc))
             continue
+        except _tweedie_density.TweedieDensityError:
+            raise
         except (RuntimeError, ValueError) as exc:
             _record_phi_fallback(fallback_reasons, f"brentq failed: {exc}")
             continue
@@ -1524,7 +1028,6 @@ def _search_phi_score_candidates(
         valid_root = bool(root_info.converged)
         valid_root &= root_point.objective_finite
         valid_root &= root_point.score_valid and root_point.score is not None
-        valid_root &= root_point.branch_signature == expected_signature
         valid_root &= root_point.score is not None and abs(root_point.score) <= _PHI_SCORE_TOLERANCE
         valid_root &= _phi_nll_no_worse(root_point.nll, left.nll)
         valid_root &= _phi_nll_no_worse(root_point.nll, right.nll)
@@ -1539,12 +1042,6 @@ def _search_phi_score_candidates(
             else:
                 probe_left = cache.evaluate(probe_left_u, compute_score=True)
                 probe_right = cache.evaluate(probe_right_u, compute_score=True)
-                if (
-                    probe_left.branch_signature != expected_signature
-                    or probe_right.branch_signature != expected_signature
-                ):
-                    branch_switch_detected = True
-                    valid_root = False
                 valid_root &= probe_left.score_valid and probe_right.score_valid
                 valid_root &= probe_left.score is not None and probe_right.score is not None
                 valid_root &= (
@@ -1570,18 +1067,6 @@ def _search_phi_score_candidates(
             fallback_reasons,
             "multiple distinct score minima require exact candidate comparison",
         )
-    if root_candidates and not fallback_reasons:
-        edge_candidates, edge_switch, edge_requires_fallback = _better_phi_branch_edge_probes(
-            cache,
-            root_candidates,
-        )
-        branch_switch_detected |= edge_switch
-        if edge_candidates or edge_requires_fallback:
-            seed_candidates.extend(edge_candidates)
-            _record_phi_fallback(
-                fallback_reasons,
-                "realized branch-edge probe cannot certify the analytic score root",
-            )
     return _PhiScoreSearchResult(
         seed_candidates=tuple(seed_candidates),
         root_candidates=tuple(root_candidates),
@@ -1632,274 +1117,10 @@ def _run_phi_bounded_interval(
                 candidate = _PhiCandidate(point, "bounded", validated=True)
         success = bool(getattr(bounded_result, "success", False) and in_bounds and fun_consistent)
         return _PhiBoundedResult(candidate=candidate, success=success, message=message)
+    except _tweedie_density.TweedieDensityError:
+        raise
     except (RuntimeError, ValueError, FloatingPointError, OverflowError) as exc:
         return _PhiBoundedResult(candidate=None, success=False, message=str(exc))
-
-
-def _phi_analytic_branch_thresholds(prepared: _PreparedTweedieDensity) -> NDArray:
-    """Return each positive observation's known exact/saddle log-phi threshold."""
-    with np.errstate(all="ignore"):
-        thresholds = (prepared.positive_log_t_phi_independent - prepared.log_t_arg_limit) / (
-            prepared.a + 1.0
-        )
-    return np.asarray(thresholds, dtype=np.float64)
-
-
-def _wright_density_recurrence_is_valid(a: float, log_t: float) -> bool:
-    """Check the common Wright-recurrence validity predicate at one scalar ``log(t)``."""
-    with np.errstate(all="ignore"):
-        t = np.exp(log_t)
-        recurrence = np.asarray(wright_bessel(a, a + 1.0, np.array([t]))).reshape(-1)[0]
-    return bool(np.isfinite(recurrence) and recurrence > 0.0)
-
-
-def _calibrate_wright_log_t_ceiling(prepared: _PreparedTweedieDensity) -> float | None:
-    """Locate the realized Wright-validity ceiling once for this fixed power ``p``."""
-    nominal = prepared.log_t_arg_limit
-    if not np.isfinite(nominal):
-        return None
-    invalid_u = float(np.nextafter(nominal, -np.inf))
-    if _wright_density_recurrence_is_valid(prepared.a, invalid_u):
-        return nominal
-
-    distance = 1.0
-    valid_u: float | None = None
-    for _ in range(16):
-        candidate = float(invalid_u - distance)
-        if _wright_density_recurrence_is_valid(prepared.a, candidate):
-            valid_u = candidate
-            break
-        distance *= 2.0
-    if valid_u is None:
-        return None
-
-    while invalid_u - valid_u > 1e-13:
-        midpoint = float(0.5 * (valid_u + invalid_u))
-        if midpoint in {valid_u, invalid_u}:
-            break
-        if _wright_density_recurrence_is_valid(prepared.a, midpoint):
-            valid_u = midpoint
-        else:
-            invalid_u = midpoint
-    return float(0.5 * (valid_u + invalid_u))
-
-
-def _phi_realized_wright_thresholds(
-    prepared: _PreparedTweedieDensity,
-) -> tuple[NDArray, bool]:
-    """Derive per-observation log-phi edges from one calibrated Wright ceiling."""
-    ceiling = _calibrate_wright_log_t_ceiling(prepared)
-    if ceiling is None:
-        return _phi_analytic_branch_thresholds(prepared), False
-    with np.errstate(all="ignore"):
-        thresholds = (prepared.positive_log_t_phi_independent - ceiling) / (prepared.a + 1.0)
-    return np.asarray(thresholds, dtype=np.float64), True
-
-
-def _select_phi_branch_thresholds(
-    thresholds_by_observation: NDArray,
-    anchors: list[float],
-) -> tuple[NDArray, bool, int]:
-    """Select a bounded, range-covering set of known analytic branch edges."""
-    in_range = thresholds_by_observation[
-        np.isfinite(thresholds_by_observation)
-        & (thresholds_by_observation > _LOG_PHI_LOWER_BOUND + _PHI_BRANCH_XTOL)
-        & (thresholds_by_observation < _LOG_PHI_UPPER_BOUND - _PHI_BRANCH_XTOL)
-    ]
-    unique = np.unique(in_range)
-    n_unique = int(unique.size)
-    if n_unique <= _PHI_MAX_ANALYTIC_BRANCH_EDGES:
-        return unique, True, n_unique
-
-    n_cover = _PHI_MAX_ANALYTIC_BRANCH_EDGES // 2
-    cover_indices = np.unique(np.rint(np.linspace(0, n_unique - 1, n_cover)).astype(np.intp))
-    selected_indices = set(int(index) for index in cover_indices)
-    finite_anchors = np.asarray([anchor for anchor in anchors if np.isfinite(anchor)])
-    if finite_anchors.size:
-        sorted_anchors = np.sort(finite_anchors)
-        insertions = np.searchsorted(sorted_anchors, unique, side="left")
-        left_indices = np.maximum(insertions - 1, 0)
-        right_indices = np.minimum(insertions, sorted_anchors.size - 1)
-        distances = np.minimum(
-            np.abs(unique - sorted_anchors[left_indices]),
-            np.abs(unique - sorted_anchors[right_indices]),
-        )
-        priority = np.argsort(distances, kind="stable")
-    else:
-        priority = np.arange(n_unique, dtype=np.intp)
-    for index in priority:
-        selected_indices.add(int(index))
-        if len(selected_indices) >= _PHI_MAX_ANALYTIC_BRANCH_EDGES:
-            break
-    selected = unique[np.asarray(sorted(selected_indices), dtype=np.intp)]
-    return selected, False, n_unique
-
-
-def _phi_branch_edge_points(
-    cache: _PhiEvaluationCache,
-    thresholds: NDArray,
-) -> list[tuple[_PhiProfilePoint, _PhiProfilePoint]]:
-    """Evaluate controlled exact points immediately around analytic branch edges."""
-    sides: list[tuple[_PhiProfilePoint, _PhiProfilePoint]] = []
-    for threshold in thresholds:
-        scale = max(1.0, abs(float(threshold)))
-        delta = max(_PHI_BRANCH_XTOL, 16.0 * np.finfo(np.float64).eps * scale)
-        left_u = float(max(_LOG_PHI_LOWER_BOUND, float(threshold) - delta))
-        right_u = float(min(_LOG_PHI_UPPER_BOUND, float(threshold) + delta))
-        left = cache.evaluate(left_u, compute_score=False, fallback=True)
-        right = cache.evaluate(right_u, compute_score=False, fallback=True)
-        sides.append((left, right))
-    return sides
-
-
-def _verified_phi_branch_transitions(
-    thresholds_by_observation: NDArray,
-    selected_thresholds: NDArray,
-    edge_sides: list[tuple[_PhiProfilePoint, _PhiProfilePoint]],
-) -> NDArray:
-    """Record only per-observation nominal edges whose controlled sides toggled."""
-    transitions = np.zeros(thresholds_by_observation.size, dtype=np.int8)
-    for threshold, (left, right) in zip(selected_thresholds, edge_sides, strict=True):
-        at_threshold = thresholds_by_observation == threshold
-        changed = left.branch_mask.changed_bits(right.branch_mask)
-        verified = at_threshold & changed
-        if not np.any(verified):
-            continue
-        left_mask = left.positive_saddlepoint_mask
-        right_mask = right.positive_saddlepoint_mask
-        transitions[verified] = right_mask[verified].astype(np.int8) - left_mask[verified].astype(
-            np.int8
-        )
-    return transitions
-
-
-def _verified_phi_branch_transitions_at_thresholds(
-    prepared: _PreparedTweedieDensity,
-    thresholds_by_observation: NDArray,
-) -> NDArray:
-    """Verify every calibrated edge in chunks without retaining full density masks."""
-    transitions = np.zeros(thresholds_by_observation.size, dtype=np.int8)
-    for start in range(0, thresholds_by_observation.size, _PHI_BRANCH_VERIFY_CHUNK_SIZE):
-        stop = min(start + _PHI_BRANCH_VERIFY_CHUNK_SIZE, thresholds_by_observation.size)
-        indices = np.arange(start, stop, dtype=np.intp)
-        thresholds = thresholds_by_observation[start:stop]
-        scale = np.maximum(1.0, np.abs(thresholds))
-        delta = np.maximum(
-            _PHI_BRANCH_XTOL,
-            16.0 * np.finfo(np.float64).eps * scale,
-        )
-        valid = (
-            np.isfinite(thresholds)
-            & (thresholds - delta >= _LOG_PHI_LOWER_BOUND)
-            & (thresholds + delta <= _LOG_PHI_UPPER_BOUND)
-        )
-        if not np.any(valid):
-            continue
-        valid_indices = indices[valid]
-        left_mask = _positive_saddlepoint_mask_at_u_values(
-            prepared,
-            valid_indices,
-            thresholds[valid] - delta[valid],
-        )
-        right_mask = _positive_saddlepoint_mask_at_u_values(
-            prepared,
-            valid_indices,
-            thresholds[valid] + delta[valid],
-        )
-        changed = left_mask != right_mask
-        local_transitions = np.zeros(valid_indices.size, dtype=np.int8)
-        local_transitions[changed] = right_mask[changed].astype(np.int8) - left_mask[
-            changed
-        ].astype(np.int8)
-        transitions[valid_indices] = local_transitions
-    return transitions
-
-
-def _phi_branch_change_is_unexplained(
-    left: _PhiProfilePoint,
-    right: _PhiProfilePoint,
-    thresholds_by_observation: NDArray,
-    verified_transitions_by_observation: NDArray | None = None,
-) -> bool:
-    """Return whether a mask change lacks a verified nominal-edge transition."""
-    changed = left.branch_mask.changed_bits(right.branch_mask)
-    if not np.any(changed):
-        return False
-    if verified_transitions_by_observation is None:
-        verified_transitions_by_observation = np.zeros(
-            thresholds_by_observation.size,
-            dtype=np.int8,
-        )
-    left_mask = left.positive_saddlepoint_mask
-    right_mask = right.positive_saddlepoint_mask
-    observed_transitions = right_mask[changed].astype(np.int8) - left_mask[changed].astype(np.int8)
-    changed_thresholds = thresholds_by_observation[changed]
-    explained = (
-        np.isfinite(changed_thresholds)
-        & (changed_thresholds >= left.u - _PHI_BRANCH_XTOL)
-        & (changed_thresholds <= right.u + _PHI_BRANCH_XTOL)
-        & (verified_transitions_by_observation[changed] == observed_transitions)
-    )
-    return bool(np.any(~explained))
-
-
-def _locate_unexplained_phi_branch_sides(
-    cache: _PhiEvaluationCache,
-    left: _PhiProfilePoint,
-    right: _PhiProfilePoint,
-    thresholds_by_observation: NDArray,
-    remaining_probes: int,
-    verified_transitions_by_observation: NDArray | None = None,
-) -> tuple[list[tuple[_PhiProfilePoint, _PhiProfilePoint]], int, bool]:
-    """Boundedly bisect numerical Wright-validity transitions not known analytically."""
-    pending = [(left, right)]
-    sides: list[tuple[_PhiProfilePoint, _PhiProfilePoint]] = []
-    completed = True
-    while pending:
-        interval_left, interval_right = pending.pop()
-        if not _phi_branch_change_is_unexplained(
-            interval_left,
-            interval_right,
-            thresholds_by_observation,
-            verified_transitions_by_observation,
-        ):
-            continue
-        if interval_right.u - interval_left.u <= _PHI_BRANCH_XTOL:
-            sides.append((interval_left, interval_right))
-            continue
-        if remaining_probes <= 0:
-            completed = False
-            continue
-        midpoint_u = float(0.5 * (interval_left.u + interval_right.u))
-        if midpoint_u in {interval_left.u, interval_right.u}:
-            sides.append((interval_left, interval_right))
-            continue
-        midpoint = cache.evaluate(midpoint_u, compute_score=False, fallback=True)
-        remaining_probes -= 1
-        pending.append((midpoint, interval_right))
-        pending.append((interval_left, midpoint))
-    return sides, remaining_probes, completed
-
-
-def _finite_phi_fallback_segments(
-    points: list[_PhiProfilePoint],
-) -> list[list[_PhiProfilePoint]]:
-    """Partition ordered finite points by full density-branch signature."""
-    segments: list[list[_PhiProfilePoint]] = []
-    current: list[_PhiProfilePoint] = []
-    for point in points:
-        if not point.objective_finite:
-            if current:
-                segments.append(current)
-                current = []
-            continue
-        if current and point.branch_signature != current[-1].branch_signature:
-            segments.append(current)
-            current = []
-        current.append(point)
-    if current:
-        segments.append(current)
-    return segments
 
 
 def _run_phi_bounded_fallback(
@@ -1907,169 +1128,35 @@ def _run_phi_bounded_fallback(
     *,
     required: bool,
 ) -> _PhiBoundedResult:
-    """Globally safeguard fallback profiles with a branch-partitioned exact scan."""
+    """Run one value-only exact rescue when analytic score search is unavailable."""
     if not required:
         return _PhiBoundedResult(candidate=None, success=True, message="")
-
-    full_range = _run_phi_bounded_interval(
+    return _run_phi_bounded_interval(
         cache,
         (_LOG_PHI_LOWER_BOUND, _LOG_PHI_UPPER_BOUND),
     )
-    n_intervals = int(
-        np.ceil((_LOG_PHI_UPPER_BOUND - _LOG_PHI_LOWER_BOUND) / _PHI_FALLBACK_GRID_STEP)
-    )
-    grid = np.linspace(
-        _LOG_PHI_LOWER_BOUND,
-        _LOG_PHI_UPPER_BOUND,
-        n_intervals + 1,
-    )
-    grid_points = [cache.evaluate(float(u), compute_score=False, fallback=True) for u in grid]
-    all_points = {point.u: point for point in grid_points}
-    finite_grid_points = [point for point in grid_points if point.objective_finite]
-    anchors = [point.u for point in finite_grid_points]
-    if full_range.candidate is not None:
-        anchors.append(full_range.candidate.point.u)
-    if finite_grid_points:
-        anchors.append(min(finite_grid_points, key=lambda point: point.nll).u)
 
-    thresholds_by_observation, wright_calibrated = _phi_realized_wright_thresholds(cache.prepared)
-    selected_thresholds, analytic_scan_completed, n_analytic_thresholds = (
-        _select_phi_branch_thresholds(thresholds_by_observation, anchors)
-    )
-    branch_switch_detected = any(
-        left.branch_signature != right.branch_signature
-        for left, right in zip(grid_points[:-1], grid_points[1:])
-    )
-    edge_sides = _phi_branch_edge_points(cache, selected_thresholds)
-    selected_verified_transitions = _verified_phi_branch_transitions(
-        thresholds_by_observation,
-        selected_thresholds,
-        edge_sides,
-    )
-    verified_transitions = _verified_phi_branch_transitions_at_thresholds(
-        cache.prepared,
-        thresholds_by_observation,
-    )
-    for threshold in selected_thresholds:
-        at_threshold = thresholds_by_observation == threshold
-        verified_transitions[at_threshold] = selected_verified_transitions[at_threshold]
-    for side_left, side_right in edge_sides:
-        all_points[side_left.u] = side_left
-        all_points[side_right.u] = side_right
-        branch_switch_detected |= side_left.branch_signature != side_right.branch_signature
 
-    remaining_numeric_probes = _PHI_MAX_NUMERIC_BRANCH_PROBES
-    numeric_scan_completed = True
-    initially_ordered = sorted(all_points.values(), key=lambda point: point.u)
-    for left, right in zip(initially_ordered[:-1], initially_ordered[1:]):
-        if left.branch_signature == right.branch_signature:
-            continue
-        branch_switch_detected = True
-        sides, remaining_numeric_probes, interval_completed = _locate_unexplained_phi_branch_sides(
-            cache,
-            left,
-            right,
-            thresholds_by_observation,
-            remaining_numeric_probes,
-            verified_transitions,
-        )
-        numeric_scan_completed &= interval_completed
-        for side_left, side_right in sides:
-            all_points[side_left.u] = side_left
-            all_points[side_right.u] = side_right
-
-    ordered_points = sorted(all_points.values(), key=lambda point: point.u)
-    segments = _finite_phi_fallback_segments(ordered_points)
-    candidates = [
-        _PhiCandidate(point, "bounded", validated=True)
-        for point in ordered_points
-        if point.objective_finite
-    ]
-    if full_range.candidate is not None:
-        candidates.append(full_range.candidate)
-
-    refinement_priorities: dict[tuple[float, float], float] = {}
-
-    def add_refinement(bounds: tuple[float, float], priority: float) -> None:
-        if bounds[1] - bounds[0] <= _PHI_BOUNDED_XATOL:
-            return
-        existing = refinement_priorities.get(bounds, np.inf)
-        refinement_priorities[bounds] = min(existing, priority)
-
-    for segment in segments:
-        if len(segment) < 2:
-            continue
-        segment_bounds_before = len(refinement_priorities)
-        for index, point in enumerate(segment):
-            left_nll = segment[index - 1].nll if index > 0 else np.inf
-            right_nll = segment[index + 1].nll if index + 1 < len(segment) else np.inf
-            if point.nll <= left_nll and point.nll <= right_nll:
-                lower = segment[max(0, index - 1)].u
-                upper = segment[min(len(segment) - 1, index + 1)].u
-                add_refinement((lower, upper), point.nll)
-        if len(refinement_priorities) == segment_bounds_before:
-            lower, upper = segment[0].u, segment[-1].u
-            add_refinement((lower, upper), min(point.nll for point in segment))
-
-    ordered_refinements = sorted(
-        refinement_priorities,
-        key=lambda bounds: (refinement_priorities[bounds], bounds),
-    )
-    max_refinements = (
-        _PHI_MAX_LARGE_FALLBACK_REFINEMENTS
-        if len(cache.prepared.y) > _PHI_LARGE_PROFILE_THRESHOLD
-        else _PHI_MAX_FALLBACK_REFINEMENTS
-    )
-    refinement_scan_completed = len(ordered_refinements) <= max_refinements
-    selected_refinements = ordered_refinements[:max_refinements]
-
-    refinement_results = [
-        _run_phi_bounded_interval(cache, bounds) for bounds in selected_refinements
-    ]
-    for refinement in refinement_results:
-        if refinement.candidate is not None:
-            candidates.append(refinement.candidate)
-
-    finite_grid_indices = [
-        index for index, point in enumerate(grid_points) if point.objective_finite
-    ]
-    finite_gap = False
-    if finite_grid_indices:
-        first_finite = finite_grid_indices[0]
-        last_finite = finite_grid_indices[-1]
-        finite_gap = any(
-            not point.objective_finite for point in grid_points[first_finite : last_finite + 1]
-        )
-    scan_completed = bool(
-        candidates
-        and full_range.success
-        and all(result.success for result in refinement_results)
-        and not finite_gap
-        and analytic_scan_completed
-        and numeric_scan_completed
-        and refinement_scan_completed
-    )
-    best_candidate = (
-        min(candidates, key=lambda candidate: candidate.point.nll) if candidates else None
-    )
-    messages = [message for message in [full_range.message] if message]
-    failed_messages = {
-        result.message for result in refinement_results if not result.success and result.message
-    }
-    messages.extend(sorted(failed_messages))
-    messages.append(
-        f"Global fallback scan covered {len(ordered_points)} exact points "
-        f"in {len(segments)} finite branch segments; probed "
-        f"{len(selected_thresholds)} of {n_analytic_thresholds} analytic branch edges "
-        f"and refined {len(selected_refinements)} of {len(ordered_refinements)} basins; "
-        f"Wright ceiling calibrated={wright_calibrated}."
-    )
-    return _PhiBoundedResult(
-        candidate=best_candidate,
-        success=scan_completed,
-        message=" ".join(messages),
-        branch_switch_detected=branch_switch_detected,
-    )
+def _competitive_phi_boundary_point(
+    cache: _PhiEvaluationCache,
+    bounded: _PhiBoundedResult,
+    boundary_u: float,
+) -> _PhiProfilePoint | None:
+    """Return an already reached or bounded-search-competitive hard boundary."""
+    cached = cache.points.get(boundary_u)
+    if cached is not None:
+        if error := cache.density_errors.get(boundary_u):
+            raise error
+        return cached
+    if (
+        bounded.candidate is not None
+        and abs(bounded.candidate.point.u - boundary_u) <= 4.0 * _PHI_BOUNDED_XATOL
+    ):
+        point = cache.evaluate(boundary_u, compute_score=True)
+        if error := cache.density_errors.get(boundary_u):
+            raise error
+        return point
+    return None
 
 
 def _finalize_phi_mle_result(
@@ -2083,24 +1170,29 @@ def _finalize_phi_mle_result(
     branch_switch_detected = bool(
         score_search.branch_switch_detected or bounded.branch_switch_detected
     )
-    if bounded.branch_switch_detected and not score_search.branch_switch_detected:
-        _record_phi_fallback(
-            fallback_reasons,
-            "density branch switched during value-only fallback scan",
-        )
     need_fallback = bool(fallback_reasons)
-    lower_point = cache.evaluate(_LOG_PHI_LOWER_BOUND, compute_score=False)
-    upper_point = cache.evaluate(_LOG_PHI_UPPER_BOUND, compute_score=False)
+    lower_point = _competitive_phi_boundary_point(
+        cache,
+        bounded,
+        _LOG_PHI_LOWER_BOUND,
+    )
+    upper_point = _competitive_phi_boundary_point(
+        cache,
+        bounded,
+        _LOG_PHI_UPPER_BOUND,
+    )
     candidates = [*score_search.seed_candidates, *score_search.root_candidates]
     if bounded.candidate is not None:
         candidates.append(bounded.candidate)
-    if lower_point.objective_finite:
+    if lower_point is not None and lower_point.objective_finite:
         candidates.append(_PhiCandidate(lower_point, "lower boundary", validated=True))
-    if upper_point.objective_finite:
+    if upper_point is not None and upper_point.objective_finite:
         candidates.append(_PhiCandidate(upper_point, "upper boundary", validated=True))
     finite_candidates = [candidate for candidate in candidates if candidate.point.objective_finite]
 
     if not finite_candidates:
+        if cache.density_errors:
+            raise next(iter(cache.density_errors.values()))
         diagnostics = next(
             (point.diagnostics for point in cache.points.values()),
             default_diagnostics,
@@ -2151,12 +1243,14 @@ def _finalize_phi_mle_result(
         )
     if (
         best.point.u - _LOG_PHI_LOWER_BOUND <= 4.0 * _PHI_BOUNDED_XATOL
+        and lower_point is not None
         and lower_point.objective_finite
         and _phi_nll_no_worse(lower_point.nll, best.point.nll)
     ):
         best = _PhiCandidate(lower_point, "lower boundary", validated=True)
     elif (
         _LOG_PHI_UPPER_BOUND - best.point.u <= 4.0 * _PHI_BOUNDED_XATOL
+        and upper_point is not None
         and upper_point.objective_finite
         and _phi_nll_no_worse(upper_point.nll, best.point.nll)
     ):
@@ -2190,10 +1284,8 @@ def _finalize_phi_mle_result(
     elif best.source == "brentq":
         candidate_converged = best.validated
     elif best.source == "bounded":
-        # A deterministic scan is a strong global safeguard, but it cannot
-        # prove that a narrow switch-and-back was not hidden between two
-        # equal-signature grid points. Preserve the best exact value without
-        # claiming global convergence for an interior value-only fallback.
+        # Preserve the best certified value without claiming an interior
+        # derivative optimum from a value-only rescue.
         candidate_converged = False
     else:
         candidate_converged = False
@@ -2289,6 +1381,29 @@ def _profile_phi_detailed(
                 upper_boundary=False,
                 diagnostics=default_diagnostics,
                 message="Pearson plug-in dispersion is not finite.",
+            )
+        if phi_hat == PHI_LOWER_BOUND:
+            return _PhiProfileResult(
+                phi=phi_hat,
+                nll=np.inf,
+                converged=False,
+                objective_finite=False,
+                n_evaluations=0,
+                n_score_evaluations=0,
+                n_value_only_evaluations=0,
+                n_fallback_evaluations=0,
+                optimizer="pearson",
+                score=None,
+                used_fallback=False,
+                fallback_reason=None,
+                branch_switch_detected=False,
+                lower_boundary=True,
+                upper_boundary=False,
+                diagnostics=default_diagnostics,
+                message=(
+                    "Pearson plug-in dispersion is at the hard lower boundary; "
+                    "the concentrated exact density was not evaluated."
+                ),
             )
         point = cache.evaluate(
             float(np.log(phi_hat)),

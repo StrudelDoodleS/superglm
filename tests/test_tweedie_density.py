@@ -711,3 +711,139 @@ def test_saddlepoint_unrepresentable_zero_mass_fails_without_warnings() -> None:
                 1.5,
                 weights=np.array([np.finfo(np.float64).max]),
             )
+
+
+def test_public_logpdf_uses_certified_exact_density_for_hard_low_power_case() -> None:
+    from superglm.profiling.tweedie import tweedie_logpdf
+
+    value = tweedie_logpdf(
+        np.array([0.04564326798684731]),
+        np.array([2.859891821890267]),
+        0.10602153698295053,
+        1.05,
+    )
+
+    assert value[0] == pytest.approx(-25.2177010089, abs=2e-10)
+
+
+def test_public_logpdf_propagates_exact_certification_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from superglm.profiling.tweedie import tweedie_logpdf
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise TweedieDensityError(
+            observation_index=0,
+            power=1.5,
+            dispersion=1.0,
+            term_count=7,
+            requested_rtol=1e-12,
+            reason="tail not certified",
+        )
+
+    monkeypatch.setattr(density_module, "evaluate_tweedie_density", fail)
+
+    with pytest.raises(TweedieDensityError, match="tail not certified"):
+        tweedie_logpdf(np.array([1.0]), np.array([1.0]), 1.0, 1.5)
+
+
+@pytest.mark.parametrize(
+    ("y", "mu", "phi", "p", "weights"),
+    [
+        pytest.param(np.array(["1.0"]), np.array([1.0]), 1.0, 1.5, None, id="string-y"),
+        pytest.param(np.array([1.0]), np.array([1.0]), True, 1.5, None, id="boolean-phi"),
+        pytest.param(np.array([1.0]), np.array([1.0]), 1.0, "1.5", None, id="string-p"),
+        pytest.param(
+            np.array([1.0]),
+            np.array([1.0]),
+            1.0,
+            1.5,
+            np.array([True]),
+            id="boolean-weights",
+        ),
+    ],
+)
+def test_public_logpdf_rejects_the_same_coercive_types_as_the_certified_kernel(
+    y: np.ndarray,
+    mu: np.ndarray,
+    phi: object,
+    p: object,
+    weights: np.ndarray | None,
+) -> None:
+    from superglm.profiling.tweedie import tweedie_logpdf
+
+    with pytest.raises(TypeError):
+        tweedie_logpdf(y, mu, phi, p, weights=weights)
+
+
+def test_public_logpdf_preserves_writable_array_compatibility() -> None:
+    from superglm.profiling.tweedie import tweedie_logpdf
+
+    result = tweedie_logpdf(np.array([1.0]), np.array([1.0]), 1.0, 1.5)
+
+    assert result.flags.owndata
+    assert result.flags.writeable
+    result[0] = 0.0
+    assert result[0] == 0.0
+
+
+def test_profile_module_has_no_second_saddlepoint_implementation() -> None:
+    import superglm.profiling.tweedie as tweedie_module
+
+    assert not hasattr(tweedie_module, "_saddlepoint")
+
+
+def test_distribution_log_likelihood_uses_the_certified_public_path() -> None:
+    from superglm.distributions import Tweedie
+
+    value = Tweedie(1.05).log_likelihood(
+        np.array([0.04564326798684731]),
+        np.array([2.859891821890267]),
+        np.ones(1),
+        phi=0.10602153698295053,
+    )
+
+    assert value == pytest.approx(-25.2177010089, abs=2e-10)
+
+
+def test_distribution_log_likelihood_preserves_nonempty_public_contract() -> None:
+    from superglm.distributions import Tweedie
+
+    with pytest.raises(ValueError, match="same non-empty shape"):
+        Tweedie(1.5).log_likelihood(
+            np.array([]),
+            np.array([]),
+            np.array([]),
+            phi=1.0,
+        )
+
+
+def test_phi_cache_reuses_one_exact_evaluation_for_value_and_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import superglm.profiling.tweedie as tweedie_module
+
+    real_evaluate = density_module.evaluate_tweedie_density
+    calls = 0
+
+    def counted_evaluate(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return real_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(density_module, "evaluate_tweedie_density", counted_evaluate)
+    y = np.array([0.0, 0.5, 2.0])
+    mu = np.array([0.4, 0.8, 1.7])
+    phi = 0.7
+    prepared = tweedie_module._prepare_tweedie_density(y, mu, 1.5)
+    cache = tweedie_module._PhiEvaluationCache(prepared)
+    value_only = cache.evaluate(math.log(phi), compute_score=False)
+    with_score = cache.evaluate(math.log(phi), compute_score=True)
+    oracle = real_evaluate(y, mu, phi, 1.5)
+
+    assert value_only is with_score
+    assert calls == 1
+    assert cache.n_evaluations == 1
+    assert cache.n_score_evaluations == 1
+    assert cache.n_value_only_evaluations == 0
+    assert with_score.score == pytest.approx(-float(np.mean(oracle.log_phi_score)))
