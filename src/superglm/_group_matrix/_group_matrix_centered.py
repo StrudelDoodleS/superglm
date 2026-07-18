@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 
 import numpy as np
+import tabmat  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from ._group_matrix_kernels import (
@@ -12,9 +14,12 @@ from ._group_matrix_kernels import (
     _fused_bincount_2,
     _pattern_support_summaries,
 )
+from ._group_matrix_tabmat import _tabmat_vector
 
 _MAX_PACKED_HIST_CELLS = 5_000_000
 _MAX_PATTERN_SUMMARY_CELLS = 5_000_000
+_MIN_MIXED_RAW_MOMENT_CELLS = 100_000
+_MIN_LOW_CARDINALITY_MIXED_ROWS = 5_000
 
 
 @dataclass(frozen=True)
@@ -24,12 +29,6 @@ class _CenteredSupport:
     mean: NDArray
     mass: NDArray
     weighted_z: NDArray
-
-
-@dataclass(frozen=True)
-class _BlockSpan:
-    start: int
-    end: int
 
 
 @dataclass(frozen=True)
@@ -73,31 +72,158 @@ def _certify_raw_centering(
     raw_rhs: NDArray,
     weighted_z: NDArray,
     sum_w: float,
+    sum_weighted_z: float | None = None,
 ) -> tuple[NDArray, NDArray, NDArray] | None:
-    mean_x = xtw / sum_w
-    centered_gram = raw_gram - np.outer(xtw, mean_x)
-    centered_gram = 0.5 * (centered_gram + centered_gram.T)
-    centered_diagonal = np.diag(centered_gram)
-    if np.any(centered_diagonal < 0.0):
+    # Raw moments can overflow even when the anchor-centered fallback remains
+    # finite (for example, a large finite location plus modest variation).
+    # Keep that implementation detail independent of the caller's errstate and
+    # reject non-finite intermediates before they reach rank calculations.
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        mean_x = xtw / sum_w
+        centered_gram = raw_gram - np.outer(xtw, mean_x)
+        centered_gram = 0.5 * (centered_gram + centered_gram.T)
+        centered_diagonal = np.diag(centered_gram)
+        if (
+            not np.all(np.isfinite(mean_x))
+            or not np.all(np.isfinite(centered_gram))
+            or not np.all(np.isfinite(centered_diagonal))
+            or np.any(centered_diagonal < 0.0)
+        ):
+            return None
+        centered_scale = np.sqrt(centered_diagonal / sum_w)
+
+    if not _raw_centering_well_scaled(mean_x, centered_scale):
         return None
 
-    centered_scale = np.sqrt(centered_diagonal / sum_w)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        if sum_weighted_z is None:
+            sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
+        centered_rhs = raw_rhs - mean_x * sum_weighted_z
+    if not np.isfinite(sum_weighted_z) or not np.all(np.isfinite(centered_rhs)):
+        return None
+    return mean_x, centered_gram, centered_rhs
+
+
+def _raw_centering_well_scaled(mean_x: NDArray, centered_scale: NDArray) -> bool:
+    """Return whether raw-moment subtraction stays in its rounding envelope."""
+    mean_x = np.asarray(mean_x, dtype=np.float64)
+    centered_scale = np.asarray(centered_scale, dtype=np.float64)
+    if not np.all(np.isfinite(mean_x)) or not np.all(np.isfinite(centered_scale)):
+        return False
     # Keep intercept profiling within the ordinary rounding envelope of a
     # Gram calculation.  Allowing a larger mean than centered RMS amplifies
     # raw-moment subtraction error beyond that envelope and can erase a
     # near-collinear direction that the shared normal-equation rank policy
     # would otherwise retain.
-    max_safe_mean_ratio = 1.0
-    well_scaled = np.all(
-        (np.abs(mean_x) <= max_safe_mean_ratio * centered_scale)
-        | ((mean_x == 0.0) & (centered_scale == 0.0))
+    return bool(
+        np.all((np.abs(mean_x) <= centered_scale) | ((mean_x == 0.0) & (centered_scale == 0.0)))
     )
-    if not well_scaled:
+
+
+def _try_tabmat_centering(
+    *,
+    tabmat_split,
+    W: NDArray,
+    z_centered: NDArray,
+    sum_w: float,
+    preflight: bool,
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """Use native categorical Tabmat kernels when raw centering is safe."""
+    if tabmat_split is None or not any(
+        isinstance(component, tabmat.CategoricalMatrix) for component in tabmat_split.matrices
+    ):
+        return None
+    if any(
+        np.dtype(component.dtype) != np.dtype(np.float64) for component in tabmat_split.matrices
+    ):
         return None
 
-    sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
-    centered_rhs = raw_rhs - mean_x * sum_weighted_z
-    return mean_x, centered_gram, centered_rhs
+    # Tabmat 4.2.1's compiled weighted kernels require a writable contiguous
+    # weight buffer. In particular, strided weights can otherwise compute an
+    # incorrect result without raising, while read-only weights are rejected.
+    tabmat_weights = _tabmat_vector(W)
+
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        if preflight:
+            # MatrixBase.standardize expects probability weights; it does not
+            # normalize arbitrary working weights itself.  We use only its
+            # cheap location/scale summary, never its raw centered sandwich.
+            normalized_weights = tabmat_weights / sum_w
+            _standardized, mean_x, centered_scale = tabmat_split.standardize(
+                normalized_weights,
+                center_predictors=True,
+                scale_predictors=True,
+            )
+            if centered_scale is None or not _raw_centering_well_scaled(mean_x, centered_scale):
+                return None
+            xtw = np.asarray(mean_x, dtype=np.float64) * sum_w
+        else:
+            xtw = np.asarray(tabmat_split.transpose_matvec(tabmat_weights), dtype=np.float64)
+
+        weighted_z = _tabmat_vector(tabmat_weights * z_centered)
+        raw_gram = np.asarray(tabmat_split.sandwich(tabmat_weights), dtype=np.float64)
+        raw_rhs = np.asarray(tabmat_split.transpose_matvec(weighted_z), dtype=np.float64)
+    return _certify_raw_centering(
+        raw_gram=raw_gram,
+        xtw=xtw,
+        raw_rhs=raw_rhs,
+        weighted_z=weighted_z,
+        sum_w=sum_w,
+    )
+
+
+def _try_raw_spline_tabmat_centering(
+    *,
+    plan,
+    W: NDArray,
+    z_centered: NDArray,
+    sum_w: float,
+    preflight: bool,
+    profile: dict | None = None,
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """Use one raw-basis Tabmat sandwich and transform to solver coordinates."""
+    started = perf_counter()
+    if profile is not None:
+        profile["centered_spline_tabmat_attempts"] = (
+            profile.get("centered_spline_tabmat_attempts", 0) + 1
+        )
+    # Raw SSP bases have compact support, while arbitrary solver transforms can
+    # still create unsafe locations.  The authoritative transformed-moment
+    # certificate below covers both cases, so a separate Tabmat standardize
+    # pass would only duplicate the weighted sparse traversal.
+    _ = preflight
+    tabmat_weights = _tabmat_vector(W)
+    result = None
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        raw_xtw = np.asarray(
+            plan.split.transpose_matvec(tabmat_weights),
+            dtype=np.float64,
+        )
+        weighted_z = _tabmat_vector(tabmat_weights * z_centered)
+        raw_gram = np.asarray(plan.split.sandwich(tabmat_weights), dtype=np.float64)
+        raw_rhs = np.asarray(plan.split.transpose_matvec(weighted_z), dtype=np.float64)
+        xtw = plan.transform_vector(raw_xtw)
+        gram = plan.transform_gram(raw_gram)
+        rhs = plan.transform_vector(raw_rhs)
+        result = _certify_raw_centering(
+            raw_gram=gram,
+            xtw=xtw,
+            raw_rhs=rhs,
+            weighted_z=weighted_z,
+            sum_w=sum_w,
+        )
+    if profile is not None:
+        outcome = "accepts" if result is not None else "rejections"
+        key = f"centered_spline_tabmat_{outcome}"
+        profile[key] = profile.get(key, 0) + 1
+        profile["centered_spline_tabmat_s"] = (
+            profile.get("centered_spline_tabmat_s", 0.0) + perf_counter() - started
+        )
+        profile["centered_spline_tabmat_retained_bytes"] = max(
+            profile.get("centered_spline_tabmat_retained_bytes", 0),
+            plan.retained_bytes,
+        )
+    return result
 
 
 def _try_factored_tensor_centering(
@@ -116,23 +242,158 @@ def _try_factored_tensor_centering(
     square-root-epsilon boundary.  Ill-scaled inputs fall through to the
     anchor-centered support implementation below.
     """
-    from ._group_matrix_algebra import _block_xtwx_rhs
+    with np.errstate(over="ignore", invalid="ignore"):
+        sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
+    if not np.isfinite(sum_weighted_z):
+        return None
 
-    widths = [gm.shape[1] for gm in dm.group_matrices]
-    starts = np.cumsum([0, *widths])
-    spans = [_BlockSpan(int(starts[i]), int(starts[i + 1])) for i in range(len(widths))]
-    raw_gram, xtw, raw_rhs = _block_xtwx_rhs(
-        dm.group_matrices,
-        spans,
+    moments = dm.execution_plan._moments_prevalidated(
         W,
-        weighted_z,
+        rhs=(weighted_z,),
+        include_xtw=True,
     )
+    if moments.xtw is None:  # pragma: no cover - guaranteed by include_xtw
+        raise RuntimeError("execution plan did not return X'W")
     return _certify_raw_centering(
-        raw_gram=raw_gram,
-        xtw=xtw,
-        raw_rhs=raw_rhs,
+        raw_gram=moments.gram,
+        xtw=moments.xtw,
+        raw_rhs=moments.xt_rhs[0],
         weighted_z=weighted_z,
         sum_w=sum_w,
+        sum_weighted_z=sum_weighted_z,
+    )
+
+
+def _mixed_raw_centering_preflight(
+    *,
+    plan,
+    W: NDArray,
+    sum_w: float,
+) -> NDArray | None:
+    """Return augmented X'W when first-call raw centering is safe."""
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        augmented_mean, augmented_scale = plan.augmented_location_scale(_tabmat_vector(W) / sum_w)
+    if (
+        augmented_scale is None
+        or not np.all(np.isfinite(augmented_mean))
+        or not np.all(np.isfinite(augmented_scale))
+    ):
+        return None
+    ordinary = plan.ordinary_augmented_indices
+    ordinary_mean = augmented_mean[ordinary]
+    ordinary_scale = augmented_scale[ordinary]
+    if not _raw_centering_well_scaled(
+        ordinary_mean,
+        ordinary_scale,
+    ):
+        return None
+    for block in plan.compressed_blocks:
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            mass = augmented_mean[block.augmented_indices] * sum_w
+            xtw = block.support.T @ mass
+            raw_diagonal = np.einsum(
+                "ij,i,ij->j",
+                block.support,
+                mass,
+                block.support,
+                optimize=False,
+            )
+            mean = xtw / sum_w
+            centered_diagonal = raw_diagonal - xtw * mean
+            if (
+                not np.all(np.isfinite(mean))
+                or not np.all(np.isfinite(centered_diagonal))
+                or np.any(centered_diagonal < 0.0)
+            ):
+                return None
+            scale = np.sqrt(centered_diagonal / sum_w)
+        if not _raw_centering_well_scaled(mean, scale):
+            return None
+    augmented_xtw = augmented_mean * sum_w
+    if not np.all(np.isfinite(augmented_xtw)):
+        return None
+    return augmented_xtw
+
+
+def _try_mixed_discrete_centering(
+    *,
+    dm,
+    W: NDArray,
+    z_centered: NDArray,
+    sum_w: float,
+    preflight: bool = True,
+) -> tuple[bool, tuple[NDArray, NDArray, NDArray] | None]:
+    """Use the cached augmented bin-space plan for a certified mixed design."""
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DenseGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+    )
+
+    allowed_types = {DenseGroupMatrix, CategoricalGroupMatrix, DiscretizedSSPGroupMatrix}
+    compressed_groups = tuple(
+        group for group in dm.group_matrices if type(group) is DiscretizedSSPGroupMatrix
+    )
+    categorical_groups = tuple(
+        group
+        for group in dm.group_matrices
+        if type(group) is CategoricalGroupMatrix and group.shape[1] > 0
+    )
+    has_ordinary = any(
+        type(group) in {DenseGroupMatrix, CategoricalGroupMatrix} and group.shape[1] > 0
+        for group in dm.group_matrices
+    )
+    if (
+        not compressed_groups
+        or not has_ordinary
+        or len(categorical_groups) > 1
+        or any(type(group) not in allowed_types for group in dm.group_matrices)
+        or dm.p == 0
+        or dm.n * dm.p < _MIN_MIXED_RAW_MOMENT_CELLS * len(compressed_groups)
+        # Below this measured row crossover, constructing a native low-cardinality
+        # block costs more than the stable dense-categorical fallback. High-cardinality
+        # blocks retain their strong win even on smaller designs.
+        or (
+            categorical_groups
+            and categorical_groups[0].n_levels <= 100
+            and dm.n < _MIN_LOW_CARDINALITY_MIXED_ROWS
+        )
+    ):
+        return False, None
+
+    plan = dm.mixed_bin_space_centering_plan
+    if plan is None:
+        return False, None
+    augmented_xtw = None
+    if preflight:
+        augmented_xtw = _mixed_raw_centering_preflight(
+            plan=plan,
+            W=W,
+            sum_w=sum_w,
+        )
+        if augmented_xtw is None:
+            return True, None
+
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        weighted_z = W * z_centered
+        sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
+    if not np.isfinite(sum_weighted_z) or not np.all(np.isfinite(weighted_z)):
+        return True, None
+
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        moments = plan.moments(W, weighted_z, augmented_xtw=augmented_xtw)
+    if moments.xtw is None:  # pragma: no cover - guaranteed by include_xtw
+        raise RuntimeError("execution plan did not return X'W")
+    return (
+        True,
+        _certify_raw_centering(
+            raw_gram=moments.gram,
+            xtw=moments.xtw,
+            raw_rhs=moments.xt_rhs[0],
+            weighted_z=weighted_z,
+            sum_w=sum_w,
+            sum_weighted_z=sum_weighted_z,
+        ),
     )
 
 
@@ -440,14 +701,14 @@ def packed_centered_gram_rhs(
 
     supports: list[_CenteredSupport] = []
     widths: list[int] = []
-    weighted_z = W * z_centered
-    sum_w = float(np.sum(W, dtype=np.float64))
     eligible_types = (DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix)
     if any(
         type(gm) not in eligible_types and not isinstance(gm, CategoricalGroupMatrix)
         for gm in dm.group_matrices
     ):
         return None
+    weighted_z = W * z_centered
+    sum_w = float(np.sum(W, dtype=np.float64))
     if any(type(gm) is DiscretizedTensorGroupMatrix for gm in dm.group_matrices):
         pattern_attempted, patterned = _try_pattern_tensor_centering(
             dm=dm,
@@ -539,6 +800,112 @@ def _compensated_add(total: NDArray, compensation: NDArray, value: NDArray) -> N
     updated = total + corrected
     compensation[...] = (updated - total) - corrected
     total[...] = updated
+
+
+def stable_centered_gram_rhs(
+    *,
+    dm,
+    W: NDArray,
+    z_centered: NDArray,
+    sum_w: float,
+    chunk_size: int = 8192,
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Return mean and centered products without forming a large raw mean.
+
+    The weighted location is accumulated relative to one observed row, and
+    the same anchor/difference representation is used for the Gram and RHS.
+    A translated column therefore loses only the unavoidable input ULP; it
+    never subtracts two O(location) moments or centers rows with a rounded
+    O(location) mean.
+    """
+    n, p = dm.shape
+    W = np.asarray(W, dtype=np.float64)
+    z_centered = np.asarray(z_centered, dtype=np.float64)
+    if W.shape != (n,) or z_centered.shape != (n,):
+        raise ValueError("W and z_centered must match the design row count")
+    if not np.isfinite(sum_w) or sum_w <= 0.0:
+        raise ValueError("sum_w must be positive and finite")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    if p == 0:
+        return (
+            np.zeros(0, dtype=np.float64),
+            np.zeros((0, 0), dtype=np.float64),
+            np.zeros(0, dtype=np.float64),
+        )
+
+    anchor_row = int(np.argmax(W))
+    anchor = np.asarray(
+        dm.row_subset(np.array([anchor_row], dtype=np.intp)).toarray()[0],
+        dtype=np.float64,
+    )
+    weighted_difference = np.zeros(p, dtype=np.float64)
+    mean_compensation = np.zeros(p, dtype=np.float64)
+    for start in range(0, n, chunk_size):
+        stop = min(start + chunk_size, n)
+        rows = np.arange(start, stop, dtype=np.intp)
+        block = np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+        contribution = (block - anchor).T @ W[start:stop]
+        _compensated_add(weighted_difference, mean_compensation, contribution)
+    mean_difference = weighted_difference / sum_w
+    mean_x = anchor + mean_difference
+
+    gram = np.zeros((p, p), dtype=np.float64)
+    gram_compensation = np.zeros_like(gram)
+    rhs = np.zeros(p, dtype=np.float64)
+    rhs_compensation = np.zeros_like(rhs)
+    for start in range(0, n, chunk_size):
+        stop = min(start + chunk_size, n)
+        rows = np.arange(start, stop, dtype=np.intp)
+        block = np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+        block = (block - anchor) - mean_difference
+        W_block = W[start:stop]
+        _compensated_add(
+            gram,
+            gram_compensation,
+            block.T @ (W_block[:, None] * block),
+        )
+        _compensated_add(
+            rhs,
+            rhs_compensation,
+            block.T @ (W_block * z_centered[start:stop]),
+        )
+    return mean_x, 0.5 * (gram + gram.T), rhs
+
+
+def stable_centered_matvec(
+    *,
+    dm,
+    beta: NDArray,
+    W: NDArray,
+    sum_w: float,
+    chunk_size: int = 8192,
+) -> NDArray:
+    """Evaluate ``(X - weighted_mean(X)) @ beta`` in anchored coordinates."""
+    n, p = dm.shape
+    beta = np.asarray(beta, dtype=np.float64)
+    W = np.asarray(W, dtype=np.float64)
+    if beta.shape != (p,) or W.shape != (n,):
+        raise ValueError("centered matvec inputs must match the design")
+    if not np.isfinite(sum_w) or sum_w <= 0.0:
+        raise ValueError("sum_w must be positive and finite")
+    if p == 0:
+        return np.zeros(n, dtype=np.float64)
+
+    anchor_row = int(np.argmax(W))
+    anchor = np.asarray(
+        dm.row_subset(np.array([anchor_row], dtype=np.intp)).toarray()[0],
+        dtype=np.float64,
+    )
+    values = np.empty(n, dtype=np.float64)
+    for start in range(0, n, chunk_size):
+        stop = min(start + chunk_size, n)
+        rows = np.arange(start, stop, dtype=np.intp)
+        block = np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+        values[start:stop] = (block - anchor) @ beta
+    mean_value = float(np.dot(W, values) / sum_w)
+    values -= mean_value
+    return values
 
 
 def centered_gram_rhs(

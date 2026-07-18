@@ -317,6 +317,53 @@ class TestBackendLinearAlgebraInvariants:
 
         assert _build_tabmat_split([gm]) is None
 
+    @pytest.mark.parametrize("vector_layout", ["strided", "readonly"])
+    def test_tabmat_raw_block_products_normalize_compiled_vector_buffers(self, vector_layout):
+        from superglm.group_matrix import (
+            CategoricalGroupMatrix,
+            _block_xtwx,
+            _block_xtwx_rhs,
+            _block_xtwx_signed,
+            _build_tabmat_split,
+        )
+        from superglm.types import GroupSlice
+
+        rng = np.random.default_rng(162)
+        n = 600
+        n_levels = 120
+        codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+        rng.shuffle(codes)
+        gm = CategoricalGroupMatrix(codes, n_levels)
+        split = _build_tabmat_split([gm])
+        assert split is not None
+        groups = [GroupSlice("cat", 0, n_levels)]
+        base_W = rng.uniform(0.25, 2.0, size=n)
+        base_Wz = rng.normal(size=n)
+        if vector_layout == "strided":
+            W_storage = np.empty(2 * n)
+            Wz_storage = np.empty(2 * n)
+            W_storage[::2] = base_W
+            Wz_storage[::2] = base_Wz
+            W = W_storage[::2]
+            Wz = Wz_storage[::2]
+        else:
+            W = base_W.copy()
+            Wz = base_Wz.copy()
+            W.setflags(write=False)
+            Wz.setflags(write=False)
+
+        expected_gram = _block_xtwx([gm], groups, base_W)
+        expected_signed = _block_xtwx_signed([gm], groups, base_W)
+        expected_rhs = _block_xtwx_rhs([gm], groups, base_W, base_Wz)
+
+        np.testing.assert_allclose(_block_xtwx([gm], groups, W, tabmat_split=split), expected_gram)
+        np.testing.assert_allclose(
+            _block_xtwx_signed([gm], groups, W, tabmat_split=split), expected_signed
+        )
+        actual_rhs = _block_xtwx_rhs([gm], groups, W, Wz, tabmat_split=split)
+        for actual, expected in zip(actual_rhs, expected_rhs, strict=True):
+            np.testing.assert_allclose(actual, expected)
+
     def test_spline_categorical_level_group_matches_masked_ssp(self):
         """Compact spline-by-category level algebra must match masked sparse SSP."""
         import scipy.sparse as sp

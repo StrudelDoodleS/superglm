@@ -129,17 +129,40 @@ def test_managed_cleanup_can_freeze_floor_pinned_lambda(monkeypatch):
         ]
     )
     active_name_calls: list[set[str]] = []
+    penalties = [
+        SimpleNamespace(name="DrivAge"),
+        SimpleNamespace(name="BonusMalus"),
+    ]
+
+    def make_mode(lambdas):
+        return SimpleNamespace(
+            lambdas=lambdas.copy(),
+            result=pirls_result,
+            scop_states={},
+            penalty_components=penalties,
+            hessian_inverse=np.eye(1),
+            evaluation=SimpleNamespace(value=1.0),
+            objective=1.0,
+            curvature_source="fisher",
+        )
 
     monkeypatch.setattr(
-        scop_efs, "fit_irls_direct", lambda **kwargs: (pirls_result, None, np.eye(1), {})
+        scop_efs,
+        "_fit_scop_reml_mode",
+        lambda context, lambdas, **kwargs: make_mode(lambdas),
     )
-    monkeypatch.setattr(scop_efs, "build_penalty_matrix", lambda *args, **kwargs: np.zeros((1, 1)))
-    monkeypatch.setattr(scop_efs, "build_scop_penalty_components", lambda *args, **kwargs: [])
-    monkeypatch.setattr(scop_efs, "assemble_joint_hessian", lambda *args, **kwargs: (np.eye(1), {}))
     monkeypatch.setattr(
         scop_efs,
-        "_safe_decompose_H",
-        lambda *args, **kwargs: (np.eye(1), 0.0, np.array([1.0])),
+        "_backtrack_scop_efs_candidate",
+        lambda context, current, proposed_lambdas, **kwargs: (
+            make_mode(proposed_lambdas),
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        scop_efs,
+        "_finalize_scop_reml_mode",
+        lambda context, mode: mode.result,
     )
 
     def fake_joint_efs_lambda_step(*args, **kwargs):
@@ -148,7 +171,6 @@ def test_managed_cleanup_can_freeze_floor_pinned_lambda(monkeypatch):
         return next(lambda_updates), args[7], {}
 
     monkeypatch.setattr(scop_efs, "_joint_efs_lambda_step", fake_joint_efs_lambda_step)
-    monkeypatch.setattr(scop_efs, "reml_laml_objective", lambda *args, **kwargs: 1.0)
     monkeypatch.setattr(
         scop_efs,
         "_multi_scop_discrete_cleanup_names",
@@ -169,10 +191,7 @@ def test_managed_cleanup_can_freeze_floor_pinned_lambda(monkeypatch):
         lambdas={"DrivAge": 1.0, "BonusMalus": 1.0},
         estimated_names={"DrivAge", "BonusMalus"},
         max_reml_iter=4,
-        reml_penalties=[
-            SimpleNamespace(name="DrivAge"),
-            SimpleNamespace(name="BonusMalus"),
-        ],
+        reml_penalties=penalties,
     )
 
     assert active_name_calls == [

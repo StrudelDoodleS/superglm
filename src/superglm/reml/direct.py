@@ -16,17 +16,33 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._fit_trace import TraceRun
+from superglm.distributions import Gamma, Gaussian
 from superglm.group_matrix import DesignMatrix
 from superglm.reml.discrete import optimize_discrete_reml_cached_w
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
-from superglm.reml.objective import reml_laml_objective
+from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
+from superglm.reml.observed_geometry import (
+    ObservedREMLGeometry,
+    build_observed_reml_geometry,
+    classify_reml_curvature,
+    observed_penalized_mode_score,
+    validate_observed_derivative_capability,
+)
 from superglm.reml.penalty_algebra import (
     build_penalty_matrix,
     coerce_reml_penalties,
-    compute_total_penalty_rank,
+    compute_penalty_nullity,
 )
 from superglm.reml.result import REMLResult
-from superglm.reml.w_derivatives import reml_w_correction
+from superglm.reml.scale import (
+    GammaScaleProfileData,
+    prepare_gamma_reml_scale_data,
+    profile_gamma_reml_scale,
+    profile_gaussian_reml_scale,
+)
+from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction_order
+from superglm.solvers.centered_system import TabmatCenteringState
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -57,6 +73,8 @@ def optimize_direct_reml(
     estimated_names: set[str] | None = None,
     pirls_tol: float = 1e-6,
     max_pirls_iter: int = 100,
+    debug_recorder=None,
+    trace_run: TraceRun | None = None,
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
 
@@ -67,7 +85,9 @@ def optimize_direct_reml(
 
     **Discrete path** (``discrete=True``):
         Cached-W fREML optimizer (fewer data passes), delegated to
-        ``optimize_discrete_reml_cached_w``.
+        ``optimize_discrete_reml_cached_w``.  This deliberately uses the
+        BAM-style cached working/Fisher curvature approximation and bypasses
+        ordinary observed-Hessian LAML for noncanonical links.
     """
     penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
@@ -75,7 +95,10 @@ def optimize_direct_reml(
         group_matrices=dm.group_matrices,
         penalty_caches=penalty_caches,
     )
+    w_correction_order = validate_w_correction_order(w_correction_order)
     if discrete:
+        # The cached-W branch is the explicit BAM-style approximation boundary:
+        # it does not claim Wood's exact observed-Hessian LAML geometry.
         return optimize_discrete_reml_cached_w(
             dm,
             distribution,
@@ -99,9 +122,30 @@ def optimize_direct_reml(
             estimated_names=estimated_names,
             pirls_tol=pirls_tol,
             max_pirls_iter=max_pirls_iter,
+            debug_recorder=debug_recorder,
+            trace_run=trace_run,
         )
 
     scale_known = getattr(distribution, "scale_known", True)
+    likelihood_size: float | None = None
+    gamma_scale_data: GammaScaleProfileData | None = None
+    if isinstance(distribution, Gaussian):
+        likelihood_size = float(np.sum(sample_weight, dtype=np.float64))
+    elif isinstance(distribution, Gamma):
+        gamma_scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
+    use_observed_geometry = (
+        isinstance(dm, DesignMatrix)
+        and classify_reml_curvature(
+            distribution,
+            link,
+        )
+        == "observed"
+    )
+    if use_observed_geometry:
+        validate_observed_derivative_capability(distribution, link, w_correction_order)
+    observed_tabmat_state = TabmatCenteringState() if use_observed_geometry else None
+    observed_pirls_tol = min(pirls_tol, 1e-10) if use_observed_geometry else pirls_tol
+    observed_mode_tol = max(10.0 * observed_pirls_tol, 100.0 * np.finfo(float).eps)
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
     # estimated_mask[i] = True  => component i is free to be optimized
@@ -132,6 +176,10 @@ def optimize_direct_reml(
     _t_gradient = 0.0
     _t_hessian = 0.0
     _t_w_correction = 0.0
+    _t_observed_geometry = 0.0
+    _accepted_observed_mode_residual_max = 0.0
+    _rejected_trial_observed_mode_residual_max = 0.0
+    _observed_mode_rejected_trial_count = 0
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
 
@@ -159,17 +207,53 @@ def optimize_direct_reml(
         profile=profile,
         direct_solve=direct_solve,
         S_override=S_boot,
+        debug_recorder=debug_recorder,
+        debug_context={"phase": "bootstrap", "reml_iteration": 0},
+        trace_run=trace_run,
+        trace_purpose="reml_bootstrap",
     )
     _t_pirls += _time.perf_counter() - _t0
     warm_beta = boot_result.beta.copy()
     warm_intercept = float(boot_result.intercept)
 
     boot_phi = 1.0
-    if not scale_known and penalty_caches is not None:
+    boot_inv_phi = 1.0
+    if not scale_known:
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
-        M_p = compute_total_penalty_rank(penalties)
-        boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
-    boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
+        boot_hessian_rank = boot_result.reml_hessian_rank
+        if boot_hessian_rank is None:
+            boot_hessian_rank = 1 + dm.p
+        boot_penalty_nullity = compute_penalty_nullity(
+            S_boot,
+            hessian_rank=boot_hessian_rank,
+            penalties=penalties,
+            lambdas=boot_lambdas,
+        )
+        penalized_deviance = float(boot_result.deviance + pq_boot)
+        if isinstance(distribution, Gaussian):
+            assert likelihood_size is not None
+            boot_scale = profile_gaussian_reml_scale(
+                penalized_deviance,
+                likelihood_size,
+                boot_penalty_nullity,
+            )
+            boot_phi = boot_scale.phi
+            boot_inv_phi = boot_scale.inverse_phi
+        elif isinstance(distribution, Gamma):
+            assert gamma_scale_data is not None
+            boot_scale = profile_gamma_reml_scale(
+                gamma_scale_data,
+                penalized_deviance,
+                boot_penalty_nullity,
+            )
+            boot_phi = boot_scale.phi
+            boot_inv_phi = boot_scale.inverse_phi
+        else:
+            boot_phi = max(
+                penalized_deviance / max(len(y) - boot_penalty_nullity, 1.0),
+                1e-10,
+            )
+            boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
     bootstrap_log_step_cap = 4.0
 
     # Store original fixed lambda values so they can be restored exactly
@@ -255,18 +339,70 @@ def optimize_direct_reml(
             beta_init=warm_beta,
             intercept_init=warm_intercept,
             max_iter=max_pirls_iter,
-            tol=pirls_tol,
+            tol=observed_pirls_tol,
+            convergence="coefficients" if use_observed_geometry else "deviance",
             return_xtwx=True,
             profile=profile,
             direct_solve=direct_solve,
             S_override=S_cand,
+            debug_recorder=debug_recorder,
+            debug_context={"phase": "candidate", "reml_iteration": n_iter},
+            trace_run=trace_run,
+            trace_purpose="reml_candidate",
         )
         _t_pirls += _time.perf_counter() - _t0
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
 
+        geometry: ObservedREMLGeometry | None = None
+        reml_inverse = XtWX_S_inv
+        objective_logdet = pirls_result.log_det_H
+        objective_hessian_rank: int | None = None
+        if use_observed_geometry:
+            if not pirls_result.converged:
+                raise RuntimeError("observed REML requires a converged penalized coefficient mode")
+            _t0 = _time.perf_counter()
+            geometry = build_observed_reml_geometry(
+                dm=dm,
+                distribution=distribution,
+                link=link,
+                y=y,
+                sample_weight=sample_weight,
+                offset_arr=offset_arr,
+                result=pirls_result,
+                penalty=S_cand,
+                tabmat_state=observed_tabmat_state,
+                derivative_order=w_correction_order,
+            )
+            _t_observed_geometry += _time.perf_counter() - _t0
+            if geometry.hessian_inverse is None:  # pragma: no cover - requested above
+                raise RuntimeError("observed REML geometry omitted its slope inverse")
+            reml_inverse = geometry.hessian_inverse
+            objective_logdet = geometry.log_det_H
+            objective_hessian_rank = geometry.hessian_rank
+            mode_score = observed_penalized_mode_score(
+                dm=dm,
+                distribution=distribution,
+                link=link,
+                y=y,
+                sample_weight=sample_weight,
+                result=pirls_result,
+                penalty=S_cand,
+                geometry=geometry,
+            )
+            _accepted_observed_mode_residual_max = max(
+                _accepted_observed_mode_residual_max,
+                mode_score.relative_max,
+            )
+            if mode_score.relative_max > observed_mode_tol:
+                raise RuntimeError(
+                    "observed REML geometry requires a converged penalized mode "
+                    f"(relative score={mode_score.relative_max:.3e}, "
+                    f"tolerance={observed_mode_tol:.3e})"
+                )
+
         _t0 = _time.perf_counter()
-        obj = reml_laml_objective(
+        objective_evaluation = reml_laml_objective(
             dm,
             distribution,
             link,
@@ -278,27 +414,86 @@ def optimize_direct_reml(
             offset_arr,
             XtWX=XtWX,
             penalty_caches=penalty_caches,
-            log_det_H=pirls_result.log_det_H,
+            log_det_H=objective_logdet,
+            hessian_rank=objective_hessian_rank,
             S_override=S_cand,
             reml_penalties=penalties,
+            likelihood_size=likelihood_size,
+            gamma_scale_data=gamma_scale_data,
+            return_evaluation=True,
         )
 
         phi_hat = 1.0
-        if not scale_known and penalty_caches is not None:
-            pq = float(pirls_result.beta @ S_cand @ pirls_result.beta)
-            M_p = compute_total_penalty_rank(penalties)
-            phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
+        inverse_phi = 1.0
+        inverse_phi_derivative = None
+        penalty_nullity: float | None = None
+        if isinstance(objective_evaluation, REMLObjectiveEvaluation):
+            obj = objective_evaluation.value
+            penalty_nullity = objective_evaluation.penalty_nullity
+            profiled_scale = objective_evaluation.profiled_scale
+        else:
+            # Compatibility for lightweight test/instrumentation callbacks
+            # that replace the public objective with a scalar-returning stub.
+            obj = float(objective_evaluation)
+            profiled_scale = None
+        if not scale_known:
+            if profiled_scale is not None:
+                phi_hat = profiled_scale.phi
+                inverse_phi = profiled_scale.inverse_phi
+                inverse_phi_derivative = profiled_scale.d_inverse_phi_d_penalized_deviance
+            else:
+                if penalty_nullity is None:
+                    hessian_rank = pirls_result.reml_hessian_rank
+                    if hessian_rank is None:
+                        hessian_rank = 1 + dm.p
+                    penalty_nullity = compute_penalty_nullity(
+                        S_cand,
+                        hessian_rank=hessian_rank,
+                        penalties=penalties,
+                        lambdas=cand_lambdas,
+                    )
+                if isinstance(objective_evaluation, REMLObjectiveEvaluation):
+                    penalized_deviance = objective_evaluation.penalized_deviance
+                else:
+                    pq = float(pirls_result.beta @ S_cand @ pirls_result.beta)
+                    penalized_deviance = float(pirls_result.deviance + pq)
+                phi_hat = max(
+                    penalized_deviance / max(len(y) - penalty_nullity, 1.0),
+                    1e-10,
+                )
+                inverse_phi = 1.0 / max(phi_hat, 1e-10)
         _t_objective += _time.perf_counter() - _t0
         objective_history.append(float(obj))
+        if trace_run is not None and trace_run.enabled:
+            if pirls_result.state_id is None:  # pragma: no cover - trace contract
+                raise RuntimeError("traced REML candidate is missing its coefficient state ID")
+            trace_run.emit_lazy(
+                "evaluation",
+                lambda: {
+                    "state_id": pirls_result.state_id,
+                    "evaluation_id": pirls_result.evaluation_id,
+                    "solver": "direct_reml",
+                    "phase": "candidate",
+                    "outer_iteration": n_iter,
+                    "objective": float(obj),
+                    "lambdas": cand_lambdas,
+                    "dispersion": float(phi_hat),
+                    "effective_df": float(pirls_result.effective_df),
+                },
+                channel="reml",
+                purpose="reml_candidate",
+                authoritative=False,
+            )
 
         _t0 = _time.perf_counter()
         grad_partial = reml_direct_gradient(
             dm.group_matrices,
             pirls_result,
-            XtWX_S_inv,
+            reml_inverse,
             cand_lambdas,
             reml_penalties=penalties,
             phi_hat=phi_hat,
+            inverse_phi=inverse_phi,
         )
         _t_gradient += _time.perf_counter() - _t0
 
@@ -310,7 +505,7 @@ def optimize_direct_reml(
                 link,
                 groups,
                 pirls_result,
-                XtWX_S_inv,
+                reml_inverse,
                 cand_lambdas,
                 penalty_caches=penalty_caches,
                 sample_weight=sample_weight,
@@ -318,6 +513,7 @@ def optimize_direct_reml(
                 distribution=distribution,
                 w_correction_order=w_correction_order,
                 reml_penalties=penalties,
+                geometry=geometry,
             )
         else:
             w_corr = None
@@ -373,21 +569,28 @@ def optimize_direct_reml(
                 converged = True
                 break
 
-        # Newton with exact outer Hessian
-        # Wood (2011) eq 6.2: diagonal correction H[i,i] += g_i + 0.5*r_j
-        # must use the *total* gradient (partial + W(rho) correction), not
-        # the fixed-W partial gradient alone.
+        # Wood outer-Hessian update.  With ``w_correction_order=2`` this
+        # includes the exact available second curvature derivatives; the
+        # default order 1 is an exact objective/gradient with a modified
+        # (quasi-Newton) Hessian.  Wood (2011) eq. 6.2 writes the
+        # diagonal dS_i/dρ_i term as g_i + 0.5*r_i, where g_i is the fixed-W
+        # gradient.  The W(rho) terms are differentiated separately through
+        # dH_extra and dH2_cross; using the total gradient here would add the
+        # first-order W correction twice on the diagonal.
         _t0 = _time.perf_counter()
         hess = reml_direct_hessian(
             dm.group_matrices,
             distribution,
-            XtWX_S_inv,
+            reml_inverse,
             cand_lambdas,
-            gradient=grad,
+            gradient=grad_partial,
             penalty_caches=penalty_caches,
             pirls_result=pirls_result,
             n_obs=len(y),
             phi_hat=phi_hat,
+            inverse_phi=inverse_phi,
+            d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
+            penalty_nullity=penalty_nullity if not scale_known else None,
             dH_extra=dH_extra,
             dH2_cross=dH2_cross,
             reml_penalties=penalties,
@@ -461,7 +664,7 @@ def optimize_direct_reml(
                 dm.p,
                 reml_penalties=penalties,
             )
-            trial_result, trial_inv, trial_xtwx = fit_irls_direct(
+            trial_result, _trial_inv, trial_xtwx = fit_irls_direct(
                 X=dm,
                 y=y,
                 weights=sample_weight,
@@ -473,14 +676,73 @@ def optimize_direct_reml(
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
                 max_iter=max_pirls_iter,
-                tol=pirls_tol,
+                tol=observed_pirls_tol,
+                convergence="coefficients" if use_observed_geometry else "deviance",
                 return_xtwx=True,
                 profile=profile,
                 direct_solve=direct_solve,
                 S_override=S_trial,
+                debug_recorder=debug_recorder,
+                debug_context={
+                    "phase": "line_search",
+                    "reml_iteration": n_iter,
+                    "line_search_iteration": _ls + 1,
+                    "trial_alpha": float(step),
+                },
+                trace_run=trace_run,
+                trace_purpose="reml_line_search",
             )
 
-            trial_obj = reml_laml_objective(
+            trial_logdet = trial_result.log_det_H
+            trial_hessian_rank: int | None = None
+            trial_mode_residual: float | None = None
+            if use_observed_geometry:
+                if not trial_result.converged:
+                    step *= 0.5
+                    continue
+                _t_geometry = _time.perf_counter()
+                try:
+                    trial_geometry = build_observed_reml_geometry(
+                        dm=dm,
+                        distribution=distribution,
+                        link=link,
+                        y=y,
+                        sample_weight=sample_weight,
+                        offset_arr=offset_arr,
+                        result=trial_result,
+                        penalty=S_trial,
+                        tabmat_state=observed_tabmat_state,
+                        compute_inverse=False,
+                    )
+                except ValueError:
+                    _t_observed_geometry += _time.perf_counter() - _t_geometry
+                    _observed_mode_rejected_trial_count += 1
+                    step *= 0.5
+                    continue
+                _t_observed_geometry += _time.perf_counter() - _t_geometry
+                trial_logdet = trial_geometry.log_det_H
+                trial_hessian_rank = trial_geometry.hessian_rank
+                trial_mode_score = observed_penalized_mode_score(
+                    dm=dm,
+                    distribution=distribution,
+                    link=link,
+                    y=y,
+                    sample_weight=sample_weight,
+                    result=trial_result,
+                    penalty=S_trial,
+                    geometry=trial_geometry,
+                )
+                trial_mode_residual = trial_mode_score.relative_max
+                if trial_mode_score.relative_max > observed_mode_tol:
+                    _observed_mode_rejected_trial_count += 1
+                    _rejected_trial_observed_mode_residual_max = max(
+                        _rejected_trial_observed_mode_residual_max,
+                        trial_mode_score.relative_max,
+                    )
+                    step *= 0.5
+                    continue
+
+            trial_evaluation = reml_laml_objective(
                 dm,
                 distribution,
                 link,
@@ -492,17 +754,71 @@ def optimize_direct_reml(
                 offset_arr,
                 XtWX=trial_xtwx,
                 penalty_caches=penalty_caches,
-                log_det_H=trial_result.log_det_H,
+                log_det_H=trial_logdet,
+                hessian_rank=trial_hessian_rank,
                 S_override=S_trial,
                 reml_penalties=penalties,
+                likelihood_size=likelihood_size,
+                gamma_scale_data=gamma_scale_data,
+                return_evaluation=True,
+            )
+            trial_obj = (
+                trial_evaluation.value
+                if isinstance(trial_evaluation, REMLObjectiveEvaluation)
+                else float(trial_evaluation)
             )
 
-            if trial_obj <= obj + armijo_c * step * descent:
+            armijo_bound = obj + armijo_c * step * descent
+            trial_accepted = bool(trial_obj <= armijo_bound)
+            if trace_run is not None and trace_run.enabled:
+                if trial_result.state_id is None:  # pragma: no cover - trace contract
+                    raise RuntimeError("traced REML line-search trial is missing its state ID")
+                trace_run.emit_lazy(
+                    "evaluation",
+                    lambda: {
+                        "state_id": trial_result.state_id,
+                        "evaluation_id": trial_result.evaluation_id,
+                        "solver": "direct_reml",
+                        "phase": "line_search",
+                        "outer_iteration": n_iter,
+                        "line_search_iteration": _ls + 1,
+                        "trial_alpha": float(step),
+                        "objective": float(trial_obj),
+                        "armijo_bound": float(armijo_bound),
+                        "accepted": trial_accepted,
+                        "lambdas": trial_lambdas,
+                    },
+                    channel="reml",
+                    purpose="reml_line_search",
+                    authoritative=False,
+                )
+
+            if trial_accepted:
+                if trial_mode_residual is not None:
+                    _accepted_observed_mode_residual_max = max(
+                        _accepted_observed_mode_residual_max,
+                        trial_mode_residual,
+                    )
                 rho = rho_trial
                 warm_beta = trial_result.beta.copy()
                 warm_intercept = float(trial_result.intercept)
+                # The accepted line-search state has already paid for a full
+                # PIRLS solve and objective evaluation.  It is therefore a
+                # valid retained candidate even when this is the final outer
+                # iteration; waiting until the next loop would silently
+                # discard a guaranteed improvement at ``max_reml_iter``.
+                if trial_obj < best_obj:
+                    best_obj = float(trial_obj)
+                    best_lambdas = trial_lambdas.copy()
+                    best_pirls = trial_result
                 accepted = True
                 break
+            if trial_mode_residual is not None:
+                _observed_mode_rejected_trial_count += 1
+                _rejected_trial_observed_mode_residual_max = max(
+                    _rejected_trial_observed_mode_residual_max,
+                    trial_mode_residual,
+                )
             step *= 0.5
 
         if not accepted:
@@ -528,6 +844,13 @@ def optimize_direct_reml(
         profile["reml_objective_s"] = _t_objective
         profile["reml_gradient_s"] = _t_gradient
         profile["reml_w_correction_s"] = _t_w_correction
+        profile["reml_observed_geometry_s"] = _t_observed_geometry
+        profile["reml_observed_mode_residual_accepted_max"] = _accepted_observed_mode_residual_max
+        profile["reml_observed_mode_residual_rejected_trial_max"] = (
+            _rejected_trial_observed_mode_residual_max
+        )
+        profile["reml_observed_mode_rejected_trial_count"] = _observed_mode_rejected_trial_count
+        profile["reml_w_correction_order"] = int(w_correction_order)
         profile["reml_hessian_newton_s"] = _t_hessian
         profile["reml_linesearch_s"] = _t_linesearch
         profile["reml_n_linesearch_fits"] = _n_linesearch_fits
@@ -541,4 +864,5 @@ def optimize_direct_reml(
         lambda_history=lambda_history,
         objective=float(best_obj),
         objective_history=objective_history,
+        curvature_source="observed" if use_observed_geometry else "fisher",
     )

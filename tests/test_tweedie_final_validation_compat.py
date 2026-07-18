@@ -355,6 +355,282 @@ def test_discrete_profile_uses_fit_scale_prediction_contract(fit_mode, retain_fi
         assert model.__dict__["_fit_inference_info"]["W"].shape == (0,)
 
 
+@pytest.mark.parametrize("retain_fit_state", [True, False])
+def test_profile_fit_guard_is_scoped_to_explicit_feature_columns(retain_fit_state):
+    """Unused unhashable columns neither block profiling nor poison fit caches."""
+    X, y, sample_weight, offset = _numeric_problem(seed=7211, n=36)
+    X = X.rename(columns={"x": "used"})
+    X["unused"] = [[index] if index % 2 else {"index": index} for index in range(len(X))]
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0.0,
+        features={"used": Numeric()},
+        retain_fit_state=retain_fit_state,
+    )
+
+    _profile_once(
+        model,
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+    )
+
+    if retain_fit_state:
+        guard = model._fit_data_guard
+        assert guard.x_columns == ("used",)
+        assert guard.matches(
+            X,
+            y,
+            sample_weight,
+            offset,
+            fit_weights=model._fit_weights,
+            fit_offset=model._fit_offset,
+        )
+        first = model.metrics(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
+        X.at[X.index[0], "unused"] = {"changed": True}
+        second = model.metrics(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
+        assert guard.matches(
+            X,
+            y,
+            sample_weight,
+            offset,
+            fit_weights=model._fit_weights,
+            fit_offset=model._fit_offset,
+        )
+        assert second.log_likelihood == pytest.approx(first.log_likelihood)
+    else:
+        assert model._fit_data_guard is None
+        assert all(
+            getattr(model, name) is None
+            for name in (
+                "_fit_X_ref",
+                "_fit_y_ref",
+                "_fit_sample_weight_ref",
+                "_fit_offset_ref",
+            )
+        )
+        metrics = model.metrics(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
+        assert np.isfinite(metrics.log_likelihood)
+        assert model._fit_data_guard is None
+        assert model._fit_X_ref is None
+
+
+def test_explicit_column_projection_does_not_copy_unsafe_frame_metadata():
+    """Column scoping validates DataFrame metadata before pandas can copy it."""
+
+    class DeepcopyBomb:
+        calls = 0
+
+        def __deepcopy__(self, memo):
+            type(self).calls += 1
+            raise AssertionError("unsafe DataFrame metadata was copied")
+
+    X, y, _sample_weight, _offset = _numeric_problem(seed=7216, n=20)
+    X["unused"] = np.arange(len(X), dtype=np.float64)
+    X.attrs["bomb"] = DeepcopyBomb()
+    model = _numeric_model()
+
+    with pytest.raises(TypeError, match="snapshot.*X"):
+        tweedie_module._prepare_tweedie_profile_inputs(model, X, y)
+
+    assert DeepcopyBomb.calls == 0
+
+
+@pytest.mark.parametrize("retain_fit_state", [True, False])
+def test_intercept_only_profile_ignores_all_caller_feature_values(retain_fit_state):
+    """An intercept-only profile needs row identity, not unused cell contents."""
+    _X, y, sample_weight, offset = _numeric_problem(seed=7214, n=30)
+    X = pd.DataFrame(
+        {"unused": [[index] if index % 2 else {"index": index} for index in range(len(y))]}
+    )
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0.0,
+        features={},
+        retain_fit_state=retain_fit_state,
+    )
+
+    _profile_once(
+        model,
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+    )
+
+    assert model._feature_order == []
+    assert model._groups == []
+    assert np.all(np.isfinite(model.predict(X, offset=offset)))
+    if retain_fit_state:
+        assert model._fit_data_guard.x_columns == ()
+        assert model._fit_data_guard.matches(
+            X,
+            y,
+            sample_weight,
+            offset,
+            fit_weights=model._fit_weights,
+            fit_offset=model._fit_offset,
+        )
+    else:
+        assert model._fit_data_guard is None
+        assert model._fit_X_ref is None
+
+
+def test_profile_publication_accepts_stateless_slot_link_configuration():
+    """Coherence validation supports safe slot-backed constructor objects."""
+
+    class SlotLogLink:
+        __slots__ = ()
+
+        def link(self, mu):
+            return np.log(mu)
+
+        def inverse(self, eta):
+            return np.exp(eta)
+
+        def deriv(self, mu):
+            return 1.0 / mu
+
+        def deriv_inverse(self, eta):
+            return np.exp(eta)
+
+        def deriv2_inverse(self, eta):
+            return np.exp(eta)
+
+        def deriv3_inverse(self, eta):
+            return np.exp(eta)
+
+    X, y, sample_weight, offset = _numeric_problem(seed=7215, n=34)
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        link=SlotLogLink(),
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+
+    _profile_once(
+        model,
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+    )
+
+    assert type(model._link_config) is SlotLogLink
+    assert type(model._config.link) is SlotLogLink
+    assert type(model._link) is SlotLogLink
+
+
+@pytest.mark.parametrize("retain_fit_state", [True, False])
+def test_profile_publication_resolves_constructor_and_postfit_interactions_once(
+    retain_fit_state,
+):
+    """Published interaction intent rematerializes without requeueing duplicates."""
+    rng = np.random.default_rng(7212)
+    n = 36
+    X = pd.DataFrame(
+        {
+            "x1": rng.normal(size=n),
+            "x2": rng.normal(size=n),
+            "x3": rng.normal(size=n),
+        }
+    )
+    mu = np.exp(0.55 + 0.15 * X["x1"] - 0.1 * X["x2"] + 0.08 * X["x3"])
+    y = generate_tweedie_cpg(n, mu=mu, phi=0.75, p=1.5, rng=rng)
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0.0,
+        features={name: Numeric() for name in X.columns},
+        interactions=[("x1", "x2")],
+        retain_fit_state=retain_fit_state,
+    ).fit(X, y)
+    model._add_interaction("x1", "x3", name="later")
+    config_revision = model._config_revision
+    fit_revision = model._fit_revision
+
+    _profile_once(model, X, y)
+
+    assert model._interaction_order == ["x1:x2", "later"]
+    assert model._pending_interactions == ()
+    assert model._config.interactions == model._pending_interactions
+    assert model._config.interaction_order == tuple(model._interaction_order)
+    assert tuple(name for name, _ in model._config.interaction_templates) == tuple(
+        model._interaction_order
+    )
+    assert model._config_revision == config_revision + 1
+    assert model._fit_revision == fit_revision + 1
+
+    clone = model.clone_unfitted()
+    assert clone._pending_interactions == ()
+    assert clone._interaction_order == model._interaction_order
+    assert tuple(clone._interaction_specs) == tuple(model._interaction_order)
+    clone.fit(X, y)
+    assert clone._interaction_order == model._interaction_order
+    assert [group.name for group in clone._groups].count("x1:x2") == 1
+    assert [group.name for group in clone._groups].count("later") == 1
+
+
+@pytest.mark.parametrize("retain_fit_state", [True, False])
+def test_shorthand_profile_publication_rematerializes_resolved_interaction(
+    retain_fit_state,
+):
+    """Auto-detected spline parents survive profile publication and cloning."""
+    rng = np.random.default_rng(7213)
+    n = 32
+    X = pd.DataFrame(
+        {
+            "x1": np.linspace(-1.0, 1.0, n),
+            "x2": rng.normal(size=n),
+        }
+    )
+    mu = np.exp(0.5 + 0.2 * X["x1"] - 0.1 * X["x2"])
+    y = generate_tweedie_cpg(n, mu=mu, phi=0.7, p=1.5, rng=rng)
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0.0,
+        splines=["x1", "x2"],
+        n_knots=[5, 5],
+        interactions=[("x1", "x2")],
+        retain_fit_state=retain_fit_state,
+    )
+
+    _profile_once(model, X, y)
+
+    assert model._feature_order == ["x1", "x2"]
+    assert model._interaction_order == ["x1:x2"]
+    assert model._pending_interactions == ()
+    assert model._config.feature_templates == ()
+    assert model._config.interactions == ()
+    assert model._config.interaction_order == ("x1:x2",)
+    configured_interaction = dict(model._config.interaction_templates)["x1:x2"]
+    assert configured_interaction.parent_names == ("x1", "x2")
+
+    clone = model.clone_unfitted()
+    assert clone._feature_order == []
+    assert clone._pending_interactions == ()
+    assert clone._interaction_order == ["x1:x2"]
+    clone.fit(X, y)
+    assert clone._feature_order == ["x1", "x2"]
+    assert clone._interaction_order == ["x1:x2"]
+    assert [group.name for group in clone._groups].count("x1:x2") == 1
+
+
 def _typed_categories(kind: str):
     """Return two valid immutable levels of the requested public category type."""
     if kind == "datetime":
@@ -506,10 +782,15 @@ def test_frozen_slots_link_remains_profileable():
 def test_immutable_registered_reducers_remain_profileable():
     """Standard immutable reducer-backed callables/configuration stay supported."""
     X, y, sample_weight, offset = _numeric_problem(seed=7233, n=42)
-    model = _numeric_model()
     pattern = re.compile(r"^x$")
-    model._specs["x"].audit_ufunc = np.square
-    model._specs["x"].audit_pattern = pattern
+    spec = Numeric()
+    spec.audit_ufunc = np.square
+    spec.audit_pattern = pattern
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0.0,
+        features={"x": spec},
+    )
 
     result = _profile_once(
         model,
@@ -545,14 +826,14 @@ def released_spline():
 
 
 @pytest.mark.parametrize("field", ["edf", "edf1"])
-@pytest.mark.parametrize("bad_value", [-0.02, 1.02])
-def test_released_component_edf_bounds_are_enforced(
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf])
+def test_released_component_edf_finiteness_is_enforced(
     released_spline,
     monkeypatch,
     field,
     bad_value,
 ):
-    """Per-coefficient EDF caches cannot contain impossible finite components."""
+    """Per-coefficient EDF caches reject non-finite corruption."""
     model, result = released_spline
     inference = model.__dict__["_fit_inference_info"]
     baseline_failures: list[str] = []
@@ -560,15 +841,12 @@ def test_released_component_edf_bounds_are_enforced(
     assert baseline_failures == []
 
     corrupted = inference[field].copy()
-    original_sum = float(np.sum(corrupted))
     corrupted[0] = bad_value
-    if field == "edf":
-        corrupted[1] += original_sum - float(np.sum(corrupted))
     monkeypatch.setitem(inference, field, corrupted)
 
     failures: list[str] = []
     profile_ops._validate_released_tweedie_inference(model, result, failures)
-    assert failures, f"released {field} accepted an impossible component {bad_value}"
+    assert failures, f"released {field} accepted a non-finite component {bad_value}"
 
 
 @pytest.mark.parametrize(

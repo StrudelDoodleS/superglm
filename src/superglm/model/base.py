@@ -22,6 +22,14 @@ from superglm.dm_builder import (
 )
 from superglm.group_matrix import DesignMatrix, _discretize_column
 from superglm.links import Link, stabilize_eta
+from superglm.model.fit_state import (
+    configured_family,
+    configured_lambda2,
+    configured_link,
+    configured_penalty,
+    fitted_lambda2,
+    fitted_penalty,
+)
 from superglm.penalties.base import (
     Penalty,
     penalty_has_targets,
@@ -459,12 +467,14 @@ def init_model(
             "Cannot set both 'features' and 'splines'. "
             "Use 'features' for explicit specs or 'splines' for auto-detect."
         )
+    # Constructor inputs become model-owned immediately.  Learned fit state is
+    # built from a second private template, never by mutating caller objects.
     model.family = family
     model.link = link
     model.penalty = resolve_penalty(penalty, lambda1, penalty_features)
     model.lambda2 = lambda2
-    model._splines = splines
-    model._n_knots = n_knots
+    model._splines = None if splines is None else list(splines)
+    model._n_knots = copy.deepcopy(n_knots)
     model._degree = degree
     model._categorical_base = categorical_base
     model._active_set = active_set
@@ -472,7 +482,7 @@ def init_model(
         raise ValueError(f"direct_solve must be 'auto', 'gram', or 'qr', got {direct_solve!r}")
     model._direct_solve = direct_solve
     model._discrete = discrete
-    model._n_bins = n_bins
+    model._n_bins = copy.deepcopy(n_bins)
     model._tol = tol
     model._max_iter = max_iter
     model._retain_fit_state = bool(retain_fit_state)
@@ -516,6 +526,7 @@ def init_model(
     model._fit_y_ref = None
     model._fit_sample_weight_ref = None
     model._fit_offset_ref = None
+    model._fit_data_guard = None
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
@@ -523,13 +534,23 @@ def init_model(
     # Interaction support
     model._interaction_specs: dict[str, Any] = {}
     model._interaction_order: list[str] = []
-    model._pending_interactions: list[tuple[str, str]] = interactions or []
+    model._pending_interactions: tuple[tuple[str, str], ...] = tuple(interactions or ())
 
     # Register explicit features dict
     if features is not None:
         for name, spec in features.items():
-            model._specs[name] = spec
+            model._specs[name] = copy.deepcopy(spec)
             model._feature_order.append(name)
+
+    from superglm.model.fit_state import ModelConfig
+
+    model._config_revision = 0
+    model._fit_revision = 0
+    model._fit_state = None
+    model._selection_penalty_fitted = None
+    model._distribution_fitted = None
+    model._resolved_penalty = None
+    model._config = ModelConfig.capture(model)
 
 
 def clone_without_features(
@@ -560,20 +581,29 @@ def clone_without_features(
             keep_interactions.append((p1, p2))
 
     # Resolve lambda1
+    source_penalty = fitted_penalty(model)
     if lambda1 is ...:
-        lam1 = model.penalty.lambda1
+        lam1 = source_penalty.lambda1
     else:
         lam1 = lambda1
 
-    new_penalty = copy.deepcopy(model.penalty)
+    new_penalty = copy.deepcopy(source_penalty)
     new_penalty.lambda1 = lam1
 
     # Deep-copy specs so the new model doesn't share mutable state
     new_features = {n: copy.deepcopy(s) for n, s in keep_features.items()}
 
+    fit_state = getattr(model, "_fit_state", None)
+    if fit_state is None:
+        source_family = configured_family(model)
+        source_link = configured_link(model)
+    else:
+        source_family = fit_state.distribution
+        source_link = fit_state.projections.get("_link", model._link)
+
     new_model = type(model)(
-        family=model.family,
-        link=model.link,
+        family=source_family,
+        link=source_link,
         penalty=new_penalty,
         features=new_features,
         interactions=keep_interactions if keep_interactions else None,
@@ -584,20 +614,21 @@ def clone_without_features(
         tol=model._tol,
         max_iter=model._max_iter,
         convergence=model._convergence,
+        retain_fit_state=model._retain_fit_state,
     )
 
     # Resolve lambda2
     if lambda2 is ...:
-        reml_lam = getattr(model, "_reml_lambdas", None)
-        if reml_lam is not None:
+        source_lambda2 = fitted_lambda2(model)
+        if isinstance(source_lambda2, dict):
             # Filter REML lambdas to remaining groups
             new_model.lambda2 = {
                 k: v
-                for k, v in reml_lam.items()
+                for k, v in source_lambda2.items()
                 if not any(k == d or k.startswith(f"{d}:") for d in drop)
             }
         else:
-            new_model.lambda2 = model.lambda2
+            new_model.lambda2 = source_lambda2
     elif lambda2 is None:
         new_model.lambda2 = 0.0
     else:
@@ -633,6 +664,16 @@ def model_add_interaction(model, feat1: str, feat2: str, name: str | None = None
         name=name,
         **kwargs,
     )
+    if hasattr(model, "_config"):
+        model._config = model._config.with_value(
+            interactions=tuple(model._pending_interactions),
+            interaction_templates=tuple(
+                (interaction_name, copy.deepcopy(model._interaction_specs[interaction_name]))
+                for interaction_name in model._interaction_order
+            ),
+            interaction_order=tuple(model._interaction_order),
+        )
+        model._config_revision += 1
 
 
 def model_build_design_matrix(
@@ -647,26 +688,28 @@ def model_build_design_matrix(
     Sets model._dm, model._groups, model._distribution, model._link.
     Returns (y, sample_weight, offset) as float64 arrays.
     """
+    pending_interactions = list(model._pending_interactions)
     result = build_design_matrix(
         X,
         y,
         sample_weight,
         offset,
-        family=model.family,
-        link_spec=model.link,
+        family=configured_family(model),
+        link_spec=configured_link(model),
         specs=model._specs,
         feature_order=model._feature_order,
         interaction_specs=model._interaction_specs,
         interaction_order=model._interaction_order,
-        pending_interactions=model._pending_interactions,
+        pending_interactions=pending_interactions,
         model_discrete=model._discrete,
         n_bins_config=model._n_bins,
-        lambda2=model.lambda2,
+        lambda2=configured_lambda2(model),
     )
     model._distribution = result.distribution
     model._link = result.link
+    model._pending_interactions = ()
     model._groups = result.groups
-    validate_penalty_features(model.penalty, result.groups)
+    validate_penalty_features(configured_penalty(model), result.groups)
     model._dm = result.dm
     return result.y, result.sample_weight, result.offset
 
@@ -681,7 +724,7 @@ def compute_lambda_max(model, y, weights):
     n = model._dm.n
     lmax = 0.0
     for g in model._groups:
-        if not penalty_targets_group(model.penalty, g):
+        if not penalty_targets_group(configured_penalty(model), g):
             continue
         lmax = max(lmax, np.linalg.norm(grad[g.sl]) / g.weight)
     return lmax / n
@@ -689,7 +732,7 @@ def compute_lambda_max(model, y, weights):
 
 def model_has_lambda1_targets(model) -> bool:
     """Whether the lambda1 penalty applies to any fitted group."""
-    return penalty_has_targets(model.penalty, model._groups)
+    return penalty_has_targets(configured_penalty(model), model._groups)
 
 
 def rebuild_dm_with_lambdas(
@@ -697,7 +740,11 @@ def rebuild_dm_with_lambdas(
 ) -> DesignMatrix:
     """Rebuild design matrix with per-group smoothing lambdas."""
     return rebuild_design_matrix_with_lambdas(
-        model._dm, model._groups, lambdas, sample_weight, model.lambda2
+        model._dm,
+        model._groups,
+        lambdas,
+        sample_weight,
+        configured_lambda2(model),
     )
 
 

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from superglm._fit_trace import SCHEMA_VERSION, JSONLTraceSink, TraceRun
+
 TraceRow = dict[str, Any]
 TRACE_SUFFIXES = ("reml", "pirls", "scop")
 
@@ -30,6 +32,7 @@ class REMLDebugRun:
     reml_rows: list[TraceRow]
     pirls_rows: list[TraceRow]
     scop_rows: list[TraceRow]
+    events: list[TraceRow]
 
     def artifact_path(self, suffix: str) -> Path:
         """Return the artifact path for one run-local suffix."""
@@ -62,15 +65,34 @@ class REMLDebugRecorder:
         self.base_dir = base_dir
         self.run_id = run_id
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.trace_run = (
+            TraceRun(run_id, sink=JSONLTraceSink(base_dir, run_id)) if enabled_level >= 2 else None
+        )
 
     def write_run_metadata(self, payload: dict) -> None:
-        (self.base_dir / f"{self.run_id}_run.json").write_text(
-            json.dumps(payload, indent=2),
+        path = self.base_dir / f"{self.run_id}_run.json"
+        existing = _load_json(path) if path.exists() else {}
+        metadata = {
+            **existing,
+            **payload,
+            "schema_version": SCHEMA_VERSION,
+            "run_id": self.run_id,
+        }
+        path.write_text(
+            json.dumps(metadata, indent=2),
             encoding="utf-8",
         )
 
     def append_jsonl(self, suffix: str, payload: dict) -> None:
         path = self.base_dir / f"{self.run_id}_{suffix}.jsonl"
+        # Existing recorders do not have evaluated state identities.  Preserve
+        # their flat compatibility shape, but make their non-authoritative
+        # status explicit rather than pretending they are canonical events.
+        payload = {
+            **payload,
+            "purpose": "legacy_compatibility",
+            "authoritative": False,
+        }
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload) + "\n")
 
@@ -101,18 +123,98 @@ def load_jsonl_rows(path: Path) -> list[TraceRow]:
     return rows
 
 
+def _is_canonical_event(row: TraceRow) -> bool:
+    return "schema_version" in row
+
+
+def _validate_canonical_event(row: TraceRow, *, path: Path, run_id: str) -> None:
+    required = {
+        "schema_version",
+        "run_id",
+        "sequence",
+        "timestamp",
+        "event_kind",
+        "channel",
+        "purpose",
+        "authoritative",
+        "payload",
+    }
+    missing = sorted(required.difference(row))
+    if missing:
+        raise ValueError(f"Malformed canonical trace row in {path}: missing {missing}")
+    schema_version = row["schema_version"]
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version <= 0
+    ):
+        raise ValueError(f"Canonical trace schema_version in {path} must be a positive integer")
+    if row["run_id"] != run_id:
+        raise ValueError(
+            f"Canonical trace row in {path} belongs to run {row['run_id']!r}, expected {run_id!r}"
+        )
+    sequence = row["sequence"]
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence <= 0:
+        raise ValueError(f"Canonical trace sequence in {path} must be a positive integer")
+    if not isinstance(row["payload"], dict):
+        raise ValueError(f"Canonical trace payload in {path} must be an object")
+
+
+def _compatibility_rows(rows: list[TraceRow]) -> list[TraceRow]:
+    projected: list[TraceRow] = []
+    for row in rows:
+        if not _is_canonical_event(row):
+            projected.append(row)
+            continue
+        payload = dict(row["payload"])
+        payload.setdefault("trace_sequence", row["sequence"])
+        payload.setdefault("trace_state_id", payload.get("state_id"))
+        payload.setdefault("trace_authoritative", row["authoritative"])
+        payload.setdefault("trace_purpose", row["purpose"])
+        projected.append(payload)
+    return projected
+
+
 def load_reml_debug_run(base_dir: Path, run_id: str) -> REMLDebugRun:
     """Load one REML debug run and its known trace files."""
     run_path = base_dir / f"{run_id}_run.json"
     if not run_path.exists():
         raise FileNotFoundError(f"Missing REML debug metadata: {run_path}")
+    channel_rows = {
+        suffix: load_jsonl_rows(base_dir / f"{run_id}_{suffix}.jsonl") for suffix in TRACE_SUFFIXES
+    }
+    events: list[TraceRow] = []
+    seen_sequences: set[int] = set()
+    for path in sorted(base_dir.glob(f"{run_id}_*.jsonl")):
+        for row in load_jsonl_rows(path):
+            if not _is_canonical_event(row):
+                continue
+            # ``run`` and ``run_child`` share the filesystem glob ``run_*``.
+            # The embedded run identity, not a filename-prefix guess, owns a
+            # canonical event.
+            if row.get("run_id") not in (None, run_id):
+                continue
+            _validate_canonical_event(row, path=path, run_id=run_id)
+            sequence = int(row["sequence"])
+            if sequence in seen_sequences:
+                raise ValueError(
+                    f"duplicate canonical trace sequence {sequence} for run {run_id!r}"
+                )
+            seen_sequences.add(sequence)
+            events.append(row)
+    events.sort(key=lambda row: int(row["sequence"]))
+    sequences = [int(row["sequence"]) for row in events]
+    if sequences != list(range(1, len(sequences) + 1)):
+        raise ValueError(f"noncontiguous canonical trace sequence for run {run_id!r}: {sequences}")
+
     return REMLDebugRun(
         run_id=run_id,
         base_dir=base_dir,
         metadata=_load_json(run_path),
-        reml_rows=load_jsonl_rows(base_dir / f"{run_id}_reml.jsonl"),
-        pirls_rows=load_jsonl_rows(base_dir / f"{run_id}_pirls.jsonl"),
-        scop_rows=load_jsonl_rows(base_dir / f"{run_id}_scop.jsonl"),
+        reml_rows=_compatibility_rows(channel_rows["reml"]),
+        pirls_rows=_compatibility_rows(channel_rows["pirls"]),
+        scop_rows=_compatibility_rows(channel_rows["scop"]),
+        events=events,
     )
 
 

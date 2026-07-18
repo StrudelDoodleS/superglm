@@ -201,6 +201,21 @@ def test_eager_ci_details_survive_detach_and_uncached_details_have_guidance(
         profile.result.ci_details(0.10)
 
 
+def test_installed_eager_ci_preserves_interval_identity(
+    released_eager_profile: _CachedProfile,
+):
+    profile = released_eager_profile
+    installed = profile.model._tweedie_profile_result
+
+    interval = installed.ci(_EAGER_ALPHA)
+    details = installed.ci_details(_EAGER_ALPHA)
+
+    assert details.interval is interval
+    assert installed._ci_cache[_EAGER_ALPHA] is interval
+    assert installed._ci_details_cache[_EAGER_ALPHA] is details
+    assert interval is not profile.interval
+
+
 def test_eager_progress_payload_reports_requested_cached_interval(
     released_eager_profile: _CachedProfile,
 ):

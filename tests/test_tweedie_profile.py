@@ -30,6 +30,7 @@ from superglm.features.spline import Spline
 from superglm.links import LogLink, stabilize_eta
 from superglm.model import fit_ops as fit_ops_module
 from superglm.model import profile_ops as profile_ops_module
+from superglm.model.fit_state import configured_penalty
 from superglm.penalties.base import penalty_has_targets
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.profiling.tweedie import (
@@ -1593,6 +1594,215 @@ def test_public_tweedie_profile_entry_points_default_to_mle_and_brent(function):
 
 
 class TestEstimatePFitMode:
+    @pytest.mark.parametrize("callback_stage", ["trace", "best_found", "final_refit"])
+    def test_callbacks_cannot_publish_nested_configuration_mutations(
+        self, monkeypatch, callback_stage
+    ):
+        X, y, _ = _tweedie_data(n=32, seed=20260817)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0.0,
+            spline_penalty={"x1": 2.0},
+            features={"x1": Numeric()},
+        )
+        result = _deterministic_profile_result()
+        initial_config_revision = model._config_revision
+        initial_fit_revision = model._fit_revision
+
+        def mutate_nested_configuration(*_args):
+            model._penalty_config.lambda1 = 77.0
+            model._config.penalty.lambda1 = 88.0
+            model._lambda2_config["x1"] = 77.0
+            model._config.lambda2["x1"] = 88.0
+
+        def fake_profile(_candidate, prepared):
+            if callback_stage == "trace":
+                prepared.trace_callback({})
+            return result
+
+        def progress_callback(event, _payload):
+            if event == callback_stage:
+                mutate_nested_configuration()
+
+        monkeypatch.setattr(tweedie_module, "_estimate_tweedie_p_prepared", fake_profile)
+
+        returned = model.estimate_p(
+            X,
+            y,
+            trace_callback=(mutate_nested_configuration if callback_stage == "trace" else None),
+            progress_callback=(None if callback_stage == "trace" else progress_callback),
+        )
+
+        assert returned is result
+        assert model.selection_penalty == pytest.approx(0.0)
+        assert model._config.penalty.lambda1 == pytest.approx(0.0)
+        assert model._lambda2_config == {"x1": 2.0}
+        assert model._config.lambda2 == {"x1": 2.0}
+        assert model._fit_state.resolved_penalty.lambda1 == pytest.approx(0.0)
+        assert model._config_revision == initial_config_revision + 1
+        assert model._fit_revision == initial_fit_revision + 1
+
+    def test_progress_callback_cache_injection_cannot_reach_installed_result(self, monkeypatch):
+        class DeepcopyBomb:
+            calls = 0
+
+            def __deepcopy__(self, memo):
+                type(self).calls += 1
+                raise AssertionError("callback cache value was copied")
+
+        X, y, _ = _tweedie_data(n=32, seed=20260818)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0.0,
+            features={"x1": Numeric()},
+        )
+        result = _deterministic_profile_result()
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            lambda *args, **kwargs: result,
+        )
+
+        def corrupt_returned_cache(event, _payload):
+            if event == "best_found":
+                result._ci_cache[0.123] = (DeepcopyBomb(), DeepcopyBomb())
+
+        returned = model.estimate_p(X, y, progress_callback=corrupt_returned_cache)
+
+        assert returned is result
+        assert DeepcopyBomb.calls == 0
+        assert model._tweedie_profile_result._ci_cache == {}
+
+    def test_uncertified_cache_objects_are_rejected_without_copy_hooks(self, monkeypatch):
+        class DeepcopyBomb:
+            calls = 0
+
+            def __deepcopy__(self, memo):
+                type(self).calls += 1
+                raise AssertionError("uncertified cache value was copied")
+
+        X, y, _ = _tweedie_data(n=28, seed=20260821)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0.0,
+            features={"x1": Numeric()},
+        )
+        result = _deterministic_profile_result()
+        result._ci_cache[0.123] = (DeepcopyBomb(), DeepcopyBomb())
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            lambda *args, **kwargs: result,
+        )
+
+        with pytest.raises(RuntimeError, match="invalid cached interval"):
+            model.estimate_p(X, y)
+
+        assert DeepcopyBomb.calls == 0
+        assert model._tweedie_profile_result is None
+
+    @pytest.mark.parametrize(
+        ("fit_mode", "workspace_fit_name"),
+        [("fit", "_fit_in_workspace"), ("reml", "_fit_reml_in_workspace")],
+    )
+    def test_real_workspace_final_refit_uses_pre_callback_input_snapshot(
+        self, monkeypatch, fit_mode, workspace_fit_name
+    ):
+        rng = np.random.default_rng(20260820)
+        x = np.linspace(-1.0, 1.0, 28)
+        X = pd.DataFrame({"x1": x})
+        sample_weight = rng.uniform(0.75, 1.25, len(X))
+        offset = 0.1 * np.sin(x)
+        y = generate_tweedie_cpg(
+            len(X),
+            mu=np.exp(0.5 + 0.2 * x + offset),
+            phi=0.75,
+            p=1.5,
+            rng=rng,
+        )
+        baseline = (X.copy(deep=True), y.copy(), sample_weight.copy(), offset.copy())
+        result = _deterministic_profile_result(reml_converged=fit_mode == "reml" or None)
+        observed = {}
+
+        def mutate_caller_inputs(_row):
+            X.iloc[:, :] = 101.0
+            y[:] = 102.0
+            sample_weight[:] = 103.0
+            offset[:] = 104.0
+
+        def fake_profile(_candidate, prepared):
+            observed["profile_inputs"] = (
+                prepared.X,
+                prepared.y,
+                prepared.sample_weight,
+                prepared.offset,
+            )
+            prepared.trace_callback({})
+            return result
+
+        monkeypatch.setattr(tweedie_module, "_estimate_tweedie_p_prepared", fake_profile)
+        real_workspace_fit = getattr(fit_ops_module, workspace_fit_name)
+
+        def capture_final_inputs(candidate, fit_X, fit_y, fit_weight, fit_offset, **kwargs):
+            observed["final_inputs"] = (fit_X, fit_y, fit_weight, fit_offset)
+            observed["final_values"] = (
+                fit_X.copy(deep=True),
+                fit_y.copy(),
+                fit_weight.copy(),
+                fit_offset.copy(),
+            )
+            return real_workspace_fit(
+                candidate,
+                fit_X,
+                fit_y,
+                fit_weight,
+                fit_offset,
+                **kwargs,
+            )
+
+        monkeypatch.setattr(fit_ops_module, workspace_fit_name, capture_final_inputs)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0.0,
+            features={
+                "x1": (Spline(n_knots=5, penalty="ssp") if fit_mode == "reml" else Numeric())
+            },
+        )
+
+        returned = model.estimate_p(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode=fit_mode,
+            trace_callback=mutate_caller_inputs,
+        )
+
+        assert returned is result
+        assert all(
+            owned is not caller
+            for owned, caller in zip(
+                observed["profile_inputs"],
+                (X, y, sample_weight, offset),
+                strict=True,
+            )
+        )
+        assert all(
+            final is profile
+            for final, profile in zip(
+                observed["final_inputs"],
+                observed["profile_inputs"],
+                strict=True,
+            )
+        )
+        pd.testing.assert_frame_equal(observed["final_values"][0], baseline[0])
+        for actual, expected in zip(observed["final_values"][1:], baseline[1:], strict=True):
+            np.testing.assert_array_equal(actual, expected)
+        assert np.all(X.to_numpy() == 101.0)
+        assert np.all(y == 102.0)
+        assert np.all(sample_weight == 103.0)
+        assert np.all(offset == 104.0)
+
     @pytest.mark.parametrize(
         ("fit_mode", "final_fit_name"),
         [("fit", "fit"), ("reml", "fit_reml")],
@@ -2864,6 +3074,41 @@ class TestEstimatePFitMode:
         assert calls == []
         assert model.family is original_family
 
+    @pytest.mark.parametrize("already_fitted", [False, True])
+    def test_profile_publication_preserves_subclass_configuration_aliases(
+        self, monkeypatch, already_fitted
+    ):
+        class ConfigAliasedSuperGLM(SuperGLM):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.config_alias = self._config
+                self.family_alias = self._family_config
+
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = ConfigAliasedSuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = _deterministic_profile_result()
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", lambda *args, **kwargs: result)
+        if already_fitted:
+            model.fit(X, y, sample_weight=sample_weight, offset=offset)
+        config_revision = model._config_revision
+
+        model.estimate_p(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode="fit",
+        )
+
+        assert model.config_alias is model._config
+        assert model.family_alias is model._family_config
+        assert model._config_revision == config_revision + 1
+        assert model.family.p == pytest.approx(result.p_hat)
+
     @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
     @pytest.mark.parametrize("retain_fit_state", [True, False])
     def test_final_profile_refit_atomically_synchronizes_model_state(
@@ -2883,8 +3128,8 @@ class TestEstimatePFitMode:
             lambda *args, **kwargs: result,
         )
 
-        fit_name = "fit_reml" if fit_mode == "reml" else "fit"
-        real_final_fit = getattr(SuperGLM, fit_name)
+        fit_name = "_fit_reml_in_workspace" if fit_mode == "reml" else "_fit_in_workspace"
+        real_final_fit = getattr(fit_ops_module, fit_name)
         captured = {}
 
         def final_fit_with_primed_caches(candidate, *args, **kwargs):
@@ -2906,12 +3151,15 @@ class TestEstimatePFitMode:
                 return fitted
 
             solver = captured["solver_result"]
-            captured["public_dynamic_metadata"] = object()
-            captured["solver_dynamic_metadata"] = np.array([1.0, 2.0])
+            # Keep the metadata comparison independent of publication's
+            # intentional ownership copy; the unit test below checks that the
+            # phi-only replacement itself preserves dynamic values by identity.
+            captured["public_dynamic_metadata"] = ("public-profile-metadata",)
+            captured["solver_dynamic_metadata"] = (1.0, 2.0)
             candidate.result.profile_sync_metadata = captured["public_dynamic_metadata"]
             solver.profile_sync_metadata = captured["solver_dynamic_metadata"]
             if candidate._reml_result is not None:
-                captured["reml_dynamic_metadata"] = {"future": np.array([3.0, 4.0])}
+                captured["reml_dynamic_metadata"] = ("reml-profile-metadata",)
                 candidate._reml_result.profile_sync_metadata = captured["reml_dynamic_metadata"]
             eta = candidate._dm.matvec(solver.beta) + solver.intercept + candidate._fit_offset
             eta = stabilize_eta(eta, candidate._link)
@@ -2926,7 +3174,7 @@ class TestEstimatePFitMode:
             captured["old_summary"] = candidate.summary()
             return fitted
 
-        monkeypatch.setattr(SuperGLM, fit_name, final_fit_with_primed_caches)
+        monkeypatch.setattr(fit_ops_module, fit_name, final_fit_with_primed_caches)
         real_release = fit_ops_module._maybe_release_fit_state
         release_events = []
 
@@ -2952,23 +3200,32 @@ class TestEstimatePFitMode:
         assert captured["staged_model"] is not model
         assert captured["retain_during_fit"] is True
         assert model._retain_fit_state is retain_fit_state
-        assert model._tweedie_profile_result is result
+        assert model._tweedie_profile_result is not result
+        assert model._tweedie_profile_result._ci_cache is not result._ci_cache
+        assert model._tweedie_profile_result._ci_details_cache is not result._ci_details_cache
         assert all(profile_result is None for _, profile_result in release_events)
         expected_release_flags = [True] if retain_fit_state else [True, False]
         assert [flag for flag, _ in release_events] == expected_release_flags
 
-        assert model.family is model._distribution
         assert model.family.p == pytest.approx(result.p_hat)
+        assert model.distribution_.p == pytest.approx(result.p_hat)
+        assert model._fit_state.distribution is model._distribution
         assert model.result.phi == pytest.approx(result.phi_hat)
         assert model._solver_pirls_result().phi == pytest.approx(result.phi_hat)
         assert model.result is not captured["public_result"]
         assert model._solver_pirls_result() is not captured["solver_result"]
-        assert model.result.beta is captured["public_result"].beta
-        assert model._solver_pirls_result().beta is captured["solver_result"].beta
-        assert model.result.profile_sync_metadata is captured["public_dynamic_metadata"]
+        np.testing.assert_array_equal(model.result.beta, captured["public_result"].beta)
+        np.testing.assert_array_equal(
+            model._solver_pirls_result().beta, captured["solver_result"].beta
+        )
+        assert not np.shares_memory(model.result.beta, captured["public_result"].beta)
+        assert not np.shares_memory(
+            model._solver_pirls_result().beta, captured["solver_result"].beta
+        )
+        assert model.result.profile_sync_metadata == captured["public_dynamic_metadata"]
         assert (
             model._solver_pirls_result().profile_sync_metadata
-            is captured["solver_dynamic_metadata"]
+            == captured["solver_dynamic_metadata"]
         )
         assert captured["public_result"].phi != pytest.approx(result.phi_hat)
         assert captured["solver_result"].phi != pytest.approx(result.phi_hat)
@@ -2985,7 +3242,7 @@ class TestEstimatePFitMode:
             assert model._reml_result.lambda_history is captured["reml_result"].lambda_history
             assert model._reml_lambdas is captured["reml_lambdas"]
             assert model._reml_penalties is captured["reml_penalties"]
-            assert model._reml_result.profile_sync_metadata is captured["reml_dynamic_metadata"]
+            assert model._reml_result.profile_sync_metadata == captured["reml_dynamic_metadata"]
         else:
             assert model._reml_result is None
 
@@ -3078,6 +3335,20 @@ class TestEstimatePFitMode:
             expected_explained_deviance
         )
 
+        # The returned handle may remain convenient and cache-compatible, but
+        # mutating its public estimate fields must not rewrite installed fit
+        # provenance or the model's reporting state.
+        returned.p_hat = 1.91
+        returned.phi_hat = 91.0
+        returned._ci_cache[0.05] = (1.85, 1.95)
+        assert model._tweedie_profile_result.p_hat == pytest.approx(1.47)
+        assert model._tweedie_profile_result.phi_hat == pytest.approx(7.25)
+        assert model._tweedie_profile_result._ci_cache == {}
+        immutable_summary = model.summary()
+        assert immutable_summary._info["tweedie_p"] == pytest.approx(1.47)
+        assert immutable_summary._info["tweedie_phi"] == pytest.approx(7.25)
+        assert immutable_summary._info["tweedie_p_ci_status"] == "not computed"
+
     @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
     @pytest.mark.parametrize("retain_fit_state", [True, False])
     def test_final_profile_refit_failure_restores_retention_without_installing_result(
@@ -3097,13 +3368,17 @@ class TestEstimatePFitMode:
             lambda *args, **kwargs: result,
         )
         seen_retain_flags = []
+        config_before = model._config
+        family_before = model._family_config
+        config_revision_before = model._config_revision
+        fit_revision_before = model._fit_revision
 
         def failing_final_fit(candidate, *args, **kwargs):
             seen_retain_flags.append(candidate._retain_fit_state)
             raise RuntimeError("final refit failed")
 
-        fit_name = "fit_reml" if fit_mode == "reml" else "fit"
-        monkeypatch.setattr(SuperGLM, fit_name, failing_final_fit)
+        fit_name = "_fit_reml_in_workspace" if fit_mode == "reml" else "_fit_in_workspace"
+        monkeypatch.setattr(fit_ops_module, fit_name, failing_final_fit)
 
         with pytest.raises(RuntimeError, match="final refit failed"):
             model.estimate_p(
@@ -3117,6 +3392,10 @@ class TestEstimatePFitMode:
         assert seen_retain_flags == [True]
         assert model._retain_fit_state is retain_fit_state
         assert model._tweedie_profile_result is None
+        assert model._config is config_before
+        assert model._family_config is family_before
+        assert model._config_revision == config_revision_before
+        assert model._fit_revision == fit_revision_before
 
     @pytest.mark.parametrize("failing_event", ["best_found", "final_refit"])
     def test_progress_callback_failure_preserves_exact_model_state(
@@ -3171,7 +3450,7 @@ class TestEstimatePFitMode:
                 candidate.__dict__["partial_final_fit"] = object()
                 raise RuntimeError("failed during fit")
 
-            monkeypatch.setattr(SuperGLM, "fit", failing_fit)
+            monkeypatch.setattr(fit_ops_module, "_fit_in_workspace", failing_fit)
         elif failure_stage == "synchronize":
 
             def failing_synchronize(candidate, *args, **kwargs):
@@ -3288,14 +3567,14 @@ class TestEstimatePFitMode:
             "_estimate_tweedie_p_prepared",
             lambda *args, **kwargs: _deterministic_profile_result(),
         )
-        real_fit = SuperGLM.fit
+        real_fit = fit_ops_module._fit_in_workspace
 
         def nonconverged_fit(candidate, *args, **kwargs):
             fitted = real_fit(candidate, *args, **kwargs)
             candidate._result = replace(candidate.result, converged=False)
             return fitted
 
-        monkeypatch.setattr(SuperGLM, "fit", nonconverged_fit)
+        monkeypatch.setattr(fit_ops_module, "_fit_in_workspace", nonconverged_fit)
 
         with pytest.raises(RuntimeError, match="final fit is not installable"):
             model.estimate_p(X, y)
@@ -3491,7 +3770,17 @@ class TestEstimatePFitMode:
         assert result._ci_cache[0.05] is interval
 
         summary = model.summary(alpha=0.05)
-        assert summary._info["tweedie_p_ci"] is interval
+        assert summary._info["tweedie_p_ci"] is None
+        assert summary._info["tweedie_p_ci_status"] == "not computed"
+
+        installed_interval = TweedieProfileResult.ci(
+            model._tweedie_profile_result,
+            alpha=0.05,
+        )
+        assert installed_interval == pytest.approx(interval)
+        assert installed_interval is not interval
+        summary = model.summary(alpha=0.05)
+        assert summary._info["tweedie_p_ci"] is installed_interval
         assert summary._info["tweedie_p_ci_status"] == "available"
 
     def test_progress_payload_ignores_stale_pearson_lr_cache(self):
@@ -3517,7 +3806,8 @@ class TestEstimatePFitMode:
         )
         invalid_weights = np.ones(len(y), dtype=np.complex128)
         invalid_weights[3] = 1.0 + 1.0j
-        family_before = model.family
+        family_before = model._family_config
+        config_before = model._config
 
         with pytest.raises(ValueError, match="weights must be finite and strictly positive"):
             model.estimate_p(
@@ -3528,7 +3818,8 @@ class TestEstimatePFitMode:
                 phi_method="pearson",
             )
 
-        assert model.family is family_before
+        assert model._family_config is family_before
+        assert model._config is config_before
         assert model._specs == {}
         assert model._feature_order == []
 
@@ -3541,7 +3832,8 @@ class TestEstimatePFitMode:
             splines=[],
         )
         invalid_weights = np.ones(len(y) - 1)
-        family_before = model.family
+        family_before = model._family_config
+        config_before = model._config
         result_before = model._result
         distribution_before = model._distribution
         specs_before = dict(model._specs)
@@ -3558,7 +3850,8 @@ class TestEstimatePFitMode:
                 grid=np.array([1.5]),
             )
 
-        assert model.family is family_before
+        assert model._family_config is family_before
+        assert model._config is config_before
         assert model._result is result_before
         assert model._distribution is distribution_before
         assert model._specs == specs_before
@@ -3574,7 +3867,8 @@ class TestEstimatePFitMode:
         )
         model.fit(X, y)
         invalid_weights = np.ones(len(y) - 1)
-        family_before = model.family
+        family_before = model._family_config
+        config_before = model._config
         result_before = model._result
         distribution_before = model._distribution
         profile_result_before = model._tweedie_profile_result
@@ -3591,7 +3885,8 @@ class TestEstimatePFitMode:
                 grid=np.array([1.5]),
             )
 
-        assert model.family is family_before
+        assert model._family_config is family_before
+        assert model._config is config_before
         assert model._result is result_before
         assert model._distribution is distribution_before
         assert model._tweedie_profile_result is profile_result_before
@@ -3927,6 +4222,52 @@ class TestProfileContextInputOwnership:
 
 
 class TestProfileFitParity:
+    def test_profile_clone_does_not_execute_subclass_constructor(self):
+        class RequiredConstructorModel(SuperGLM):
+            constructor_calls = 0
+
+            def __init__(self, required_state, **kwargs):
+                type(self).constructor_calls += 1
+                super().__init__(**kwargs)
+                self.required_state = required_state
+                self.config_alias = self._config
+                self.family_alias = self._family_config
+
+        X = pd.DataFrame({"x1": np.linspace(-1.0, 1.0, 12)})
+        required_state = ["owned-extension"]
+        model = RequiredConstructorModel(
+            required_state,
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0.0,
+            features={"x1": Numeric()},
+        )
+
+        clone = tweedie_module._clone_profile_model(model, X, None)
+
+        assert RequiredConstructorModel.constructor_calls == 1
+        assert clone._fit_state is None
+        assert clone.required_state == required_state
+        assert clone.required_state is not required_state
+        assert clone.config_alias is clone._config
+        assert clone.family_alias is clone._family_config
+
+    def test_profile_clone_uses_current_configured_penalty_after_fit(self):
+        X, y, _ = _tweedie_data(n=32, seed=20260819)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0.0,
+            features={"x1": Numeric()},
+        )
+        model.fit(X, y)
+        assert model.selection_penalty_ == pytest.approx(0.0)
+        model.selection_penalty = 9.0
+
+        clone = tweedie_module._clone_profile_model(model, X, None)
+
+        assert clone._fit_state is None
+        assert configured_penalty(clone).lambda1 == pytest.approx(9.0)
+        assert clone._config.penalty.lambda1 == pytest.approx(9.0)
+
     """Fixed-p profile fits must be identical to the ordinary fit regimes."""
 
     @staticmethod
@@ -3988,7 +4329,7 @@ class TestProfileFitParity:
         clone = tweedie_module._clone_profile_model(model, X, None)
 
         assert clone._interaction_order == ["custom_surface"]
-        assert clone._pending_interactions == []
+        assert clone._pending_interactions == ()
         cloned = clone._interaction_specs["custom_surface"]
         assert isinstance(cloned, TensorInteraction)
         assert cloned.parent_names == ("x1", "x2")
@@ -3998,6 +4339,14 @@ class TestProfileFitParity:
         assert cloned._marginal1 is not None
         assert cloned._marginal2 is not None
         assert cloned._R_inv is not None
+
+        rematerialized = clone._config.materialize(type(clone))
+        assert rematerialized._interaction_order == ["custom_surface"]
+        assert rematerialized._pending_interactions == ()
+        configured = rematerialized._interaction_specs["custom_surface"]
+        assert configured.parent_names == ("x1", "x2")
+        assert configured._n_knots == (3, 4)
+        assert configured._decompose is True
 
     def test_profile_clone_deep_copies_resolved_custom_tensor_state(self):
         model, X = self._resolved_custom_tensor_model()
@@ -4155,16 +4504,16 @@ class TestProfileFitParity:
         caller_state = pickle.dumps(model.__dict__, protocol=5)
         assert model._specs == {}
         assert model._interaction_specs == {}
-        assert model._pending_interactions == [("x1", "x2")]
+        assert model._pending_interactions == (("x1", "x2"),)
 
         clone = tweedie_module._clone_profile_model(model, X, None)
 
         assert clone._interaction_specs == {}
         assert clone._interaction_order == []
-        assert clone._pending_interactions == [("x1", "x2")]
+        assert clone._pending_interactions == (("x1", "x2"),)
         assert list(clone._specs) == ["x1", "x2"]
         clone._build_design_matrix(X, y, None, None)
-        assert clone._pending_interactions == []
+        assert clone._pending_interactions == ()
         assert clone._interaction_order == ["x1:x2"]
         assert isinstance(clone._interaction_specs["x1:x2"], TensorInteraction)
 

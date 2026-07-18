@@ -166,6 +166,10 @@ def clone_with_replaced_feature(model, term: str, replacement, *, lambda1=..., l
     """Clone a model and replace one feature spec before fitting."""
     new_model = model._clone_without_features(set(), lambda1=lambda1, lambda2=lambda2)
     new_model._specs[term] = replacement
+    new_model._config = new_model._config.with_value(
+        feature_templates=tuple((name, new_model._specs[name]) for name in new_model._feature_order)
+    )
+    new_model._config_revision += 1
     return new_model
 
 
