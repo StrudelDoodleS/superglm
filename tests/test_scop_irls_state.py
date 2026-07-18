@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from superglm import Constraint, SuperGLM
+from superglm._fit_trace import MemoryTraceSink, TraceRun
 from superglm.distributions import Gaussian
 from superglm.features.spline import PSpline
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
@@ -134,11 +135,14 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
     import superglm.solvers.irls_direct as irls_direct
 
     model, y, weights, offset = _scop_fit_inputs()
-    monkeypatch.setattr(
-        irls_direct,
-        "_select_irls_trial",
-        lambda **kwargs: _IRLSStepDecision(0.0, 0, True),
-    )
+
+    def reject_all(**kwargs):
+        for depth in range(1, 6):
+            kwargs["evaluate_state"](2.0**-depth)
+        return _IRLSStepDecision(0.0, 0, True, trials_attempted=6)
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_all)
+    sink = MemoryTraceSink()
 
     result, _, states = irls_direct.fit_irls_direct(
         model._dm,
@@ -152,6 +156,7 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
         max_iter=1,
         record_diagnostics=True,
         return_scop_state=True,
+        trace_run=TraceRun("scop-reject", sink=sink),
     )
 
     assert not result.converged
@@ -169,6 +174,16 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
     mu = result.intercept + model._dm.matvec(result.beta) + offset_arr
     expected_deviance = float(np.sum(weights * (y - mu) ** 2))
     assert result.deviance == pytest.approx(expected_deviance)
+    decision = next(event for event in sink.events if event.event_kind == "step_decision")
+    commits = [event for event in sink.events if event.event_kind == "state_commit"]
+    evaluated = {
+        event.payload["state_id"] for event in sink.events if event.event_kind == "evaluation"
+    }
+    assert decision.payload["trials_attempted"] == 6
+    assert decision.payload["committed_state_id"] == decision.payload["base_state_id"]
+    assert commits[-1].payload["state_id"] == decision.payload["base_state_id"]
+    assert all(commit.payload["state_id"] in evaluated for commit in commits)
+    assert result.state_id == decision.payload["base_state_id"]
 
 
 def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch) -> None:
@@ -191,7 +206,7 @@ def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch)
     monkeypatch.setattr(
         irls_direct,
         "_select_irls_trial",
-        lambda **kwargs: _IRLSStepDecision(0.0, 0, True),
+        lambda **kwargs: _IRLSStepDecision(0.0, 0, True, trials_attempted=6),
     )
 
     rejected, _, rejected_states = irls_direct.fit_irls_direct(
@@ -232,9 +247,10 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
 
     def select_half(**kwargs):
         kwargs["evaluate_state"](0.5)
-        return _IRLSStepDecision(0.5, 1, False)
+        return _IRLSStepDecision(0.5, 1, False, trials_attempted=2)
 
     monkeypatch.setattr(irls_direct, "_select_irls_trial", select_half)
+    sink = MemoryTraceSink()
     result, _, states = irls_direct.fit_irls_direct(
         model._dm,
         y,
@@ -247,6 +263,7 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
         max_iter=1,
         record_diagnostics=True,
         return_scop_state=True,
+        trace_run=TraceRun("scop-half", sink=sink),
     )
 
     gi, state = next(iter(states.items()))
@@ -259,6 +276,18 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
     assert result.iteration_log is not None
     assert result.iteration_log[0].step_halvings == 1
     assert not result.iteration_log[0].step_rejected
+    decision = next(event for event in sink.events if event.event_kind == "step_decision")
+    commits = [event for event in sink.events if event.event_kind == "state_commit"]
+    trial = next(
+        event
+        for event in sink.events
+        if event.event_kind == "evaluation" and event.payload["phase"] == "scop_line_search_trial"
+    )
+    assert decision.payload["trials_attempted"] == 2
+    assert decision.payload["committed_state_id"] == trial.payload["state_id"]
+    assert trial.payload["enclosing_proposal_state_id"] == decision.payload["proposal_state_id"]
+    assert commits[-1].payload["state_id"] == trial.payload["state_id"]
+    assert result.state_id == trial.payload["state_id"]
 
     expected_input = {
         gi: {
