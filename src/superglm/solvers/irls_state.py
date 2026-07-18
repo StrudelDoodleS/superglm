@@ -14,8 +14,8 @@ from superglm.links import Link, stabilize_eta
 
 
 @dataclass(frozen=True)
-class _IRLSState:
-    """A complete, immutable coefficient and prediction snapshot."""
+class SolverState:
+    """A complete, immutable evaluated coefficient-state snapshot."""
 
     beta: NDArray
     intercept: float
@@ -23,6 +23,19 @@ class _IRLSState:
     eta: NDArray
     mu: NDArray
     deviance: float
+    state_id: int | None = None
+    evaluation_id: int | None = None
+    state_space: str = "solver"
+    basis_id: int | None = None
+    lambdas: tuple[tuple[str, object], ...] = ()
+    dispersion: float | None = None
+    convergence_value: float | None = None
+    termination_reason: str | None = None
+
+
+# Migration alias retained while direct IRLS and downstream private callers
+# move onto the shared state identity contract.
+_IRLSState = SolverState
 
 
 @dataclass(frozen=True)
@@ -59,6 +72,12 @@ def _evaluate_irls_state(
     intercept: float,
     *,
     deviance: float | None = None,
+    state_id: int | None = None,
+    evaluation_id: int | None = None,
+    state_space: str = "solver",
+    basis_id: int | None = None,
+    lambdas: tuple[tuple[str, object], ...] = (),
+    dispersion: float | None = None,
 ) -> _IRLSState:
     """Evaluate and freeze all state derived from one coefficient vector."""
     retained_beta = _immutable_array(beta)
@@ -80,6 +99,12 @@ def _evaluate_irls_state(
         eta=eta,
         mu=mu,
         deviance=retained_deviance,
+        state_id=state_id,
+        evaluation_id=evaluation_id,
+        state_space=state_space,
+        basis_id=basis_id,
+        lambdas=lambdas,
+        dispersion=dispersion,
     )
 
 
