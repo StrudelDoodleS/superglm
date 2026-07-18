@@ -27,13 +27,16 @@ def estimate_p(
     **kwargs,
 ):
     """Estimate Tweedie p via profile likelihood, refit, and return result."""
-    from superglm.profiling.tweedie import estimate_tweedie_p
+    from superglm.profiling.tweedie import (
+        _prepare_tweedie_profile_inputs,
+        _use_prepared_tweedie_profile_inputs,
+        estimate_tweedie_p,
+    )
 
     if progress_callback is not None and not callable(progress_callback):
         raise TypeError("progress_callback must be callable or None")
     resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
-
-    result = estimate_tweedie_p(
+    prepared = _prepare_tweedie_profile_inputs(
         model,
         X,
         y,
@@ -44,6 +47,43 @@ def estimate_p(
         method=method,
         **kwargs,
     )
+    X_snapshot, y_snapshot, weight_snapshot, offset_snapshot = (
+        _snapshot_tweedie_profile_refit_inputs(
+            prepared.X,
+            prepared.y,
+            prepared.sample_weight,
+            prepared.offset,
+        )
+    )
+    prepared = replace(
+        prepared,
+        X=X_snapshot,
+        y=y_snapshot,
+        sample_weight=weight_snapshot,
+        offset=offset_snapshot,
+    )
+
+    with _use_prepared_tweedie_profile_inputs(prepared):
+        result = estimate_tweedie_p(
+            model,
+            X_snapshot,
+            y_snapshot,
+            sample_weight=weight_snapshot,
+            offset=offset_snapshot,
+            p_bounds=prepared.p_bounds,
+            xatol=prepared.xatol,
+            maxiter=prepared.maxiter,
+            verbose=prepared.verbose,
+            fit_mode=prepared.fit_mode,
+            phi_method=prepared.phi_method,
+            method=prepared.method,
+            n_grid=prepared.n_grid,
+            grid=prepared.grid,
+            n_grid_coarse=prepared.n_grid_coarse,
+            optimizer=prepared.optimizer,
+            trace_callback=prepared.trace_callback,
+            trace_iterations=prepared.trace_iterations,
+        )
     if progress_callback is not None:
         progress_callback("best_found", {"profile_estimate": _tweedie_estimate_payload(result)})
     model.family = Tweedie(p=result.p_hat)
@@ -55,10 +95,20 @@ def estimate_p(
     try:
         model._retain_fit_state = True
         if resolved_mode == "fit_reml":
-            model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
+            model.fit_reml(
+                X_snapshot,
+                y_snapshot,
+                sample_weight=weight_snapshot,
+                offset=offset_snapshot,
+            )
         else:
-            model.fit(X, y, sample_weight=sample_weight, offset=offset)
-        _synchronize_tweedie_profile_refit(model, y, result)
+            model.fit(
+                X_snapshot,
+                y_snapshot,
+                sample_weight=weight_snapshot,
+                offset=offset_snapshot,
+            )
+        _synchronize_tweedie_profile_refit(model, y_snapshot, result)
     finally:
         model._retain_fit_state = retain_fit_state
 
@@ -71,6 +121,11 @@ def estimate_p(
     model._tweedie_profile_result = result
 
     return result
+
+
+def _snapshot_tweedie_profile_refit_inputs(X, y, sample_weight, offset):
+    """Own one coherent input set for both profiling and its final refit."""
+    return X, y, sample_weight, offset
 
 
 def _replace_dataclass_preserving_dynamic_attributes(instance, **changes):
