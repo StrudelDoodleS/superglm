@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import signal
 import subprocess
@@ -11,6 +12,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 from scripts.check_tweedie_reference import (
     RESPONSE_FORMAT,
@@ -24,12 +26,35 @@ from scripts.check_tweedie_reference import (
     validate_reference_payload,
 )
 
-from superglm.profiling.tweedie import generate_tweedie_cpg, tweedie_logpdf
+from superglm import SuperGLM
+from superglm._tweedie_density import evaluate_tweedie_density
+from superglm.distributions import Tweedie
+from superglm.features.numeric import Numeric
+from superglm.profiling.tweedie import estimate_tweedie_p, generate_tweedie_cpg, tweedie_logpdf
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = ROOT / "tests" / "fixtures" / "tweedie_reference_values.json"
 CHECKER_PATH = ROOT / "scripts" / "check_tweedie_reference.py"
 COMMITTED_FIXTURE = load_reference_fixture(FIXTURE_PATH)
+
+
+def _regenerate_profile_response(profile):
+    rng = np.random.default_rng(profile.seed)
+    x = rng.standard_normal(profile.n)
+    mu = np.exp(profile.log_mu_intercept + profile.log_mu_slope * x)
+    y = generate_tweedie_cpg(
+        profile.n,
+        mu=mu,
+        phi=profile.true_phi,
+        p=profile.true_p,
+        rng=rng,
+    )
+    return x, y
+
+
+def _response_sha256(y: np.ndarray) -> str:
+    canonical = np.ascontiguousarray(y, dtype=np.dtype("<f8"))
+    return hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
 
 
 def _valid_payload() -> dict[str, object]:
@@ -148,6 +173,22 @@ def test_self_check_uses_strict_absolute_error() -> None:
     assert summary.n_cases == 1
     assert summary.max_local_fixture_abs == 0.0
     assert summary.max_candidate_fixture_abs is None
+
+
+def test_self_check_reports_uncertifiable_local_case_without_raw_kernel_error() -> None:
+    payload = _valid_payload()
+    payload["density_cases"][0].update(  # type: ignore[index]
+        y=1.0,
+        mu=1.0,
+        phi=1e-12,
+        p=1.5,
+        weight=1.0,
+        logpdf=0.0,
+    )
+    fixture = validate_reference_payload(payload)
+
+    with pytest.raises(ReferenceComparisonError, match="zero_atom.*could not certify"):
+        run_self_check(fixture)
 
 
 def test_json_lines_command_receives_versioned_input_and_echoes_case() -> None:
@@ -372,20 +413,82 @@ def test_committed_fixture_covers_boundary_distances_atoms_and_scales() -> None:
     ids=lambda profile: profile.case,
 )
 def test_committed_profile_recipe_regenerates_response_digest(profile) -> None:
-    rng = np.random.default_rng(profile.seed)
-    x = rng.standard_normal(profile.n)
-    mu = np.exp(profile.log_mu_intercept + profile.log_mu_slope * x)
-    y = generate_tweedie_cpg(
-        profile.n,
-        mu=mu,
-        phi=profile.true_phi,
-        p=profile.true_p,
-        rng=rng,
-    )
-    canonical = np.ascontiguousarray(y, dtype=np.dtype("<f8"))
-    digest = hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
+    _, y = _regenerate_profile_response(profile)
 
-    assert digest == profile.response_sha256
+    assert _response_sha256(y) == profile.response_sha256
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "profile",
+    COMMITTED_FIXTURE.profile_cases,
+    ids=lambda profile: profile.case,
+)
+def test_public_profile_matches_joint_neutral_reference(profile) -> None:
+    x, y = _regenerate_profile_response(profile)
+    assert _response_sha256(y) == profile.response_sha256
+
+    model = SuperGLM(
+        family=Tweedie(1.5),
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    result = estimate_tweedie_p(
+        model,
+        pd.DataFrame({"x": x}),
+        y,
+        phi_method="mle",
+        method="brent",
+    )
+
+    assert result.p_hat == pytest.approx(
+        profile.reference_p,
+        rel=0.0,
+        abs=COMMITTED_FIXTURE.tolerances.p_abs,
+    )
+    assert result.phi_hat == pytest.approx(
+        profile.reference_phi,
+        rel=COMMITTED_FIXTURE.tolerances.phi_rel,
+        abs=0.0,
+    )
+    assert result.converged is profile.reference_converged
+    assert result.outer_converged
+    assert result.outer_boundary is None
+    assert result.fit_converged
+    assert result.solver_converged
+    assert result.objective_finite
+    assert result.phi_converged
+    assert not result.phi_used_fallback
+    assert result.phi_n_fallback_evaluations == 0
+    assert result.phi_n_value_only_evaluations == 0
+    assert result.density_exact is True
+    assert result.density_method == "exact"
+    assert result.n_saddlepoint == 0
+
+
+@pytest.mark.slow
+def test_certified_density_work_is_bounded_for_ordinary_positive_cases() -> None:
+    n = 200
+    mu = np.geomspace(0.05, 20.0, n)
+    y = mu * np.exp(np.linspace(-1.5, 1.5, n))
+    weights = np.geomspace(0.5, 2.0, n)
+
+    for power in (1.05, 1.5, 1.95):
+        evaluation = evaluate_tweedie_density(
+            y,
+            mu,
+            0.8,
+            power,
+            weights=weights,
+        )
+        diagnostics = evaluation.diagnostics
+
+        assert diagnostics.exact
+        assert diagnostics.certified
+        assert diagnostics.n_positive == n
+        assert diagnostics.n_exact == n
+        assert diagnostics.n_approximate == 0
+        assert diagnostics.max_terms < 100_000
 
 
 @pytest.mark.parametrize(
@@ -431,3 +534,31 @@ def test_checker_cli_self_check_reports_strict_maximum_error() -> None:
     assert f"checked={len(COMMITTED_FIXTURE.density_cases)}" in completed.stdout
     assert "max_local_fixture_abs=" in completed.stdout
     assert completed.stderr == ""
+
+
+def test_checker_cli_reports_uncertifiable_fixture_without_traceback(tmp_path) -> None:
+    payload = _valid_payload()
+    payload["density_cases"][0].update(  # type: ignore[index]
+        y=1.0,
+        mu=1.0,
+        phi=1e-12,
+        p=1.5,
+        weight=1.0,
+        logpdf=0.0,
+    )
+    fixture_path = tmp_path / "uncertifiable.json"
+    fixture_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, str(CHECKER_PATH), "--fixture", str(fixture_path), "--self-check"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30.0,
+    )
+
+    assert completed.returncode == ReferenceComparisonError.exit_code
+    assert "zero_atom could not certify" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert completed.stdout == ""
