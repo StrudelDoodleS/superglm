@@ -8,6 +8,7 @@ All functions accept raw numpy arrays and are usable with any model framework.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -128,15 +129,6 @@ def _quantile_bins(sort_values: NDArray, weights: NDArray, n_bins: int) -> NDArr
     return result
 
 
-def _gini(cum_x: NDArray, cum_y: NDArray) -> float:
-    """Gini coefficient from a Lorenz curve via trapezoidal rule.
-
-    Gini = 1 - 2 * AUC(lorenz_curve).
-    """
-    auc = float(np.trapezoid(cum_y, cum_x))
-    return 1.0 - 2.0 * auc
-
-
 def _lorenz_cumulative_by_score(
     scores: NDArray,
     exposures: NDArray,
@@ -158,6 +150,55 @@ def _lorenz_cumulative_by_score(
     cum_exp = np.cumsum(exp_blocks) / total_exp
     cum_loss = np.cumsum(loss_blocks) / total_loss
     return cum_exp, cum_loss
+
+
+def _weighted_pair_concordance(scores, weights, centered_target) -> float:
+    """Sum weighted target differences between ordered, tie-collapsed blocks."""
+    order = np.argsort(scores, kind="stable")
+    scores_sorted = scores[order]
+    weights_sorted = weights[order]
+    target_totals_sorted = (weights * centered_target)[order]
+
+    _, block_starts = np.unique(scores_sorted, return_index=True)
+    weight_blocks = np.add.reduceat(weights_sorted, block_starts)
+    target_blocks = np.add.reduceat(target_totals_sorted, block_starts)
+    prior_weights = np.cumsum(weight_blocks) - weight_blocks
+    prior_targets = np.cumsum(target_blocks) - target_blocks
+    terms = prior_weights * target_blocks - prior_targets * weight_blocks
+    return math.fsum(float(term) for term in terms)
+
+
+def _gini_coefficients(y_obs, y_pred, sample_weight=None) -> tuple[float, float, float]:
+    """Return stable model, perfect, and normalized tie-collapsed Gini values."""
+    y_obs = _ensure_array(y_obs)
+    y_pred = _ensure_array(y_pred)
+    weights = _default_weights(sample_weight, len(y_obs))
+    if y_obs.size == 0:
+        return 0.0, 0.0, 0.0
+    losses = weights * y_obs
+    total_weight = float(weights.sum())
+    total_loss = float(losses.sum())
+    if total_weight <= 0.0 or total_loss <= 0.0:
+        return 0.0, 0.0, 0.0
+
+    # The usual 1 - 2*AUC calculation loses all precision when the target is
+    # nearly constant. Pair concordance is algebraically equivalent, while
+    # centering removes the common target level before any subtraction.
+    centered_target = y_obs - np.min(y_obs)
+    perfect_pair_sum = _weighted_pair_concordance(y_obs, weights, centered_target)
+    if perfect_pair_sum <= 0.0:
+        return 0.0, 0.0, 0.0
+    model_pair_sum = _weighted_pair_concordance(y_pred, weights, centered_target)
+    scale = total_weight * total_loss
+    gini_model = model_pair_sum / scale
+    gini_perfect = perfect_pair_sum / scale
+    gini_ratio = np.clip(model_pair_sum / perfect_pair_sum, -1.0, 1.0)
+    return float(gini_model), float(gini_perfect), float(gini_ratio)
+
+
+def _normalized_gini(y_obs, y_pred, sample_weight=None) -> float:
+    """Return a stable, tie-collapsed Gini ratio without creating a plot."""
+    return _gini_coefficients(y_obs, y_pred, sample_weight)[2]
 
 
 def _make_ax(ax: Axes | None):
@@ -559,9 +600,11 @@ def lorenz_curve(
     cum_loss_p = np.concatenate([[0.0], cum_loss_perfect])
 
     # Gini coefficients
-    gini_model = _gini(cum_exp_m, cum_loss_m)
-    gini_perfect = _gini(cum_exp_p, cum_loss_p)
-    gini_ratio = gini_model / gini_perfect if gini_perfect > 0 else 0.0
+    gini_model, gini_perfect, gini_ratio = _gini_coefficients(
+        y_obs,
+        y_pred,
+        exposures,
+    )
 
     # Build curve DataFrame — use model ordering x-axis for all curves
     # Random ordering diagonal: cum_loss_share == cum_exposure_share

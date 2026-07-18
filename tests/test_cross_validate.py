@@ -12,6 +12,7 @@ from superglm import (
     SuperGLM,
     cross_validate,
 )
+from superglm.model_selection import _score_gini
 
 # ── Helpers ───────────────────────────────────────────────────────
 
@@ -857,6 +858,113 @@ class TestAutoDetectClone:
 # ── Scorer edge cases ────────────────────────────────────────────
 
 
+class TestGiniScorer:
+    class _PredictionOnlyModel:
+        def __init__(self, predictions):
+            self.predictions = np.asarray(predictions, dtype=float)
+
+        def predict(self, X, offset=None):
+            return self.predictions
+
+    def test_gini_perfect_ranking_is_normalized_to_one(self):
+        model = self._PredictionOnlyModel([1.0, 0.0])
+
+        score = _score_gini(model, None, np.array([1.0, 0.0]))
+
+        assert score == pytest.approx(1.0)
+
+    def test_gini_constant_predictions_have_no_ranking_signal(self):
+        model = self._PredictionOnlyModel([1.0, 1.0])
+
+        score = _score_gini(
+            model,
+            None,
+            np.array([1.0, 0.0]),
+            sample_weight=np.array([2.0, 1.0]),
+        )
+
+        assert score == pytest.approx(0.0)
+
+    def test_gini_tied_predictions_are_permutation_invariant(self):
+        y = np.array([10.0, 1.0, 8.0, 2.0, 6.0, 3.0])
+        predictions = np.array([0.2, 0.2, 0.5, 0.5, 0.9, 0.9])
+        sample_weight = np.array([1.0, 2.0, 1.5, 0.5, 1.0, 3.0])
+        permutation = np.array([1, 0, 3, 2, 5, 4])
+
+        score = _score_gini(
+            self._PredictionOnlyModel(predictions),
+            None,
+            y,
+            sample_weight=sample_weight,
+        )
+        permuted_score = _score_gini(
+            self._PredictionOnlyModel(predictions[permutation]),
+            None,
+            y[permutation],
+            sample_weight=sample_weight[permutation],
+        )
+
+        assert score == pytest.approx(permuted_score)
+
+    def test_gini_perfect_weighted_frequency_ranking_is_normalized_to_one(self):
+        y = np.array([2.0, 0.0, 1.0, 0.0])
+        sample_weight = np.array([3.0, 0.5, 1.0, 4.0])
+        model = self._PredictionOnlyModel(y)
+
+        score = _score_gini(model, None, y, sample_weight=sample_weight)
+
+        assert score == pytest.approx(1.0)
+
+    def test_gini_weighted_constant_positive_target_is_zero(self):
+        y = np.ones(3)
+        sample_weight = np.array([0.1, 0.2, 10.1])
+        model = self._PredictionOnlyModel(y)
+
+        score = _score_gini(model, None, y, sample_weight=sample_weight)
+
+        assert score == 0.0
+
+    def test_gini_near_constant_target_is_numerically_stable(self):
+        y = np.array([1.0, 1.0, np.nextafter(1.0, 2.0)])
+        sample_weight = np.array([0.1, 0.2, 10.1])
+
+        constant = _score_gini(
+            self._PredictionOnlyModel(np.ones(3)),
+            None,
+            y,
+            sample_weight=sample_weight,
+        )
+        perfect = _score_gini(
+            self._PredictionOnlyModel(y),
+            None,
+            y,
+            sample_weight=sample_weight,
+        )
+        reverse = _score_gini(
+            self._PredictionOnlyModel(-y),
+            None,
+            y,
+            sample_weight=sample_weight,
+        )
+
+        assert constant == 0.0
+        assert perfect == pytest.approx(1.0)
+        assert reverse == pytest.approx(-1.0)
+
+    def test_gini_all_zero_response(self, poisson_data, base_model):
+        """Gini scorer returns 0.0 when all y=0 (no division by zero)."""
+        df, y, _ = poisson_data
+        y_zero = np.zeros_like(y)
+        result = cross_validate(
+            base_model,
+            df,
+            y_zero,
+            cv=SimpleKFold(3),
+            scoring="gini",
+        )
+        assert all(np.isfinite(result.fold_scores["gini"]))
+
+
 class TestScorerEdgeCases:
     def test_dict_scorer_reserved_key_raises(self, poisson_data, base_model):
         """Dict scorer returning a reserved column name raises ValueError."""
@@ -874,16 +982,3 @@ class TestScorerEdgeCases:
                 scoring=bad_scorer,
                 error_score="raise",
             )
-
-    def test_gini_all_zero_response(self, poisson_data, base_model):
-        """Gini scorer returns 0.0 when all y=0 (no division by zero)."""
-        df, y, sw = poisson_data
-        y_zero = np.zeros_like(y)
-        result = cross_validate(
-            base_model,
-            df,
-            y_zero,
-            cv=SimpleKFold(3),
-            scoring="gini",
-        )
-        assert all(np.isfinite(result.fold_scores["gini"]))
