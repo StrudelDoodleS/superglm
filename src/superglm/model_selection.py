@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm.validation import _normalized_gini
+
 logger = logging.getLogger(__name__)
 
 
@@ -160,19 +162,9 @@ def _score_nll(model, X_val, y_val, *, sample_weight=None, offset=None):
 
 
 def _score_gini(model, X_val, y_val, *, sample_weight=None, offset=None):
-    """Gini coefficient (2 * AUC - 1) for binary/frequency models."""
+    """Tie-collapsed normalized Gini for binary/frequency models."""
     mu = model.predict(X_val, offset=offset)
-    w = sample_weight if sample_weight is not None else np.ones(len(y_val))
-    total_wy = np.sum(w * y_val)
-    if total_wy == 0.0:
-        return 0.0
-    order = np.argsort(mu)
-    y_sorted = y_val[order]
-    w_sorted = w[order]
-    total_w = np.sum(w_sorted)
-    cum_wy = np.cumsum(w_sorted * y_sorted)
-    gini = 1.0 - 2.0 * np.sum(w_sorted * cum_wy) / (total_w * total_wy)
-    return float(gini)
+    return _normalized_gini(y_val, mu, sample_weight)
 
 
 def _pooled_deviance_parts(model, X_val, y_val, *, sample_weight=None, offset=None):

@@ -160,6 +160,42 @@ def _lorenz_cumulative_by_score(
     return cum_exp, cum_loss
 
 
+def _normalized_gini(y_obs, y_pred, sample_weight=None) -> float:
+    """Return the tie-collapsed Gini ratio without creating a plot."""
+    y_obs = _ensure_array(y_obs)
+    y_pred = _ensure_array(y_pred)
+    weights = _default_weights(sample_weight, len(y_obs))
+    losses = weights * y_obs
+    total_weight = float(weights.sum())
+    total_loss = float(losses.sum())
+    if total_weight <= 0.0 or total_loss <= 0.0:
+        return 0.0
+
+    cum_weight_model, cum_loss_model = _lorenz_cumulative_by_score(
+        y_pred,
+        weights,
+        losses,
+        total_exp=total_weight,
+        total_loss=total_loss,
+    )
+    cum_weight_perfect, cum_loss_perfect = _lorenz_cumulative_by_score(
+        y_obs,
+        weights,
+        losses,
+        total_exp=total_weight,
+        total_loss=total_loss,
+    )
+    gini_model = _gini(
+        np.concatenate([[0.0], cum_weight_model]),
+        np.concatenate([[0.0], cum_loss_model]),
+    )
+    gini_perfect = _gini(
+        np.concatenate([[0.0], cum_weight_perfect]),
+        np.concatenate([[0.0], cum_loss_perfect]),
+    )
+    return float(gini_model / gini_perfect) if gini_perfect > 0.0 else 0.0
+
+
 def _make_ax(ax: Axes | None):
     """Return (ax, fig_or_None). If ax is None, create a new figure."""
     import matplotlib.pyplot as plt
