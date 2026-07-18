@@ -8,8 +8,8 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import _VARIANCE_FLOOR, Gamma
-from superglm.links import LogLink
+from superglm.distributions import _VARIANCE_FLOOR, Gamma, Gaussian
+from superglm.links import IdentityLink, LogLink
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,17 @@ def _fisher_rows(
     sample_weight: NDArray,
     fallback_reason: str | None = None,
 ) -> CoefficientWorkingRows:
+    # For the exact Gaussian/identity pair the Fisher rows reduce algebraically
+    # to the supplied weights and y. Preserve that identity bit-for-bit: the
+    # generic ``eta + (y - eta)`` expression introduces iteration-dependent
+    # roundoff and defeats constant-geometry factor-certificate reuse.
+    if type(distribution) is Gaussian and type(link) is IdentityLink:
+        return CoefficientWorkingRows(
+            weights=np.array(sample_weight, dtype=np.float64, copy=True),
+            response=np.array(y, dtype=np.float64, copy=True),
+            curvature_source="fisher",
+            fallback_reason=fallback_reason,
+        )
     variance = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
     dmu_deta = link.deriv_inverse(eta)
     weights = sample_weight * dmu_deta**2 / variance

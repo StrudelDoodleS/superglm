@@ -150,7 +150,7 @@ def _certified_data_rank(
     data_gram: NDArray,
     xtw1: NDArray,
 ):
-    """Use a bounded factor pass only when a Gram full-rank result is uncertified."""
+    """Certify ambiguous centered data geometry with observation rows."""
     decomposition = decompose_gram(data_gram)
     if not needs_factor_certification(decomposition):
         return decomposition
@@ -159,10 +159,7 @@ def _certified_data_rank(
         W,
         center=xtw1 / float(np.sum(W)),
     )
-    factor_decomposition = decompose_factor(factor)
-    return (
-        factor_decomposition if factor_decomposition.rank != decomposition.rank else decomposition
-    )
+    return decompose_factor(factor)
 
 
 def _certified_coefficient_rank(
@@ -171,7 +168,7 @@ def _certified_coefficient_rank(
     raw_gram: NDArray,
     penalty: NDArray,
 ):
-    """Certify an unpenalized raw Gram only inside its ambiguous full-rank band."""
+    """Certify ambiguous raw penalized geometry with observation rows."""
     decomposition = decompose_gram(raw_gram + penalty)
     if not needs_factor_certification(decomposition):
         return decomposition
@@ -179,10 +176,7 @@ def _certified_coefficient_rank(
     smooth_factor = penalty_factor(penalty)
     if smooth_factor.shape[0]:
         factor = np.vstack((factor, smooth_factor))
-    factor_decomposition = decompose_factor(factor)
-    return (
-        factor_decomposition if factor_decomposition.rank != decomposition.rank else decomposition
-    )
+    return decompose_factor(factor)
 
 
 def _certified_profile_rank(
@@ -207,10 +201,7 @@ def _certified_profile_rank(
     smooth_factor = penalty_factor(penalty)
     if smooth_factor.shape[0]:
         factor = np.vstack((factor, smooth_factor))
-    factor_decomposition = decompose_factor(factor)
-    return (
-        factor_decomposition if factor_decomposition.rank != decomposition.rank else decomposition
-    )
+    return decompose_factor(factor)
 
 
 def _coefficient_estimability(

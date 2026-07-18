@@ -153,6 +153,16 @@ class _SCOPTrialState:
     groups: tuple[_SCOPGroupState, ...]
 
 
+@dataclass(frozen=True)
+class _CenteredFactorCertification:
+    """One fit-local factor certificate tied to immutable centered geometry."""
+
+    system: CenteredSystem
+    factor: NDArray
+    decomposition: RankDecomposition
+    transformed_rhs: NDArray | None
+
+
 def _evaluate_scop_trial(
     *,
     committed: _SCOPTrialState,
@@ -223,8 +233,8 @@ def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
     from superglm.distributions import Gamma, Gaussian
     from superglm.links import IdentityLink, LogLink
 
-    return (isinstance(family, Gaussian) and isinstance(link, IdentityLink)) or (
-        isinstance(family, Gamma) and isinstance(link, LogLink)
+    return (type(family) is Gaussian and type(link) is IdentityLink) or (
+        type(family) is Gamma and type(link) is LogLink
     )
 
 
@@ -879,6 +889,7 @@ def fit_irls_direct(
     _constant_w_gram_cache: tuple[NDArray, NDArray, float] | None = None
     _constant_centered_cache: CenteredSystem | None = None
     _constant_centered_z: NDArray | None = None
+    _centered_factor_certification: _CenteredFactorCertification | None = None
 
     def get_centered_system(W_current: NDArray, z_off_current: NDArray) -> CenteredSystem:
         nonlocal _constant_centered_cache, _constant_centered_z
@@ -910,6 +921,67 @@ def fit_irls_direct(
             _constant_centered_cache = system
             _constant_centered_z = z_off_current.copy()
         return system
+
+    def certify_centered_factor(
+        system: CenteredSystem,
+        W_current: NDArray,
+        *,
+        response: NDArray | None = None,
+    ) -> _CenteredFactorCertification:
+        """Return a factor certificate for one immutable centered geometry."""
+        nonlocal _centered_factor_certification
+        cached = _centered_factor_certification
+        same_geometry = bool(
+            cached is not None
+            and cached.system.data_gram is system.data_gram
+            and cached.system.penalty is system.penalty
+            and cached.system.hessian is system.hessian
+            and cached.system.mean_x is system.mean_x
+            and cached.system.sum_w == system.sum_w
+        )
+        # A refreshed RHS can share the exact weighted Gram while differing in
+        # a factor-resolvable direction that normal equations round away. The
+        # immutable CenteredSystem instance identifies one RHS generation, so
+        # transformed RHS reuse needs only identity—not an O(n) response copy
+        # and comparison. Geometry-only terminal consumers may reuse the same
+        # compact factor across refreshed constant-weight systems.
+        if (
+            same_geometry
+            and cached is not None
+            and (
+                response is None or (cached.system is system and cached.transformed_rhs is not None)
+            )
+        ):
+            return cached
+
+        if response is None:
+            factor = grouped_augmented_factor(
+                dm,
+                W_current,
+                system.penalty,
+                center=system.mean_x,
+            )
+            transformed_rhs = None
+        else:
+            factor, transformed_rhs = grouped_augmented_factor_rhs(
+                dm,
+                W_current,
+                system.penalty,
+                response=response,
+                center=system.mean_x,
+            )
+        factor_decomposition = decompose_factor(
+            factor,
+            retain_factor_solve=transformed_rhs is not None,
+        )
+        cached = _CenteredFactorCertification(
+            system=system,
+            factor=factor,
+            decomposition=factor_decomposition,
+            transformed_rhs=transformed_rhs,
+        )
+        _centered_factor_certification = cached
+        return cached
 
     t_start = time.perf_counter()
     converged = False
@@ -1140,10 +1212,9 @@ def fit_irls_direct(
                         reduced_factor,
                         retain_factor_solve=True,
                     )
-                    if certified.rank != reduced_rank.rank:
-                        reduced_rank = certified
-                        reduced_factor_rhs = certified_rhs
-                        used_rank_certification = True
+                    reduced_rank = certified
+                    reduced_factor_rhs = certified_rhs
+                    used_rank_certification = True
                 beta_reduced = (
                     reduced_rank.solve(reduced_centered.rhs)
                     if reduced_factor_rhs is None
@@ -1244,21 +1315,17 @@ def fit_irls_direct(
                 iteration_rank = decompose_gram(centered.hessian)
                 iteration_factor_rhs = None
                 if needs_factor_certification(iteration_rank):
-                    iteration_factor, certified_rhs = grouped_augmented_factor_rhs(
-                        dm,
+                    certification = certify_centered_factor(
+                        centered,
                         W,
-                        centered.penalty,
                         response=z_off - centered.mean_z,
-                        center=centered.mean_x,
                     )
-                    certified = decompose_factor(
-                        iteration_factor,
-                        retain_factor_solve=True,
-                    )
-                    if certified.rank != iteration_rank.rank:
-                        iteration_rank = certified
-                        iteration_factor_rhs = certified_rhs
-                        used_rank_certification = True
+                    certified = certification.decomposition
+                    if certification.transformed_rhs is None:  # pragma: no cover - invariant
+                        raise RuntimeError("factor certification omitted its transformed RHS")
+                    iteration_rank = certified
+                    iteration_factor_rhs = certification.transformed_rhs
+                    used_rank_certification = True
                 beta = (
                     iteration_rank.solve(centered.rhs)
                     if iteration_factor_rhs is None
@@ -1943,16 +2010,12 @@ def fit_irls_direct(
     if _compute_reml_geometry:
         reml_slope_rank = decompose_gram(centered_final.hessian)
         if needs_factor_certification(reml_slope_rank):
-            certified = decompose_factor(
-                grouped_augmented_factor(
-                    dm,
-                    W,
-                    centered_final.penalty,
-                    center=centered_final.mean_x,
-                )
+            certification = certify_centered_factor(
+                centered_final,
+                W,
             )
-            if certified.rank != reml_slope_rank.rank:
-                reml_slope_rank = certified
+            certified = certification.decomposition
+            reml_slope_rank = certified
         XtWX_S_inv_beta = reml_slope_rank.pseudo_inverse()
         log_det_H = float(np.log(centered_final.sum_w) + reml_slope_rank.log_pdet)
         reml_hessian_rank = 1 + reml_slope_rank.rank
@@ -1973,9 +2036,17 @@ def fit_irls_direct(
         )
         coefficient_rank = decompose_gram(M_beta)
         if needs_factor_certification(coefficient_rank):
-            certified = decompose_factor(grouped_augmented_factor(dm, W, centered_final.penalty))
-            if certified.rank != coefficient_rank.rank:
-                coefficient_rank = certified
+            certification = certify_centered_factor(centered_final, W)
+            # If R_c.T @ R_c = G_centered + S, appending this single
+            # orthogonal mean row gives G_raw + S without another data pass.
+            raw_factor = np.vstack(
+                (
+                    certification.factor,
+                    np.sqrt(centered_final.sum_w) * centered_final.mean_x,
+                )
+            )
+            certified = decompose_factor(raw_factor)
+            coefficient_rank = certified
     if _compute_fit_statistics:
         if reml_slope_rank is None:  # pragma: no cover - validated above
             raise RuntimeError("fit statistics require generic REML geometry")
@@ -1987,15 +2058,18 @@ def fit_irls_direct(
         else:
             data_rank = decompose_gram(centered_final.data_gram) if compute_rank_info else None
             if data_rank is not None and needs_factor_certification(data_rank):
-                certified = decompose_factor(
-                    grouped_weighted_factor(
-                        dm,
-                        W,
-                        center=centered_final.mean_x,
+                if not np.any(centered_final.penalty):
+                    certification = certify_centered_factor(centered_final, W)
+                    certified = certification.decomposition
+                else:
+                    certified = decompose_factor(
+                        grouped_weighted_factor(
+                            dm,
+                            W,
+                            center=centered_final.mean_x,
+                        )
                     )
-                )
-                if certified.rank != data_rank.rank:
-                    data_rank = certified
+                data_rank = certified
             augmented_rank = reml_slope_rank
         feature_edf = np.diag(augmented_rank.pseudo_inverse() @ centered_final.data_gram).copy()
         feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0

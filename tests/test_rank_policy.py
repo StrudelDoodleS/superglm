@@ -450,22 +450,22 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
 ) -> None:
     """Raw-rounding rank ambiguity is repaired by the shared observation-factor policy."""
     import superglm.solvers.centered_system as centered_system_module
-    import superglm.solvers.irls_direct as irls_direct_module
 
     rng = np.random.default_rng(20260809)
     n_bins = 64
-    n_cycles = 316
+    n_cycles = 4
     n = n_bins * n_cycles
     support = rng.normal(size=(64, 3))
     support -= np.mean(support, axis=0)
     bin_idx = np.arange(n, dtype=np.intp) % n_bins
     cycle = np.arange(n, dtype=np.intp) // n_bins
     # These balanced patterns are exactly centered and orthogonal within
-    # every bin. The separation lies just above the factor-rank boundary but
-    # inside the Gram-resolution band, without depending on random BLAS sums.
+    # every bin. The separation lies just above the factor-rank boundary, but
+    # its Gram eigenvalue rounds to an exact zero on the reference platform.
     x = np.where(cycle % 2, 1.0, -1.0)
     orthogonal_direction = np.where(cycle % 4 < 2, 1.0, -1.0)
-    x_alias = x + 3.03e-8 * orthogonal_direction
+    separation = 3.02e-8
+    x_alias = x + separation * orthogonal_direction
     weights = np.ones(n)
     discrete = DiscretizedSSPGroupMatrix(
         support,
@@ -482,7 +482,12 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
         GroupSlice(name="x_alias", start=1, end=2),
         GroupSlice(name="s", start=2, end=5),
     ]
-    y = 0.4 + 1.7 * x + discrete.matvec(np.array([0.3, -0.2, 0.1]))
+    y = (
+        0.4
+        + 1.7 * x
+        + 0.5 * separation * orthogonal_direction
+        + discrete.matvec(np.array([0.3, -0.2, 0.1]))
+    )
     preliminary = build_centered_system(
         dm=dm,
         W=weights,
@@ -491,8 +496,9 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
         tabmat_state=TabmatCenteringState(),
     )
     preliminary_rank = decompose_gram(preliminary.data_gram)
-    assert preliminary_rank.rank == 4
-    assert preliminary_rank.resolution_limited
+    # BLAS eigensolvers can report this cutoff-boundary Gram as rank 4 or 5;
+    # both outcomes lie inside the shared factor-certification band.
+    assert preliminary_rank.rank in {4, 5}
     assert needs_factor_certification(preliminary_rank)
     factor, factor_rhs = grouped_augmented_factor_rhs(
         dm,
@@ -506,15 +512,15 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
     certified_beta = certified.solve_factor_rhs(factor_rhs)
     certified_prediction = preliminary.mean_z + dm.matvec(certified_beta)
     np.testing.assert_allclose(certified_prediction, y, rtol=2e-12, atol=2e-11)
-    factor_calls = 0
-    original_factor = irls_direct_module.grouped_augmented_factor_rhs
+    factor_passes = 0
+    original_chunks = centered_system_module.iter_grouped_design_chunks
 
-    def counted_factor(*args, **kwargs):
-        nonlocal factor_calls
-        factor_calls += 1
-        return original_factor(*args, **kwargs)
+    def counted_chunks(design):
+        nonlocal factor_passes
+        factor_passes += 1
+        yield from original_chunks(design)
 
-    monkeypatch.setattr(irls_direct_module, "grouped_augmented_factor_rhs", counted_factor)
+    monkeypatch.setattr(centered_system_module, "iter_grouped_design_chunks", counted_chunks)
 
     hybrid, _ = fit_irls_direct(
         dm,
@@ -526,7 +532,8 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
         lambda2=0.0,
         tol=1e-12,
     )
-    assert factor_calls >= 1
+    assert factor_passes == 1
+    factor_passes = 0
     monkeypatch.setattr(
         centered_system_module,
         "_try_mixed_discrete_centering",
@@ -542,6 +549,7 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
         lambda2=0.0,
         tol=1e-12,
     )
+    assert factor_passes == 1
 
     assert hybrid.rank_info is not None
     assert stable.rank_info is not None
@@ -552,6 +560,114 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
     np.testing.assert_allclose(hybrid_prediction, y, rtol=2e-12, atol=2e-11)
     np.testing.assert_allclose(stable_prediction, y, rtol=2e-12, atol=2e-11)
     assert hybrid.deviance == pytest.approx(stable.deviance, rel=2e-12, abs=2e-11)
+
+
+def test_equal_rank_factor_certificate_controls_retained_subspace() -> None:
+    """Equal certified ranks can still retain different cutoff-boundary directions."""
+    rng = np.random.default_rng(4274)
+    right, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    half_left, _ = np.linalg.qr(rng.normal(size=(8, 3)))
+    left = np.vstack((half_left, -half_left)) / np.sqrt(2.0)
+    design = left @ np.diag([1.0, 1.55e-8, 1.30e-8]) @ right.T
+    dm = _dense_design_matrix(design)
+    weights = np.ones(len(design))
+    groups = [GroupSlice(name="x", start=0, end=3)]
+    y = 0.4 + design @ (1.0e8 * right[:, 1])
+    centered = build_centered_system(
+        dm=dm,
+        W=weights,
+        z_off=y,
+        penalty=np.zeros((3, 3)),
+    )
+    gram_rank = decompose_gram(centered.data_gram)
+    factor, factor_rhs = grouped_augmented_factor_rhs(
+        dm,
+        weights,
+        centered.penalty,
+        response=y - centered.mean_z,
+        center=centered.mean_x,
+    )
+    factor_rank = decompose_factor(factor, retain_factor_solve=True)
+    assert gram_rank.rank == factor_rank.rank == 2
+    assert needs_factor_certification(gram_rank)
+    gram_null = gram_rank.null_basis()
+    factor_null = factor_rank.null_basis()
+    gram_null_projector = gram_null @ np.linalg.pinv(gram_null)
+    factor_null_projector = factor_null @ np.linalg.pinv(factor_null)
+    assert np.linalg.norm(gram_null_projector - factor_null_projector, ord=2) > 0.1
+    gram_beta = gram_rank.solve(centered.rhs)
+    factor_beta = factor_rank.solve_factor_rhs(factor_rhs)
+    gram_prediction = centered.mean_z + dm.matvec(gram_beta) - centered.mean_x @ gram_beta
+    factor_prediction = centered.mean_z + dm.matvec(factor_beta) - centered.mean_x @ factor_beta
+    assert (
+        np.linalg.norm(gram_prediction - factor_prediction)
+        / np.linalg.norm(factor_prediction - centered.mean_z)
+        > 0.1
+    )
+
+    automatic, _ = fit_irls_direct(
+        dm,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        tol=1e-12,
+        direct_solve="auto",
+    )
+
+    assert automatic.rank_info is not None
+    assert automatic.rank_info.data.rank == 2
+    automatic_prediction = automatic.intercept + dm.matvec(automatic.beta)
+    np.testing.assert_allclose(automatic_prediction, factor_prediction, rtol=1e-10, atol=1e-10)
+
+
+def test_exact_gaussian_alias_reuses_factor_certificate_across_iterations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact Gaussian working rows keep one factor pass across iterations."""
+    import superglm.solvers.centered_system as centered_system_module
+
+    x = np.linspace(-2.0, 2.0, 32)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(x), DenseGroupMatrix(x.copy())],
+        n=len(x),
+        p=2,
+    )
+    groups = [
+        GroupSlice(name="x", start=0, end=1),
+        GroupSlice(name="duplicate", start=1, end=2),
+    ]
+    y = 1.0 + 3.0 * x + 0.03 * np.sin(5.0 * x)
+    factor_passes = 0
+    original_chunks = centered_system_module.iter_grouped_design_chunks
+
+    def counted_chunks(design):
+        nonlocal factor_passes
+        factor_passes += 1
+        yield from original_chunks(design)
+
+    monkeypatch.setattr(centered_system_module, "iter_grouped_design_chunks", counted_chunks)
+    result, _ = fit_irls_direct(
+        dm,
+        y,
+        np.ones(len(x)),
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        tol=1e-12,
+    )
+
+    assert result.n_iter == 2
+    assert result.rank_info is not None
+    assert result.rank_info.data.rank == result.rank_info.augmented.rank == 1
+    assert result.rank_info.coefficient.rank == 1
+    assert factor_passes == 1
+    expected = np.linalg.lstsq(np.column_stack((np.ones(len(x)), x)), y, rcond=None)[0]
+    prediction = result.intercept + dm.matvec(result.beta)
+    np.testing.assert_allclose(prediction, expected[0] + expected[1] * x, rtol=1e-12, atol=1e-12)
 
 
 def test_streamed_factor_rhs_includes_penalty_rows_without_normal_equation_loss() -> None:
@@ -1261,6 +1377,8 @@ def test_factor_alias_log_pdet_matches_gram(columns: np.ndarray) -> None:
     gram_decomposition = decompose_gram(factor.T @ factor)
 
     assert factor_decomposition.rank == gram_decomposition.rank == 1
+    assert gram_decomposition.resolution_limited
+    assert needs_factor_certification(gram_decomposition)
     assert factor_decomposition.log_pdet == pytest.approx(gram_decomposition.log_pdet)
 
 
@@ -1299,6 +1417,28 @@ def test_resolution_limited_gram_truncation_requests_factor_certification() -> N
     assert gram_decomposition.resolution_limited
     assert factor_decomposition.rank == 2
     assert needs_factor_certification(gram_decomposition)
+
+
+def test_negative_roundoff_eigenvalue_requests_factor_certification() -> None:
+    eps = np.finfo(float).eps
+    rounded_gram = np.array([[1.0, 1.0], [1.0, 1.0 - 2.0 * eps]])
+
+    decomposition = decompose_gram(rounded_gram)
+
+    assert decomposition.rank == 1
+    assert decomposition.resolution_limited
+    assert needs_factor_certification(decomposition)
+
+
+def test_factor_certificate_does_not_request_recursion() -> None:
+    factor = np.array([[1.0, 1.0], [0.0, 1.0e-9]])
+
+    decomposition = decompose_factor(factor)
+
+    assert decomposition.method == "qr_svd"
+    assert decomposition.rank == 1
+    assert decomposition.resolution_limited
+    assert not needs_factor_certification(decomposition)
 
 
 def test_column_rescaling_preserves_rank_and_fitted_projection() -> None:

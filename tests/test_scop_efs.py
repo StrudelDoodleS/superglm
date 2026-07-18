@@ -1896,6 +1896,18 @@ class TestSCOPEFSOuterLoop:
 
         assert scop_efs_module._scop_mode_newton_relative(mode) == pytest.approx(1.0)
 
+    def test_mode_certificate_floor_scales_with_joint_rank(self):
+        """Factor/score roundoff accumulates at root-rank scale."""
+        epsilon = np.finfo(np.float64).eps
+        mode = SimpleNamespace(hessian_rank=36)
+
+        assert scop_efs_module._scop_mode_tolerance(mode, 1.0e-12) == pytest.approx(
+            np.sqrt(36.0 * epsilon)
+        )
+        assert scop_efs_module._scop_mode_tolerance(mode, 1.0e-4) == pytest.approx(
+            np.sqrt(36.0 * epsilon)
+        )
+
     def test_candidate_guard_requires_reflected_direction_to_be_downhill(self, monkeypatch):
         """The forward numerical tie tolerance must not admit an uphill reflection."""
         current = SimpleNamespace(

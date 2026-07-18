@@ -101,7 +101,17 @@ def needs_factor_certification(
     *,
     policy: RankPolicy = SHARED_RANK_POLICY,
 ) -> bool:
-    """Whether a nominally full Gram rank lies inside its uncertified band."""
+    """Whether Gram geometry lies inside a band requiring factor certification.
+
+    A certificate governs the retained subspace as well as the integer rank.
+    Normal equations can erase a factor-scale direction at the numerical
+    boundary, or retain a different direction while reporting the same rank.
+    """
+    if decomposition.method == "qr_svd":
+        # A factor decomposition is already the authoritative certificate;
+        # never stream and factor the same rows again merely because the
+        # factor policy itself truncated a nonzero singular value.
+        return False
     certification_condition = policy.warning_condition / np.sqrt(policy.certification_band)
     return bool(
         decomposition.width > 0
@@ -536,6 +546,7 @@ def decompose_gram(
             pass
 
     eigenvalues, eigenvectors = np.linalg.eigh(equilibrated)
+    raw_eigenvalues = eigenvalues
     max_eigenvalue = max(float(eigenvalues[-1]), 0.0)
     max_abs_eigenvalue = float(np.max(np.abs(eigenvalues), initial=0.0))
     negative_tolerance = 100.0 * _EPS * max(max_abs_eigenvalue, 1.0)
@@ -607,8 +618,13 @@ def decompose_gram(
     estimable_basis[active_columns, :] = retained_vectors * active_scale[:, None]
     null = _null_basis(width, active_columns, active_scale, discarded_vectors)
     retained_values = eigenvalues[retained_mask]
+    # Normal equations cannot distinguish an exact active-column alias from a
+    # full-rank factor direction whose squared singular value rounded to zero.
+    # Structural zero columns were removed above; every other PSD truncation
+    # therefore needs observation-factor certification when one is available.
     resolution_limited = bool(
-        np.any((np.abs(eigenvalues) > 0.0) & ~retained_mask)
+        (psd_semantics and rank < len(active_columns))
+        or np.any((np.abs(raw_eigenvalues) > 0.0) & ~retained_mask)
         or (fallback_factor is not None and decompose_factor(fallback_factor).rank > rank)
     )
     log_pdet = (

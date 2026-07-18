@@ -187,12 +187,10 @@ def _legacy_active_state(model, solver, W: NDArray):
     data_rank = decompose_gram(centered.data_gram)
     if needs_factor_certification(data_rank):
         certified = decompose_factor(grouped_weighted_factor(design, W, center=centered.mean_x))
-        if certified.rank != data_rank.rank:
-            data_rank = certified
+        data_rank = certified
     if needs_factor_certification(coefficient_rank):
         certified = decompose_factor(grouped_augmented_factor(design, W, curvature))
-        if certified.rank != coefficient_rank.rank:
-            coefficient_rank = certified
+        coefficient_rank = certified
     if not np.any(curvature):
         profile_rank = data_rank
     else:
@@ -206,8 +204,7 @@ def _legacy_active_state(model, solver, W: NDArray):
                     center=centered.mean_x,
                 )
             )
-            if certified.rank != profile_rank.rank:
-                profile_rank = certified
+            profile_rank = certified
     coefficient_inverse = coefficient_rank.pseudo_inverse()
     profile_inverse = profile_rank.pseudo_inverse()
     mean_x = xtw1 / centered.sum_w

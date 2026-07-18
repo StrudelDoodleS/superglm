@@ -880,8 +880,7 @@ def build_observed_reml_geometry(
                 center=mean_x,
             )
         )
-        if factor_certified.rank != decomposition.rank:
-            decomposition = factor_certified
+        decomposition = factor_certified
 
     return ObservedREMLGeometry(
         eta=_readonly(eta),
