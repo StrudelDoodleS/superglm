@@ -287,6 +287,26 @@ class TestPenaltyFeatureHelpers:
 
 
 class TestGroupElasticNetProxGroup:
+    def test_matches_closed_form_composite_prox(self):
+        """Group thresholding precedes the final ridge denominator."""
+        group = GroupSlice("g", 0, 2, weight=1.5)
+        values = np.array([3.0, 4.0])
+        step = 0.7
+        lam = 0.8
+        alpha = 0.35
+        penalty = GroupElasticNet(lambda1=lam, alpha=alpha)
+
+        threshold = step * lam * alpha * group.weight
+        group_soft_threshold = values * (1.0 - threshold / np.linalg.norm(values))
+        expected = group_soft_threshold / (1.0 + step * lam * (1.0 - alpha))
+
+        np.testing.assert_allclose(
+            penalty.prox_group(values, group, step),
+            expected,
+            rtol=1e-14,
+            atol=1e-14,
+        )
+
     def test_matches_full_prox(self, groups):
         """prox_group on each group should match full prox."""
         beta = np.array([0.5, 0.5, 0.5, 2.0])

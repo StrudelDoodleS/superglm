@@ -20,14 +20,21 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
 
 import superglm.solvers.scop_exact_support as scop_exact_support
 from superglm._fit_trace import TraceRun
-from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
+from superglm._group_matrix._group_matrix_centered import (
+    _raw_centering_well_scaled,
+    stable_centered_matvec,
+)
+from superglm._group_matrix._group_matrix_tabmat import (
+    _defer_raw_spline_tabmat_plan,
+    _is_raw_spline_tabmat_centering_candidate,
+)
 from superglm.distributions import _VARIANCE_FLOOR, Distribution, initial_mean
 from superglm.group_matrix import (
     DesignMatrix,
@@ -40,12 +47,15 @@ from superglm.links import Link
 from superglm.solvers.centered_system import (
     CenteredSystem,
     TabmatCenteringState,
+    build_anchor_centered_system,
     build_centered_system,
     grouped_augmented_factor,
+    grouped_augmented_factor_rhs,
     grouped_weighted_factor,
     refresh_centered_rhs,
 )
 from superglm.solvers.constrained_qp import solve_constrained_qp
+from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
     _immutable_array,
@@ -59,6 +69,7 @@ from superglm.solvers.pirls import (
 )
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
+    RankDecomposition,
     RankInfo,
     decompose_factor,
     decompose_gram,
@@ -67,6 +78,10 @@ from superglm.solvers.rank import (
 )
 from superglm.solvers.scop import SCOPSolverReparam
 from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
+from superglm.solvers.working_rows import (
+    coefficient_working_rows,
+    supports_observed_newton,
+)
 from superglm.types import GroupSlice, PenaltyComponent
 
 logger = logging.getLogger(__name__)
@@ -319,9 +334,12 @@ def fit_irls_direct(
     compute_rank_info: bool = True,
     _return_working_system: bool = False,
     _compute_fit_statistics: bool = True,
+    _compute_reml_geometry: bool = True,
+    _use_observed_newton: bool = True,
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
+    _compute_scop_postfit_inference: bool = True,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -331,7 +349,8 @@ def fit_irls_direct(
     reduces the per-iteration cost from O(n·p²) to O(n_bins·K²).
 
     Returns (PIRLSResult, XtWX_S_inv) where XtWX_S_inv is the (p, p)
-    inverse from the final iteration, reusable for REML trace terms.
+    profiled-intercept slope inverse from the final iteration, reusable for
+    REML trace terms.
 
     Parameters
     ----------
@@ -376,9 +395,24 @@ def fit_irls_direct(
         Internal optimization switch. If False, omit EDF and scale summaries
         that the fREML outer loop does not consume. The authoritative final
         fit must leave this True.
+    _compute_reml_geometry : bool
+        Internal SCOP-candidate switch. If False, omit the generic profiled
+        slope inverse, determinant, and rank because the caller replaces them
+        with one joint latent-coordinate LAML geometry. This requires both
+        retained rank metadata and fit statistics to be disabled. Public and
+        terminal fits must leave this True.
+    _use_observed_newton : bool
+        Internal rescue-controller switch. When enabled, an ordinary Gamma/log
+        fit switches to its exact positive observed curvature only after an
+        atomic Fisher proposal rejection. Accepted Fisher iterations, unsupported,
+        constrained, SCOP, and cached-working-system routes retain Fisher scoring.
+        Public callers should leave this True.
     _deviance_init : float, optional
         Previously evaluated deviance at ``beta_init``/``intercept_init``.
         Used by private fREML steps to avoid repeating a full response scan.
+    _compute_scop_postfit_inference : bool
+        Internal SCOP EFS switch. Candidate modes leave this False; the
+        terminal/public mode installs covariance and EDF exactly once.
     record_diagnostics : bool
         If True, record per-iteration W/mu/eta stats on the result.
     S_override : (p, p) ndarray, optional
@@ -391,7 +425,8 @@ def fit_irls_direct(
     -------
     result : PIRLSResult
     XtWX_S_inv : (p, p) ndarray
-        Inverse of (X'WX + S) from the final iteration.
+        Slope block of the full augmented Hessian inverse after profiling the
+        intercept: ``(X_c' W X_c + S)^+``.
     """
     if isinstance(X, DesignMatrix):
         dm = X
@@ -460,7 +495,7 @@ def fit_irls_direct(
                 "solver": "irls_direct",
                 "phase": phase,
                 "outer_iteration": iteration,
-                "accepted_alpha": alpha,
+                "trial_alpha": alpha,
                 "enclosing_proposal_state_id": enclosing_proposal_state_id,
                 "state_space": state.state_space,
                 "basis_id": state.basis_id,
@@ -468,6 +503,7 @@ def fit_irls_direct(
                 "dispersion": state.dispersion,
                 "intercept": state.intercept,
                 "deviance": state.deviance,
+                "penalized_deviance": state.penalized_deviance,
                 "deviance_source": "provided" if deviance_reused else "evaluated",
             },
             channel="pirls",
@@ -483,7 +519,9 @@ def fit_irls_direct(
         iteration: int,
         alpha: float | None = None,
         deviance: float | None = None,
+        eta_unclipped: NDArray | None = None,
         enclosing_proposal_state_id: int | None = None,
+        emit_trace: bool = True,
     ) -> _IRLSState:
         if trace_enabled:
             assert trace_run is not None
@@ -502,19 +540,26 @@ def fit_irls_direct(
             beta_values,
             intercept_value,
             deviance=deviance,
+            eta_unclipped=eta_unclipped,
             state_id=state_id,
             evaluation_id=evaluation_id,
             basis_id=trace_basis_id,
             lambdas=resolved_lambdas,
         )
-        emit_evaluation(
-            state,
-            phase=phase,
-            iteration=iteration,
-            alpha=alpha,
-            enclosing_proposal_state_id=enclosing_proposal_state_id,
-            deviance_reused=deviance is not None,
-        )
+        if not _has_scop:
+            state = replace(
+                state,
+                penalized_deviance=float(state.deviance + state.beta @ S @ state.beta),
+            )
+        if emit_trace:
+            emit_evaluation(
+                state,
+                phase=phase,
+                iteration=iteration,
+                alpha=alpha,
+                enclosing_proposal_state_id=enclosing_proposal_state_id,
+                deviance_reused=deviance is not None,
+            )
         return state
 
     def emit_state_commit(
@@ -542,6 +587,7 @@ def fit_irls_direct(
                 "dispersion": state.dispersion,
                 "intercept": state.intercept,
                 "deviance": state.deviance,
+                "penalized_deviance": state.penalized_deviance,
                 "fit_converged": fit_converged,
                 "convergence_criterion": convergence,
                 "convergence_value": convergence_value,
@@ -571,10 +617,28 @@ def fit_irls_direct(
 
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
+    _scop_curvature = "fisher"
+    if _has_scop:
+        from superglm.reml.observed_geometry import classify_scop_reml_curvature
+
+        _scop_curvature = classify_scop_reml_curvature(family, link)
     if (not _compute_fit_statistics and compute_rank_info) or (
         _return_working_system and (compute_rank_info or has_constraints or _has_scop)
     ):
         raise ValueError("intermediate REML shortcuts require rank metadata to be disabled")
+    if not _compute_reml_geometry and (compute_rank_info or _compute_fit_statistics):
+        raise ValueError(
+            "omitting generic REML geometry requires rank metadata and fit statistics "
+            "to be disabled"
+        )
+    _observed_newton_available = bool(
+        _use_observed_newton
+        and not has_constraints
+        and not _has_scop
+        and not _return_working_system
+        and supports_observed_newton(family, link)
+    )
+    _observed_newton_active = False
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
@@ -666,7 +730,8 @@ def fit_irls_direct(
         _reduced_gms = []
         for gi in _non_scop_groups_idx:
             _reduced_gms.append(gms[gi])
-        _reduced_execution_plan = MatrixExecutionPlan(_reduced_gms, n=n)
+        _reduced_dm = DesignMatrix(_reduced_gms, n=n, p=_p_reduced)
+        _reduced_tabmat_state = TabmatCenteringState()
 
         _scop_specs = {
             gi: _SCOPGroupSpec(
@@ -755,9 +820,28 @@ def fit_irls_direct(
         # contains a native high-cardinality categorical component. Avoid
         # materializing an unused dense duplicate for numeric and low-cardinality fits.
         _tabmat_split = dm.tabmat_centering_split
-    dm.execution_plan.validate_group_spans(groups)
-    _tabmat_centering_state = TabmatCenteringState()
     _can_reuse_weighted_gram = _has_constant_irls_weights(family, link) and not _has_scop
+    dm.execution_plan.validate_group_spans(groups)
+    _defer_raw_spline = (
+        not dm.raw_spline_tabmat_plan_built
+        and _is_raw_spline_tabmat_centering_candidate(gms, n=n)
+        and (
+            _defer_raw_spline_tabmat_plan(
+                n=n,
+                raw_width=sum(int(group.B.shape[1]) for group in gms if group.shape[1] > 0),
+                constant_weights=_can_reuse_weighted_gram,
+                repeated_fit=trace_purpose
+                in {"reml_bootstrap", "reml_candidate", "reml_line_search"},
+            )
+        )
+    )
+    _tabmat_centering_state = TabmatCenteringState(
+        raw_spline_eligible=False if _defer_raw_spline else None
+    )
+    if profile is not None and _defer_raw_spline:
+        profile["centered_spline_tabmat_cold_policy_rejections"] = (
+            profile.get("centered_spline_tabmat_cold_policy_rejections", 0) + 1
+        )
     _constant_w_gram_cache: tuple[NDArray, NDArray, float] | None = None
     _constant_centered_cache: CenteredSystem | None = None
     _constant_centered_z: NDArray | None = None
@@ -786,6 +870,7 @@ def fit_irls_direct(
             penalty=S,
             tabmat_split=_tabmat_split,
             tabmat_state=_tabmat_centering_state,
+            profile=profile,
         )
         if _can_reuse_weighted_gram:
             _constant_centered_cache = system
@@ -812,13 +897,7 @@ def fit_irls_direct(
         phase="initial",
         iteration=0,
         deviance=_deviance_init,
-    )
-    emit_state_commit(
-        committed,
-        iteration=0,
-        fit_converged=False,
-        convergence_value=None,
-        termination_reason=None,
+        emit_trace=not _has_scop,
     )
     if _has_scop:
         scop_committed = _SCOPTrialState(
@@ -839,6 +918,46 @@ def fit_irls_direct(
                 for gi, st in sorted(_scop_state.items())
             ),
         )
+
+        def with_scop_merit(trial: _SCOPTrialState) -> _SCOPTrialState:
+            """Attach deviance plus the latent-coordinate quadratic penalty."""
+            penalty_quad = float(trial.irls.beta @ S @ trial.irls.beta)
+            for group_state in trial.groups:
+                group = groups[group_state.group_index]
+                group_slice = group.sl
+                block = S[group_slice, group_slice]
+                penalty_quad -= float(group_state.gamma_eff @ block @ group_state.gamma_eff)
+                lam_scop = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                latent_penalty = _scop_specs[group_state.group_index].S_scop
+                penalty_quad += float(
+                    lam_scop * (group_state.beta_eff @ latent_penalty @ group_state.beta_eff)
+                )
+            return replace(
+                trial,
+                irls=replace(
+                    trial.irls,
+                    penalized_deviance=float(trial.irls.deviance + penalty_quad),
+                ),
+            )
+
+        scop_committed = with_scop_merit(scop_committed)
+        committed = scop_committed.irls
+        emit_evaluation(
+            committed,
+            phase="initial",
+            iteration=0,
+            deviance_reused=_deviance_init is not None,
+        )
+    emit_state_commit(
+        committed,
+        iteration=0,
+        fit_converged=False,
+        convergence_value=None,
+        termination_reason=None,
+    )
+    objective_prev = (
+        committed.deviance if committed.penalized_deviance is None else committed.penalized_deviance
+    )
     dev_prev = committed.deviance
     eta_unclipped = committed.eta_unclipped
     eta = committed.eta
@@ -851,7 +970,7 @@ def fit_irls_direct(
     )
     capture_extrema = record_diagnostics or record_debug_rows
 
-    max_halving = 5  # max step-halving attempts per iteration
+    max_halving = 20  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
 
     for it in range(max_iter):
@@ -862,14 +981,36 @@ def fit_irls_direct(
         committed_active_set = None if prev_active_set is None else list(prev_active_set)
         rank_truncated: bool | None = None
         used_rank_certification = False
+        scop_proposal_eta_unclipped: NDArray | None = None
 
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
-        V = family.variance(mu)
-        V = np.maximum(V, _VARIANCE_FLOOR)
-        dmu_deta = link.deriv_inverse(eta)
-        W = weights * dmu_deta**2 / V
-        z = eta + (y - mu) / dmu_deta
+        working_rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=mu,
+            eta=eta,
+            sample_weight=weights,
+            prefer_observed=_observed_newton_active,
+        )
+        W = working_rows.weights
+        z = working_rows.response
+        if working_rows.fallback_reason is not None:
+            # Once exact observed rows fail their fit-wide safety contract,
+            # keep all later proposals on one coherent Fisher-scoring route.
+            _observed_newton_active = False
+            _observed_newton_available = False
+            _can_reuse_weighted_gram = _has_constant_irls_weights(family, link)
+            _constant_w_gram_cache = None
+            _constant_centered_cache = None
+            _constant_centered_z = None
+            if profile is not None:
+                profile["irls_observed_newton_fallbacks"] = (
+                    profile.get("irls_observed_newton_fallbacks", 0) + 1
+                )
+        elif working_rows.curvature_source == "observed" and profile is not None:
+            profile["irls_observed_newton_iters"] = profile.get("irls_observed_newton_iters", 0) + 1
         working_eta_unclipped = eta_unclipped
         working_eta = eta
         working_mu = mu
@@ -895,8 +1036,8 @@ def fit_irls_direct(
             A_data = sqrtW[:, None] * (_X_full - centered.mean_x)
             A = np.vstack([A_data, _L_aug[1:, 1:]])
             rhs_qr = np.concatenate([sqrtW * (z_off - centered.mean_z), np.zeros(p)])
-            iteration_rank = decompose_factor(A)
-            beta = iteration_rank.solve(A.T @ rhs_qr)
+            iteration_rank = decompose_factor(A, retain_factor_solve=True)
+            beta = iteration_rank.solve_factor_rhs(rhs_qr)
             intercept = centered.mean_z - float(centered.mean_x @ beta)
             _cond_est = iteration_rank.pre_truncation_condition
             _used_svd = iteration_rank.used_svd_fallback
@@ -920,39 +1061,64 @@ def fit_irls_direct(
 
                 # Step 2: Adjust working response by removing SCOP contribution
                 z_adj = z_off - eta_scop
-                Wz_adj = W * z_adj
-                sum_W, sum_Wz_adj = _working_sums(W, Wz_adj)
 
-                # Step 3: Build reduced Gram system (non-SCOP columns only)
-                reduced_moments = _reduced_execution_plan._moments_prevalidated(
-                    W,
-                    rhs=(Wz_adj,),
-                    include_xtw=True,
+                # Step 3: Profile the intercept in stable centered
+                # coordinates.  The raw augmented Gram loses the ordinary
+                # slope entirely after a large column translation.
+                reduced_centered = build_centered_system(
+                    dm=_reduced_dm,
+                    W=W,
+                    z_off=z_adj,
+                    penalty=_S_reduced,
+                    tabmat_split=_reduced_dm.tabmat_centering_split,
+                    tabmat_state=_reduced_tabmat_state,
                     profile=profile,
                 )
-                if reduced_moments.xtw is None:  # pragma: no cover - requested above
-                    raise RuntimeError("execution plan did not return X'W")
-                XtWX_r = reduced_moments.gram
-                XtW1_r = reduced_moments.xtw
-                XtWz_r = reduced_moments.xt_rhs[0]
-
-                # Build augmented (p_reduced+1, p_reduced+1) system
-                M_aug_r = np.empty((_p_reduced + 1, _p_reduced + 1))
-                M_aug_r[0, 0] = sum_W
-                M_aug_r[0, 1:] = XtW1_r
-                M_aug_r[1:, 0] = XtW1_r
-                M_aug_r[1:, 1:] = XtWX_r + _S_reduced
-
-                rhs_r = np.empty(_p_reduced + 1)
-                rhs_r[0] = sum_Wz_adj
-                rhs_r[1:] = XtWz_r
+                reduced_scale = np.sqrt(
+                    np.maximum(np.diag(reduced_centered.data_gram), 0.0) / reduced_centered.sum_w
+                )
+                use_anchor_centering = not _raw_centering_well_scaled(
+                    reduced_centered.mean_x,
+                    reduced_scale,
+                )
+                if use_anchor_centering:
+                    reduced_centered = build_anchor_centered_system(
+                        dm=_reduced_dm,
+                        W=W,
+                        z_off=z_adj,
+                        penalty=_S_reduced,
+                    )
                 _t_gram += time.perf_counter() - _t0
 
                 # Step 4: Solve for unconstrained coefficients
                 _t0 = time.perf_counter()
-                beta_aug_r, _cond_est, _used_svd = _robust_solve(M_aug_r, rhs_r)
-                intercept = float(beta_aug_r[0])
-                beta_reduced = beta_aug_r[1:]
+                reduced_rank = decompose_gram(reduced_centered.hessian)
+                reduced_factor_rhs = None
+                if needs_factor_certification(reduced_rank):
+                    reduced_factor, certified_rhs = grouped_augmented_factor_rhs(
+                        _reduced_dm,
+                        W,
+                        reduced_centered.penalty,
+                        response=z_adj - reduced_centered.mean_z,
+                        center=reduced_centered.mean_x,
+                    )
+                    certified = decompose_factor(
+                        reduced_factor,
+                        retain_factor_solve=True,
+                    )
+                    if certified.rank != reduced_rank.rank:
+                        reduced_rank = certified
+                        reduced_factor_rhs = certified_rhs
+                        used_rank_certification = True
+                beta_reduced = (
+                    reduced_rank.solve(reduced_centered.rhs)
+                    if reduced_factor_rhs is None
+                    else reduced_rank.solve_factor_rhs(reduced_factor_rhs)
+                )
+                intercept = reduced_centered.mean_z - float(reduced_centered.mean_x @ beta_reduced)
+                _cond_est = reduced_rank.pre_truncation_condition
+                _used_svd = reduced_rank.used_svd_fallback
+                rank_truncated = reduced_rank.rank_truncated
 
                 # Scatter reduced beta back into full beta vector
                 beta = np.zeros(p)
@@ -960,11 +1126,15 @@ def fit_irls_direct(
                 _t_solve += time.perf_counter() - _t0
 
                 # Step 5: Compute residual for SCOP Newton step
-                eta_unconstrained = np.zeros(n)
-                for gi_r, gi in enumerate(_non_scop_groups_idx):
-                    g = groups[gi]
-                    eta_unconstrained += gms[gi].matvec(beta[g.sl])
-                eta_unconstrained += intercept
+                if use_anchor_centering:
+                    eta_unconstrained = reduced_centered.mean_z + stable_centered_matvec(
+                        dm=_reduced_dm,
+                        beta=beta_reduced,
+                        W=W,
+                        sum_w=reduced_centered.sum_w,
+                    )
+                else:
+                    eta_unconstrained = intercept + _reduced_dm.matvec(beta_reduced)
 
                 # Step 6: Apply SCOP Newton step
                 if _scop_joint:
@@ -1024,6 +1194,13 @@ def fit_irls_direct(
                     g = groups[gi]
                     gamma_eff = st["reparam"].forward(scop_results[gi].beta_new)
                     beta[g.sl] = gamma_eff
+                scop_proposal_eta_unclipped = eta_unconstrained + offset
+                for gi, st in _scop_state.items():
+                    gamma_eff = st["reparam"].forward(scop_results[gi].beta_new)
+                    eta_group = st["B_scop"] @ gamma_eff
+                    if st["bin_idx"] is not None:
+                        eta_group = eta_group[st["bin_idx"]]
+                    scop_proposal_eta_unclipped += eta_group
 
             elif not has_constraints:
                 centered = get_centered_system(W, z_off)
@@ -1031,19 +1208,28 @@ def fit_irls_direct(
                 _t_gram += time.perf_counter() - _t0
                 _t0 = time.perf_counter()
                 iteration_rank = decompose_gram(centered.hessian)
+                iteration_factor_rhs = None
                 if needs_factor_certification(iteration_rank):
+                    iteration_factor, certified_rhs = grouped_augmented_factor_rhs(
+                        dm,
+                        W,
+                        centered.penalty,
+                        response=z_off - centered.mean_z,
+                        center=centered.mean_x,
+                    )
                     certified = decompose_factor(
-                        grouped_augmented_factor(
-                            dm,
-                            W,
-                            centered.penalty,
-                            center=centered.mean_x,
-                        )
+                        iteration_factor,
+                        retain_factor_solve=True,
                     )
                     if certified.rank != iteration_rank.rank:
                         iteration_rank = certified
+                        iteration_factor_rhs = certified_rhs
                         used_rank_certification = True
-                beta = iteration_rank.solve(centered.rhs)
+                beta = (
+                    iteration_rank.solve(centered.rhs)
+                    if iteration_factor_rhs is None
+                    else iteration_rank.solve_factor_rhs(iteration_factor_rhs)
+                )
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
                 _cond_est = iteration_rank.pre_truncation_condition
                 _used_svd = iteration_rank.used_svd_fallback
@@ -1130,6 +1316,8 @@ def fit_irls_direct(
                 phase="scop_proposal",
                 iteration=it + 1,
                 alpha=1.0,
+                eta_unclipped=scop_proposal_eta_unclipped,
+                emit_trace=False,
             )
             proposal_scop = _SCOPTrialState(
                 irls=proposal_irls,
@@ -1150,6 +1338,14 @@ def fit_irls_direct(
                     )
                     for gi in sorted(_scop_specs)
                 ),
+            )
+            proposal_scop = with_scop_merit(proposal_scop)
+            proposal_irls = proposal_scop.irls
+            emit_evaluation(
+                proposal_irls,
+                phase="scop_proposal",
+                iteration=it + 1,
+                alpha=1.0,
             )
             scop_trial_cache: dict[float, _SCOPTrialState] = {1.0: proposal_scop}
 
@@ -1177,6 +1373,7 @@ def fit_irls_direct(
                     basis_id=trace_basis_id,
                     lambdas=resolved_lambdas,
                 )
+                candidate = with_scop_merit(candidate)
                 emit_evaluation(
                     candidate.irls,
                     phase="scop_line_search_trial",
@@ -1240,18 +1437,27 @@ def fit_irls_direct(
                 alpha=1.0,
             )
             trial_cache: dict[float, _IRLSState] = {1.0: proposal}
+            trial_directions: tuple[NDArray, float, NDArray] | None = None
 
             def evaluate_trial(alpha: float) -> _IRLSState:
-                beta_trial = committed.beta + alpha * (proposal.beta - committed.beta)
-                intercept_trial = committed.intercept + alpha * (
-                    proposal.intercept - committed.intercept
-                )
+                nonlocal trial_directions
+                if trial_directions is None:
+                    trial_directions = (
+                        proposal.beta - committed.beta,
+                        proposal.intercept - committed.intercept,
+                        proposal.eta_unclipped - committed.eta_unclipped,
+                    )
+                beta_direction, intercept_direction, eta_direction = trial_directions
+                beta_trial = committed.beta + alpha * beta_direction
+                intercept_trial = committed.intercept + alpha * intercept_direction
+                eta_trial = committed.eta_unclipped + alpha * eta_direction
                 candidate = evaluate_state(
                     beta_trial,
                     intercept_trial,
                     phase="line_search_trial",
                     iteration=it + 1,
                     alpha=alpha,
+                    eta_unclipped=eta_trial,
                     enclosing_proposal_state_id=proposal.state_id,
                 )
                 trial_cache[alpha] = candidate
@@ -1302,8 +1508,13 @@ def fit_irls_direct(
                 converged_this_iter = coef_change < tol
                 convergence_value = coef_change
             else:
-                if np.isfinite(dev_prev):
-                    dev_rel_change = abs(dev - dev_prev) / (abs(dev_prev) + 1.0)
+                objective = (
+                    retained.deviance
+                    if retained.penalized_deviance is None
+                    else retained.penalized_deviance
+                )
+                if np.isfinite(objective_prev):
+                    dev_rel_change = abs(objective - objective_prev) / (abs(objective_prev) + 1.0)
                 converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
                 convergence_value = dev_rel_change
         else:
@@ -1312,7 +1523,21 @@ def fit_irls_direct(
         if step_rejected:
             converged_this_iter = False
 
-        if step_rejected:
+        curvature_rescue_activated = bool(
+            step_rejected
+            and _observed_newton_available
+            and not _observed_newton_active
+            and it + 1 < max_iter
+        )
+        fisher_fallback_activated = bool(
+            step_rejected and _observed_newton_active and it + 1 < max_iter
+        )
+
+        if fisher_fallback_activated:
+            termination_reason = "curvature_fallback"
+        elif curvature_rescue_activated:
+            termination_reason = "curvature_rescue"
+        elif step_rejected:
             termination_reason = "step_rejected"
         elif not np.isfinite(dev):
             termination_reason = "nonfinite_deviance"
@@ -1342,6 +1567,9 @@ def fit_irls_direct(
                     "convergence_value": convergence_value,
                     "convergence_tolerance": tol,
                     "termination_reason": termination_reason,
+                    "working_curvature": working_rows.curvature_source,
+                    "curvature_rescue_activated": curvature_rescue_activated,
+                    "curvature_fallback_activated": fisher_fallback_activated,
                 },
                 channel="pirls",
                 purpose=trace_purpose,
@@ -1468,15 +1696,50 @@ def fit_irls_direct(
                     "cond_estimate": float(_cond_est),
                     "used_svd_fallback": bool(_used_svd),
                     "has_scop": bool(_has_scop),
+                    "working_curvature": working_rows.curvature_source,
+                    "curvature_rescue_activated": bool(curvature_rescue_activated),
+                    "curvature_fallback_activated": bool(fisher_fallback_activated),
                 },
             )
 
-        if step_rejected:
+        if step_rejected and not (curvature_rescue_activated or fisher_fallback_activated):
             logger.warning(
                 "IRLS direct rejected all trial steps at iter=%d; restored committed state",
                 it + 1,
             )
             break
+
+        if curvature_rescue_activated:
+            _observed_newton_active = True
+            _can_reuse_weighted_gram = False
+            _constant_w_gram_cache = None
+            _constant_centered_cache = None
+            _constant_centered_z = None
+            if profile is not None:
+                profile["irls_observed_newton_rescues"] = (
+                    profile.get("irls_observed_newton_rescues", 0) + 1
+                )
+            logger.info(
+                "IRLS direct switching Gamma/log coefficient proposals to observed "
+                "Newton curvature after iteration %d",
+                it + 1,
+            )
+        elif fisher_fallback_activated:
+            _observed_newton_active = False
+            _observed_newton_available = False
+            _can_reuse_weighted_gram = _has_constant_irls_weights(family, link)
+            _constant_w_gram_cache = None
+            _constant_centered_cache = None
+            _constant_centered_z = None
+            if profile is not None:
+                profile["irls_observed_newton_rejections"] = (
+                    profile.get("irls_observed_newton_rejections", 0) + 1
+                )
+            logger.info(
+                "IRLS direct rejected an observed Gamma/log proposal at iteration %d; "
+                "restoring Fisher scoring",
+                it + 1,
+            )
 
         committed = retained
         if _has_scop:
@@ -1485,6 +1748,11 @@ def fit_irls_direct(
             converged = True
             break
         dev_prev = dev
+        objective_prev = (
+            retained.deviance
+            if retained.penalized_deviance is None
+            else retained.penalized_deviance
+        )
 
     t_elapsed = time.perf_counter() - t_start
     logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
@@ -1501,10 +1769,15 @@ def fit_irls_direct(
             state.get("H_scop_penalized") is None for state in _scop_state.values()
         )
         if not step_rejected or needs_initial_hessian:
-            eta_unconstrained = np.full(n, intercept)
-            for gi in _non_scop_groups_idx:
-                g = groups[gi]
-                eta_unconstrained += gms[gi].matvec(beta[g.sl])
+            # Recover the retained non-SCOP contribution from the exact
+            # committed predictor. Rebuilding X beta + intercept would lose
+            # several score digits for a translated ordinary column.
+            eta_unconstrained = eta_unclipped - offset
+            for st in _scop_state.values():
+                eta_group = st["B_scop"] @ st["gamma_eff"]
+                if st["bin_idx"] is not None:
+                    eta_group = eta_group[st["bin_idx"]]
+                eta_unconstrained = eta_unconstrained - eta_group
             z_scop_final = z - offset - eta_unconstrained
             if _scop_joint:
                 refresh_results = scop_joint_newton_step(
@@ -1519,6 +1792,7 @@ def fit_irls_direct(
                     _scop_state[gi]["H_scop_penalized"] = (
                         None if refresh.H_penalized is None else refresh.H_penalized.copy()
                     )
+                    _scop_state[gi]["last_fisher_fallback"] = bool(refresh.used_fisher_fallback)
             else:
                 for gi, st in _scop_state.items():
                     z_scop_group = z_scop_final.copy()
@@ -1544,6 +1818,7 @@ def fit_irls_direct(
                     st["H_scop_penalized"] = (
                         None if refresh.H_penalized is None else refresh.H_penalized.copy()
                     )
+                    st["last_fisher_fallback"] = bool(refresh.used_fisher_fallback)
 
     # Every public/exported matrix and rank claim is evaluated at the retained
     # model. Private fREML performance iterations deliberately reuse the
@@ -1580,38 +1855,81 @@ def fit_irls_direct(
     XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
     sum_W = centered_final.sum_w
 
-    # Cache final-iteration RHS quantities for the cached-W fREML optimizer.
-    # These allow re-solving the augmented system with a new penalty matrix S
-    # without any data passes (O(p³) instead of O(n·K²) per group).
+    # Cache final-iteration raw and stable centered quantities for the cached-W
+    # fREML optimizer. These allow re-solving the profiled-intercept system with
+    # a new penalty matrix S without any data passes (O(p³), not O(n·K²)).
     if cache_out is not None:
         cache_out["XtWX"] = XtWX
+        cache_out["centered_XtWX"] = centered_final.data_gram
         cache_out["XtWz"] = XtWz
         cache_out["XtW1"] = XtW1
         cache_out["sum_W"] = sum_W
         cache_out["sum_Wz"] = sum_Wz
+        cache_out["centered_rhs"] = centered_final.rhs
+        cache_out["mean_x"] = centered_final.mean_x
+        cache_out["mean_z"] = centered_final.mean_z
+        if _has_scop:
+            # The SCOP LAML mode certificate must evaluate the exact retained
+            # predictor. Reconstructing a huge translated column plus its
+            # compensating intercept can otherwise manufacture a false KKT
+            # residual several orders above tolerance.
+            cache_out["eta_unclipped"] = eta_unclipped
 
-    # Compute (X'WX + S)^{-1} directly (NOT the intercept-profiled inverse).
-    # Reconstruct it from the certified centered Hessian so PSD round-off
-    # corrections for degenerate spline penalties remain in force.
+    # REML works in the full (intercept, slopes) coefficient space.  Profiling
+    # the unpenalized intercept yields the centered Schur complement H_c.  Its
+    # inverse is the slope block of H_aug^{-1}, while the unit-determinant
+    # centering transform gives log|H_aug| = log(sum(W)) + log|H_c| at full
+    # rank. With aliases, the same expression is the retained centered-space
+    # determinant measure, not the raw augmented pseudo-determinant.
     _t0 = time.perf_counter()
     XtWX_beta = XtWX
-    M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
-        centered_final.mean_x, centered_final.mean_x
-    )
-    coefficient_rank = decompose_gram(M_beta)
-    if needs_factor_certification(coefficient_rank):
-        certified = decompose_factor(grouped_augmented_factor(dm, W, centered_final.penalty))
-        if certified.rank != coefficient_rank.rank:
-            coefficient_rank = certified
-    XtWX_S_inv_beta = coefficient_rank.pseudo_inverse()
-    log_det_H = coefficient_rank.log_pdet
+    reml_slope_rank: RankDecomposition | None
+    log_det_H: float | None
+    reml_hessian_rank: int | None
+    if _compute_reml_geometry:
+        reml_slope_rank = decompose_gram(centered_final.hessian)
+        if needs_factor_certification(reml_slope_rank):
+            certified = decompose_factor(
+                grouped_augmented_factor(
+                    dm,
+                    W,
+                    centered_final.penalty,
+                    center=centered_final.mean_x,
+                )
+            )
+            if certified.rank != reml_slope_rank.rank:
+                reml_slope_rank = certified
+        XtWX_S_inv_beta = reml_slope_rank.pseudo_inverse()
+        log_det_H = float(np.log(centered_final.sum_w) + reml_slope_rank.log_pdet)
+        reml_hessian_rank = 1 + reml_slope_rank.rank
+    else:
+        reml_slope_rank = None
+        # The tuple arity/type remains stable for every historical caller.
+        # SCOP EFS deliberately ignores this unmistakable zero-width sentinel.
+        XtWX_S_inv_beta = np.empty((0, 0), dtype=np.float64)
+        log_det_H = None
+        reml_hessian_rank = None
 
+    # Preserve the raw coefficient-space decomposition for fitted inference
+    # metadata.  It is intentionally distinct from the REML Schur geometry.
+    coefficient_rank = None
+    if _compute_fit_statistics and compute_rank_info:
+        M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
+            centered_final.mean_x, centered_final.mean_x
+        )
+        coefficient_rank = decompose_gram(M_beta)
+        if needs_factor_certification(coefficient_rank):
+            certified = decompose_factor(grouped_augmented_factor(dm, W, centered_final.penalty))
+            if certified.rank != coefficient_rank.rank:
+                coefficient_rank = certified
     if _compute_fit_statistics:
+        if reml_slope_rank is None:  # pragma: no cover - validated above
+            raise RuntimeError("fit statistics require generic REML geometry")
         if _use_qr:
             sqrtW = np.sqrt(W)
             A_data_final = sqrtW[:, None] * (_X_full - centered_final.mean_x)
             data_rank = decompose_factor(A_data_final) if compute_rank_info else None
-            augmented_rank = decompose_factor(np.vstack([A_data_final, _L_aug[1:, 1:]]))
+            augmented_rank = reml_slope_rank
         else:
             data_rank = decompose_gram(centered_final.data_gram) if compute_rank_info else None
             if data_rank is not None and needs_factor_certification(data_rank):
@@ -1624,28 +1942,15 @@ def fit_irls_direct(
                 )
                 if certified.rank != data_rank.rank:
                     data_rank = certified
-            augmented_rank = (
-                data_rank
-                if data_rank is not None and not np.any(centered_final.penalty)
-                else decompose_gram(centered_final.hessian)
-            )
-            if needs_factor_certification(augmented_rank):
-                certified = decompose_factor(
-                    grouped_augmented_factor(
-                        dm,
-                        W,
-                        centered_final.penalty,
-                        center=centered_final.mean_x,
-                    )
-                )
-                if certified.rank != augmented_rank.rank:
-                    augmented_rank = certified
+            augmented_rank = reml_slope_rank
         feature_edf = np.diag(augmented_rank.pseudo_inverse() @ centered_final.data_gram).copy()
         feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
         p_eff = 1.0 + float(np.sum(feature_edf))
         if compute_rank_info:
             if data_rank is None:
                 raise RuntimeError("data-rank metadata was not computed")
+            if coefficient_rank is None:
+                raise RuntimeError("coefficient-rank metadata was not computed")
             group_edf = {g.name: float(np.sum(feature_edf[g.sl])) for g in groups}
             selected_columns = np.arange(p, dtype=int)
             selected_columns.setflags(write=False)
@@ -1674,17 +1979,21 @@ def fit_irls_direct(
         _t_finalize = time.perf_counter() - _t0
         profile["irls_finalize_s"] = profile.get("irls_finalize_s", 0.0) + _t_finalize
 
-    # Pearson-based phi for estimated-scale families (Tweedie, Gamma, NB2).
-    # SuperGLM's sample_weight follows the prior-weight convention, so the
-    # residual d.f. correction is observation-count based (n - edf), while
-    # the weights still scale the Pearson numerator.
-    if _compute_fit_statistics:
+    # Pearson-based phi for estimated-scale families. Gaussian/Gamma weights
+    # are frequency weights; Tweedie weights are EDM prior weights.
+    if _compute_fit_statistics and not getattr(family, "scale_known", True):
         V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
         pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
-        df_resid = max(float(len(y)) - p_eff, 1)
+        df_resid = pearson_residual_degrees_of_freedom(family, weights, p_eff)
         phi = pearson_chi2 / df_resid
     else:
         phi = 1.0
+    if not _compute_reml_geometry:
+        # Private SCOP candidates have no retained-fit statistics. NaN makes
+        # accidental publication fail visibly instead of presenting 0 EDF or
+        # unit dispersion as if either had been evaluated.
+        p_eff = float("nan")
+        phi = float("nan")
 
     result = PIRLSResult(
         beta=beta,
@@ -1696,6 +2005,7 @@ def fit_irls_direct(
         effective_df=p_eff,
         iteration_log=iteration_log if record_diagnostics else None,
         log_det_H=log_det_H,
+        reml_hessian_rank=reml_hessian_rank,
         rank_info=rank_info,
         state_id=retained.state_id,
         evaluation_id=retained.evaluation_id,
@@ -1726,6 +2036,71 @@ def fit_irls_direct(
             }
     else:
         scop_converged = None
+
+    if (
+        _has_scop
+        and scop_converged is not None
+        and _compute_fit_statistics
+        and _compute_scop_postfit_inference
+    ):
+        import superglm.reml.scop_geometry as scop_geometry
+
+        if _scop_curvature == "observed":
+            joint_geometry = scop_geometry.build_observed_scop_joint_geometry(
+                dm=dm,
+                distribution=family,
+                link=link,
+                y=y,
+                sample_weight=weights,
+                offset_arr=offset,
+                result=result,
+                penalty=S,
+                scop_states=scop_converged,
+                fisher_XtWX=XtWX,
+                fisher_XtW1=XtW1,
+                fisher_sum_W=sum_W,
+                centered_fisher_gram=centered_final.data_gram,
+                fisher_mean_x=centered_final.mean_x,
+                eta_unclipped=eta_unclipped,
+            )
+        else:
+            joint_geometry = scop_geometry.build_cached_scop_joint_geometry(
+                raw_fisher_gram=XtWX,
+                fisher_xtw=XtW1,
+                fisher_sum_w=sum_W,
+                latent_penalty=S,
+                scop_states=scop_converged,
+                centered_fisher_gram=centered_final.data_gram,
+                fisher_mean_x=centered_final.mean_x,
+                dm=dm,
+                fisher_weights=W,
+            )
+        inference = scop_geometry.install_scop_postfit_inference(
+            result,
+            raw_fisher_gram=XtWX,
+            centered_fisher_gram=centered_final.data_gram,
+            fisher_xtw=XtW1,
+            fisher_mean_x=centered_final.mean_x,
+            fisher_sum_w=sum_W,
+            latent_penalty=S,
+            scop_states=scop_converged,
+            groups=groups,
+            observed_geometry=joint_geometry,
+            dm=dm,
+            fisher_weights=W,
+        )
+
+        # Estimated dispersion must use the same terminal EDF that downstream
+        # covariance and summaries expose.  Known-scale likelihoods retain
+        # their defining phi=1 rather than profiling a Pearson scale.
+        if not getattr(family, "scale_known", True):
+            V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
+            pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
+            result.phi = pearson_chi2 / pearson_residual_degrees_of_freedom(
+                family,
+                weights,
+                inference.total_edf,
+            )
     if _expose_exact_support_state:
         result.scop_states = scop_converged
 

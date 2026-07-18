@@ -32,7 +32,7 @@ dev = [
     "uvicorn>=0.30",
 ]
 bench = [
-    "glum>=3.0",
+    "glum>=3.4.1",
     "statsmodels>=0.14",
     "pyarrow>=10.0",
 ]

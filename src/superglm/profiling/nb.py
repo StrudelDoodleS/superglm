@@ -17,6 +17,8 @@ References
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -25,6 +27,12 @@ from scipy.special import digamma, gammaln, polygamma
 
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
+from superglm.model.fit_state import (
+    FrozenMapping,
+    configured_family,
+    configured_lambda2,
+    configured_penalty,
+)
 from superglm.penalties.base import penalty_has_targets
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
@@ -38,7 +46,7 @@ class NBProfileResult:
     nll: float
     n_evaluations: int
     converged: bool
-    cache: dict[float, float] = field(default_factory=dict)
+    cache: Mapping[float, float] = field(default_factory=dict)
 
     # Set after estimation to enable .ci()
     _y: NDArray | None = field(default=None, repr=False)
@@ -46,6 +54,93 @@ class NBProfileResult:
     _weights: NDArray | None = field(default=None, repr=False)
 
     _ci_cache: dict[float, tuple[float, float]] = field(default_factory=dict, repr=False)
+    _publication_locked: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if self.__dict__.get("_publication_locked", False):
+            raise AttributeError(f"published NBProfileResult is immutable; cannot rebind {name!r}")
+        object.__setattr__(self, name, value)
+
+    def _published_with_data(
+        self,
+        y: NDArray,
+        mu: NDArray,
+        weights: NDArray,
+    ) -> NBProfileResult:
+        """Return an owned result synchronized to one final fitted mean vector."""
+        y_owned = _immutable_array_copy(np.asarray(y, dtype=np.float64))
+        mu_owned = _immutable_array_copy(np.asarray(mu, dtype=np.float64))
+        weights_owned = _immutable_array_copy(np.asarray(weights, dtype=np.float64))
+        nll = _nb2_nll(y_owned, mu_owned, weights_owned, float(self.theta_hat))
+        cache = dict(self.cache)
+        cache[round(float(self.theta_hat), 6)] = nll
+        published = type(self)(
+            theta_hat=float(self.theta_hat),
+            nll=nll,
+            n_evaluations=int(self.n_evaluations),
+            converged=bool(self.converged),
+            cache=FrozenMapping(cache),
+            _y=y_owned,
+            _mu=mu_owned,
+            _weights=weights_owned,
+        )
+        object.__setattr__(published, "_publication_locked", True)
+        return published
+
+    def _detached_public_copy(self) -> NBProfileResult:
+        """Return a distinct immutable handle without duplicating immutable row buffers."""
+        cache = self.cache if isinstance(self.cache, FrozenMapping) else FrozenMapping(self.cache)
+        detached = type(self)(
+            theta_hat=float(self.theta_hat),
+            nll=float(self.nll),
+            n_evaluations=int(self.n_evaluations),
+            converged=bool(self.converged),
+            cache=cache,
+            _y=self._y,
+            _mu=self._mu,
+            _weights=self._weights,
+            _ci_cache=dict(self._ci_cache),
+        )
+        object.__setattr__(detached, "_publication_locked", True)
+        return detached
+
+    def __deepcopy__(self, memo: dict[int, object]) -> NBProfileResult:
+        existing = memo.get(id(self))
+        if existing is not None:
+            return existing  # type: ignore[return-value]
+        if self.__dict__.get("_publication_locked", False):
+            result = self._detached_public_copy()
+        else:
+            result = type(self)(
+                theta_hat=float(self.theta_hat),
+                nll=float(self.nll),
+                n_evaluations=int(self.n_evaluations),
+                converged=bool(self.converged),
+                cache=copy.deepcopy(self.cache, memo),
+                _y=copy.deepcopy(self._y, memo),
+                _mu=copy.deepcopy(self._mu, memo),
+                _weights=copy.deepcopy(self._weights, memo),
+                _ci_cache=copy.deepcopy(self._ci_cache, memo),
+            )
+        memo[id(self)] = result
+        return result
+
+    def __getstate__(self) -> dict[str, object]:
+        return dict(self.__dict__)
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        published = bool(state.get("_publication_locked", False))
+        object.__setattr__(self, "_publication_locked", False)
+        for name, value in state.items():
+            if name != "_publication_locked":
+                object.__setattr__(self, name, value)
+        if published:
+            for name in ("_y", "_mu", "_weights"):
+                value = getattr(self, name)
+                if value is not None:
+                    object.__setattr__(self, name, _immutable_array_copy(value))
+            object.__setattr__(self, "cache", FrozenMapping(self.cache))
+            object.__setattr__(self, "_publication_locked", True)
 
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
         """Profile likelihood confidence interval for theta.
@@ -227,6 +322,12 @@ def _theta_ml(
     return theta
 
 
+def _immutable_array_copy(value: NDArray) -> NDArray:
+    """Copy onto a bytes-backed buffer whose write flag cannot be restored."""
+    array = np.ascontiguousarray(value)
+    return np.frombuffer(array.tobytes(order="C"), dtype=array.dtype).reshape(array.shape)
+
+
 def _nb2_nll(y: NDArray, mu: NDArray, weights: NDArray, theta: float) -> float:
     """Weighted mean negative NB2 log-likelihood."""
     ll = (
@@ -291,7 +392,7 @@ def estimate_nb_theta(
     from superglm.distributions import NegativeBinomial
 
     # Validate family
-    family = model.family
+    family = configured_family(model)
     if not isinstance(family, NegativeBinomial):
         raise ValueError(
             f"estimate_nb_theta requires a NegativeBinomial family, got {family!r}. "
@@ -307,15 +408,16 @@ def estimate_nb_theta(
     # Temporary theta for _build_design_matrix (DM doesn't depend on theta)
     from superglm.distributions import NegativeBinomial
 
-    saved_family = model.family
+    saved_family = configured_family(model)
     model.family = NegativeBinomial(theta=1.0)
     try:
         y_arr, w_arr, offset_arr = model._build_design_matrix(X, y, sample_weight, offset)
     finally:
         model.family = saved_family
 
-    if model.penalty.lambda1 is None:
-        model.penalty.lambda1 = model._compute_lambda_max(y_arr, w_arr) * 0.1
+    penalty = configured_penalty(model)
+    if penalty.lambda1 is None:
+        penalty.lambda1 = model._compute_lambda_max(y_arr, w_arr) * 0.1
 
     if offset_arr is None:
         offset_arr = np.zeros(len(y_arr))
@@ -323,7 +425,6 @@ def estimate_nb_theta(
     dm = model._dm
     groups = model._groups
     link = model._link
-    penalty = model.penalty
 
     # Use direct solver when lambda1=0 (no L1 penalty → no BCD needed)
     _use_direct = penalty.lambda1 is not None and (
@@ -348,7 +449,7 @@ def estimate_nb_theta(
                 family=dist,
                 link=link,
                 groups=groups,
-                lambda2=model.lambda2,
+                lambda2=configured_lambda2(model),
                 offset=offset_arr,
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
@@ -364,6 +465,7 @@ def estimate_nb_theta(
                 groups=groups,
                 penalty=penalty,
                 offset=offset_arr,
+                lambda2=configured_lambda2(model),
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
             )
@@ -407,7 +509,7 @@ def estimate_nb_theta(
     theta_hat = round(theta, 6)
     nll_final = cache.get(theta_hat, _nb2_nll(y_arr, mu, w_arr, theta_hat))
 
-    return NBProfileResult(
+    result = NBProfileResult(
         theta_hat=theta_hat,
         nll=nll_final,
         n_evaluations=iteration + 1,
@@ -417,6 +519,7 @@ def estimate_nb_theta(
         _mu=mu,
         _weights=w_arr,
     )
+    return result._published_with_data(y_arr, mu, w_arr)
 
 
 def profile_ci_theta(

@@ -23,7 +23,7 @@ Primary references:
 - [Official changelog](https://tabmat.readthedocs.io/en/latest/changelog.html)
 - [PyPI release and wheels](https://pypi.org/project/tabmat/)
 
-Context7 was queried on 2026-07-17 for Tabmat and glum; it did not return either library. Agents
+Context7 was queried on 2026-07-18 for Tabmat and glum; it did not return either library. Agents
 should therefore use the official links above and the installed 4.2.1 public API rather than
 accepting an unrelated Context7 match.
 
@@ -70,10 +70,14 @@ accepting an unrelated Context7 match.
    fixture shows that this is slightly slower than the existing dense path.
 9. Never infer real Tabmat use from construction alone. Regression tests and benchmarks must count
    `sandwich` and `transpose_matvec` calls on the timed fit.
-10. Mixed native categoricals with at most 100 retained levels require at least 5,000 rows. The
+10. Treat every `DesignMatrix` and its group matrices as immutable after construction. Cached
+    `SplitMatrix`, execution-plan, and bin-space views deliberately share the original storage;
+    mutating an internal group array would make those retained views stale. Model/editor changes
+    must construct a replacement design rather than alter a published matrix in place.
+11. Mixed native categoricals with at most 100 retained levels require at least 5,000 rows. The
     measured 2,000-row setup cell lost, while the 5,000-row cell won; high-cardinality blocks keep
     the general scaled-work gate because their stable dense fallback is already expensive.
-11. Reject a mixed plan before construction when its retained arrays, constructor peak, or
+12. Reject a mixed plan before construction when its retained arrays, constructor peak, or
     per-moment live temporaries exceed the 64 MiB aggregate bounds. Category metadata and temporary
     code copies are part of those estimates, not assumed to fit in incidental index slack.
 
@@ -84,15 +88,93 @@ and at least 50,000 rows. Explicit internal forcing remains available for contro
 The narrow rule matters: one dense column, two separately stored dense columns, sparse mixtures,
 and multiple categorical blocks all produced repeatable counterexamples.
 
+Repeated unweighted design-vector products have a separate retained-storage gate. They never
+construct a `SplitMatrix`: `DesignMatrix.matvec` and `rmatvec` consume the DesignMatrix-owned split
+only after another operation has already built it; the automatic construction policy is unchanged.
+The measured vector layout has at least 10,000 rows, at least eight separately stored scalar
+`DenseGroupMatrix` blocks, and no more than one native categorical block wider than 100 levels per
+three scalar blocks. Sparse, compressed, all-discrete, dense-expanded low-cardinality categorical,
+category-heavy, small-row, and dense-slab layouts retain their existing group kernels. This
+distinction is important because the grouped path creates one row-sized temporary for every scalar
+block, while a single dense slab already performs one efficient matrix-vector product.
+
+With one thread and counterbalanced ordering, the retained split changed `matvec`/`rmatvec` from
+383.5/62.7 to 53.1/41.1 microseconds at 10,000 rows and from 2,153.1/331.0 to 231.1/181.1
+microseconds at 60,000 rows for the certified 20-scalar-plus-160-level layout. Full Gaussian fits
+changed from 6.108 to 5.108 ms at 10,000 rows (16.4% faster) and 19.232 to 11.648 ms at 60,000 rows
+(39.4% faster). Poisson fits changed from 15.340 to 13.410 ms (12.6%) and 56.460 to 45.069 ms
+(20.2%), respectively. Forced half-step fits improved by 14.2% and 31.7%. Coefficient differences
+were at most `3.12e-15`; deviance and iteration counts were unchanged. A 60,000-row Poisson fit
+retained the same 10.669 MB traced peak. The guarded one-dense-slab controller never dispatched to
+Tabmat and stayed within routine timing noise (+1.4% at 10,000 rows and +0.6% at 60,000 rows).
+Direct vector microbenchmarks explain the gate: at 10,000 rows a single slab made `matvec` 46.7%
+slower and `rmatvec` 33.8% slower, whereas 20 scalar blocks made them 86.2% and 34.5% faster. `out=`
+was not adopted because the existing single-output API already avoids the grouped temporaries and
+measurements did not support another workspace lifecycle.
+
+The scalar-block gate is structural rather than tied to one benchmark's category count. With 20
+scalar numeric blocks and zero, one, or two retained native categoricals, 10,000-row vector kernels
+were 90.5%/49.8%, 86.5%/32.4%, and 83.5%/24.2% faster for `matvec`/`rmatvec`; at 60,000 rows they
+were 91.8%/48.4%, 89.3%/44.4%, and 87.0%/41.2% faster. Corresponding Poisson fits improved by
+16.6%, 11.6%, and 3.8% at 10,000 rows and by 16.5%, 20.0%, and 16.0% at 60,000 rows. Every fit
+kept the same deviance and iteration count; the largest coefficient difference was `4.8e-15`.
+The categorical ratio is also measured rather than cosmetic: at 10,000 rows, `rmatvec` regressed by
+3.3% for eight scalar plus four categorical blocks, by 0.8% for 20 plus eight, and by 5.9% for 20
+plus 12. Those controllers remain on the grouped kernels even though their forward products were
+faster through Tabmat; the shared dispatch therefore protects the complete fit hot path rather than
+optimizing one kernel in isolation.
+
+Categorical width has an independent work guard:
+`96 * sum(n_levels) <= n_rows * n_scalar_blocks`. At 10,000 rows with eight scalar blocks,
+transpose products crossed from a 3.4% win at 1,000 total levels to a 0.9% regression around 1,250
+levels and a 9.4% regression at 2,000. At 60,000 rows the analogous one-category crossover was
+between 15,000 and 17,500 levels. Full fits just beyond those crossovers were within 0.11% timing
+noise, so rejecting them loses no material fit-time gain while protecting repeated score products.
+The structural decision is precomputed when the `DesignMatrix` is created; ordinary false cases do
+not pay an extra dispatch helper call on every vector operation.
+
 `discrete=True` remains a hybrid path. BAM-style `B_unique`, bin indices, tensor grids, and
 coefficient transforms stay compressed. Eligible mixed ordinary/discretized centered systems now
-  have a cached public-Tabmat bin-space plan: each spline contributes native bin indicators to one
-  `SplitMatrix`, and only the bounded bin-space moments are transformed through cached supports.
-  Packed all-discrete and unsupported tensor/sparse layouts retain their specialized paths. Frozen
-  controller benchmarks accepted the route after measuring 4.1% faster CPU for a 10k mixed fit,
-  11.6% for a 10k four-spline fit, and 76.7% for a 60k high-cardinality fit; the latter reduced the
-  cold RSS delta from 65.2 to 24.4 MiB. Wholesale row-level materialization remains outside the
-  architecture.
+have a cached public-Tabmat bin-space plan: each spline contributes native bin indicators to one
+`SplitMatrix`, and only the bounded bin-space moments are transformed through cached supports.
+Packed all-discrete and unsupported tensor/sparse layouts retain their specialized paths. Frozen
+controller benchmarks accepted the route after measuring 4.1% faster CPU for a 10k mixed fit,
+11.6% for a 10k four-spline fit, and 76.7% for a 60k high-cardinality fit; the latter reduced the
+cold RSS delta from 65.2 to 24.4 MiB. Wholesale row-level materialization remains outside the
+architecture.
+
+## GLUM 3.4.1 comparison
+
+The current released GLUM source was installed through the benchmark extra and reviewed alongside
+Tabmat 4.2.1. Its useful engineering patterns are family-specific rather than a blanket rejection
+of Fisher scoring:
+
+- GLUM retains Tabmat matrices through its predictor, score, and Hessian operations and uses
+  `sandwich` for weighted cross-products.
+- Its line search computes the predictor direction once and scales that vector during Armijo
+  trials. SuperGLM now follows the same row-space caching rule while retaining its exact
+  penalized-deviance merit and transactional state trace.
+- GLUM uses the exact observed Gamma/log rows `w * (y / mu - 1)` and `w * y / mu`, but still uses
+  Fisher curvature for other supported combinations where that is the chosen stable geometry.
+  SuperGLM's exact Gamma/log kernel agrees with those rows.
+- GLUM can update a Hessian from a thresholded subset of changed rows, but its public default
+  approximation threshold is zero. SuperGLM does not silently introduce that approximation into
+  exact fit or LAML routes; Tabmat's `rows=` API remains a measured future option when an exact or
+  explicitly requested approximation contract exists.
+
+An eager observed-Newton coefficient policy was rejected by benchmark rather than by convention.
+At 60,000 rows and 30 columns it increased normal-start fit time by 127% for a dense design, 81%
+for raw splines, and 22% for discrete splines, while increasing peak memory. A clock-based switch
+also had seed-dependent regressions as large as 63%. The retained controller arms exact
+Gamma/log observed curvature only after a Fisher proposal is atomically rejected; ordinary
+accepted Fisher fits remain coefficient-identical, retain their invariant centered-Gram cache,
+and showed no observed iterations or memory increase. This keeps the robust Newton geometry as a
+recovery mechanism without charging the common hot path.
+
+Primary comparison references:
+
+- [GLUM repository](https://github.com/Quantco/glum)
+- [GLUM documentation](https://glum.readthedocs.io/)
 
 ## Current measured opportunity
 

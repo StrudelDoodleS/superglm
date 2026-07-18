@@ -22,6 +22,7 @@ from superglm.inference._term_model_ops import (
 from superglm.inference._term_ops import (
     term_inference as _term_inference,
 )
+from superglm.model.fit_state import fitted_lambda2
 
 _EDITOR_STALE_INFERENCE_MESSAGE = (
     "Editor coefficient edits make fitted standard errors and confidence "
@@ -34,11 +35,24 @@ def metrics(model, X, y, sample_weight=None, offset=None):
     from superglm.inference.metrics import ModelMetrics
 
     cache_signature = (id(model.result), id(getattr(model, "_reml_penalties", None)))
-    same_fit_refs = (
+    same_fit_objects = (
         X is getattr(model, "_fit_X_ref", None)
         and y is getattr(model, "_fit_y_ref", None)
         and sample_weight is getattr(model, "_fit_sample_weight_ref", None)
         and offset is getattr(model, "_fit_offset_ref", None)
+    )
+    fit_data_guard = getattr(model, "_fit_data_guard", None)
+    same_fit_refs = bool(
+        same_fit_objects
+        and fit_data_guard is not None
+        and fit_data_guard.matches(
+            X,
+            y,
+            sample_weight,
+            offset,
+            fit_weights=getattr(model, "_fit_weights", None),
+            fit_offset=getattr(model, "_fit_offset", None),
+        )
     )
     if (
         same_fit_refs
@@ -47,7 +61,7 @@ def metrics(model, X, y, sample_weight=None, offset=None):
     ):
         return model._fit_metrics_cache
 
-    use_fit_mu = X is getattr(model, "_fit_X_ref", None) and (
+    use_fit_mu = same_fit_refs and (
         (offset is None and model._fit_offset is None)
         or offset is getattr(model, "_fit_offset_ref", None)
     )
@@ -178,7 +192,7 @@ def term_inference(
         interaction_specs=model._interaction_specs,
         covariance_fn=lambda: model._coef_covariance,
         reml_lambdas=getattr(model, "_reml_lambdas", None),
-        lambda2=model.lambda2,
+        lambda2=fitted_lambda2(model),
         group_edf=model._group_edf,
         with_se=with_se,
         simultaneous=simultaneous,

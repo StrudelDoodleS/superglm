@@ -349,7 +349,6 @@ def test_mixed_bin_space_plan_validates_declared_cached_and_moment_shapes(
     import tabmat
 
     dm, _X = _mixed_discrete_design()
-    invalid = DesignMatrix(list(dm.group_matrices), n=dm.n, p=dm.p + 1)
     with monkeypatch.context() as guarded:
         guarded.setattr(
             tabmat,
@@ -359,7 +358,7 @@ def test_mixed_bin_space_plan_validates_declared_cached_and_moment_shapes(
             ),
         )
         with pytest.raises(ValueError, match="declared design shape"):
-            _ = invalid.mixed_bin_space_centering_plan
+            DesignMatrix(list(dm.group_matrices), n=dm.n, p=dm.p + 1)
 
     plan = dm.mixed_bin_space_centering_plan
     assert plan is not None

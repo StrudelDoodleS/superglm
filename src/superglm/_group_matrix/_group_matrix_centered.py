@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 
 import numpy as np
 import tabmat  # type: ignore[import-untyped]
@@ -169,6 +170,60 @@ def _try_tabmat_centering(
         weighted_z=weighted_z,
         sum_w=sum_w,
     )
+
+
+def _try_raw_spline_tabmat_centering(
+    *,
+    plan,
+    W: NDArray,
+    z_centered: NDArray,
+    sum_w: float,
+    preflight: bool,
+    profile: dict | None = None,
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """Use one raw-basis Tabmat sandwich and transform to solver coordinates."""
+    started = perf_counter()
+    if profile is not None:
+        profile["centered_spline_tabmat_attempts"] = (
+            profile.get("centered_spline_tabmat_attempts", 0) + 1
+        )
+    # Raw SSP bases have compact support, while arbitrary solver transforms can
+    # still create unsafe locations.  The authoritative transformed-moment
+    # certificate below covers both cases, so a separate Tabmat standardize
+    # pass would only duplicate the weighted sparse traversal.
+    _ = preflight
+    tabmat_weights = _tabmat_vector(W)
+    result = None
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        raw_xtw = np.asarray(
+            plan.split.transpose_matvec(tabmat_weights),
+            dtype=np.float64,
+        )
+        weighted_z = _tabmat_vector(tabmat_weights * z_centered)
+        raw_gram = np.asarray(plan.split.sandwich(tabmat_weights), dtype=np.float64)
+        raw_rhs = np.asarray(plan.split.transpose_matvec(weighted_z), dtype=np.float64)
+        xtw = plan.transform_vector(raw_xtw)
+        gram = plan.transform_gram(raw_gram)
+        rhs = plan.transform_vector(raw_rhs)
+        result = _certify_raw_centering(
+            raw_gram=gram,
+            xtw=xtw,
+            raw_rhs=rhs,
+            weighted_z=weighted_z,
+            sum_w=sum_w,
+        )
+    if profile is not None:
+        outcome = "accepts" if result is not None else "rejections"
+        key = f"centered_spline_tabmat_{outcome}"
+        profile[key] = profile.get(key, 0) + 1
+        profile["centered_spline_tabmat_s"] = (
+            profile.get("centered_spline_tabmat_s", 0.0) + perf_counter() - started
+        )
+        profile["centered_spline_tabmat_retained_bytes"] = max(
+            profile.get("centered_spline_tabmat_retained_bytes", 0),
+            plan.retained_bytes,
+        )
+    return result
 
 
 def _try_factored_tensor_centering(
@@ -745,6 +800,112 @@ def _compensated_add(total: NDArray, compensation: NDArray, value: NDArray) -> N
     updated = total + corrected
     compensation[...] = (updated - total) - corrected
     total[...] = updated
+
+
+def stable_centered_gram_rhs(
+    *,
+    dm,
+    W: NDArray,
+    z_centered: NDArray,
+    sum_w: float,
+    chunk_size: int = 8192,
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Return mean and centered products without forming a large raw mean.
+
+    The weighted location is accumulated relative to one observed row, and
+    the same anchor/difference representation is used for the Gram and RHS.
+    A translated column therefore loses only the unavoidable input ULP; it
+    never subtracts two O(location) moments or centers rows with a rounded
+    O(location) mean.
+    """
+    n, p = dm.shape
+    W = np.asarray(W, dtype=np.float64)
+    z_centered = np.asarray(z_centered, dtype=np.float64)
+    if W.shape != (n,) or z_centered.shape != (n,):
+        raise ValueError("W and z_centered must match the design row count")
+    if not np.isfinite(sum_w) or sum_w <= 0.0:
+        raise ValueError("sum_w must be positive and finite")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    if p == 0:
+        return (
+            np.zeros(0, dtype=np.float64),
+            np.zeros((0, 0), dtype=np.float64),
+            np.zeros(0, dtype=np.float64),
+        )
+
+    anchor_row = int(np.argmax(W))
+    anchor = np.asarray(
+        dm.row_subset(np.array([anchor_row], dtype=np.intp)).toarray()[0],
+        dtype=np.float64,
+    )
+    weighted_difference = np.zeros(p, dtype=np.float64)
+    mean_compensation = np.zeros(p, dtype=np.float64)
+    for start in range(0, n, chunk_size):
+        stop = min(start + chunk_size, n)
+        rows = np.arange(start, stop, dtype=np.intp)
+        block = np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+        contribution = (block - anchor).T @ W[start:stop]
+        _compensated_add(weighted_difference, mean_compensation, contribution)
+    mean_difference = weighted_difference / sum_w
+    mean_x = anchor + mean_difference
+
+    gram = np.zeros((p, p), dtype=np.float64)
+    gram_compensation = np.zeros_like(gram)
+    rhs = np.zeros(p, dtype=np.float64)
+    rhs_compensation = np.zeros_like(rhs)
+    for start in range(0, n, chunk_size):
+        stop = min(start + chunk_size, n)
+        rows = np.arange(start, stop, dtype=np.intp)
+        block = np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+        block = (block - anchor) - mean_difference
+        W_block = W[start:stop]
+        _compensated_add(
+            gram,
+            gram_compensation,
+            block.T @ (W_block[:, None] * block),
+        )
+        _compensated_add(
+            rhs,
+            rhs_compensation,
+            block.T @ (W_block * z_centered[start:stop]),
+        )
+    return mean_x, 0.5 * (gram + gram.T), rhs
+
+
+def stable_centered_matvec(
+    *,
+    dm,
+    beta: NDArray,
+    W: NDArray,
+    sum_w: float,
+    chunk_size: int = 8192,
+) -> NDArray:
+    """Evaluate ``(X - weighted_mean(X)) @ beta`` in anchored coordinates."""
+    n, p = dm.shape
+    beta = np.asarray(beta, dtype=np.float64)
+    W = np.asarray(W, dtype=np.float64)
+    if beta.shape != (p,) or W.shape != (n,):
+        raise ValueError("centered matvec inputs must match the design")
+    if not np.isfinite(sum_w) or sum_w <= 0.0:
+        raise ValueError("sum_w must be positive and finite")
+    if p == 0:
+        return np.zeros(n, dtype=np.float64)
+
+    anchor_row = int(np.argmax(W))
+    anchor = np.asarray(
+        dm.row_subset(np.array([anchor_row], dtype=np.intp)).toarray()[0],
+        dtype=np.float64,
+    )
+    values = np.empty(n, dtype=np.float64)
+    for start in range(0, n, chunk_size):
+        stop = min(start + chunk_size, n)
+        rows = np.arange(start, stop, dtype=np.intp)
+        block = np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+        values[start:stop] = (block - anchor) @ beta
+    mean_value = float(np.dot(W, values) / sum_w)
+    values -= mean_value
+    return values
 
 
 def centered_gram_rhs(

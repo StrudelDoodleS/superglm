@@ -12,6 +12,7 @@ import tabmat
 from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm._group_matrix._group_matrix_execution import GroupSpan, MatrixExecutionPlan
 from superglm._group_matrix._group_matrix_tabmat import _build_tabmat_split
+from superglm.distributions import Poisson
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -21,6 +22,9 @@ from superglm.group_matrix import (
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
 )
+from superglm.links import LogLink
+from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.types import GroupSlice
 
 
 def _mixed_groups(seed: int = 170):
@@ -84,6 +88,264 @@ def _count_tabmat_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     monkeypatch.setattr(tabmat.SplitMatrix, "sandwich", counted_sandwich)
     monkeypatch.setattr(tabmat.SplitMatrix, "transpose_matvec", counted_transpose)
     return calls
+
+
+def _count_tabmat_vector_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    calls = {"matvec": 0, "transpose_matvec": 0}
+    original_matvec = tabmat.SplitMatrix.matvec
+    original_transpose = tabmat.SplitMatrix.transpose_matvec
+
+    def counted_matvec(self, *args, **kwargs):
+        calls["matvec"] += 1
+        return original_matvec(self, *args, **kwargs)
+
+    def counted_transpose(self, *args, **kwargs):
+        calls["transpose_matvec"] += 1
+        return original_transpose(self, *args, **kwargs)
+
+    monkeypatch.setattr(tabmat.SplitMatrix, "matvec", counted_matvec)
+    monkeypatch.setattr(tabmat.SplitMatrix, "transpose_matvec", counted_transpose)
+    return calls
+
+
+def _ordinary_vector_groups(
+    *,
+    n: int,
+    dense_blocks: int,
+    seed: int,
+    categorical_blocks: int = 1,
+) -> tuple[np.random.Generator, list, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    dense = [DenseGroupMatrix(rng.normal(size=n)) for _ in range(dense_blocks)]
+    categoricals = [
+        CategoricalGroupMatrix(
+            rng.integers(-1, 160, size=n, dtype=np.intp),
+            n_levels=160,
+        )
+        for _ in range(categorical_blocks)
+    ]
+    groups = [*dense, *categoricals]
+    return rng, groups, np.column_stack([group.toarray() for group in groups])
+
+
+@pytest.mark.parametrize("categorical_blocks", [0, 1, 2])
+def test_retained_tabmat_split_accelerates_many_block_design_vectors(
+    monkeypatch: pytest.MonkeyPatch,
+    categorical_blocks: int,
+) -> None:
+    rng, groups, X = _ordinary_vector_groups(
+        n=10_000,
+        dense_blocks=8,
+        categorical_blocks=categorical_blocks,
+        seed=190 + categorical_blocks,
+    )
+    dm = DesignMatrix(groups, n=X.shape[0], p=X.shape[1])
+    beta = rng.normal(size=X.shape[1])
+    rows = rng.normal(size=X.shape[0])
+    expected_eta = X @ beta
+    expected_score = X.T @ rows
+    beta.setflags(write=False)
+    rows.setflags(write=False)
+
+    assert dm.tabmat_split is not None
+    calls = _count_tabmat_vector_calls(monkeypatch)
+
+    np.testing.assert_allclose(dm.matvec(beta), expected_eta, rtol=2e-14, atol=2e-13)
+    np.testing.assert_allclose(dm.rmatvec(rows), expected_score, rtol=2e-14, atol=2e-11)
+    assert calls == {"matvec": 1, "transpose_matvec": 1}
+
+
+def test_retained_tabmat_split_rejects_category_heavy_vector_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(195)
+    n = 10_000
+    dense_groups = [DenseGroupMatrix(rng.normal(size=n)) for _ in range(8)]
+    categorical_groups = [
+        CategoricalGroupMatrix(
+            rng.integers(-1, 160, size=n, dtype=np.intp),
+            n_levels=160,
+        )
+        for _ in range(4)
+    ]
+    groups = [*dense_groups, *categorical_groups]
+    dm = DesignMatrix(groups, n=n, p=sum(group.shape[1] for group in groups))
+    beta = rng.normal(size=dm.p)
+    rows = rng.normal(size=n)
+    expected_eta = np.zeros(n)
+    expected_score = np.empty(dm.p)
+    column = 0
+    for group in groups:
+        width = group.shape[1]
+        expected_eta += group.matvec(beta[column : column + width])
+        expected_score[column : column + width] = group.rmatvec(rows)
+        column += width
+
+    assert dm.tabmat_split is not None
+    calls = _count_tabmat_vector_calls(monkeypatch)
+
+    np.testing.assert_allclose(dm.matvec(beta), expected_eta, rtol=2e-14, atol=2e-13)
+    np.testing.assert_allclose(dm.rmatvec(rows), expected_score, rtol=2e-14, atol=2e-11)
+    assert calls == {"matvec": 0, "transpose_matvec": 0}
+
+
+@pytest.mark.parametrize(
+    ("categorical_blocks", "levels"),
+    [(1, 2_000), (2, 1_000)],
+)
+def test_retained_tabmat_split_rejects_high_cardinality_vector_work(
+    monkeypatch: pytest.MonkeyPatch,
+    categorical_blocks: int,
+    levels: int,
+) -> None:
+    rng = np.random.default_rng(196 + categorical_blocks)
+    n = 10_000
+    dense_groups = [DenseGroupMatrix(rng.normal(size=n)) for _ in range(8)]
+    categorical_groups = [
+        CategoricalGroupMatrix(
+            rng.integers(-1, levels, size=n, dtype=np.intp),
+            n_levels=levels,
+        )
+        for _ in range(categorical_blocks)
+    ]
+    groups = [*dense_groups, *categorical_groups]
+    dm = DesignMatrix(groups, n=n, p=sum(group.shape[1] for group in groups))
+    beta = rng.normal(size=dm.p)
+    rows = rng.normal(size=n)
+    expected_eta = np.zeros(n)
+    expected_score = np.empty(dm.p)
+    column = 0
+    for group in groups:
+        width = group.shape[1]
+        expected_eta += group.matvec(beta[column : column + width])
+        expected_score[column : column + width] = group.rmatvec(rows)
+        column += width
+
+    assert dm.tabmat_split is not None
+    calls = _count_tabmat_vector_calls(monkeypatch)
+
+    np.testing.assert_allclose(dm.matvec(beta), expected_eta, rtol=2e-14, atol=2e-13)
+    np.testing.assert_allclose(dm.rmatvec(rows), expected_score, rtol=2e-14, atol=2e-11)
+    assert calls == {"matvec": 0, "transpose_matvec": 0}
+
+
+def test_design_vectors_do_not_build_an_eligible_tabmat_split() -> None:
+    rng, groups, X = _ordinary_vector_groups(n=10_000, dense_blocks=8, seed=191)
+    dm = DesignMatrix(groups, n=X.shape[0], p=X.shape[1])
+    beta = rng.normal(size=X.shape[1])
+    rows = rng.normal(size=X.shape[0])
+
+    assert not dm._tabmat_built
+    np.testing.assert_allclose(dm.matvec(beta), X @ beta, rtol=2e-14, atol=2e-13)
+    np.testing.assert_allclose(dm.rmatvec(rows), X.T @ rows, rtol=2e-14, atol=2e-11)
+    assert not dm._tabmat_built
+
+
+def test_retained_tabmat_split_keeps_one_dense_block_on_group_vectors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(192)
+    n = 10_000
+    groups = [
+        DenseGroupMatrix(rng.normal(size=(n, 8))),
+        CategoricalGroupMatrix(rng.integers(-1, 160, size=n), n_levels=160),
+    ]
+    X = np.column_stack([group.toarray() for group in groups])
+    dm = DesignMatrix(groups, n=n, p=X.shape[1])
+    beta = rng.normal(size=X.shape[1])
+    rows = rng.normal(size=n)
+
+    assert dm.tabmat_split is not None
+    calls = _count_tabmat_vector_calls(monkeypatch)
+
+    np.testing.assert_allclose(dm.matvec(beta), X @ beta, rtol=2e-14, atol=2e-13)
+    np.testing.assert_allclose(dm.rmatvec(rows), X.T @ rows, rtol=2e-14, atol=2e-11)
+    assert calls == {"matvec": 0, "transpose_matvec": 0}
+
+
+def test_discrete_design_vectors_keep_compressed_group_kernels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(193)
+    n = 10_000
+    n_bins = 64
+    group = DiscretizedSSPGroupMatrix(
+        rng.normal(size=(n_bins, 6)),
+        rng.normal(size=(6, 4)),
+        rng.integers(0, n_bins, size=n, dtype=np.intp),
+    )
+    dm = DesignMatrix([group], n=n, p=4)
+    beta = rng.normal(size=4)
+    rows = rng.normal(size=n)
+    expected_eta = group.matvec(beta)
+    expected_score = group.rmatvec(rows)
+
+    assert dm.tabmat_split is None
+    calls = _count_tabmat_vector_calls(monkeypatch)
+
+    np.testing.assert_array_equal(dm.matvec(beta), expected_eta)
+    np.testing.assert_array_equal(dm.rmatvec(rows), expected_score)
+    assert calls == {"matvec": 0, "transpose_matvec": 0}
+
+
+def test_retained_tabmat_vectors_preserve_full_fit_state() -> None:
+    rng, groups, X = _ordinary_vector_groups(n=10_000, dense_blocks=8, seed=194)
+    eta = 0.2 + X[:, :8] @ rng.normal(scale=0.08, size=8)
+    y = rng.poisson(np.exp(eta))
+    starts = np.cumsum([0, *[group.shape[1] for group in groups]])
+    slices = [
+        GroupSlice(name=f"g{index}", start=int(starts[index]), end=int(starts[index + 1]))
+        for index in range(len(groups))
+    ]
+    penalty = 0.02 * np.eye(X.shape[1])
+    baseline_dm = DesignMatrix(groups, n=X.shape[0], p=X.shape[1])
+    candidate_dm = DesignMatrix(groups, n=X.shape[0], p=X.shape[1])
+    baseline_dm._tabmat_vector_candidate = False
+
+    baseline, _ = fit_irls_direct(
+        baseline_dm,
+        y,
+        np.ones(len(y)),
+        Poisson(),
+        LogLink(),
+        slices,
+        lambda2=0.02,
+        S_override=penalty,
+        max_iter=20,
+        tol=1e-10,
+        record_diagnostics=True,
+        compute_rank_info=False,
+        _compute_fit_statistics=False,
+    )
+    candidate, _ = fit_irls_direct(
+        candidate_dm,
+        y,
+        np.ones(len(y)),
+        Poisson(),
+        LogLink(),
+        slices,
+        lambda2=0.02,
+        S_override=penalty,
+        max_iter=20,
+        tol=1e-10,
+        record_diagnostics=True,
+        compute_rank_info=False,
+        _compute_fit_statistics=False,
+    )
+
+    assert candidate_dm._tabmat_vector_candidate is True
+    assert candidate.n_iter == baseline.n_iter
+    assert candidate.converged == baseline.converged
+    assert candidate.deviance == pytest.approx(baseline.deviance, rel=2e-14, abs=2e-11)
+    np.testing.assert_allclose(candidate.beta, baseline.beta, rtol=2e-13, atol=2e-13)
+    baseline_mu = np.exp(baseline_dm.matvec(baseline.beta) + baseline.intercept)
+    candidate_mu = np.exp(candidate_dm.matvec(candidate.beta) + candidate.intercept)
+    np.testing.assert_allclose(candidate_mu, baseline_mu, rtol=2e-13, atol=2e-13)
+    assert candidate.iteration_log is not None
+    assert baseline.iteration_log is not None
+    assert [row.accepted_alpha for row in candidate.iteration_log] == [
+        row.accepted_alpha for row in baseline.iteration_log
+    ]
 
 
 @pytest.mark.parametrize("signed", [False, True])
@@ -390,12 +652,18 @@ def test_design_matrix_restores_legacy_tabmat_pickle_state(split_built: bool) ->
     np.testing.assert_allclose(restored.toarray(), np.column_stack([g.toarray() for g in groups]))
 
 
-def test_design_matrix_execution_plan_rejects_declared_width_mismatch() -> None:
+def test_design_matrix_constructor_rejects_declared_width_mismatch() -> None:
     _rng, groups, X = _mixed_groups(seed=173)
-    dm = DesignMatrix(groups, n=X.shape[0], p=X.shape[1] + 1)
 
     with pytest.raises(ValueError, match="declared design shape"):
-        _ = dm.execution_plan
+        DesignMatrix(groups, n=X.shape[0], p=X.shape[1] + 1)
+
+
+def test_design_matrix_constructor_rejects_declared_row_mismatch() -> None:
+    _rng, groups, X = _mixed_groups(seed=174)
+
+    with pytest.raises(ValueError, match="declared design shape"):
+        DesignMatrix(groups, n=X.shape[0] + 1, p=X.shape[1])
 
 
 def test_design_matrix_execution_plan_reuses_existing_tabmat_split() -> None:

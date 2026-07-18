@@ -30,12 +30,37 @@ from superglm.reml.penalty_algebra import (
     build_penalty_context,
     build_penalty_matrix,
     coerce_reml_penalties,
+    compute_penalty_nullity,
     compute_total_penalty_rank,
 )
 from superglm.reml.result import REMLResult, _map_beta_between_bases
 from superglm.solvers.irls_direct import _invert_xtwx_plus_penalty, fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 from superglm.types import GroupSlice, PenaltyComponent
+
+
+def _center_cached_direct_gram(centered_XtWX: NDArray, pirls_result: Any) -> NDArray:
+    """Validate the authoritative intercept-profiled Gram for cheap iterations.
+
+    The direct solver builds this matrix in centered coordinates.  Rebuilding
+    it from raw moments would subtract two location-scale quantities and lose
+    the fitted geometry for large feature translations.
+    """
+    rank_info = getattr(pirls_result, "rank_info", None)
+    if rank_info is None:
+        raise RuntimeError("cached direct REML requires centered rank metadata")
+    centered_XtWX = np.asarray(centered_XtWX, dtype=np.float64)
+    mean_x = np.asarray(rank_info.mean_x, dtype=np.float64)
+    if centered_XtWX.ndim != 2 or centered_XtWX.shape[0] != centered_XtWX.shape[1]:
+        raise ValueError("cached centered XtWX must be square")
+    if mean_x.shape != (centered_XtWX.shape[0],):
+        raise ValueError("cached mean_x does not match centered XtWX")
+    sum_w = float(rank_info.sum_w)
+    if not np.isfinite(sum_w) or sum_w <= 0.0:
+        raise ValueError("cached sum_w must be positive and finite")
+    if not np.all(np.isfinite(centered_XtWX)):
+        raise ValueError("cached centered XtWX must be finite")
+    return centered_XtWX
 
 
 def run_reml_once(
@@ -100,7 +125,7 @@ def run_reml_once(
     aa_prev_log_x: NDArray | None = None
     aa_prev_log_gx: NDArray | None = None
     cheap_iter = False
-    cached_direct_xtwx: NDArray | None = None
+    cached_direct_centered_xtwx: NDArray | None = None
     last_pirls_iters = 0
     direct_has_scalar_groups = any(pc.rank <= 1 for pc in penalties_rro)
     direct_cheap_threshold = 0.01 if direct_has_scalar_groups else 0.2
@@ -113,7 +138,8 @@ def run_reml_once(
             S_iter = build_penalty_matrix(
                 dm.group_matrices, groups, lambdas, dm.p, reml_penalties=penalties_rro
             )
-            pirls_result, XtWX_S_inv_full, XtWX_full = fit_irls_direct(
+            direct_cache: dict[str, Any] = {}
+            pirls_result, XtWX_S_inv_full, _XtWX_full = fit_irls_direct(
                 X=dm,
                 y=y,
                 weights=sample_weight,
@@ -127,11 +153,14 @@ def run_reml_once(
                 return_xtwx=True,
                 direct_solve=direct_solve,
                 S_override=S_iter,
+                cache_out=direct_cache,
             )
             beta = pirls_result.beta
             intercept = pirls_result.intercept
             last_pirls_iters = pirls_result.n_iter
-            cached_direct_xtwx = XtWX_full
+            cached_direct_centered_xtwx = _center_cached_direct_gram(
+                direct_cache["centered_XtWX"], pirls_result
+            )
 
             eta = stabilize_eta(dm.matvec(beta) + intercept + offset_arr, link)
             mu = clip_mu(link.inverse(eta), distribution)
@@ -169,10 +198,10 @@ def run_reml_once(
             W = sample_weight * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
         if use_direct and cheap_iter:
-            if cached_direct_xtwx is None:
-                raise RuntimeError("REML cheap iteration missing cached direct XtWX")
+            if cached_direct_centered_xtwx is None:
+                raise RuntimeError("REML cheap iteration missing cached centered XtWX")
             XtWX_S_inv = _invert_xtwx_plus_penalty(
-                cached_direct_xtwx,
+                cached_direct_centered_xtwx,
                 dm.group_matrices,
                 groups,
                 lambdas,
@@ -202,7 +231,16 @@ def run_reml_once(
                 reml_penalties=penalties_rro,
             )
             pq = float(beta @ S_fp @ beta)
-            M_p = compute_total_penalty_rank(penalties_rro)
+            hessian_rank = getattr(pirls_result, "reml_hessian_rank", None)
+            if use_direct and hessian_rank is not None:
+                M_p = compute_penalty_nullity(
+                    S_fp,
+                    hessian_rank=hessian_rank,
+                    penalties=penalties_rro,
+                    lambdas=lambdas,
+                )
+            else:
+                M_p = compute_total_penalty_rank(penalties_rro)
             phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
             inv_phi = 1.0 / phi_hat
 

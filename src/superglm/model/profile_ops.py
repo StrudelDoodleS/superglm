@@ -154,24 +154,112 @@ def _synchronize_tweedie_profile_refit(model, y, profile_result) -> None:
 
 
 def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fit", **kwargs):
-    """Estimate NB theta via profile likelihood, refit, and return result."""
+    """Estimate NB theta and atomically publish one profiled final fit."""
+    from superglm.model import fit_ops
+    from superglm.model.fit_state import _install_fit_state, capture_fit_state
+    from superglm.model.fit_workspace import FitWorkspace
     from superglm.profiling.nb import estimate_nb_theta
 
     resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
-
     progress_callback = kwargs.pop("progress_callback", None)
-    result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset, **kwargs)
+
+    X_ref = X
+    y_ref = y
+    sample_weight_ref = sample_weight
+    offset_ref = offset
+    X, y, sample_weight, offset = fit_ops._validate_entrypoint_input(
+        model,
+        X,
+        y,
+        sample_weight,
+        offset,
+    )
+    validated_inputs = (X, y, sample_weight, offset)
+
+    profile_workspace = FitWorkspace.start(
+        model,
+        mode="estimate_theta_profile",
+        validated_inputs=validated_inputs,
+    )
+    result = estimate_nb_theta(
+        profile_workspace.model,
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+        **kwargs,
+    )
+    # The profile result retains only the vectors needed for reporting/CI.
+    # Release its design workspace before allocating the final-fit design.
+    del profile_workspace
     if progress_callback is not None:
         progress_callback("best_found", {"profile_estimate": _theta_estimate_payload(result)})
-    model.family = NegativeBinomial(theta=result.theta_hat)
     if progress_callback is not None:
         progress_callback("final_refit", {"profile_estimate": _theta_estimate_payload(result)})
+
+    final_workspace = FitWorkspace.start(
+        model,
+        mode=resolved_mode,
+        validated_inputs=validated_inputs,
+        config_overrides={
+            "family": NegativeBinomial(theta=result.theta_hat),
+            # Profile publication must synchronize against the final refit even
+            # when the public model requests compact fitted state.  Row-scale
+            # buffers are released again before the atomic install below.
+            "retain_fit_state": True,
+        },
+    )
+    debug_recorder = None
     if resolved_mode == "fit_reml":
-        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
+        debug_recorder = fit_ops._fit_reml_in_workspace(
+            final_workspace.model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+            pirls_tol=final_workspace.model._tol,
+            max_pirls_iter=final_workspace.model._max_iter,
+        )
     else:
-        model.fit(X, y, sample_weight=sample_weight, offset=offset)
-    model._nb_profile_result = result  # after refit so fit()'s clear doesn't wipe it
-    return result
+        fit_ops._fit_in_workspace(
+            final_workspace.model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+        )
+
+    final_model = final_workspace.model
+    installed_result = result._published_with_data(
+        y,
+        final_model._fit_mu,
+        final_model._fit_weights,
+    )
+    final_model._nb_profile_result = installed_result
+    if not model._retain_fit_state:
+        final_model._retain_fit_state = False
+        fit_ops._maybe_release_fit_state(final_model)
+    # Allocate the distinct public handle before the no-fail dictionary swap.
+    # A future custom result implementation may make this operation fallible;
+    # such a failure must preserve the previously installed model revision.
+    public_result = installed_result._detached_public_copy()
+    candidate = capture_fit_state(
+        final_workspace,
+        model,
+        revision=model._fit_revision + 1,
+    )
+    _install_fit_state(model, candidate)
+    if resolved_mode == "fit_reml":
+        fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
+    return public_result
 
 
 def _resolve_profile_fit_mode(model, fit_mode: str) -> str:

@@ -464,9 +464,21 @@ class TestDiscretePath:
             ratio = lam_e / max(lam_d, 1e-12)
             assert 0.1 < ratio < 10, f"{name}: exact={lam_e:.4g} vs discrete={lam_d:.4g}"
 
-    def test_discrete_gamma_estimated_scale(self, gamma_data):
-        """Discrete path works with estimated-scale families."""
+    def test_discrete_gamma_estimated_scale(self, gamma_data, monkeypatch):
+        """Discrete scale profiling uses penalty nullity, not penalty rank."""
+        import superglm.reml.discrete as discrete
+        from superglm.reml.penalty_algebra import compute_penalty_nullity
+
         X, y, w = gamma_data
+        dimensions: list[tuple[float, float]] = []
+
+        def observed_nullity(*args, **kwargs):
+            value = compute_penalty_nullity(*args, **kwargs)
+            penalties = kwargs["penalties"]
+            dimensions.append((value, float(sum(pc.rank for pc in penalties))))
+            return value
+
+        monkeypatch.setattr(discrete, "compute_penalty_nullity", observed_nullity)
         model = SuperGLM(
             family="gamma",
             selection_penalty=0,
@@ -474,6 +486,8 @@ class TestDiscretePath:
             features={"x": Spline(n_knots=6, penalty="ssp")},
         )
         model.fit_reml(X, y, sample_weight=w)
+        assert dimensions
+        assert any(nullity != rank for nullity, rank in dimensions)
         assert model._reml_result.converged
 
 

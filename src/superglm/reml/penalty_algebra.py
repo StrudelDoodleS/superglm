@@ -304,10 +304,15 @@ def build_penalty_matrix(
     This is the shared penalty-assembly contract used by REML objective and
     optimizer code.  It was lifted out of ``solvers.irls_direct`` so REML
     modules no longer need to reach through a solver-private helper.
+
+    When ``reml_penalties`` is supplied, its components are authoritative for
+    every group index they represent.  The SCOP group fallback below covers
+    only SCOP groups omitted from that component list.
     """
     S = np.zeros((p, p))
 
     if reml_penalties is not None:
+        represented_group_indices = {pc.group_index for pc in reml_penalties}
         for pc in reml_penalties:
             gm = group_matrices[pc.group_index]
             lam = lambda2[pc.name] if isinstance(lambda2, dict) else lambda2
@@ -318,7 +323,9 @@ def build_penalty_matrix(
             )
             S[pc.group_sl, pc.group_sl] += lam * omega_ssp
 
-        for gm, g in zip(group_matrices, groups):
+        for group_index, (gm, g) in enumerate(zip(group_matrices, groups)):
+            if group_index in represented_group_indices:
+                continue
             if g.scop_reparameterization is not None and g.penalized:
                 lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
                 if lam_g > 0:
@@ -382,12 +389,44 @@ def build_penalty_components(
     component_cache = None if cache is None else cache.setdefault("penalty_components", {})
     eps_thresh = np.finfo(float).eps ** (2 / 3)
 
+    def _canonicalize_ssp_penalty(
+        omega_ssp: NDArray,
+        rank: float,
+        *,
+        eigenvalues: NDArray | None = None,
+        eigenvectors: NDArray | None = None,
+    ) -> NDArray:
+        """Enforce the declared PSD rank after a noisy SSP congruence.
+
+        Spline penalties are PSD by construction, but transforming them with
+        ``R_inv.T @ omega @ R_inv`` can leave 1e-12-scale negative curvature
+        in an exact null direction.  Rank selection has already identified
+        the authoritative retained subspace, so reconstructing that subspace
+        removes only numerical null-space contamination instead of weakening
+        downstream PSD validation.
+        """
+        symmetric = 0.5 * (np.asarray(omega_ssp, dtype=float) + np.asarray(omega_ssp).T)
+        width = symmetric.shape[0]
+        retained = int(rank)
+        if retained == width:
+            return symmetric
+        if retained == 0:
+            return np.zeros_like(symmetric)
+        if eigenvalues is None or eigenvectors is None:
+            eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
+        retained_values = np.asarray(eigenvalues[-retained:], dtype=float)
+        if np.any(retained_values <= 0.0):
+            raise ValueError("declared penalty rank includes non-positive SSP curvature")
+        retained_vectors = np.asarray(eigenvectors[:, -retained:], dtype=float)
+        canonical = (retained_vectors * retained_values) @ retained_vectors.T
+        return 0.5 * (canonical + canonical.T)
+
     def _rank_and_logdet(
         omega_raw: NDArray,
         omega_ssp: NDArray,
         *,
         force_solver_rank: bool = False,
-    ) -> tuple[float, float, NDArray]:
+    ) -> tuple[float, float, NDArray, NDArray]:
         """Compute basis-invariant rank from raw penalty, log|Ω|₊ from SSP.
 
         For square SSP congruences, rank is computed from the raw
@@ -411,7 +450,7 @@ def build_penalty_components(
         raw_rank = float(np.sum(raw_eigvals > raw_thresh))
 
         # log|Ω|₊ and eigvals from SSP penalty (same basis as log|H|)
-        ssp_eigvals = np.linalg.eigvalsh(omega_ssp)
+        ssp_eigvals, ssp_eigvectors = np.linalg.eigh(omega_ssp)
         ssp_thresh = eps_thresh * max(ssp_eigvals.max(), 1e-12)
         ssp_rank = float(np.sum(ssp_eigvals > ssp_thresh))
         rank = ssp_rank if force_solver_rank or raw_rank > omega_ssp.shape[0] else raw_rank
@@ -426,7 +465,13 @@ def build_penalty_components(
             pos_eigvals = np.array([])
             log_det = 0.0
 
-        return rank, log_det, pos_eigvals
+        canonical_ssp = _canonicalize_ssp_penalty(
+            omega_ssp,
+            rank,
+            eigenvalues=ssp_eigvals,
+            eigenvectors=ssp_eigvectors,
+        )
+        return rank, log_det, pos_eigvals, canonical_ssp
 
     for idx, g in reml_groups:
         gm = group_matrices[idx]
@@ -449,15 +494,15 @@ def build_penalty_components(
                     eps_thresh=eps_thresh,
                 )
                 if tensor_summary is not None:
-                    omega_ssp_j = omega_j
                     rank, log_det, pos_eigvals = tensor_summary
+                    omega_ssp_j = _canonicalize_ssp_penalty(omega_j, rank)
                 else:
                     omega_ssp_j = gm.R_inv.T @ omega_j @ gm.R_inv
                     force_solver_rank = (
                         isinstance(gm, DiscretizedTensorGroupMatrix)
                         and getattr(gm, "projection", None) is not None
                     )
-                    rank, log_det, pos_eigvals = _rank_and_logdet(
+                    rank, log_det, pos_eigvals, omega_ssp_j = _rank_and_logdet(
                         omega_j,
                         omega_ssp_j,
                         force_solver_rank=force_solver_rank,
@@ -485,7 +530,7 @@ def build_penalty_components(
                 isinstance(gm, DiscretizedTensorGroupMatrix)
                 and getattr(gm, "projection", None) is not None
             )
-            rank, log_det, pos_eigvals = _rank_and_logdet(
+            rank, log_det, pos_eigvals, omega_ssp = _rank_and_logdet(
                 gm.omega,
                 omega_ssp,
                 force_solver_rank=force_solver_rank,
@@ -648,6 +693,126 @@ def compute_total_penalty_rank(
             thresh = eps_thresh * max(eigvals.max(), 1e-12)
             total += float(np.sum(eigvals > thresh))
     return total
+
+
+def _matrix_penalty_rank(penalty_matrix: NDArray) -> int:
+    """Numerical rank fallback for an already assembled PSD penalty."""
+    from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_factor
+
+    penalty_matrix = np.asarray(penalty_matrix, dtype=np.float64)
+    if penalty_matrix.ndim != 2 or penalty_matrix.shape[0] != penalty_matrix.shape[1]:
+        raise ValueError("penalty_matrix must be square")
+    symmetric = 0.5 * (penalty_matrix + penalty_matrix.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
+    scale = max(
+        float(np.max(np.abs(eigenvalues), initial=0.0)),
+        np.finfo(np.float64).tiny,
+    )
+    negative_tolerance = 1e-10 * scale
+    if eigenvalues.size and eigenvalues[0] < -negative_tolerance:
+        raise ValueError("penalty_matrix must be positive semidefinite")
+    spectral_cutoff = SHARED_RANK_POLICY.gram_rcond * scale
+    positive = eigenvalues > spectral_cutoff
+    penalty_factor = (
+        np.sqrt(eigenvalues[positive])[:, None] * eigenvectors[:, positive].T
+        if np.any(positive)
+        else np.empty((0, penalty_matrix.shape[0]))
+    )
+    return decompose_factor(penalty_factor).rank
+
+
+def _structural_active_penalty_rank(
+    penalties: list[PenaltyComponent],
+    lambdas: dict[str, float],
+) -> int:
+    """Rank the active component null-space intersection without lambda scaling."""
+    total = 0
+    for indices in _group_penalties(penalties).values():
+        active: list[PenaltyComponent] = []
+        for index in indices:
+            component = penalties[index]
+            lam = float(lambdas.get(component.name, 1.0))
+            if not np.isfinite(lam) or lam < 0.0:
+                raise ValueError("smoothing parameters must be finite and non-negative")
+            if lam > 0.0:
+                active.append(component)
+        if not active:
+            continue
+        if len(active) == 1 and active[0].rank > 0.0:
+            total += int(round(active[0].rank))
+            continue
+
+        width = active[0].group_sl.stop - active[0].group_sl.start
+        normalized_sum = np.zeros((width, width), dtype=np.float64)
+        for component in active:
+            omega = component.omega_ssp
+            if omega is None:
+                omega = component.omega_raw
+            omega = np.asarray(omega, dtype=np.float64)
+            if omega.shape != (width, width):
+                raise ValueError("penalty component does not match its coefficient slice")
+            symmetric = 0.5 * (omega + omega.T)
+            eigenvalues = np.linalg.eigvalsh(symmetric)
+            scale = float(np.max(np.abs(eigenvalues), initial=0.0))
+            if scale > 0.0:
+                normalized_sum += symmetric / scale
+        total += _matrix_penalty_rank(normalized_sum)
+    return total
+
+
+def compute_penalty_nullity(
+    penalty_matrix: NDArray | None = None,
+    *,
+    hessian_rank: int,
+    penalties: list[PenaltyComponent] | None = None,
+    lambdas: dict[str, float] | None = None,
+    coefficient_width: int | None = None,
+) -> float:
+    """Return Wood's ``M_p`` in the identifiable full coefficient space.
+
+    Production REML callers should supply ``penalties`` and ``lambdas``.  The
+    rank is then computed from equally normalized active component matrices:
+    every finite positive lambda is structurally active, while an exact zero
+    is inactive.  This makes ``null(S)`` invariant to arbitrary positive
+    smoothing-parameter ratios.
+
+    ``penalty_matrix`` alone is a deliberately limited numerical fallback for
+    independent dense oracles that do not own component metadata.  An already
+    scaled matrix cannot distinguish a genuine small eigenvalue from an
+    extreme lambda ratio.
+
+    The intercept is already included in ``hessian_rank``.  For a full-rank
+    augmented Hessian, ``M_p = p + 1 - rank(S)``.  The identified Hessian rank
+    excludes unpenalized coefficient aliases that the data cannot identify.
+    """
+    if penalty_matrix is not None:
+        penalty_matrix = np.asarray(penalty_matrix, dtype=np.float64)
+        if penalty_matrix.ndim != 2 or penalty_matrix.shape[0] != penalty_matrix.shape[1]:
+            raise ValueError("penalty_matrix must be square")
+        matrix_width = penalty_matrix.shape[0]
+        if coefficient_width is not None and coefficient_width != matrix_width:
+            raise ValueError("coefficient_width does not match penalty_matrix")
+        coefficient_width = matrix_width
+    elif coefficient_width is None:
+        coefficient_width = (
+            max(component.group_sl.stop for component in penalties)
+            if penalties
+            else max(hessian_rank - 1, 0)
+        )
+
+    max_hessian_rank = coefficient_width + 1
+    if hessian_rank < 0 or hessian_rank > max_hessian_rank:
+        raise ValueError("hessian_rank is incompatible with the penalty dimension")
+
+    if penalties is not None:
+        if lambdas is None:
+            raise ValueError("lambdas are required with penalty components")
+        penalty_rank = _structural_active_penalty_rank(penalties, lambdas)
+    elif penalty_matrix is not None:
+        penalty_rank = _matrix_penalty_rank(penalty_matrix)
+    else:
+        penalty_rank = 0
+    return float(max(hessian_rank - penalty_rank, 0))
 
 
 def _group_penalties(penalties: list[PenaltyComponent]) -> dict[str, list[int]]:

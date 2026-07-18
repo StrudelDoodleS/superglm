@@ -23,6 +23,7 @@ class SolverState:
     eta: NDArray
     mu: NDArray
     deviance: float
+    penalized_deviance: float | None = None
     state_id: int | None = None
     evaluation_id: int | None = None
     state_space: str = "solver"
@@ -70,6 +71,8 @@ def _evaluate_irls_state(
     intercept: float,
     *,
     deviance: float | None = None,
+    eta_unclipped: NDArray | None = None,
+    penalized_deviance: float | None = None,
     state_id: int | None = None,
     evaluation_id: int | None = None,
     state_space: str = "solver",
@@ -79,7 +82,12 @@ def _evaluate_irls_state(
 ) -> _IRLSState:
     """Evaluate and freeze all state derived from one coefficient vector."""
     retained_beta = _immutable_array(beta)
-    eta_unclipped = dm.matvec(retained_beta) + intercept + offset
+    if eta_unclipped is None:
+        eta_unclipped = dm.matvec(retained_beta) + intercept + offset
+    else:
+        eta_unclipped = np.asarray(eta_unclipped, dtype=float)
+        if eta_unclipped.shape != (dm.n,):
+            raise ValueError(f"eta_unclipped must have shape {(dm.n,)}, got {eta_unclipped.shape}")
     eta = stabilize_eta(eta_unclipped, link)
     mu = clip_mu(link.inverse(eta), family)
     retained_deviance = (
@@ -97,6 +105,7 @@ def _evaluate_irls_state(
         eta=eta,
         mu=mu,
         deviance=retained_deviance,
+        penalized_deviance=(None if penalized_deviance is None else float(penalized_deviance)),
         state_id=state_id,
         evaluation_id=evaluation_id,
         state_space=state_space,
@@ -117,7 +126,15 @@ def _state_is_finite(state: _IRLSState) -> bool:
         and np.all(np.isfinite(state.eta))
         and np.all(np.isfinite(state.mu))
         and np.isfinite(state.deviance)
+        and (state.penalized_deviance is None or np.isfinite(state.penalized_deviance))
     )
+
+
+def _state_merit(state: _IRLSState) -> float:
+    """Return the fitted objective used to judge an IRLS trial."""
+    if state.penalized_deviance is not None:
+        return float(state.penalized_deviance)
+    return float(state.deviance)
 
 
 def _irls_trial_is_unsafe(
@@ -125,21 +142,28 @@ def _irls_trial_is_unsafe(
     committed: _IRLSState,
     invalid_state: StateInvalid | None = None,
 ) -> bool:
-    """Apply the centralized legacy catastrophe predicate to a full state."""
+    """Reject invalid states or a material increase in the fitted objective."""
     if not _state_is_finite(candidate):
         return True
     if invalid_state is not None and invalid_state(candidate):
         return True
+    if (candidate.penalized_deviance is None) != (committed.penalized_deviance is None):
+        return True
 
-    candidate_deviance = candidate.deviance
-    committed_deviance = committed.deviance
-    return bool(
-        np.isfinite(committed_deviance)
-        and (
-            candidate_deviance > 2.0 * committed_deviance
-            or (committed_deviance >= 0.0 and candidate_deviance < -abs(committed_deviance))
+    candidate_merit = _state_merit(candidate)
+    committed_merit = _state_merit(committed)
+    if not np.isfinite(committed_merit):
+        return False
+    roundoff = (
+        64.0
+        * np.finfo(float).eps
+        * max(
+            1.0,
+            abs(candidate_merit),
+            abs(committed_merit),
         )
     )
+    return bool(candidate_merit > committed_merit + roundoff)
 
 
 def _select_irls_trial(
@@ -148,7 +172,7 @@ def _select_irls_trial(
     proposal: _IRLSState,
     evaluate_state: Callable[[float], _IRLSState],
     invalid_state: StateInvalid | None = None,
-    max_halving: int = 5,
+    max_halving: int = 20,
 ) -> _IRLSStepDecision:
     """Return the largest safe fixed-endpoint trial, or reject atomically."""
     if max_halving < 1:

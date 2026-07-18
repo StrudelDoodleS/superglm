@@ -24,6 +24,7 @@ from superglm.inference.covariance import (  # noqa: F401
     _second_diff_penalty,
 )
 from superglm.inference.summary import ModelSummary, _CoefRow
+from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.model.state_ops import (
     _public_augmented_covariance,
     _rank_active_state,
@@ -481,7 +482,7 @@ class ModelMetrics:
             selected_group_name_set(
                 self._result,
                 self._groups,
-                penalty=self._model.penalty,
+                penalty=fitted_penalty(self._model),
             )
         )
 
@@ -674,14 +675,39 @@ class ModelMetrics:
             W = self._weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
         uses_fitted_rank = self._working_weights_match_fit(W)
+        scop_inference = getattr(self._result, "scop_inference", None)
+        if scop_inference is not None:
+            fit_X_a, _, inverse, augmented, active_groups = self._model._fit_active_info
+            if self._uses_fit_design:
+                X_a = fit_X_a
+            else:
+                rank_info = getattr(self._result, "rank_info", None)
+                if rank_info is not None:
+                    selected_columns = np.asarray(rank_info.selected_columns, dtype=np.intp)
+                    self.__dict__["_coefficient_estimable"] = rank_info.coefficient_estimable()
+                else:
+                    selected_columns, _ = _selected_group_state(
+                        self._result,
+                        self._groups,
+                        penalty=fitted_penalty(self._model),
+                    )
+                    self.__dict__["_coefficient_estimable"] = np.ones(len(beta), dtype=bool)
+                X_a = EvaluationDesign(self._model, self._X, selected_columns)
+            if "_coefficient_estimable" not in self.__dict__:
+                if rank_info is not None:
+                    self.__dict__["_coefficient_estimable"] = rank_info.coefficient_estimable()
+                else:
+                    self.__dict__["_coefficient_estimable"] = np.ones(len(beta), dtype=bool)
+            return X_a, W, inverse, augmented, active_groups
+
         if not self._uses_fit_design:
             selected_columns, active_groups = _selected_group_state(
                 self._result,
                 self._groups,
-                penalty=self._model.penalty,
+                penalty=fitted_penalty(self._model),
             )
             X_a = EvaluationDesign(self._model, self._X, selected_columns)
-            lam2 = getattr(self._model, "_reml_lambdas", None) or self._model.lambda2
+            lam2 = fitted_lambda2(self._model)
             S_active = _active_penalty_matrix(
                 self._model._dm.group_matrices,
                 self._groups,
@@ -718,6 +744,10 @@ class ModelMetrics:
             return X_a, W, inverse, augmented, active_groups
 
         if uses_fitted_rank:
+            if getattr(self._result, "scop_inference", None) is not None:
+                X_a, _, inverse, augmented, active_groups = self._model._fit_active_info
+                self.__dict__["_coefficient_estimable"] = rank_info.coefficient_estimable()
+                return X_a, W, inverse, augmented, active_groups
             X_a, active_groups = _rank_active_state(self._model, rank_info)
             inverse = rank_info.coefficient.pseudo_inverse()
             augmented = _rank_augmented_covariance(self._model, rank_info, active_groups)
@@ -727,10 +757,10 @@ class ModelMetrics:
         _, active_groups = _selected_group_state(
             self._result,
             self._groups,
-            penalty=self._model.penalty,
+            penalty=fitted_penalty(self._model),
         )
         X_a = _grouped_active_design(self._model, active_groups)
-        lam2 = getattr(self._model, "_reml_lambdas", None) or self._model.lambda2
+        lam2 = fitted_lambda2(self._model)
         S_active = _active_penalty_matrix(
             self._dm.group_matrices,
             self._groups,
@@ -793,6 +823,9 @@ class ModelMetrics:
         if X_a.shape[1] == 0:
             return np.empty((0, 0))
 
+        if getattr(self._result, "scop_inference", None) is not None:
+            return self._model._fit_inference_info["R_a"]
+
         if self._working_weights_match_fit(W):
             return self._model._fit_inference_info["R_a"]
 
@@ -811,6 +844,10 @@ class ModelMetrics:
         if X_a.shape[1] == 0:
             return np.array([]), np.array([])
 
+        if getattr(self._result, "scop_inference", None) is not None:
+            inference = self._model._fit_inference_info
+            return inference["edf"], inference["edf1"]
+
         if self._working_weights_match_fit(W):
             inference = self._model._fit_inference_info
             return inference["edf"], inference["edf1"]
@@ -824,10 +861,8 @@ class ModelMetrics:
 
     @property
     def _known_scale(self) -> bool:
-        """Poisson has known scale (phi=1 for test purposes)."""
-        from superglm.distributions import Poisson
-
-        return isinstance(self._family, Poisson)
+        """Whether the fitted family defines rather than estimates dispersion."""
+        return bool(getattr(self._family, "scale_known", False))
 
     @cached_property
     def _hat_diag(self) -> NDArray:
@@ -910,7 +945,7 @@ class ModelMetrics:
         selected_names = selected_group_name_set(
             self._result,
             self._groups,
-            penalty=self._model.penalty,
+            penalty=fitted_penalty(self._model),
         )
 
         result: dict[str, NDArray] = {}
@@ -941,7 +976,7 @@ class ModelMetrics:
         selected_names = selected_group_name_set(
             self._result,
             self._groups,
-            penalty=self._model.penalty,
+            penalty=fitted_penalty(self._model),
         )
 
         result: dict[str, NDArray] = {}
@@ -1017,7 +1052,7 @@ class ModelMetrics:
         selected_names = selected_group_name_set(
             self._result,
             self._groups,
-            penalty=self._model.penalty,
+            penalty=fitted_penalty(self._model),
         )
         if isinstance(spec, OrderedCategorical) and spec.basis == "spline":
             _, _, _, XtWX_inv_aug, active_groups = self._active_info
@@ -1140,7 +1175,7 @@ class ModelMetrics:
             known_scale=self._known_scale,
             group_edf_map=(dict(self._result.rank_info.group_edf) if uses_fitted_rank else None),
             reml_lambdas=getattr(self._model, "_reml_lambdas", None),
-            lambda2=self._model.lambda2,
+            lambda2=fitted_lambda2(self._model),
             n_obs=self.n_obs,
             alpha=alpha,
             precomputed_R_a=R_a,
@@ -1202,7 +1237,7 @@ class ModelMetrics:
             },
         }
 
-        penalty = self._model.penalty
+        penalty = fitted_penalty(self._model)
         link_name = type(self._link).__name__
         if link_name.endswith("Link"):
             link_name = link_name[:-4]

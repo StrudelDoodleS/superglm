@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pytest
 
@@ -776,6 +778,8 @@ def test_signed_observed_geometry_matches_augmented_hessian() -> None:
         X[:, 0],
         sample_weight,
     )
+    assert np.any(observed_w < 0.0)
+    np.testing.assert_array_equal(geometry.weights, observed_w)
     augmented = np.column_stack((np.ones(len(X)), X))
     expected = augmented.T @ (observed_w[:, None] * augmented)
     expected[1:, 1:] += penalty
@@ -795,6 +799,21 @@ def test_observed_geometry_rejects_indefinite_penalty_and_total_curvature() -> N
     X = np.arange(-3.0, 4.0)[:, None]
     dm = DesignMatrix([DenseGroupMatrix(X)], n=len(X), p=1)
 
+    eta = X[:, 0]
+    observed_w = compute_observed_information_weights(
+        Binomial(),
+        CauchitLink(),
+        np.zeros(len(X)),
+        CauchitLink().inverse(eta),
+        eta,
+        np.ones(len(X)),
+    )
+    assert np.sum(observed_w) > 0.0
+    mean_x = np.sum(observed_w[:, None] * X, axis=0) / np.sum(observed_w)
+    centered = X - mean_x
+    terminal_hessian = centered.T @ (observed_w[:, None] * centered)
+    assert np.linalg.eigvalsh(terminal_hessian)[0] < -1.0
+
     with pytest.raises(ValueError, match="negative|indefinite"):
         build_observed_reml_geometry(
             dm=dm,
@@ -807,7 +826,9 @@ def test_observed_geometry_rejects_indefinite_penalty_and_total_curvature() -> N
             penalty=np.array([[-100.0]]),
         )
 
-    with pytest.raises(ValueError, match="negative|indefinite"):
+    with pytest.raises(
+        ValueError, match="terminal observed REML coefficient Hessian is indefinite"
+    ):
         build_observed_reml_geometry(
             dm=dm,
             distribution=Binomial(),
@@ -1214,6 +1235,327 @@ def test_gamma_observed_order2_hessian_matches_refitted_gradient_finite_differen
     )
 
 
+@dataclass(frozen=True)
+class _ObservedLAMLProblem:
+    dm: DesignMatrix
+    distribution: object
+    link: object
+    group: GroupSlice
+    component: PenaltyComponent
+    omega: np.ndarray
+    y: np.ndarray
+    sample_weight: np.ndarray
+    offset: np.ndarray
+
+
+def _make_observed_laml_problem(case: str) -> _ObservedLAMLProblem:
+    from scipy.special import ndtr
+
+    case_index = {
+        "nb2-log": 1,
+        "tweedie-log": 2,
+        "binomial-probit": 3,
+        "binomial-cloglog": 4,
+        "binomial-cauchit": 5,
+        "poisson-sqrt": 6,
+        "poisson-identity": 7,
+        "gamma-identity": 8,
+        "gamma-log": 9,
+        "gaussian-log": 10,
+    }[case]
+    rng = np.random.default_rng(20260720 + case_index)
+    n = 320 if case.startswith("binomial") else 240
+    x = np.linspace(-0.9, 0.9, n)
+    harmonic = np.sin(1.7 * x)
+    X = np.column_stack((x, harmonic))
+    dm = DesignMatrix([DenseGroupMatrix(X)], n=n, p=2)
+    group = GroupSlice(name="smooth", start=0, end=2)
+    omega = np.array([[1.0, 0.11], [0.11, 1.55]])
+    component = PenaltyComponent(
+        name="smooth",
+        group_name="smooth",
+        group_index=0,
+        group_sl=slice(0, 2),
+        omega_raw=omega,
+        omega_ssp=omega,
+        rank=2.0,
+    )
+    sample_weight = rng.uniform(0.7, 1.4, n)
+    offset = np.linspace(-0.08, 0.06, n)
+
+    if case == "nb2-log":
+        distribution = NegativeBinomial(theta=2.7)
+        link = LogLink()
+        mu = np.exp(0.35 + 0.35 * x - 0.22 * harmonic + offset)
+        y = rng.negative_binomial(2.7, 2.7 / (2.7 + mu)).astype(float)
+    elif case == "tweedie-log":
+        distribution = Tweedie(p=1.5)
+        link = LogLink()
+        mu = np.exp(0.25 + 0.3 * x - 0.18 * harmonic + offset)
+        phi = 0.55
+        count_mean = mu**0.5 / (phi * 0.5)
+        counts = rng.poisson(count_mean)
+        y = np.zeros(n)
+        positive = counts > 0
+        y[positive] = rng.gamma(
+            shape=counts[positive],
+            scale=phi * 0.5 * mu[positive] ** 0.5,
+        )
+    elif case.startswith("binomial"):
+        distribution = Binomial()
+        if case == "binomial-probit":
+            link = ProbitLink()
+            linear_predictor = 0.12 + 0.48 * x - 0.24 * harmonic + offset
+            probability = ndtr(linear_predictor)
+        elif case == "binomial-cloglog":
+            link = CloglogLink()
+            linear_predictor = 0.12 + 0.48 * x - 0.24 * harmonic + offset
+            probability = 1.0 - np.exp(-np.exp(linear_predictor))
+        else:
+            link = CauchitLink()
+            # A wider fitted predictor plus contrary tail outcomes exercises
+            # Wood's valid signed Newton rows while the penalized total
+            # curvature remains positive definite.
+            linear_predictor = 0.1 + 1.6 * x - 0.3 * harmonic + offset
+            probability = 0.5 + np.arctan(linear_predictor) / np.pi
+        y = rng.binomial(1, probability).astype(float)
+    elif case == "poisson-sqrt":
+        distribution = Poisson()
+        link = SqrtLink()
+        eta = 1.35 + 0.16 * x - 0.1 * harmonic + offset
+        y = rng.poisson(eta**2).astype(float)
+    elif case == "poisson-identity":
+        distribution = Poisson()
+        link = IdentityLink()
+        mu = 2.1 + 0.34 * x - 0.18 * harmonic + offset
+        y = rng.poisson(mu).astype(float)
+    elif case == "gamma-identity":
+        distribution = Gamma()
+        link = IdentityLink()
+        mu = 1.5 + 0.28 * x - 0.14 * harmonic + offset
+        y = rng.gamma(shape=5.0, scale=mu / 5.0)
+    elif case == "gamma-log":
+        distribution = Gamma()
+        link = LogLink()
+        mu = np.exp(0.3 + 0.3 * x - 0.16 * harmonic + offset)
+        y = rng.gamma(shape=5.0, scale=mu / 5.0)
+    else:
+        distribution = Gaussian()
+        link = LogLink()
+        mu = np.exp(0.4 + 0.22 * x - 0.12 * harmonic + offset)
+        y = mu + rng.normal(scale=0.16, size=n)
+
+    return _ObservedLAMLProblem(
+        dm=dm,
+        distribution=distribution,
+        link=link,
+        group=group,
+        component=component,
+        omega=omega,
+        y=y,
+        sample_weight=sample_weight,
+        offset=offset,
+    )
+
+
+def _evaluate_refitted_observed_laml(
+    problem: _ObservedLAMLProblem,
+    log_lambda: float,
+    *,
+    derivative_order: int,
+) -> tuple[float, np.ndarray | None, np.ndarray | None]:
+    lam = float(np.exp(log_lambda))
+    lambdas = {problem.component.name: lam}
+    penalty = lam * problem.omega
+    result, _fisher_inverse, fisher_gram = fit_irls_direct(
+        X=problem.dm,
+        y=problem.y,
+        weights=problem.sample_weight,
+        family=problem.distribution,
+        link=problem.link,
+        groups=[problem.group],
+        lambda2=lambdas,
+        offset=problem.offset,
+        return_xtwx=True,
+        S_override=penalty,
+        reml_penalties=[problem.component],
+        tol=1e-11,
+        max_iter=200,
+        convergence="coefficients",
+    )
+    assert result.converged
+    geometry = build_observed_reml_geometry(
+        dm=problem.dm,
+        distribution=problem.distribution,
+        link=problem.link,
+        y=problem.y,
+        sample_weight=problem.sample_weight,
+        offset_arr=problem.offset,
+        result=result,
+        penalty=penalty,
+        compute_inverse=derivative_order >= 1,
+        derivative_order=derivative_order,
+    )
+    gamma_scale_data = (
+        prepare_gamma_reml_scale_data(problem.y, problem.sample_weight)
+        if type(problem.distribution) is Gamma
+        else None
+    )
+    objective = reml_laml_objective(
+        problem.dm,
+        problem.distribution,
+        problem.link,
+        [problem.group],
+        problem.y,
+        result,
+        lambdas,
+        problem.sample_weight,
+        problem.offset,
+        XtWX=fisher_gram,
+        log_det_H=geometry.log_det_H,
+        hessian_rank=geometry.hessian_rank,
+        S_override=penalty,
+        reml_penalties=[problem.component],
+        gamma_scale_data=gamma_scale_data,
+        return_evaluation=True,
+    )
+    assert isinstance(objective, REMLObjectiveEvaluation)
+    if derivative_order == 0:
+        return objective.value, None, None
+
+    assert geometry.hessian_inverse is not None
+    if objective.profiled_scale is not None:
+        inverse_phi = objective.profiled_scale.inverse_phi
+        inverse_phi_derivative = objective.profiled_scale.d_inverse_phi_d_penalized_deviance
+    elif not getattr(problem.distribution, "scale_known", True):
+        assert objective.penalty_nullity is not None
+        inverse_phi = max(len(problem.y) - objective.penalty_nullity, 1.0) / max(
+            objective.penalized_deviance,
+            1e-300,
+        )
+        inverse_phi_derivative = None
+    else:
+        inverse_phi = 1.0
+        inverse_phi_derivative = None
+    partial = reml_direct_gradient(
+        problem.dm.group_matrices,
+        result,
+        geometry.hessian_inverse,
+        lambdas,
+        reml_penalties=[problem.component],
+        inverse_phi=inverse_phi,
+    )
+    correction = reml_w_correction(
+        problem.dm,
+        problem.link,
+        [problem.group],
+        result,
+        geometry.hessian_inverse,
+        lambdas,
+        sample_weight=problem.sample_weight,
+        offset_arr=problem.offset,
+        distribution=problem.distribution,
+        w_correction_order=derivative_order,
+        reml_penalties=[problem.component],
+        geometry=geometry,
+    )
+    assert correction is not None
+    gradient = partial + correction[0]
+    if derivative_order == 1:
+        return objective.value, gradient, None
+
+    assert len(correction) == 3
+    hessian = reml_direct_hessian(
+        problem.dm.group_matrices,
+        problem.distribution,
+        geometry.hessian_inverse,
+        lambdas,
+        gradient=partial,
+        pirls_result=result,
+        n_obs=len(problem.y),
+        inverse_phi=inverse_phi,
+        d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
+        penalty_nullity=(
+            objective.penalty_nullity
+            if not getattr(problem.distribution, "scale_known", True)
+            else None
+        ),
+        dH_extra=correction[1],
+        dH2_cross=correction[2],
+        reml_penalties=[problem.component],
+    )
+    return objective.value, gradient, hessian
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "nb2-log",
+        "tweedie-log",
+        "binomial-probit",
+        "binomial-cloglog",
+        "binomial-cauchit",
+        "poisson-sqrt",
+        "poisson-identity",
+        "gamma-identity",
+        "gamma-log",
+        "gaussian-log",
+    ],
+)
+def test_refitted_noncanonical_laml_gradient_matches_objective_finite_difference(
+    case: str,
+) -> None:
+    problem = _make_observed_laml_problem(case)
+    rho = float(np.log(1.25))
+    _value, gradient, _hessian = _evaluate_refitted_observed_laml(
+        problem,
+        rho,
+        derivative_order=1,
+    )
+    assert gradient is not None
+    eps = 2e-4
+    value_plus, _, _ = _evaluate_refitted_observed_laml(
+        problem,
+        rho + eps,
+        derivative_order=0,
+    )
+    value_minus, _, _ = _evaluate_refitted_observed_laml(
+        problem,
+        rho - eps,
+        derivative_order=0,
+    )
+    finite_difference = (value_plus - value_minus) / (2.0 * eps)
+    np.testing.assert_allclose(gradient[0], finite_difference, rtol=2e-6, atol=2e-7)
+
+
+@pytest.mark.parametrize("case", ["nb2-log", "tweedie-log", "binomial-cauchit"])
+def test_refitted_noncanonical_order2_hessian_matches_gradient_finite_difference(
+    case: str,
+) -> None:
+    problem = _make_observed_laml_problem(case)
+    rho = float(np.log(1.25))
+    _value, _gradient, hessian = _evaluate_refitted_observed_laml(
+        problem,
+        rho,
+        derivative_order=2,
+    )
+    assert hessian is not None
+    eps = 2e-4
+    _, gradient_plus, _ = _evaluate_refitted_observed_laml(
+        problem,
+        rho + eps,
+        derivative_order=1,
+    )
+    _, gradient_minus, _ = _evaluate_refitted_observed_laml(
+        problem,
+        rho - eps,
+        derivative_order=1,
+    )
+    assert gradient_plus is not None and gradient_minus is not None
+    finite_difference = (gradient_plus[0] - gradient_minus[0]) / (2.0 * eps)
+    np.testing.assert_allclose(hessian[0, 0], finite_difference, rtol=5e-6, atol=2e-7)
+
+
 def test_fit_reml_gamma_uses_observed_main_and_objective_only_trial_geometry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1260,6 +1602,274 @@ def test_fit_reml_gamma_uses_observed_main_and_objective_only_trial_geometry(
     assert model._reml_profile["reml_observed_mode_residual_rejected_trial_max"] >= 0.0
     assert model._reml_profile["reml_w_correction_order"] == 1
     assert model._reml_profile["reml_observed_geometry_s"] > 0.0
+
+
+def test_fit_reml_terminal_observed_state_owns_objective_rank_and_scale() -> None:
+    """The published final refit must own its observed LAML evaluation."""
+    import pandas as pd
+
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    rng = np.random.default_rng(991)
+    n = 240
+    x = rng.uniform(0.0, 6.0, n)
+    mu = np.exp(0.25 + 0.18 * np.sin(1.3 * x))
+    y = rng.gamma(shape=4.0, scale=mu / 4.0)
+    sample_weight = np.resize(np.array([1.0, 2.0, 3.0]), n)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gamma",
+        selection_penalty=0,
+        features={"x": Spline(n_knots=6, penalty="ssp")},
+    )
+
+    model.fit_reml(X, y, sample_weight=sample_weight)
+
+    result = model._solver_result
+    penalty = build_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        model._reml_lambdas,
+        model._dm.p,
+        reml_penalties=model._reml_penalties,
+    )
+    geometry = build_observed_reml_geometry(
+        dm=model._dm,
+        distribution=model._distribution,
+        link=model._link,
+        y=y,
+        sample_weight=sample_weight,
+        offset_arr=np.zeros(n),
+        result=result,
+        penalty=penalty,
+        derivative_order=0,
+        compute_inverse=False,
+    )
+    mode_score = observed_penalized_mode_score(
+        dm=model._dm,
+        distribution=model._distribution,
+        link=model._link,
+        y=y,
+        sample_weight=sample_weight,
+        result=result,
+        penalty=penalty,
+        geometry=geometry,
+    )
+    evaluation = reml_laml_objective(
+        model._dm,
+        model._distribution,
+        model._link,
+        model._groups,
+        y,
+        result,
+        model._reml_lambdas,
+        sample_weight,
+        np.zeros(n),
+        log_det_H=geometry.log_det_H,
+        hessian_rank=geometry.hessian_rank,
+        S_override=penalty,
+        reml_penalties=model._reml_penalties,
+        return_evaluation=True,
+    )
+
+    assert isinstance(evaluation, REMLObjectiveEvaluation)
+    assert mode_score.relative_max < 1e-9
+    assert model._reml_result.curvature_source == "observed"
+    assert result.reml_hessian_rank == geometry.hessian_rank
+    assert result.log_det_H == geometry.log_det_H
+    assert model._reml_result.objective == evaluation.value
+    assert evaluation.profiled_scale is not None
+    assert result.phi == evaluation.profiled_scale.phi
+
+
+def test_observed_laml_backtracks_after_invalid_trial_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pandas as pd
+
+    import superglm.reml.direct as direct
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(99)
+    n = 400
+    x = rng.uniform(1.0, 10.0, n)
+    mu = np.exp(0.3 + 0.1 * np.sin(x))
+    y = rng.gamma(shape=5.0, scale=mu / 5.0)
+    objective_only_calls = 0
+    original = direct.build_observed_reml_geometry
+
+    def reject_first_long_trial(**kwargs):
+        nonlocal objective_only_calls
+        if not kwargs.get("compute_inverse", True):
+            objective_only_calls += 1
+            if objective_only_calls == 1:
+                raise ValueError("synthetic invalid signed trial geometry")
+        return original(**kwargs)
+
+    monkeypatch.setattr(direct, "build_observed_reml_geometry", reject_first_long_trial)
+    model = SuperGLM(
+        family="gamma",
+        selection_penalty=0,
+        features={"x": Spline(n_knots=6, penalty="ssp")},
+    )
+
+    model.fit_reml(pd.DataFrame({"x": x}), y)
+
+    assert model._reml_result.converged
+    assert objective_only_calls >= 2
+    assert model._reml_profile["reml_observed_mode_rejected_trial_count"] >= 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["nb2-log", "binomial-probit", "poisson-sqrt", "gamma-log", "tweedie-log"],
+)
+def test_exact_reml_routes_all_noncanonical_builtins_through_observed_geometry(
+    case: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pandas as pd
+    from scipy.special import ndtr
+
+    import superglm.reml.direct as direct
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(104)
+    n = 140
+    x = np.linspace(-1.0, 1.0, n)
+    if case == "nb2-log":
+        distribution = NegativeBinomial(theta=2.5)
+        link = LogLink()
+        mu = np.exp(0.3 + 0.2 * np.sin(2.0 * x))
+        y = rng.negative_binomial(2.5, 2.5 / (2.5 + mu)).astype(float)
+    elif case == "binomial-probit":
+        distribution = Binomial()
+        link = ProbitLink()
+        y = rng.binomial(1, ndtr(0.15 + 0.4 * x)).astype(float)
+    elif case == "poisson-sqrt":
+        distribution = Poisson()
+        link = SqrtLink()
+        y = rng.poisson((1.1 + 0.25 * np.sin(2.0 * x)) ** 2).astype(float)
+    elif case == "gamma-log":
+        distribution = Gamma()
+        link = LogLink()
+        mu = np.exp(0.2 + 0.2 * np.sin(2.0 * x))
+        y = rng.gamma(shape=6.0, scale=mu / 6.0)
+    else:
+        distribution = Tweedie(p=1.5)
+        link = LogLink()
+        mu = np.exp(0.1 + 0.2 * np.sin(2.0 * x))
+        y = np.where(rng.random(n) < 0.25, 0.0, rng.gamma(shape=3.0, scale=mu / 3.0))
+
+    calls: list[tuple[bool, int]] = []
+    original = direct.build_observed_reml_geometry
+
+    def observed_geometry_spy(**kwargs):
+        calls.append(
+            (
+                bool(kwargs.get("compute_inverse", True)),
+                int(kwargs.get("derivative_order", 0)),
+            )
+        )
+        return original(**kwargs)
+
+    monkeypatch.setattr(direct, "build_observed_reml_geometry", observed_geometry_spy)
+    model = SuperGLM(
+        family=distribution,
+        link=link,
+        selection_penalty=0,
+        features={"x": Spline(n_knots=5, penalty="ssp")},
+    )
+    model.fit_reml(
+        pd.DataFrame({"x": x}),
+        y,
+        max_reml_iter=2,
+        reml_tol=1e-12,
+        pirls_tol=1e-9,
+        runtime_validation="skip",
+        w_correction_order=2,
+    )
+
+    assert any(compute_inverse and order == 2 for compute_inverse, order in calls)
+    assert any(not compute_inverse and order == 0 for compute_inverse, order in calls)
+
+
+def test_discrete_bam_path_bypasses_ordinary_observed_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pandas as pd
+
+    import superglm.reml.direct as direct
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(105)
+    x = np.linspace(-1.0, 1.0, 120)
+    mu = np.exp(0.2 + 0.2 * np.sin(2.0 * x))
+    y = rng.gamma(shape=6.0, scale=mu / 6.0)
+
+    def unexpected_geometry(**_kwargs):  # pragma: no cover - failure sentinel
+        raise AssertionError("discrete BAM approximation must bypass ordinary observed geometry")
+
+    monkeypatch.setattr(direct, "build_observed_reml_geometry", unexpected_geometry)
+    model = SuperGLM(
+        family=Gamma(),
+        link=LogLink(),
+        selection_penalty=0,
+        discrete=True,
+        features={"x": Spline(n_knots=5, penalty="ssp")},
+    )
+    model.fit_reml(
+        pd.DataFrame({"x": x}),
+        y,
+        max_reml_iter=2,
+        runtime_validation="skip",
+        w_correction_order=2,
+    )
+
+
+def test_custom_order2_observed_capability_fails_before_first_pirls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pandas as pd
+
+    import superglm.reml.direct as direct
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    class CustomGaussian(Gaussian):
+        def reml_curvature(self, link):
+            return "observed"
+
+    class CustomIdentity(IdentityLink):
+        def reml_curvature(self, distribution):
+            return "observed"
+
+    def unexpected_pirls(*_args, **_kwargs):  # pragma: no cover - failure sentinel
+        raise AssertionError("observed derivative capability must be checked before PIRLS")
+
+    monkeypatch.setattr(direct, "fit_irls_direct", unexpected_pirls)
+    x = np.linspace(-1.0, 1.0, 80)
+    y = 0.2 + 0.3 * x
+    model = SuperGLM(
+        family=CustomGaussian(),
+        link=CustomIdentity(),
+        selection_penalty=0,
+        features={"x": Spline(n_knots=5, penalty="ssp")},
+    )
+
+    with pytest.raises(NotImplementedError, match="link.deriv4_inverse"):
+        model.fit_reml(
+            pd.DataFrame({"x": x}),
+            y,
+            max_reml_iter=2,
+            runtime_validation="skip",
+            w_correction_order=2,
+        )
 
 
 @pytest.mark.parametrize("family", ["poisson", "gaussian"])

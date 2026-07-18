@@ -816,6 +816,27 @@ class TestValidation:
 
 
 class TestAutoDetectClone:
+    def test_clone_preserves_constructor_fit_controls(self):
+        """Cross-validation clones must retain every configured fit control."""
+        from superglm.model_selection import _clone_model
+
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            spline_penalty=2.75,
+            features={"x": Spline(n_knots=5)},
+            tol=1e-3,
+            max_iter=7,
+            retain_fit_state=False,
+        )
+
+        cloned = _clone_model(model)
+
+        assert cloned.lambda2 == pytest.approx(2.75)
+        assert cloned._tol == pytest.approx(1e-3)
+        assert cloned._max_iter == 7
+        assert cloned._retain_fit_state is False
+
     def test_unfitted_autodetect_model(self, poisson_data):
         """Unfitted auto-detect (splines=) model clones correctly."""
         df, y, sw = poisson_data

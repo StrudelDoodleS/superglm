@@ -3175,7 +3175,7 @@ class TestProfileFitParity:
         clone = tweedie_module._clone_profile_model(model, X, None)
 
         assert clone._interaction_order == ["custom_surface"]
-        assert clone._pending_interactions == []
+        assert clone._pending_interactions == ()
         cloned = clone._interaction_specs["custom_surface"]
         assert isinstance(cloned, TensorInteraction)
         assert cloned.parent_names == ("x1", "x2")
@@ -3342,16 +3342,16 @@ class TestProfileFitParity:
         caller_state = pickle.dumps(model.__dict__, protocol=5)
         assert model._specs == {}
         assert model._interaction_specs == {}
-        assert model._pending_interactions == [("x1", "x2")]
+        assert model._pending_interactions == (("x1", "x2"),)
 
         clone = tweedie_module._clone_profile_model(model, X, None)
 
         assert clone._interaction_specs == {}
         assert clone._interaction_order == []
-        assert clone._pending_interactions == [("x1", "x2")]
+        assert clone._pending_interactions == (("x1", "x2"),)
         assert list(clone._specs) == ["x1", "x2"]
         clone._build_design_matrix(X, y, None, None)
-        assert clone._pending_interactions == []
+        assert clone._pending_interactions == ()
         assert clone._interaction_order == ["x1:x2"]
         assert isinstance(clone._interaction_specs["x1:x2"], TensorInteraction)
 

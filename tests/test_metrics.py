@@ -1,5 +1,6 @@
 """Tests for ModelMetrics diagnostics module."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,6 +15,17 @@ from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, DiscretizedTensorGroupMatrix
+from superglm.model.fit_state import FittedStateRevision
+
+
+def _publish_result_revision(model, **changes) -> None:
+    revision = FittedStateRevision.start(model)
+    for result_name in ("_result", "_solver_result"):
+        result = getattr(revision.model, result_name)
+        for name, value in changes.items():
+            setattr(result, name, value)
+    revision.commit()
+
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -107,6 +119,59 @@ class TestMetricsCaching:
         metrics2 = model.metrics(X, y, sample_weight=w)
 
         assert metrics1 is metrics2
+
+    def test_mutated_fit_response_invalidates_identity_cache(self, fitted_poisson):
+        """Object identity must not make mutated caller data look unchanged."""
+        model, X, y, w = fitted_poisson
+        cached = model.metrics(X, y, sample_weight=w)
+        y[0] += 25.0
+
+        refreshed = model.metrics(X, y, sample_weight=w)
+        independent = model.metrics(X.copy(), y.copy(), sample_weight=w.copy())
+
+        assert refreshed is not cached
+        assert refreshed.log_likelihood == pytest.approx(independent.log_likelihood)
+
+    def test_mutated_fit_features_invalidate_identity_cache(self, fitted_poisson):
+        model, X, y, w = fitted_poisson
+        cached = model.metrics(X, y, sample_weight=w)
+        X.loc[X.index[0], "x1"] += 3.0
+
+        refreshed = model.metrics(X, y, sample_weight=w)
+        independent = model.metrics(X.copy(), y.copy(), sample_weight=w.copy())
+
+        assert refreshed is not cached
+        assert refreshed.log_likelihood == pytest.approx(independent.log_likelihood)
+
+    def test_mutated_fit_weights_invalidate_identity_cache(self, fitted_poisson):
+        model, X, y, w = fitted_poisson
+        cached = model.metrics(X, y, sample_weight=w)
+        w[0] *= 7.0
+
+        refreshed = model.metrics(X, y, sample_weight=w)
+        independent = model.metrics(X.copy(), y.copy(), sample_weight=w.copy())
+
+        assert refreshed is not cached
+        assert refreshed.log_likelihood == pytest.approx(independent.log_likelihood)
+
+    def test_mutated_fit_offset_invalidates_identity_cache(self):
+        x = np.linspace(-1.0, 1.0, 120)
+        X = pd.DataFrame({"x": x})
+        y = 0.4 + 0.7 * x
+        offset = np.zeros_like(x)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y, offset=offset)
+        cached = model.metrics(X, y, offset=offset)
+        offset[0] = 2.0
+
+        refreshed = model.metrics(X, y, offset=offset)
+        independent = model.metrics(X.copy(), y.copy(), offset=offset.copy())
+
+        assert refreshed is not cached
+        assert refreshed.log_likelihood == pytest.approx(independent.log_likelihood)
 
     def test_changed_offset_recomputes_inverse_from_evaluation_working_weights(self):
         """Fit-time rank inverses are invalid when a new offset changes Fisher weights."""
@@ -359,8 +424,7 @@ class TestMetricsCaching:
         assert np.all(np.isfinite(edf1))
         assert summary._coef_rows
 
-        model.result.rank_info = None
-        model._solver_pirls_result().rank_info = None
+        _publish_result_revision(model, rank_info=None)
         legacy_metrics = ModelMetrics(model, X, y, _mu=model._fit_mu)
         assert legacy_metrics.coefficient_se
         assert legacy_metrics.summary()._coef_rows
@@ -478,7 +542,7 @@ class TestMetricsCaching:
             features={"x": Numeric()},
         )
         model.fit(X_fit, 0.5 + 1.7 * x_fit)
-        model.result.rank_info = None
+        _publish_result_revision(model, rank_info=None)
 
         x_eval = np.linspace(3.0, 7.0, len(X_fit))
         X_eval = pd.DataFrame({"x": x_eval})
@@ -507,7 +571,7 @@ class TestMetricsCaching:
         )
         model.fit(X, y)
         assert model.result.beta[0] == pytest.approx(0.0, abs=1e-14)
-        model.result.rank_info = None
+        _publish_result_revision(model, rank_info=None)
 
         metrics = ModelMetrics(model, X, y, _mu=model._fit_mu)
         design, _, _, _, active_groups = metrics._active_info
@@ -852,6 +916,35 @@ class TestInformationCriteria:
     def test_ebic_gamma_zero_equals_bic(self, metrics_obj):
         """EBIC(gamma=0) == BIC."""
         np.testing.assert_allclose(metrics_obj.ebic(gamma=0.0), metrics_obj.bic, atol=1e-10)
+
+
+@pytest.mark.parametrize(
+    ("family", "expected"),
+    [
+        pytest.param("poisson", True, id="poisson"),
+        pytest.param("binomial", True, id="binomial"),
+        pytest.param("negative_binomial", True, id="negative-binomial"),
+        pytest.param("gaussian", False, id="gaussian"),
+        pytest.param("gamma", False, id="gamma"),
+        pytest.param("tweedie", False, id="tweedie"),
+    ],
+)
+def test_metrics_known_scale_dispatch_matches_distribution_contract(family, expected):
+    """Inference reference laws must follow the family's dispersion contract."""
+    from superglm.distributions import Binomial, Gaussian, NegativeBinomial
+
+    families = {
+        "poisson": Poisson(),
+        "binomial": Binomial(),
+        "negative_binomial": NegativeBinomial(theta=2.5),
+        "gaussian": Gaussian(),
+        "gamma": Gamma(),
+        "tweedie": Tweedie(p=1.5),
+    }
+    metrics = object.__new__(ModelMetrics)
+    metrics._family = families[family]
+
+    assert metrics._known_scale is expected
 
 
 # ── Null model ────────────────────────────────────────────────────
@@ -2072,10 +2165,10 @@ class TestAICcEdgeCase:
         model.fit(X, y)
         m = model.metrics(X, y)
         # Patch effective_df to force the denom <= 0 branch
-        original_edf = m._result.effective_df
-        m._result.effective_df = float(n)  # n - edf - 1 = -1 <= 0
+        original_result = m._result
+        m._result = replace(m._result, effective_df=float(n))
         assert m.aicc == np.inf
-        m._result.effective_df = original_edf  # restore
+        m._result = original_result
 
 
 class TestSummaryHelpers:

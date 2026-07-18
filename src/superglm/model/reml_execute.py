@@ -6,6 +6,8 @@ import math
 import time
 from typing import Any
 
+import numpy as np
+
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.reml_setup import promote_estimated_scop_lambdas
@@ -51,47 +53,37 @@ def _record_non_scop_reml_trace(best, debug_recorder) -> None:
     )
 
 
-def _record_non_scop_pirls_trace(
-    model,
-    *,
-    best,
-    y,
-    sample_weight,
-    offset_arr,
-    pirls_tol: float,
-    debug_recorder,
-    reml_penalties,
-) -> None:
-    """Replay one final direct IRLS iteration to emit PIRLS trace rows."""
-    if not _trace_rows_enabled(debug_recorder):
+def record_reml_terminal(model, debug_recorder) -> None:
+    """Record success only after the fitted state has been publicly installed."""
+    trace_run = getattr(debug_recorder, "trace_run", None)
+    if trace_run is None or not trace_run.enabled:
         return
 
-    best_result = getattr(best, "pirls_result", None)
-    if best_result is None:
+    solver_result = getattr(model, "_solver_result", None)
+    reml_result = getattr(model, "_reml_result", None)
+    state_id = getattr(solver_result, "state_id", None)
+    objective = getattr(reml_result, "objective", None)
+    if solver_result is None or reml_result is None or state_id is None or objective is None:
+        # Fixed-constraint and SCOP compatibility paths do not yet allocate
+        # canonical coefficient-state identities.  Their legacy rows remain
+        # available, but they must not manufacture an authoritative terminal.
         return
 
-    fit_irls_direct(
-        X=model._dm,
-        y=y,
-        weights=sample_weight,
-        family=model._distribution,
-        link=model._link,
-        groups=model._groups,
-        lambda2=best.lambdas,
-        offset=offset_arr,
-        beta_init=best_result.beta,
-        intercept_init=best_result.intercept,
-        max_iter=1,
-        tol=pirls_tol,
-        convergence=model._convergence,
-        reml_penalties=reml_penalties if reml_penalties else None,
-        debug_recorder=debug_recorder,
-        debug_context={
-            "phase": "reml",
-            "path": "non_scop",
-            "reml_iteration": int(getattr(best, "n_reml_iter", 0) or 0),
-            "trace_replay": True,
+    trace_run.emit_lazy(
+        "terminal",
+        lambda: {
+            "state_id": state_id,
+            "evaluation_id": getattr(solver_result, "evaluation_id", None),
+            "solver": "fit_reml",
+            "objective": float(objective),
+            "lambdas": model._reml_lambdas,
+            "dispersion": float(solver_result.phi),
+            "effective_df": float(solver_result.effective_df),
+            "fit_converged": bool(reml_result.converged),
+            "outer_iterations": int(reml_result.n_reml_iter),
         },
+        channel="reml",
+        purpose="fit_reml",
     )
 
 
@@ -106,25 +98,53 @@ def run_fixed_monotone_reml(
     lambdas: dict[str, float],
     reml_penalties: list[Any],
     compute_fit_stats,
+    profile: dict[str, Any] | None = None,
+    total_start: float | None = None,
     debug_recorder=None,
-) -> None:
+) -> Any:
     """Run the fixed-lambda monotone REML path and update the model in place."""
-    result, _ = fit_irls_direct(
-        X=model._dm,
-        y=y,
-        weights=sample_weight,
-        family=model._distribution,
-        link=model._link,
-        groups=model._groups,
-        lambda2=lambdas,
-        offset=offset,
-        max_iter=max_pirls_iter,
-        tol=pirls_tol,
-        convergence="deviance",
-        reml_penalties=reml_penalties if reml_penalties else None,
-        debug_recorder=debug_recorder,
-        debug_context={"phase": "fixed_constraint"},
-    )
+    has_scop = any(group.monotone_engine == "scop" for group in model._groups)
+    best = None
+    if has_scop:
+        from superglm.reml.scop_efs import fit_fixed_scop_reml
+
+        offset_arr = offset if offset is not None else np.zeros(len(y), dtype=np.float64)
+        best = fit_fixed_scop_reml(
+            model._dm,
+            model._distribution,
+            model._link,
+            model._groups,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            pirls_tol=pirls_tol,
+            max_pirls_iter=max_pirls_iter,
+            reml_penalties=reml_penalties if reml_penalties else None,
+            convergence=model._convergence,
+            debug_recorder=debug_recorder,
+        )
+        result = best.pirls_result
+        lambdas = best.lambdas
+        reml_penalties = best.reml_penalties or reml_penalties
+        model._reml_result = best
+    else:
+        result, _ = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=lambdas,
+            offset=offset,
+            max_iter=max_pirls_iter,
+            tol=pirls_tol,
+            convergence="deviance",
+            reml_penalties=reml_penalties if reml_penalties else None,
+            debug_recorder=debug_recorder,
+            debug_context={"phase": "fixed_constraint"},
+        )
 
     model._result = result
     model._reml_lambdas = lambdas
@@ -140,7 +160,18 @@ def run_fixed_monotone_reml(
         y, mu, sample_weight, offset, model._distribution, model._link, result.phi
     )
     model._solver_result = result
-    model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
+    model._last_fit_meta = {
+        "method": "fit_reml",
+        "discrete": model._discrete,
+        "lambda_strategy": "fixed",
+    }
+    if profile is not None:
+        if total_start is not None:
+            profile["total_s"] = time.perf_counter() - total_start
+        profile["n_reml_iter"] = 0
+        profile["converged"] = bool(result.converged)
+        model._reml_profile = profile
+    return best
 
 
 def run_scop_efs_reml(
@@ -250,6 +281,7 @@ def optimize_reml_best(
     debug_recorder=None,
 ):
     """Run the appropriate REML optimizer and return its best result object."""
+    trace_run = getattr(debug_recorder, "trace_run", None)
     if not estimated_names:
         if use_direct:
             best = model_optimize_direct_reml(
@@ -270,18 +302,10 @@ def optimize_reml_best(
                 estimated_names=estimated_names,
                 pirls_tol=pirls_tol,
                 max_pirls_iter=max_pirls_iter,
+                debug_recorder=debug_recorder,
+                trace_run=trace_run,
             )
             _record_non_scop_reml_trace(best, debug_recorder)
-            _record_non_scop_pirls_trace(
-                model,
-                best=best,
-                y=y,
-                sample_weight=sample_weight,
-                offset_arr=offset_arr,
-                pirls_tol=pirls_tol,
-                debug_recorder=debug_recorder,
-                reml_penalties=reml_penalties,
-            )
             return best
         best = model_optimize_efs_reml(
             model,
@@ -301,16 +325,6 @@ def optimize_reml_best(
             max_pirls_iter=max_pirls_iter,
         )
         _record_non_scop_reml_trace(best, debug_recorder)
-        _record_non_scop_pirls_trace(
-            model,
-            best=best,
-            y=y,
-            sample_weight=sample_weight,
-            offset_arr=offset_arr,
-            pirls_tol=pirls_tol,
-            debug_recorder=debug_recorder,
-            reml_penalties=reml_penalties,
-        )
         return best
 
     if use_direct:
@@ -332,18 +346,10 @@ def optimize_reml_best(
             estimated_names=estimated_names,
             pirls_tol=pirls_tol,
             max_pirls_iter=max_pirls_iter,
+            debug_recorder=debug_recorder,
+            trace_run=trace_run,
         )
         _record_non_scop_reml_trace(best, debug_recorder)
-        _record_non_scop_pirls_trace(
-            model,
-            best=best,
-            y=y,
-            sample_weight=sample_weight,
-            offset_arr=offset_arr,
-            pirls_tol=pirls_tol,
-            debug_recorder=debug_recorder,
-            reml_penalties=reml_penalties,
-        )
         return best
     best = model_optimize_efs_reml(
         model,
@@ -363,14 +369,4 @@ def optimize_reml_best(
         max_pirls_iter=max_pirls_iter,
     )
     _record_non_scop_reml_trace(best, debug_recorder)
-    _record_non_scop_pirls_trace(
-        model,
-        best=best,
-        y=y,
-        sample_weight=sample_weight,
-        offset_arr=offset_arr,
-        pirls_tol=pirls_tol,
-        debug_recorder=debug_recorder,
-        reml_penalties=reml_penalties,
-    )
     return best

@@ -38,6 +38,7 @@ from scipy.special import expit, logit, wright_bessel
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
+from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.penalties.base import penalty_has_targets
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
@@ -3402,7 +3403,7 @@ def _clone_profile_model(model, X, sample_weight):
     """Clone configured profile state and resolve shorthand only on the clone."""
     profile_model = model._clone_without_features(
         set(),
-        lambda2=copy.deepcopy(model.lambda2),
+        lambda2=copy.deepcopy(configured_lambda2(model)),
     )
     profile_model._interaction_specs = copy.deepcopy(model._interaction_specs)
     profile_model._interaction_order = list(model._interaction_order)
@@ -3464,7 +3465,7 @@ def _build_profile_context(
 
     # Temporary p so _build_design_matrix can resolve the distribution.
     # The design matrix itself doesn't depend on p.
-    saved_family = profile_model.family
+    saved_family = configured_family(profile_model)
     profile_model.family = Tweedie(p=1.5)
     try:
         y_arr, w_arr, offset_arr = profile_model._build_design_matrix(
@@ -3478,13 +3479,13 @@ def _build_profile_context(
 
     validate_response(y_arr, profile_model._distribution)
 
-    if profile_model.penalty.lambda1 is None:
-        profile_model.penalty.lambda1 = profile_model._compute_lambda_max(y_arr, w_arr) * 0.1
+    penalty = configured_penalty(profile_model)
+    if penalty.lambda1 is None:
+        penalty.lambda1 = profile_model._compute_lambda_max(y_arr, w_arr) * 0.1
 
     if offset_arr is None:
         offset_arr = np.zeros(len(y_arr))
 
-    penalty = profile_model.penalty
     groups = profile_model._groups
     has_lambda1_targets = penalty_has_targets(penalty, groups)
 
@@ -3522,7 +3523,7 @@ def _build_profile_context(
         link=profile_model._link,
         penalty=penalty,
         use_direct=use_direct,
-        lambda2=profile_model.lambda2,
+        lambda2=configured_lambda2(profile_model),
         direct_solve=profile_model._direct_solve,
         max_iter=profile_model._max_iter,
         tol=profile_model._tol,
@@ -4259,7 +4260,7 @@ def estimate_tweedie_p(
         sample_weight = _validate_strict_prior_weights(sample_weight, len(y_arr))
 
     # Validate family
-    family = model.family
+    family = configured_family(model)
     if not isinstance(family, Tweedie):
         raise ValueError(
             f"estimate_tweedie_p requires a Tweedie family, got {family!r}. "
