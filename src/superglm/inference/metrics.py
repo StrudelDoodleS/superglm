@@ -739,10 +739,6 @@ class ModelMetrics:
             return X_a, W, inverse, augmented, active_groups
 
         if uses_fitted_rank:
-            if getattr(self._result, "scop_inference", None) is not None:
-                X_a, _, inverse, augmented, active_groups = self._model._fit_active_info
-                self.__dict__["_coefficient_estimable"] = rank_info.coefficient_estimable()
-                return X_a, W, inverse, augmented, active_groups
             X_a, active_groups = _rank_active_state(self._model, rank_info)
             inverse = rank_info.coefficient.pseudo_inverse()
             augmented = _rank_augmented_covariance(self._model, rank_info, active_groups)
