@@ -39,9 +39,11 @@ from superglm.types import GroupSlice
 
 def _paired_boundary_design(
     singular_values: tuple[float, float, float] = (1.0, 1.55e-8, 1.30e-8),
+    *,
+    seed: int = 4274,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return the deterministic centered design whose Gram loses its factor subspace."""
-    rng = np.random.default_rng(4274)
+    rng = np.random.default_rng(seed)
     right, _ = np.linalg.qr(rng.normal(size=(3, 3)))
     half_left, _ = np.linalg.qr(rng.normal(size=(8, 3)))
     left = np.vstack((half_left, -half_left)) / np.sqrt(2.0)
@@ -234,7 +236,10 @@ def test_scop_efs_terminal_rank_uses_equal_rank_factor_subspace() -> None:
 
 
 def test_scop_fisher_geometry_uses_equal_full_rank_factor_certificate() -> None:
-    design, _ = _paired_boundary_design((1.0, 4e-8, 3e-8))
+    # This construction leaves a wide cross-platform margin: both routes are
+    # full rank, while their inverses differ by roughly 60% on the reference
+    # LAPACK build rather than sitting near the assertion boundary.
+    design, _ = _paired_boundary_design((1.0, 5.5e-8, 3.025e-8), seed=4256)
     dm = _grouped_design(design)
     weights = np.ones(len(design))
     mean_x = np.average(design, axis=0, weights=weights)
