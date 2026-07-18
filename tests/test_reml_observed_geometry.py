@@ -5,9 +5,24 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from superglm.distributions import Binomial, Gamma, Gaussian, Poisson
+from superglm.distributions import (
+    Binomial,
+    Gamma,
+    Gaussian,
+    NegativeBinomial,
+    Poisson,
+    Tweedie,
+    clip_mu,
+)
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
-from superglm.links import CauchitLink, IdentityLink, LogLink
+from superglm.links import (
+    CauchitLink,
+    CloglogLink,
+    IdentityLink,
+    LogLink,
+    ProbitLink,
+    SqrtLink,
+)
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
@@ -138,26 +153,164 @@ def test_observed_weight_derivatives_are_exact_for_gamma_and_poisson_log() -> No
     np.testing.assert_allclose(poisson_d2, fisher, rtol=2e-9, atol=2e-10)
 
 
-def test_generic_second_observed_derivative_requires_explicit_approximation() -> None:
-    link = CauchitLink()
-    eta = np.array([-0.7, 0.2, 0.8])
-    mu = link.inverse(eta)
-    y = np.array([0.0, 1.0, 0.0])
-    weights = np.ones_like(y)
+@pytest.mark.parametrize(
+    ("distribution", "link", "eta", "y"),
+    [
+        pytest.param(
+            NegativeBinomial(theta=2.3),
+            LogLink(),
+            np.log(np.array([0.45, 1.4, 3.2])),
+            np.array([0.0, 2.0, 5.0]),
+            id="nb2-log",
+        ),
+        pytest.param(
+            Tweedie(p=1.55),
+            LogLink(),
+            np.log(np.array([0.35, 1.1, 2.7])),
+            np.array([0.0, 0.8, 3.4]),
+            id="tweedie-log",
+        ),
+        pytest.param(
+            Binomial(),
+            ProbitLink(),
+            np.array([-0.7, 0.1, 0.8]),
+            np.array([0.0, 1.0, 0.0]),
+            id="binomial-probit",
+        ),
+        pytest.param(
+            Binomial(),
+            CloglogLink(),
+            np.array([-0.8, -0.1, 0.6]),
+            np.array([0.0, 1.0, 1.0]),
+            id="binomial-cloglog",
+        ),
+        pytest.param(
+            Binomial(),
+            CauchitLink(),
+            np.array([-0.7, 0.2, 0.8]),
+            np.array([0.0, 1.0, 0.0]),
+            id="binomial-cauchit",
+        ),
+        pytest.param(
+            Poisson(),
+            SqrtLink(),
+            np.array([0.7, 1.1, 1.6]),
+            np.array([0.0, 1.0, 4.0]),
+            id="poisson-sqrt",
+        ),
+        pytest.param(
+            Poisson(),
+            IdentityLink(),
+            np.array([0.7, 1.2, 2.2]),
+            np.array([0.0, 1.0, 4.0]),
+            id="poisson-identity",
+        ),
+        pytest.param(
+            Gamma(),
+            IdentityLink(),
+            np.array([0.6, 1.1, 2.0]),
+            np.array([0.4, 1.4, 2.8]),
+            id="gamma-identity",
+        ),
+        pytest.param(
+            Gamma(),
+            LogLink(),
+            np.log(np.array([0.6, 1.1, 2.0])),
+            np.array([0.4, 1.4, 2.8]),
+            id="gamma-log",
+        ),
+        pytest.param(
+            Gaussian(),
+            LogLink(),
+            np.log(np.array([0.7, 1.3, 2.1])),
+            np.array([0.3, 1.6, 2.8]),
+            id="gaussian-log",
+        ),
+    ],
+)
+def test_observed_row_derivative_oracle_matches_likelihood_finite_differences(
+    distribution, link, eta, y
+) -> None:
+    sample_weight = np.array([0.6, 1.2, 1.9])
 
-    with pytest.raises(NotImplementedError, match="exact second"):
-        compute_observed_d2W_deta2(Binomial(), link, y, mu, eta, weights)
+    def observed(delta: float) -> np.ndarray:
+        shifted_eta = eta + delta
+        shifted_mu = clip_mu(link.inverse(shifted_eta), distribution)
+        return compute_observed_information_weights(
+            distribution,
+            link,
+            y,
+            shifted_mu,
+            shifted_eta,
+            sample_weight,
+        )
 
-    approximate = compute_observed_d2W_deta2(
-        Binomial(),
+    def negative_log_likelihood_rows(delta: float) -> np.ndarray:
+        shifted_mu = clip_mu(link.inverse(eta + delta), distribution)
+        return 0.5 * sample_weight * distribution.deviance_unit(y, shifted_mu)
+
+    mu = clip_mu(link.inverse(eta), distribution)
+    actual_w = observed(0.0)
+    actual_d1 = compute_observed_dW_deta(
+        distribution,
         link,
         y,
         mu,
         eta,
-        weights,
-        allow_approximate=True,
+        sample_weight,
     )
-    assert np.all(np.isfinite(approximate))
+    actual_d2 = compute_observed_d2W_deta2(
+        distribution,
+        link,
+        y,
+        mu,
+        eta,
+        sample_weight,
+    )
+
+    likelihood_step = 4.0e-4
+    expected_w = (
+        -negative_log_likelihood_rows(2.0 * likelihood_step)
+        + 16.0 * negative_log_likelihood_rows(likelihood_step)
+        - 30.0 * negative_log_likelihood_rows(0.0)
+        + 16.0 * negative_log_likelihood_rows(-likelihood_step)
+        - negative_log_likelihood_rows(-2.0 * likelihood_step)
+    ) / (12.0 * likelihood_step**2)
+    derivative_step = 2.0e-4
+    expected_d1 = (
+        observed(-2.0 * derivative_step)
+        - 8.0 * observed(-derivative_step)
+        + 8.0 * observed(derivative_step)
+        - observed(2.0 * derivative_step)
+    ) / (12.0 * derivative_step)
+    expected_d2 = (
+        -observed(2.0 * derivative_step)
+        + 16.0 * observed(derivative_step)
+        - 30.0 * observed(0.0)
+        + 16.0 * observed(-derivative_step)
+        - observed(-2.0 * derivative_step)
+    ) / (12.0 * derivative_step**2)
+
+    np.testing.assert_allclose(actual_w, expected_w, rtol=3e-6, atol=2e-6)
+    np.testing.assert_allclose(actual_d1, expected_d1, rtol=2e-7, atol=2e-8)
+    np.testing.assert_allclose(actual_d2, expected_d2, rtol=3e-6, atol=3e-7)
+
+
+def test_custom_second_observed_derivative_requires_exact_fourth_order_protocol() -> None:
+    class CustomGaussian(Gaussian):
+        pass
+
+    class CustomIdentity(IdentityLink):
+        pass
+
+    eta = np.array([-0.7, 0.2, 0.8])
+    link = CustomIdentity()
+    mu = link.inverse(eta)
+    y = np.array([0.0, 1.0, 0.0])
+    weights = np.ones_like(y)
+
+    with pytest.raises(NotImplementedError, match="deriv4_inverse"):
+        compute_observed_d2W_deta2(CustomGaussian(), link, y, mu, eta, weights)
 
 
 def _result(beta: np.ndarray, intercept: float, *, phi: float = 1.0) -> PIRLSResult:
