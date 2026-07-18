@@ -3943,6 +3943,34 @@ class TestEstimatePFitMode:
         assert model._result is not None
         assert model._last_fit_meta["method"] == "fit"
 
+    @pytest.mark.parametrize("retain_fit_state", [True, False])
+    def test_fit_mode_reml_supports_intercept_only_zero_column_frame(self, retain_fit_state):
+        _, y, _ = _tweedie_data(n=30, seed=20260823)
+        X = pd.DataFrame(index=pd.RangeIndex(len(y)))
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={},
+            retain_fit_state=retain_fit_state,
+        )
+
+        result = model.estimate_p(
+            X,
+            y,
+            fit_mode="reml",
+            phi_method="pearson",
+            method="grid",
+            grid=np.array([1.5]),
+        )
+
+        assert result.p_hat == pytest.approx(1.5)
+        assert (model._dm is not None) is retain_fit_state
+        if retain_fit_state:
+            assert model._dm.shape == (len(X), 0)
+        assert model.result.beta.shape == (0,)
+        assert model._last_fit_meta["method"] == "fit_reml"
+        assert np.all(np.isfinite(model.predict(X)))
+
     @pytest.mark.slow
     def test_fit_mode_reml_recovers_p(self):
         """fit_mode='reml' should recover p using REML fits."""

@@ -1050,20 +1050,39 @@ def _fit_reml_in_workspace(
 
     if not reml_groups and not _has_monotone:
         logger.warning("fit_reml: no REML-eligible groups found, falling back to fit()")
-        model._result = fit_pirls(
-            X=model._dm,
-            y=y,
-            weights=sample_weight,
-            family=model._distribution,
-            link=model._link,
-            groups=model._groups,
-            penalty=penalty,
-            offset=offset,
-            active_set=model._active_set,
-            lambda2=configured_smoothing,
-            tol=pirls_tol,
-            max_iter_outer=max_pirls_iter,
-        )
+        if model._dm.p == 0:
+            # Match fit()'s intercept-only routing.  There is no composite
+            # coefficient block to update, so PIRLS' block convergence
+            # reductions are inapplicable to this zero-column design.
+            model._result, _ = fit_irls_direct(
+                X=model._dm,
+                y=y,
+                weights=sample_weight,
+                family=model._distribution,
+                link=model._link,
+                groups=model._groups,
+                lambda2=configured_smoothing,
+                offset=offset,
+                max_iter=max_pirls_iter,
+                tol=pirls_tol,
+                direct_solve=model._direct_solve,
+                convergence=model._convergence,
+            )
+        else:
+            model._result = fit_pirls(
+                X=model._dm,
+                y=y,
+                weights=sample_weight,
+                family=model._distribution,
+                link=model._link,
+                groups=model._groups,
+                penalty=penalty,
+                offset=offset,
+                active_set=model._active_set,
+                lambda2=configured_smoothing,
+                tol=pirls_tol,
+                max_iter_outer=max_pirls_iter,
+            )
         eta = model._dm.matvec(model._result.beta) + model._result.intercept
         if offset is not None:
             eta = eta + offset

@@ -264,6 +264,292 @@ class TestNB2ProfileTheta:
 
 
 class TestNB2AutoTheta:
+    @pytest.mark.parametrize("retain_fit_state", [True, False])
+    def test_estimate_theta_reml_supports_intercept_only_zero_column_frame(self, retain_fit_state):
+        rng = np.random.default_rng(20260823)
+        n = 30
+        X = pd.DataFrame(index=pd.RangeIndex(n))
+        y = _generate_nb2(n, mu=3.0, theta=2.0, rng=rng)
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            selection_penalty=0.0,
+            features={},
+            retain_fit_state=retain_fit_state,
+        )
+
+        result = model.estimate_theta(X, y, fit_mode="reml", maxiter=1)
+
+        assert np.isfinite(result.theta_hat)
+        assert (model._dm is not None) is retain_fit_state
+        if retain_fit_state:
+            assert model._dm.shape == (len(X), 0)
+        assert model.result.beta.shape == (0,)
+        assert model._last_fit_meta["method"] == "fit_reml"
+        assert np.all(np.isfinite(model.predict(X)))
+
+    @pytest.mark.parametrize("callback_stage", ["trace", "best_found", "final_refit"])
+    @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
+    @pytest.mark.parametrize("retain_fit_state", [True, False])
+    def test_callbacks_cannot_poison_profile_refit_inputs_or_configuration(
+        self,
+        monkeypatch,
+        callback_stage,
+        fit_mode,
+        retain_fit_state,
+    ):
+        from superglm.model import fit_ops as fit_ops_module
+
+        n = 24
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, n)})
+        y = np.resize(np.array([0.0, 1.0, 2.0, 4.0]), n)
+        sample_weight = np.linspace(0.5, 1.5, n)
+        offset = np.linspace(-0.2, 0.2, n)
+        baseline_X = X.copy(deep=True)
+        baseline_y = y.copy()
+        baseline_weight = sample_weight.copy()
+        baseline_offset = offset.copy()
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+            retain_fit_state=retain_fit_state,
+        )
+        initial_config_revision = model._config_revision
+        initial_fit_revision = model._fit_revision
+        result = NBProfileResult(
+            theta_hat=2.5,
+            nll=1.2,
+            n_evaluations=1,
+            converged=True,
+            cache={2.5: 1.2},
+        )
+        poisoned = False
+
+        def poison_caller_state():
+            nonlocal poisoned
+            if poisoned:
+                return
+            poisoned = True
+            X.iloc[:, 0] += 50.0
+            y[:] += 7.0
+            sample_weight[:] *= 3.0
+            offset[:] += 1.0
+            model._config.penalty.lambda1 = 0.5
+            model._penalty_config.lambda1 = 0.75
+            model._retain_fit_state = not retain_fit_state
+            model._config_revision += 50
+            model._fit_revision += 50
+
+        def fake_profile(_candidate, _X, _y, **kwargs):
+            if callback_stage == "trace":
+                kwargs["trace_callback"]({"step": 0, "theta": 2.5, "nll": 1.2})
+            return result
+
+        monkeypatch.setattr("superglm.profiling.nb.estimate_nb_theta", fake_profile)
+        fit_name = "_fit_reml_in_workspace" if fit_mode == "reml" else "_fit_in_workspace"
+        real_fit = getattr(fit_ops_module, fit_name)
+        captured = {}
+
+        def capture_final_fit(candidate, X_arg, y_arg, weight_arg, offset_arg, **kwargs):
+            captured["X"] = X_arg.copy(deep=True)
+            captured["y"] = y_arg.copy()
+            captured["weight"] = weight_arg.copy()
+            captured["offset"] = offset_arg.copy()
+            return real_fit(candidate, X_arg, y_arg, weight_arg, offset_arg, **kwargs)
+
+        monkeypatch.setattr(fit_ops_module, fit_name, capture_final_fit)
+
+        def progress_callback(stage, _payload):
+            if stage == callback_stage:
+                poison_caller_state()
+
+        trace_callback = (
+            (lambda _payload: poison_caller_state()) if callback_stage == "trace" else None
+        )
+        returned = model.estimate_theta(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode=fit_mode,
+            trace_callback=trace_callback,
+            progress_callback=progress_callback,
+        )
+
+        assert poisoned
+        pd.testing.assert_frame_equal(captured["X"], baseline_X, check_column_type=False)
+        np.testing.assert_array_equal(captured["y"], baseline_y)
+        np.testing.assert_array_equal(captured["weight"], baseline_weight)
+        np.testing.assert_array_equal(captured["offset"], baseline_offset)
+        np.testing.assert_array_equal(model._nb_profile_result._y, baseline_y)
+        np.testing.assert_array_equal(model._nb_profile_result._weights, baseline_weight)
+        assert returned.theta_hat == pytest.approx(2.5)
+        assert model.family.theta == pytest.approx(2.5)
+        assert model._config.penalty.lambda1 == pytest.approx(0.0)
+        assert model._penalty_config.lambda1 == pytest.approx(0.0)
+        assert model._fit_state.resolved_penalty.lambda1 == pytest.approx(0.0)
+        assert model.clone_unfitted().selection_penalty == pytest.approx(0.0)
+        assert model._retain_fit_state is retain_fit_state
+        assert model._config_revision == initial_config_revision + 1
+        assert model._fit_revision == initial_fit_revision + 1
+        if retain_fit_state:
+            assert model._fit_X_ref is not X
+            assert model._fit_y_ref is not y
+            assert model._fit_sample_weight_ref is not sample_weight
+            assert model._fit_offset_ref is not offset
+            assert model._fit_data_guard.matches(
+                baseline_X,
+                baseline_y,
+                baseline_weight,
+                baseline_offset,
+                fit_weights=model._fit_weights,
+                fit_offset=model._fit_offset,
+            )
+        else:
+            assert model._fit_X_ref is None
+            assert model._fit_y_ref is None
+            assert model._fit_sample_weight_ref is None
+            assert model._fit_offset_ref is None
+
+    @pytest.mark.parametrize("callback_stage", ["best_found", "final_refit"])
+    def test_progress_callback_cannot_poison_nb_profile_publication(
+        self, monkeypatch, callback_stage
+    ):
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 20)})
+        y = np.resize(np.array([0.0, 1.0, 2.0, 3.0]), len(X))
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        result = NBProfileResult(
+            theta_hat=2.5,
+            nll=1.2,
+            n_evaluations=1,
+            converged=True,
+            cache={2.5: 1.2},
+        )
+        monkeypatch.setattr(
+            "superglm.profiling.nb.estimate_nb_theta",
+            lambda *_args, **_kwargs: result,
+        )
+        progress_events = []
+
+        def poison_result(stage, payload):
+            progress_events.append((stage, dict(payload["profile_estimate"])))
+            if stage != callback_stage:
+                return
+            result.theta_hat = 9.0
+            result.nll = -100.0
+            result.cache[9.0] = -100.0
+
+        returned = model.estimate_theta(X, y, progress_callback=poison_result)
+        installed = model._nb_profile_result
+
+        assert result.theta_hat == pytest.approx(9.0)
+        assert returned.theta_hat == pytest.approx(2.5)
+        assert installed.theta_hat == pytest.approx(2.5)
+        assert model.family.theta == pytest.approx(2.5)
+        assert 9.0 not in returned.cache
+        assert 9.0 not in installed.cache
+        assert returned is not installed
+        assert returned._ci_cache is not installed._ci_cache
+        assert [stage for stage, _ in progress_events] == ["best_found", "final_refit"]
+        assert all(payload["value"] == pytest.approx(2.5) for _, payload in progress_events)
+        assert all(payload["objective"] == pytest.approx(1.2) for _, payload in progress_events)
+
+    def test_nb_profile_rejects_frame_metadata_without_copy_hooks(self, monkeypatch):
+        class DeepcopyBomb:
+            calls = 0
+
+            def __deepcopy__(self, memo):
+                type(self).calls += 1
+                raise AssertionError("DataFrame metadata copy hook executed")
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 8)})
+        X.attrs["unsafe"] = DeepcopyBomb()
+        y = np.resize(np.array([0.0, 1.0]), len(X))
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        monkeypatch.setattr(
+            "superglm.profiling.nb.estimate_nb_theta",
+            lambda *_args, **_kwargs: pytest.fail("profile must not start"),
+        )
+
+        with pytest.raises(TypeError, match="Could not safely snapshot values in X"):
+            model.estimate_theta(X, y)
+
+        assert DeepcopyBomb.calls == 0
+        assert model._result is None
+
+    def test_nb_profile_rejects_mutable_object_cells_before_callbacks(self, monkeypatch):
+        class MutableNumeric:
+            def __init__(self, value):
+                self.value = value
+
+            def __float__(self):
+                return float(self.value)
+
+        cells = [MutableNumeric(value) for value in np.linspace(-1.0, 1.0, 8)]
+        X = pd.DataFrame({"x": np.array(cells, dtype=object)})
+        y = np.resize(np.array([0.0, 1.0]), len(X))
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        trace_calls = []
+        monkeypatch.setattr(
+            "superglm.profiling.nb.estimate_nb_theta",
+            lambda *_args, **_kwargs: pytest.fail("profile must not start"),
+        )
+
+        with pytest.raises(TypeError, match="Could not safely snapshot values in X"):
+            model.estimate_theta(X, y, trace_callback=trace_calls.append)
+
+        assert trace_calls == []
+        assert model._result is None
+
+    def test_nb_profile_does_not_traverse_unused_mutable_columns(self, monkeypatch):
+        class DeepcopyBomb:
+            calls = 0
+
+            def __deepcopy__(self, memo):
+                type(self).calls += 1
+                raise AssertionError("unused cell copy hook executed")
+
+        n = 12
+        X = pd.DataFrame(
+            {
+                "x": np.linspace(-1.0, 1.0, n),
+                "unused": [DeepcopyBomb() for _ in range(n)],
+            }
+        )
+        y = np.resize(np.array([0.0, 1.0, 2.0]), n)
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        monkeypatch.setattr(
+            "superglm.profiling.nb.estimate_nb_theta",
+            lambda *_args, **_kwargs: NBProfileResult(
+                theta_hat=2.5,
+                nll=1.2,
+                n_evaluations=1,
+                converged=True,
+            ),
+        )
+
+        model.estimate_theta(X, y)
+
+        assert DeepcopyBomb.calls == 0
+        assert list(model._fit_X_ref.columns) == ["x"]
+        assert model._fit_data_guard.x_columns == ("x",)
+
     def test_estimate_theta_inherit_preserves_reml_final_refit(self, monkeypatch):
         X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 80)})
         y = np.resize(np.array([1.0, 2.0, 3.0, 4.0]), len(X))
@@ -287,7 +573,9 @@ class TestNB2AutoTheta:
         def fake_profile(model_arg, X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
             assert model_arg is not model
             assert model_arg.family.theta == "auto"
-            assert X_arg is X
+            assert X_arg is not X
+            pd.testing.assert_frame_equal(X_arg, X, check_column_type=False)
+            assert y_arg is not y
             np.testing.assert_array_equal(y_arg, y)
             return result
 
@@ -299,7 +587,8 @@ class TestNB2AutoTheta:
         assert model._last_fit_meta["method"] == "fit_reml"
         assert model._config is not configured_model
         assert model._family_config is not configured_family
-        assert model._penalty_config is configured_penalty
+        assert model._penalty_config is not configured_penalty
+        assert model._penalty_config.lambda1 == pytest.approx(configured_penalty.lambda1)
         assert model._config_revision == configured_revision + 1
         assert model._config.family.theta == pytest.approx(2.5)
         assert model.family.theta == pytest.approx(2.5)
