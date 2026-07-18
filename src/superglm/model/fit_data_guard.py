@@ -37,16 +37,33 @@ class FitDataGuard:
 
     x_digest: bytes
     y_snapshot: NDArray[np.float64]
+    x_columns: tuple[object, ...] | None = None
 
     @classmethod
-    def capture(cls, X: pd.DataFrame, y: NDArray) -> FitDataGuard:
-        x_digest = _frame_digest(X)
+    def capture(
+        cls,
+        X: pd.DataFrame,
+        y: NDArray,
+        *,
+        columns: tuple[object, ...] | None = None,
+    ) -> FitDataGuard:
+        x_columns = None if columns is None else tuple(columns)
+        guarded_X = X if x_columns is None else X.loc[:, list(x_columns)]
+        x_digest = _frame_digest(guarded_X)
         y_snapshot = np.array(y, dtype=np.float64, copy=True)
         y_snapshot.setflags(write=False)
         return cls(
             x_digest=x_digest,
             y_snapshot=y_snapshot,
+            x_columns=x_columns,
         )
+
+    def _matches_frame(self, X: pd.DataFrame) -> bool:
+        try:
+            guarded_X = X if self.x_columns is None else X.loc[:, list(self.x_columns)]
+            return _frame_digest(guarded_X) == self.x_digest
+        except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+            return False
 
     def matches(
         self,
@@ -71,7 +88,7 @@ class FitDataGuard:
             fit_offset is None or not _same_numeric_vector(offset, fit_offset)
         ):
             return False
-        if _frame_digest(X) != self.x_digest:
+        if not self._matches_frame(X):
             return False
         return True
 
@@ -88,7 +105,7 @@ class FitDataGuard:
             return False
         if not _same_numeric_vector(y, self.y_snapshot):
             return False
-        if _frame_digest(X) != self.x_digest:
+        if not self._matches_frame(X):
             return False
         return True
 

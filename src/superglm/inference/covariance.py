@@ -56,6 +56,7 @@ def _active_penalty_matrix(
 
     S = np.zeros((p_active, p_active), dtype=np.float64)
     if reml_penalties is not None:
+        represented_group_indices = {component.group_index for component in reml_penalties}
         for component in reml_penalties:
             active_group = active_by_name.get(component.group_name)
             if active_group is None:
@@ -71,7 +72,9 @@ def _active_penalty_matrix(
             )
             S[active_group.sl, active_group.sl] += lam * omega
 
-        for group in groups:
+        for group_index, group in enumerate(groups):
+            if group_index in represented_group_indices:
+                continue
             active_group = active_by_name.get(group.name)
             if active_group is None or group.scop_reparameterization is None or not group.penalized:
                 continue
