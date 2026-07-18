@@ -6,7 +6,8 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from superglm._fit_trace import MemoryTraceSink, NullTraceSink, TraceRun
+from superglm._fit_trace import JSONLTraceSink, MemoryTraceSink, NullTraceSink, TraceRun
+from superglm.model.reml_debug import load_reml_debug_run
 
 
 def test_trace_run_assigns_one_sequence_across_channels() -> None:
@@ -130,3 +131,102 @@ def test_lazy_enabled_sink_materializes_payload_once() -> None:
 def test_run_id_must_be_nonempty() -> None:
     with pytest.raises(ValueError, match="run_id"):
         TraceRun("")
+
+
+def test_jsonl_sink_preserves_run_sequence_across_channels(tmp_path) -> None:
+    sink = JSONLTraceSink(tmp_path, "run-1")
+    run = TraceRun("run-1", sink=sink, clock=lambda: 0.0)
+    run.emit(
+        "evaluation",
+        channel="pirls",
+        state_id=run.next_state_id(),
+        deviance=1.0,
+    )
+    run.emit(
+        "evaluation",
+        channel="reml",
+        state_id=run.next_state_id(),
+        objective=2.0,
+    )
+
+    loaded = load_reml_debug_run(tmp_path, "run-1")
+
+    assert [event["sequence"] for event in loaded.events] == [1, 2]
+    assert [event["channel"] for event in loaded.events] == ["pirls", "reml"]
+    assert loaded.pirls_rows[0]["deviance"] == 1.0
+    assert loaded.reml_rows[0]["objective"] == 2.0
+
+
+def test_jsonl_sink_detaches_array_like_payloads(tmp_path) -> None:
+    class ArrayLike:
+        shape = (2,)
+
+        def __init__(self, values):
+            self.values = list(values)
+
+        def copy(self):
+            return ArrayLike(self.values)
+
+        def setflags(self, *, write):
+            assert not write
+
+        def tolist(self):
+            return list(self.values)
+
+    sink = JSONLTraceSink(tmp_path, "run-1")
+    run = TraceRun("run-1", sink=sink)
+    values = ArrayLike([1.0, 2.0])
+    run.emit("terminal", channel="fit", state_id=1, beta=values)
+    values.values[0] = 99.0
+
+    loaded = load_reml_debug_run(tmp_path, "run-1")
+    assert loaded.events[0]["payload"]["beta"] == [1.0, 2.0]
+
+
+def test_loader_accepts_legacy_rows_without_schema_version(tmp_path) -> None:
+    (tmp_path / "old_run.json").write_text('{"method":"fit_reml"}', encoding="utf-8")
+    (tmp_path / "old_reml.jsonl").write_text(
+        '{"iteration":1,"objective_after":3.0}\n',
+        encoding="utf-8",
+    )
+
+    loaded = load_reml_debug_run(tmp_path, "old")
+
+    assert loaded.events == []
+    assert loaded.reml_rows[0]["iteration"] == 1
+
+
+def test_loader_rejects_duplicate_canonical_sequences(tmp_path) -> None:
+    sink = JSONLTraceSink(tmp_path, "run-1")
+    run = TraceRun("run-1", sink=sink)
+    event = run.emit("evaluation", channel="pirls", state_id=1, deviance=1.0)
+    assert event is not None
+    pirls_path = tmp_path / "run-1_pirls.jsonl"
+    row = pirls_path.read_text(encoding="utf-8")
+    (tmp_path / "run-1_reml.jsonl").write_text(row, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate canonical trace sequence"):
+        load_reml_debug_run(tmp_path, "run-1")
+
+
+def test_loader_ignores_longer_run_ids_with_the_same_prefix(tmp_path) -> None:
+    short = TraceRun("run", sink=JSONLTraceSink(tmp_path, "run"))
+    long = TraceRun("run_child", sink=JSONLTraceSink(tmp_path, "run_child"))
+    short.emit("evaluation", channel="pirls", state_id=1, deviance=1.0)
+    long.emit("evaluation", channel="pirls", state_id=1, deviance=2.0)
+
+    loaded = load_reml_debug_run(tmp_path, "run")
+
+    assert len(loaded.events) == 1
+    assert loaded.events[0]["payload"]["deviance"] == 1.0
+
+
+def test_loader_rejects_noncontiguous_canonical_sequences(tmp_path) -> None:
+    sink = JSONLTraceSink(tmp_path, "run-1")
+    run = TraceRun("run-1", sink=sink)
+    run.emit("evaluation", channel="pirls", state_id=1, deviance=1.0)
+    run.emit("evaluation", channel="reml", state_id=2, objective=2.0)
+    (tmp_path / "run-1_pirls.jsonl").unlink()
+
+    with pytest.raises(ValueError, match="noncontiguous canonical trace sequence"):
+        load_reml_debug_run(tmp_path, "run-1")

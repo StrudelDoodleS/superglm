@@ -7,9 +7,12 @@ sequencer.  A disabled run has one predictable branch and, through
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
@@ -69,6 +72,81 @@ class MemoryTraceSink:
 
     def append(self, event: TraceEvent) -> None:
         self.events.append(event)
+
+
+_SAFE_PATH_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+
+
+def _require_safe_path_component(value: str, *, name: str) -> str:
+    if not isinstance(value, str) or _SAFE_PATH_COMPONENT.fullmatch(value) is None:
+        raise ValueError(f"{name} must be a safe non-empty file-name component")
+    return value
+
+
+def _jsonable(value):
+    """Project frozen event values onto JSON-compatible standard types."""
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, frozenset | set):
+        return [_jsonable(item) for item in sorted(value, key=repr)]
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return _jsonable(tolist())
+    item = getattr(value, "item", None)
+    if callable(item):
+        return _jsonable(item())
+    return value
+
+
+class JSONLTraceSink:
+    """Append canonical events to channel-local JSONL files.
+
+    Sequence numbers are allocated by the shared :class:`TraceRun`, so rows in
+    separate channel files still have one unambiguous total order.
+    """
+
+    enabled = True
+
+    def __init__(self, base_dir: str | Path, run_id: str) -> None:
+        self.base_dir = Path(base_dir)
+        self.run_id = _require_safe_path_component(run_id, name="run_id")
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        metadata_path = self.base_dir / f"{self.run_id}_run.json"
+        if not metadata_path.exists():
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "run_id": self.run_id,
+                        "canonical_trace": True,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+    def append(self, event: TraceEvent) -> None:
+        if event.run_id != self.run_id:
+            raise ValueError(
+                f"trace event run_id {event.run_id!r} does not match sink {self.run_id!r}"
+            )
+        channel = _require_safe_path_component(event.channel, name="channel")
+        payload = {
+            "schema_version": event.schema_version,
+            "run_id": event.run_id,
+            "sequence": event.sequence,
+            "timestamp": event.timestamp,
+            "event_kind": event.event_kind,
+            "channel": event.channel,
+            "purpose": event.purpose,
+            "authoritative": event.authoritative,
+            "payload": _jsonable(event.payload),
+        }
+        path = self.base_dir / f"{self.run_id}_{channel}.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
 
 
 def _freeze_value(value):
@@ -209,6 +287,7 @@ class TraceRun:
 
 __all__ = [
     "SCHEMA_VERSION",
+    "JSONLTraceSink",
     "MemoryTraceSink",
     "NullTraceSink",
     "TraceEvent",
