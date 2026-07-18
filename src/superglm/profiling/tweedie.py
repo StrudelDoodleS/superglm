@@ -25,6 +25,7 @@ from __future__ import annotations
 import copy
 import logging
 import operator
+import threading
 import warnings as _warnings
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -32,6 +33,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Literal, Protocol
+from uuid import UUID, SafeUUID
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -1703,6 +1705,32 @@ class TweedieProfileCIDetails:
     density_warning_signatures: tuple[str, ...] = ()
 
 
+_TWEEDIE_PROFILE_RESULT_TOKEN = object()
+
+
+@dataclass
+class _TweedieProfileEvaluator:
+    """One detachable owner for all post-search profile operations."""
+
+    context: Any = field(repr=False)
+    _lock: Any = field(default_factory=threading.RLock, repr=False, compare=False)
+
+    def evaluate(self, p: float, source: str = "") -> float:
+        """Evaluate and retain one fixed-power profile record."""
+        with self._lock:
+            return self.context.evaluate(p, source=source)
+
+    def evaluation_count(self) -> int:
+        """Return the number of completed distinct profile records."""
+        with self._lock:
+            return int(self.context.evaluation_count())
+
+    def evaluation_record(self, p: float):
+        """Return the authoritative completed record at an exact power."""
+        with self._lock:
+            return self.context.evaluation_record(p)
+
+
 @dataclass
 class TweedieProfileResult:
     """Result of Tweedie power parameter estimation.
@@ -1793,6 +1821,24 @@ class TweedieProfileResult:
     density_exact: bool | None = field(default=None, kw_only=True)
     density_warning_severity: _DensityWarningSeverity = field(default="none", kw_only=True)
     near_power_boundary: bool = field(default=False, kw_only=True)
+    _validation_token: object | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+        kw_only=True,
+    )
+    _evaluator: _TweedieProfileEvaluator | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+        kw_only=True,
+    )
+    _frozen_evaluation_count: int | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+        kw_only=True,
+    )
 
     def __post_init__(self) -> None:
         """Derive new density fields for legacy positional construction."""
@@ -1834,11 +1880,58 @@ class TweedieProfileResult:
             self._emitted_ci_density_warning_signatures = signatures
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore compatibility fields absent from legacy pickle state."""
+        """Restore a detached result without reviving row-owning callbacks."""
         self.__dict__.update(state)
         self._ensure_density_compat_state()
         if "_ci_details_cache" not in self.__dict__:
             self._ci_details_cache = {}
+        frozen_count = self.__dict__.get("_frozen_evaluation_count")
+        if type(frozen_count) is not int or frozen_count < int(self.n_evaluations):
+            self._frozen_evaluation_count = int(self.n_evaluations)
+        self._evaluator = None
+        self._objective = None
+        self._evaluation_count = None
+        self._evaluation_record = None
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Serialize a detached copy of state without racing a live profile operation."""
+        evaluator = self.__dict__.get("_evaluator")
+        if type(evaluator) is _TweedieProfileEvaluator:
+            with evaluator._lock:
+                return self._detached_pickle_state()
+        return self._detached_pickle_state()
+
+    def _detached_pickle_state(self) -> dict[str, Any]:
+        """Build serialization state while the evaluator lock is held, when live."""
+        state = self.__dict__.copy()
+        evaluator = state.get("_evaluator")
+        if type(evaluator) is _TweedieProfileEvaluator:
+            try:
+                frozen_count = evaluator.evaluation_count()
+            except Exception:
+                frozen_count = int(self.n_evaluations)
+        else:
+            existing = state.get("_frozen_evaluation_count")
+            frozen_count = (
+                existing
+                if type(existing) is int and existing >= int(self.n_evaluations)
+                else int(self.n_evaluations)
+            )
+        state["_frozen_evaluation_count"] = max(int(self.n_evaluations), int(frozen_count))
+        state["_evaluator"] = None
+        state["_objective"] = None
+        state["_evaluation_count"] = None
+        state["_evaluation_record"] = None
+        # Only these library-owned containers can change during a guarded
+        # profile operation. Snapshot them while holding the evaluator lock so
+        # serialization observes one coherent cache state without recursively
+        # copying arbitrary user-attached result attributes.
+        state["_ci_cache"] = dict(state.get("_ci_cache", {}))
+        state["_ci_details_cache"] = dict(state.get("_ci_details_cache", {}))
+        state["_emitted_ci_density_warning_signatures"] = set(
+            state.get("_emitted_ci_density_warning_signatures", set())
+        )
+        return state
 
     @property
     def cache(self) -> dict[float, float]:
@@ -1873,12 +1966,87 @@ class TweedieProfileResult:
         repr=False,
     )
 
+    def _profile_evaluator_callbacks(self):
+        """Resolve modern evaluator callbacks or legacy constructor fields."""
+        if type(self._evaluator) is _TweedieProfileEvaluator:
+            return (
+                self._evaluator.evaluate,
+                self._evaluator.evaluation_count,
+                self._evaluator.evaluation_record,
+            )
+        return self._objective, self._evaluation_count, self._evaluation_record
+
+    @contextmanager
+    def _profile_operation_guard(self):
+        """Serialize multi-evaluation operations against detachment and peers."""
+        evaluator = self._evaluator
+        if type(evaluator) is _TweedieProfileEvaluator:
+            with evaluator._lock:
+                if self._evaluator is not evaluator:
+                    raise RuntimeError("Tweedie profile evaluator was detached concurrently")
+                yield
+            return
+        yield
+
+    def detach_evaluator(self) -> None:
+        """Release all profile training rows while preserving completed caches."""
+        evaluator = self._evaluator
+        if type(evaluator) is _TweedieProfileEvaluator:
+            with evaluator._lock:
+                self._detach_evaluator_locked(evaluator)
+            return
+        self._detach_evaluator_locked(None)
+
+    def _detach_evaluator_locked(self, evaluator: _TweedieProfileEvaluator | None) -> None:
+        """Detach after excluding live operations on the supplied evaluator."""
+        if evaluator is not None:
+            try:
+                frozen_count = evaluator.evaluation_count()
+            except Exception:
+                frozen_count = int(self.n_evaluations)
+            context = evaluator.context
+            if hasattr(context, "trace_callback"):
+                context.trace_callback = None
+        elif type(self._frozen_evaluation_count) is int:
+            frozen_count = self._frozen_evaluation_count
+        else:
+            # Do not execute arbitrary legacy callbacks during detachment.
+            frozen_count = int(self.n_evaluations)
+        self._frozen_evaluation_count = max(int(self.n_evaluations), int(frozen_count))
+        self._evaluator = None
+        self._objective = None
+        self._evaluation_count = None
+        self._evaluation_record = None
+
     @property
     def n_total_evaluations(self) -> int:
         """Completed distinct fixed-p records, including later CI/plot probes."""
-        if self._evaluation_count is None:
-            return int(self.n_evaluations)
-        return max(int(self.n_evaluations), int(self._evaluation_count()))
+        evaluator = self._evaluator
+        if type(evaluator) is _TweedieProfileEvaluator:
+            with evaluator._lock:
+                if self._evaluator is not evaluator:
+                    return max(
+                        int(self.n_evaluations),
+                        self._frozen_evaluation_count
+                        if type(self._frozen_evaluation_count) is int
+                        else 0,
+                    )
+                return self._n_total_evaluations_unlocked()
+        return self._n_total_evaluations_unlocked()
+
+    def _n_total_evaluations_unlocked(self) -> int:
+        """Update the count high-water mark while any live evaluator lock is held."""
+        _, evaluation_count, _ = self._profile_evaluator_callbacks()
+        frozen_count = (
+            self._frozen_evaluation_count
+            if type(self._frozen_evaluation_count) is int
+            else int(self.n_evaluations)
+        )
+        if callable(evaluation_count):
+            observed_count = int(evaluation_count())
+            frozen_count = max(int(self.n_evaluations), frozen_count, observed_count)
+            self._frozen_evaluation_count = frozen_count
+        return max(int(self.n_evaluations), frozen_count)
 
     @property
     def n_post_search_evaluations(self) -> int:
@@ -1904,6 +2072,15 @@ class TweedieProfileResult:
             )
 
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
+        """Return the nearest detected connected profile-likelihood interval.
+
+        Live evaluator use is serialized. Its finite scan can miss a narrower unsampled
+        likelihood-ratio island.
+        """
+        with self._profile_operation_guard():
+            return self._ci_locked(alpha)
+
+    def _ci_locked(self, alpha: float = 0.05) -> tuple[float, float]:
         """Profile likelihood confidence interval for Tweedie p.
 
         Requires that the result was produced by ``estimate_tweedie_p``.
@@ -1922,21 +2099,25 @@ class TweedieProfileResult:
         self._validate_ci_winner()
         if alpha_value in self._ci_cache:
             return self._ci_cache[alpha_value]
-        if self._objective is None:
+        objective, evaluation_count, evaluation_record = self._profile_evaluator_callbacks()
+        if not callable(objective):
             raise RuntimeError(
-                "Profile CI requires the objective function. Use "
-                "estimate_tweedie_p() to produce this result."
+                "Tweedie profile evaluator is detached, whether explicitly, after fit-state "
+                "release, or after serialization. Cached intervals remain available; for an "
+                "uncached interval, pass eager_ci_alpha=<alpha> to SuperGLM.estimate_p(...) "
+                "or use retain_fit_state=True before fitting, and call ci(...) before "
+                "serialization."
             )
         details = _profile_ci_p_detailed(
-            self._objective,
+            objective,
             self.p_hat,
             self.nll,
             self._ll_scale,
             alpha=alpha_value,
             p_range=self._ci_p_range,
             seed_points=self._ci_seed_points,
-            evaluation_count=self._evaluation_count,
-            evaluation_record=self._evaluation_record,
+            evaluation_count=evaluation_count,
+            evaluation_record=evaluation_record,
         )
         density_signatures = dict(
             zip(
@@ -1963,6 +2144,11 @@ class TweedieProfileResult:
         return details.interval
 
     def ci_details(self, alpha: float = 0.05) -> TweedieProfileCIDetails:
+        """Return cached endpoint evidence, serializing live evaluator use."""
+        with self._profile_operation_guard():
+            return self._ci_details_locked(alpha)
+
+    def _ci_details_locked(self, alpha: float = 0.05) -> TweedieProfileCIDetails:
         """Return immutable endpoint status and evaluation evidence for ``ci``."""
         self._validate_ci_phi_method()
         alpha_value, _, _, _, _ = _validate_profile_ci_inputs(
@@ -2057,6 +2243,17 @@ class TweedieProfileResult:
         n_points: int = 50,
         ax=None,
     ):
+        """Plot a dense profile curve while serializing live evaluator use."""
+        with self._profile_operation_guard():
+            return self._profile_plot_locked(alpha=alpha, n_points=n_points, ax=ax)
+
+    def _profile_plot_locked(
+        self,
+        *,
+        alpha: float = 0.05,
+        n_points: int = 50,
+        ax=None,
+    ):
         """Profile-objective plot for Tweedie power parameter p.
 
         Evaluates the profile objective on a dense grid for the curve, and
@@ -2077,14 +2274,23 @@ class TweedieProfileResult:
         -------
         matplotlib.figure.Figure
         """
-        if self._objective is None:
+        objective, _, _ = self._profile_evaluator_callbacks()
+        if not callable(objective):
             raise RuntimeError(
-                "Profile plot requires the objective function. Use "
-                "estimate_tweedie_p() to produce this result."
+                "Tweedie profile evaluator is detached, whether explicitly, after fit-state "
+                "release, or after serialization. Dense profile plots require a live evaluator; "
+                "call profile_plot() before serialization or retain fit state before release. "
+                "trace_plot() remains available from the immutable search trace."
             )
 
         if _contains_masked_array(n_points):
             raise ValueError("n_points must be an unmasked integer")
+        n_points_value = normalize_positive_int(
+            n_points,
+            name="n_points",
+            minimum=2,
+            maximum=_MAX_PROFILE_GRID_POINTS,
+        )
 
         import matplotlib.pyplot as plt
 
@@ -2127,11 +2333,11 @@ class TweedieProfileResult:
             margin = max(0.05, 0.2 * (support_hi - support_lo))
             grid_lo = max(1.01, support_lo - margin)
             grid_hi = min(1.99, support_hi + margin)
-        p_grid = np.linspace(grid_lo, grid_hi, n_points)
+        p_grid = np.linspace(grid_lo, grid_hi, n_points_value)
 
         raw_nll_values = []
         for p in p_grid:
-            raw_nll = self._objective(p)
+            raw_nll = objective(p)
             if _contains_masked_array(raw_nll):
                 raise ValueError("Tweedie profile plot objective values must not contain a mask")
             raw_nll_values.append(raw_nll)
@@ -2410,6 +2616,10 @@ class _ProfileContext:
     convergence: str = "deviance"
     trace_callback: Any = field(default=None, repr=False)
     trace_iterations: bool = False
+    profile_x: Any = field(default=None, repr=False, kw_only=True)
+    profile_y: Any = field(default=None, repr=False, kw_only=True)
+    profile_sample_weight: Any = field(default=None, repr=False, kw_only=True)
+    profile_offset: Any = field(default=None, repr=False, kw_only=True)
 
     # Mutable warm-start state
     warm_beta: NDArray | None = field(default=None, repr=False)
@@ -2549,21 +2759,32 @@ class _ProfileContext:
 
 def _clone_profile_model(model, X, sample_weight):
     """Clone configured profile state and resolve shorthand only on the clone."""
+    from superglm.distributions import Tweedie
+    from superglm.model.profile_ops import (
+        _validate_tweedie_profile_clone_isolation,
+        _validate_tweedie_profile_copy_protocols,
+    )
+
+    _validate_tweedie_profile_copy_protocols(model)
     profile_model = model._clone_without_features(
         set(),
         lambda2=copy.deepcopy(model.lambda2),
     )
+    profile_model.family = Tweedie(p=model.family.p)
+    profile_model.link = copy.deepcopy(model.link)
     profile_model._interaction_specs = copy.deepcopy(model._interaction_specs)
     profile_model._interaction_order = list(model._interaction_order)
     profile_model._pending_interactions = copy.deepcopy(model._pending_interactions)
+    profile_model._splines = copy.deepcopy(model._splines)
+    profile_model._n_knots = copy.deepcopy(model._n_knots)
+    profile_model._n_bins = copy.deepcopy(model._n_bins)
+    profile_model._degree = model._degree
+    profile_model._categorical_base = model._categorical_base
     if model._splines is not None and not model._specs:
         # clone_without_features() normally clones resolved specs. Preserve
         # unresolved shorthand metadata and resolve it only on the scratch model.
-        profile_model._splines = copy.deepcopy(model._splines)
-        profile_model._n_knots = copy.deepcopy(model._n_knots)
-        profile_model._degree = model._degree
-        profile_model._categorical_base = model._categorical_base
         profile_model._auto_detect_features(X, sample_weight)
+    _validate_tweedie_profile_clone_isolation(model, profile_model)
     return profile_model
 
 
@@ -2602,6 +2823,7 @@ def _build_profile_context(
             sample_weight,
             offset,
         )
+    y_snapshot = y_arr
 
     # Profile fits and later CI probes must not rewrite the caller's fitted
     # design, resolved family/link, penalty, groups, or inference caches.
@@ -2687,6 +2909,10 @@ def _build_profile_context(
         ll_scale=float(len(y_arr)),
         trace_callback=trace_callback,
         trace_iterations=trace_iterations,
+        profile_x=X_snapshot,
+        profile_y=y_snapshot,
+        profile_sample_weight=weight_snapshot,
+        profile_offset=offset_snapshot,
     )
 
 
@@ -3022,11 +3248,10 @@ def _finalize_profile_record(
         phi_branch_switch_detected=phi_result.branch_switch_detected,
         phi_boundary=phi_boundary,
         phi_message=phi_result.message,
-        _objective=ctx.evaluate,
         _ll_scale=ctx.ll_scale,
         _ci_seed_points=tuple(float(value) for value in trace["p"]),
-        _evaluation_count=ctx.evaluation_count,
-        _evaluation_record=ctx.evaluation_record,
+        _evaluator=_TweedieProfileEvaluator(ctx),
+        _validation_token=_TWEEDIE_PROFILE_RESULT_TOKEN,
     )
 
 
@@ -3611,6 +3836,8 @@ def _is_known_immutable_profile_value(value: object) -> bool:
         return True
     if value_type in _PROFILE_EXACT_ATOMIC_TYPES:
         return True
+    if value_type is UUID:
+        return type(value.int) is int and (value.is_safe is None or type(value.is_safe) is SafeUUID)
     if value_type in (datetime, time):
         return _is_share_safe_profile_timezone(value.tzinfo)
     if value_type in (tuple, frozenset):

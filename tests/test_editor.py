@@ -2861,8 +2861,21 @@ def test_tweedie_reml_profile_trace_can_include_candidate_objective_curves():
     assert set(result.search_trace["fit_trace_kind"]) == {"REML objective"}
 
 
+@pytest.mark.parametrize(
+    ("requested_alpha", "ci_cache", "expected_alpha", "expected_interval"),
+    [
+        (0.2, {0.2: (1.35, 1.51)}, 0.2, (1.35, 1.51)),
+        (None, {0.05: (1.34, 1.50)}, 0.05, (1.34, 1.50)),
+    ],
+)
 def test_widget_profile_distribution_forwards_options_and_returns_trace(
-    editor_model, editor_frame, monkeypatch
+    editor_model,
+    editor_frame,
+    monkeypatch,
+    requested_alpha,
+    ci_cache,
+    expected_alpha,
+    expected_interval,
 ):
     X, y = editor_frame
     session = EditorSession.from_model(
@@ -2878,6 +2891,8 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
             assert orient == "records"
             return [{"step": 0, "p": 1.42, "phi": 0.3, "nll": 0.12, "source": "brent"}]
 
+    cached_intervals = dict(ci_cache)
+
     class FakeResult:
         p_hat = 1.42
         phi_hat = 0.3
@@ -2885,7 +2900,7 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
         method = "brent"
         phi_method = "mle"
         density_exact = True
-        _ci_cache = {}
+        _ci_cache = cached_intervals
         search_trace = FakeTrace()
 
         def ci(self, alpha=0.05):
@@ -2909,6 +2924,7 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
             method="brent",
             phi_method="mle",
             xatol=0.002,
+            eager_ci_alpha=requested_alpha,
         )
     finally:
         widget.close()
@@ -2916,7 +2932,12 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
     assert calls == [
         {
             "parameter": "tweedie_p",
-            "kwargs": {"method": "brent", "phi_method": "mle", "xatol": 0.002},
+            "kwargs": {
+                "method": "brent",
+                "phi_method": "mle",
+                "xatol": 0.002,
+                "eager_ci_alpha": requested_alpha,
+            },
         }
     ]
     assert payload["profile_trace"] == [
@@ -2926,9 +2947,10 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
         "parameter": "p",
         "label": "p_hat",
         "value": 1.42,
-        "ci_low": None,
-        "ci_high": None,
-        "ci_status": "not computed",
+        "ci_low": expected_interval[0],
+        "ci_high": expected_interval[1],
+        "ci_alpha": expected_alpha,
+        "ci_status": "available",
         "objective": 0.12,
         "objective_label": "loss",
         "lower_is_better": True,
@@ -2991,6 +3013,26 @@ def test_tweedie_editor_profile_payload_tolerates_legacy_missing_ci_state():
     assert payload["ci_low"] is None
     assert payload["ci_high"] is None
     assert payload["ci_status"] == "not computed"
+
+
+def test_tweedie_editor_profile_payload_uses_requested_cached_ci_alpha():
+    from superglm.editor.widget import _profile_estimate_payload
+
+    result = SimpleNamespace(
+        p_hat=1.42,
+        phi_hat=0.3,
+        nll=0.12,
+        phi_method="mle",
+        density_exact=True,
+        _ci_cache={0.2: (1.35, 1.51)},
+    )
+
+    payload = _profile_estimate_payload(result, "tweedie_p", ci_alpha=0.2)
+
+    assert payload["ci_low"] == 1.35
+    assert payload["ci_high"] == 1.51
+    assert payload["ci_alpha"] == 0.2
+    assert payload["ci_status"] == "available"
 
 
 def test_widget_profile_distribution_job_reports_live_trace(
