@@ -86,6 +86,8 @@ __all__ = [
 def _immutable_path_array(values, *, dtype) -> NDArray:
     """Return a contiguous array whose immutable bytes backing cannot be reopened."""
     array = np.ascontiguousarray(np.asarray(values, dtype=dtype))
+    # A bytes owner is intentional: write=False alone can be reversed with
+    # setflags(write=True), while a bytes-backed view cannot be reopened.
     return np.frombuffer(array.tobytes(order="C"), dtype=array.dtype).reshape(array.shape)
 
 
