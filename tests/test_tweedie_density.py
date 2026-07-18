@@ -541,6 +541,108 @@ def test_forced_certification_failure_has_only_neutral_bounded_metadata() -> Non
     assert len(message) < 240
 
 
+@pytest.mark.parametrize(
+    ("y", "phi", "weight"),
+    [
+        pytest.param(1.0, 1e-12, 1.0, id="central"),
+        pytest.param(np.nextafter(1.0, np.inf), 1e-12, 1.0, id="adjacent-y"),
+        pytest.param(1.0, 2e-12, 2.0, id="equivalent-effective-dispersion"),
+    ],
+)
+def test_alpha_one_impossible_term_budget_fails_before_central_term(
+    monkeypatch: pytest.MonkeyPatch,
+    y: float,
+    phi: float,
+    weight: float,
+) -> None:
+    from superglm.profiling.tweedie import tweedie_logpdf
+
+    def unexpected_central_term(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a provably impossible series entered term arithmetic")
+
+    monkeypatch.setattr(density_module, "_stable_log_term", unexpected_central_term)
+
+    with pytest.raises(TweedieDensityError) as caught:
+        tweedie_logpdf(
+            np.array([y]),
+            np.array([1.0]),
+            phi,
+            1.5,
+            weights=np.array([weight]),
+        )
+
+    error = caught.value
+    assert error.reason == "term limit reached before both tails were certified"
+    assert error.term_count == 1_000_000
+    assert error.observation_index == 0
+
+
+@pytest.mark.parametrize(
+    "series_argument",
+    [
+        pytest.param(10_000 * 10_001, id="ordinary-upper-mode-tie"),
+        pytest.param(10_000 * 9_999, id="ordinary-lower-mode-tie"),
+        pytest.param(2**50 * (2**50 + 1), id="huge-upper-mode-tie"),
+        pytest.param(2**50 * (2**50 - 1), id="huge-lower-mode-tie"),
+    ],
+)
+def test_alpha_one_impossibility_preflight_handles_exact_mode_ties(
+    monkeypatch: pytest.MonkeyPatch,
+    series_argument: int,
+) -> None:
+    def unexpected_central_term(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a tied, provably impossible series entered term arithmetic")
+
+    monkeypatch.setattr(density_module, "_stable_log_term", unexpected_central_term)
+
+    with pytest.raises(TweedieDensityError, match="term limit") as caught:
+        evaluate_tweedie_density(
+            np.array([series_argument / 4.0]),
+            np.array([3.7]),
+            1.0,
+            1.5,
+            max_terms=8,
+        )
+
+    assert caught.value.term_count == 8
+
+
+@pytest.mark.parametrize("p", [np.nextafter(1.5, 1.0), np.nextafter(1.5, 2.0)])
+def test_alpha_one_impossibility_preflight_is_not_used_for_neighboring_powers(
+    monkeypatch: pytest.MonkeyPatch,
+    p: float,
+) -> None:
+    class CentralTermReachedError(RuntimeError):
+        pass
+
+    def reached_central_term(*args: object, **kwargs: object) -> None:
+        raise CentralTermReachedError
+
+    monkeypatch.setattr(density_module, "_stable_log_term", reached_central_term)
+
+    with pytest.raises(CentralTermReachedError):
+        evaluate_tweedie_density(np.array([1.0]), np.array([1.0]), 1e-12, p)
+
+
+def test_alpha_one_ordinary_certifiable_series_still_enters_term_arithmetic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_stable_log_term = density_module._stable_log_term
+    calls = 0
+
+    def counted_central_term(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return real_stable_log_term(*args, **kwargs)
+
+    monkeypatch.setattr(density_module, "_stable_log_term", counted_central_term)
+
+    result = evaluate_tweedie_density(np.array([1.0]), np.array([1.0]), 0.7, 1.5)
+
+    assert calls > 0
+    assert result.diagnostics.certified
+
+
 def test_first_moment_tail_prevents_mass_only_false_certification() -> None:
     arguments = (
         np.array([0.01]),

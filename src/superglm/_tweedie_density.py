@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from decimal import Decimal, DecimalException, localcontext
+from fractions import Fraction
 from numbers import Integral
 from typing import NoReturn
 
@@ -739,6 +740,64 @@ def _score_base_and_radius(
     raise ArithmeticError("score base could not be certified")
 
 
+def _alpha_one_term_budget_is_provably_insufficient(
+    parameters: _CompoundParameters,
+    mode: int,
+    max_terms: int,
+    requested_rtol: float,
+) -> bool:
+    """Prove that an alpha-one series cannot certify within ``max_terms``.
+
+    At ``p=1.5`` the positive-series terms have forward ratio
+    ``x / (j * (j + 1))``, where ``x = 4 * y * weight**2 / phi**2``.
+    Exact rational arithmetic independently locates the mode, including cases
+    where the general floating-point search selects the equally high adjacent
+    term at an exact tie.  A monotone lower bound on the next ``max_terms``
+    upper-side terms then proves that every truncation of that size omits more
+    relative mass than ``requested_rtol``.  Returning ``False`` means only that
+    this narrow proof is inconclusive; it never certifies a series by itself.
+    """
+    if (
+        parameters.power_input != 1.5
+        or parameters.y_input <= 0.0
+        or mode <= 1
+        or mode <= max_terms + 1
+    ):
+        return False
+
+    y = Fraction.from_float(parameters.y_input)
+    weight = Fraction.from_float(parameters.weight_input)
+    phi = Fraction.from_float(parameters.phi_input)
+    series_argument = 4 * y * weight * weight / (phi * phi)
+    numerator = series_argument.numerator
+    denominator = series_argument.denominator
+
+    exact_mode = max(1, math.isqrt(numerator // denominator))
+    while exact_mode * (exact_mode + 1) * denominator < numerator:
+        exact_mode += 1
+    while exact_mode > 1 and (exact_mode - 1) * exact_mode * denominator >= numerator:
+        exact_mode -= 1
+    if exact_mode <= 1 or exact_mode <= max_terms + 1:
+        return False
+    mode = exact_mode
+
+    q = Fraction(
+        mode * (mode - 1),
+        (mode + max_terms - 1) * (mode + max_terms),
+    )
+    delta = 1 - q
+    if max_terms * delta > 1:
+        return False
+
+    binomial_lower_bound = (
+        1
+        - max_terms * delta
+        + Fraction(max_terms * (max_terms - 1), 2) * delta**2
+        - Fraction(max_terms * (max_terms - 1) * (max_terms - 2), 6) * delta**3
+    )
+    return binomial_lower_bound > max_terms * Fraction.from_float(requested_rtol)
+
+
 def _certified_series(
     parameters: _CompoundParameters,
     *,
@@ -750,6 +809,20 @@ def _certified_series(
 ) -> _SeriesResult:
     try:
         mode = _find_mode_index(parameters)
+        if _alpha_one_term_budget_is_provably_insufficient(
+            parameters,
+            mode,
+            max_terms,
+            requested_rtol,
+        ):
+            _raise_density_error(
+                observation_index=observation_index,
+                power=power,
+                dispersion=dispersion,
+                term_count=max_terms,
+                requested_rtol=requested_rtol,
+                reason="term limit reached before both tails were certified",
+            )
         central_term = _stable_log_term(mode, parameters)
         mode_term: _LogTerm = (central_term[0], 0.0)
         lower_candidate = _lower_series_term(mode, mode_term, parameters) if mode > 1 else None
