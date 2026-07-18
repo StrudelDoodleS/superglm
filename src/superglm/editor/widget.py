@@ -775,7 +775,14 @@ class EditorWidget:
             if progress_callback is not None:
                 profile_options["progress_callback"] = progress_callback
             result = self.session.reprofile_distribution(parameter, **profile_options)
-            estimate = _profile_estimate_payload(result, parameter)
+            ci_alpha = profile_options.get("eager_ci_alpha")
+            if ci_alpha is None:
+                ci_alpha = 0.05
+            estimate = _profile_estimate_payload(
+                result,
+                parameter,
+                ci_alpha=ci_alpha,
+            )
             if progress_callback is not None:
                 progress_callback("finalizing", {"profile_estimate": estimate})
             if self.selected_term not in self.session.terms:
@@ -1070,7 +1077,12 @@ def _profile_trace_rows(result: Any) -> list[dict[str, Any]]:
     return [jsonable(row) for row in rows]
 
 
-def _profile_estimate_payload(result: Any, parameter: str) -> dict[str, Any]:
+def _profile_estimate_payload(
+    result: Any,
+    parameter: str,
+    *,
+    ci_alpha: float = 0.05,
+) -> dict[str, Any]:
     key = parameter.lower().replace("-", "_")
     is_tweedie = key in {"tweedie", "tweedie_p", "p"}
     if is_tweedie:
@@ -1090,7 +1102,7 @@ def _profile_estimate_payload(result: Any, parameter: str) -> dict[str, Any]:
     ci_high = None
     ci_status = None
     if is_tweedie:
-        cached_ci, ci_status = cached_tweedie_profile_ci(result, 0.05)
+        cached_ci, ci_status = cached_tweedie_profile_ci(result, ci_alpha)
         if cached_ci is not None:
             ci_low, ci_high = cached_ci
     else:
@@ -1113,6 +1125,7 @@ def _profile_estimate_payload(result: Any, parameter: str) -> dict[str, Any]:
     }
     if ci_status is not None:
         estimate["ci_status"] = ci_status
+        estimate["ci_alpha"] = ci_alpha
     return _normalise_profile_estimate(estimate)
 
 

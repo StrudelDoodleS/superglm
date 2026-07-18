@@ -206,6 +206,37 @@ def _assert_fitted_model_unchanged(model, X, snapshot, *, offset=None):
     assert pickle.dumps(model.__dict__, protocol=5) == snapshot["state"]
 
 
+@pytest.mark.parametrize(
+    "n_points",
+    [True, False, 0, 1, -1, 1.5, "3", np.array(3), 10_001, np.ma.array(3, mask=True)],
+)
+def test_profile_plot_rejects_invalid_grid_size_before_objective_evaluation(n_points):
+    """Dense plotting validates allocation controls before doing profile work."""
+    objective_calls = 0
+
+    def objective(p):
+        nonlocal objective_calls
+        objective_calls += 1
+        return float(p)
+
+    result = TweedieProfileResult(
+        p_hat=1.5,
+        phi_hat=1.0,
+        nll=0.0,
+        n_evaluations=1,
+        converged=True,
+        method="grid",
+        phi_method="pearson",
+        search_trace=pd.DataFrame({"p": [1.5], "nll": [0.0]}),
+        _objective=objective,
+    )
+
+    with pytest.raises((TypeError, ValueError), match="n_points"):
+        result.profile_plot(n_points=n_points)
+
+    assert objective_calls == 0
+
+
 # =====================================================================
 # TestGenerateTweedieCPG
 # =====================================================================
@@ -1498,7 +1529,23 @@ def _offset_spline_tweedie_data(n=72, seed=20260720):
     return pd.DataFrame({"x1": x1}), y, sample_weight, offset
 
 
-def _deterministic_profile_result():
+def _deterministic_profile_result(*, reml_converged=None):
+    trace = pd.DataFrame(
+        {
+            "p": [1.47],
+            "phi": [7.25],
+            "nll": [0.0],
+            "edf": [1.0],
+            "fit_converged": [True],
+            "solver_converged": [True],
+            "reml_converged": [reml_converged],
+            "phi_converged": [True],
+            "objective_finite": [True],
+            "n_saddlepoint": [0],
+            "density_method": ["exact"],
+            "density_exact": [True],
+        }
+    )
     return TweedieProfileResult(
         p_hat=1.47,
         phi_hat=7.25,
@@ -1507,7 +1554,15 @@ def _deterministic_profile_result():
         converged=True,
         method="brent",
         phi_method="mle",
-        search_trace=pd.DataFrame({"p": [1.47], "phi": [7.25], "nll": [0.0]}),
+        search_trace=trace,
+        reml_converged=reml_converged,
+        density_method="exact",
+        density_exact=True,
+        _objective=lambda p, source="": 0.0,
+        _ll_scale=1.0,
+        _evaluation_count=lambda: 1,
+        _evaluation_record=lambda p: None,
+        _validation_token=tweedie_module._TWEEDIE_PROFILE_RESULT_TOKEN,
     )
 
 
@@ -1556,7 +1611,7 @@ class TestEstimatePFitMode:
             sample_weight.copy(),
             offset.copy(),
         )
-        result = _deterministic_profile_result()
+        result = _deterministic_profile_result(reml_converged=fit_mode == "reml" or None)
         observed = {}
 
         def mutate_caller_inputs(_row):
@@ -1604,7 +1659,7 @@ class TestEstimatePFitMode:
         setattr(model, final_fit_name, final_fit)
 
         def synchronize(candidate, sync_y, profile_result):
-            assert candidate is model
+            assert candidate is not model
             assert profile_result is result
             observed["sync_y"] = sync_y
             observed["sync_y_value"] = np.array(sync_y, copy=True)
@@ -1613,6 +1668,9 @@ class TestEstimatePFitMode:
             profile_ops_module,
             "_synchronize_tweedie_profile_refit",
             synchronize,
+        )
+        monkeypatch.setattr(
+            profile_ops_module, "_validate_tweedie_profile_stage", lambda *args: None
         )
 
         returned = profile_ops_module.estimate_p(
@@ -1719,6 +1777,9 @@ class TestEstimatePFitMode:
         monkeypatch.setattr(
             profile_ops_module, "_synchronize_tweedie_profile_refit", lambda *a: None
         )
+        monkeypatch.setattr(
+            profile_ops_module, "_validate_tweedie_profile_stage", lambda *args: None
+        )
 
         profile_ops_module.estimate_p(
             model,
@@ -1767,6 +1828,9 @@ class TestEstimatePFitMode:
         )
         monkeypatch.setattr(
             profile_ops_module, "_synchronize_tweedie_profile_refit", lambda *a: None
+        )
+        monkeypatch.setattr(
+            profile_ops_module, "_validate_tweedie_profile_stage", lambda *args: None
         )
 
         profile_ops_module.estimate_p(
@@ -1823,6 +1887,9 @@ class TestEstimatePFitMode:
         )
         monkeypatch.setattr(
             profile_ops_module, "_synchronize_tweedie_profile_refit", lambda *a: None
+        )
+        monkeypatch.setattr(
+            profile_ops_module, "_validate_tweedie_profile_stage", lambda *args: None
         )
 
         profile_ops_module.estimate_p(
@@ -2625,7 +2692,7 @@ class TestEstimatePFitMode:
         gc.collect()
 
         assert holder_ref() is None
-        assert np.isfinite(result._objective(1.6, source="later_probe"))
+        assert np.isfinite(result._evaluator.evaluate(1.6, source="later_probe"))
         assert result.n_total_evaluations == evaluations_after_search + 1
         assert len(callback_events) == events_after_search
 
@@ -2640,7 +2707,7 @@ class TestEstimatePFitMode:
         self, monkeypatch, fit_mode, builder_name, final_fit_name
     ):
         X = pd.DataFrame({"x1": pd.Series(["level"], dtype=object)})
-        result = _deterministic_profile_result()
+        result = _deterministic_profile_result(reml_converged=fit_mode == "reml" or None)
         observed = {}
         snapshot_calls = []
         real_snapshot = tweedie_module._snapshot_tweedie_profile_dataframe
@@ -2690,6 +2757,9 @@ class TestEstimatePFitMode:
         setattr(model, final_fit_name, final_fit)
         monkeypatch.setattr(
             profile_ops_module, "_synchronize_tweedie_profile_refit", lambda *a: None
+        )
+        monkeypatch.setattr(
+            profile_ops_module, "_validate_tweedie_profile_stage", lambda *args: None
         )
 
         returned = profile_ops_module.estimate_p(
@@ -2751,6 +2821,9 @@ class TestEstimatePFitMode:
         monkeypatch.setattr(
             profile_ops_module, "_synchronize_tweedie_profile_refit", lambda *args: None
         )
+        monkeypatch.setattr(
+            profile_ops_module, "_validate_tweedie_profile_stage", lambda *args: None
+        )
 
         returned = profile_ops_module.estimate_p(model, X, y)
 
@@ -2803,7 +2876,7 @@ class TestEstimatePFitMode:
             retain_fit_state=retain_fit_state,
             features={"x1": Spline(n_knots=5, penalty="ssp")},
         )
-        result = _deterministic_profile_result()
+        result = _deterministic_profile_result(reml_converged=fit_mode == "reml" or None)
         monkeypatch.setattr(
             tweedie_module,
             "_estimate_tweedie_p_prepared",
@@ -2811,50 +2884,49 @@ class TestEstimatePFitMode:
         )
 
         fit_name = "fit_reml" if fit_mode == "reml" else "fit"
-        real_final_fit = getattr(model, fit_name)
+        real_final_fit = getattr(SuperGLM, fit_name)
         captured = {}
 
-        def final_fit_with_primed_caches(*args, **kwargs):
-            captured["retain_during_fit"] = model._retain_fit_state
-            if fit_mode == "reml":
-                kwargs["max_reml_iter"] = 3
-            fitted = real_final_fit(*args, **kwargs)
-            captured["public_result"] = model.result
-            captured["solver_result"] = model._solver_pirls_result()
-            captured["reml_result"] = model._reml_result
-            captured["reml_lambdas"] = model._reml_lambdas
-            captured["reml_penalties"] = model._reml_penalties
-            captured["fit_meta"] = model._last_fit_meta
-            captured["runtime_state"] = model._runtime_canonical_state
-            captured["prediction_plan"] = model._prediction_plan
-            captured["fast_prediction_state"] = model._fast_prediction_state
+        def final_fit_with_primed_caches(candidate, *args, **kwargs):
+            captured["staged_model"] = candidate
+            captured["retain_during_fit"] = candidate._retain_fit_state
+            fitted = real_final_fit(candidate, *args, **kwargs)
+            captured["public_result"] = candidate.result
+            captured["solver_result"] = candidate._solver_pirls_result()
+            captured["reml_result"] = candidate._reml_result
+            captured["reml_lambdas"] = candidate._reml_lambdas
+            captured["reml_penalties"] = candidate._reml_penalties
+            captured["fit_meta"] = candidate._last_fit_meta
+            captured["runtime_state"] = candidate._runtime_canonical_state
+            captured["prediction_plan"] = candidate._prediction_plan
+            captured["fast_prediction_state"] = candidate._fast_prediction_state
             # Before the fix, retain=False has already released these rows.  Skip
             # cache priming so the regression fails at the production access.
-            if model._dm is None:
+            if candidate._dm is None:
                 return fitted
 
             solver = captured["solver_result"]
             captured["public_dynamic_metadata"] = object()
             captured["solver_dynamic_metadata"] = np.array([1.0, 2.0])
-            model.result.profile_sync_metadata = captured["public_dynamic_metadata"]
+            candidate.result.profile_sync_metadata = captured["public_dynamic_metadata"]
             solver.profile_sync_metadata = captured["solver_dynamic_metadata"]
-            if model._reml_result is not None:
+            if candidate._reml_result is not None:
                 captured["reml_dynamic_metadata"] = {"future": np.array([3.0, 4.0])}
-                model._reml_result.profile_sync_metadata = captured["reml_dynamic_metadata"]
-            eta = model._dm.matvec(solver.beta) + solver.intercept + model._fit_offset
-            eta = stabilize_eta(eta, model._link)
-            captured["solver_mu"] = clip_mu(model._link.inverse(eta), model._distribution)
-            captured["old_covariance"] = model._coef_covariance
-            captured["old_active_info"] = model._fit_active_info
-            captured["old_inference_info"] = model._fit_inference_info
-            captured["old_group_edf"] = model._group_edf
-            captured["old_metrics"] = model.metrics(
+                candidate._reml_result.profile_sync_metadata = captured["reml_dynamic_metadata"]
+            eta = candidate._dm.matvec(solver.beta) + solver.intercept + candidate._fit_offset
+            eta = stabilize_eta(eta, candidate._link)
+            captured["solver_mu"] = clip_mu(candidate._link.inverse(eta), candidate._distribution)
+            captured["old_covariance"] = candidate._coef_covariance
+            captured["old_active_info"] = candidate._fit_active_info
+            captured["old_inference_info"] = candidate._fit_inference_info
+            captured["old_group_edf"] = candidate._group_edf
+            captured["old_metrics"] = candidate.metrics(
                 X, y, sample_weight=sample_weight, offset=offset
             )
-            captured["old_summary"] = model.summary()
+            captured["old_summary"] = candidate.summary()
             return fitted
 
-        monkeypatch.setattr(model, fit_name, final_fit_with_primed_caches)
+        monkeypatch.setattr(SuperGLM, fit_name, final_fit_with_primed_caches)
         real_release = fit_ops_module._maybe_release_fit_state
         release_events = []
 
@@ -2877,6 +2949,7 @@ class TestEstimatePFitMode:
         )
 
         assert returned is result
+        assert captured["staged_model"] is not model
         assert captured["retain_during_fit"] is True
         assert model._retain_fit_state is retain_fit_state
         assert model._tweedie_profile_result is result
@@ -3017,7 +3090,7 @@ class TestEstimatePFitMode:
             retain_fit_state=retain_fit_state,
             features={"x1": Spline(n_knots=5, penalty="ssp")},
         )
-        result = _deterministic_profile_result()
+        result = _deterministic_profile_result(reml_converged=fit_mode == "reml" or None)
         monkeypatch.setattr(
             tweedie_module,
             "_estimate_tweedie_p_prepared",
@@ -3025,12 +3098,12 @@ class TestEstimatePFitMode:
         )
         seen_retain_flags = []
 
-        def failing_final_fit(*args, **kwargs):
-            seen_retain_flags.append(model._retain_fit_state)
+        def failing_final_fit(candidate, *args, **kwargs):
+            seen_retain_flags.append(candidate._retain_fit_state)
             raise RuntimeError("final refit failed")
 
         fit_name = "fit_reml" if fit_mode == "reml" else "fit"
-        monkeypatch.setattr(model, fit_name, failing_final_fit)
+        monkeypatch.setattr(SuperGLM, fit_name, failing_final_fit)
 
         with pytest.raises(RuntimeError, match="final refit failed"):
             model.estimate_p(
@@ -3044,6 +3117,254 @@ class TestEstimatePFitMode:
         assert seen_retain_flags == [True]
         assert model._retain_fit_state is retain_fit_state
         assert model._tweedie_profile_result is None
+
+    @pytest.mark.parametrize("failing_event", ["best_found", "final_refit"])
+    def test_progress_callback_failure_preserves_exact_model_state(
+        self, monkeypatch, failing_event
+    ):
+        X, y, _ = _tweedie_data(n=32, seed=20260801)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        model.fit(X, y)
+        snapshot = _snapshot_fitted_model(model, X)
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            lambda *args, **kwargs: _deterministic_profile_result(),
+        )
+
+        def failing_callback(event, payload):
+            payload["profile_estimate"].clear()
+            if event == failing_event:
+                raise RuntimeError(f"failed at {event}")
+
+        with pytest.raises(RuntimeError, match=f"failed at {failing_event}"):
+            model.estimate_p(X, y, progress_callback=failing_callback)
+
+        _assert_fitted_model_unchanged(model, X, snapshot)
+
+    @pytest.mark.parametrize("failure_stage", ["fit", "synchronize", "release"])
+    def test_final_refit_failure_preserves_exact_model_state(self, monkeypatch, failure_stage):
+        retain_fit_state = failure_stage != "release"
+        X, y, _ = _tweedie_data(n=32, seed=20260802)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            retain_fit_state=retain_fit_state,
+            features={"x1": Numeric()},
+        )
+        model.fit(X, y)
+        snapshot = _snapshot_fitted_model(model, X)
+        result = _deterministic_profile_result()
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            lambda *args, **kwargs: result,
+        )
+
+        if failure_stage == "fit":
+
+            def failing_fit(candidate, *args, **kwargs):
+                candidate.__dict__["partial_final_fit"] = object()
+                raise RuntimeError("failed during fit")
+
+            monkeypatch.setattr(SuperGLM, "fit", failing_fit)
+        elif failure_stage == "synchronize":
+
+            def failing_synchronize(candidate, *args, **kwargs):
+                candidate.__dict__["partial_synchronization"] = object()
+                raise RuntimeError("failed during synchronize")
+
+            monkeypatch.setattr(
+                profile_ops_module,
+                "_synchronize_tweedie_profile_refit",
+                failing_synchronize,
+            )
+        else:
+            real_release = fit_ops_module._maybe_release_fit_state
+
+            def failing_release(candidate):
+                if candidate._retain_fit_state:
+                    return real_release(candidate)
+                candidate.__dict__["partial_release"] = object()
+                raise RuntimeError("failed during release")
+
+            monkeypatch.setattr(fit_ops_module, "_maybe_release_fit_state", failing_release)
+
+        with pytest.raises(RuntimeError, match=f"failed during {failure_stage}"):
+            model.estimate_p(X, y)
+
+        _assert_fitted_model_unchanged(model, X, snapshot)
+
+    @pytest.mark.parametrize(
+        "invalid_field",
+        [
+            "converged",
+            "outer_converged",
+            "fit_converged",
+            "solver_converged",
+            "objective_finite",
+            "phi_converged",
+            "density_exact",
+        ],
+    )
+    def test_uncertified_profile_result_is_not_installed(self, monkeypatch, invalid_field):
+        X, y, _ = _tweedie_data(n=32, seed=20260804)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        model.fit(X, y)
+        snapshot = _snapshot_fitted_model(model, X)
+        result = replace(_deterministic_profile_result(), **{invalid_field: False})
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            lambda *args, **kwargs: result,
+        )
+        progress_events = []
+
+        with pytest.raises(RuntimeError, match="profile result is not installable"):
+            model.estimate_p(
+                X,
+                y,
+                progress_callback=lambda event, payload: progress_events.append(event),
+            )
+
+        assert progress_events == []
+        _assert_fitted_model_unchanged(model, X, snapshot)
+
+    @pytest.mark.parametrize(
+        ("invalid_field", "invalid_value"),
+        [
+            ("p_hat", 1.0),
+            ("p_hat", np.nan),
+            ("phi_hat", 0.0),
+            ("phi_hat", np.inf),
+            ("nll", np.inf),
+        ],
+    )
+    def test_nonfinite_profile_estimate_is_not_installed(
+        self, monkeypatch, invalid_field, invalid_value
+    ):
+        X, y, _ = _tweedie_data(n=32, seed=20260806)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        model.fit(X, y)
+        snapshot = _snapshot_fitted_model(model, X)
+        result = replace(
+            _deterministic_profile_result(),
+            **{invalid_field: invalid_value},
+        )
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            lambda *args, **kwargs: result,
+        )
+
+        with pytest.raises(RuntimeError, match="profile result is not installable"):
+            model.estimate_p(X, y)
+
+        _assert_fitted_model_unchanged(model, X, snapshot)
+
+    def test_nonconverged_staged_final_fit_is_not_installed(self, monkeypatch):
+        X, y, _ = _tweedie_data(n=32, seed=20260805)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        model.fit(X, y)
+        snapshot = _snapshot_fitted_model(model, X)
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            lambda *args, **kwargs: _deterministic_profile_result(),
+        )
+        real_fit = SuperGLM.fit
+
+        def nonconverged_fit(candidate, *args, **kwargs):
+            fitted = real_fit(candidate, *args, **kwargs)
+            candidate._result = replace(candidate.result, converged=False)
+            return fitted
+
+        monkeypatch.setattr(SuperGLM, "fit", nonconverged_fit)
+
+        with pytest.raises(RuntimeError, match="final fit is not installable"):
+            model.estimate_p(X, y)
+
+        _assert_fitted_model_unchanged(model, X, snapshot)
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            "family_power",
+            "distribution_power",
+            "public_convergence",
+            "solver_convergence",
+            "public_dispersion",
+            "solver_dispersion",
+            "fit_statistics",
+            "predictions",
+        ],
+    )
+    def test_incoherent_staged_final_fit_is_not_installed(self, monkeypatch, corruption):
+        X, y, _ = _tweedie_data(n=32, seed=20260807)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        model.fit(X, y)
+        snapshot = _snapshot_fitted_model(model, X)
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            lambda *args, **kwargs: _deterministic_profile_result(),
+        )
+        real_synchronize = profile_ops_module._synchronize_tweedie_profile_refit
+
+        def corrupt_synchronized_stage(candidate, sync_y, profile_result):
+            real_synchronize(candidate, sync_y, profile_result)
+            if corruption == "family_power":
+                candidate.family = TweedieDistribution(p=1.6)
+            elif corruption == "distribution_power":
+                candidate._distribution = TweedieDistribution(p=1.6)
+            elif corruption == "public_convergence":
+                candidate._result = replace(candidate.result, converged=False)
+            elif corruption == "solver_convergence":
+                candidate._solver_result = replace(
+                    candidate._solver_pirls_result(), converged=False
+                )
+            elif corruption == "public_dispersion":
+                candidate._result = replace(candidate.result, phi=3.0)
+            elif corruption == "solver_dispersion":
+                candidate._solver_result = replace(candidate._solver_pirls_result(), phi=3.0)
+            elif corruption == "fit_statistics":
+                candidate._fit_stats = replace(
+                    candidate._fit_stats,
+                    log_likelihood=np.nan,
+                )
+            else:
+                candidate.predict = lambda *args, **kwargs: np.full(len(X), np.nan)
+
+        monkeypatch.setattr(
+            profile_ops_module,
+            "_synchronize_tweedie_profile_refit",
+            corrupt_synchronized_stage,
+        )
+
+        with pytest.raises(RuntimeError, match="final fit is not installable"):
+            model.estimate_p(X, y)
+
+        _assert_fitted_model_unchanged(model, X, snapshot)
 
     def test_pirls_phi_replacement_preserves_declared_and_dynamic_state(self):
         beta = np.array([0.25, -0.5])
@@ -3084,6 +3405,17 @@ class TestEstimatePFitMode:
             objective_calls.append(float(p))
             return (float(p) - 1.5) ** 2
 
+        def evaluation_record(p):
+            return SimpleNamespace(
+                nll=(float(p) - 1.5) ** 2,
+                fit_converged=True,
+                phi_result=SimpleNamespace(
+                    objective_finite=True,
+                    converged=True,
+                    diagnostics=SimpleNamespace(n_positive=len(y), n_saddlepoint=0),
+                ),
+            )
+
         result = TweedieProfileResult(
             p_hat=1.5,
             phi_hat=1.0,
@@ -3092,10 +3424,29 @@ class TestEstimatePFitMode:
             converged=True,
             method="brent",
             phi_method="mle",
-            search_trace=pd.DataFrame({"p": [1.4, 1.5], "nll": [0.1, 0.0]}),
+            search_trace=pd.DataFrame(
+                {
+                    "p": [1.4, 1.5],
+                    "phi": [1.0, 1.0],
+                    "nll": [0.1, 0.0],
+                    "edf": [2.0, 2.0],
+                    "fit_converged": [True, True],
+                    "solver_converged": [True, True],
+                    "reml_converged": [None, None],
+                    "phi_converged": [True, True],
+                    "objective_finite": [True, True],
+                    "n_saddlepoint": [0, 0],
+                    "density_method": ["exact", "exact"],
+                    "density_exact": [True, True],
+                }
+            ),
+            density_method="exact",
+            density_exact=True,
             _objective=objective,
             _ll_scale=float(len(y)),
             _evaluation_count=lambda: total_evaluations,
+            _evaluation_record=evaluation_record,
+            _validation_token=tweedie_module._TWEEDIE_PROFILE_RESULT_TOKEN,
         )
         profiler_kwargs = {}
 
@@ -3389,14 +3740,15 @@ class TestEstimatePFitMode:
         model._last_fit_meta = {"method": "fit_path", "discrete": False}
         calls: list[str] = []
 
-        class FakeResult:
-            p_hat = 1.45
-            phi_hat = 1.0
-            _objective = None
+        fake_result = _deterministic_profile_result()
+        fake_result.p_hat = 1.45
+        fake_result.phi_hat = 1.0
+        fake_result.phi_method = "pearson"
+        fake_result.search_trace.loc[0, ["p", "phi"]] = [1.45, 1.0]
 
         def fake_estimate_tweedie_p(*args, **kwargs):
             calls.append(kwargs["fit_mode"])
-            return FakeResult()
+            return fake_result
 
         monkeypatch.setattr(
             "superglm.profiling.tweedie.estimate_tweedie_p",
@@ -3786,7 +4138,7 @@ class TestProfileFitParity:
             grid=np.array([1.5]),
             phi_method="pearson",
         )
-        result._objective(1.6, source="later_probe")
+        result._evaluator.evaluate(1.6, source="later_probe")
 
         _assert_fitted_model_unchanged(model, X, snapshot)
 
@@ -4033,7 +4385,7 @@ class TestProfileFitParity:
             grid=np.array([1.4, 1.6]),
             phi_method="pearson",
         )
-        result._objective(1.7, source="ci_probe")
+        result._evaluator.evaluate(1.7, source="ci_probe")
 
         _assert_fitted_model_unchanged(model, X, snapshot, offset=offset)
 
@@ -4098,7 +4450,7 @@ class TestProfileFitParity:
             grid=np.array([1.4, 1.6]),
             phi_method="pearson",
         )
-        result._objective(1.7, source="ci_probe")
+        result._evaluator.evaluate(1.7, source="ci_probe")
 
         _assert_fitted_model_unchanged(model, X, snapshot, offset=offset)
 
@@ -5657,7 +6009,7 @@ class TestDensityProvenance:
         assert result.density_method == "hybrid_exact_saddlepoint"
         assert result.density_exact is False
 
-    def test_pre_density_field_pickle_restores_compatibility_state_for_ci(self):
+    def test_pre_density_field_pickle_restores_compatibility_state_detached(self):
         result = tweedie_module.TweedieProfileResult(
             p_hat=1.5,
             phi_hat=1.0,
@@ -5691,12 +6043,11 @@ class TestDensityProvenance:
         assert restored.density_warning_severity == "none"
         assert restored.near_power_boundary is False
         assert restored._emitted_ci_density_warning_signatures == set()
-        with pytest.warns(UserWarning, match="evaluated LR region"):
-            interval = restored.ci()
-        assert interval[0] < restored.p_hat < interval[1]
-        assert restored._emitted_ci_density_warning_signatures == {"saddle:warning"}
+        with pytest.raises(RuntimeError, match="eager_ci_alpha"):
+            restored.ci()
+        assert restored._emitted_ci_density_warning_signatures == set()
 
-    def test_origin_master_pickle_restores_missing_ci_details_cache(self):
+    def test_origin_master_pickle_restores_missing_ci_details_cache_detached(self):
         result = tweedie_module.TweedieProfileResult(
             p_hat=1.5,
             phi_hat=1.0,
@@ -5733,6 +6084,6 @@ class TestDensityProvenance:
 
         restored = pickle.loads(pickle.dumps(result))
 
-        interval = restored.ci()
-        assert restored._ci_cache[0.05] is interval
-        assert restored._ci_details_cache[0.05].interval is interval
+        assert restored._ci_details_cache == {}
+        with pytest.raises(RuntimeError, match="eager_ci_alpha"):
+            restored.ci()

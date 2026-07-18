@@ -125,7 +125,7 @@ conditional mean. Use an explicit offset when exposure should also enter the mea
 
 With `fit_mode="reml"`, REML selects spline smoothing penalties within each
 candidate fit. The *p*/φ profile is then evaluated conditionally; it does not jointly estimate *p* and φ
-using an mgcv-style REML objective.
+through a separate smoothing-objective profile.
 
 ### Profile confidence interval
 
@@ -138,6 +138,14 @@ ci = result.ci(alpha=0.05)  # (lower, upper) via profile LRT
     can require a full model refit. It is available only for MLE dispersion
     profiles. The interval is cached, so summaries and exports display it after
     this explicit call without evaluating the profile again.
+
+    Models keep the lazy evaluator when `retain_fit_state=True` (the default).
+    With `retain_fit_state=False`, request an interval during estimation with
+    `eager_ci_alpha=0.05`; the cached interval remains available after profile
+    training rows are released. Uncached intervals and dense profile plots then
+    raise with guidance, while `trace_plot()` remains available. Serialized or
+    copied results are always detached, so compute any interval that must
+    survive a round trip before serialization or copying.
 
 ### Search trace and profile plots
 

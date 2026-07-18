@@ -675,6 +675,7 @@ class SuperGLM:
         fit_mode: str = "fit",
         phi_method: str = "mle",
         method: str = "brent",
+        eager_ci_alpha: float | None = None,
         **kwargs,
     ):
         """Estimate Tweedie p via profile likelihood, refit, and return result.
@@ -706,6 +707,17 @@ class SuperGLM:
             ``"grid_refine"`` does a coarse grid + local Brent refinement.
             ``"profile_opt"`` uses a general-purpose optimizer on
             logit-transformed p.
+        eager_ci_alpha : float, optional
+            Compute and cache this likelihood-ratio interval before releasing
+            profile training state. Useful with ``retain_fit_state=False``;
+            requires ``phi_method="mle"``.
+
+        Notes
+        -----
+        Library-authored fitting changes are installed transactionally. A
+        ``progress_callback`` is ordinary user code: side effects it performs
+        deliberately on captured mutable objects are outside that transaction
+        and cannot be rolled back by the estimator.
         """
         return profile_ops.estimate_p(
             self,
@@ -716,6 +728,7 @@ class SuperGLM:
             fit_mode=fit_mode,
             phi_method=phi_method,
             method=method,
+            eager_ci_alpha=eager_ci_alpha,
             **kwargs,
         )
 
