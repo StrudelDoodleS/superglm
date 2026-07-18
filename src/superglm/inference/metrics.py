@@ -668,8 +668,12 @@ class ModelMetrics:
         uses_fitted_rank = self._working_weights_match_fit(W)
         scop_inference = getattr(self._result, "scop_inference", None)
         if scop_inference is not None:
-            fit_X_a, _, inverse, augmented, active_groups = self._model._fit_active_info
+            fit_inference = self._model._fit_inference_info
+            inverse = fit_inference["XtWX_inv"]
+            augmented = fit_inference["XtWX_inv_aug"]
+            active_groups = fit_inference["active_groups"]
             if self._uses_fit_design:
+                fit_X_a, _, _, _, _ = self._model._fit_active_info
                 X_a = fit_X_a
             else:
                 rank_info = getattr(self._result, "rank_info", None)

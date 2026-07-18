@@ -237,6 +237,24 @@ def test_post_construction_interaction_is_rebuilt_on_every_fit():
     )
 
 
+def test_post_fit_interaction_update_does_not_requeue_constructor_interactions():
+    X, y, weights = _poisson_data()
+    X = X.assign(w=X["x"] * X["z"])
+    model = SuperGLM(
+        selection_penalty=0.0,
+        features={"x": Numeric(), "z": Numeric(), "w": Numeric()},
+        interactions=[("x", "z")],
+    ).fit(X, y, sample_weight=weights)
+
+    model._add_interaction("x", "w")
+    cloned = model.clone_unfitted()
+
+    assert model._pending_interactions == ()
+    assert model._config.interactions == ()
+    assert cloned._pending_interactions == ()
+    assert cloned._interaction_order == ["x:z", "x:w"]
+
+
 def test_public_mutable_configuration_getters_are_defensive():
     model = SuperGLM(
         family=NegativeBinomial(theta="auto"),

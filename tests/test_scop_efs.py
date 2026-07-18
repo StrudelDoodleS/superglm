@@ -14,6 +14,7 @@ import superglm.reml.scop_efs as scop_efs_module
 from superglm import Constraint, SuperGLM
 from superglm.families import Gaussian, Poisson
 from superglm.features.spline import PSpline
+from superglm.inference.covariance import _active_penalty_matrix
 from superglm.model.base import model_build_design_matrix
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.reml.scop_efs import (
@@ -304,6 +305,19 @@ class TestBuildSCOPPenaltyMatrixOwnership:
             [group],
             {"x": 3.0},
             group.size,
+            reml_penalties=[component],
+        )
+
+        np.testing.assert_allclose(assembled, 3.0 * omega, rtol=0.0, atol=0.0)
+
+    def test_active_supplied_scop_component_is_not_added_again_by_group_fallback(self):
+        omega, group, component = self._group_and_component()
+
+        assembled = _active_penalty_matrix(
+            [SimpleNamespace(R_inv=np.eye(group.size))],
+            [group],
+            [group],
+            {"x": 3.0},
             reml_penalties=[component],
         )
 

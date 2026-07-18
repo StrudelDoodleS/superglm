@@ -519,7 +519,11 @@ def _refresh_fit_statistics(
     ):
         from superglm.model.fit_data_guard import FitDataGuard
 
-        model._fit_data_guard = FitDataGuard.capture(X_ref, y_arr)
+        model._fit_data_guard = FitDataGuard.capture(
+            X_ref,
+            y_arr,
+            columns=tuple(model._feature_order),
+        )
 
 
 def _stamp_stale_inference(model, edited_terms: list[str]) -> None:

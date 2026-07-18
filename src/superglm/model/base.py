@@ -666,6 +666,7 @@ def model_add_interaction(model, feat1: str, feat2: str, name: str | None = None
     )
     if hasattr(model, "_config"):
         model._config = model._config.with_value(
+            interactions=tuple(model._pending_interactions),
             interaction_templates=tuple(
                 (interaction_name, copy.deepcopy(model._interaction_specs[interaction_name]))
                 for interaction_name in model._interaction_order

@@ -249,11 +249,11 @@ def _required_fit_columns(model) -> tuple[str, ...]:
     names = [*model._feature_order, *(model._splines or [])]
     for interaction_name in model._interaction_order:
         names.extend(model._interaction_specs[interaction_name].parent_names)
-    # Preserve the interaction API's more specific configuration error before
-    # treating a parent name as merely a missing input column.  In fully
-    # auto-detected models there is no configured feature universe yet, so the
-    # builder remains responsible for resolving parents after detection.
-    configured_features = set(model._feature_order) | set(model._splines or ())
+    # Preserve the interaction API's more specific configuration error for an
+    # explicit feature mapping, which defines a closed feature universe.  The
+    # spline shorthand only names columns to smooth; every other X column is
+    # still eligible for auto-detection when the fit workspace is built.
+    configured_features = set(model._feature_order) if model._splines is None else set()
     for left, right in model._pending_interactions:
         if configured_features:
             if left not in configured_features:
@@ -488,7 +488,9 @@ def _prime_fit_caches(
     # Compact fits release every retained row reference immediately below.
     # Avoid an O(n) content hash that could never be consumed.
     model._fit_data_guard = (
-        FitDataGuard.capture(X_ref, y_arr) if getattr(model, "_retain_fit_state", True) else None
+        FitDataGuard.capture(X_ref, y_arr, columns=tuple(model._feature_order))
+        if getattr(model, "_retain_fit_state", True)
+        else None
     )
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
