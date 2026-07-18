@@ -924,6 +924,33 @@ class TestGiniScorer:
 
         assert score == 0.0
 
+    def test_gini_near_constant_target_is_numerically_stable(self):
+        y = np.array([1.0, 1.0, np.nextafter(1.0, 2.0)])
+        sample_weight = np.array([0.1, 0.2, 10.1])
+
+        constant = _score_gini(
+            self._PredictionOnlyModel(np.ones(3)),
+            None,
+            y,
+            sample_weight=sample_weight,
+        )
+        perfect = _score_gini(
+            self._PredictionOnlyModel(y),
+            None,
+            y,
+            sample_weight=sample_weight,
+        )
+        reverse = _score_gini(
+            self._PredictionOnlyModel(-y),
+            None,
+            y,
+            sample_weight=sample_weight,
+        )
+
+        assert constant == 0.0
+        assert perfect == pytest.approx(1.0)
+        assert reverse == pytest.approx(-1.0)
+
     def test_gini_all_zero_response(self, poisson_data, base_model):
         """Gini scorer returns 0.0 when all y=0 (no division by zero)."""
         df, y, _ = poisson_data
