@@ -501,6 +501,15 @@ def optimize_direct_reml(
                 rho = rho_trial
                 warm_beta = trial_result.beta.copy()
                 warm_intercept = float(trial_result.intercept)
+                # The accepted line-search state has already paid for a full
+                # PIRLS solve and objective evaluation.  It is therefore a
+                # valid retained candidate even when this is the final outer
+                # iteration; waiting until the next loop would silently
+                # discard a guaranteed improvement at ``max_reml_iter``.
+                if trial_obj < best_obj:
+                    best_obj = float(trial_obj)
+                    best_lambdas = trial_lambdas.copy()
+                    best_pirls = trial_result
                 accepted = True
                 break
             step *= 0.5
