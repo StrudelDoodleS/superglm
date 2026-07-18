@@ -22,6 +22,20 @@ def _tabmat_vector(values):
     return array
 
 
+def _native_categorical_matrix(codes, n_levels: int):
+    """Return a native Tabmat block matching SuperGLM's base-sentinel encoding."""
+    remapped = np.asarray(codes, dtype=np.int32).copy()
+    base_mask = remapped == n_levels
+    remapped[~base_mask] += 1
+    remapped[base_mask] = 0
+    return tabmat.CategoricalMatrix(
+        remapped,
+        categories=np.arange(n_levels + 1, dtype=np.int32),
+        drop_first=True,
+        dtype=np.float64,
+    )
+
+
 def _is_tabmat_centering_candidate(gms) -> bool:
     """Return whether centering can use a native categorical Tabmat block."""
     from ..group_matrix import (
@@ -82,19 +96,7 @@ def _build_tabmat_split(gms):
     for gm in gms:
         if isinstance(gm, CategoricalGroupMatrix):
             if gm.n_levels > 100:
-                codes = gm.codes.copy().astype(np.int32)
-                base_mask = codes == gm.n_levels
-                codes[~base_mask] += 1
-                codes[base_mask] = 0
-                categories = np.arange(gm.n_levels + 1)
-                matrices.append(
-                    tabmat.CategoricalMatrix(
-                        codes,
-                        categories=categories,
-                        drop_first=True,
-                        dtype=np.float64,
-                    )
-                )
+                matrices.append(_native_categorical_matrix(gm.codes, gm.n_levels))
             else:
                 matrices.append(_dense_float64(gm.toarray()))
         elif isinstance(gm, SparseGroupMatrix):

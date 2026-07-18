@@ -53,20 +53,29 @@ accepting an unrelated Context7 match.
    eligible; categorical-only and discretized designs are already strong here.
 2. Lazily build a `SplitMatrix` only for a route that can consume it. Numeric, low-cardinality
    categorical, and categorical-only centered fits must not retain an unused dense duplicate.
-3. For a mixed design with a native `CategoricalMatrix`, use one normalized `standardize` call as
-   a cheap location/scale preflight, then compute raw Gram and RHS with `sandwich` and
-   `transpose_matvec`.
-4. Pass raw moments through SuperGLM's existing certification as well. A rejection permanently
+3. For an eligible mixed ordinary/discretized design, use one normalized `standardize` call on
+   the first attempted iteration as a cheap full-augmented location/scale preflight. Reuse its
+   call-local indicator means for compressed-support screening and `X'W`.
+4. On every accepted mixed iteration, compute the raw Gram with `sandwich` and the RHS with one
+   `transpose_matvec`. Later iterations derive one-hot `X'W` from the sandwich diagonal and dense
+   `X'W` from the bounded dense slab, without repeating standardization.
+5. Pass raw moments through SuperGLM's existing certification as well. A rejection permanently
    locks that inner fit to stable chunks; accepted changing-weight iterations remain certified.
-5. Before compiled weighted calls, provide float64, C-contiguous, writable weight buffers. Tabmat
+6. Before compiled weighted calls, provide float64, C-contiguous, writable weight buffers. Tabmat
    4.2.1 can silently miscompute with strided weights and rejects read-only sandwich weights;
    read-only predictor storage itself is fine.
-6. Retain stable, bounded, explicitly centered chunks as the fallback for ill-scaled inputs or
+7. Retain stable, bounded, explicitly centered chunks as the fallback for ill-scaled inputs or
    unsupported components.
-7. Do not route small all-dense systems through Tabmat merely because a split exists; the frozen
+8. Do not route small all-dense systems through Tabmat merely because a split exists; the frozen
    fixture shows that this is slightly slower than the existing dense path.
-8. Never infer real Tabmat use from construction alone. Regression tests and benchmarks must count
+9. Never infer real Tabmat use from construction alone. Regression tests and benchmarks must count
    `sandwich` and `transpose_matvec` calls on the timed fit.
+10. Mixed native categoricals with at most 100 retained levels require at least 5,000 rows. The
+    measured 2,000-row setup cell lost, while the 5,000-row cell won; high-cardinality blocks keep
+    the general scaled-work gate because their stable dense fallback is already expensive.
+11. Reject a mixed plan before construction when its retained arrays, constructor peak, or
+    per-moment live temporaries exceed the 64 MiB aggregate bounds. Category metadata and temporary
+    code copies are part of those estimates, not assumed to fit in incidental index slack.
 
 For repeated raw weighted moments, automatic Tabmat dispatch is narrower than centered-system
 dispatch. The currently certified layout is a wholly ordinary design with exactly one native
@@ -76,11 +85,14 @@ The narrow rule matters: one dense column, two separately stored dense columns, 
 and multiple categorical blocks all produced repeatable counterexamples.
 
 `discrete=True` remains a hybrid path. BAM-style `B_unique`, bin indices, tensor grids, and
-coefficient transforms stay compressed and use specialized aggregation kernels. A future partial
-plan can put eligible observation-level dense/sparse/categorical blocks in Tabmat and assemble
-their cross-moments with discrete blocks in coefficient space. Materializing a discrete basis only
-to pass it to Tabmat lost to the existing aggregated kernel (1.629 ms versus 0.958 ms on the tested
-50,000-row mixed fixture), so wholesale conversion is not the target architecture.
+coefficient transforms stay compressed. Eligible mixed ordinary/discretized centered systems now
+  have a cached public-Tabmat bin-space plan: each spline contributes native bin indicators to one
+  `SplitMatrix`, and only the bounded bin-space moments are transformed through cached supports.
+  Packed all-discrete and unsupported tensor/sparse layouts retain their specialized paths. Frozen
+  controller benchmarks accepted the route after measuring 4.1% faster CPU for a 10k mixed fit,
+  11.6% for a 10k four-spline fit, and 76.7% for a 60k high-cardinality fit; the latter reduced the
+  cold RSS delta from 65.2 to 24.4 MiB. Wholesale row-level materialization remains outside the
+  architecture.
 
 ## Current measured opportunity
 
@@ -114,8 +126,8 @@ memory reduction.
 - Use `sandwich(cols=...)` for genuinely selected systems; it reduced work and memory substantially.
   Column-restricted `transpose_matvec` was slower in the tested cases. `rows=` is promising only
   when the active row fraction is genuinely small.
-- Benchmark native low-cardinality categorical blocks behind a size crossover. They won strongly
-  at 60,000 rows but lost on the small case, so unconditional conversion is not justified.
+- Re-measure the 5,000-row native low-cardinality crossover when Tabmat's categorical kernels or
+  constructor ownership change; the active rule is deliberately evidence-bound.
 - Compare direct group construction with `from_df` for copy count and build time, but preserve
   SuperGLM's feature transformations, identifiability projections, coefficient ordering, and
   prediction metadata.

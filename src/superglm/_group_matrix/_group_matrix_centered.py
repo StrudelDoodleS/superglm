@@ -17,6 +17,8 @@ from ._group_matrix_tabmat import _tabmat_vector
 
 _MAX_PACKED_HIST_CELLS = 5_000_000
 _MAX_PATTERN_SUMMARY_CELLS = 5_000_000
+_MIN_MIXED_RAW_MOMENT_CELLS = 100_000
+_MIN_LOW_CARDINALITY_MIXED_ROWS = 5_000
 
 
 @dataclass(frozen=True)
@@ -204,6 +206,139 @@ def _try_factored_tensor_centering(
         weighted_z=weighted_z,
         sum_w=sum_w,
         sum_weighted_z=sum_weighted_z,
+    )
+
+
+def _mixed_raw_centering_preflight(
+    *,
+    plan,
+    W: NDArray,
+    sum_w: float,
+) -> NDArray | None:
+    """Return augmented X'W when first-call raw centering is safe."""
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        augmented_mean, augmented_scale = plan.augmented_location_scale(_tabmat_vector(W) / sum_w)
+    if (
+        augmented_scale is None
+        or not np.all(np.isfinite(augmented_mean))
+        or not np.all(np.isfinite(augmented_scale))
+    ):
+        return None
+    ordinary = plan.ordinary_augmented_indices
+    ordinary_mean = augmented_mean[ordinary]
+    ordinary_scale = augmented_scale[ordinary]
+    if not _raw_centering_well_scaled(
+        ordinary_mean,
+        ordinary_scale,
+    ):
+        return None
+    for block in plan.compressed_blocks:
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            mass = augmented_mean[block.augmented_indices] * sum_w
+            xtw = block.support.T @ mass
+            raw_diagonal = np.einsum(
+                "ij,i,ij->j",
+                block.support,
+                mass,
+                block.support,
+                optimize=False,
+            )
+            mean = xtw / sum_w
+            centered_diagonal = raw_diagonal - xtw * mean
+            if (
+                not np.all(np.isfinite(mean))
+                or not np.all(np.isfinite(centered_diagonal))
+                or np.any(centered_diagonal < 0.0)
+            ):
+                return None
+            scale = np.sqrt(centered_diagonal / sum_w)
+        if not _raw_centering_well_scaled(mean, scale):
+            return None
+    augmented_xtw = augmented_mean * sum_w
+    if not np.all(np.isfinite(augmented_xtw)):
+        return None
+    return augmented_xtw
+
+
+def _try_mixed_discrete_centering(
+    *,
+    dm,
+    W: NDArray,
+    z_centered: NDArray,
+    sum_w: float,
+    preflight: bool = True,
+) -> tuple[bool, tuple[NDArray, NDArray, NDArray] | None]:
+    """Use the cached augmented bin-space plan for a certified mixed design."""
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DenseGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+    )
+
+    allowed_types = {DenseGroupMatrix, CategoricalGroupMatrix, DiscretizedSSPGroupMatrix}
+    compressed_groups = tuple(
+        group for group in dm.group_matrices if type(group) is DiscretizedSSPGroupMatrix
+    )
+    categorical_groups = tuple(
+        group
+        for group in dm.group_matrices
+        if type(group) is CategoricalGroupMatrix and group.shape[1] > 0
+    )
+    has_ordinary = any(
+        type(group) in {DenseGroupMatrix, CategoricalGroupMatrix} and group.shape[1] > 0
+        for group in dm.group_matrices
+    )
+    if (
+        not compressed_groups
+        or not has_ordinary
+        or len(categorical_groups) > 1
+        or any(type(group) not in allowed_types for group in dm.group_matrices)
+        or dm.p == 0
+        or dm.n * dm.p < _MIN_MIXED_RAW_MOMENT_CELLS * len(compressed_groups)
+        # Below this measured row crossover, constructing a native low-cardinality
+        # block costs more than the stable dense-categorical fallback. High-cardinality
+        # blocks retain their strong win even on smaller designs.
+        or (
+            categorical_groups
+            and categorical_groups[0].n_levels <= 100
+            and dm.n < _MIN_LOW_CARDINALITY_MIXED_ROWS
+        )
+    ):
+        return False, None
+
+    plan = dm.mixed_bin_space_centering_plan
+    if plan is None:
+        return False, None
+    augmented_xtw = None
+    if preflight:
+        augmented_xtw = _mixed_raw_centering_preflight(
+            plan=plan,
+            W=W,
+            sum_w=sum_w,
+        )
+        if augmented_xtw is None:
+            return True, None
+
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        weighted_z = W * z_centered
+        sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
+    if not np.isfinite(sum_weighted_z) or not np.all(np.isfinite(weighted_z)):
+        return True, None
+
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        moments = plan.moments(W, weighted_z, augmented_xtw=augmented_xtw)
+    if moments.xtw is None:  # pragma: no cover - guaranteed by include_xtw
+        raise RuntimeError("execution plan did not return X'W")
+    return (
+        True,
+        _certify_raw_centering(
+            raw_gram=moments.gram,
+            xtw=moments.xtw,
+            raw_rhs=moments.xt_rhs[0],
+            weighted_z=weighted_z,
+            sum_w=sum_w,
+            sum_weighted_z=sum_weighted_z,
+        ),
     )
 
 
@@ -511,14 +646,14 @@ def packed_centered_gram_rhs(
 
     supports: list[_CenteredSupport] = []
     widths: list[int] = []
-    weighted_z = W * z_centered
-    sum_w = float(np.sum(W, dtype=np.float64))
     eligible_types = (DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix)
     if any(
         type(gm) not in eligible_types and not isinstance(gm, CategoricalGroupMatrix)
         for gm in dm.group_matrices
     ):
         return None
+    weighted_z = W * z_centered
+    sum_w = float(np.sum(W, dtype=np.float64))
     if any(type(gm) is DiscretizedTensorGroupMatrix for gm in dm.group_matrices):
         pattern_attempted, patterned = _try_pattern_tensor_centering(
             dm=dm,

@@ -12,8 +12,8 @@ Three approaches were measured:
 
 1. **Cached Tabmat bin-space plan (selected).** Represent every eligible discretized spline's
    observation-to-bin map as a `tabmat.CategoricalMatrix`, combine those compact blocks with the
-   ordinary Tabmat blocks, and obtain all raw moments from one `SplitMatrix.sandwich` plus two
-   `transpose_matvec` calls. Transform only bin-space blocks through `B_unique @ R_inv`.
+   ordinary Tabmat blocks, and obtain all raw moments from one `SplitMatrix.sandwich` plus one RHS
+   `transpose_matvec` call. Transform only bin-space blocks through `B_unique @ R_inv`.
 2. **Replace Numba scatter kernels with NumPy.** This removes roughly 100--220 ms and 45--59 MiB
    of first-use overhead, but measured hot regressions reach 13--21% for complete centered systems
    and are much larger for wide dense aggregation.
@@ -48,11 +48,17 @@ not subclass checks.
 
 For each changed IRLS weight vector:
 
-1. Check the existing scaled work floor and supported topology.
-2. Use virtual Tabmat standardization for ordinary location/scale summaries and bounded support
-   summaries for each compressed spline. Discard the virtual standardized wrapper.
-3. Compute the augmented raw Gram with `SplitMatrix.sandwich(W)` and augmented `X'W`/`X'Wz`
-   with two `transpose_matvec` calls.
+1. Check the scaled `100,000 * compressed_groups` work floor and supported topology. Native
+   low-cardinality categoricals (at most 100 retained levels) additionally require 5,000 rows;
+   the 2,000-row benchmark lost on setup while the 5,000-row cell won materially.
+2. On the first attempted call, use virtual Tabmat standardization for the full augmented
+   location/scale summary. Derive compressed-spline bin masses from those call-local means,
+   screen the cached supports, retain `X'W = mean * sum_w` only for that call, and discard the
+   virtual standardized wrapper.
+3. Compute the augmented raw Gram with `SplitMatrix.sandwich(W)` and `X'Wz` with one
+   `transpose_matvec` call. On later calls, derive one-hot categorical/bin `X'W` entries from the
+   raw-Gram diagonal and compute dense `X'W` from the already bounded dense slab with one BLAS
+   matvec, so standardization is not repeated.
 4. Copy the whole ordinary-ordinary block once. For each spline, transform its diagonal,
    ordinary cross block, vectors, and spline-spline cross blocks through its support transform.
 5. Pass the solver-space raw moments through `_certify_raw_centering` unchanged.
@@ -69,13 +75,18 @@ not a numerical rejection and therefore must not mutate the fit-local tri-state.
 moments return the existing numerical rejection result and permanently select stable chunks for
 that inner fit.
 
+Plan construction is rejected before Tabmat allocation when any individual, aggregate retained,
+aggregate construction-peak, or per-moment transient estimate exceeds 64 MiB. Estimates include
+native-category metadata, temporary code copies, SplitMatrix validation indices, simultaneous
+solver/augmented moments, and the largest live block-transform scratch operation.
+
 ## Correctness and performance acceptance
 
 - Dense-reference parity for ordinary plus one/multiple splines, native low/high-cardinality
   categoricals, exact aliases, and weight vectors containing zeros.
 - Tensor and unsupported layouts remain unattempted.
 - Unsafe large-offset layouts fall back and remain locked out.
-- Accepted calls execute one Tabmat sandwich and two transpose products, with zero calls to the
+- Accepted calls execute one Tabmat sandwich and one RHS transpose product, with zero calls to the
   named Numba scatter kernels and zero row materializations.
 - Cache identity is stable within a fit and reset by pickle.
 - Focused tests, rank-policy tests, execution-plan tests, direct IRLS tests, Ruff, and diff checks
