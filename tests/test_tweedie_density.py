@@ -96,26 +96,122 @@ def test_integer_shape_reference_has_independent_score_oracle() -> None:
     )
 
 
-@pytest.mark.slow
-def test_large_mode_bessel_oracle_is_accurate_or_fails_closed() -> None:
-    try:
-        result = evaluate_tweedie_density(
-            np.array([1.0]),
-            np.array([1.0]),
-            1e-8,
-            1.5,
-        )
-    except TweedieDensityError as error:
-        assert error.reason == "arithmetic precision was insufficient for certification"
-    else:
-        assert result.logpdf[0] == pytest.approx(
-            8.2914018378340099931197610797683626198,
-            abs=8e-13,
-        )
-        assert result.log_phi_score[0] == pytest.approx(
-            -0.50000000093750000234375000769042972046,
-            abs=8e-13,
-        )
+def test_large_mode_bessel_oracle_is_certified() -> None:
+    minimum_rtol = float(16.0 * np.finfo(np.float64).eps)
+    result = evaluate_tweedie_density(
+        np.array([1.0]),
+        np.array([1.0]),
+        1e-8,
+        1.5,
+        rtol=minimum_rtol,
+    )
+
+    assert result.logpdf[0] == pytest.approx(
+        8.2914018378340099826584806450892255643,
+        rel=0.0,
+        abs=4e-15,
+    )
+    assert result.log_phi_score[0] == pytest.approx(
+        -0.50000000093750000234375002730533059678,
+        rel=0.0,
+        abs=4e-15,
+    )
+    assert result.diagnostics.certified
+    assert result.diagnostics.max_relative_tail_error <= minimum_rtol
+    assert result.diagnostics.method == "compound_poisson_bessel"
+
+
+def test_fitted_tiny_dispersion_alpha_one_density_is_certified() -> None:
+    """A valid near-interpolating fit must not lose its terminal likelihood."""
+    minimum_rtol = float(16.0 * np.finfo(np.float64).eps)
+    result = evaluate_tweedie_density(
+        np.array([1.3498588075760032]),
+        np.array([1.34986415125162]),
+        3.798769532923206e-08,
+        1.5,
+        rtol=minimum_rtol,
+    )
+
+    # Independent 100-digit evaluation of the exact scaled-I1 identity.
+    assert result.logpdf[0] == pytest.approx(
+        7.3988235845699789236277314837711800498,
+        rel=0.0,
+        abs=4e-15,
+    )
+    assert result.log_phi_score[0] == pytest.approx(
+        -0.49976035551403797740968514088924259055,
+        rel=0.0,
+        abs=4e-15,
+    )
+    assert result.diagnostics.certified
+    assert result.diagnostics.max_relative_tail_error <= minimum_rtol
+    assert result.diagnostics.method == "compound_poisson_bessel"
+
+
+def test_alpha_one_score_precision_transition_uses_certified_bessel_identity() -> None:
+    minimum_rtol = float(16.0 * np.finfo(np.float64).eps)
+    result = evaluate_tweedie_density(
+        np.array([1.0]),
+        np.array([1.0]),
+        1e-5,
+        1.5,
+        rtol=minimum_rtol,
+    )
+
+    assert result.logpdf[0] == pytest.approx(
+        4.8375232617792695497995604504525543315,
+        rel=0.0,
+        abs=4e-15,
+    )
+    assert result.log_phi_score[0] == pytest.approx(
+        -0.50000093750234375769053933741197709554,
+        rel=0.0,
+        abs=4e-15,
+    )
+    assert result.diagnostics.certified
+    assert result.diagnostics.method == "compound_poisson_bessel"
+
+
+def test_mixed_series_and_bessel_rows_report_exact_hybrid_provenance() -> None:
+    result = evaluate_tweedie_density(
+        np.array([1.0, 100.0]),
+        np.array([1.0, 100.0]),
+        0.01,
+        1.5,
+    )
+
+    assert np.all(np.isfinite(result.logpdf))
+    assert np.all(np.isfinite(result.log_phi_score))
+    assert result.diagnostics.n_exact == 2
+    assert result.diagnostics.n_approximate == 0
+    assert result.diagnostics.certified
+    assert result.diagnostics.method == "hybrid_compound_poisson_exact"
+
+
+def test_series_bessel_switch_is_continuous_within_certified_error() -> None:
+    boundary_phi = 4.0 / float(density_module._BESSEL_ASYMPTOTIC_MIN_ARGUMENT)
+    series = evaluate_tweedie_density(
+        np.array([1.0]),
+        np.array([1.0]),
+        np.nextafter(boundary_phi, np.inf),
+        1.5,
+    )
+    bessel = evaluate_tweedie_density(
+        np.array([1.0]),
+        np.array([1.0]),
+        np.nextafter(boundary_phi, 0.0),
+        1.5,
+    )
+
+    assert series.diagnostics.method == "compound_poisson_series"
+    assert bessel.diagnostics.method == "compound_poisson_bessel"
+    np.testing.assert_allclose(series.logpdf, bessel.logpdf, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(
+        series.log_phi_score,
+        bessel.log_phi_score,
+        rtol=0.0,
+        atol=1e-12,
+    )
 
 
 @pytest.mark.slow
@@ -310,6 +406,28 @@ def test_prior_weights_equal_inverse_dispersion_row_by_row() -> None:
         assert weighted.logpdf[index] == pytest.approx(unweighted.logpdf[0], abs=2e-13)
         assert weighted.log_phi_score[index] == pytest.approx(
             unweighted.log_phi_score[0], abs=2e-12
+        )
+
+
+def test_bessel_prior_weights_equal_inverse_dispersion_row_by_row() -> None:
+    y = np.array([0.7, 1.0, 2.3])
+    mu = np.array([0.72, 0.98, 2.25])
+    weights = np.array([1.0, 2.0, 4.0])
+    phi = 1e-5
+    weighted = evaluate_tweedie_density(y, mu, phi, 1.5, weights=weights)
+
+    assert weighted.diagnostics.method == "compound_poisson_bessel"
+    for index, weight in enumerate(weights):
+        unweighted = evaluate_tweedie_density(
+            y[index : index + 1],
+            mu[index : index + 1],
+            phi / weight,
+            1.5,
+        )
+        assert weighted.logpdf[index] == pytest.approx(unweighted.logpdf[0], abs=8e-13)
+        assert weighted.log_phi_score[index] == pytest.approx(
+            unweighted.log_phi_score[0],
+            abs=8e-13,
         )
 
 
@@ -549,32 +667,29 @@ def test_forced_certification_failure_has_only_neutral_bounded_metadata() -> Non
         pytest.param(1.0, 2e-12, 2.0, id="equivalent-effective-dispersion"),
     ],
 )
-def test_alpha_one_impossible_term_budget_fails_before_central_term(
+def test_alpha_one_impossible_series_budget_uses_bessel_before_central_term(
     monkeypatch: pytest.MonkeyPatch,
     y: float,
     phi: float,
     weight: float,
 ) -> None:
-    from superglm.profiling.tweedie import tweedie_logpdf
-
     def unexpected_central_term(*args: object, **kwargs: object) -> None:
-        raise AssertionError("a provably impossible series entered term arithmetic")
+        raise AssertionError("the closed-form regime entered series term arithmetic")
 
     monkeypatch.setattr(density_module, "_stable_log_term", unexpected_central_term)
 
-    with pytest.raises(TweedieDensityError) as caught:
-        tweedie_logpdf(
-            np.array([y]),
-            np.array([1.0]),
-            phi,
-            1.5,
-            weights=np.array([weight]),
-        )
+    result = evaluate_tweedie_density(
+        np.array([y]),
+        np.array([1.0]),
+        phi,
+        1.5,
+        weights=np.array([weight]),
+    )
 
-    error = caught.value
-    assert error.reason == "term limit reached before both tails were certified"
-    assert error.term_count == 1_000_000
-    assert error.observation_index == 0
+    assert np.isfinite(result.logpdf[0])
+    assert np.isfinite(result.log_phi_score[0])
+    assert result.diagnostics.certified
+    assert result.diagnostics.method == "compound_poisson_bessel"
 
 
 @pytest.mark.parametrize(
@@ -906,6 +1021,23 @@ def test_distribution_log_likelihood_uses_the_certified_public_path() -> None:
     )
 
     assert value == pytest.approx(-25.2177010089, abs=2e-10)
+
+
+def test_distribution_log_likelihood_accepts_certified_tiny_dispersion() -> None:
+    from superglm.distributions import Tweedie
+
+    value = Tweedie(1.5).log_likelihood(
+        np.array([1.3498588075760032]),
+        np.array([1.34986415125162]),
+        np.ones(1),
+        phi=3.798769532923206e-08,
+    )
+
+    assert value == pytest.approx(
+        7.3988235845699789236277314837711800498,
+        rel=0.0,
+        abs=4e-15,
+    )
 
 
 def test_distribution_log_likelihood_preserves_nonempty_public_contract() -> None:

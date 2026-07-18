@@ -106,10 +106,12 @@ evaluates the Tweedie log-likelihood. `phi_method="pearson"` is an explicit fast
 option when exploratory speed matters, but it is not a likelihood profile
 and cannot support a likelihood-ratio confidence interval.
 
-Positive densities use a certified compound-Poisson/Gamma series. The evaluator
-bounds both omitted probability mass and the first moment needed by the
-dispersion score. Likelihood and profile calls never select a saddlepoint approximation:
-an evaluation that cannot certify its arithmetic fails closed.
+Positive densities use a certified compound-Poisson/Gamma series. At *p*=1.5,
+large series modes use a certified exact modified-Bessel resummation so the
+density and dispersion score remain stable without millions of recurrence
+steps. Both paths bound their omitted work and arithmetic. Likelihood and
+profile calls never select a saddlepoint approximation: an evaluation that
+cannot certify its arithmetic fails closed.
 Inspect `density_method`, `density_exact`, `near_power_boundary`,
 `outer_boundary`, and `warnings` on the result. Profiles at a search bound, and
 especially near *p*=1 and *p*=2, are naturally unstable; optimizer convergence

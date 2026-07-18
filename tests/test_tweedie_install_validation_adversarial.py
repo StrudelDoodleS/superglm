@@ -339,7 +339,9 @@ def test_progress_callback_predict_injection_is_not_installed(monkeypatch) -> No
     assert "predict" not in model.__dict__
     assert model.predict.__func__ is SuperGLM.predict
     assert np.all(model.predict(X) > 0.0)
-    assert model._tweedie_profile_result is result
+    assert model._tweedie_profile_result is not result
+    assert model._tweedie_profile_result.p_hat == result.p_hat
+    assert model._tweedie_profile_result.phi_hat == result.phi_hat
 
 
 def test_mutating_aliasing_penalty_deepcopy_is_rejected_before_profiling(
@@ -358,6 +360,12 @@ def test_mutating_aliasing_penalty_deepcopy_is_rejected_before_profiling(
     X, y = _small_tweedie_data()
     penalty = MutatingAliasingGroupLasso()
     model = _new_model(penalty=penalty)
+    # Isolate the profile entrypoint boundary from the constructor's generic
+    # defensive-copy protocol.  The malicious hook aliases the configured
+    # object, so resetting it here lets this regression prove that profiling
+    # rejects the hook before starting another copy or touching caller state.
+    penalty.deepcopy_calls = 0
+    penalty.lambda1 = 0.0
     before = _snapshot_identity_state(model)
     profile_calls = []
     monkeypatch.setattr(

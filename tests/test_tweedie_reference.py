@@ -180,8 +180,8 @@ def test_self_check_reports_uncertifiable_local_case_without_raw_kernel_error() 
     payload["density_cases"][0].update(  # type: ignore[index]
         y=1.0,
         mu=1.0,
-        phi=1e-12,
-        p=1.5,
+        phi=float(np.nextafter(0.0, 1.0)),
+        p=1.6,
         weight=1.0,
         logpdf=0.0,
     )
@@ -541,8 +541,8 @@ def test_checker_cli_reports_uncertifiable_fixture_without_traceback(tmp_path) -
     payload["density_cases"][0].update(  # type: ignore[index]
         y=1.0,
         mu=1.0,
-        phi=1e-12,
-        p=1.5,
+        phi=float(np.nextafter(0.0, 1.0)),
+        p=1.6,
         weight=1.0,
         logpdf=0.0,
     )
