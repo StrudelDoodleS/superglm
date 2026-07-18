@@ -566,16 +566,22 @@ def test_model_pickle_round_trip_preserves_predictions_and_detaches_profile(
 ):
     profile = request.getfixturevalue(profile_fixture)
     original_evaluator = profile.result._evaluator
+    installed_result = profile.model._tweedie_profile_result
+    installed_interval = installed_result.ci(_EAGER_ALPHA)
+    installed_details = installed_result.ci_details(_EAGER_ALPHA)
     original_predictions = profile.model.predict(profile.X)
 
     restored_model = pickle.loads(pickle.dumps(profile.model, protocol=protocol))
     restored_result = restored_model._tweedie_profile_result
+    restored_interval = restored_result.ci(_EAGER_ALPHA)
+    restored_details = restored_result.ci_details(_EAGER_ALPHA)
 
     np.testing.assert_allclose(restored_model.predict(profile.X), original_predictions)
     assert profile.result._evaluator is original_evaluator
+    assert installed_details.interval is installed_interval
     assert restored_result._evaluator is None
-    assert restored_result.ci(_EAGER_ALPHA) == profile.interval
-    assert restored_result.ci_details(_EAGER_ALPHA).interval == profile.interval
+    assert restored_interval == pytest.approx(profile.interval)
+    assert restored_details.interval is restored_interval
 
 
 def test_detached_and_restored_results_keep_trace_plot_but_reject_dense_plot(
