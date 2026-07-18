@@ -263,6 +263,27 @@ def test_canonical_poisson_laml_uses_observed_full_hessian() -> None:
     assert actual == pytest.approx(expected, rel=1e-11, abs=1e-11)
 
 
+def test_dense_poisson_oracle_handles_roundoff_limited_newton_decrease() -> None:
+    """A converged Newton step may be smaller than objective-value resolution."""
+    rng = np.random.default_rng(20260718)
+    n_obs = int(rng.integers(6, 30))
+    n_features = int(rng.integers(1, 5))
+    X = rng.normal(size=(n_obs, n_features)) * 10 ** rng.uniform(-1.0, 1.0, size=n_features)
+    coefficients = rng.normal(scale=0.5, size=n_features)
+    eta = np.clip(rng.normal() + X @ coefficients, -3.0, 3.0)
+    y = rng.poisson(np.exp(eta)).astype(np.float64)
+    slope_penalty = np.diag(10 ** rng.uniform(-2.0, 2.0, size=n_features))
+
+    state = solve_poisson_log_state(X, y, slope_penalty)
+    augmented_design = np.column_stack((np.ones(n_obs), X))
+    fitted_coefficients = np.concatenate(([state.intercept], state.beta))
+    mu = np.exp(augmented_design @ fitted_coefficients)
+    score = augmented_design.T @ (mu - y)
+    score[1:] += slope_penalty @ state.beta
+
+    assert np.max(np.abs(score)) < 1e-9
+
+
 def test_gamma_scale_profile_retains_saturated_likelihood() -> None:
     """Wood Eq. (4) does not permit the Gaussian scale shortcut for Gamma."""
     distribution = Gamma()
