@@ -240,6 +240,41 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class ModelConfigPublication:
+    """Complete constructor-state identities to install with a fitted revision."""
+
+    config: ModelConfig
+    revision: int
+    penalty: object
+    link: object
+    family: object
+    lambda2: object
+
+    @classmethod
+    def capture(cls, model) -> ModelConfigPublication:
+        """Retain one model's already-owned constructor-state identities."""
+        return cls(
+            config=model._config,
+            revision=int(model._config_revision),
+            penalty=model._penalty_config,
+            link=model._link_config,
+            family=model._family_config,
+            lambda2=model._lambda2_config,
+        )
+
+    def as_model_dict(self) -> dict[str, object]:
+        """Return the coherent slots consumed by atomic publication."""
+        return {
+            "_config": self.config,
+            "_config_revision": self.revision,
+            "_penalty_config": self.penalty,
+            "_link_config": self.link,
+            "_family_config": self.family,
+            "_lambda2_config": self.lambda2,
+        }
+
+
+@dataclass(frozen=True)
 class FitState:
     """Authoritative identity and projections for one complete successful fit."""
 
@@ -578,6 +613,7 @@ def _capture_model_state(
     revision: int,
     repair_revision: int,
     freeze_auxiliary_arrays: bool,
+    config_publication: ModelConfigPublication | None = None,
 ) -> FitCandidate:
     """Build a validated candidate from a complete private fitted model."""
     selection_penalty = _validate_workspace_result(work_model)
@@ -616,14 +652,12 @@ def _capture_model_state(
     # Shallow transfer is intentional: every large buffer was created by this
     # attempt and ownership moves to the installed model without duplication.
     prepared = dict(work_model.__dict__)
-    prepared["_config"] = public_model._config
-    prepared["_config_revision"] = public_model._config_revision
-    prepared["_penalty_config"] = public_model._penalty_config
-    prepared["_link_config"] = public_model._link_config
-    # Preserve current staged NB compatibility while keeping the permanent
-    # constructor template in ModelConfig for the next attempt.
-    prepared["_family_config"] = public_model._family_config
-    prepared["_lambda2_config"] = public_model._lambda2_config
+    publication = (
+        ModelConfigPublication.capture(public_model)
+        if config_publication is None
+        else config_publication
+    )
+    prepared.update(publication.as_model_dict())
     prepared["_resolved_penalty"] = resolved_penalty
     prepared["_selection_penalty_fitted"] = selection_penalty
     prepared["_distribution_fitted"] = work_model._distribution
@@ -633,7 +667,13 @@ def _capture_model_state(
     return FitCandidate(state=state, prepared_model_dict=prepared)
 
 
-def capture_fit_state(workspace, public_model, *, revision: int) -> FitCandidate:
+def capture_fit_state(
+    workspace,
+    public_model,
+    *,
+    revision: int,
+    config_publication: ModelConfigPublication | None = None,
+) -> FitCandidate:
     """Transfer one complete workspace into a candidate without row-scale copies."""
     design = getattr(workspace.model, "_dm", None)
     release_raw_splines = getattr(design, "release_raw_spline_tabmat_plan", None)
@@ -648,6 +688,7 @@ def capture_fit_state(workspace, public_model, *, revision: int) -> FitCandidate
         revision=revision,
         repair_revision=0,
         freeze_auxiliary_arrays=True,
+        config_publication=config_publication,
     )
 
 

@@ -29,7 +29,11 @@ def estimate_p(
 ):
     """Estimate Tweedie p and atomically publish one profiled final fit."""
     from superglm.model import fit_ops
-    from superglm.model.fit_state import _install_fit_state, capture_fit_state
+    from superglm.model.fit_state import (
+        ModelConfigPublication,
+        _install_fit_state,
+        capture_fit_state,
+    )
     from superglm.model.fit_workspace import FitWorkspace
     from superglm.profiling.tweedie import estimate_tweedie_p
 
@@ -129,13 +133,13 @@ def estimate_p(
         final_workspace,
         model,
         revision=model._fit_revision + 1,
+        config_publication=replace(
+            ModelConfigPublication.capture(model),
+            config=selected_config,
+            revision=model._config_revision + 1,
+            family=final_model._family_config,
+        ),
     )
-    # A successful public estimate_p() historically stages the selected p for
-    # future fits. Prepare that configuration revision before the single
-    # dictionary-swap commit; failures above leave every caller identity intact.
-    candidate.prepared_model_dict["_config"] = selected_config
-    candidate.prepared_model_dict["_family_config"] = final_model._family_config
-    candidate.prepared_model_dict["_config_revision"] = model._config_revision + 1
     _install_fit_state(model, candidate)
     if resolved_mode == "fit_reml":
         fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
