@@ -354,6 +354,7 @@ def _estimate_p_in_fit_workspaces(
 
     caller_config_revision = int(model._config_revision)
     caller_fit_revision = int(model._fit_revision)
+    weight_was_provided = prepared.sample_weight is not None
     X, y, sample_weight, offset = fit_ops._validate_entrypoint_input(
         model,
         prepared.X,
@@ -368,6 +369,7 @@ def _estimate_p_in_fit_workspaces(
         sample_weight=sample_weight,
         offset=offset,
     )
+    sample_weight_ref = sample_weight if weight_was_provided else None
     validated_inputs = (X, y, sample_weight, offset)
 
     # Create both configuration snapshots before profiling can execute a trace
@@ -478,6 +480,7 @@ def _estimate_p_in_fit_workspaces(
         installed_result,
         result,
         prepared,
+        sample_weight_ref=sample_weight_ref,
         resolved_mode=resolved_mode,
         caller_publication=caller_publication,
         caller_fit_revision=caller_fit_revision,
@@ -1051,6 +1054,7 @@ def _fit_tweedie_profile_workspace(
     returned_result,
     prepared,
     *,
+    sample_weight_ref,
     resolved_mode: str,
     caller_publication,
     caller_fit_revision: int,
@@ -1071,7 +1075,7 @@ def _fit_tweedie_profile_workspace(
             offset,
             X_ref=X,
             y_ref=y,
-            sample_weight_ref=sample_weight,
+            sample_weight_ref=sample_weight_ref,
             offset_ref=offset,
             pirls_tol=final_model._tol,
             max_pirls_iter=final_model._max_iter,
@@ -1085,7 +1089,7 @@ def _fit_tweedie_profile_workspace(
             offset,
             X_ref=X,
             y_ref=y,
-            sample_weight_ref=sample_weight,
+            sample_weight_ref=sample_weight_ref,
             offset_ref=offset,
         )
 
@@ -1094,7 +1098,7 @@ def _fit_tweedie_profile_workspace(
         final_model,
         X,
         y,
-        sample_weight,
+        sample_weight_ref,
         offset,
         installed_result,
         resolved_mode,

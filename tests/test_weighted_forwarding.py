@@ -85,6 +85,26 @@ class TestWeightedNBTheta:
 class TestWeightedTweedieP:
     """Verify sample_weight flows through Tweedie p estimation."""
 
+    def test_estimate_p_preserves_omitted_weight_sentinel(self):
+        """An unweighted profile refit should retain ``None`` as its public weight reference."""
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 12)})
+        y = np.array([0.0, 0.5, 1.0, 2.0] * 3)
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        model.estimate_p(
+            X,
+            y,
+            method="grid",
+            grid=np.array([1.5]),
+            phi_method="pearson",
+        )
+
+        assert model._fit_sample_weight_ref is None
+
     def test_estimate_p_preserves_weights(self):
         """After estimate_p with weights, model._fit_weights should reflect those weights."""
         rng = np.random.default_rng(99)
