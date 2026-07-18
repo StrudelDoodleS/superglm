@@ -4075,25 +4075,30 @@ def _estimate_tweedie_p_prepared(
             _inputs_owned=True,
         )
 
-    if prepared.method == "brent":
-        return _search_brent(ctx, prepared.p_bounds, prepared.xatol, prepared.maxiter)
-    if prepared.method == "grid":
-        return _search_grid(ctx, prepared.p_bounds, prepared.n_grid, prepared.grid)
-    if prepared.method == "grid_refine":
-        return _search_grid_refine(
+    try:
+        if prepared.method == "brent":
+            return _search_brent(ctx, prepared.p_bounds, prepared.xatol, prepared.maxiter)
+        if prepared.method == "grid":
+            return _search_grid(ctx, prepared.p_bounds, prepared.n_grid, prepared.grid)
+        if prepared.method == "grid_refine":
+            return _search_grid_refine(
+                ctx,
+                prepared.p_bounds,
+                prepared.n_grid_coarse,
+                prepared.xatol,
+                prepared.maxiter,
+            )
+        return _search_profile_opt(
             ctx,
             prepared.p_bounds,
-            prepared.n_grid_coarse,
+            prepared.optimizer,
             prepared.xatol,
             prepared.maxiter,
         )
-    return _search_profile_opt(
-        ctx,
-        prepared.p_bounds,
-        prepared.optimizer,
-        prepared.xatol,
-        prepared.maxiter,
-    )
+    finally:
+        # Trace callbacks are synchronous search instrumentation, not part of
+        # the lazy objective retained for confidence intervals or later probes.
+        ctx.trace_callback = None
 
 
 def estimate_tweedie_p(

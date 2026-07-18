@@ -1,5 +1,6 @@
 """Tests for Tweedie profile likelihood — p estimation."""
 
+import gc
 import inspect
 import pickle
 import warnings
@@ -2589,6 +2590,44 @@ class TestEstimatePFitMode:
         assert observed["after"] == caller_values
         assert observed["profile_X"] is not X
         assert X["x1"].tolist() == ["changed", "changed", "changed"]
+
+    def test_completed_profile_releases_trace_callback_before_lazy_probes(self):
+        class Holder:
+            pass
+
+        X, y, _ = _tweedie_data(n=40, seed=20260731)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        holder = Holder()
+        holder_ref = weakref.ref(holder)
+        callback_events = []
+
+        def trace_callback(row, retained=holder):
+            callback_events.append(row)
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="grid",
+            grid=np.array([1.5]),
+            phi_method="pearson",
+            trace_callback=trace_callback,
+        )
+        events_after_search = len(callback_events)
+        evaluations_after_search = result.n_total_evaluations
+
+        del trace_callback
+        del holder
+        gc.collect()
+
+        assert holder_ref() is None
+        assert np.isfinite(result._objective(1.6, source="later_probe"))
+        assert result.n_total_evaluations == evaluations_after_search + 1
+        assert len(callback_events) == events_after_search
 
     @pytest.mark.parametrize(
         ("fit_mode", "builder_name", "final_fit_name"),
