@@ -252,7 +252,7 @@ def _fit_pirls_inner(
                     "solver": "pirls",
                     "phase": phase,
                     "outer_iteration": outer_iteration,
-                    "accepted_alpha": alpha,
+                    "trial_alpha": alpha,
                     "state_space": state.state_space,
                     "basis_id": state.basis_id,
                     "lambdas": state.lambdas,

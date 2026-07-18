@@ -29,8 +29,6 @@ class SolverState:
     basis_id: int | None = None
     lambdas: tuple[tuple[str, object], ...] = ()
     dispersion: float | None = None
-    convergence_value: float | None = None
-    termination_reason: str | None = None
 
 
 # Migration alias retained while direct IRLS and downstream private callers
