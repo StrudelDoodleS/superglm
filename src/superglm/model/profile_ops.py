@@ -2955,6 +2955,35 @@ def _synchronize_tweedie_profile_refit(model, y, profile_result) -> None:
     model._summary_cache = None
 
 
+def _snapshot_nb_profile_frame(model, X):
+    """Own a plain frame before generic validation can follow pandas metadata hooks."""
+    import pandas as pd
+
+    from superglm.profiling.tweedie import (
+        _snapshot_tweedie_profile_dataframe,
+        _tweedie_profile_frame_for_snapshot,
+    )
+
+    if not isinstance(X, pd.DataFrame):
+        return X
+    if type(X) is not pd.DataFrame:
+        raise TypeError("Could not safely snapshot values in X for NB profiling")
+    # Reuse the hook-free frame canonicalizer used by the other profiled
+    # family.  In particular, pandas ``deep=True`` still shares object cells
+    # and executes deepcopy hooks stored in DataFrame metadata.
+    return _snapshot_tweedie_profile_dataframe(_tweedie_profile_frame_for_snapshot(model, X))
+
+
+def _snapshot_nb_profile_refit_inputs(X, y, sample_weight, offset):
+    """Own one validated input graph before an NB profile callback can run."""
+    y_snapshot = np.array(y, dtype=np.float64, copy=True, subok=False)
+    weight_snapshot = np.array(sample_weight, dtype=np.float64, copy=True, subok=False)
+    offset_snapshot = (
+        None if offset is None else np.array(offset, dtype=np.float64, copy=True, subok=False)
+    )
+    return X, y_snapshot, weight_snapshot, offset_snapshot
+
+
 def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fit", **kwargs):
     """Estimate NB theta and atomically publish one profiled final fit."""
     from superglm.model import fit_ops
@@ -2964,15 +2993,16 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
         capture_fit_state,
     )
     from superglm.model.fit_workspace import FitWorkspace
-    from superglm.profiling.nb import estimate_nb_theta
+    from superglm.profiling.nb import NBProfileResult, estimate_nb_theta
 
     resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
     progress_callback = kwargs.pop("progress_callback", None)
+    caller_config_revision = int(model._config_revision)
+    caller_fit_revision = int(model._fit_revision)
+    weight_was_provided = sample_weight is not None
+    offset_was_provided = offset is not None
 
-    X_ref = X
-    y_ref = y
-    sample_weight_ref = sample_weight
-    offset_ref = offset
+    X = _snapshot_nb_profile_frame(model, X)
     X, y, sample_weight, offset = fit_ops._validate_entrypoint_input(
         model,
         X,
@@ -2980,12 +3010,34 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
         sample_weight,
         offset,
     )
+    X, y, sample_weight, offset = _snapshot_nb_profile_refit_inputs(
+        X,
+        y,
+        sample_weight,
+        offset,
+    )
+    X_ref = X
+    y_ref = y
+    sample_weight_ref = sample_weight if weight_was_provided else None
+    offset_ref = offset if offset_was_provided else None
     validated_inputs = (X, y, sample_weight, offset)
 
+    # Both workspaces and the publication identities must precede trace and
+    # progress callbacks.  User edits to the caller then remain outside this
+    # attempt instead of changing the final refit or its constructor state.
     profile_workspace = FitWorkspace.start(
         model,
         mode="estimate_theta_profile",
         validated_inputs=validated_inputs,
+    )
+    final_source_workspace = FitWorkspace.start(
+        model,
+        mode=f"{resolved_mode}_profile_source",
+        validated_inputs=validated_inputs,
+    )
+    caller_publication = replace(
+        ModelConfigPublication.capture(final_source_workspace.model),
+        revision=caller_config_revision,
     )
     result = estimate_nb_theta(
         profile_workspace.model,
@@ -2995,18 +3047,19 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
         offset=offset,
         **kwargs,
     )
+    if type(result) is not NBProfileResult:
+        raise TypeError("estimate_nb_theta returned an invalid profile result")
+    # Freeze the values used by configuration, final fitting, and publication
+    # before a progress callback can retain and mutate the estimator result.
+    profile_seed = NBProfileResult._detached_public_copy(result)
     # The profile result retains only the vectors needed for reporting/CI.
     # Release its design workspace before allocating the final-fit design.
     del profile_workspace
-    if progress_callback is not None:
-        progress_callback("best_found", {"profile_estimate": _theta_estimate_payload(result)})
-    if progress_callback is not None:
-        progress_callback("final_refit", {"profile_estimate": _theta_estimate_payload(result)})
 
-    selected_family = NegativeBinomial(theta=result.theta_hat)
-    selected_config = model._config.with_value(family=selected_family)
+    selected_family = NegativeBinomial(theta=profile_seed.theta_hat)
+    selected_config = caller_publication.config.with_value(family=selected_family)
     final_workspace = FitWorkspace.start(
-        model,
+        final_source_workspace.model,
         mode=resolved_mode,
         validated_inputs=validated_inputs,
         config_overrides={
@@ -3017,6 +3070,17 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
             "retain_fit_state": True,
         },
     )
+    del final_source_workspace
+    if progress_callback is not None:
+        progress_callback(
+            "best_found",
+            {"profile_estimate": _theta_estimate_payload(profile_seed)},
+        )
+        progress_callback(
+            "final_refit",
+            {"profile_estimate": _theta_estimate_payload(profile_seed)},
+        )
+
     debug_recorder = None
     if resolved_mode == "fit_reml":
         debug_recorder = fit_ops._fit_reml_in_workspace(
@@ -3046,27 +3110,28 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
         )
 
     final_model = final_workspace.model
-    installed_result = result._published_with_data(
+    installed_result = NBProfileResult._published_with_data(
+        profile_seed,
         y,
         final_model._fit_mu,
         final_model._fit_weights,
     )
     final_model._nb_profile_result = installed_result
-    if not model._retain_fit_state:
+    if not caller_publication.config.retain_fit_state:
         final_model._retain_fit_state = False
         fit_ops._maybe_release_fit_state(final_model)
     # Allocate the distinct public handle before the no-fail dictionary swap.
     # A future custom result implementation may make this operation fallible;
     # such a failure must preserve the previously installed model revision.
-    public_result = installed_result._detached_public_copy()
+    public_result = NBProfileResult._detached_public_copy(installed_result)
     candidate = capture_fit_state(
         final_workspace,
         model,
-        revision=model._fit_revision + 1,
+        revision=caller_fit_revision + 1,
         config_publication=replace(
-            ModelConfigPublication.capture(model),
+            caller_publication,
             config=selected_config,
-            revision=model._config_revision + 1,
+            revision=caller_config_revision + 1,
             family=final_model._family_config,
         ),
     )

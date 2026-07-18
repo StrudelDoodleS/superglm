@@ -188,6 +188,48 @@ def test_intercept_only_fit_allows_zero_column_dataframe() -> None:
     np.testing.assert_allclose(model.predict(X), np.mean(y))
 
 
+@pytest.mark.parametrize("retain_fit_state", [True, False])
+def test_intercept_only_fit_reml_fallback_allows_zero_column_dataframe(
+    retain_fit_state: bool,
+) -> None:
+    X = pd.DataFrame(index=pd.RangeIndex(6))
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    sample_weight = np.array([0.5, 1.0, 1.5, 0.75, 2.0, 1.25])
+    offset = np.linspace(-0.2, 0.3, len(X))
+    reference = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={},
+    ).fit(X, y, sample_weight=sample_weight, offset=offset)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={},
+        retain_fit_state=retain_fit_state,
+    )
+
+    model.fit_reml(
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+        max_reml_iter=1,
+    )
+
+    assert model.result.beta.shape == (0,)
+    assert model._last_fit_meta["method"] == "fit_reml"
+    assert getattr(model, "_reml_lambdas", None) is None
+    assert (model._dm is not None) is retain_fit_state
+    np.testing.assert_allclose(
+        model.predict(X, offset=offset),
+        reference.predict(X, offset=offset),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert model.result.intercept == pytest.approx(reference.result.intercept)
+    assert model.result.phi == pytest.approx(reference.result.phi)
+
+
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
 def test_auto_detect_validates_complex_additional_column_before_build(
     entrypoint: str,
