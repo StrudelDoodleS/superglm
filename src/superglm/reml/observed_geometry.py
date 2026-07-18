@@ -89,50 +89,156 @@ def _validate_rows(
     return y, mu, eta, sample_weight
 
 
-def compute_observed_information_weights(
+def _deriv4_inverse(link: Any, eta: NDArray) -> NDArray:
+    """Return an exact fourth inverse-link derivative for built-ins or protocols."""
+    link_type = type(link)
+    if link_type is LogLink:
+        result = np.exp(eta)
+    elif link_type is IdentityLink or link_type is SqrtLink:
+        result = np.zeros_like(eta)
+    elif link_type is LogitLink:
+        from scipy.special import expit
+
+        probability = expit(eta)
+        result = (
+            probability
+            * (1.0 - probability)
+            * (1.0 - 14.0 * probability + 36.0 * probability**2 - 24.0 * probability**3)
+        )
+    elif link_type is ProbitLink:
+        from scipy.stats import norm
+
+        result = (3.0 * eta - eta**3) * norm.pdf(eta)
+    elif link_type is CloglogLink:
+        exp_eta = np.exp(eta)
+        result = exp_eta * np.exp(-exp_eta) * (1.0 - 7.0 * exp_eta + 6.0 * exp_eta**2 - exp_eta**3)
+    elif link_type is CauchitLink:
+        result = 24.0 * eta * (1.0 - eta**2) / (np.pi * (1.0 + eta**2) ** 4)
+    elif link_type is InverseLink:
+        result = 24.0 / eta**5
+    elif link_type is InverseSquaredLink:
+        result = 6.5625 * eta ** (-4.5)
+    elif link_type is PowerLink:
+        exponent = 1.0 / float(link.power)
+        result = (
+            exponent
+            * (exponent - 1.0)
+            * (exponent - 2.0)
+            * (exponent - 3.0)
+            * np.maximum(eta, 1e-15) ** (exponent - 4.0)
+        )
+    elif link_type is NegativeBinomialLink:
+        exp_eta = np.exp(np.clip(eta, -30.0, -1e-10))
+        result = (
+            float(link.theta)
+            * exp_eta
+            * (1.0 + 11.0 * exp_eta + 11.0 * exp_eta**2 + exp_eta**3)
+            / (1.0 - exp_eta) ** 5
+        )
+    else:
+        protocol = getattr(link, "deriv4_inverse", None)
+        if not callable(protocol):
+            raise NotImplementedError(
+                "exact second observed-weight derivatives require link.deriv4_inverse"
+            )
+        result = protocol(eta)
+    result = np.asarray(result, dtype=np.float64)
+    if result.shape != eta.shape or not np.all(np.isfinite(result)):
+        raise ValueError("fourth inverse-link derivatives must be finite and match eta")
+    return result
+
+
+def _variance_third_derivative(distribution: Any, mu: NDArray) -> NDArray:
+    """Return an exact third variance derivative for built-ins or protocols."""
+    distribution_type = type(distribution)
+    if distribution_type in (Gaussian, Poisson, Gamma, NegativeBinomial, Binomial):
+        result = np.zeros_like(mu)
+    elif distribution_type is Tweedie:
+        power = float(distribution.p)
+        result = power * (power - 1.0) * (power - 2.0) * mu ** (power - 3.0)
+    else:
+        protocol = getattr(distribution, "variance_third_derivative", None)
+        if not callable(protocol):
+            raise NotImplementedError(
+                "exact second observed-weight derivatives require "
+                "distribution.variance_third_derivative"
+            )
+        result = protocol(mu)
+    result = np.asarray(result, dtype=np.float64)
+    if result.shape != mu.shape or not np.all(np.isfinite(result)):
+        raise ValueError("third variance derivatives must be finite and match mu")
+    return result
+
+
+def _validate_observed_bundle(
+    values: tuple[NDArray, NDArray | None, NDArray | None],
+) -> tuple[NDArray, NDArray | None, NDArray | None]:
+    labels = ("weights", "first derivatives", "second derivatives")
+    for label, rows in zip(labels, values, strict=True):
+        if rows is not None and not np.all(np.isfinite(rows)):
+            raise ValueError(f"observed-information {label} are not finite")
+    return values
+
+
+def _compute_observed_row_bundle(
     distribution: Any,
     link: Any,
     y: NDArray,
     mu: NDArray,
     eta: NDArray,
     sample_weight: NDArray,
-) -> NDArray:
-    """Return row weights for the negative observed log-likelihood Hessian.
-
-    With ``u = dmu/deta``, ``v = d2mu/deta2``, variance ``V`` and response
-    residual ``r = y - mu``, the unit-dispersion curvature is
-
-    ``W_obs = w*u**2/V + w*r*(u**2*V'/V**2 - v/V)``.
-
-    This is Wood's Newton weight written using inverse-link derivatives.  For
-    Gamma/log it reduces to ``w*y/mu``; its Fisher counterpart is merely
-    ``w``.  The dispersion factor is deliberately absent because Wood's
-    criterion factors the common ``1/phi`` out of both likelihood and penalty
-    curvature.
-    """
+    *,
+    derivative_order: int,
+) -> tuple[NDArray, NDArray | None, NDArray | None]:
+    """Return observed rows and exact eta derivatives through the requested order."""
+    if derivative_order not in (0, 1, 2):
+        raise ValueError("observed row derivative_order must be 0, 1, or 2")
     y, mu, eta, sample_weight = _validate_rows(y, mu, eta, sample_weight)
-    if isinstance(link, LogLink):
-        observed: NDArray | None = None
-        if isinstance(distribution, Gamma):
-            # GLUM uses the same closed form in its specialized Gamma/log
-            # Newton rows.  It avoids five temporary O(n) arrays here.
+
+    if type(link) is LogLink:
+        if type(distribution) is Gamma:
             observed = sample_weight * y / mu
-        elif isinstance(distribution, Poisson):
+            first = -observed if derivative_order >= 1 else None
+            second = observed if derivative_order >= 2 else None
+            return _validate_observed_bundle((observed, first, second))
+        if type(distribution) is Poisson:
             observed = sample_weight * mu
-        elif isinstance(distribution, NegativeBinomial) and distribution.theta != "auto":
+            first = observed if derivative_order >= 1 else None
+            second = observed if derivative_order >= 2 else None
+            return _validate_observed_bundle((observed, first, second))
+        if type(distribution) is NegativeBinomial and distribution.theta != "auto":
             theta = float(distribution.theta)
+            denominator = theta + mu
             with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-                observed = sample_weight * theta * mu * (theta + y) / (theta + mu) ** 2
-        elif isinstance(distribution, Tweedie):
-            power = float(distribution.p)
-            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-                observed = (
-                    sample_weight * mu ** (1.0 - power) * ((2.0 - power) * mu + (power - 1.0) * y)
+                observed = sample_weight * theta * mu * (theta + y) / denominator**2
+                ratio = (theta - mu) / denominator
+                first = observed * ratio if derivative_order >= 1 else None
+                second = (
+                    observed * (theta**2 - 4.0 * theta * mu + mu**2) / denominator**2
+                    if derivative_order >= 2
+                    else None
                 )
-        if observed is not None:
-            if not np.all(np.isfinite(observed)):
-                raise ValueError("observed-information weights are not finite")
-            return observed
+            return _validate_observed_bundle((observed, first, second))
+        if type(distribution) is Tweedie:
+            power = float(distribution.p)
+            left = 2.0 - power
+            right = power - 1.0
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                mu_left = mu ** (2.0 - power)
+                y_right = y * mu ** (1.0 - power)
+                observed = sample_weight * (left * mu_left + right * y_right)
+                first = (
+                    sample_weight * (left**2 * mu_left - right**2 * y_right)
+                    if derivative_order >= 1
+                    else None
+                )
+                second = (
+                    sample_weight * (left**3 * mu_left + right**3 * y_right)
+                    if derivative_order >= 2
+                    else None
+                )
+            return _validate_observed_bundle((observed, first, second))
+
     if not hasattr(link, "deriv2_inverse"):
         raise NotImplementedError("observed curvature requires link.deriv2_inverse")
     if not hasattr(distribution, "variance_derivative"):
@@ -147,14 +253,80 @@ def compute_observed_information_weights(
     variance_prime = np.asarray(distribution.variance_derivative(mu), dtype=np.float64)
     residual = y - mu
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        fisher = sample_weight * u**2 / variance
-        noncanonical = (
-            sample_weight * residual * (u**2 * variance_prime / variance**2 - v / variance)
+        fisher = u**2 / variance
+        noncanonical_factor = u**2 * variance_prime / variance**2 - v / variance
+        observed = sample_weight * (fisher + residual * noncanonical_factor)
+    if derivative_order == 0:
+        return _validate_observed_bundle((observed, None, None))
+
+    if not hasattr(link, "deriv3_inverse"):
+        raise NotImplementedError("first observed-weight derivatives require link.deriv3_inverse")
+    if not hasattr(distribution, "variance_second_derivative"):
+        raise NotImplementedError(
+            "first observed-weight derivatives require distribution.variance_second_derivative"
         )
-        observed = fisher + noncanonical
-    if not np.all(np.isfinite(observed)):
-        raise ValueError("observed-information weights are not finite")
-    return observed
+    t = np.asarray(link.deriv3_inverse(eta), dtype=np.float64)
+    variance_second = np.asarray(
+        distribution.variance_second_derivative(mu),
+        dtype=np.float64,
+    )
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        fisher_first = 2.0 * u * v / variance - u**3 * variance_prime / variance**2
+        factor_first = (
+            3.0 * u * v * variance_prime / variance**2
+            + u**3 * variance_second / variance**2
+            - 2.0 * u**3 * variance_prime**2 / variance**3
+            - t / variance
+        )
+        first = sample_weight * (fisher_first - u * noncanonical_factor + residual * factor_first)
+    if derivative_order == 1:
+        return _validate_observed_bundle((observed, first, None))
+
+    fourth = _deriv4_inverse(link, eta)
+    variance_third = _variance_third_derivative(distribution, mu)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        fisher_second = (
+            2.0 * (v**2 + u * t) / variance
+            - 5.0 * u**2 * v * variance_prime / variance**2
+            - u**4 * variance_second / variance**2
+            + 2.0 * u**4 * variance_prime**2 / variance**3
+        )
+        factor_second = (
+            -fourth / variance
+            + (3.0 * v**2 + 4.0 * u * t) * variance_prime / variance**2
+            + 6.0 * u**2 * v * variance_second / variance**2
+            + u**4 * variance_third / variance**2
+            - 12.0 * u**2 * v * variance_prime**2 / variance**3
+            - 6.0 * u**4 * variance_prime * variance_second / variance**3
+            + 6.0 * u**4 * variance_prime**3 / variance**4
+        )
+        second = sample_weight * (
+            fisher_second
+            - v * noncanonical_factor
+            - 2.0 * u * factor_first
+            + residual * factor_second
+        )
+    return _validate_observed_bundle((observed, first, second))
+
+
+def compute_observed_information_weights(
+    distribution: Any,
+    link: Any,
+    y: NDArray,
+    mu: NDArray,
+    eta: NDArray,
+    sample_weight: NDArray,
+) -> NDArray:
+    """Return row weights for Wood's negative observed likelihood Hessian."""
+    return _compute_observed_row_bundle(
+        distribution,
+        link,
+        y,
+        mu,
+        eta,
+        sample_weight,
+        derivative_order=0,
+    )[0]
 
 
 REMLCurvature = Literal["fisher", "observed"]
@@ -326,12 +498,9 @@ def compute_scop_observed_information_weights(
 def requires_observed_reml_geometry(distribution: Any, link: Any) -> bool:
     """Whether direct REML must replace its fitted Fisher geometry.
 
-    Canonical/equal-curvature combinations must reuse the solver geometry to
-    avoid an unnecessary full data pass.  Gamma/log is the first enabled
-    noncanonical specialization: its positive closed-form rows make the
-    observed replacement exact and keep it on the accelerated centered path.
-    Other noncanonical combinations are enabled separately once their mode
-    convergence and indefinite-curvature policies are fully gated.
+    Canonical/equal-curvature combinations reuse the solver geometry and avoid
+    an unnecessary full data pass.  Every other supported built-in pair uses
+    Wood's negative observed likelihood Hessian.
     """
     return classify_reml_curvature(distribution, link) == "observed"
 
@@ -345,49 +514,16 @@ def compute_observed_dW_deta(
     sample_weight: NDArray,
 ) -> NDArray:
     """Differentiate the observed-information row weights w.r.t. ``eta``."""
-    y, mu, eta, sample_weight = _validate_rows(y, mu, eta, sample_weight)
-    if isinstance(link, LogLink):
-        if isinstance(distribution, Gamma):
-            return -(sample_weight * y / mu)
-        if isinstance(distribution, Poisson):
-            return sample_weight * mu
-    if not hasattr(link, "deriv3_inverse"):
-        raise NotImplementedError("observed-weight derivatives require link.deriv3_inverse")
-    if not hasattr(distribution, "variance_second_derivative"):
-        raise NotImplementedError(
-            "observed-weight derivatives require distribution.variance_second_derivative"
-        )
-
-    u = np.asarray(link.deriv_inverse(eta), dtype=np.float64)
-    v = np.asarray(link.deriv2_inverse(eta), dtype=np.float64)
-    t = np.asarray(link.deriv3_inverse(eta), dtype=np.float64)
-    variance = np.maximum(
-        np.asarray(distribution.variance(mu), dtype=np.float64),
-        _VARIANCE_FLOOR,
+    _, derivative, _ = _compute_observed_row_bundle(
+        distribution,
+        link,
+        y,
+        mu,
+        eta,
+        sample_weight,
+        derivative_order=1,
     )
-    variance_prime = np.asarray(distribution.variance_derivative(mu), dtype=np.float64)
-    variance_second = np.asarray(
-        distribution.variance_second_derivative(mu),
-        dtype=np.float64,
-    )
-    residual = y - mu
-
-    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        fisher_prime = sample_weight * (
-            2.0 * u * v / variance - u**3 * variance_prime / variance**2
-        )
-        noncanonical_factor = u**2 * variance_prime / variance**2 - v / variance
-        factor_prime = (
-            3.0 * u * v * variance_prime / variance**2
-            + u**3 * variance_second / variance**2
-            - 2.0 * u**3 * variance_prime**2 / variance**3
-            - t / variance
-        )
-        derivative = fisher_prime + sample_weight * (
-            -u * noncanonical_factor + residual * factor_prime
-        )
-    if not np.all(np.isfinite(derivative)):
-        raise ValueError("observed-information weight derivatives are not finite")
+    assert derivative is not None
     return derivative
 
 
@@ -403,47 +539,50 @@ def compute_observed_d2W_deta2(
 ) -> NDArray:
     """Return the second ``eta`` derivative of observed row curvature.
 
-    Gamma/log and Poisson/log have exact closed forms. Other combinations
-    require inverse-link fourth and variance third derivatives for Wood's
-    analytic expression; those are not part of the current family protocol.
-    They therefore fail by default rather than silently presenting a fixed-step
-    finite difference as exact. ``allow_approximate=True`` is an explicit
-    diagnostic escape hatch and is not used by production LAML.
+    Production LAML always requests the exact analytic bundle.  The explicit
+    ``allow_approximate`` escape hatch is retained only for diagnostics with a
+    custom family or link that has not implemented the fourth/third derivative
+    protocol; built-ins never use it.
     """
-    y, _mu, eta, sample_weight = _validate_rows(y, mu, eta, sample_weight)
-    if isinstance(link, LogLink):
-        if isinstance(distribution, Gamma):
-            return sample_weight * y / _mu
-        if isinstance(distribution, Poisson):
-            return sample_weight * _mu
-    if not allow_approximate:
-        raise NotImplementedError(
-            "exact second observed-weight derivatives are unavailable for this family/link"
+    try:
+        _, _, derivative = _compute_observed_row_bundle(
+            distribution,
+            link,
+            y,
+            mu,
+            eta,
+            sample_weight,
+            derivative_order=2,
         )
-    eps = 1e-5
-    eta_plus = eta + eps
-    eta_minus = eta - eps
-    mu_plus = clip_mu(link.inverse(eta_plus), distribution)
-    mu_minus = clip_mu(link.inverse(eta_minus), distribution)
-    plus = compute_observed_dW_deta(
-        distribution,
-        link,
-        y,
-        mu_plus,
-        eta_plus,
-        sample_weight,
-    )
-    minus = compute_observed_dW_deta(
-        distribution,
-        link,
-        y,
-        mu_minus,
-        eta_minus,
-        sample_weight,
-    )
-    derivative = (plus - minus) / (2.0 * eps)
-    if not np.all(np.isfinite(derivative)):
-        raise ValueError("second observed-information weight derivatives are not finite")
+    except NotImplementedError:
+        if not allow_approximate:
+            raise
+        y, _, eta, sample_weight = _validate_rows(y, mu, eta, sample_weight)
+        eps = 1e-5
+        eta_plus = eta + eps
+        eta_minus = eta - eps
+        mu_plus = clip_mu(link.inverse(eta_plus), distribution)
+        mu_minus = clip_mu(link.inverse(eta_minus), distribution)
+        plus = compute_observed_dW_deta(
+            distribution,
+            link,
+            y,
+            mu_plus,
+            eta_plus,
+            sample_weight,
+        )
+        minus = compute_observed_dW_deta(
+            distribution,
+            link,
+            y,
+            mu_minus,
+            eta_minus,
+            sample_weight,
+        )
+        derivative = (plus - minus) / (2.0 * eps)
+        if not np.all(np.isfinite(derivative)):
+            raise ValueError("second observed-information weight derivatives are not finite")
+    assert derivative is not None
     return derivative
 
 
@@ -639,37 +778,14 @@ def build_observed_reml_geometry(
 
     eta = stabilize_eta(dm.matvec(beta) + result.intercept + offset_arr, link)
     mu = clip_mu(link.inverse(eta), distribution)
-    observed_w = compute_observed_information_weights(
+    observed_w, weight_derivative, weight_second_derivative = _compute_observed_row_bundle(
         distribution,
         link,
         y,
         mu,
         eta,
         sample_weight,
-    )
-    weight_derivative = (
-        compute_observed_dW_deta(
-            distribution,
-            link,
-            y,
-            mu,
-            eta,
-            sample_weight,
-        )
-        if derivative_order >= 1
-        else None
-    )
-    weight_second_derivative = (
-        compute_observed_d2W_deta2(
-            distribution,
-            link,
-            y,
-            mu,
-            eta,
-            sample_weight,
-        )
-        if derivative_order >= 2
-        else None
+        derivative_order=derivative_order,
     )
     nonnegative = bool(np.all(observed_w >= 0.0))
     sum_w = (
