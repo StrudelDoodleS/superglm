@@ -91,6 +91,67 @@ def test_debug_level_two_writes_non_scop_reml_and_pirls_traces(tmp_path: Path, m
     assert not list(tmp_path.glob("*scop.jsonl"))
 
 
+def test_debug_level_two_never_replays_a_coefficient_solve(tmp_path: Path, monkeypatch):
+    """Tracing must observe optimizer work, not run an extra post-fit PIRLS call."""
+    from superglm._debug import set_debug_level
+    from superglm.model import reml_execute
+
+    monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
+    set_debug_level(2)
+    monkeypatch.setattr(
+        reml_execute,
+        "fit_irls_direct",
+        lambda *_args, **_kwargs: pytest.fail("debug tracing replayed a coefficient solve"),
+    )
+
+    x, y = _make_demo_data()
+    model = _make_unconstrained_model(discrete=False)
+    model.fit_reml(x, y, max_reml_iter=3)
+
+
+def test_debug_level_two_records_one_ordered_actual_run_and_selected_terminal(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Canonical rows must identify the actual retained REML state."""
+    from superglm._debug import set_debug_level
+    from superglm.model.reml_debug import load_reml_debug_run
+
+    monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
+    set_debug_level(2)
+
+    x, y = _make_demo_data()
+    model = _make_unconstrained_model(discrete=False)
+    model.fit_reml(x, y, max_reml_iter=3)
+
+    run_file = next(tmp_path.glob("*run.json"))
+    run_id = run_file.name.removesuffix("_run.json")
+    run = load_reml_debug_run(tmp_path, run_id)
+    assert run.events
+    assert [event["sequence"] for event in run.events] == list(range(1, len(run.events) + 1))
+    assert any(
+        event["channel"] == "pirls"
+        and event["event_kind"] == "state_commit"
+        and event["authoritative"]
+        for event in run.events
+    )
+    terminal = [
+        event
+        for event in run.events
+        if event["channel"] == "reml"
+        and event["event_kind"] == "terminal"
+        and event["purpose"] == "fit_reml"
+    ]
+    assert len(terminal) == 1
+    payload = terminal[0]["payload"]
+    assert payload["state_id"] == model._solver_result.state_id
+    assert payload["objective"] == pytest.approx(model._reml_result.objective)
+    assert payload["lambdas"] == pytest.approx(model._reml_lambdas)
+    assert payload["dispersion"] == pytest.approx(model._solver_result.phi)
+    assert payload["effective_df"] == pytest.approx(model._solver_result.effective_df)
+    assert all(not event["payload"].get("trace_replay", False) for event in run.events)
+
+
 def test_debug_level_two_writes_reml_trace_files(tmp_path: Path, monkeypatch):
     from superglm._debug import set_debug_level
 
