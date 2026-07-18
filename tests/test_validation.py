@@ -227,6 +227,10 @@ class TestLorenzCurveGini:
         assert constant.gini_ratio == 0.0
         assert perfect.gini_ratio == pytest.approx(1.0)
         assert reverse.gini_ratio == pytest.approx(-1.0)
+        assert constant.gini_model == 0.0
+        for result in (perfect, reverse):
+            assert result.gini_perfect > 0.0
+            assert result.gini_ratio == pytest.approx(result.gini_model / result.gini_perfect)
 
     def test_tied_predictions_are_permutation_invariant(self):
         """Rows with identical scores should not depend on input order."""
