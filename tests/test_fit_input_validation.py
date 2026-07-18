@@ -144,7 +144,7 @@ def test_fit_entrypoints_validate_vectors_before_feature_build(
     [
         (np.array([[0.0], [1.0]]), "X must be a pandas DataFrame"),
         (pd.DataFrame({"x": []}), "X must be non-empty"),
-        (pd.DataFrame(index=[0, 1]), "X must be non-empty"),
+        (pd.DataFrame(index=[0, 1]), "X is missing required columns.*x"),
         (
             pd.DataFrame(np.ones((2, 2)), columns=["x", "x"]),
             "X columns must be unique",
@@ -170,6 +170,22 @@ def test_fit_entrypoints_validate_dataframe_before_feature_build(
 
     with pytest.raises(ValueError, match=message):
         _call_entrypoint(_model(), entrypoint, X, np.array([0.0, 1.0]))
+
+
+def test_intercept_only_fit_allows_zero_column_dataframe() -> None:
+    X = pd.DataFrame(index=pd.RangeIndex(6))
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={},
+    )
+
+    model.fit(X, y)
+
+    assert model._dm.shape == (len(X), 0)
+    assert model.result.beta.shape == (0,)
+    np.testing.assert_allclose(model.predict(X), np.mean(y))
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)

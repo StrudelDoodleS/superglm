@@ -67,7 +67,7 @@ def validate_fit_input(
     """Validate a public fit call before any feature is built or learned."""
     if not isinstance(X, pd.DataFrame):
         raise ValueError("X must be a pandas DataFrame")
-    if X.empty:
+    if len(X) == 0:
         raise ValueError("X must be non-empty")
     if not X.columns.is_unique:
         raise ValueError("X columns must be unique")
