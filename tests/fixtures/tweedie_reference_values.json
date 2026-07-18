@@ -1,0 +1,170 @@
+{
+  "format": "superglm.tweedie.reference.v1",
+  "tolerances": {
+    "logpdf_abs": 2.5e-9,
+    "p_abs": 0.0002,
+    "phi_rel": 0.0005
+  },
+  "density_cases": [
+    {
+      "case": "near_lower_1e-6_positive",
+      "y": 2.75,
+      "mu": 3.0,
+      "phi": 0.3,
+      "p": 1.000001,
+      "weight": 2.0,
+      "logpdf": -3044.851249613393
+    },
+    {
+      "case": "near_lower_1e-6_zero",
+      "y": 0.0,
+      "mu": 1e-6,
+      "phi": 2e-7,
+      "p": 1.000001,
+      "weight": 0.4,
+      "logpdf": -2.000029631241614
+    },
+    {
+      "case": "near_lower_1e-4_positive",
+      "y": 0.017,
+      "mu": 0.02,
+      "phi": 0.004,
+      "p": 1.0001,
+      "weight": 0.4,
+      "logpdf": -242.08168865838033
+    },
+    {
+      "case": "near_lower_1e-2_positive",
+      "y": 9000.0,
+      "mu": 10000.0,
+      "phi": 200.0,
+      "p": 1.01,
+      "weight": 0.5,
+      "logpdf": -8.636743836168788
+    },
+    {
+      "case": "lower_quarter_weight_base",
+      "y": 0.22,
+      "mu": 0.15,
+      "phi": 0.125,
+      "p": 1.25,
+      "weight": 4.0,
+      "logpdf": 1.0417074672233964
+    },
+    {
+      "case": "lower_quarter_weight_rescaled",
+      "y": 0.22,
+      "mu": 0.15,
+      "phi": 1.0,
+      "p": 1.25,
+      "weight": 32.0,
+      "logpdf": 1.0417074672233964
+    },
+    {
+      "case": "midpoint_small_y_positive",
+      "y": 0.03,
+      "mu": 4.0,
+      "phi": 0.7,
+      "p": 1.5,
+      "weight": 0.2,
+      "logpdf": -2.2657661799346407
+    },
+    {
+      "case": "midpoint_zero_tiny_lambda",
+      "y": 0.0,
+      "mu": 0.001,
+      "phi": 50.0,
+      "p": 1.5,
+      "weight": 5.0,
+      "logpdf": -0.006324555320336759
+    },
+    {
+      "case": "upper_quarter_positive",
+      "y": 80.0,
+      "mu": 50.0,
+      "phi": 5.3,
+      "p": 1.75,
+      "weight": 4.0,
+      "logpdf": -5.206967741958142
+    },
+    {
+      "case": "near_upper_1e-2_positive",
+      "y": 0.0002,
+      "mu": 0.001,
+      "phi": 1.3,
+      "p": 1.99,
+      "weight": 0.1,
+      "logpdf": 5.575914834713504
+    },
+    {
+      "case": "near_upper_1e-4_positive",
+      "y": 10.0,
+      "mu": 10.0,
+      "phi": 3000.0,
+      "p": 1.9999,
+      "weight": 3.0,
+      "logpdf": -9.217974895561044
+    },
+    {
+      "case": "near_upper_1e-4_zero",
+      "y": 0.0,
+      "mu": 10.0,
+      "phi": 3000.0,
+      "p": 1.9999,
+      "weight": 3.0,
+      "logpdf": -10.002302850209349
+    },
+    {
+      "case": "near_upper_1e-6_positive",
+      "y": 0.001,
+      "mu": 0.3,
+      "phi": 2000.0,
+      "p": 1.999999,
+      "weight": 0.02,
+      "logpdf": -4.605353456417069
+    },
+    {
+      "case": "near_upper_1e-6_zero",
+      "y": 0.0,
+      "mu": 1000.0,
+      "phi": 49000.0,
+      "p": 1.999999,
+      "weight": 0.7,
+      "logpdf": -14.285812969448632
+    },
+    {
+      "case": "hard_low_power",
+      "y": 0.04564326798684731,
+      "mu": 2.859891821890267,
+      "phi": 0.10602153698295053,
+      "p": 1.05,
+      "weight": 1.0,
+      "logpdf": -25.217701008861372
+    },
+    {
+      "case": "lower_quarter_zero_scale",
+      "y": 0.0,
+      "mu": 100.0,
+      "phi": 0.05,
+      "p": 1.25,
+      "weight": 0.01,
+      "logpdf": -8.432740427115679
+    }
+  ],
+  "profile_cases": [
+    {
+      "case": "seed_101_low_power",
+      "seed": 101,
+      "n": 800,
+      "recipe": "normal_log_mean.v1",
+      "log_mu_intercept": 0.3,
+      "log_mu_slope": 0.45,
+      "true_p": 1.2,
+      "true_phi": 0.8,
+      "reference_p": 1.1968971098776182,
+      "reference_phi": 0.8068142191615686,
+      "reference_converged": true,
+      "response_sha256": "7d2c5cf30a0d8f3c1a7fb281adb2c864900f1ec16e59fdfff536d197f3186477"
+    }
+  ]
+}
