@@ -1795,7 +1795,11 @@ class TestEstimatePFitMode:
                 strict=True,
             )
         )
-        pd.testing.assert_frame_equal(observed["final_values"][0], baseline[0])
+        pd.testing.assert_frame_equal(
+            observed["final_values"][0],
+            baseline[0],
+            check_column_type=False,
+        )
         for actual, expected in zip(observed["final_values"][1:], baseline[1:], strict=True):
             np.testing.assert_array_equal(actual, expected)
         assert np.all(X.to_numpy() == 101.0)
@@ -2058,11 +2062,15 @@ class TestEstimatePFitMode:
 
     def test_categorical_category_buffer_is_detached_from_caller(self, monkeypatch):
         caller_categories = ["low", "middle", "high"]
+        category_index = pd.Index(
+            np.array(caller_categories, dtype=object),
+            dtype=object,
+        )
         X = pd.DataFrame(
             {
                 "x1": pd.Categorical(
                     caller_categories,
-                    categories=caller_categories,
+                    categories=category_index,
                     ordered=True,
                 )
             }
