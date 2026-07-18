@@ -10,9 +10,9 @@ import sys
 import time
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
-import pandas as pd
 import pytest
 from scripts.check_tweedie_reference import (
     RESPONSE_FORMAT,
@@ -21,21 +21,33 @@ from scripts.check_tweedie_reference import (
     ReferenceProtocolError,
     ReferenceSchemaError,
     load_reference_fixture,
+    main,
     run_command,
     run_self_check,
     validate_reference_payload,
 )
 
-from superglm import SuperGLM
 from superglm._tweedie_density import evaluate_tweedie_density
-from superglm.distributions import Tweedie
-from superglm.features.numeric import Numeric
 from superglm.profiling.tweedie import estimate_tweedie_p, generate_tweedie_cpg, tweedie_logpdf
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = ROOT / "tests" / "fixtures" / "tweedie_reference_values.json"
 CHECKER_PATH = ROOT / "scripts" / "check_tweedie_reference.py"
 COMMITTED_FIXTURE = load_reference_fixture(FIXTURE_PATH)
+
+
+@pytest.fixture(autouse=True)
+def _use_fast_checker_profile_fit(monkeypatch) -> None:
+    """Keep checker unit tests fast; the committed slow test exercises the real fit."""
+
+    def fit_profile(*args, **kwargs):
+        return SimpleNamespace(
+            p_hat=1.1968971098776182,
+            phi_hat=0.8068142191615686,
+            converged=True,
+        )
+
+    monkeypatch.setattr("superglm.profiling.tweedie.estimate_tweedie_p", fit_profile)
 
 
 def _regenerate_profile_response(profile):
@@ -86,10 +98,12 @@ def _valid_payload() -> dict[str, object]:
                 "log_mu_slope": 0.45,
                 "true_p": 1.2,
                 "true_phi": 0.8,
-                "reference_p": 1.196897,
-                "reference_phi": 0.81,
+                "reference_p": 1.1968971098776182,
+                "reference_phi": 0.8068142191615686,
                 "reference_converged": True,
-                "response_sha256": "0" * 64,
+                "response_sha256": (
+                    "7d2c5cf30a0d8f3c1a7fb281adb2c864900f1ec16e59fdfff536d197f3186477"
+                ),
             }
         ],
     }
@@ -103,7 +117,7 @@ def test_reference_payload_is_strictly_validated_and_detached() -> None:
     assert isinstance(fixture.density_cases, tuple)
     assert isinstance(fixture.profile_cases, tuple)
     assert fixture.density_cases[0].case == "zero_atom"
-    assert fixture.profile_cases[0].reference_phi == 0.81
+    assert fixture.profile_cases[0].reference_phi == 0.8068142191615686
 
     payload["density_cases"][0]["logpdf"] = 100.0  # type: ignore[index]
     assert fixture.density_cases[0].logpdf == -2.0
@@ -173,6 +187,27 @@ def test_self_check_uses_strict_absolute_error() -> None:
     assert summary.n_cases == 1
     assert summary.max_local_fixture_abs == 0.0
     assert summary.max_candidate_fixture_abs is None
+    assert summary.n_profile_cases == 1
+    assert summary.max_local_profile_p_abs == 0.0
+    assert summary.max_local_profile_phi_rel == 0.0
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("response_sha256", "f" * 64, "profile response digest"),
+        ("reference_p", 1.5, "profile-p local-vs-fixture"),
+        ("reference_phi", 1.5, "profile-phi local-vs-fixture"),
+        ("reference_converged", False, "profile-converged local-vs-fixture"),
+    ],
+)
+def test_self_check_rejects_corrupt_profile_reference(field, value, match) -> None:
+    payload = _valid_payload()
+    payload["profile_cases"][0][field] = value  # type: ignore[index]
+    fixture = validate_reference_payload(payload)
+
+    with pytest.raises(ReferenceComparisonError, match=match):
+        run_self_check(fixture)
 
 
 def test_self_check_reports_uncertifiable_local_case_without_raw_kernel_error() -> None:
@@ -202,6 +237,7 @@ assert sys.argv[2] == ""
 for line in sys.stdin:
     request = json.loads(line)
     assert request["format"] == "superglm.tweedie.reference.request.v1"
+    assert set(request) == {{"format", "case", "y", "mu", "phi", "p", "weight"}}
     response = {{
         "format": {RESPONSE_FORMAT!r},
         "case": request["case"],
@@ -217,6 +253,29 @@ for line in sys.stdin:
 
     assert summary.max_candidate_fixture_abs == 0.0
     assert summary.max_candidate_local_abs == 0.0
+    assert summary.n_profile_cases == 1
+
+
+def test_json_lines_command_rejects_corrupt_profile_before_candidate_launch(tmp_path) -> None:
+    payload = _valid_payload()
+    payload["profile_cases"][0]["reference_p"] = 1.5  # type: ignore[index]
+    fixture = validate_reference_payload(payload)
+    marker = tmp_path / "launched"
+    code = f"""
+import json
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_text("launched", encoding="ascii")
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({{"format": {RESPONSE_FORMAT!r}, "case": request["case"], "logpdf": -2.0}}))
+"""
+
+    with pytest.raises(ReferenceComparisonError, match="profile-p local-vs-fixture"):
+        run_command(fixture, [sys.executable, "-c", code, str(marker)])
+
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize(
@@ -419,51 +478,55 @@ def test_committed_profile_recipe_regenerates_response_digest(profile) -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize(
-    "profile",
-    COMMITTED_FIXTURE.profile_cases,
-    ids=lambda profile: profile.case,
-)
-def test_public_profile_matches_joint_neutral_reference(profile) -> None:
-    x, y = _regenerate_profile_response(profile)
-    assert _response_sha256(y) == profile.response_sha256
+def test_checker_real_profiles_match_joint_neutral_references(monkeypatch) -> None:
+    """Exercise the checker with real profile fits while retaining fit diagnostics."""
+    observed_results = []
 
-    model = SuperGLM(
-        family=Tweedie(1.5),
-        selection_penalty=0.0,
-        features={"x": Numeric()},
-    )
-    result = estimate_tweedie_p(
-        model,
-        pd.DataFrame({"x": x}),
-        y,
-        phi_method="mle",
-        method="brent",
+    def capture_real_profile(*args, **kwargs):
+        # This early-bound import predates the autouse stub, so the slow path stays real.
+        result = estimate_tweedie_p(*args, **kwargs)
+        observed_results.append(result)
+        return result
+
+    monkeypatch.setattr(
+        "superglm.profiling.tweedie.estimate_tweedie_p",
+        capture_real_profile,
     )
 
-    assert result.p_hat == pytest.approx(
-        profile.reference_p,
-        rel=0.0,
-        abs=COMMITTED_FIXTURE.tolerances.p_abs,
-    )
-    assert result.phi_hat == pytest.approx(
-        profile.reference_phi,
-        rel=COMMITTED_FIXTURE.tolerances.phi_rel,
-        abs=0.0,
-    )
-    assert result.converged is profile.reference_converged
-    assert result.outer_converged
-    assert result.outer_boundary is None
-    assert result.fit_converged
-    assert result.solver_converged
-    assert result.objective_finite
-    assert result.phi_converged
-    assert not result.phi_used_fallback
-    assert result.phi_n_fallback_evaluations == 0
-    assert result.phi_n_value_only_evaluations == 0
-    assert result.density_exact is True
-    assert result.density_method == "exact"
-    assert result.n_saddlepoint == 0
+    summary = run_self_check(COMMITTED_FIXTURE)
+
+    assert summary.n_profile_cases == len(COMMITTED_FIXTURE.profile_cases)
+    assert summary.max_local_profile_p_abs <= COMMITTED_FIXTURE.tolerances.p_abs
+    assert summary.max_local_profile_phi_rel <= COMMITTED_FIXTURE.tolerances.phi_rel
+    assert len(observed_results) == len(COMMITTED_FIXTURE.profile_cases)
+    for profile, result in zip(
+        COMMITTED_FIXTURE.profile_cases,
+        observed_results,
+        strict=True,
+    ):
+        assert result.p_hat == pytest.approx(
+            profile.reference_p,
+            rel=0.0,
+            abs=COMMITTED_FIXTURE.tolerances.p_abs,
+        )
+        assert result.phi_hat == pytest.approx(
+            profile.reference_phi,
+            rel=COMMITTED_FIXTURE.tolerances.phi_rel,
+            abs=0.0,
+        )
+        assert result.converged is profile.reference_converged
+        assert result.outer_converged
+        assert result.outer_boundary is None
+        assert result.fit_converged
+        assert result.solver_converged
+        assert result.objective_finite
+        assert result.phi_converged
+        assert not result.phi_used_fallback
+        assert result.phi_n_fallback_evaluations == 0
+        assert result.phi_n_value_only_evaluations == 0
+        assert result.density_exact is True
+        assert result.density_method == "exact"
+        assert result.n_saddlepoint == 0
 
 
 @pytest.mark.slow
@@ -514,26 +577,25 @@ def test_public_density_matches_neutral_reference_fixture(case) -> None:
     np.testing.assert_array_equal(weights, before[2])
 
 
-def test_checker_cli_self_check_reports_strict_maximum_error() -> None:
-    completed = subprocess.run(
+def test_checker_cli_self_check_reports_strict_maximum_error(capsys) -> None:
+    return_code = main(
         [
-            sys.executable,
-            str(CHECKER_PATH),
             "--fixture",
             str(FIXTURE_PATH),
             "--self-check",
-        ],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30.0,
+        ]
     )
+    captured = capsys.readouterr()
 
-    assert completed.returncode == 0, completed.stderr
-    assert f"checked={len(COMMITTED_FIXTURE.density_cases)}" in completed.stdout
-    assert "max_local_fixture_abs=" in completed.stdout
-    assert completed.stderr == ""
+    assert return_code == 0
+    assert f"checked={len(COMMITTED_FIXTURE.density_cases)}" in captured.out
+    assert f"profile_checked={len(COMMITTED_FIXTURE.profile_cases)}" in captured.out
+    assert "max_local_fixture_abs=" in captured.out
+    assert "max_local_profile_p_abs=" in captured.out
+    assert "max_local_profile_phi_rel=" in captured.out
+    assert "profile_response_digests=verified" in captured.out
+    assert "profile_convergence=verified" in captured.out
+    assert captured.err == ""
 
 
 def test_checker_cli_reports_uncertifiable_fixture_without_traceback(tmp_path) -> None:
