@@ -2,7 +2,8 @@
 
 The wire protocol sends one versioned density request per line and requires one
 versioned response with the same case identifier.  Candidate commands receive
-no expected values.  Profile recipe ``normal_log_mean.v1`` means that one
+no expected values.  Both checker modes also replay and validate every profile
+case locally.  Profile recipe ``normal_log_mean.v1`` means that one
 ``default_rng(seed)`` instance draws ``x = standard_normal(n)``, constructs
 ``mu = exp(log_mu_intercept + log_mu_slope * x)``, and then draws the response
 from the published compound-Poisson/Gamma recipe using that same generator.
@@ -11,6 +12,7 @@ from the published compound-Poisson/Gamma recipe using that same generator.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -113,6 +115,13 @@ class ComparisonSummary:
     worst_candidate_fixture_case: str | None = None
     max_candidate_local_abs: float | None = None
     worst_candidate_local_case: str | None = None
+    n_profile_cases: int = 0
+    p_tolerance: float | None = None
+    max_local_profile_p_abs: float | None = None
+    worst_local_profile_p_case: str | None = None
+    phi_rel_tolerance: float | None = None
+    max_local_profile_phi_rel: float | None = None
+    worst_local_profile_phi_case: str | None = None
 
     def render(self) -> str:
         fields = [
@@ -130,7 +139,30 @@ class ComparisonSummary:
                     f"worst_candidate_local_case={self.worst_candidate_local_case}",
                 ]
             )
+        if self.n_profile_cases:
+            fields.extend(
+                [
+                    f"profile_checked={self.n_profile_cases}",
+                    f"p_tolerance={self.p_tolerance:.17g}",
+                    f"max_local_profile_p_abs={self.max_local_profile_p_abs:.17g}",
+                    f"worst_local_profile_p_case={self.worst_local_profile_p_case}",
+                    f"phi_rel_tolerance={self.phi_rel_tolerance:.17g}",
+                    f"max_local_profile_phi_rel={self.max_local_profile_phi_rel:.17g}",
+                    f"worst_local_profile_phi_case={self.worst_local_profile_phi_case}",
+                    "profile_response_digests=verified",
+                    "profile_convergence=verified",
+                ]
+            )
         return " ".join(fields)
+
+
+@dataclass(frozen=True, slots=True)
+class _ProfileComparisonSummary:
+    n_cases: int
+    max_p_abs: float
+    worst_p_case: str
+    max_phi_rel: float
+    worst_phi_case: str
 
 
 def _strict_json_loads(
@@ -379,6 +411,136 @@ def _local_logpdf(fixture: ReferenceFixture) -> tuple[float, ...]:
     return tuple(values)
 
 
+def _regenerate_profile_data(case: ProfileReferenceCase) -> tuple[np.ndarray, np.ndarray]:
+    from superglm.profiling.tweedie import generate_tweedie_cpg
+
+    try:
+        rng = np.random.default_rng(case.seed)
+        x = rng.standard_normal(case.n)
+        with np.errstate(over="ignore", invalid="ignore"):
+            mu = np.exp(case.log_mu_intercept + case.log_mu_slope * x)
+        if not np.all(np.isfinite(mu)) or np.any(mu <= 0.0):
+            raise ValueError("generated means must be finite and strictly positive")
+        y = generate_tweedie_cpg(
+            case.n,
+            mu=mu,
+            phi=case.true_phi,
+            p=case.true_p,
+            rng=rng,
+        )
+    except (TypeError, ValueError, OverflowError, FloatingPointError, RuntimeError) as exc:
+        raise ReferenceComparisonError(
+            f"local profile replay case={case.case} failed: {exc}"
+        ) from exc
+    return x, y
+
+
+def _response_sha256(y: np.ndarray) -> str:
+    canonical = np.ascontiguousarray(y, dtype=np.dtype("<f8"))
+    return hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
+
+
+def _fit_local_profile(
+    case: ProfileReferenceCase,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> tuple[float, float, bool]:
+    import pandas as pd
+
+    from superglm import SuperGLM
+    from superglm.distributions import Tweedie
+    from superglm.features.numeric import Numeric
+    from superglm.profiling.tweedie import estimate_tweedie_p
+
+    model = SuperGLM(
+        family=Tweedie(1.5),
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    try:
+        result = estimate_tweedie_p(
+            model,
+            pd.DataFrame({"x": x}),
+            y,
+            phi_method="mle",
+            method="brent",
+        )
+        p_hat = float(result.p_hat)
+        phi_hat = float(result.phi_hat)
+    except (TypeError, ValueError, OverflowError, FloatingPointError, RuntimeError) as exc:
+        raise ReferenceComparisonError(f"local profile fit case={case.case} failed: {exc}") from exc
+    if not math.isfinite(p_hat) or not math.isfinite(phi_hat) or phi_hat <= 0.0:
+        raise ReferenceComparisonError(
+            f"local profile fit case={case.case} returned invalid p or phi"
+        )
+    return p_hat, phi_hat, bool(result.converged)
+
+
+def _check_local_profiles(fixture: ReferenceFixture) -> _ProfileComparisonSummary:
+    observed_p = []
+    observed_phi = []
+    observed_converged = []
+    for case in fixture.profile_cases:
+        x, y = _regenerate_profile_data(case)
+        digest = _response_sha256(y)
+        if digest != case.response_sha256:
+            raise ReferenceComparisonError(
+                f"profile response digest case={case.case} observed={digest!r} "
+                f"expected={case.response_sha256!r}"
+            )
+        p_hat, phi_hat, converged = _fit_local_profile(case, x, y)
+        observed_p.append(p_hat)
+        observed_phi.append(phi_hat)
+        observed_converged.append(converged)
+
+    p_errors = [
+        abs(actual - case.reference_p)
+        for case, actual in zip(fixture.profile_cases, observed_p, strict=True)
+    ]
+    phi_errors = [
+        abs(actual - case.reference_phi) / case.reference_phi
+        for case, actual in zip(fixture.profile_cases, observed_phi, strict=True)
+    ]
+    failures = []
+    for case, actual, error in zip(fixture.profile_cases, observed_p, p_errors, strict=True):
+        if error > fixture.tolerances.p_abs:
+            failures.append(
+                f"profile-p local-vs-fixture case={case.case} observed={actual:.17g} "
+                f"expected={case.reference_p:.17g} abs_error={error:.17g} "
+                f"tolerance={fixture.tolerances.p_abs:.17g}"
+            )
+    for case, actual, error in zip(
+        fixture.profile_cases,
+        observed_phi,
+        phi_errors,
+        strict=True,
+    ):
+        if error > fixture.tolerances.phi_rel:
+            failures.append(
+                f"profile-phi local-vs-fixture case={case.case} observed={actual:.17g} "
+                f"expected={case.reference_phi:.17g} rel_error={error:.17g} "
+                f"tolerance={fixture.tolerances.phi_rel:.17g}"
+            )
+    for case, actual in zip(fixture.profile_cases, observed_converged, strict=True):
+        if actual is not case.reference_converged:
+            failures.append(
+                f"profile-converged local-vs-fixture case={case.case} "
+                f"observed={actual!r} expected={case.reference_converged!r}"
+            )
+    if failures:
+        raise ReferenceComparisonError("\n".join(failures))
+
+    worst_p_index = max(range(len(p_errors)), key=p_errors.__getitem__)
+    worst_phi_index = max(range(len(phi_errors)), key=phi_errors.__getitem__)
+    return _ProfileComparisonSummary(
+        n_cases=len(fixture.profile_cases),
+        max_p_abs=p_errors[worst_p_index],
+        worst_p_case=fixture.profile_cases[worst_p_index].case,
+        max_phi_rel=phi_errors[worst_phi_index],
+        worst_phi_case=fixture.profile_cases[worst_phi_index].case,
+    )
+
+
 def _max_error(
     cases: tuple[DensityReferenceCase, ...],
     observed: Sequence[float],
@@ -422,11 +584,19 @@ def run_self_check(fixture: ReferenceFixture) -> ComparisonSummary:
         expected=committed,
         tolerance=fixture.tolerances.logpdf_abs,
     )
+    profiles = _check_local_profiles(fixture)
     return ComparisonSummary(
         n_cases=len(fixture.density_cases),
         tolerance=fixture.tolerances.logpdf_abs,
         max_local_fixture_abs=maximum,
         worst_local_fixture_case=worst_case,
+        n_profile_cases=profiles.n_cases,
+        p_tolerance=fixture.tolerances.p_abs,
+        max_local_profile_p_abs=profiles.max_p_abs,
+        worst_local_profile_p_case=profiles.worst_p_case,
+        phi_rel_tolerance=fixture.tolerances.phi_rel,
+        max_local_profile_phi_rel=profiles.max_phi_rel,
+        worst_local_profile_phi_case=profiles.worst_phi_case,
     )
 
 
@@ -576,6 +746,7 @@ def run_command(
         expected=committed,
         tolerance=fixture.tolerances.logpdf_abs,
     )
+    profiles = _check_local_profiles(fixture)
     stdout = _run_external_command(argv, _request_payload(fixture), timeout)
     candidate = _parse_responses(fixture, stdout)
     candidate_fixture_maximum, candidate_fixture_worst = _require_within_tolerance(
@@ -601,6 +772,13 @@ def run_command(
         worst_candidate_fixture_case=candidate_fixture_worst,
         max_candidate_local_abs=candidate_local_maximum,
         worst_candidate_local_case=candidate_local_worst,
+        n_profile_cases=profiles.n_cases,
+        p_tolerance=fixture.tolerances.p_abs,
+        max_local_profile_p_abs=profiles.max_p_abs,
+        worst_local_profile_p_case=profiles.worst_p_case,
+        phi_rel_tolerance=fixture.tolerances.phi_rel,
+        max_local_profile_phi_rel=profiles.max_phi_rel,
+        worst_local_profile_phi_case=profiles.worst_phi_case,
     )
 
 
@@ -616,7 +794,7 @@ def _positive_timeout(value: str) -> float:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Check neutral Tweedie density reference records.",
+        description="Check neutral Tweedie density and profile reference records.",
     )
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--timeout", type=_positive_timeout, default=30.0)
