@@ -8,10 +8,19 @@ import pytest
 
 import superglm.profiling.tweedie as tweedie_module
 from superglm import SuperGLM
+from superglm._tweedie_numerics import (
+    compound_poisson_gamma_parameters,
+    pearson_dispersion,
+    tweedie_unit_deviance,
+)
 from superglm.distributions import Tweedie
 from superglm.features.numeric import Numeric
 from superglm.model import profile_ops
-from superglm.profiling.tweedie import estimate_tweedie_p
+from superglm.profiling.tweedie import (
+    estimate_tweedie_p,
+    generate_tweedie_cpg,
+    tweedie_logpdf,
+)
 
 
 @pytest.fixture
@@ -24,6 +33,12 @@ def profile_problem():
         features={"x": Numeric()},
     )
     return model, X, y
+
+
+def _masked_vector(values):
+    mask = np.zeros(len(values), dtype=np.bool_)
+    mask[1] = True
+    return np.ma.array(values, mask=mask)
 
 
 @pytest.mark.parametrize(
@@ -396,3 +411,155 @@ def test_categorical_dataframe_reaches_profile_context(monkeypatch, profile_prob
     )
     with pytest.raises(ContextReachedError):
         estimate_tweedie_p(model, X, y)
+
+
+@pytest.mark.parametrize("field", ["y", "mu", "weights"])
+def test_masked_exact_density_input_is_rejected(field):
+    values = {
+        "y": np.array([0.2, 0.5, 1.0]),
+        "mu": np.array([0.4, 0.8, 1.2]),
+        "weights": np.ones(3),
+    }
+    values[field] = _masked_vector(values[field])
+
+    with pytest.raises(TypeError, match=field):
+        tweedie_logpdf(
+            values["y"],
+            values["mu"],
+            0.8,
+            1.5,
+            weights=values["weights"],
+        )
+
+
+@pytest.mark.parametrize("field", ["y", "mu"])
+def test_masked_unit_deviance_input_is_rejected(field):
+    values = {
+        "y": np.array([0.2, 0.5, 1.0]),
+        "mu": np.array([0.4, 0.8, 1.2]),
+    }
+    values[field] = _masked_vector(values[field])
+
+    with pytest.raises(TypeError, match=field):
+        tweedie_unit_deviance(values["y"], values["mu"], 1.5)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda nested: tweedie_unit_deviance(nested, [[0.8]], 1.5),
+        lambda nested: Tweedie(1.5).deviance_unit(nested, np.array([[0.8]])),
+        lambda nested: Tweedie(1.5).variance(nested),
+        lambda nested: Tweedie(1.5).variance_derivative(nested),
+        lambda nested: Tweedie(1.5).variance_second_derivative(nested),
+    ],
+    ids=[
+        "unit-deviance",
+        "distribution-deviance",
+        "variance",
+        "variance-derivative",
+        "variance-second-derivative",
+    ],
+)
+def test_nested_masked_tweedie_numerical_input_is_rejected(operation):
+    nested = [np.ma.array([0.5], mask=[True])]
+
+    with pytest.raises(TypeError, match="mask"):
+        operation(nested)
+
+
+@pytest.mark.parametrize("field", ["y", "mu", "weights"])
+def test_masked_pearson_input_is_rejected(field):
+    values = {
+        "y": np.array([0.2, 0.5, 1.0]),
+        "mu": np.array([0.4, 0.8, 1.2]),
+        "weights": np.ones(3),
+    }
+    values[field] = _masked_vector(values[field])
+
+    with pytest.raises(TypeError, match=field):
+        pearson_dispersion(
+            values["y"],
+            values["mu"],
+            1.5,
+            values["weights"],
+            2.0,
+        )
+
+
+@pytest.mark.parametrize("field", ["mu", "phi", "weights"])
+def test_masked_compound_parameters_input_is_rejected(field):
+    values = {
+        "mu": np.array([0.4, 0.8, 1.2]),
+        "phi": np.full(3, 0.8),
+        "weights": np.ones(3),
+    }
+    values[field] = _masked_vector(values[field])
+
+    with pytest.raises(TypeError, match=field):
+        compound_poisson_gamma_parameters(
+            values["mu"],
+            values["phi"],
+            1.5,
+            weights=values["weights"],
+        )
+
+
+def test_nested_masked_compound_dispersion_is_rejected_before_numpy_coercion():
+    phi = [np.ma.array(0.8, mask=True), 0.8, 0.8]
+
+    with pytest.raises(TypeError, match="phi.*mask"):
+        compound_poisson_gamma_parameters(
+            np.array([0.4, 0.8, 1.2]),
+            phi,
+            1.5,
+        )
+
+
+@pytest.mark.parametrize("field", ["n", "mu", "phi", "p"])
+def test_masked_generator_input_is_rejected(field):
+    values = {
+        "n": 3,
+        "mu": np.array([0.4, 0.8, 1.2]),
+        "phi": np.full(3, 0.8),
+        "p": 1.5,
+    }
+    if field == "n":
+        values[field] = np.ma.array(3, mask=True)
+    elif field == "p":
+        values[field] = np.ma.array(1.5, mask=True)
+    else:
+        values[field] = _masked_vector(values[field])
+
+    with pytest.raises((TypeError, ValueError), match=field):
+        generate_tweedie_cpg(
+            values["n"],
+            values["mu"],
+            values["phi"],
+            values["p"],
+            rng=np.random.default_rng(101),
+        )
+
+
+def test_masked_poisson_sampler_output_is_rejected_before_gamma() -> None:
+    class MaskedPoissonRNG:
+        def poisson(self, lam):
+            return np.ma.array(np.ones(lam.shape, dtype=np.int64), mask=np.ones(lam.shape))
+
+        def gamma(self, shape, *, scale):
+            raise AssertionError("Gamma sampler must not run after masked Poisson output")
+
+    with pytest.raises(RuntimeError, match="Poisson sampler output.*mask"):
+        generate_tweedie_cpg(1, 1.0, 0.8, 1.5, rng=MaskedPoissonRNG())
+
+
+def test_masked_gamma_sampler_output_is_rejected() -> None:
+    class MaskedGammaRNG:
+        def poisson(self, lam):
+            return np.ones(lam.shape, dtype=np.int64)
+
+        def gamma(self, shape, *, scale):
+            return np.ma.array(np.full(shape.shape, 2.0), mask=np.ones(shape.shape))
+
+    with pytest.raises(RuntimeError, match="Gamma sampler output.*mask"):
+        generate_tweedie_cpg(1, 1.0, 0.8, 1.5, rng=MaskedGammaRNG())
