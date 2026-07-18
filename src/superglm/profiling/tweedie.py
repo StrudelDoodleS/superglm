@@ -41,12 +41,17 @@ from superglm._tweedie_numerics import (
     TweedieNumericalError,
     _as_real_float64_array,
     compound_poisson_gamma_parameters,
+    normalize_boolean,
+    normalize_numeric_vector,
+    normalize_optional_callable,
+    normalize_positive_int,
     normalize_positive_scalar,
+    normalize_tweedie_bounds,
+    normalize_tweedie_grid,
     normalize_tweedie_power,
     pearson_dispersion,
     tweedie_unit_deviance,
 )
-from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.penalties.base import penalty_has_targets
@@ -3286,6 +3291,67 @@ def _search_profile_opt(
 # ---------------------------------------------------------------------------
 
 
+_MAX_PROFILE_INTEGER_CONTROL = int(np.iinfo(np.intp).max)
+# Every grid point runs a complete model fit and dispersion profile.  This is
+# intentionally generous while preventing accidental allocation/runaway work.
+_MAX_PROFILE_GRID_POINTS = 10_000
+
+
+def _normalize_profile_choice(value: object, *, name: str, choices: set[str]) -> str:
+    """Return one supported string choice with a stable public error."""
+    if type(value) is not str or value not in choices:
+        raise ValueError(f"{name}={value!r} is not valid, expected one of {sorted(choices)}")
+    return value
+
+
+def _normalize_profile_rows(
+    X: object,
+    y: object,
+    sample_weight: object,
+    offset: object,
+) -> tuple[
+    pd.DataFrame, NDArray[np.float64], NDArray[np.float64] | None, NDArray[np.float64] | None
+]:
+    """Validate row-oriented public inputs before building a profile context."""
+    if not isinstance(X, pd.DataFrame):
+        raise TypeError("X must be a pandas DataFrame")
+    if not X.columns.is_unique:
+        raise ValueError("X column labels must be unique")
+
+    y_array = normalize_numeric_vector(y, name="y", nonnegative=True)
+    if y_array.size == 0:
+        raise ValueError("y must contain at least one observation")
+    if len(X) != len(y_array):
+        raise ValueError(
+            f"X and y must have the same number of rows; got {len(X)} and {len(y_array)}"
+        )
+
+    weight_array = None
+    if sample_weight is not None:
+        weight_message = (
+            "weights must be finite and strictly positive, one-dimensional, "
+            f"and have length {len(y_array)}"
+        )
+        try:
+            weight_array = normalize_numeric_vector(
+                sample_weight,
+                name="weights",
+                length=len(y_array),
+                positive=True,
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(weight_message) from exc
+
+    offset_array = None
+    if offset is not None:
+        offset_array = normalize_numeric_vector(
+            offset,
+            name="offset",
+            length=len(y_array),
+        )
+    return X, y_array, weight_array, offset_array
+
+
 def estimate_tweedie_p(
     model,
     X,
@@ -3369,10 +3435,6 @@ def estimate_tweedie_p(
     """
     from superglm.distributions import Tweedie
 
-    y_arr = np.asarray(y)
-    if sample_weight is not None:
-        sample_weight = _validate_strict_prior_weights(sample_weight, len(y_arr))
-
     # Validate family
     family = model.family
     if not isinstance(family, Tweedie):
@@ -3382,21 +3444,53 @@ def estimate_tweedie_p(
         )
 
     _VALID_METHODS = {"brent", "grid", "grid_refine", "profile_opt", "joint_ml", "integrated"}
-    if method not in _VALID_METHODS:
-        raise ValueError(
-            f"method={method!r} is not valid, expected one of {sorted(_VALID_METHODS)}"
-        )
+    method = _normalize_profile_choice(method, name="method", choices=_VALID_METHODS)
 
     _VALID_FIT_MODES = {"fit", "fit_reml"}
-    if fit_mode not in _VALID_FIT_MODES:
-        raise ValueError(
-            f"fit_mode={fit_mode!r} is not valid, expected one of {sorted(_VALID_FIT_MODES)}"
-        )
+    fit_mode = _normalize_profile_choice(fit_mode, name="fit_mode", choices=_VALID_FIT_MODES)
     _VALID_PHI_METHODS = {"pearson", "mle"}
-    if phi_method not in _VALID_PHI_METHODS:
-        raise ValueError(
-            f"phi_method={phi_method!r} is not valid, expected one of {sorted(_VALID_PHI_METHODS)}"
-        )
+    phi_method = _normalize_profile_choice(
+        phi_method,
+        name="phi_method",
+        choices=_VALID_PHI_METHODS,
+    )
+    optimizer = _normalize_profile_choice(
+        optimizer,
+        name="optimizer",
+        choices={"L-BFGS-B", "Powell"},
+    )
+
+    p_bounds = normalize_tweedie_bounds(p_bounds)
+    xatol = normalize_positive_scalar("xatol", xatol)
+    maxiter = normalize_positive_int(
+        maxiter,
+        name="maxiter",
+        maximum=_MAX_PROFILE_INTEGER_CONTROL,
+    )
+    n_grid = normalize_positive_int(
+        n_grid,
+        name="n_grid",
+        minimum=2,
+        maximum=_MAX_PROFILE_GRID_POINTS,
+    )
+    n_grid_coarse = normalize_positive_int(
+        n_grid_coarse,
+        name="n_grid_coarse",
+        minimum=2,
+        maximum=_MAX_PROFILE_GRID_POINTS,
+    )
+    verbose = normalize_boolean(verbose, name="verbose")
+    trace_iterations = normalize_boolean(trace_iterations, name="trace_iterations")
+    trace_callback = normalize_optional_callable(trace_callback, name="trace_callback")
+    if grid is not None:
+        grid = normalize_tweedie_grid(grid, maximum=_MAX_PROFILE_GRID_POINTS)
+
+    X, y_arr, sample_weight, offset = _normalize_profile_rows(
+        X,
+        y,
+        sample_weight,
+        offset,
+    )
 
     if method in ("joint_ml", "integrated"):
         raise NotImplementedError(
@@ -3409,7 +3503,7 @@ def estimate_tweedie_p(
         ctx = _build_profile_context_reml(
             model,
             X,
-            y,
+            y_arr,
             sample_weight,
             offset,
             phi_method,
@@ -3421,7 +3515,7 @@ def estimate_tweedie_p(
         ctx = _build_profile_context(
             model,
             X,
-            y,
+            y_arr,
             sample_weight,
             offset,
             phi_method,
