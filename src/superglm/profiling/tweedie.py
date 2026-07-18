@@ -22,7 +22,6 @@ References
 
 from __future__ import annotations
 
-import copy
 import logging
 import operator
 import threading
@@ -62,6 +61,7 @@ from superglm._tweedie_numerics import (
 )
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
+from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.penalties.base import penalty_has_targets
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
@@ -2759,31 +2759,35 @@ class _ProfileContext:
 
 def _clone_profile_model(model, X, sample_weight):
     """Clone configured profile state and resolve shorthand only on the clone."""
-    from superglm.distributions import Tweedie
+    from superglm.model.fit_state import ModelConfig
+    from superglm.model.fit_workspace import _copy_subclass_state
     from superglm.model.profile_ops import (
         _validate_tweedie_profile_clone_isolation,
         _validate_tweedie_profile_copy_protocols,
     )
 
     _validate_tweedie_profile_copy_protocols(model)
-    profile_model = model._clone_without_features(
-        set(),
-        lambda2=copy.deepcopy(model.lambda2),
-    )
-    profile_model.family = Tweedie(p=model.family.p)
-    profile_model.link = copy.deepcopy(model.link)
-    profile_model._interaction_specs = copy.deepcopy(model._interaction_specs)
-    profile_model._interaction_order = list(model._interaction_order)
-    profile_model._pending_interactions = copy.deepcopy(model._pending_interactions)
-    profile_model._splines = copy.deepcopy(model._splines)
-    profile_model._n_knots = copy.deepcopy(model._n_knots)
-    profile_model._n_bins = copy.deepcopy(model._n_bins)
-    profile_model._degree = model._degree
-    profile_model._categorical_base = model._categorical_base
+    # Capture the live configured templates (including resolved interaction
+    # metadata) but materialize through ``__new__``.  Calling the public model
+    # constructor here can repeat subclass side effects, fail for required
+    # subclass arguments, and—through clone_without_features—select stale
+    # fitted penalty state instead of current constructor intent.
+    profile_config = ModelConfig.capture(model)
+    profile_model = profile_config.materialize(type(model))
     if model._splines is not None and not model._specs:
-        # clone_without_features() normally clones resolved specs. Preserve
-        # unresolved shorthand metadata and resolve it only on the scratch model.
+        # Preserve unresolved shorthand metadata and resolve it only on the
+        # scratch model.
         profile_model._auto_detect_features(X, sample_weight)
+    # Fit attempts rematerialize immutable constructor intent.  The private
+    # runtime copies above therefore need one matching configuration snapshot;
+    # otherwise a resolved custom interaction falls back to its shorthand when
+    # the profile model enters a transactional fit workspace.
+    profile_model._config = type(profile_model._config).capture(profile_model)
+    profile_model._config_revision += 1
+    # Copy constructor extensions only after the final configuration identity
+    # exists so aliases such as ``self.config_alias = self._config`` bind to the
+    # durable scratch identity rather than the superseded materialization.
+    _copy_subclass_state(model, profile_model)
     _validate_tweedie_profile_clone_isolation(model, profile_model)
     return profile_model
 
@@ -2840,7 +2844,7 @@ def _build_profile_context(
 
     # Temporary p so _build_design_matrix can resolve the distribution.
     # The design matrix itself doesn't depend on p.
-    saved_family = profile_model.family
+    saved_family = configured_family(profile_model)
     profile_model.family = Tweedie(p=1.5)
     try:
         y_arr, w_arr, offset_arr = profile_model._build_design_matrix(
@@ -2854,13 +2858,13 @@ def _build_profile_context(
 
     validate_response(y_arr, profile_model._distribution)
 
-    if profile_model.penalty.lambda1 is None:
-        profile_model.penalty.lambda1 = profile_model._compute_lambda_max(y_arr, w_arr) * 0.1
+    penalty = configured_penalty(profile_model)
+    if penalty.lambda1 is None:
+        penalty.lambda1 = profile_model._compute_lambda_max(y_arr, w_arr) * 0.1
 
     if offset_arr is None:
         offset_arr = np.zeros(len(y_arr))
 
-    penalty = profile_model.penalty
     groups = profile_model._groups
     has_lambda1_targets = penalty_has_targets(penalty, groups)
 
@@ -2898,7 +2902,7 @@ def _build_profile_context(
         link=profile_model._link,
         penalty=penalty,
         use_direct=use_direct,
-        lambda2=profile_model.lambda2,
+        lambda2=configured_lambda2(profile_model),
         direct_solve=profile_model._direct_solve,
         max_iter=profile_model._max_iter,
         tol=profile_model._tol,
@@ -4152,6 +4156,51 @@ def _snapshot_tweedie_profile_dataframe(X: pd.DataFrame) -> pd.DataFrame:
         raise TypeError("Could not safely snapshot values in X") from exc
 
 
+def _tweedie_profile_frame_for_snapshot(model, X: pd.DataFrame) -> pd.DataFrame:
+    """Select explicit model columns before validating caller-irrelevant data."""
+    if type(X.attrs) is not dict or X.attrs:
+        # Let the hardened whole-frame validator reject metadata without
+        # pandas selection attempting to deepcopy it first.
+        return X
+    try:
+        _validate_tweedie_profile_axis(X.index, name="X index")
+        _validate_tweedie_profile_axis(X.columns, name="X column")
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        # The snapshot wrapper below provides the stable public error after
+        # rejecting unsafe labels/storage without selection or hashing hooks.
+        return X
+    try:
+        config = object.__getattribute__(model, "_config")
+        templates = object.__getattribute__(config, "feature_templates")
+    except AttributeError:
+        return X
+    if type(templates) is not tuple:
+        return X
+    if not templates:
+        if object.__getattribute__(config, "splines") is not None:
+            # Shorthand/auto-detected models intentionally learn from every
+            # column.
+            return X
+        # Generic fit validation uses at least one DataFrame column as a row
+        # carrier even for an intercept-only model.  Supply an owned numeric
+        # carrier rather than traversing caller columns that the model cannot
+        # consume.
+        return pd.DataFrame(
+            {"__superglm_profile_row__": np.zeros(len(X), dtype=np.float64)},
+            index=X.index,
+        )
+    required = tuple(name for name, _spec in templates)
+    if not X.columns.is_unique:
+        raise ValueError("X columns must be unique")
+    missing = [name for name in required if name not in X.columns]
+    if missing:
+        raise ValueError(f"X is missing required columns: {missing}")
+    selected = X.loc[:, list(required)]
+    if type(selected) is not pd.DataFrame:
+        raise TypeError("X explicit feature selection did not produce a plain DataFrame")
+    return selected
+
+
 def _prepare_tweedie_profile_inputs(
     model,
     X,
@@ -4181,7 +4230,12 @@ def _prepare_tweedie_profile_inputs(
         name = next(iter(unexpected))
         raise TypeError(f"estimate_tweedie_p() got an unexpected keyword argument {name!r}")
 
-    family = model.family
+    try:
+        family = configured_family(model)
+    except AttributeError:
+        # Preserve the documented lightweight duck seam used by direct profile
+        # integrations that predate ModelConfig ownership.
+        family = model.family
     if not isinstance(family, Tweedie):
         raise ValueError(
             f"estimate_tweedie_p requires a Tweedie family, got {family!r}. "
@@ -4244,7 +4298,7 @@ def _prepare_tweedie_profile_inputs(
             f"method={method!r} is not yet implemented. "
             "Use one of: 'brent', 'grid', 'grid_refine', 'profile_opt'."
         )
-    X = _snapshot_tweedie_profile_dataframe(X)
+    X = _snapshot_tweedie_profile_dataframe(_tweedie_profile_frame_for_snapshot(model, X))
 
     return _PreparedTweedieProfileInputs(
         X=X,

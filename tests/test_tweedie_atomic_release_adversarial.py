@@ -495,7 +495,9 @@ def test_released_transaction_certifies_detach_postcondition(
             phi_method="pearson",
         )
 
-    assert detach_calls == 1
+    # Compact publication certifies two independent handles: the object
+    # returned to the caller and the library-owned result installed on model.
+    assert detach_calls == 2
     _assert_identity_state(model, before)
 
 

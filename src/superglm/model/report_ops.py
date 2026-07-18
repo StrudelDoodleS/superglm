@@ -9,6 +9,7 @@ import numpy as np
 
 from superglm.inference._term_helpers import spline_group_enrichment
 from superglm.inference.summary import _CoefRow
+from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.profiling._reporting import (
     cached_tweedie_profile_ci,
     tweedie_profile_method_label,
@@ -25,7 +26,9 @@ def diagnostics(model) -> dict[str, Any]:
     res = model.result
     group_edf = model._group_edf
     reml_lam = getattr(model, "_reml_lambdas", None)
-    selected_names = selected_group_name_set(res, model._groups, penalty=model.penalty)
+    penalty = fitted_penalty(model)
+    lambda2 = fitted_lambda2(model)
+    selected_names = selected_group_name_set(res, model._groups, penalty=penalty)
 
     out = {}
     for g in model._groups:
@@ -37,7 +40,7 @@ def diagnostics(model) -> dict[str, Any]:
         }
         spec = model._specs.get(g.feature_name)
         if isinstance(spec, _SplineBase):
-            entry.update(spline_group_enrichment(g.name, spec, group_edf, reml_lam, model.lambda2))
+            entry.update(spline_group_enrichment(g.name, spec, group_edf, reml_lam, lambda2))
         out[g.name] = entry
     out["_model"] = {
         "intercept": res.intercept,
@@ -54,7 +57,7 @@ def diagnostics(model) -> dict[str, Any]:
             if getattr(model, "_reml_result", None) is not None
             else res.converged
         ),
-        "lambda1": model.penalty.lambda1,
+        "lambda1": penalty.lambda1,
     }
     return out
 
@@ -90,7 +93,7 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
     bic = -2 * ll + np.log(n) * edf
     denom = n - edf - 1.0
     aicc = aic + 2 * edf * (edf + 1) / denom if denom > 0 else np.inf
-    selected_names = selected_group_name_set(res, model._groups, penalty=model.penalty)
+    selected_names = selected_group_name_set(res, model._groups, penalty=fitted_penalty(model))
     n_active = len(selected_names)
     p_total = len(model._groups)
 
@@ -121,7 +124,7 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         },
     }
 
-    penalty = model.penalty
+    penalty = fitted_penalty(model)
     link_name = type(model._link).__name__
     if link_name.endswith("Link"):
         link_name = link_name[:-4]
@@ -242,7 +245,7 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         known_scale=known_scale,
         group_edf_map=inf["group_edf_map"],
         reml_lambdas=getattr(model, "_reml_lambdas", None),
-        lambda2=model.lambda2,
+        lambda2=fitted_lambda2(model),
         n_obs=n,
         alpha=alpha,
         monotone_repairs=getattr(model, "_monotone_repairs", None),
@@ -319,7 +322,7 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
     selected_names = selected_group_name_set(
         model.result,
         model._groups,
-        penalty=model.penalty,
+        penalty=fitted_penalty(model),
     )
     handled_ordered_features: set[str] = set()
 
@@ -347,7 +350,7 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
                     spec._spline,
                     group_edf,
                     reml_lambdas,
-                    model.lambda2,
+                    fitted_lambda2(model),
                 )
                 metadata["edf"] = feature_edf
                 rows.append(
@@ -387,7 +390,13 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
             continue
 
         if isinstance(spec, SplineCategorical | PolynomialCategorical):
-            metadata = spline_group_enrichment(g.name, spec, group_edf, reml_lambdas, model.lambda2)
+            metadata = spline_group_enrichment(
+                g.name,
+                spec,
+                group_edf,
+                reml_lambdas,
+                fitted_lambda2(model),
+            )
             rows.append(
                 _CoefRow(
                     name=g.name,
@@ -433,7 +442,13 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
             continue
 
         metadata = (
-            spline_group_enrichment(g.name, spec, group_edf, reml_lambdas, model.lambda2)
+            spline_group_enrichment(
+                g.name,
+                spec,
+                group_edf,
+                reml_lambdas,
+                fitted_lambda2(model),
+            )
             if spec is not None
             else {}
         )

@@ -12,12 +12,17 @@ DesignMatrix holds the list and provides full-matrix matvec/rmatvec.
 
 from __future__ import annotations
 
-from typing import cast
+from time import perf_counter
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
 from ._group_matrix import _group_matrix_algebra
+from ._group_matrix._group_matrix_bin_space import (
+    MixedBinSpaceCenteringPlan,
+    build_mixed_bin_space_centering_plan,
+)
 from ._group_matrix._group_matrix_bins import discretize_column
 from ._group_matrix._group_matrix_core import (
     CategoricalGroupMatrix,
@@ -32,10 +37,18 @@ from ._group_matrix._group_matrix_discretized import (
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
 )
+from ._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from ._group_matrix._group_matrix_kernels import (
     _disc_disc_2d_hist as _kernel_disc_disc_2d_hist,
 )
-from ._group_matrix._group_matrix_tabmat import _build_tabmat_split
+from ._group_matrix._group_matrix_tabmat import (
+    RawSplineTabmatPlan,
+    _build_raw_spline_tabmat_plan,
+    _build_tabmat_split,
+    _is_retained_tabmat_vector_candidate,
+    _is_tabmat_centering_candidate,
+    _tabmat_vector,
+)
 
 DenseGroupMatrix.__module__ = __name__
 SparseGroupMatrix.__module__ = __name__
@@ -83,7 +96,10 @@ def _disc_disc_2d_hist(
     bin_idx_i: NDArray, bin_idx_j: NDArray, W: NDArray, n_bins_i: int, n_bins_j: int
 ) -> NDArray:
     """Compatibility wrapper for the fused discretized 2D histogram kernel."""
-    return _kernel_disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j)
+    return cast(
+        NDArray,
+        _kernel_disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j),
+    )
 
 
 def _cross_gram_tensor_main(gm_tensor, gm_main, W: NDArray) -> NDArray:
@@ -116,7 +132,11 @@ def _block_xtwx(
 ) -> NDArray:
     """Compatibility wrapper for block XtWX assembly."""
     return _group_matrix_algebra._block_xtwx(
-        gms, groups, W, tabmat_split=tabmat_split, profile=profile
+        gms,
+        groups,
+        W,
+        tabmat_split=tabmat_split,
+        profile=profile,
     )
 
 
@@ -161,29 +181,232 @@ def _block_xtwx_signed(
     )
 
 
+class _LazyTabmatSplit:
+    """One shared lazy split without a back-reference to its DesignMatrix."""
+
+    __slots__ = ("built", "group_matrices", "split")
+
+    def __init__(self, group_matrices) -> None:
+        self.group_matrices = group_matrices
+        self.split = None
+        self.built = False
+
+    def get(self):
+        if not self.built:
+            self.split = _build_tabmat_split(self.group_matrices)
+            self.built = True
+        return self.split
+
+
+class _LazyRawSplineTabmatPlan:
+    """One releasable DesignMatrix-owned raw-spline acceleration plan."""
+
+    __slots__ = ("built", "group_matrices", "n", "plan")
+
+    def __init__(self, group_matrices, *, n: int) -> None:
+        self.group_matrices = group_matrices
+        self.n = n
+        self.plan: RawSplineTabmatPlan | None = None
+        self.built = False
+
+    def get(self) -> tuple[RawSplineTabmatPlan | None, bool, float]:
+        if self.built:
+            return self.plan, False, 0.0
+        started = perf_counter()
+        self.plan = _build_raw_spline_tabmat_plan(self.group_matrices, n=self.n)
+        elapsed = perf_counter() - started
+        self.built = True
+        return self.plan, True, elapsed
+
+    def clear(self) -> None:
+        self.plan = None
+        self.built = False
+
+
 class DesignMatrix:
     """Container for per-group matrices. Provides full-matrix operations."""
 
     def __init__(self, group_matrices: list[GroupMatrix], n: int, p: int):
-        self.group_matrices = group_matrices
+        matrices = tuple(group_matrices)
+        grouped_shape = (
+            n if not matrices else matrices[0].shape[0],
+            sum(matrix.shape[1] for matrix in matrices),
+        )
+        rows_match = all(matrix.shape[0] == n for matrix in matrices)
+        if not rows_match or grouped_shape != (n, p):
+            actual_rows: int | str = grouped_shape[0] if rows_match else "inconsistent"
+            raise ValueError(
+                f"declared design shape {(n, p)} does not match grouped shape "
+                f"{(actual_rows, grouped_shape[1])}"
+            )
+        self.group_matrices = matrices
         self.n = n
         self.p = p
         self.shape = (n, p)
-        self._tabmat_split = None  # lazily built
-        self._tabmat_built = False
+        self._tabmat_holder = _LazyTabmatSplit(self.group_matrices)
+        self._raw_spline_tabmat_holder = _LazyRawSplineTabmatPlan(self.group_matrices, n=n)
+        self._tabmat_centering_candidate = None
+        self._tabmat_vector_candidate = _is_retained_tabmat_vector_candidate(
+            self.group_matrices,
+            n=n,
+        )
+        self._execution_plan: MatrixExecutionPlan | None = None
+        self._mixed_bin_space_centering_plan: MixedBinSpaceCenteringPlan | None = None
+        self._mixed_bin_space_centering_plan_attempted = False
         self._centered_pattern_plan = None
         self._centered_solver_supports = None
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Serialize durable matrix state without the rebuildable execution plan."""
+        state = self.__dict__.copy()
+        state["_execution_plan"] = None
+        state["_raw_spline_tabmat_holder"] = _LazyRawSplineTabmatPlan(
+            self.group_matrices,
+            n=self.n,
+        )
+        state.pop("_mixed_centering_execution_plan", None)
+        state["_mixed_bin_space_centering_plan"] = None
+        state["_mixed_bin_space_centering_plan_attempted"] = False
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore current and pre-shared-Tabmat-holder pickle state."""
+        state = state.copy()
+        legacy_split = state.pop("_tabmat_split", None)
+        legacy_built = bool(state.pop("_tabmat_built", False))
+        group_matrices = tuple(state["group_matrices"])
+        state["group_matrices"] = group_matrices
+
+        holder = state.get("_tabmat_holder")
+        if not isinstance(holder, _LazyTabmatSplit):
+            holder = _LazyTabmatSplit(group_matrices)
+            holder.split = legacy_split
+            holder.built = legacy_built
+        else:
+            holder.group_matrices = group_matrices
+        state["_tabmat_holder"] = holder
+        state["_raw_spline_tabmat_holder"] = _LazyRawSplineTabmatPlan(
+            group_matrices,
+            n=int(state["n"]),
+        )
+
+        state["_execution_plan"] = None
+        state.pop("_mixed_centering_execution_plan", None)
+        state["_mixed_bin_space_centering_plan"] = None
+        state["_mixed_bin_space_centering_plan_attempted"] = False
+        state.setdefault("_tabmat_centering_candidate", None)
+        state["_tabmat_vector_candidate"] = _is_retained_tabmat_vector_candidate(
+            group_matrices,
+            n=int(state["n"]),
+        )
+        state.setdefault("_centered_pattern_plan", None)
+        state.setdefault("_centered_solver_supports", None)
+        self.__dict__.update(state)
+
+    def _get_or_build_tabmat_split(self):
+        """Return the single DesignMatrix-owned Tabmat split, building it once."""
+        return self._tabmat_holder.get()
+
+    @property
+    def _tabmat_split(self):
+        """Compatibility view of the shared lazy split."""
+        return self._tabmat_holder.split
+
+    @property
+    def _tabmat_built(self) -> bool:
+        """Compatibility view of whether split construction was attempted."""
+        return self._tabmat_holder.built
 
     @property
     def tabmat_split(self):
         """Lazily build a tabmat SplitMatrix for non-discrete paths."""
-        if not self._tabmat_built:
-            self._tabmat_split = _build_tabmat_split(self.group_matrices)
-            self._tabmat_built = True
-        return self._tabmat_split
+        return self._get_or_build_tabmat_split()
+
+    @property
+    def tabmat_centering_split(self):
+        """Build Tabmat only when the centered solver can dispatch to it."""
+        if self._tabmat_centering_candidate is None:
+            self._tabmat_centering_candidate = _is_tabmat_centering_candidate(self.group_matrices)
+        if not self._tabmat_centering_candidate:
+            return None
+        return self.tabmat_split
+
+    @property
+    def raw_spline_tabmat_plan_built(self) -> bool:
+        """Return whether raw-spline plan construction has been attempted."""
+        return self._raw_spline_tabmat_holder.built
+
+    def get_raw_spline_tabmat_centering_plan(
+        self,
+        *,
+        profile: dict | None = None,
+    ) -> RawSplineTabmatPlan | None:
+        """Return the lazy raw-spline plan and record its one-time policy decision."""
+        plan, newly_built, elapsed = self._raw_spline_tabmat_holder.get()
+        if profile is not None and newly_built:
+            if plan is None:
+                profile["centered_spline_tabmat_policy_rejections"] = (
+                    profile.get("centered_spline_tabmat_policy_rejections", 0) + 1
+                )
+            else:
+                profile["centered_spline_tabmat_builds"] = (
+                    profile.get("centered_spline_tabmat_builds", 0) + 1
+                )
+                profile["centered_spline_tabmat_build_s"] = (
+                    profile.get("centered_spline_tabmat_build_s", 0.0) + elapsed
+                )
+        if profile is not None and plan is not None:
+            profile["centered_spline_tabmat_retained_bytes"] = max(
+                profile.get("centered_spline_tabmat_retained_bytes", 0),
+                plan.retained_bytes,
+            )
+        return plan
+
+    def release_raw_spline_tabmat_plan(self) -> None:
+        """Release the optional CSC/CSR acceleration cache after fit publication."""
+        self._raw_spline_tabmat_holder.clear()
+
+    @property
+    def execution_plan(self) -> MatrixExecutionPlan:
+        """Return the cached backend-neutral matrix execution plan."""
+        plan = self._execution_plan
+        if plan is None:
+            plan = MatrixExecutionPlan(
+                self.group_matrices,
+                n=self.n,
+                ordinary_split_factory=self._tabmat_holder.get,
+            )
+            if plan.shape != self.shape:
+                raise ValueError(
+                    f"declared design shape {self.shape} does not match grouped shape {plan.shape}"
+                )
+            self._execution_plan = plan
+        return plan
+
+    @property
+    def mixed_bin_space_centering_plan(self) -> MixedBinSpaceCenteringPlan | None:
+        """Return the one cached augmented Tabmat plan for supported mixed layouts."""
+        plan = self._mixed_bin_space_centering_plan
+        if plan is None and not self._mixed_bin_space_centering_plan_attempted:
+            plan = build_mixed_bin_space_centering_plan(
+                self.group_matrices,
+                n=self.n,
+                p=self.p,
+            )
+            self._mixed_bin_space_centering_plan = plan
+            self._mixed_bin_space_centering_plan_attempted = True
+        if plan is not None and plan.shape != self.shape:
+            raise ValueError(
+                f"cached bin-space plan shape {plan.shape} does not match "
+                f"declared design shape {self.shape}"
+            )
+        return plan
 
     def matvec(self, beta: NDArray) -> NDArray:
         """X @ beta via per-group matvecs."""
+        holder = self._tabmat_holder
+        if self._tabmat_vector_candidate and holder.split is not None:
+            return np.asarray(holder.split.matvec(_tabmat_vector(beta)), dtype=np.float64)
         result = np.zeros(self.n)
         col = 0
         for gm in self.group_matrices:
@@ -194,6 +417,9 @@ class DesignMatrix:
 
     def rmatvec(self, w: NDArray) -> NDArray:
         """X.T @ w via per-group rmatvecs."""
+        holder = self._tabmat_holder
+        if self._tabmat_vector_candidate and holder.split is not None:
+            return np.asarray(holder.split.transpose_matvec(_tabmat_vector(w)), dtype=np.float64)
         result = np.zeros(self.p)
         col = 0
         for gm in self.group_matrices:

@@ -43,6 +43,7 @@ from superglm.reml.penalty_algebra import (  # noqa: F401
     cached_logdet_s_plus,
     compute_logdet_s_derivatives,
     compute_logdet_s_plus,
+    compute_penalty_nullity,
     compute_total_penalty_rank,
 )
 from superglm.reml.result import PenaltyCache, REMLResult, _map_beta_between_bases  # noqa: F401

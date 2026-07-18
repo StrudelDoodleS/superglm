@@ -166,7 +166,7 @@ def estimate_p(
     eager_ci_alpha=None,
     **kwargs,
 ):
-    """Estimate Tweedie p via profile likelihood, refit, and return result."""
+    """Estimate Tweedie p and atomically publish one certified final fit."""
     with _exclusive_tweedie_profile_call(model):
         caller_mapping = _tweedie_profile_instance_dict(model)
         caller_state = caller_mapping.copy()
@@ -252,6 +252,15 @@ def _estimate_p_transaction(
         sample_weight=weight_snapshot,
         offset=offset_snapshot,
     )
+    if _is_superglm_profile_model(model):
+        return _estimate_p_in_fit_workspaces(
+            model,
+            prepared,
+            resolved_mode=resolved_mode,
+            progress_callback=progress_callback,
+            eager_ci_alpha=eager_ci_alpha,
+        )
+
     staged = _prepare_tweedie_profile_stage(
         model,
         X_snapshot,
@@ -326,6 +335,157 @@ def _estimate_p_transaction(
     return result
 
 
+def _estimate_p_in_fit_workspaces(
+    model,
+    prepared,
+    *,
+    resolved_mode: str,
+    progress_callback,
+    eager_ci_alpha,
+):
+    """Profile and refit through independent private workspaces."""
+    from superglm.model import fit_ops
+    from superglm.model.fit_state import ModelConfigPublication
+    from superglm.model.fit_workspace import FitWorkspace
+    from superglm.profiling.tweedie import (
+        _use_prepared_tweedie_profile_inputs,
+        estimate_tweedie_p,
+    )
+
+    caller_config_revision = int(model._config_revision)
+    caller_fit_revision = int(model._fit_revision)
+    X, y, sample_weight, offset = fit_ops._validate_entrypoint_input(
+        model,
+        prepared.X,
+        prepared.y,
+        prepared.sample_weight,
+        prepared.offset,
+    )
+    prepared = replace(
+        prepared,
+        X=X,
+        y=y,
+        sample_weight=sample_weight,
+        offset=offset,
+    )
+    validated_inputs = (X, y, sample_weight, offset)
+
+    # Create both configuration snapshots before profiling can execute a trace
+    # callback.  The final candidate therefore cannot inherit callback edits to
+    # the caller or mutations of the attempt used by the profile evaluator.
+    profile_workspace = FitWorkspace.start(
+        model,
+        mode="estimate_p_profile",
+        validated_inputs=validated_inputs,
+        # Profile evaluations need their fitted training-scale means even when
+        # the durable caller model is configured for compact publication.  In
+        # particular, discrete fits must score the same binned design used by
+        # the solver rather than falling back to exact public prediction after
+        # row state has been released.
+        config_overrides={"retain_fit_state": True},
+    )
+    final_source_workspace = FitWorkspace.start(
+        model,
+        mode=f"{resolved_mode}_profile_source",
+        validated_inputs=validated_inputs,
+    )
+    _validate_tweedie_profile_clone_isolation(model, profile_workspace.model)
+    _validate_tweedie_profile_clone_isolation(model, final_source_workspace.model)
+    # Publication must be based on private pre-callback identities.  Capturing
+    # the public model here would retain shallow aliases to its mutable family,
+    # link, penalty, and smoothing configuration, allowing a trace/progress
+    # callback to alter the supposedly transactional result.
+    caller_publication = replace(
+        ModelConfigPublication.capture(final_source_workspace.model),
+        revision=caller_config_revision,
+    )
+
+    profile_model = profile_workspace.model
+    prepared = replace(prepared, _model_identity=id(profile_model))
+    with _use_prepared_tweedie_profile_inputs(prepared):
+        result = estimate_tweedie_p(
+            profile_model,
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            p_bounds=prepared.p_bounds,
+            xatol=prepared.xatol,
+            maxiter=prepared.maxiter,
+            verbose=prepared.verbose,
+            fit_mode=prepared.fit_mode,
+            phi_method=prepared.phi_method,
+            method=prepared.method,
+            n_grid=prepared.n_grid,
+            grid=prepared.grid,
+            n_grid_coarse=prepared.n_grid_coarse,
+            optimizer=prepared.optimizer,
+            trace_callback=prepared.trace_callback,
+            trace_iterations=prepared.trace_iterations,
+        )
+    del profile_workspace
+
+    _validate_tweedie_profile_result_for_refit(result, prepared)
+    if eager_ci_alpha is not None:
+        result.ci(alpha=eager_ci_alpha)
+        _validate_tweedie_profile_result_for_refit(result, prepared)
+
+    selected_family = Tweedie(p=float(result.p_hat))
+    selected_config = caller_publication.config.with_value(family=selected_family)
+    final_workspace = FitWorkspace.start(
+        final_source_workspace.model,
+        mode=resolved_mode,
+        validated_inputs=validated_inputs,
+        config_overrides={
+            "family": selected_family,
+            # Synchronization and certification need row state even when the
+            # durable public result is compact. Release it only after both.
+            "retain_fit_state": True,
+        },
+    )
+    _validate_tweedie_profile_clone_isolation(
+        final_source_workspace.model,
+        final_workspace.model,
+    )
+    del final_source_workspace
+
+    # Fork the model-owned handle before progress callbacks can mutate the
+    # returned result or inject arbitrary objects into its reporting caches.
+    installed_result = _installed_tweedie_profile_copy(result)
+    _validate_tweedie_profile_result_for_refit(installed_result, prepared)
+
+    ci_alpha = 0.05 if eager_ci_alpha is None else eager_ci_alpha
+    if progress_callback is not None:
+        progress_callback(
+            "best_found",
+            {"profile_estimate": _tweedie_estimate_payload(result, ci_alpha=ci_alpha)},
+        )
+        progress_callback(
+            "final_refit",
+            {"profile_estimate": _tweedie_estimate_payload(result, ci_alpha=ci_alpha)},
+        )
+
+    # Re-certify the caller-facing handle after callbacks.  The independent
+    # installation handle was already captured above.
+    _validate_tweedie_profile_result_for_refit(result, prepared)
+    _fit_tweedie_profile_workspace(
+        model,
+        final_workspace,
+        X,
+        y,
+        sample_weight,
+        offset,
+        installed_result,
+        result,
+        prepared,
+        resolved_mode=resolved_mode,
+        caller_publication=caller_publication,
+        caller_fit_revision=caller_fit_revision,
+        selected_config=selected_config,
+    )
+    return result
+
+
 def _normalize_eager_tweedie_ci_alpha(value):
     """Normalize an optional eager CI level without executing coercion hooks."""
     if value is None:
@@ -367,6 +527,7 @@ def _validate_tweedie_profile_model_storage(model) -> None:
                 not in {
                     "__annotations__",
                     "__doc__",
+                    "__init__",
                     "__module__",
                     "__slots__",
                 }
@@ -383,12 +544,17 @@ def _validate_tweedie_profile_model_storage(model) -> None:
                     "Tweedie profile refitting does not support model subclasses with "
                     "custom behavior: " + ", ".join(unsafe_members)
                 )
-        family = object.__getattribute__(model, "family")
+        from superglm.model.fit_state import configured_family
+
+        family = configured_family(model)
         if isinstance(family, Tweedie) and type(family) is not Tweedie:
             raise TypeError(
                 "Tweedie profile refitting requires an exact Tweedie family, not a subclass"
             )
         _validate_tweedie_profile_copy_protocols(model)
+        extension_roots = _tweedie_profile_extension_roots(model)
+        if extension_roots:
+            _validate_tweedie_profile_copy_protocols(model, roots=extension_roots)
         shadowed_methods = sorted(
             name
             for name in model_dict
@@ -423,11 +589,19 @@ def _validate_tweedie_profile_model_storage(model) -> None:
 
 def _tweedie_profile_configuration_roots(model):
     """Return mutable configuration roots copied into scratch profile models."""
+    from superglm.model.fit_state import (
+        configured_family,
+        configured_lambda2,
+        configured_link,
+        configured_penalty,
+    )
+
     return (
-        model.family,
-        model.link,
-        model.penalty,
-        model.lambda2,
+        model._config,
+        configured_family(model),
+        configured_link(model),
+        configured_penalty(model),
+        configured_lambda2(model),
         model._specs,
         model._interaction_specs,
         model._pending_interactions,
@@ -448,7 +622,36 @@ def _tweedie_profile_configuration_roots(model):
     )
 
 
-def _validate_tweedie_profile_copy_protocols(model) -> None:
+def _tweedie_profile_extension_roots(model) -> tuple[object, ...]:
+    """Return constructor extension values that FitWorkspace will deepcopy."""
+    from superglm.model.fit_workspace import _ATTEMPT_RUNTIME_OPTIONS, _SUBCLASS_STATE_NAMES
+
+    model_dict = _tweedie_profile_instance_dict(model)
+    tracked_names = model_dict.get(_SUBCLASS_STATE_NAMES)
+    if tracked_names is None:
+        baseline = model._config.materialize(type(model))
+        base_names = set(_tweedie_profile_instance_dict(baseline))
+        tracked_names = tuple(
+            sorted(
+                name
+                for name in model_dict
+                if name not in base_names and name not in _ATTEMPT_RUNTIME_OPTIONS
+            )
+        )
+    elif type(tracked_names) is not tuple or any(type(name) is not str for name in tracked_names):
+        raise TypeError("Tweedie profile workspace extension tracking is invalid")
+    missing = [name for name in tracked_names if name not in model_dict]
+    if missing:
+        raise RuntimeError(f"tracked subclass fit state {missing[0]!r} is missing")
+    return tuple(model_dict[name] for name in tracked_names)
+
+
+def _tweedie_profile_clone_roots(model) -> tuple[object, ...]:
+    """Return base configuration and tracked extension graphs for isolation checks."""
+    return (*_tweedie_profile_configuration_roots(model), *_tweedie_profile_extension_roots(model))
+
+
+def _validate_tweedie_profile_copy_protocols(model, *, roots=None) -> None:
     """Reject user copy hooks that could mutate the caller during scratch cloning."""
     from fractions import Fraction
     from uuid import UUID, SafeUUID
@@ -641,7 +844,9 @@ def _validate_tweedie_profile_copy_protocols(model) -> None:
             )
         visit(attributes)
 
-    for root in _tweedie_profile_configuration_roots(model):
+    if roots is None:
+        roots = _tweedie_profile_configuration_roots(model)
+    for root in roots:
         visit(root)
 
 
@@ -769,8 +974,8 @@ def _validate_tweedie_profile_clone_isolation(model, staged) -> None:
             visit(root)
         return found
 
-    shared = mutable_ids(_tweedie_profile_configuration_roots(model)) & mutable_ids(
-        _tweedie_profile_configuration_roots(staged)
+    shared = mutable_ids(_tweedie_profile_clone_roots(model)) & mutable_ids(
+        _tweedie_profile_clone_roots(staged)
     )
     if shared:
         raise RuntimeError(
@@ -833,6 +1038,214 @@ def _fit_tweedie_profile_stage(
             release_core=release_core,
         )
     return staged
+
+
+def _fit_tweedie_profile_workspace(
+    public_model,
+    final_workspace,
+    X,
+    y,
+    sample_weight,
+    offset,
+    installed_result,
+    returned_result,
+    prepared,
+    *,
+    resolved_mode: str,
+    caller_publication,
+    caller_fit_revision: int,
+    selected_config,
+) -> None:
+    """Fit, certify, and publish one SuperGLM profile candidate."""
+    from superglm.model import fit_ops
+    from superglm.model.fit_state import _install_fit_state, capture_fit_state
+
+    final_model = final_workspace.model
+    debug_recorder = None
+    if resolved_mode == "fit_reml":
+        debug_recorder = fit_ops._fit_reml_in_workspace(
+            final_model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X,
+            y_ref=y,
+            sample_weight_ref=sample_weight,
+            offset_ref=offset,
+            pirls_tol=final_model._tol,
+            max_pirls_iter=final_model._max_iter,
+        )
+    else:
+        fit_ops._fit_in_workspace(
+            final_model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X,
+            y_ref=y,
+            sample_weight_ref=sample_weight,
+            offset_ref=offset,
+        )
+
+    _synchronize_tweedie_profile_refit(final_model, y, installed_result)
+    _validate_tweedie_profile_stage(
+        final_model,
+        X,
+        y,
+        sample_weight,
+        offset,
+        installed_result,
+        resolved_mode,
+    )
+    _validate_tweedie_profile_result_for_refit(installed_result, prepared)
+
+    retain_fit_state = bool(caller_publication.config.retain_fit_state)
+    if not retain_fit_state:
+        final_model._retain_fit_state = False
+        release_core = _snapshot_tweedie_profile_release_core(
+            final_model,
+            X=X,
+            offset=offset,
+        )
+        fit_ops._maybe_release_fit_state(final_model)
+        _validate_released_tweedie_profile_stage(
+            final_model,
+            X,
+            offset,
+            installed_result,
+            release_core=release_core,
+        )
+        returned_result.detach_evaluator()
+        installed_result.detach_evaluator()
+        _validate_detached_tweedie_profile_result(returned_result)
+        _validate_detached_tweedie_profile_result(installed_result)
+
+    final_model._tweedie_profile_result = installed_result
+    published_config = _tweedie_profile_publication_config(selected_config, final_model)
+    publication = replace(
+        caller_publication,
+        config=published_config,
+        revision=caller_publication.revision + 1,
+        family=final_model._family_config,
+    )
+    candidate = capture_fit_state(
+        final_workspace,
+        public_model,
+        revision=caller_fit_revision + 1,
+        config_publication=publication,
+    )
+    _validate_tweedie_profile_candidate(
+        candidate,
+        final_model,
+        installed_result,
+        published_config,
+        publication,
+        expected_config_revision=caller_publication.revision + 1,
+        expected_fit_revision=caller_fit_revision + 1,
+        retain_fit_state=retain_fit_state,
+    )
+    _install_fit_state(public_model, candidate)
+    if resolved_mode == "fit_reml":
+        fit_ops._record_reml_terminal_best_effort(public_model, debug_recorder)
+
+
+def _tweedie_profile_publication_config(selected_config, final_model):
+    """Publish resolved interactions without changing other constructor intent."""
+    return selected_config.with_value(
+        interactions=tuple(final_model._pending_interactions),
+        interaction_templates=tuple(
+            (name, final_model._interaction_specs[name]) for name in final_model._interaction_order
+        ),
+        interaction_order=tuple(final_model._interaction_order),
+    )
+
+
+def _validate_tweedie_profile_candidate(
+    candidate,
+    final_model,
+    installed_result,
+    published_config,
+    publication,
+    *,
+    expected_config_revision: int,
+    expected_fit_revision: int,
+    retain_fit_state: bool,
+) -> None:
+    """Check configuration, fitted state, and retention as one publication unit."""
+    from superglm.model.fit_data_guard import FitDataGuard
+    from superglm.model.fit_state import fitted_penalty
+
+    prepared = candidate.prepared_model_dict
+    state = candidate.state
+    failures = []
+    if prepared.get("_tweedie_profile_result") is not installed_result:
+        failures.append("profile result ownership")
+    publication_slots = publication.as_model_dict()
+    if prepared.get("_config_revision") != expected_config_revision or any(
+        prepared.get(name) is not value for name, value in publication_slots.items()
+    ):
+        failures.append("configuration publication")
+    published_family = published_config.family
+    raw_family = prepared.get("_family_config")
+    if (
+        type(published_family) is not Tweedie
+        or type(raw_family) is not Tweedie
+        or published_family.p != raw_family.p
+    ):
+        failures.append("configuration coherence")
+    if (
+        state.distribution is not final_model._distribution
+        or prepared.get("_distribution") is not state.distribution
+        or prepared.get("_fit_state") is not state
+        or prepared.get("_fit_revision") != expected_fit_revision
+        or state.revision != expected_fit_revision
+    ):
+        failures.append("fitted distribution publication")
+    resolved_penalty = fitted_penalty(final_model)
+    if (
+        state.resolved_penalty is not resolved_penalty
+        or prepared.get("_resolved_penalty") is not resolved_penalty
+    ):
+        failures.append("fitted penalty publication")
+    if (
+        bool(prepared.get("_retain_fit_state")) is not retain_fit_state
+        or bool(state.retained) is not retain_fit_state
+    ):
+        failures.append("retention publication")
+
+    pending = tuple(prepared.get("_pending_interactions", ()))
+    interaction_order = tuple(prepared.get("_interaction_order", ()))
+    interaction_specs = prepared.get("_interaction_specs")
+    if (
+        published_config.interactions != pending
+        or published_config.interaction_order != interaction_order
+        or type(interaction_specs) is not dict
+        or tuple(name for name, _ in published_config.interaction_templates) != interaction_order
+        or any(name not in interaction_specs for name in interaction_order)
+    ):
+        failures.append("interaction configuration publication")
+
+    guard = prepared.get("_fit_data_guard")
+    expected_columns = tuple(prepared.get("_feature_order", ()))
+    if retain_fit_state:
+        if type(guard) is not FitDataGuard or guard.x_columns != expected_columns:
+            failures.append("fit-data guard publication")
+    elif guard is not None or any(
+        prepared.get(name) is not None
+        for name in (
+            "_fit_X_ref",
+            "_fit_y_ref",
+            "_fit_sample_weight_ref",
+            "_fit_offset_ref",
+        )
+    ):
+        failures.append("compact row-state publication")
+
+    if failures:
+        joined = ", ".join(dict.fromkeys(failures))
+        raise RuntimeError(f"Tweedie fit candidate is not installable: invalid {joined}")
 
 
 def _commit_tweedie_profile_state(model, staged, result, caller_state) -> None:
@@ -1420,18 +1833,18 @@ def _validate_tweedie_profile_stage(
     resolved_mode: str,
 ) -> None:
     """Certify the synchronized staged fit before it can replace caller state."""
+    from superglm.model.fit_state import configured_family
     from superglm.solvers.pirls import PIRLSResult
     from superglm.types import FitStats
 
     failures = []
+    family = configured_family(model)
     distribution = getattr(model, "_distribution", None)
-    if not isinstance(model.family, Tweedie) or not isinstance(distribution, Tweedie):
+    if type(family) is not Tweedie or type(distribution) is not Tweedie:
         failures.append("Tweedie family/distribution")
     else:
-        if model.family is not distribution:
-            failures.append("family/distribution identity")
-        if not _is_finite_tweedie_scalar(model.family.p) or not np.isclose(
-            float(model.family.p), float(result.p_hat), rtol=0.0, atol=1e-14
+        if not _is_finite_tweedie_scalar(family.p) or not np.isclose(
+            float(family.p), float(result.p_hat), rtol=0.0, atol=1e-14
         ):
             failures.append("family power")
         if not _is_finite_tweedie_scalar(distribution.p) or not np.isclose(
@@ -1733,6 +2146,14 @@ def _validate_tweedie_profile_stage(
         if getattr(model, name, None) is not expected:
             failures.append("final fit input ownership")
 
+    from superglm.model.fit_data_guard import FitDataGuard
+
+    fit_data_guard = getattr(model, "_fit_data_guard", None)
+    if type(fit_data_guard) is not FitDataGuard or fit_data_guard.x_columns != tuple(
+        model._feature_order
+    ):
+        failures.append("fit-data guard")
+
     if _live_tweedie_profile_context(result) is not None:
         trace = result.search_trace
         winner_rows = trace.loc[trace["p"] == float(result.p_hat)]
@@ -1759,6 +2180,8 @@ def _validate_tweedie_profile_stage(
 
 def _snapshot_tweedie_profile_release_core(model, *, X=None, offset=None):
     """Capture state that row-release is never permitted to alter."""
+    from superglm.model.fit_state import configured_family
+
     mutable_keys = {
         "_coef_covariance",
         "_fit_active_info",
@@ -1773,6 +2196,7 @@ def _snapshot_tweedie_profile_release_core(model, *, X=None, offset=None):
         "_fit_y_ref",
         "_fit_sample_weight_ref",
         "_fit_offset_ref",
+        "_fit_data_guard",
         "_fit_metrics_cache",
         "_fit_metrics_cache_signature",
         "_summary_cache",
@@ -1848,7 +2272,7 @@ def _snapshot_tweedie_profile_release_core(model, *, X=None, offset=None):
         "public_result": fitted_result_state(getattr(model, "_result", None)),
         "solver_result": fitted_result_state(getattr(model, "_solver_result", None)),
         "fit_stats": fit_stats_state,
-        "family_p": getattr(getattr(model, "family", None), "p", None),
+        "family_p": getattr(configured_family(model), "p", None),
         "distribution_p": getattr(getattr(model, "_distribution", None), "p", None),
         "reml": reml_state,
         "meta": None if type(meta) is not dict else meta.copy(),
@@ -1867,6 +2291,8 @@ def _validate_tweedie_profile_release_core_unchanged(
     offset=None,
 ) -> None:
     """Reject any semantic mutation performed by row-state release."""
+    from superglm.model.fit_state import configured_family
+
     stable_state = snapshot["stable_state"]
     mutable_keys = {
         "_coef_covariance",
@@ -1882,6 +2308,7 @@ def _validate_tweedie_profile_release_core_unchanged(
         "_fit_y_ref",
         "_fit_sample_weight_ref",
         "_fit_offset_ref",
+        "_fit_data_guard",
         "_fit_metrics_cache",
         "_fit_metrics_cache_signature",
         "_summary_cache",
@@ -1937,7 +2364,7 @@ def _validate_tweedie_profile_release_core_unchanged(
     if current_fit_stats != snapshot["fit_stats"]:
         failures.append("released fit-statistics state")
     if (
-        getattr(getattr(model, "family", None), "p", None) != snapshot["family_p"]
+        getattr(configured_family(model), "p", None) != snapshot["family_p"]
         or getattr(getattr(model, "_distribution", None), "p", None) != snapshot["distribution_p"]
     ):
         failures.append("released family state")
@@ -2057,6 +2484,7 @@ def _validate_released_tweedie_profile_stage(
         "_fit_y_ref",
         "_fit_sample_weight_ref",
         "_fit_offset_ref",
+        "_fit_data_guard",
     ):
         if getattr(model, name, None) is not None:
             failures.append("released row state")
@@ -2103,8 +2531,6 @@ def _validate_released_tweedie_inference(model, result, failures) -> None:
     if not _is_finite_tweedie_vector(edf):
         failures.append("released inference state")
         return
-    if np.any(edf < -0.01) or np.any(edf > 1.01):
-        failures.append("released coefficient EDF state")
     n_active = len(edf)
     edf1 = inference["edf1"]
     solver_result = getattr(model, "_solver_result", None)
@@ -2124,8 +2550,10 @@ def _validate_released_tweedie_inference(model, result, failures) -> None:
         or not _is_tweedie_bool_vector(inference["coefficient_estimable"], length=n_coefficients)
     ):
         failures.append("released inference state")
-    elif np.any(edf1 < -0.01) or np.any(edf1 > 1.01):
-        failures.append("released coefficient EDF1 state")
+    # These are coefficient-coordinate contributions, not observation-space
+    # hat diagonals.  With non-orthogonal spline/interaction bases individual
+    # entries may legitimately be negative or exceed one; their finite shape,
+    # group sums, and total effective DF are certified below.
 
     active_groups = inference["active_groups"]
     active_groups_valid = type(active_groups) is list and all(
@@ -2234,6 +2662,211 @@ def _snapshot_tweedie_profile_refit_inputs(X, y, sample_weight, offset):
     return X, y, sample_weight, offset
 
 
+_TWEEDIE_PROFILE_SHARED_RUNTIME_FIELDS = frozenset(
+    {
+        "_evaluator",
+        "_objective",
+        "_evaluation_count",
+        "_evaluation_record",
+        "_validation_token",
+    }
+)
+
+
+def _copy_tweedie_profile_trace_for_publication(trace):
+    """Copy one certified trace without following arbitrary object payloads."""
+    import pandas as pd
+
+    from superglm.profiling.tweedie import _TRACE_COLUMNS
+
+    if type(trace) is not pd.DataFrame:
+        raise RuntimeError("certified Tweedie result has an invalid search trace")
+    columns = tuple(trace.columns)
+    if any(type(name) is not str or name not in _TRACE_COLUMNS for name in columns):
+        raise RuntimeError("certified Tweedie result has an invalid search trace column")
+
+    copied = {}
+    for name in columns:
+        values = []
+        for value in trace[name].tolist():
+            if name == "fit_trace":
+                if type(value) is not list:
+                    raise RuntimeError("certified Tweedie result has an invalid fit trace")
+                fit_rows = []
+                for row in value:
+                    if type(row) is not dict:
+                        raise RuntimeError("certified Tweedie result has an invalid fit trace")
+                    row_keys = tuple(row)
+                    if (
+                        len(row_keys) != 2
+                        or any(type(key) is not str for key in row_keys)
+                        or set(row_keys) != {"iteration", "loss"}
+                    ):
+                        raise RuntimeError("certified Tweedie result has an invalid fit trace")
+                    iteration = row["iteration"]
+                    loss = row["loss"]
+                    if (
+                        type(iteration) not in _TWEEDIE_EXACT_INTEGER_SCALAR_TYPES
+                        or int(iteration) < 0
+                        or not _is_finite_tweedie_scalar(loss)
+                    ):
+                        raise RuntimeError("certified Tweedie result has an invalid fit trace")
+                    fit_rows.append({"iteration": int(iteration), "loss": float(loss)})
+                values.append(fit_rows)
+                continue
+            if not (
+                value is None
+                or type(value) in {bool, str, np.bool_}
+                or type(value) in _TWEEDIE_EXACT_REAL_SCALAR_TYPES
+            ):
+                raise RuntimeError("certified Tweedie result has an unsafe search trace value")
+            values.append(value)
+        copied[name] = values
+    return pd.DataFrame(copied, columns=list(columns))
+
+
+def _copy_tweedie_profile_ci_value(value):
+    """Recursively own an exact library CI graph without user copy hooks."""
+    from superglm.profiling.tweedie import (
+        TweedieProfileCIDensityProvenance,
+        TweedieProfileCIDetails,
+        TweedieProfileCIEndpoint,
+        TweedieProfileCIEvaluation,
+    )
+
+    if value is None or type(value) in {bool, int, float, str, np.bool_}:
+        return value
+    if type(value) in _TWEEDIE_EXACT_NUMPY_SCALAR_TYPES:
+        return value.copy()
+    if type(value) is tuple:
+        return tuple(_copy_tweedie_profile_ci_value(item) for item in value)
+    allowed_records = {
+        TweedieProfileCIDensityProvenance,
+        TweedieProfileCIDetails,
+        TweedieProfileCIEndpoint,
+        TweedieProfileCIEvaluation,
+    }
+    if type(value) in allowed_records:
+        return type(value)(
+            **{
+                field.name: _copy_tweedie_profile_ci_value(
+                    object.__getattribute__(value, field.name)
+                )
+                for field in fields(value)
+            }
+        )
+    raise RuntimeError("certified Tweedie result has an unsafe confidence-interval cache")
+
+
+def _copy_tweedie_profile_caches_for_publication(result):
+    """Snapshot certified CI caches before user progress callbacks run."""
+    from superglm.profiling.tweedie import TweedieProfileCIDetails
+
+    cache = result.__dict__.get("_ci_cache")
+    details_cache = result.__dict__.get("_ci_details_cache")
+    signatures = result.__dict__.get("_emitted_ci_density_warning_signatures")
+    if type(cache) is not dict or type(details_cache) is not dict or type(signatures) is not set:
+        raise RuntimeError("certified Tweedie result has invalid confidence-interval caches")
+
+    copied_cache = {}
+    for alpha, interval in cache.items():
+        if (
+            not _is_finite_tweedie_scalar(alpha)
+            or not 0.0 < float(alpha) < 1.0
+            or type(interval) is not tuple
+            or len(interval) != 2
+            or any(not _is_finite_tweedie_scalar(endpoint) for endpoint in interval)
+        ):
+            raise RuntimeError("certified Tweedie result has an invalid cached interval")
+        copied_cache[float(alpha)] = tuple(float(endpoint) for endpoint in interval)
+
+    copied_details = {}
+    for alpha, details in details_cache.items():
+        if not _is_finite_tweedie_scalar(alpha) or not 0.0 < float(alpha) < 1.0:
+            raise RuntimeError("certified Tweedie result has invalid cached CI details")
+        copied_details[float(alpha)] = _copy_tweedie_profile_ci_value(details)
+    for alpha, details in tuple(copied_details.items()):
+        if (
+            type(details) is not TweedieProfileCIDetails
+            or alpha not in copied_cache
+            or float(details.alpha) != alpha
+            or tuple(details.interval) != copied_cache[alpha]
+        ):
+            raise RuntimeError("certified Tweedie result has incoherent cached CI details")
+        copied_details[alpha] = replace(details, interval=copied_cache[alpha])
+    if any(type(signature) is not str for signature in signatures):
+        raise RuntimeError("certified Tweedie result has invalid CI warning state")
+    return copied_cache, copied_details, set(signatures)
+
+
+def _installed_tweedie_profile_copy(result):
+    """Fork a certified result while retaining its guarded lazy evaluator.
+
+    The public result remains usable for later lazy likelihood-ratio inference.
+    Its objective/evaluation registry is shared, but estimate-dependent CI
+    caches are independently owned: mutating a returned estimate and then
+    calling ``ci()`` must not poison the installed model's connected profile
+    component. Core estimates and reporting containers are independent too.
+    """
+    from superglm.profiling.tweedie import TweedieProfileResult, _TweedieProfileEvaluator
+
+    if type(result) is not TweedieProfileResult:
+        raise TypeError("installed Tweedie profile results require the exact result type")
+
+    def fork():
+        source = result.__dict__
+        ci_cache, ci_details_cache, warning_signatures = (
+            _copy_tweedie_profile_caches_for_publication(result)
+        )
+        installed_state = {}
+        for field in fields(result):
+            if field.name not in source:
+                raise RuntimeError(f"certified Tweedie result is missing {field.name!r}")
+            value = source[field.name]
+            if field.name in _TWEEDIE_PROFILE_SHARED_RUNTIME_FIELDS:
+                installed_state[field.name] = value
+            elif field.name == "search_trace":
+                installed_state[field.name] = _copy_tweedie_profile_trace_for_publication(value)
+            elif field.name == "warnings":
+                if type(value) is not list or any(type(message) is not str for message in value):
+                    raise RuntimeError("certified Tweedie result has invalid warnings")
+                installed_state[field.name] = list(value)
+            elif field.name == "_ci_cache":
+                installed_state[field.name] = ci_cache
+            elif field.name == "_ci_details_cache":
+                installed_state[field.name] = ci_details_cache
+            elif field.name == "_emitted_ci_density_warning_signatures":
+                installed_state[field.name] = warning_signatures
+            elif field.name in {"_ci_p_range", "_ci_seed_points"}:
+                installed_state[field.name] = _copy_tweedie_profile_ci_value(value)
+            elif (
+                value is None
+                or type(value)
+                in {
+                    bool,
+                    int,
+                    float,
+                    str,
+                    np.bool_,
+                }
+                or type(value) in _TWEEDIE_EXACT_NUMPY_SCALAR_TYPES
+            ):
+                installed_state[field.name] = value
+            else:
+                raise RuntimeError(f"certified Tweedie result has unsafe field {field.name!r}")
+        installed = object.__new__(TweedieProfileResult)
+        object.__setattr__(installed, "__dict__", installed_state)
+        return installed
+
+    evaluator = result.__dict__.get("_evaluator")
+    if type(evaluator) is _TweedieProfileEvaluator:
+        with evaluator._lock:
+            if result.__dict__.get("_evaluator") is not evaluator:
+                raise RuntimeError("Tweedie profile evaluator changed during publication")
+            return fork()
+    return fork()
+
+
 def _replace_dataclass_preserving_dynamic_attributes(instance, **changes):
     """Replace dataclass fields without dropping solver-added attributes."""
     replacement = replace(instance, **changes)
@@ -2254,9 +2887,16 @@ def _synchronize_tweedie_profile_refit(model, y, profile_result) -> None:
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
     from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
+    from superglm.model.fit_state import configured_family
 
+    family = configured_family(model)
     distribution = model._distribution
-    if not isinstance(distribution, Tweedie) or distribution.p != profile_result.p_hat:
+    if (
+        type(family) is not Tweedie
+        or type(distribution) is not Tweedie
+        or family.p != profile_result.p_hat
+        or distribution.p != profile_result.p_hat
+    ):
         raise RuntimeError("Final Tweedie refit does not match the profiled power parameter")
     if model._dm is None or model._fit_weights is None:
         raise RuntimeError("Final Tweedie refit state was released before synchronization")
@@ -2295,7 +2935,6 @@ def _synchronize_tweedie_profile_refit(model, y, profile_result) -> None:
         )
     )
 
-    model.family = distribution
     model._result = replacement_public
     model._solver_result = replacement_solver
     if reml_result is not None:
@@ -2317,24 +2956,112 @@ def _synchronize_tweedie_profile_refit(model, y, profile_result) -> None:
 
 
 def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fit", **kwargs):
-    """Estimate NB theta via profile likelihood, refit, and return result."""
+    """Estimate NB theta and atomically publish one profiled final fit."""
+    from superglm.model import fit_ops
+    from superglm.model.fit_state import _install_fit_state, capture_fit_state
+    from superglm.model.fit_workspace import FitWorkspace
     from superglm.profiling.nb import estimate_nb_theta
 
     resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
-
     progress_callback = kwargs.pop("progress_callback", None)
-    result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset, **kwargs)
+
+    X_ref = X
+    y_ref = y
+    sample_weight_ref = sample_weight
+    offset_ref = offset
+    X, y, sample_weight, offset = fit_ops._validate_entrypoint_input(
+        model,
+        X,
+        y,
+        sample_weight,
+        offset,
+    )
+    validated_inputs = (X, y, sample_weight, offset)
+
+    profile_workspace = FitWorkspace.start(
+        model,
+        mode="estimate_theta_profile",
+        validated_inputs=validated_inputs,
+    )
+    result = estimate_nb_theta(
+        profile_workspace.model,
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+        **kwargs,
+    )
+    # The profile result retains only the vectors needed for reporting/CI.
+    # Release its design workspace before allocating the final-fit design.
+    del profile_workspace
     if progress_callback is not None:
         progress_callback("best_found", {"profile_estimate": _theta_estimate_payload(result)})
-    model.family = NegativeBinomial(theta=result.theta_hat)
     if progress_callback is not None:
         progress_callback("final_refit", {"profile_estimate": _theta_estimate_payload(result)})
+
+    final_workspace = FitWorkspace.start(
+        model,
+        mode=resolved_mode,
+        validated_inputs=validated_inputs,
+        config_overrides={
+            "family": NegativeBinomial(theta=result.theta_hat),
+            # Profile publication must synchronize against the final refit even
+            # when the public model requests compact fitted state.  Row-scale
+            # buffers are released again before the atomic install below.
+            "retain_fit_state": True,
+        },
+    )
+    debug_recorder = None
     if resolved_mode == "fit_reml":
-        model.fit_reml(X, y, sample_weight=sample_weight, offset=offset)
+        debug_recorder = fit_ops._fit_reml_in_workspace(
+            final_workspace.model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+            pirls_tol=final_workspace.model._tol,
+            max_pirls_iter=final_workspace.model._max_iter,
+        )
     else:
-        model.fit(X, y, sample_weight=sample_weight, offset=offset)
-    model._nb_profile_result = result  # after refit so fit()'s clear doesn't wipe it
-    return result
+        fit_ops._fit_in_workspace(
+            final_workspace.model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+        )
+
+    final_model = final_workspace.model
+    installed_result = result._published_with_data(
+        y,
+        final_model._fit_mu,
+        final_model._fit_weights,
+    )
+    final_model._nb_profile_result = installed_result
+    if not model._retain_fit_state:
+        final_model._retain_fit_state = False
+        fit_ops._maybe_release_fit_state(final_model)
+    # Allocate the distinct public handle before the no-fail dictionary swap.
+    # A future custom result implementation may make this operation fallible;
+    # such a failure must preserve the previously installed model revision.
+    public_result = installed_result._detached_public_copy()
+    candidate = capture_fit_state(
+        final_workspace,
+        model,
+        revision=model._fit_revision + 1,
+    )
+    _install_fit_state(model, candidate)
+    if resolved_mode == "fit_reml":
+        fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
+    return public_result
 
 
 def _resolve_profile_fit_mode(model, fit_mode: str) -> str:

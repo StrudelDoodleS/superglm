@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,12 @@ from . import (
     profile_ops,
     report_ops,
     state_ops,
+)
+from .fit_state import (
+    configured_family,
+    configured_lambda2,
+    configured_link,
+    configured_penalty,
 )
 
 if TYPE_CHECKING:
@@ -182,10 +189,148 @@ class SuperGLM:
         n_features = len(self._specs) if self._specs else "?"
         return f"SuperGLM(family={family}, fitted=False, {n_features} features)"
 
+    def clone_unfitted(self) -> SuperGLM:
+        """Return an independent unfitted model with the same constructor intent.
+
+        The inherited implementation owns the :class:`SuperGLM` constructor
+        contract. Subclasses that add constructor parameters must override this
+        method so their additional configuration cannot be silently reset.
+        """
+        if type(self) is SuperGLM:
+            return self._config.materialize(SuperGLM)
+
+        import inspect
+        import warnings
+
+        base_parameters = set(inspect.signature(SuperGLM.__init__).parameters) - {"self"}
+        subclass_parameters = inspect.signature(type(self).__init__).parameters
+        additional_parameters = {
+            name
+            for name, parameter in subclass_parameters.items()
+            if name != "self"
+            and parameter.kind
+            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            and name not in base_parameters
+        }
+        if additional_parameters:
+            raise TypeError(
+                f"{type(self).__name__} adds constructor configuration "
+                f"{sorted(additional_parameters)!r}; override clone_unfitted() "
+                "to preserve it explicitly"
+            )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="convergence='coefficients' is experimental",
+                category=UserWarning,
+            )
+            try:
+                cloned = type(self)(**self._config.constructor_kwargs())
+            except TypeError as exc:
+                raise TypeError(
+                    f"{type(self).__name__} cannot be reconstructed from the "
+                    "SuperGLM constructor contract; override clone_unfitted()"
+                ) from exc
+
+        cloned._interaction_specs = {
+            name: copy.deepcopy(spec) for name, spec in self._config.interaction_templates
+        }
+        cloned._interaction_order = list(self._config.interaction_order)
+        cloned._pending_interactions = tuple(self._config.interactions)
+        cloned._config = type(self._config).capture(cloned)
+        return cloned
+
     @property
     def features(self) -> dict:
-        """Feature specs dict (column name → feature object)."""
-        return self._specs
+        """Defensive fitted/configured feature-spec view."""
+        return copy.deepcopy(self._specs)
+
+    @property
+    def family(self):
+        """Defensive copy of configured family intent."""
+        return copy.deepcopy(configured_family(self))
+
+    @family.setter
+    def family(self, value) -> None:
+        owned = copy.deepcopy(value)
+        self._family_config = owned
+        if hasattr(self, "_config"):
+            self._config = self._config.with_value(family=owned)
+            self._config_revision += 1
+
+    @property
+    def link(self):
+        """Defensive copy of configured link intent."""
+        return copy.deepcopy(configured_link(self))
+
+    @link.setter
+    def link(self, value) -> None:
+        owned = copy.deepcopy(value)
+        self._link_config = owned
+        if hasattr(self, "_config"):
+            self._config = self._config.with_value(link=owned)
+            self._config_revision += 1
+
+    @property
+    def penalty(self):
+        """Defensive copy of the configured penalty template."""
+        return copy.deepcopy(configured_penalty(self))
+
+    @penalty.setter
+    def penalty(self, value) -> None:
+        owned = copy.deepcopy(value)
+        self._penalty_config = owned
+        if hasattr(self, "_config"):
+            self._config = self._config.with_value(penalty=owned)
+            self._config_revision += 1
+
+    @property
+    def selection_penalty(self) -> float | None:
+        """Configured selection-penalty intent."""
+        return configured_penalty(self).lambda1
+
+    @selection_penalty.setter
+    def selection_penalty(self, value: float | None) -> None:
+        penalty = copy.deepcopy(configured_penalty(self))
+        penalty.lambda1 = value
+        self.penalty = penalty
+
+    @property
+    def selection_penalty_(self) -> float:
+        """Resolved selection penalty from the latest successful fit."""
+        if self._fit_state is None:
+            raise RuntimeError("Model is not fitted")
+        return self._fit_state.selection_penalty
+
+    @property
+    def lambda2(self):
+        """Defensive copy of configured smoothing penalties."""
+        return copy.deepcopy(configured_lambda2(self))
+
+    @lambda2.setter
+    def lambda2(self, value) -> None:
+        owned = copy.deepcopy(value)
+        self._lambda2_config = owned
+        if hasattr(self, "_config"):
+            self._config = self._config.with_value(lambda2=owned)
+            self._config_revision += 1
+
+    @property
+    def distribution_(self) -> Distribution:
+        """Resolved distribution from the latest successful fit."""
+        if self._fit_state is None:
+            raise RuntimeError("Model is not fitted")
+        return copy.deepcopy(self._fit_state.distribution)
+
+    @property
+    def theta_(self) -> float:
+        """Resolved NB2 dispersion parameter from the latest successful fit."""
+        distribution = self.distribution_
+        theta = getattr(distribution, "theta", None)
+        if theta is None or theta == "auto":
+            raise AttributeError("theta_ is only available after fitting a negative-binomial model")
+        return float(theta)
 
     # ── Static / class helpers ────────────────────────────────────
 
@@ -395,9 +540,10 @@ class SuperGLM:
             Print progress.
         w_correction_order : int
             Order of the W(rho) implicit-differentiation correction.
-            1 = first-order (default, fast). 2 = includes second-order
-            d²W/dη² Hessian cross-terms (Wood 2011 Appendix C, computed
-            via FD approximation). Only affects the exact REML path.
+            1 gives the exact objective and gradient with a modified-Newton
+            outer Hessian (default, fast). 2 also includes the available exact
+            d²W/dη² Hessian cross-terms from Wood (2011, Appendix C). Only
+            affects the exact REML path.
 
         Returns
         -------
@@ -1246,10 +1392,25 @@ class SuperGLM:
         )
 
     def _reml_direct_gradient(
-        self, result, XtWX_S_inv, lambdas, reml_groups, penalty_ranks, phi_hat=1.0
+        self,
+        result,
+        XtWX_S_inv,
+        lambdas,
+        reml_groups,
+        penalty_ranks,
+        phi_hat=1.0,
+        *,
+        inverse_phi=None,
     ):
         return fit_ops.model_reml_direct_gradient(
-            self, result, XtWX_S_inv, lambdas, reml_groups, penalty_ranks, phi_hat
+            self,
+            result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            phi_hat,
+            inverse_phi=inverse_phi,
         )
 
     def _reml_direct_hessian(
@@ -1265,6 +1426,9 @@ class SuperGLM:
         phi_hat=1.0,
         dH_extra=None,
         dH2_cross=None,
+        *,
+        inverse_phi=None,
+        d_inverse_phi_d_penalized_deviance=None,
     ):
         return fit_ops.model_reml_direct_hessian(
             self,
@@ -1279,6 +1443,8 @@ class SuperGLM:
             phi_hat,
             dH_extra,
             dH2_cross,
+            inverse_phi=inverse_phi,
+            d_inverse_phi_d_penalized_deviance=(d_inverse_phi_d_penalized_deviance),
         )
 
     def _optimize_direct_reml(

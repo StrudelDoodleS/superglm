@@ -9,9 +9,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_centered import (
+    _try_mixed_discrete_centering,
+    _try_raw_spline_tabmat_centering,
+    _try_tabmat_centering,
     centered_gram_rhs,
     centered_rhs,
     packed_centered_gram_rhs,
+    stable_centered_gram_rhs,
 )
 from superglm.group_matrix import DesignMatrix
 
@@ -46,6 +50,14 @@ class CenteredSystem:
         return gram, xtw1, xtwz, sum_wz
 
 
+@dataclass
+class TabmatCenteringState:
+    """Fit-local safety decision for accelerated raw-moment centering."""
+
+    eligible: bool | None = None
+    raw_spline_eligible: bool | None = None
+
+
 def iter_grouped_design_chunks(dm: DesignMatrix) -> Iterator[tuple[int, int, NDArray]]:
     """Yield bounded dense rows only for rare factor-rank certification."""
     bytes_per_row = 3 * np.dtype(np.float64).itemsize * max(dm.p, 1)
@@ -68,6 +80,24 @@ def grouped_weighted_factor(
     return streamed_weighted_factor(iter_grouped_design_chunks(dm), W, center=center)
 
 
+def grouped_weighted_factor_rhs(
+    dm: DesignMatrix,
+    W: NDArray,
+    response: NDArray,
+    *,
+    center: NDArray | None = None,
+) -> tuple[NDArray, NDArray]:
+    """Return a bounded weighted QR factor and its transformed response."""
+    from superglm.solvers.rank import streamed_weighted_factor_rhs
+
+    return streamed_weighted_factor_rhs(
+        iter_grouped_design_chunks(dm),
+        W,
+        response,
+        center=center,
+    )
+
+
 def penalty_factor(penalty: NDArray) -> NDArray:
     """Return a square factor whose cross-product is a PSD penalty matrix."""
     if penalty.shape == (0, 0) or not np.any(penalty):
@@ -88,6 +118,30 @@ def grouped_augmented_factor(
     data_factor = grouped_weighted_factor(dm, W, center=center)
     smooth_factor = penalty_factor(penalty)
     return data_factor if smooth_factor.shape[0] == 0 else np.vstack((data_factor, smooth_factor))
+
+
+def grouped_augmented_factor_rhs(
+    dm: DesignMatrix,
+    W: NDArray,
+    penalty: NDArray,
+    *,
+    response: NDArray,
+    center: NDArray | None = None,
+) -> tuple[NDArray, NDArray]:
+    """Return one compact QR of the weighted data, penalty, and response."""
+    data_factor, transformed_rhs = grouped_weighted_factor_rhs(
+        dm,
+        W,
+        response,
+        center=center,
+    )
+    smooth_factor = penalty_factor(penalty)
+    if smooth_factor.shape[0] == 0:
+        return data_factor, transformed_rhs
+    joint = np.column_stack((data_factor, transformed_rhs))
+    smooth_joint = np.column_stack((smooth_factor, np.zeros(smooth_factor.shape[0])))
+    joint_factor = np.linalg.qr(np.vstack((joint, smooth_joint)), mode="r")
+    return np.asarray(joint_factor[:, :-1]), np.asarray(joint_factor[:, -1])
 
 
 def refresh_centered_rhs(
@@ -133,6 +187,9 @@ def build_centered_system(
     W: NDArray,
     z_off: NDArray,
     penalty: NDArray,
+    tabmat_split=None,
+    tabmat_state: TabmatCenteringState | None = None,
+    profile: dict | None = None,
 ) -> CenteredSystem:
     """Build a stably centered data Gram, RHS, and penalized Hessian."""
     n, p = dm.shape
@@ -152,6 +209,62 @@ def build_centered_system(
     mean_z = float(np.dot(W, z_off) / sum_w)
     z_centered = z_off - mean_z
     packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
+    if packed is None and (tabmat_state is None or tabmat_state.eligible is not False):
+        mixed_attempted, mixed = _try_mixed_discrete_centering(
+            dm=dm,
+            W=W,
+            z_centered=z_centered,
+            sum_w=sum_w,
+            preflight=tabmat_state is None or tabmat_state.eligible is None,
+        )
+        if mixed_attempted:
+            packed = mixed
+            if tabmat_state is not None:
+                # Only the first call pays for Tabmat's location/scale
+                # preflight. Every changed weight vector still receives the
+                # authoritative full-moment certificate, and a rejection
+                # permanently selects stable chunks for this inner fit.
+                tabmat_state.eligible = mixed is not None
+    # Raw-spline CSC construction is worthwhile only for a caller that owns a
+    # reusable fit-local policy state (direct PIRLS and REML do). One-shot
+    # inference/finalization calls retain the bounded stable-chunk path.
+    if (
+        packed is None
+        and tabmat_state is not None
+        and tabmat_state.raw_spline_eligible is not False
+    ):
+        raw_spline_plan = dm.get_raw_spline_tabmat_centering_plan(profile=profile)
+        if raw_spline_plan is not None:
+            packed = _try_raw_spline_tabmat_centering(
+                plan=raw_spline_plan,
+                W=W,
+                z_centered=z_centered,
+                sum_w=sum_w,
+                preflight=tabmat_state.raw_spline_eligible is None,
+                profile=profile,
+            )
+            tabmat_state.raw_spline_eligible = packed is not None
+            if packed is None and profile is not None:
+                profile["centered_spline_tabmat_stable_fallbacks"] = (
+                    profile.get("centered_spline_tabmat_stable_fallbacks", 0) + 1
+                )
+    if (
+        packed is None
+        and tabmat_split is not None
+        and (tabmat_state is None or tabmat_state.eligible is not False)
+    ):
+        packed = _try_tabmat_centering(
+            tabmat_split=tabmat_split,
+            W=W,
+            z_centered=z_centered,
+            sum_w=sum_w,
+            preflight=tabmat_state is None or tabmat_state.eligible is None,
+        )
+        if tabmat_state is not None:
+            # A rejection is permanent for this fit.  Later IRLS weights can
+            # change the centering ratio, but the stable path remains correct
+            # and avoids repeating rejected raw work.
+            tabmat_state.eligible = packed is not None
     if packed is None:
         mean_x = dm.rmatvec(W) / sum_w
         data_gram, rhs = centered_gram_rhs(
@@ -175,6 +288,53 @@ def build_centered_system(
             hessian = (
                 hessian_eigenvectors * np.maximum(hessian_eigenvalues, 0.0)[None, :]
             ) @ hessian_eigenvectors.T
+            hessian = 0.5 * (hessian + hessian.T)
+    return CenteredSystem(
+        sum_w=sum_w,
+        mean_x=_freeze(mean_x),
+        mean_z=mean_z,
+        data_gram=_freeze(data_gram),
+        rhs=_freeze(rhs),
+        penalty=_freeze(penalty_symmetric),
+        hessian=_freeze(hessian),
+    )
+
+
+def build_anchor_centered_system(
+    *,
+    dm: DesignMatrix,
+    W: NDArray,
+    z_off: NDArray,
+    penalty: NDArray,
+) -> CenteredSystem:
+    """Build an anchored system for predictors with locations beyond their scale."""
+    W = np.asarray(W, dtype=np.float64)
+    z_off = np.asarray(z_off, dtype=np.float64)
+    penalty = np.asarray(penalty, dtype=np.float64)
+    if W.shape != (dm.n,) or z_off.shape != (dm.n,):
+        raise ValueError("W and z_off must match the design row count")
+    if penalty.shape != (dm.p, dm.p):
+        raise ValueError("penalty must match the design column count")
+    if not np.all(np.isfinite(W)) or np.any(W < 0.0):
+        raise ValueError("working weights must be finite and non-negative")
+    sum_w = float(np.sum(W, dtype=np.float64))
+    if not np.isfinite(sum_w) or sum_w <= 0.0:
+        raise ValueError("working weights must have a positive finite sum")
+    mean_z = float(np.dot(W, z_off) / sum_w)
+    mean_x, data_gram, rhs = stable_centered_gram_rhs(
+        dm=dm,
+        W=W,
+        z_centered=z_off - mean_z,
+        sum_w=sum_w,
+    )
+    penalty_symmetric = 0.5 * (penalty + penalty.T)
+    hessian = 0.5 * (data_gram + data_gram.T) + penalty_symmetric
+    try:
+        np.linalg.cholesky(hessian)
+    except np.linalg.LinAlgError:
+        eigenvalues, eigenvectors = np.linalg.eigh(hessian)
+        if eigenvalues.size and eigenvalues[0] < 0.0:
+            hessian = (eigenvectors * np.maximum(eigenvalues, 0.0)[None, :]) @ eigenvectors.T
             hessian = 0.5 * (hessian + hessian.T)
     return CenteredSystem(
         sum_w=sum_w,

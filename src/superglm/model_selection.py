@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import logging
 import time
 from collections.abc import Callable, Sequence
@@ -103,42 +102,7 @@ class CrossValidationResult:
 
 def _clone_model(model):
     """Create a fresh (unfitted) copy of *model* preserving constructor config."""
-    new_penalty = copy.deepcopy(model.penalty)
-
-    interactions: list[tuple[str, str]] | None = None
-    if model._interaction_order:
-        interactions = [
-            model._interaction_specs[iname].parent_names for iname in model._interaction_order
-        ]
-    elif model._pending_interactions:
-        interactions = list(model._pending_interactions)
-
-    # A fitted auto-detect model has both _specs (populated at fit time) and
-    # _splines (the original constructor arg).  The constructor forbids passing
-    # both, so we must choose: if _specs exist use features=, otherwise fall
-    # back to the splines= auto-detect path.
-    if model._specs:
-        features = {k: copy.deepcopy(v) for k, v in model._specs.items()}
-        splines = None
-    else:
-        features = None
-        splines = list(model._splines) if model._splines else None
-
-    return type(model)(
-        family=model.family,
-        link=model.link,
-        penalty=new_penalty,
-        features=features,
-        splines=splines,
-        n_knots=model._n_knots,
-        degree=model._degree,
-        categorical_base=model._categorical_base,
-        interactions=interactions,
-        active_set=model._active_set,
-        direct_solve=model._direct_solve,
-        discrete=model._discrete,
-        n_bins=model._n_bins,
-    )
+    return model.clone_unfitted()
 
 
 # ── Built-in scorers ─────────────────────────────────────────────

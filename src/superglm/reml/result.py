@@ -54,6 +54,8 @@ class REMLResult:
     scop_states: dict | None = None  # converged SCOP state for objective reproduction
     inner_iter_history: list[int] | None = None  # PIRLS iters per outer EFS step
     objective_history: list[float] | None = None  # REML objective per outer step
+    curvature_source: str | None = None  # retained coefficient-Hessian geometry
+    termination_reason: str | None = None  # outer-optimizer terminal condition
     scop_step_norms: list[dict[str, float]] | None = None  # per-group Newton step_norm per step
     scop_fisher_fallbacks: int = 0  # total Fisher-fallback count
     managed_cleanup_names: list[str] | None = None  # SCOP names handled by managed cleanup

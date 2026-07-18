@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from superglm import Constraint, SuperGLM
+from superglm._fit_trace import MemoryTraceSink, TraceRun
 from superglm.distributions import Gaussian
 from superglm.features.spline import PSpline
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
@@ -130,15 +131,43 @@ def _scop_fit_inputs():
     return model, y_out, weights, offset
 
 
+def test_well_scaled_scop_fit_avoids_anchor_prediction_fallback(monkeypatch) -> None:
+    """Ordinary SCOP iterations retain the native matrix matvec hot path."""
+    import superglm.solvers.irls_direct as irls_direct
+
+    model, y, weights, offset = _scop_fit_inputs()
+
+    def unexpected_anchor_matvec(**kwargs):
+        raise AssertionError("anchor prediction is reserved for unsafe translated designs")
+
+    monkeypatch.setattr(irls_direct, "stable_centered_matvec", unexpected_anchor_matvec)
+    result, _ = irls_direct.fit_irls_direct(
+        model._dm,
+        y,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x": 1.0},
+        offset=offset,
+        max_iter=2,
+    )
+
+    assert result.converged or result.n_iter == 2
+
+
 def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> None:
     import superglm.solvers.irls_direct as irls_direct
 
     model, y, weights, offset = _scop_fit_inputs()
-    monkeypatch.setattr(
-        irls_direct,
-        "_select_irls_trial",
-        lambda **kwargs: _IRLSStepDecision(0.0, 0, True),
-    )
+
+    def reject_all(**kwargs):
+        for depth in range(1, 6):
+            kwargs["evaluate_state"](2.0**-depth)
+        return _IRLSStepDecision(0.0, 0, True, trials_attempted=6)
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_all)
+    sink = MemoryTraceSink()
 
     result, _, states = irls_direct.fit_irls_direct(
         model._dm,
@@ -152,6 +181,7 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
         max_iter=1,
         record_diagnostics=True,
         return_scop_state=True,
+        trace_run=TraceRun("scop-reject", sink=sink),
     )
 
     assert not result.converged
@@ -169,6 +199,16 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
     mu = result.intercept + model._dm.matvec(result.beta) + offset_arr
     expected_deviance = float(np.sum(weights * (y - mu) ** 2))
     assert result.deviance == pytest.approx(expected_deviance)
+    decision = next(event for event in sink.events if event.event_kind == "step_decision")
+    commits = [event for event in sink.events if event.event_kind == "state_commit"]
+    evaluated = {
+        event.payload["state_id"] for event in sink.events if event.event_kind == "evaluation"
+    }
+    assert decision.payload["trials_attempted"] == 6
+    assert decision.payload["committed_state_id"] == decision.payload["base_state_id"]
+    assert commits[-1].payload["state_id"] == decision.payload["base_state_id"]
+    assert all(commit.payload["state_id"] in evaluated for commit in commits)
+    assert result.state_id == decision.payload["base_state_id"]
 
 
 def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch) -> None:
@@ -191,7 +231,7 @@ def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch)
     monkeypatch.setattr(
         irls_direct,
         "_select_irls_trial",
-        lambda **kwargs: _IRLSStepDecision(0.0, 0, True),
+        lambda **kwargs: _IRLSStepDecision(0.0, 0, True, trials_attempted=6),
     )
 
     rejected, _, rejected_states = irls_direct.fit_irls_direct(
@@ -232,9 +272,10 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
 
     def select_half(**kwargs):
         kwargs["evaluate_state"](0.5)
-        return _IRLSStepDecision(0.5, 1, False)
+        return _IRLSStepDecision(0.5, 1, False, trials_attempted=2)
 
     monkeypatch.setattr(irls_direct, "_select_irls_trial", select_half)
+    sink = MemoryTraceSink()
     result, _, states = irls_direct.fit_irls_direct(
         model._dm,
         y,
@@ -247,6 +288,7 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
         max_iter=1,
         record_diagnostics=True,
         return_scop_state=True,
+        trace_run=TraceRun("scop-half", sink=sink),
     )
 
     gi, state = next(iter(states.items()))
@@ -259,6 +301,18 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
     assert result.iteration_log is not None
     assert result.iteration_log[0].step_halvings == 1
     assert not result.iteration_log[0].step_rejected
+    decision = next(event for event in sink.events if event.event_kind == "step_decision")
+    commits = [event for event in sink.events if event.event_kind == "state_commit"]
+    trial = next(
+        event
+        for event in sink.events
+        if event.event_kind == "evaluation" and event.payload["phase"] == "scop_line_search_trial"
+    )
+    assert decision.payload["trials_attempted"] == 2
+    assert decision.payload["committed_state_id"] == trial.payload["state_id"]
+    assert trial.payload["enclosing_proposal_state_id"] == decision.payload["proposal_state_id"]
+    assert commits[-1].payload["state_id"] == trial.payload["state_id"]
+    assert result.state_id == trial.payload["state_id"]
 
     expected_input = {
         gi: {
@@ -278,3 +332,114 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
         model._groups,
     )[gi].H_penalized
     np.testing.assert_allclose(state["H_scop_penalized"], expected)
+
+
+def test_scop_terminal_refresh_replaces_stale_fisher_fallback_flag(monkeypatch) -> None:
+    """The fallback flag must describe the refreshed terminal Hessian block."""
+    from dataclasses import replace
+
+    import superglm.solvers.irls_direct as irls_direct
+
+    model, y, weights, offset = _scop_fit_inputs()
+    original = irls_direct.scop_joint_newton_step
+
+    def mark_terminal_refresh(*args, **kwargs):
+        results = original(*args, **kwargs)
+        if "debug_context" not in kwargs:
+            return {
+                gi: replace(result, used_fisher_fallback=True) for gi, result in results.items()
+            }
+        return results
+
+    monkeypatch.setattr(irls_direct, "scop_joint_newton_step", mark_terminal_refresh)
+    _, _, states = irls_direct.fit_irls_direct(
+        model._dm,
+        y,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x": 1.0},
+        offset=offset,
+        max_iter=1,
+        return_scop_state=True,
+    )
+
+    assert all(state["last_fisher_fallback"] for state in states.values())
+
+
+def test_scop_trace_merit_uses_authoritative_latent_penalty(monkeypatch) -> None:
+    """SCOP merit uses lambda*S_scop in beta-space, not the mapped global block."""
+    import superglm.solvers.irls_direct as irls_direct
+
+    model, y, weights, offset = _scop_fit_inputs()
+    monkeypatch.setattr(
+        irls_direct,
+        "_select_irls_trial",
+        lambda **kwargs: _IRLSStepDecision(0.0, 0, True, trials_attempted=1),
+    )
+    sink = MemoryTraceSink()
+    lam = 2.5
+    mapped_override = 37.0 * np.eye(model._dm.p)
+
+    result, _, states = irls_direct.fit_irls_direct(
+        model._dm,
+        y,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x": lam},
+        S_override=mapped_override,
+        offset=offset,
+        max_iter=1,
+        return_scop_state=True,
+        trace_run=TraceRun("scop-latent-merit", sink=sink),
+    )
+
+    state = next(iter(states.values()))
+    initial = next(
+        event
+        for event in sink.events
+        if event.event_kind == "evaluation" and event.payload["phase"] == "initial"
+    )
+    expected = result.deviance + lam * float(
+        state["beta_eff"] @ state["S_scop"] @ state["beta_eff"]
+    )
+    assert initial.payload["penalized_deviance"] == pytest.approx(expected)
+
+
+def test_poisson_scop_terminal_inference_keeps_known_dispersion() -> None:
+    """Installing terminal SCOP EDF must not profile a known family scale."""
+    import superglm.solvers.irls_direct as irls_direct
+
+    rng = np.random.default_rng(91)
+    x = np.linspace(0.0, 1.0, 120)
+    y = rng.poisson(np.exp(0.2 + 0.7 * x)).astype(float)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.fit.increasing)},
+    )
+    y_out, weights, offset = model_build_design_matrix(
+        model,
+        frame,
+        y,
+        np.ones_like(y),
+        None,
+    )
+
+    result, _ = irls_direct.fit_irls_direct(
+        model._dm,
+        y_out,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x": 1.0},
+        offset=offset,
+    )
+
+    assert result.phi == 1.0
