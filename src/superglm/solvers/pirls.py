@@ -10,6 +10,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm._fit_trace import TraceRun
 from superglm.distributions import _VARIANCE_FLOOR, Distribution, initial_mean
 from superglm.group_matrix import (
     DenseGroupMatrix,
@@ -88,6 +89,18 @@ class IterationDiagnostics:
     working_eta_clipped: bool | None = None
     step_rejected: bool = False
     rank_truncated: bool | None = None
+    trials_attempted: int = 1
+    accepted_alpha: float = 1.0
+    base_state_id: int | None = None
+    proposal_state_id: int | None = None
+    committed_state_id: int | None = None
+    evaluation_id: int | None = None
+    state_space: str = "solver"
+    basis_id: int | None = None
+    convergence_criterion: str | None = None
+    convergence_value: float | None = None
+    convergence_tolerance: float | None = None
+    termination_reason: str | None = None
 
 
 @dataclass
@@ -102,6 +115,11 @@ class PIRLSResult:
     iteration_log: list[IterationDiagnostics] | None = None
     log_det_H: float | None = None  # log|X'WX + S| from _safe_decompose_H  # noqa: N815
     rank_info: RankInfo | None = None
+    state_id: int | None = None
+    evaluation_id: int | None = None
+    state_space: str = "solver"
+    basis_id: int | None = None
+    termination_reason: str | None = None
 
 
 def _compute_group_hessians(
@@ -151,6 +169,9 @@ def _fit_pirls_inner(
     record_diagnostics: bool = False,
     convergence: str = "deviance",
     S_override: NDArray | None = None,
+    trace_run: TraceRun | None = None,
+    trace_basis_id: int | None = None,
+    trace_purpose: str = "fit",
 ) -> PIRLSResult:
     """Single-pass PIRLS fit with proximal Newton BCD inner solver."""
     n, p = dm.shape
@@ -174,8 +195,123 @@ def _fit_pirls_inner(
     total_inner_iters = 0
     total_groups_skipped = 0
 
+    trace_enabled = trace_run is not None and trace_run.enabled
+    if trace_enabled and trace_basis_id is None:
+        assert trace_run is not None
+        trace_basis_id = trace_run.next_basis_id()
+    resolved_lambdas: tuple[tuple[str, object], ...]
+    if not trace_enabled:
+        resolved_lambdas = ()
+    elif isinstance(lambda2, dict):
+        resolved_lambdas = tuple(
+            [("selection", penalty.lambda1)]
+            + [(f"smooth:{name}", float(value)) for name, value in sorted(lambda2.items())]
+        )
+    else:
+        resolved_lambdas = (
+            ("selection", penalty.lambda1),
+            ("smooth", float(lambda2)),
+        )
+
+    def evaluate_state(
+        beta_values: NDArray,
+        intercept_value: float,
+        *,
+        phase: str,
+        outer_iteration: int,
+        alpha: float | None = None,
+    ) -> _IRLSState:
+        if trace_enabled:
+            assert trace_run is not None
+            state_id = trace_run.next_state_id()
+            evaluation_id = trace_run.next_evaluation_id()
+        else:
+            state_id = None
+            evaluation_id = None
+        state = _evaluate_irls_state(
+            dm,
+            y,
+            weights,
+            family,
+            link,
+            offset,
+            beta_values,
+            intercept_value,
+            state_id=state_id,
+            evaluation_id=evaluation_id,
+            basis_id=trace_basis_id,
+            lambdas=resolved_lambdas,
+        )
+        if trace_enabled:
+            assert trace_run is not None
+            trace_run.emit_lazy(
+                "evaluation",
+                lambda: {
+                    "state_id": state.state_id,
+                    "evaluation_id": state.evaluation_id,
+                    "solver": "pirls",
+                    "phase": phase,
+                    "outer_iteration": outer_iteration,
+                    "accepted_alpha": alpha,
+                    "state_space": state.state_space,
+                    "basis_id": state.basis_id,
+                    "lambdas": state.lambdas,
+                    "dispersion": state.dispersion,
+                    "intercept": state.intercept,
+                    "deviance": state.deviance,
+                },
+                channel="pirls",
+                purpose=trace_purpose,
+                authoritative=False,
+            )
+        return state
+
+    def emit_state_commit(
+        state: _IRLSState,
+        *,
+        outer_iteration: int,
+        fit_converged: bool,
+        convergence_criterion: str | None,
+        convergence_value: float | None,
+        termination_reason: str | None,
+    ) -> None:
+        if not trace_enabled:
+            return
+        assert trace_run is not None
+        trace_run.emit_lazy(
+            "state_commit",
+            lambda: {
+                "state_id": state.state_id,
+                "evaluation_id": state.evaluation_id,
+                "solver": "pirls",
+                "phase": "initial" if outer_iteration == 0 else "outer",
+                "outer_iteration": outer_iteration,
+                "state_space": state.state_space,
+                "basis_id": state.basis_id,
+                "lambdas": state.lambdas,
+                "dispersion": state.dispersion,
+                "intercept": state.intercept,
+                "deviance": state.deviance,
+                "fit_converged": fit_converged,
+                "convergence_criterion": convergence_criterion,
+                "convergence_value": convergence_value,
+                "convergence_tolerance": tol,
+                "termination_reason": termination_reason,
+            },
+            channel="pirls",
+            purpose=trace_purpose,
+        )
+
     # Freeze the fit-entry state so every trial is evaluated from fixed endpoints.
-    committed = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+    committed = evaluate_state(beta, intercept, phase="initial", outer_iteration=0)
+    emit_state_commit(
+        committed,
+        outer_iteration=0,
+        fit_converged=False,
+        convergence_criterion=None,
+        convergence_value=None,
+        termination_reason=None,
+    )
     dev_prev = committed.deviance
     if not np.isfinite(dev_prev):
         dev_prev = np.inf
@@ -276,7 +412,13 @@ def _fit_pirls_inner(
         total_inner_iters += inner_iters
         t_inner_total += time.perf_counter() - t_inner_start
 
-        proposal = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+        proposal = evaluate_state(
+            beta,
+            intercept,
+            phase="proposal",
+            outer_iteration=outer + 1,
+            alpha=1.0,
+        )
         trial_cache: dict[float, _IRLSState] = {1.0: proposal}
 
         def evaluate_trial(alpha: float) -> _IRLSState:
@@ -284,15 +426,12 @@ def _fit_pirls_inner(
             intercept_trial = committed.intercept + alpha * (
                 proposal.intercept - committed.intercept
             )
-            candidate = _evaluate_irls_state(
-                dm,
-                y,
-                weights,
-                family,
-                link,
-                offset,
+            candidate = evaluate_state(
                 beta_trial,
                 intercept_trial,
+                phase="line_search_trial",
+                outer_iteration=outer + 1,
+                alpha=alpha,
             )
             trial_cache[alpha] = candidate
             return candidate
@@ -312,6 +451,64 @@ def _fit_pirls_inner(
         dev = retained.deviance
         n_halvings = decision.step_halvings
         step_rejected = decision.step_rejected
+
+        convergence_criterion = convergence
+        if step_rejected or not np.isfinite(dev):
+            convergence_value = float("inf")
+            iteration_converged = False
+        elif convergence == "coefficients":
+            coef_change = float(np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta))))
+            convergence_value = max(
+                coef_change,
+                abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
+            )
+            iteration_converged = convergence_value < tol
+        else:
+            convergence_value = abs(dev - dev_prev) / (abs(dev_prev) + 1.0)
+            iteration_converged = convergence_value < tol
+
+        if step_rejected:
+            termination_reason = "step_rejected"
+        elif not np.isfinite(dev):
+            termination_reason = "nonfinite_deviance"
+        elif iteration_converged:
+            termination_reason = "converged"
+        elif outer + 1 == max_iter_outer:
+            termination_reason = "max_iter"
+        else:
+            termination_reason = "continue"
+
+        if trace_enabled:
+            assert trace_run is not None
+            trace_run.emit_lazy(
+                "step_decision",
+                lambda: {
+                    "solver": "pirls",
+                    "outer_iteration": outer + 1,
+                    "base_state_id": committed.state_id,
+                    "proposal_state_id": proposal.state_id,
+                    "committed_state_id": retained.state_id,
+                    "accepted_alpha": decision.alpha,
+                    "step_halvings": decision.step_halvings,
+                    "trials_attempted": decision.trials_attempted,
+                    "step_rejected": decision.step_rejected,
+                    "fit_converged": iteration_converged,
+                    "convergence_criterion": convergence_criterion,
+                    "convergence_value": convergence_value,
+                    "convergence_tolerance": tol,
+                    "termination_reason": termination_reason,
+                },
+                channel="pirls",
+                purpose=trace_purpose,
+            )
+        emit_state_commit(
+            retained,
+            outer_iteration=outer + 1,
+            fit_converged=iteration_converged,
+            convergence_criterion=convergence_criterion,
+            convergence_value=convergence_value,
+            termination_reason=termination_reason,
+        )
         if n_halvings:
             logger.info(
                 "  PIRLS outer=%d: accepted step fraction %.5g after %d halvings, dev=%.2e",
@@ -371,6 +568,18 @@ def _fit_pirls_inner(
                     working_eta_max_unclipped=float(np.max(eta_unclipped)),
                     working_eta_clipped=working_eta_clipped,
                     step_rejected=step_rejected,
+                    trials_attempted=decision.trials_attempted,
+                    accepted_alpha=decision.alpha,
+                    base_state_id=committed.state_id,
+                    proposal_state_id=proposal.state_id,
+                    committed_state_id=retained.state_id,
+                    evaluation_id=retained.evaluation_id,
+                    state_space=retained.state_space,
+                    basis_id=retained.basis_id,
+                    convergence_criterion=convergence_criterion,
+                    convergence_value=convergence_value,
+                    convergence_tolerance=tol,
+                    termination_reason=termination_reason,
                 )
             )
 
@@ -396,19 +605,9 @@ def _fit_pirls_inner(
             logger.warning(f"PIRLS non-finite deviance at outer={outer + 1}: dev={dev:.2e}")
             break
 
-        if convergence == "coefficients":
-            coef_change = float(np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta))))
-            coef_change = max(
-                coef_change,
-                abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
-            )
-            if coef_change < tol:
-                converged = True
-                break
-        else:
-            if abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < tol:
-                converged = True
-                break
+        if iteration_converged:
+            converged = True
+            break
         committed = retained
         dev_prev = dev
 
@@ -591,6 +790,11 @@ def _fit_pirls_inner(
         effective_df=p_eff,
         iteration_log=iteration_log if record_diagnostics else None,
         rank_info=rank_info,
+        state_id=retained.state_id,
+        evaluation_id=retained.evaluation_id,
+        state_space=retained.state_space,
+        basis_id=retained.basis_id,
+        termination_reason=termination_reason,
     )
 
 
@@ -620,6 +824,7 @@ def fit_pirls(
     record_diagnostics: bool = False,
     convergence: str = "deviance",
     S_override: NDArray | None = None,
+    trace_run: TraceRun | None = None,
 ) -> PIRLSResult:
     """Fit a penalised GLM via PIRLS with proximal Newton BCD.
 
@@ -637,6 +842,10 @@ def fit_pirls(
 
     if offset is None:
         offset = np.zeros(n)
+
+    trace_basis_id = (
+        trace_run.next_basis_id() if trace_run is not None and trace_run.enabled else None
+    )
 
     # Stage 1: initial fit
     result = _fit_pirls_inner(
@@ -658,6 +867,9 @@ def fit_pirls(
         record_diagnostics=record_diagnostics,
         convergence=convergence,
         S_override=S_override,
+        trace_run=trace_run,
+        trace_basis_id=trace_basis_id,
+        trace_purpose="initial_flavor_fit" if penalty.flavor is not None else "fit",
     )
 
     # Stage 2: if flavor, adjust weights and refit (warm-start both beta and intercept)
@@ -684,6 +896,9 @@ def fit_pirls(
             record_diagnostics=record_diagnostics,
             convergence=convergence,
             S_override=S_override,
+            trace_run=trace_run,
+            trace_basis_id=trace_basis_id,
+            trace_purpose="adjusted_flavor_fit",
         )
 
     return result

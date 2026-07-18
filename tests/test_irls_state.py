@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from superglm._fit_trace import MemoryTraceSink, NullTraceSink, TraceRun
 from superglm.distributions import Gaussian
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.links import IdentityLink
@@ -184,6 +185,7 @@ def _fit_controlled_pirls(
     deviance_for_mean,
     *,
     convergence: str = "deviance",
+    trace_run: TraceRun | None = None,
 ):
     n = 6
     X = np.zeros((n, 1))
@@ -202,6 +204,7 @@ def _fit_controlled_pirls(
         tol=1e-12,
         record_diagnostics=True,
         convergence=convergence,
+        trace_run=trace_run,
     )
 
 
@@ -290,6 +293,108 @@ def test_pirls_rejected_proposal_does_not_select_restored_zero_group() -> None:
     assert result.rank_info.selected_group_names == ()
     assert result.rank_info.selected_columns.size == 0
     assert result.effective_df == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_alpha", "expected_attempts", "expected_committed_state"),
+    [
+        ("full", 1.0, 1, 2),
+        ("half", 0.5, 2, 3),
+        ("reject", 0.0, 6, 1),
+    ],
+)
+def test_pirls_trace_decision_commits_an_evaluated_state(
+    outcome: str,
+    expected_alpha: float,
+    expected_attempts: int,
+    expected_committed_state: int,
+) -> None:
+    def deviance_for_mean(mu: float) -> float:
+        if np.isclose(mu, 0.0):
+            return 2.0
+        if outcome == "full":
+            return 3.0
+        if outcome == "half" and np.isclose(mu, 0.5):
+            return 3.0
+        return 10.0
+
+    sink = MemoryTraceSink()
+    result = _fit_controlled_pirls(
+        deviance_for_mean,
+        trace_run=TraceRun(f"pirls-{outcome}", sink=sink, clock=lambda: 0.0),
+    )
+
+    evaluations = [event for event in sink.events if event.event_kind == "evaluation"]
+    decisions = [event for event in sink.events if event.event_kind == "step_decision"]
+    commits = [event for event in sink.events if event.event_kind == "state_commit"]
+    assert len(decisions) == 1
+    decision = decisions[0]
+    terminal_commit = commits[-1]
+    evaluated_ids = {event.payload["state_id"] for event in evaluations}
+
+    assert decision.payload["base_state_id"] == 1
+    assert decision.payload["proposal_state_id"] == 2
+    assert decision.payload["accepted_alpha"] == expected_alpha
+    assert decision.payload["trials_attempted"] == expected_attempts
+    assert decision.payload["committed_state_id"] == expected_committed_state
+    assert terminal_commit.payload["state_id"] == expected_committed_state
+    assert all(commit.payload["state_id"] in evaluated_ids for commit in commits)
+    assert result.state_id == expected_committed_state
+    assert result.iteration_log is not None
+    row = result.iteration_log[-1]
+    assert row.base_state_id == 1
+    assert row.proposal_state_id == 2
+    assert row.committed_state_id == expected_committed_state
+    assert row.trials_attempted == expected_attempts
+    if outcome == "reject":
+        assert not decision.payload["fit_converged"]
+        assert not result.converged
+
+
+def test_pirls_null_trace_does_not_change_results_or_evaluation_count() -> None:
+    counts: list[int] = []
+    results = []
+    for trace_run in (
+        None,
+        TraceRun("disabled", sink=NullTraceSink()),
+        TraceRun("enabled", sink=MemoryTraceSink()),
+    ):
+        count = 0
+
+        def deviance_for_mean(mu: float) -> float:
+            nonlocal count
+            count += 1
+            return 2.0 if np.isclose(mu, 0.0) else 3.0
+
+        results.append(_fit_controlled_pirls(deviance_for_mean, trace_run=trace_run))
+        counts.append(count)
+
+    assert counts == [counts[0]] * 3
+    for result in results[1:]:
+        np.testing.assert_array_equal(results[0].beta, result.beta)
+        assert results[0].intercept == result.intercept
+        assert results[0].deviance == result.deviance
+        assert results[0].converged == result.converged
+    assert results[0].state_id is None
+    assert results[1].state_id is None
+    assert results[2].state_id is not None
+
+
+def test_pirls_convergence_claim_uses_the_committed_state_identity() -> None:
+    sink = MemoryTraceSink()
+    result = _fit_controlled_pirls(
+        lambda mu: 2.0,
+        trace_run=TraceRun("pirls-converged", sink=sink),
+    )
+
+    decision = next(event for event in sink.events if event.event_kind == "step_decision")
+    commit = [event for event in sink.events if event.event_kind == "state_commit"][-1]
+    assert result.converged
+    assert decision.payload["fit_converged"]
+    assert decision.payload["committed_state_id"] == result.state_id
+    assert commit.payload["state_id"] == result.state_id
+    assert commit.payload["fit_converged"]
+    assert commit.payload["convergence_value"] == pytest.approx(0.0)
 
 
 def _fit_controlled_direct(
