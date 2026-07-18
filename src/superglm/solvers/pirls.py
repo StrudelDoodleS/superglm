@@ -1296,8 +1296,7 @@ def _fit_pirls_inner(
                 center=centered.mean_x,
             )
         )
-        if certified.rank != data_rank.rank:
-            data_rank = certified
+        data_rank = certified
     augmented_rank = data_rank if not np.any(selected_penalty) else decompose_gram(centered.hessian)
     if needs_factor_certification(augmented_rank):
         certified = decompose_factor(
@@ -1308,16 +1307,14 @@ def _fit_pirls_inner(
                 center=centered.mean_x,
             )
         )
-        if certified.rank != augmented_rank.rank:
-            augmented_rank = certified
+        augmented_rank = certified
     raw_gram, _, _, _ = centered.raw_weighted_moments()
     coefficient_rank = decompose_gram(raw_gram + selected_penalty)
     if needs_factor_certification(coefficient_rank):
         certified = decompose_factor(
             grouped_augmented_factor(selected_dm, W_final, selected_penalty)
         )
-        if certified.rank != coefficient_rank.rank:
-            coefficient_rank = certified
+        coefficient_rank = certified
     feature_edf = np.zeros(p)
     group_edf = {group.name: 0.0 for group in groups}
 

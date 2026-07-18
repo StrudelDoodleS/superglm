@@ -680,6 +680,69 @@ class TestDirectSolverBasic:
         assert cached.intercept == pytest.approx(uncached.intercept, abs=1e-12)
         assert cached.deviance == pytest.approx(uncached.deviance, abs=1e-12)
 
+    def test_distribution_subclass_cannot_inherit_constant_weight_cache(self, monkeypatch):
+        """Behavior-changing family subclasses must rebuild their weighted Gram."""
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gaussian, Poisson
+        from superglm.links import IdentityLink
+
+        class PoissonVarianceGaussian(Gaussian):
+            variance = Poisson.variance
+            variance_derivative = Poisson.variance_derivative
+            variance_second_derivative = Poisson.variance_second_derivative
+            deviance_unit = Poisson.deviance_unit
+
+        rng = np.random.default_rng(77)
+        n = 200
+        x = np.linspace(-1.0, 1.0, n)
+        X_raw = np.column_stack((x, x**2))
+        mean = 3.0 + 0.8 * x + 0.3 * x**2
+        y = rng.poisson(mean).astype(np.float64)
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
+        groups = [GroupSlice(name="x", start=0, end=2)]
+        family = PoissonVarianceGaussian()
+        link = IdentityLink()
+        original_centered = irls_direct.build_centered_system
+        centered_calls = 0
+
+        def counting_centered_system(*args, **kwargs):
+            nonlocal centered_calls
+            centered_calls += 1
+            return original_centered(*args, **kwargs)
+
+        assert not irls_direct._has_constant_irls_weights(family, link)
+        monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
+        actual, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones(n),
+            family=family,
+            link=link,
+            groups=groups,
+            lambda2=0.0,
+            max_iter=50,
+            tol=1e-10,
+        )
+        assert centered_calls > 1
+
+        monkeypatch.setattr(irls_direct, "_has_constant_irls_weights", lambda *_: False)
+        reference, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones(n),
+            family=family,
+            link=link,
+            groups=groups,
+            lambda2=0.0,
+            max_iter=50,
+            tol=1e-10,
+        )
+
+        assert actual.converged and reference.converged
+        np.testing.assert_allclose(actual.beta, reference.beta, rtol=0.0, atol=1e-13)
+        assert actual.intercept == pytest.approx(reference.intercept, abs=1e-13)
+        assert actual.deviance == pytest.approx(reference.deviance, abs=1e-13)
+
     def test_gamma_log_reuses_centered_gram_when_working_response_changes(self, monkeypatch):
         """Constant Gamma-log weights must not rebuild the invariant Gram."""
         import superglm.solvers.irls_direct as irls_direct

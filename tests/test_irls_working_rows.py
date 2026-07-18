@@ -4,9 +4,30 @@ from __future__ import annotations
 
 import numpy as np
 
-from superglm.distributions import Gamma, Poisson
+from superglm.distributions import Gamma, Gaussian, Poisson
 from superglm.links import IdentityLink, LogLink
 from superglm.solvers.working_rows import coefficient_working_rows
+
+
+def test_gaussian_identity_preserves_exact_constant_working_rows() -> None:
+    y = np.array([1.0, -3.0, 7.5])
+    eta = np.array([1.0e16, -1.0e16, 3.0])
+    sample_weight = np.array([0.5, 2.0, 4.0])
+
+    rows = coefficient_working_rows(
+        distribution=Gaussian(),
+        link=IdentityLink(),
+        y=y,
+        mu=eta,
+        eta=eta,
+        sample_weight=sample_weight,
+        prefer_observed=False,
+    )
+
+    np.testing.assert_array_equal(rows.response, y)
+    np.testing.assert_array_equal(rows.weights, sample_weight)
+    assert not np.shares_memory(rows.response, y)
+    assert not np.shares_memory(rows.weights, sample_weight)
 
 
 def test_gamma_log_uses_exact_observed_newton_rows() -> None:

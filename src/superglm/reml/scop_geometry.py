@@ -326,9 +326,7 @@ def _decompose_with_factor_certification(
             raise
         return certifier(center)
     if certifier is not None and needs_factor_certification(decomposition):
-        certified = certifier(center)
-        if certified.rank != decomposition.rank:
-            return certified
+        return certifier(center)
     return decomposition
 
 
@@ -609,16 +607,23 @@ def build_cached_scop_joint_geometry(
             and needs_factor_certification(decomposition)
         ):
             certified = certifier(fisher_mean_x)
-            if certified.rank != decomposition.rank:
-                # Near a suppressed shape boundary, roundoff can lift the
-                # exact penalty null direction just enough for Cholesky to
-                # report a discontinuous full rank.  Use the row/penalty
-                # factor only to certify the estimable range, then retain the
-                # observed curvature and determinant on that range.
+            # Near a suppressed shape boundary, roundoff can lift the exact
+            # penalty null direction just enough for Cholesky to report a
+            # discontinuous full rank. Equal integer ranks can also retain
+            # different cutoff-boundary subspaces. Use the row/penalty factor
+            # to certify the estimable range, then retain the observed
+            # curvature and determinant on that range.
+            if certified.rank < certified.width:
                 restricted_decomposition = _decompose_on_certified_range(
                     centered,
                     certified,
                 )
+            elif certified.rank != decomposition.rank:
+                # Fisher certifies only estimability, not the observed
+                # curvature values. If it certifies the full space while the
+                # observed Gram truncates one, let the established fallback
+                # below replace the entire geometry with Fisher curvature.
+                raise ValueError("observed curvature is singular on the certified full space")
     except ValueError:
         centered = expected_centered
         decomposition = _decompose_with_factor_certification(

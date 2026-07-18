@@ -875,9 +875,7 @@ def _fit_path_in_workspace(
     _maybe_release_fit_state(model)
 
     path_result = PathResult(
-        # A custom lambda sequence may be caller-owned.  Copy only this small
-        # vector; all other path buffers were allocated by the attempt.
-        lambda_seq=np.array(lambda_seq, dtype=np.float64, copy=True),
+        lambda_seq=lambda_seq,
         coef_path=path_data["coef_path"],
         intercept_path=intercept_path,
         deviance_path=path_data["deviance_path"],
@@ -885,17 +883,6 @@ def _fit_path_in_workspace(
         converged_path=path_data["converged_path"],
         edf_path=path_data["edf_path"],
     )
-    for values in (
-        path_result.lambda_seq,
-        path_result.coef_path,
-        path_result.intercept_path,
-        path_result.deviance_path,
-        path_result.n_iter_path,
-        path_result.converged_path,
-        path_result.edf_path,
-    ):
-        if values is not None:
-            values.setflags(write=False)
     return path_result
 
 

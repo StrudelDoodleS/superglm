@@ -733,6 +733,18 @@ def _scop_mode_newton_relative(mode: _SCOPREMLMode) -> float:
     return max(slope_relative, intercept_relative)
 
 
+def _scop_mode_tolerance(mode: _SCOPREMLMode, pirls_tol: float) -> float:
+    """Return a rank-aware numerical floor for terminal mode certification.
+
+    The authoritative observation-factor policy resolves directions only to
+    ``sqrt(eps)`` relative accuracy. A joint rank-dimensional correction
+    aggregates that factor/score roundoff at root-rank scale. This remains a
+    numerical floor, not an alternative score-based convergence criterion.
+    """
+    numerical_floor = np.sqrt(max(1, mode.hessian_rank) * np.finfo(np.float64).eps)
+    return max(10.0 * min(pirls_tol, 1.0e-10), float(numerical_floor))
+
+
 def _fit_scop_reml_mode(
     context: _SCOPREMLFitContext,
     lambdas: dict[str, float],
@@ -887,10 +899,7 @@ def _fit_scop_reml_mode(
         eta_unclipped=working_cache.get("eta_unclipped"),
     )
     mode_newton_relative = _scop_mode_newton_relative(mode)
-    mode_tolerance = max(
-        10.0 * min(context.pirls_tol, 1.0e-10),
-        np.sqrt(np.finfo(np.float64).eps),
-    )
+    mode_tolerance = _scop_mode_tolerance(mode, context.pirls_tol)
     if mode_newton_relative > mode_tolerance:
         if _certification_retry < 2:
             retry_tolerance = 10.0 ** (-10 - _certification_retry)
@@ -962,9 +971,7 @@ def _certified_terminal_rank(
     """Apply the shared Gram-first policy to one terminal-only rank claim."""
     decomposition = decompose_gram(matrix)
     if needs_factor_certification(decomposition):
-        certified = decompose_factor(factor_factory())
-        if certified.rank != decomposition.rank:
-            decomposition = certified
+        decomposition = decompose_factor(factor_factory())
     return decomposition
 
 
