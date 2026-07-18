@@ -67,6 +67,13 @@ def test_evaluate_irls_state_freezes_complete_gaussian_snapshot() -> None:
             values[0] = 123.0
 
 
+def test_solver_state_excludes_relational_convergence_metadata() -> None:
+    state = _synthetic_state(2.0)
+
+    assert "convergence_value" not in state.__dataclass_fields__
+    assert "termination_reason" not in state.__dataclass_fields__
+
+
 def test_select_irls_trial_accepts_safe_full_without_evaluating_callback() -> None:
     decision = _select_irls_trial(
         committed=_synthetic_state(2.0),
@@ -186,6 +193,7 @@ def _fit_controlled_pirls(
     *,
     convergence: str = "deviance",
     trace_run: TraceRun | None = None,
+    max_iter_outer: int = 1,
 ):
     n = 6
     X = np.zeros((n, 1))
@@ -199,7 +207,7 @@ def _fit_controlled_pirls(
         GroupLasso(lambda1=0.01),
         beta_init=np.zeros(1),
         intercept_init=0.0,
-        max_iter_outer=1,
+        max_iter_outer=max_iter_outer,
         max_iter_inner=1,
         tol=1e-12,
         record_diagnostics=True,
@@ -349,6 +357,37 @@ def test_pirls_trace_decision_commits_an_evaluated_state(
     if outcome == "reject":
         assert not decision.payload["fit_converged"]
         assert not result.converged
+
+
+def test_pirls_evaluation_trace_labels_trial_alpha_without_acceptance_claim() -> None:
+    sink = MemoryTraceSink()
+    _fit_controlled_pirls(
+        lambda mu: 2.0 if np.isclose(mu, 0.0) else 10.0,
+        trace_run=TraceRun("pirls-trial-alpha", sink=sink),
+    )
+
+    trial = next(
+        event
+        for event in sink.events
+        if event.event_kind == "evaluation" and event.payload["phase"] == "line_search_trial"
+    )
+    assert trial.payload["trial_alpha"] == pytest.approx(0.5)
+    assert "accepted_alpha" not in trial.payload
+
+
+def test_pirls_trace_links_each_iteration_to_the_previous_commit() -> None:
+    sink = MemoryTraceSink()
+    result = _fit_controlled_pirls(
+        lambda mu: 4.0 if np.isclose(mu, 0.0) else 2.0,
+        trace_run=TraceRun("pirls-lineage", sink=sink),
+        max_iter_outer=2,
+    )
+
+    decisions = [event for event in sink.events if event.event_kind == "step_decision"]
+    assert len(decisions) == 2
+    assert decisions[1].payload["base_state_id"] == decisions[0].payload["committed_state_id"]
+    assert result.state_id == decisions[1].payload["committed_state_id"]
+    assert result.converged
 
 
 def test_pirls_null_trace_does_not_change_results_or_evaluation_count() -> None:
