@@ -26,8 +26,13 @@ import copy
 import logging
 import operator
 import warnings as _warnings
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Literal, Protocol
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -2565,7 +2570,7 @@ def _clone_profile_model(model, X, sample_weight):
 def _snapshot_profile_inputs(X, y, sample_weight, offset):
     """Own the inputs retained by profile contexts and their lazy probes."""
     return (
-        copy.deepcopy(X),
+        _snapshot_tweedie_profile_dataframe(X),
         np.array(y, dtype=np.float64, copy=True),
         (None if sample_weight is None else np.array(sample_weight, dtype=np.float64, copy=True)),
         None if offset is None else np.array(offset, dtype=np.float64, copy=True),
@@ -2582,16 +2587,21 @@ def _build_profile_context(
     verbose: bool,
     trace_callback=None,
     trace_iterations: bool = False,
+    *,
+    _inputs_owned: bool = False,
 ) -> _ProfileContext:
     """One-time setup: build design matrix, calibrate lambda, create context."""
     from superglm.distributions import Tweedie, validate_response
 
-    X_snapshot, y_arr, weight_snapshot, offset_snapshot = _snapshot_profile_inputs(
-        X,
-        y,
-        sample_weight,
-        offset,
-    )
+    if _inputs_owned:
+        X_snapshot, y_arr, weight_snapshot, offset_snapshot = X, y, sample_weight, offset
+    else:
+        X_snapshot, y_arr, weight_snapshot, offset_snapshot = _snapshot_profile_inputs(
+            X,
+            y,
+            sample_weight,
+            offset,
+        )
 
     # Profile fits and later CI probes must not rewrite the caller's fitted
     # design, resolved family/link, penalty, groups, or inference caches.
@@ -2830,14 +2840,19 @@ def _build_profile_context_reml(
     verbose: bool,
     trace_callback=None,
     trace_iterations: bool = False,
+    *,
+    _inputs_owned: bool = False,
 ) -> _ProfileContextREML:
     """Build context for REML-based profile estimation."""
-    X_snapshot, y_snapshot, weight_snapshot, offset_snapshot = _snapshot_profile_inputs(
-        X,
-        y,
-        sample_weight,
-        offset,
-    )
+    if _inputs_owned:
+        X_snapshot, y_snapshot, weight_snapshot, offset_snapshot = X, y, sample_weight, offset
+    else:
+        X_snapshot, y_snapshot, weight_snapshot, offset_snapshot = _snapshot_profile_inputs(
+            X,
+            y,
+            sample_weight,
+            offset,
+        )
 
     # REML profile evaluations call fit_reml(), which rewrites the fitted model
     # state. Keep that mutation inside an isolated scratch model so result.ci()
@@ -3319,6 +3334,120 @@ _MAX_PROFILE_INTEGER_CONTROL = int(np.iinfo(np.intp).max)
 # Every grid point runs a complete model fit and dispersion profile.  This is
 # intentionally generous while preventing accidental allocation/runaway work.
 _MAX_PROFILE_GRID_POINTS = 10_000
+_PREPARED_TWEEDIE_PROFILE_TOKEN = object()
+
+
+@dataclass(frozen=True)
+class _PreparedTweedieProfileInputs:
+    """Validated controls and owned numeric rows for one profile call."""
+
+    X: pd.DataFrame
+    y: NDArray[np.float64]
+    sample_weight: NDArray[np.float64] | None
+    offset: NDArray[np.float64] | None
+    p_bounds: tuple[float, float]
+    xatol: float
+    maxiter: int
+    verbose: bool
+    fit_mode: str
+    phi_method: str
+    method: str
+    n_grid: int
+    grid: NDArray[np.float64] | None
+    n_grid_coarse: int
+    optimizer: str
+    trace_callback: Any
+    trace_iterations: bool
+    _model_identity: int = field(repr=False)
+    _validation_token: object = field(repr=False, compare=False)
+
+
+_PREPARED_TWEEDIE_PROFILE_CALL: ContextVar[_PreparedTweedieProfileInputs | None] = ContextVar(
+    "_PREPARED_TWEEDIE_PROFILE_CALL", default=None
+)
+
+
+@contextmanager
+def _use_prepared_tweedie_profile_inputs(prepared: _PreparedTweedieProfileInputs):
+    """Offer one prepared snapshot to the next matching public estimator call."""
+    token = _PREPARED_TWEEDIE_PROFILE_CALL.set(prepared)
+    try:
+        yield
+    finally:
+        _PREPARED_TWEEDIE_PROFILE_CALL.reset(token)
+
+
+def _claim_prepared_tweedie_profile_inputs(
+    model,
+    X,
+    y,
+    sample_weight,
+    offset,
+    p_bounds,
+    xatol,
+    maxiter,
+    verbose,
+    fit_mode,
+    phi_method,
+    method,
+    n_grid,
+    grid,
+    n_grid_coarse,
+    optimizer,
+    trace_callback,
+    trace_iterations,
+) -> _PreparedTweedieProfileInputs | None:
+    """Consume the context-local snapshot only for its exact public call."""
+    prepared = _PREPARED_TWEEDIE_PROFILE_CALL.get()
+    if prepared is None:
+        return None
+    actual = (
+        X,
+        y,
+        sample_weight,
+        offset,
+        p_bounds,
+        xatol,
+        maxiter,
+        verbose,
+        fit_mode,
+        phi_method,
+        method,
+        n_grid,
+        grid,
+        n_grid_coarse,
+        optimizer,
+        trace_callback,
+        trace_iterations,
+    )
+    expected = (
+        prepared.X,
+        prepared.y,
+        prepared.sample_weight,
+        prepared.offset,
+        prepared.p_bounds,
+        prepared.xatol,
+        prepared.maxiter,
+        prepared.verbose,
+        prepared.fit_mode,
+        prepared.phi_method,
+        prepared.method,
+        prepared.n_grid,
+        prepared.grid,
+        prepared.n_grid_coarse,
+        prepared.optimizer,
+        prepared.trace_callback,
+        prepared.trace_iterations,
+    )
+    if (
+        prepared._validation_token is _PREPARED_TWEEDIE_PROFILE_TOKEN
+        and prepared._model_identity == id(model)
+        and all(value is expected_value for value, expected_value in zip(actual, expected))
+    ):
+        # Remove it before profiling can invoke a callback and re-enter this API.
+        _PREPARED_TWEEDIE_PROFILE_CALL.set(None)
+        return prepared
+    return None
 
 
 def _normalize_profile_choice(value: object, *, name: str, choices: set[str]) -> str:
@@ -3337,10 +3466,8 @@ def _normalize_profile_rows(
     pd.DataFrame, NDArray[np.float64], NDArray[np.float64] | None, NDArray[np.float64] | None
 ]:
     """Validate row-oriented public inputs before building a profile context."""
-    if not isinstance(X, pd.DataFrame):
-        raise TypeError("X must be a pandas DataFrame")
-    if not X.columns.is_unique:
-        raise ValueError("X column labels must be unique")
+    if type(X) is not pd.DataFrame:
+        raise TypeError("X must be a plain pandas DataFrame")
 
     y_array = normalize_numeric_vector(y, name="y", nonnegative=True)
     if y_array.size == 0:
@@ -3376,6 +3503,599 @@ def _normalize_profile_rows(
     return X, y_array, weight_array, offset_array
 
 
+_PROFILE_NUMPY_SCALAR_TYPES = {
+    scalar_type
+    for scalar_type in np.sctypeDict.values()
+    if isinstance(scalar_type, type)
+    and issubclass(scalar_type, np.generic)
+    and not issubclass(scalar_type, np.void)
+}
+_PROFILE_EXACT_ATOMIC_TYPES = {
+    bool,
+    int,
+    float,
+    complex,
+    str,
+    bytes,
+    Decimal,
+    date,
+    timedelta,
+    range,
+}
+_PROFILE_SUPPORTED_EXTENSION_DTYPE_TYPES = (
+    pd.BooleanDtype,
+    pd.CategoricalDtype,
+    pd.DatetimeTZDtype,
+    pd.Float32Dtype,
+    pd.Float64Dtype,
+    pd.Int8Dtype,
+    pd.Int16Dtype,
+    pd.Int32Dtype,
+    pd.Int64Dtype,
+    pd.IntervalDtype,
+    pd.StringDtype,
+    pd.UInt8Dtype,
+    pd.UInt16Dtype,
+    pd.UInt32Dtype,
+    pd.UInt64Dtype,
+)
+_PROFILE_NULLABLE_NUMERIC_DTYPE_TYPES = (
+    pd.Float32Dtype,
+    pd.Float64Dtype,
+    pd.Int8Dtype,
+    pd.Int16Dtype,
+    pd.Int32Dtype,
+    pd.Int64Dtype,
+    pd.UInt8Dtype,
+    pd.UInt16Dtype,
+    pd.UInt32Dtype,
+    pd.UInt64Dtype,
+)
+_PROFILE_INDEX_TYPES = (
+    pd.CategoricalIndex,
+    pd.DatetimeIndex,
+    pd.Index,
+    pd.IntervalIndex,
+    pd.MultiIndex,
+    pd.RangeIndex,
+    pd.TimedeltaIndex,
+)
+_PROFILE_NULLABLE_NUMERIC_ARRAY_TYPES = (
+    pd.arrays.FloatingArray,
+    pd.arrays.IntegerArray,
+)
+_PROFILE_MASKED_ARRAY_TYPES = (
+    pd.arrays.BooleanArray,
+    *_PROFILE_NULLABLE_NUMERIC_ARRAY_TYPES,
+)
+
+
+def _profile_dtype_has_no_metadata(dtype: np.dtype) -> bool:
+    """Return whether a NumPy dtype contains no metadata or structured references."""
+    return dtype.metadata is None and dtype.subdtype is None and dtype.fields is None
+
+
+def _is_share_safe_profile_timezone(value: object) -> bool:
+    """Return whether retaining this exact timezone object is safe."""
+    if value is None:
+        return True
+    if type(value) is timezone:
+        try:
+            return type(value.utcoffset(None)) is timedelta and type(value.tzname(None)) is str
+        except (TypeError, ValueError, OverflowError):
+            return False
+    if type(value) is ZoneInfo:
+        return type(value.key) is str
+    return False
+
+
+def _canonical_tweedie_profile_timezone(value: object) -> object:
+    """Return a canonical safe timezone without retaining mutable third-party state."""
+    if _is_share_safe_profile_timezone(value):
+        return value
+    zone = getattr(value, "zone", None)
+    if type(value).__module__.partition(".")[0] == "pytz" and type(zone) is str:
+        try:
+            return ZoneInfo(zone)
+        except (KeyError, ValueError) as exc:
+            raise TypeError("timezone does not identify an installed IANA zone") from exc
+    raise TypeError("timezone must be datetime.timezone, ZoneInfo, or a named pytz zone")
+
+
+def _is_known_immutable_profile_value(value: object) -> bool:
+    """Return whether sharing this exact scalar across a profile snapshot is safe."""
+    value_type = type(value)
+    if value is None or value is Ellipsis or value is NotImplemented:
+        return True
+    if value is pd.NA or value is pd.NaT:
+        return True
+    if value_type in _PROFILE_EXACT_ATOMIC_TYPES:
+        return True
+    if value_type in (datetime, time):
+        return _is_share_safe_profile_timezone(value.tzinfo)
+    if value_type in (tuple, frozenset):
+        return all(_is_known_immutable_profile_value(item) for item in value)
+    if value_type is slice:
+        return all(
+            _is_known_immutable_profile_value(item)
+            for item in (value.start, value.stop, value.step)
+        )
+    if value_type in _PROFILE_NUMPY_SCALAR_TYPES:
+        return not value.dtype.hasobject
+    return False
+
+
+def _validate_tweedie_profile_dtype(dtype: object, *, name: str) -> None:
+    """Accept only native NumPy and understood built-in pandas column storage."""
+    if isinstance(dtype, np.dtype):
+        if not _profile_dtype_has_no_metadata(dtype) or dtype.kind == "V":
+            raise TypeError(f"{name} has an unsupported structured or metadata-bearing dtype")
+        return
+    if type(dtype) not in _PROFILE_SUPPORTED_EXTENSION_DTYPE_TYPES:
+        raise TypeError(f"{name} has an unsupported custom extension dtype")
+    if type(dtype) in _PROFILE_NULLABLE_NUMERIC_DTYPE_TYPES:
+        _validate_tweedie_profile_dtype(dtype.numpy_dtype, name=name)
+    if type(dtype) is pd.StringDtype:
+        missing_value = getattr(dtype, "na_value", pd.NA)
+        if (
+            type(dtype.storage) is not str
+            or dtype.storage not in {"python", "pyarrow"}
+            or not _is_known_immutable_profile_value(missing_value)
+        ):
+            raise TypeError(f"{name} has unsupported string storage or missing-value state")
+    if type(dtype) is pd.DatetimeTZDtype:
+        try:
+            _canonical_tweedie_profile_timezone(dtype.tz)
+        except TypeError as exc:
+            raise TypeError(f"{name} has an unsupported mutable or custom timezone") from exc
+        if type(dtype.unit) is not str:
+            raise TypeError(f"{name} has an unsupported mutable or custom timezone")
+    if type(dtype) is pd.IntervalDtype:
+        if type(dtype.closed) is not str or dtype.closed not in {
+            "left",
+            "right",
+            "both",
+            "neither",
+        }:
+            raise TypeError(f"{name} has unsupported interval closure state")
+        _validate_tweedie_profile_dtype(dtype.subtype, name=name)
+
+
+def _copy_tweedie_profile_dtype(dtype: object) -> object:
+    """Construct a fresh canonical dtype from already-validated public state."""
+    if isinstance(dtype, np.dtype):
+        return np.dtype(dtype.str)
+    if type(dtype) in _PROFILE_NULLABLE_NUMERIC_DTYPE_TYPES:
+        return np.dtype(dtype.numpy_dtype)
+    if type(dtype) is pd.StringDtype:
+        missing_value = getattr(dtype, "na_value", pd.NA)
+        try:
+            return pd.StringDtype(storage="python", na_value=missing_value)
+        except TypeError:
+            if missing_value is not pd.NA:
+                raise TypeError("This pandas version cannot preserve the string missing value")
+            return pd.StringDtype(storage="python")
+    if type(dtype) is pd.DatetimeTZDtype:
+        return pd.DatetimeTZDtype(
+            unit=dtype.unit,
+            tz=_canonical_tweedie_profile_timezone(dtype.tz),
+        )
+    if type(dtype) is pd.IntervalDtype:
+        return pd.IntervalDtype(
+            subtype=_copy_tweedie_profile_dtype(dtype.subtype),
+            closed=dtype.closed,
+        )
+    if type(dtype) is pd.CategoricalDtype:
+        raise TypeError("categorical dtypes are reconstructed from categories and codes")
+    return type(dtype)()
+
+
+def _require_base_ndarray(value: object, *, name: str) -> None:
+    """Reject ndarray subclasses whose copy/read operations are user-controlled."""
+    if type(value) is not np.ndarray:
+        raise TypeError(f"{name} must use an exact NumPy ndarray backing buffer")
+
+
+def _validate_tweedie_profile_array_storage(values: object, *, name: str) -> None:
+    """Validate the concrete pandas array and every mutable backing buffer."""
+    values_type = type(values)
+    if values_type is np.ndarray:
+        return
+    if values_type is pd.Categorical:
+        _require_base_ndarray(values._codes, name=f"{name} categorical codes")
+        if type(values.ordered) is not bool:
+            raise TypeError(f"{name} has unsupported categorical ordering state")
+        _validate_tweedie_profile_axis(values.categories, name=f"{name} categories")
+        return
+    if values_type in _PROFILE_MASKED_ARRAY_TYPES:
+        _require_base_ndarray(values._data, name=f"{name} data")
+        _require_base_ndarray(values._mask, name=f"{name} mask")
+        return
+    if values_type is pd.arrays.StringArray:
+        _require_base_ndarray(values._ndarray, name=f"{name} string data")
+        if any(not _is_known_immutable_profile_value(value) for value in values._ndarray):
+            raise TypeError(f"{name} contains unsupported custom string scalar values")
+        return
+    arrow_string_array = getattr(pd.arrays, "ArrowStringArray", None)
+    if arrow_string_array is not None and values_type is arrow_string_array:
+        # Arrow buffers are immutable; reconstruction iterates into Python-backed
+        # string storage so the prepared frame retains no caller-owned Arrow graph.
+        return
+    if values_type in (pd.arrays.DatetimeArray, pd.arrays.TimedeltaArray):
+        _require_base_ndarray(values._ndarray, name=f"{name} datetime data")
+        return
+    if values_type is pd.arrays.IntervalArray:
+        _validate_tweedie_profile_array_storage(values._left, name=f"{name} left endpoints")
+        _validate_tweedie_profile_array_storage(values._right, name=f"{name} right endpoints")
+        return
+    raise TypeError(f"{name} uses an unsupported or custom pandas array implementation")
+
+
+def _materialize_tweedie_nullable_numeric(values: object, *, name: str) -> np.ndarray:
+    """Own nullable numeric values in native storage without silent integer rounding."""
+    target_dtype = np.dtype(values._data.dtype)
+    mask = values._mask
+    if np.any(mask) and target_dtype.kind in "iu":
+        present = values._data[~mask]
+        as_float = np.asarray(present, dtype=np.float64)
+        if any(
+            not np.isfinite(converted) or int(converted) != int(original)
+            for original, converted in zip(present, as_float, strict=True)
+        ):
+            raise TypeError(
+                f"{name} has missing nullable integers that cannot be represented exactly"
+            )
+        target_dtype = np.dtype(np.float64)
+    owned = np.array(values._data, dtype=target_dtype, copy=True, subok=False)
+    if np.any(mask):
+        owned[mask] = np.nan
+    return owned
+
+
+def _validate_tweedie_profile_axis(axis: pd.Index, *, name: str) -> None:
+    """Reject mutable/custom labels whose state could leak into a snapshot."""
+    if type(axis) not in _PROFILE_INDEX_TYPES:
+        raise TypeError(f"{name} must use a built-in pandas Index type")
+    _validate_tweedie_profile_dtype(axis.dtype, name=name)
+    if any(not _is_known_immutable_profile_value(value) for value in axis.names):
+        raise TypeError(f"{name} names must be immutable scalar values for Tweedie profiling")
+    if type(axis) in (pd.DatetimeIndex, pd.TimedeltaIndex):
+        frequency = axis.freqstr
+        if frequency is not None and type(frequency) is not str:
+            raise TypeError(f"{name} has unsupported frequency metadata")
+    if isinstance(axis, pd.CategoricalIndex):
+        _validate_tweedie_profile_array_storage(axis.array, name=name)
+        _validate_tweedie_profile_axis(axis.categories, name=f"{name} categories")
+        return
+    if isinstance(axis, pd.MultiIndex):
+        for position, code in enumerate(axis.codes):
+            _require_base_ndarray(code, name=f"{name} code {position}")
+        for position, level in enumerate(axis.levels):
+            _validate_tweedie_profile_axis(level, name=f"{name} level {position}")
+        return
+    _validate_tweedie_profile_array_storage(axis._values, name=name)
+    if pd.api.types.is_object_dtype(axis.dtype) or type(axis.dtype) is pd.StringDtype:
+        if any(not _is_known_immutable_profile_value(value) for value in axis):
+            raise TypeError(f"{name} labels must be immutable scalar values for Tweedie profiling")
+
+
+def _tweedie_profile_dataframe_column(X: pd.DataFrame, position: int) -> pd.Series:
+    """Return one trusted base-Series view from an exact base DataFrame."""
+    column = X.iloc[:, position]
+    if type(column) is not pd.Series:
+        raise TypeError(f"X column {position} did not produce a plain pandas Series")
+    return column
+
+
+def _validate_tweedie_profile_dataframe_values(X: pd.DataFrame) -> None:
+    """Validate object-backed values before retaining any shared scalar references."""
+    attributes = X.attrs
+    if type(attributes) is not dict:
+        raise TypeError("X.attrs must use a plain dict for Tweedie profiling")
+    if attributes:
+        raise TypeError("X.attrs must be empty for Tweedie profiling")
+    _validate_tweedie_profile_axis(X.index, name="X index")
+    _validate_tweedie_profile_axis(X.columns, name="X column")
+    for position in range(len(X.columns)):
+        column = _tweedie_profile_dataframe_column(X, position)
+        dtype = column.dtype
+        _validate_tweedie_profile_dtype(dtype, name=f"X column {position}")
+        values = column._values
+        _validate_tweedie_profile_array_storage(values, name=f"X column {position}")
+        if pd.api.types.is_object_dtype(dtype) or type(dtype) is pd.StringDtype:
+            scalar_values = values._ndarray if type(values) is pd.arrays.StringArray else values
+        else:
+            continue
+        if any(not _is_known_immutable_profile_value(value) for value in scalar_values):
+            raise TypeError(
+                "X object and categorical values must be immutable scalar values "
+                "for Tweedie profiling"
+            )
+
+
+def _copy_tweedie_profile_axis(axis: pd.Index) -> pd.Index:
+    """Reconstruct a validated pandas axis without retaining caller storage."""
+    if isinstance(axis, pd.CategoricalIndex):
+        source = axis.array
+        categorical = pd.Categorical.from_codes(
+            np.array(source.codes, copy=True, subok=False),
+            categories=_copy_tweedie_profile_axis(source.categories),
+            ordered=source.ordered,
+        )
+        return pd.CategoricalIndex(categorical, name=axis.name)
+    if isinstance(axis, pd.MultiIndex):
+        return pd.MultiIndex(
+            levels=[_copy_tweedie_profile_axis(level) for level in axis.levels],
+            codes=[np.array(code, copy=True, subok=False) for code in axis.codes],
+            sortorder=axis.sortorder,
+            names=list(axis.names),
+            verify_integrity=False,
+        )
+    if isinstance(axis, pd.RangeIndex):
+        return pd.RangeIndex(axis.start, axis.stop, axis.step, name=axis.name)
+    values = axis._values
+    if type(values) in _PROFILE_NULLABLE_NUMERIC_ARRAY_TYPES:
+        owned = _materialize_tweedie_nullable_numeric(values, name="profile axis")
+        return pd.Index(owned, dtype=owned.dtype, name=axis.name, tupleize_cols=False)
+    dtype = _copy_tweedie_profile_dtype(axis.dtype)
+    if isinstance(dtype, np.dtype):
+        if type(values) is np.ndarray:
+            owned = np.array(values, dtype=dtype, copy=True, subok=False)
+        else:
+            owned = np.array(values._ndarray, dtype=dtype, copy=True, subok=False)
+    else:
+        owned = pd.array(list(axis), dtype=dtype, copy=True)
+    if type(axis) is pd.DatetimeIndex:
+        return pd.DatetimeIndex(
+            owned,
+            dtype=dtype,
+            freq=axis.freqstr,
+            name=axis.name,
+        )
+    if type(axis) is pd.TimedeltaIndex:
+        return pd.TimedeltaIndex(
+            owned,
+            dtype=dtype,
+            freq=axis.freqstr,
+            name=axis.name,
+        )
+    return pd.Index(owned, dtype=dtype, name=axis.name, tupleize_cols=False)
+
+
+def _copy_tweedie_profile_column(
+    values: object,
+    dtype: object,
+    *,
+    index: pd.Index,
+) -> pd.Series:
+    """Reconstruct one validated column from owned canonical storage."""
+    if isinstance(dtype, pd.CategoricalDtype):
+        categorical = pd.Categorical.from_codes(
+            np.array(values.codes, copy=True, subok=False),
+            categories=_copy_tweedie_profile_axis(values.categories),
+            ordered=values.ordered,
+        )
+        return pd.Series(categorical, index=index, copy=False)
+    if type(values) in _PROFILE_NULLABLE_NUMERIC_ARRAY_TYPES:
+        owned = _materialize_tweedie_nullable_numeric(values, name="profile column")
+        return pd.Series(owned, index=index, dtype=owned.dtype, copy=False)
+    owned_dtype = _copy_tweedie_profile_dtype(dtype)
+    if isinstance(owned_dtype, np.dtype):
+        if type(values) is np.ndarray:
+            owned = np.array(values, dtype=owned_dtype, copy=True, subok=False)
+        else:
+            owned = np.array(values._ndarray, dtype=owned_dtype, copy=True, subok=False)
+    else:
+        owned = pd.array(list(values), dtype=owned_dtype, copy=True)
+    return pd.Series(owned, index=index, dtype=owned_dtype, copy=False)
+
+
+def _reconstruct_tweedie_profile_dataframe(X: pd.DataFrame) -> pd.DataFrame:
+    """Build the owned frame after source validation has completed."""
+    snapshot_index = _copy_tweedie_profile_axis(X.index)
+    snapshot_columns = _copy_tweedie_profile_axis(X.columns)
+    snapshot = pd.DataFrame(index=snapshot_index)
+    for position in range(len(X.columns)):
+        column = _tweedie_profile_dataframe_column(X, position)
+        source = column._values
+        snapshot.insert(
+            position,
+            position,
+            _copy_tweedie_profile_column(
+                source,
+                column.dtype,
+                index=snapshot_index,
+            ),
+        )
+    snapshot.columns = snapshot_columns
+    return snapshot
+
+
+def _snapshot_tweedie_profile_dataframe(X: pd.DataFrame) -> pd.DataFrame:
+    """Reconstruct a validated frame entirely from owned canonical storage."""
+    try:
+        _validate_tweedie_profile_dataframe_values(X)
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise TypeError("Could not safely snapshot values in X") from exc
+    if not X.columns.is_unique:
+        raise ValueError("X column labels must be unique")
+    try:
+        return _reconstruct_tweedie_profile_dataframe(X)
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise TypeError("Could not safely snapshot values in X") from exc
+
+
+def _prepare_tweedie_profile_inputs(
+    model,
+    X,
+    y,
+    sample_weight=None,
+    offset=None,
+    *,
+    p_bounds: tuple[float, float] = (1.05, 1.95),
+    xatol: float = 1e-3,
+    maxiter: int = 30,
+    verbose: bool = False,
+    fit_mode: str = "fit",
+    phi_method: str = "mle",
+    method: str = "brent",
+    n_grid: int = 20,
+    grid: NDArray | None = None,
+    n_grid_coarse: int = 10,
+    optimizer: str = "L-BFGS-B",
+    trace_callback=None,
+    trace_iterations: bool = False,
+    **unexpected,
+) -> _PreparedTweedieProfileInputs:
+    """Validate one public profile call before any model fit or user callback."""
+    from superglm.distributions import Tweedie
+
+    if unexpected:
+        name = next(iter(unexpected))
+        raise TypeError(f"estimate_tweedie_p() got an unexpected keyword argument {name!r}")
+
+    family = model.family
+    if not isinstance(family, Tweedie):
+        raise ValueError(
+            f"estimate_tweedie_p requires a Tweedie family, got {family!r}. "
+            "Use families.tweedie(p=...) to create one."
+        )
+
+    method = _normalize_profile_choice(
+        method,
+        name="method",
+        choices={"brent", "grid", "grid_refine", "profile_opt", "joint_ml", "integrated"},
+    )
+    fit_mode = _normalize_profile_choice(
+        fit_mode,
+        name="fit_mode",
+        choices={"fit", "fit_reml"},
+    )
+    phi_method = _normalize_profile_choice(
+        phi_method,
+        name="phi_method",
+        choices={"pearson", "mle"},
+    )
+    optimizer = _normalize_profile_choice(
+        optimizer,
+        name="optimizer",
+        choices={"L-BFGS-B", "Powell"},
+    )
+    p_bounds = normalize_tweedie_bounds(p_bounds)
+    xatol = normalize_positive_scalar("xatol", xatol)
+    maxiter = normalize_positive_int(
+        maxiter,
+        name="maxiter",
+        maximum=_MAX_PROFILE_INTEGER_CONTROL,
+    )
+    n_grid = normalize_positive_int(
+        n_grid,
+        name="n_grid",
+        minimum=2,
+        maximum=_MAX_PROFILE_GRID_POINTS,
+    )
+    n_grid_coarse = normalize_positive_int(
+        n_grid_coarse,
+        name="n_grid_coarse",
+        minimum=2,
+        maximum=_MAX_PROFILE_GRID_POINTS,
+    )
+    verbose = normalize_boolean(verbose, name="verbose")
+    trace_iterations = normalize_boolean(trace_iterations, name="trace_iterations")
+    trace_callback = normalize_optional_callable(trace_callback, name="trace_callback")
+    if grid is not None:
+        grid = normalize_tweedie_grid(grid, maximum=_MAX_PROFILE_GRID_POINTS)
+
+    X, y_array, sample_weight, offset = _normalize_profile_rows(
+        X,
+        y,
+        sample_weight,
+        offset,
+    )
+    if method in ("joint_ml", "integrated"):
+        raise NotImplementedError(
+            f"method={method!r} is not yet implemented. "
+            "Use one of: 'brent', 'grid', 'grid_refine', 'profile_opt'."
+        )
+    X = _snapshot_tweedie_profile_dataframe(X)
+
+    return _PreparedTweedieProfileInputs(
+        X=X,
+        y=y_array,
+        sample_weight=sample_weight,
+        offset=offset,
+        p_bounds=p_bounds,
+        xatol=xatol,
+        maxiter=maxiter,
+        verbose=verbose,
+        fit_mode=fit_mode,
+        phi_method=phi_method,
+        method=method,
+        n_grid=n_grid,
+        grid=grid,
+        n_grid_coarse=n_grid_coarse,
+        optimizer=optimizer,
+        trace_callback=trace_callback,
+        trace_iterations=trace_iterations,
+        _model_identity=id(model),
+        _validation_token=_PREPARED_TWEEDIE_PROFILE_TOKEN,
+    )
+
+
+def _estimate_tweedie_p_prepared(
+    model,
+    prepared: _PreparedTweedieProfileInputs,
+) -> TweedieProfileResult:
+    """Execute a profile search from one already validated, owned input set."""
+    ctx: _ProfileContext | _ProfileContextREML
+    if prepared.fit_mode == "fit_reml":
+        ctx = _build_profile_context_reml(
+            model,
+            prepared.X,
+            prepared.y,
+            prepared.sample_weight,
+            prepared.offset,
+            prepared.phi_method,
+            prepared.verbose,
+            prepared.trace_callback,
+            prepared.trace_iterations,
+            _inputs_owned=True,
+        )
+    else:
+        ctx = _build_profile_context(
+            model,
+            prepared.X,
+            prepared.y,
+            prepared.sample_weight,
+            prepared.offset,
+            prepared.phi_method,
+            prepared.verbose,
+            prepared.trace_callback,
+            prepared.trace_iterations,
+            _inputs_owned=True,
+        )
+
+    if prepared.method == "brent":
+        return _search_brent(ctx, prepared.p_bounds, prepared.xatol, prepared.maxiter)
+    if prepared.method == "grid":
+        return _search_grid(ctx, prepared.p_bounds, prepared.n_grid, prepared.grid)
+    if prepared.method == "grid_refine":
+        return _search_grid_refine(
+            ctx,
+            prepared.p_bounds,
+            prepared.n_grid_coarse,
+            prepared.xatol,
+            prepared.maxiter,
+        )
+    return _search_profile_opt(
+        ctx,
+        prepared.p_bounds,
+        prepared.optimizer,
+        prepared.xatol,
+        prepared.maxiter,
+    )
+
+
 def estimate_tweedie_p(
     model,
     X,
@@ -3408,7 +4128,15 @@ def estimate_tweedie_p(
         A configured but *unfitted* model with features already added.
         Must have a Tweedie family (e.g. ``families.tweedie(p=1.5)``).
     X : DataFrame
-        Feature matrix.
+        Feature matrix. Profiling snapshots one exact ``pandas.DataFrame`` with
+        empty ``attrs`` and built-in NumPy/pandas dtypes. Object values,
+        categorical levels, and axis labels must be ordinary deeply immutable
+        scalars; convert custom numeric wrappers or category objects to plain
+        numbers or strings before profiling. Built-in nullable numerics are
+        accepted when they can be materialized exactly as owned NumPy storage.
+        Sparse, period, Arrow-backed, and custom extension storage must first
+        be converted to dense native NumPy, Python-string, boolean, or
+        categorical columns.
     y : array-like
         Response variable.
     sample_weight : array-like, optional
@@ -3457,105 +4185,48 @@ def estimate_tweedie_p(
     -------
     TweedieProfileResult
     """
-    from superglm.distributions import Tweedie
-
-    # Validate family
-    family = model.family
-    if not isinstance(family, Tweedie):
-        raise ValueError(
-            f"estimate_tweedie_p requires a Tweedie family, got {family!r}. "
-            "Use families.tweedie(p=...) to create one."
-        )
-
-    _VALID_METHODS = {"brent", "grid", "grid_refine", "profile_opt", "joint_ml", "integrated"}
-    method = _normalize_profile_choice(method, name="method", choices=_VALID_METHODS)
-
-    _VALID_FIT_MODES = {"fit", "fit_reml"}
-    fit_mode = _normalize_profile_choice(fit_mode, name="fit_mode", choices=_VALID_FIT_MODES)
-    _VALID_PHI_METHODS = {"pearson", "mle"}
-    phi_method = _normalize_profile_choice(
-        phi_method,
-        name="phi_method",
-        choices=_VALID_PHI_METHODS,
-    )
-    optimizer = _normalize_profile_choice(
-        optimizer,
-        name="optimizer",
-        choices={"L-BFGS-B", "Powell"},
-    )
-
-    p_bounds = normalize_tweedie_bounds(p_bounds)
-    xatol = normalize_positive_scalar("xatol", xatol)
-    maxiter = normalize_positive_int(
-        maxiter,
-        name="maxiter",
-        maximum=_MAX_PROFILE_INTEGER_CONTROL,
-    )
-    n_grid = normalize_positive_int(
-        n_grid,
-        name="n_grid",
-        minimum=2,
-        maximum=_MAX_PROFILE_GRID_POINTS,
-    )
-    n_grid_coarse = normalize_positive_int(
-        n_grid_coarse,
-        name="n_grid_coarse",
-        minimum=2,
-        maximum=_MAX_PROFILE_GRID_POINTS,
-    )
-    verbose = normalize_boolean(verbose, name="verbose")
-    trace_iterations = normalize_boolean(trace_iterations, name="trace_iterations")
-    trace_callback = normalize_optional_callable(trace_callback, name="trace_callback")
-    if grid is not None:
-        grid = normalize_tweedie_grid(grid, maximum=_MAX_PROFILE_GRID_POINTS)
-
-    X, y_arr, sample_weight, offset = _normalize_profile_rows(
+    prepared = _claim_prepared_tweedie_profile_inputs(
+        model,
         X,
         y,
         sample_weight,
         offset,
+        p_bounds,
+        xatol,
+        maxiter,
+        verbose,
+        fit_mode,
+        phi_method,
+        method,
+        n_grid,
+        grid,
+        n_grid_coarse,
+        optimizer,
+        trace_callback,
+        trace_iterations,
     )
-
-    if method in ("joint_ml", "integrated"):
-        raise NotImplementedError(
-            f"method={method!r} is not yet implemented. "
-            f"Use one of: 'brent', 'grid', 'grid_refine', 'profile_opt'."
-        )
-
-    # Build context
-    if fit_mode == "fit_reml":
-        ctx = _build_profile_context_reml(
+    if prepared is None:
+        prepared = _prepare_tweedie_profile_inputs(
             model,
             X,
-            y_arr,
-            sample_weight,
-            offset,
-            phi_method,
-            verbose,
-            trace_callback,
-            trace_iterations,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            p_bounds=p_bounds,
+            xatol=xatol,
+            maxiter=maxiter,
+            verbose=verbose,
+            fit_mode=fit_mode,
+            phi_method=phi_method,
+            method=method,
+            n_grid=n_grid,
+            grid=grid,
+            n_grid_coarse=n_grid_coarse,
+            optimizer=optimizer,
+            trace_callback=trace_callback,
+            trace_iterations=trace_iterations,
         )
-    else:
-        ctx = _build_profile_context(
-            model,
-            X,
-            y_arr,
-            sample_weight,
-            offset,
-            phi_method,
-            verbose,
-            trace_callback,
-            trace_iterations,
-        )
-
-    # Dispatch search
-    if method == "brent":
-        return _search_brent(ctx, p_bounds, xatol, maxiter)
-    if method == "grid":
-        return _search_grid(ctx, p_bounds, n_grid, grid)
-    if method == "grid_refine":
-        return _search_grid_refine(ctx, p_bounds, n_grid_coarse, xatol, maxiter)
-    return _search_profile_opt(ctx, p_bounds, optimizer, xatol, maxiter)
+    return _estimate_tweedie_p_prepared(model, prepared)
 
 
 # ---------------------------------------------------------------------------

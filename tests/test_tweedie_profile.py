@@ -3,8 +3,14 @@
 import inspect
 import pickle
 import warnings
+import weakref
 from dataclasses import FrozenInstanceError, replace
+from datetime import datetime, timedelta, tzinfo
+from enum import Enum, IntEnum
+from fractions import Fraction
 from types import SimpleNamespace
+from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -1527,9 +1533,1225 @@ def test_public_tweedie_profile_entry_points_default_to_mle_and_brent(function):
 
     assert signature.parameters["phi_method"].default == "mle"
     assert signature.parameters["method"].default == "brent"
+    assert "_prepared_inputs" not in signature.parameters
 
 
 class TestEstimatePFitMode:
+    @pytest.mark.parametrize(
+        ("fit_mode", "final_fit_name"),
+        [("fit", "fit"), ("reml", "fit_reml")],
+    )
+    def test_final_refit_uses_profile_input_snapshot_after_callback_mutation(
+        self, monkeypatch, fit_mode, final_fit_name
+    ):
+        X = pd.DataFrame({"x1": np.array([-1.0, 0.0, 1.0])})
+        y = np.array([0.0, 1.0, 2.0])
+        sample_weight = np.array([0.75, 1.0, 1.25])
+        offset = np.array([-0.2, 0.0, 0.2])
+        caller_objects = (X, y, sample_weight, offset)
+        baseline = (
+            X.copy(deep=True),
+            y.copy(),
+            sample_weight.copy(),
+            offset.copy(),
+        )
+        result = _deterministic_profile_result()
+        observed = {}
+
+        def mutate_caller_inputs(_row):
+            X.iloc[:, :] = 101.0
+            y[:] = 102.0
+            sample_weight[:] = 103.0
+            offset[:] = 104.0
+
+        def fake_profile(candidate, prepared):
+            observed["profile_objects"] = (
+                prepared.X,
+                prepared.y,
+                prepared.sample_weight,
+                prepared.offset,
+            )
+            observed["profile_values"] = (
+                prepared.X.copy(deep=True),
+                np.array(prepared.y, copy=True),
+                np.array(prepared.sample_weight, copy=True),
+                np.array(prepared.offset, copy=True),
+            )
+            prepared.trace_callback({})
+            return result
+
+        monkeypatch.setattr(tweedie_module, "_estimate_tweedie_p_prepared", fake_profile)
+
+        def final_fit(fit_X, fit_y, *, sample_weight, offset):
+            observed["final_objects"] = (fit_X, fit_y, sample_weight, offset)
+            observed["final_values"] = (
+                fit_X.copy(deep=True),
+                np.array(fit_y, copy=True),
+                np.array(sample_weight, copy=True),
+                np.array(offset, copy=True),
+            )
+
+        def unexpected_fit(*args, **kwargs):
+            raise AssertionError("estimate_p selected the wrong final refit method")
+
+        model = SimpleNamespace(
+            family=TweedieDistribution(p=1.5),
+            _retain_fit_state=True,
+            fit=unexpected_fit,
+            fit_reml=unexpected_fit,
+        )
+        setattr(model, final_fit_name, final_fit)
+
+        def synchronize(candidate, sync_y, profile_result):
+            assert candidate is model
+            assert profile_result is result
+            observed["sync_y"] = sync_y
+            observed["sync_y_value"] = np.array(sync_y, copy=True)
+
+        monkeypatch.setattr(
+            profile_ops_module,
+            "_synchronize_tweedie_profile_refit",
+            synchronize,
+        )
+
+        returned = profile_ops_module.estimate_p(
+            model,
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode=fit_mode,
+            trace_callback=mutate_caller_inputs,
+        )
+
+        assert returned is result
+        for caller, profiled, refitted in zip(
+            caller_objects,
+            observed["profile_objects"],
+            observed["final_objects"],
+            strict=True,
+        ):
+            assert profiled is refitted
+            assert profiled is not caller
+        assert observed["sync_y"] is observed["profile_objects"][1]
+
+        pd.testing.assert_frame_equal(
+            observed["profile_values"][0], baseline[0], check_column_type=False
+        )
+        pd.testing.assert_frame_equal(
+            observed["final_values"][0], baseline[0], check_column_type=False
+        )
+        for actual, expected in zip(
+            observed["profile_values"][1:],
+            baseline[1:],
+            strict=True,
+        ):
+            np.testing.assert_array_equal(actual, expected)
+        for actual, expected in zip(
+            observed["final_values"][1:],
+            baseline[1:],
+            strict=True,
+        ):
+            np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_array_equal(observed["sync_y_value"], baseline[1])
+        assert np.all(X.to_numpy() == 101.0)
+        assert np.all(y == 102.0)
+        assert np.all(sample_weight == 103.0)
+        assert np.all(offset == 104.0)
+
+    def test_invalid_profile_controls_fail_before_input_snapshot(self, monkeypatch):
+        model = SimpleNamespace(family=TweedieDistribution(p=1.5))
+        X = pd.DataFrame({"x1": [0.0]})
+
+        def unexpected_snapshot(*args, **kwargs):
+            raise AssertionError("invalid controls must fail before snapshotting row inputs")
+
+        monkeypatch.setattr(
+            profile_ops_module,
+            "_snapshot_tweedie_profile_refit_inputs",
+            unexpected_snapshot,
+        )
+
+        with pytest.raises(ValueError, match="method"):
+            profile_ops_module.estimate_p(model, X, np.array([1.0]), method=[])
+
+        with pytest.raises(TypeError, match="estimate_tweedie_p.*unexpected keyword.*bogus"):
+            profile_ops_module.estimate_p(model, X, np.array([1.0]), bogus=True)
+
+    @pytest.mark.parametrize("row_kind", ["memoryview", "no-deepcopy-array"])
+    def test_valid_numeric_row_inputs_do_not_require_deepcopy(self, monkeypatch, row_kind):
+        class NoDeepcopyArray(np.ndarray):
+            def __deepcopy__(self, memo):
+                raise AssertionError("numeric row normalization must not call deepcopy")
+
+        sources = (
+            np.array([0.0, 1.0, 2.0]),
+            np.array([0.75, 1.0, 1.25]),
+            np.array([-0.2, 0.0, 0.2]),
+        )
+        if row_kind == "memoryview":
+            y, sample_weight, offset = (memoryview(value) for value in sources)
+        else:
+            y, sample_weight, offset = (value.view(NoDeepcopyArray) for value in sources)
+
+        result = _deterministic_profile_result()
+        observed = {}
+
+        def fake_profile(candidate, prepared):
+            observed["profile"] = (
+                prepared.y,
+                prepared.sample_weight,
+                prepared.offset,
+            )
+            return result
+
+        monkeypatch.setattr(tweedie_module, "_estimate_tweedie_p_prepared", fake_profile)
+
+        def final_fit(fit_X, fit_y, *, sample_weight, offset):
+            observed["final"] = (fit_y, sample_weight, offset)
+
+        model = SimpleNamespace(
+            family=TweedieDistribution(p=1.5),
+            _retain_fit_state=True,
+            fit=final_fit,
+        )
+        monkeypatch.setattr(
+            profile_ops_module, "_synchronize_tweedie_profile_refit", lambda *a: None
+        )
+
+        profile_ops_module.estimate_p(
+            model,
+            pd.DataFrame({"x1": [-1.0, 0.0, 1.0]}),
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
+
+        for expected, profiled, refitted in zip(
+            sources,
+            observed["profile"],
+            observed["final"],
+            strict=True,
+        ):
+            assert type(profiled) is np.ndarray
+            assert profiled.flags.owndata
+            assert profiled is refitted
+            np.testing.assert_array_equal(profiled, expected)
+
+    def test_object_dataframe_scalar_values_use_owned_frame_snapshot(self, monkeypatch):
+        caller_values = ["low", "low", "high"]
+        X = pd.DataFrame({"x1": pd.Series(caller_values, dtype=object)})
+        result = _deterministic_profile_result()
+        observed = {}
+
+        def mutate_caller_frame(_row):
+            X.iloc[:, 0] = ["changed", "changed", "changed"]
+
+        def fake_profile(candidate, prepared):
+            observed["profile_X"] = prepared.X
+            observed["profile_values"] = prepared.X["x1"].tolist()
+            prepared.trace_callback({})
+            return result
+
+        monkeypatch.setattr(tweedie_module, "_estimate_tweedie_p_prepared", fake_profile)
+
+        def final_fit(fit_X, fit_y, **kwargs):
+            observed["final_X"] = fit_X
+            observed["final_values"] = fit_X["x1"].tolist()
+
+        model = SimpleNamespace(
+            family=TweedieDistribution(p=1.5),
+            _retain_fit_state=True,
+            fit=final_fit,
+        )
+        monkeypatch.setattr(
+            profile_ops_module, "_synchronize_tweedie_profile_refit", lambda *a: None
+        )
+
+        profile_ops_module.estimate_p(
+            model,
+            X,
+            np.array([0.0, 1.0, 2.0]),
+            trace_callback=mutate_caller_frame,
+        )
+
+        assert observed["profile_X"] is observed["final_X"]
+        assert observed["profile_X"] is not X
+        assert observed["profile_values"] == caller_values
+        assert observed["final_values"] == caller_values
+        assert X["x1"].tolist() == ["changed", "changed", "changed"]
+
+    def test_categorical_category_buffer_is_detached_from_caller(self, monkeypatch):
+        caller_categories = ["low", "middle", "high"]
+        X = pd.DataFrame(
+            {
+                "x1": pd.Categorical(
+                    caller_categories,
+                    categories=caller_categories,
+                    ordered=True,
+                )
+            }
+        )
+        result = _deterministic_profile_result()
+        observed = {}
+
+        def mutate_caller_categories(_row):
+            category_values = X["x1"].cat.categories.to_numpy(copy=False)
+            category_values.setflags(write=True)
+            category_values[:] = ["changed-low", "changed-middle", "changed-high"]
+
+        def values(frame):
+            return frame["x1"].tolist()
+
+        def fake_profile(candidate, prepared):
+            observed["profile_X"] = prepared.X
+            observed["profile_values"] = values(prepared.X)
+            prepared.trace_callback({})
+            return result
+
+        monkeypatch.setattr(tweedie_module, "_estimate_tweedie_p_prepared", fake_profile)
+
+        def final_fit(fit_X, fit_y, **kwargs):
+            observed["final_X"] = fit_X
+            observed["final_values"] = values(fit_X)
+
+        model = SimpleNamespace(
+            family=TweedieDistribution(p=1.5),
+            _retain_fit_state=True,
+            fit=final_fit,
+        )
+        monkeypatch.setattr(
+            profile_ops_module, "_synchronize_tweedie_profile_refit", lambda *a: None
+        )
+
+        profile_ops_module.estimate_p(
+            model,
+            X,
+            np.array([0.0, 1.0, 2.0]),
+            trace_callback=mutate_caller_categories,
+        )
+
+        assert observed["profile_X"] is observed["final_X"]
+        assert observed["profile_values"] == caller_categories
+        assert observed["final_values"] == caller_categories
+        assert observed["profile_X"]["x1"].cat.categories.tolist() == caller_categories
+        assert X["x1"].cat.categories.tolist() == [
+            "changed-low",
+            "changed-middle",
+            "changed-high",
+        ]
+
+    @pytest.mark.parametrize(
+        "categories",
+        [
+            pd.Index(
+                pd.array(["a", "b"], dtype=pd.StringDtype(storage="python")),
+                name="levels",
+            ),
+            pd.Index(pd.array([True, False], dtype="boolean"), name="levels"),
+            pd.Index(
+                [("a", 1), ("b", 2)],
+                dtype=object,
+                name="pair",
+                tupleize_cols=False,
+            ),
+        ],
+        ids=["string-extension", "nullable-boolean", "tuple-object"],
+    )
+    def test_profile_snapshot_preserves_categorical_category_dtype(self, categories):
+        X = pd.DataFrame(
+            {
+                "x1": pd.Categorical.from_codes(
+                    [0, 1, 0],
+                    categories=categories,
+                    ordered=True,
+                )
+            }
+        )
+
+        prepared = tweedie_module._prepare_tweedie_profile_inputs(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            X,
+            np.array([0.0, 1.0, 2.0]),
+        )
+
+        original_categories = X["x1"].cat.categories
+        snapshot_categories = prepared.X["x1"].cat.categories
+        assert snapshot_categories.dtype == original_categories.dtype
+        assert snapshot_categories.name == original_categories.name
+        assert snapshot_categories.equals(original_categories)
+        assert prepared.X["x1"].dtype == X["x1"].dtype
+
+    def test_profile_snapshot_normalizes_nullable_numeric_category_dtype(self):
+        X = pd.DataFrame(
+            {
+                "x1": pd.Categorical.from_codes(
+                    [0, 1, 0],
+                    categories=pd.Index(pd.array([1, 2], dtype="Int64")),
+                )
+            }
+        )
+
+        prepared = tweedie_module._prepare_tweedie_profile_inputs(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            X,
+            np.array([0.0, 1.0, 2.0]),
+        )
+
+        assert prepared.X["x1"].cat.categories.tolist() == [1, 2]
+        assert prepared.X["x1"].cat.categories.dtype == np.dtype("int64")
+        assert prepared.X["x1"].tolist() == [1, 2, 1]
+
+    @pytest.mark.parametrize(
+        "categories",
+        [
+            pd.date_range("2026-01-01", periods=2, freq="D", name="levels"),
+            pd.timedelta_range("1D", periods=2, freq="2D", name="levels"),
+            pd.IntervalIndex.from_breaks([0, 1, 2], name="levels"),
+        ],
+        ids=["datetime", "timedelta", "interval"],
+    )
+    def test_profile_snapshot_preserves_typed_categorical_categories(self, categories):
+        X = pd.DataFrame(
+            {
+                "x1": pd.Categorical.from_codes(
+                    [0, 1, 0],
+                    categories=categories,
+                    ordered=True,
+                )
+            }
+        )
+
+        prepared = tweedie_module._prepare_tweedie_profile_inputs(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            X,
+            np.array([0.0, 1.0, 2.0]),
+        )
+
+        pd.testing.assert_index_equal(
+            prepared.X["x1"].cat.categories,
+            categories,
+            exact=True,
+        )
+        assert prepared.X["x1"].cat.ordered
+
+    @pytest.mark.parametrize("axis_name", ["index", "columns"])
+    def test_profile_snapshot_detaches_plain_axis_buffers(self, axis_name):
+        X = pd.DataFrame(
+            {"x1": pd.Series([1.0, 2.0, 3.0], dtype=np.float64)},
+            index=pd.Index(["row-a", "row-b", "row-c"], dtype=object),
+        )
+        prepared = tweedie_module._prepare_tweedie_profile_inputs(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            X,
+            np.array([1.0, 2.0, 3.0]),
+        )
+
+        source_axis = getattr(X, axis_name)
+        source_values = source_axis.to_numpy(copy=False)
+        source_values.setflags(write=True)
+        source_values[0] = "changed"
+
+        expected = ["row-a", "row-b", "row-c"] if axis_name == "index" else ["x1"]
+        assert getattr(prepared.X, axis_name).tolist() == expected
+
+    def test_profile_snapshot_detaches_categorical_index_categories(self):
+        X = pd.DataFrame(
+            {"x1": [1.0, 2.0, 3.0]},
+            index=pd.CategoricalIndex(
+                ["row-a", "row-b", "row-a"],
+                categories=["row-a", "row-b"],
+                ordered=True,
+                name="rows",
+            ),
+        )
+        prepared = tweedie_module._prepare_tweedie_profile_inputs(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            X,
+            np.array([1.0, 2.0, 3.0]),
+        )
+
+        source_values = X.index.categories.to_numpy(copy=False)
+        source_values.setflags(write=True)
+        source_values[:] = ["changed-a", "changed-b"]
+
+        assert prepared.X.index.tolist() == ["row-a", "row-b", "row-a"]
+        assert prepared.X.index.categories.tolist() == ["row-a", "row-b"]
+        assert prepared.X.index.name == "rows"
+
+    def test_profile_snapshot_rejects_dataframe_subclasses_and_attrs(self):
+        class FrameSubclass(pd.DataFrame):
+            pass
+
+        class MutableMetadata:
+            pass
+
+        cases = [
+            FrameSubclass({"x1": [1.0]}),
+            pd.DataFrame({"x1": [1.0]}),
+        ]
+        cases[1].attrs["metadata"] = MutableMetadata()
+
+        for X in cases:
+            with pytest.raises(TypeError, match="snapshot.*X|plain pandas DataFrame"):
+                tweedie_module._prepare_tweedie_profile_inputs(
+                    SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                    X,
+                    np.array([1.0]),
+                )
+
+    def test_profile_snapshot_rejects_custom_column_labels_before_hashing(self):
+        class CustomLabel:
+            def __hash__(self):
+                raise AssertionError("unsupported labels must not be hashed")
+
+        X = pd.DataFrame([[1.0]])
+        X.columns = pd.Index([CustomLabel()], dtype=object)
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    def test_profile_snapshot_contextualizes_excessively_nested_object_values(self):
+        value = "leaf"
+        for _ in range(2_000):
+            value = (value,)
+        X = pd.DataFrame({"x1": pd.Series([value], dtype=object)})
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    def test_profile_snapshot_rejects_mutable_sparse_object_values(self):
+        class MutableValue:
+            pass
+
+        sparse = pd.arrays.SparseArray(
+            [MutableValue()],
+            dtype=pd.SparseDtype(object, fill_value=None),
+        )
+        X = pd.DataFrame({"x1": sparse})
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    def test_profile_snapshot_rejects_metadata_bearing_column_dtype(self):
+        dtype = np.dtype("f8", metadata={"state": [1.0]})
+        X = pd.DataFrame({"x1": np.array([1.0], dtype=dtype)})
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    @pytest.mark.parametrize("storage_kind", ["native", "integer-ea", "integer-buffer"])
+    def test_profile_snapshot_rejects_untrusted_backing_arrays(self, storage_kind):
+        class RetainedArray(np.ndarray):
+            def copy(self, *args, **kwargs):
+                return self
+
+        values = np.array([1, 2], dtype=np.int64).view(RetainedArray)
+        if storage_kind == "native":
+            column = values
+        else:
+            mask = np.zeros(2, dtype=bool)
+            integer = pd.arrays.IntegerArray(values, mask)
+            if storage_kind == "integer-ea":
+
+                class RetainedIntegerArray(pd.arrays.IntegerArray):
+                    def copy(self):
+                        return self
+
+                integer = RetainedIntegerArray(values.view(np.ndarray), mask)
+            column = integer
+        X = pd.DataFrame({"x1": column}, copy=False)
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0, 2.0]),
+            )
+
+    def test_profile_snapshot_rejects_untrusted_axis_storage_and_subclasses(self):
+        class RetainedArray(np.ndarray):
+            def copy(self, *args, **kwargs):
+                return self
+
+        class IndexSubclass(pd.Index):
+            pass
+
+        retained = np.array([1.0, 2.0]).view(RetainedArray)
+        cases = [
+            pd.Index(retained, copy=False),
+            IndexSubclass._simple_new(
+                np.array(["row-a", "row-b"], dtype=object),
+                name=None,
+            ),
+        ]
+
+        for index in cases:
+            X = pd.DataFrame({"x1": [1.0, 2.0]}, index=index)
+            with pytest.raises(TypeError, match="snapshot.*X"):
+                tweedie_module._prepare_tweedie_profile_inputs(
+                    SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                    X,
+                    np.array([1.0, 2.0]),
+                )
+
+    @pytest.mark.parametrize(
+        "column",
+        [
+            pd.arrays.SparseArray([0.0, 1.0, 0.0], fill_value=0.0),
+            pd.array(["2026-01", "2026-02", "2026-03"], dtype="period[M]"),
+        ],
+        ids=["sparse", "period"],
+    )
+    def test_profile_snapshot_rejects_storage_with_shared_internal_state(self, column):
+        X = pd.DataFrame({"x1": column})
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0, 2.0, 3.0]),
+            )
+
+    def test_profile_snapshot_rejects_string_extension_scalar_subclasses(self):
+        class MutableStr(str):
+            def __new__(cls, value):
+                instance = super().__new__(cls, value)
+                instance.state = [1.0]
+                return instance
+
+        X = pd.DataFrame(
+            {
+                "x1": pd.array(
+                    [MutableStr("level")],
+                    dtype=pd.StringDtype(storage="python"),
+                )
+            }
+        )
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    @pytest.mark.parametrize(
+        ("dtype", "values"),
+        [
+            (pd.StringDtype(storage="python"), ["a", None]),
+            (pd.BooleanDtype(), [1, None]),
+        ],
+        ids=["string", "boolean"],
+    )
+    def test_profile_snapshot_reconstructs_extension_dtype_identity(self, dtype, values):
+        X = pd.DataFrame({"x1": pd.array(values, dtype=dtype)})
+
+        prepared = tweedie_module._prepare_tweedie_profile_inputs(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            X,
+            np.array([1.0, 2.0]),
+        )
+
+        assert prepared.X["x1"].dtype == X["x1"].dtype
+        assert prepared.X["x1"].dtype is not X["x1"].dtype
+
+    @pytest.mark.parametrize(
+        "column",
+        [
+            pd.Series(["a", "b"], dtype=object),
+            pd.array(["a", None], dtype=pd.StringDtype(storage="python")),
+            pd.array([True, None], dtype="boolean"),
+            pd.date_range("2026-01-01", periods=2),
+            pd.date_range("2026-01-01", periods=2, tz="UTC"),
+            pd.to_timedelta([1, 2], unit="D"),
+            pd.arrays.IntervalArray.from_breaks([0, 1, 2]),
+            pd.Categorical.from_codes(
+                [0, 1],
+                categories=pd.Index(np.array(["a", "b"], dtype=object), dtype=object),
+                ordered=True,
+            ),
+        ],
+        ids=[
+            "object-string",
+            "string-extension",
+            "nullable-boolean",
+            "datetime",
+            "datetime-tz",
+            "timedelta",
+            "interval",
+            "categorical",
+        ],
+    )
+    def test_profile_snapshot_preserves_supported_storage_values_and_dtype(self, column):
+        X = pd.DataFrame({"x1": column})
+        expected = X["x1"].copy(deep=True)
+
+        prepared = tweedie_module._prepare_tweedie_profile_inputs(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            X,
+            np.array([1.0, 2.0]),
+        )
+
+        pd.testing.assert_series_equal(prepared.X["x1"], expected)
+        assert prepared.X["x1"]._values is not X["x1"]._values
+
+    def test_profile_snapshot_canonicalizes_builtin_arrow_strings(self):
+        pytest.importorskip("pyarrow")
+        arrow_dtype = pd.StringDtype(storage="pyarrow")
+        X = pd.DataFrame(
+            {"x1": pd.array(["a", None], dtype=arrow_dtype)},
+            index=pd.Index(pd.array(["row-a", "row-b"], dtype=arrow_dtype)),
+        )
+        X.columns = pd.Index(pd.array(["x1"], dtype=arrow_dtype))
+
+        prepared = tweedie_module._prepare_tweedie_profile_inputs(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            X,
+            np.array([1.0, 2.0]),
+        )
+
+        assert prepared.X["x1"].tolist() == ["a", pd.NA]
+        assert prepared.X.index.tolist() == ["row-a", "row-b"]
+        assert prepared.X.columns.tolist() == ["x1"]
+        assert prepared.X["x1"].dtype.storage == "python"
+        assert prepared.X.index.dtype.storage == "python"
+        assert prepared.X.columns.dtype.storage == "python"
+        assert type(prepared.X["x1"]._values) is pd.arrays.StringArray
+        assert type(prepared.X.index._values) is pd.arrays.StringArray
+        assert type(prepared.X.columns._values) is pd.arrays.StringArray
+
+        plain = pd.DataFrame({"x1": [1.0, 2.0]})
+        plain_prepared = tweedie_module._prepare_tweedie_profile_inputs(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            plain,
+            np.array([1.0, 2.0]),
+        )
+        pd.testing.assert_frame_equal(
+            plain_prepared.X,
+            plain,
+            check_dtype=False,
+            check_column_type=False,
+        )
+
+    def test_profile_snapshot_canonicalizes_named_pytz_storage(self):
+        pytz = pytest.importorskip("pytz")
+        X = pd.DataFrame(
+            {
+                "x1": pd.date_range(
+                    "2026-01-01",
+                    periods=2,
+                    tz=pytz.timezone("Europe/London"),
+                )
+            }
+        )
+
+        prepared = tweedie_module._prepare_tweedie_profile_inputs(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            X,
+            np.array([1.0, 2.0]),
+        )
+
+        pd.testing.assert_series_equal(
+            prepared.X["x1"].dt.tz_convert("UTC"),
+            X["x1"].dt.tz_convert("UTC"),
+            check_dtype=False,
+        )
+        assert type(prepared.X["x1"].dtype.tz) is ZoneInfo
+
+    @pytest.mark.parametrize("dtype", ["Int64", "UInt64", "Float64"])
+    def test_profile_snapshot_normalizes_nullable_numeric_dtypes(self, dtype):
+        X = pd.DataFrame({"x1": pd.array([1, None], dtype=dtype)})
+
+        prepared = tweedie_module._prepare_tweedie_profile_inputs(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            X,
+            np.array([1.0, 2.0]),
+        )
+
+        assert prepared.X["x1"].dtype == np.dtype("float64")
+        np.testing.assert_array_equal(
+            prepared.X["x1"].to_numpy(),
+            np.array([1.0, np.nan]),
+        )
+        assert prepared.X["x1"]._values is not X["x1"]._values
+
+    @pytest.mark.parametrize(
+        ("value", "dtype"),
+        [
+            (2**63 + 1, "UInt64"),
+            (2**64 - 1, "UInt64"),
+            (2**63 - 1, "Int64"),
+        ],
+    )
+    def test_profile_snapshot_rejects_inexact_nullable_integer_normalization(self, value, dtype):
+        X = pd.DataFrame({"x1": pd.array([value, None], dtype=dtype)})
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0, 2.0]),
+            )
+
+    def test_profile_snapshot_rejects_object_cell_back_reference(self):
+        class FrameLinkedFloat:
+            def __init__(self, value):
+                self.value = value
+                self.owner = None
+
+            def __float__(self):
+                return float(self.owner.iloc[0, 0].value)
+
+        caller_cell = FrameLinkedFloat(1.0)
+        X = pd.DataFrame({"x1": pd.Series([caller_cell], dtype=object)})
+        caller_cell.owner = X
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    @pytest.mark.parametrize("container_kind", ["series", "dataframe"])
+    def test_profile_snapshot_rejects_nested_pandas_payloads(self, container_kind):
+        class MutableFloat:
+            def __init__(self, value):
+                self.value = value
+
+        class ContainerLinkedFloat:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __float__(self):
+                if isinstance(self.payload, pd.DataFrame):
+                    return float(self.payload.iloc[0, 0].value)
+                return float(self.payload.iloc[0].value)
+
+        mutable = MutableFloat(1.0)
+        if container_kind == "series":
+            payload = pd.Series([mutable], dtype=object)
+        else:
+            payload = pd.DataFrame({"nested": pd.Series([mutable], dtype=object)})
+        X = pd.DataFrame({"x1": pd.Series([ContainerLinkedFloat(payload)], dtype=object)})
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    def test_profile_snapshot_checks_callable_instance_payloads(self):
+        class MutableFloat:
+            def __init__(self, value):
+                self.value = value
+
+        class CallableFloat:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __call__(self):
+                return float(self)
+
+            def __float__(self):
+                return float(self.payload.iloc[0].value)
+
+        X = pd.DataFrame(
+            {
+                "x1": pd.Series(
+                    [CallableFloat(pd.Series([MutableFloat(1.0)], dtype=object))],
+                    dtype=object,
+                )
+            }
+        )
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    @pytest.mark.parametrize("column_kind", ["object", "categorical"])
+    def test_profile_snapshot_rejects_enum_members_with_mutable_values(self, column_kind):
+        class MutableEnum(Enum):
+            LEVEL = [1.0]
+
+        if column_kind == "object":
+            column = pd.Series([MutableEnum.LEVEL], dtype=object)
+        else:
+            column = pd.Categorical(
+                [MutableEnum.LEVEL],
+                categories=[MutableEnum.LEVEL],
+            )
+        X = pd.DataFrame({"x1": column})
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    def test_profile_snapshot_rejects_enum_singletons_even_with_immutable_values(self):
+        class ImmutableEnum(Enum):
+            LOW = "low"
+            HIGH = "high"
+
+        X = pd.DataFrame(
+            {
+                "object": pd.Series([ImmutableEnum.LOW], dtype=object),
+                "categorical": pd.Categorical(
+                    [ImmutableEnum.HIGH],
+                    categories=[ImmutableEnum.LOW, ImmutableEnum.HIGH],
+                ),
+            }
+        )
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    def test_profile_snapshot_rejects_weak_references(self):
+        class MutableFloat:
+            def __init__(self, value):
+                self.value = value
+
+        class WeakLinkedFloat:
+            def __init__(self, target):
+                self.reference = weakref.ref(target)
+
+            def __float__(self):
+                return float(self.reference().value)
+
+        target = MutableFloat(1.0)
+        X = pd.DataFrame({"x1": pd.Series([WeakLinkedFloat(target)], dtype=object)})
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    @pytest.mark.parametrize(
+        "payload_kind",
+        [
+            "custom-object",
+            "float-subclass",
+            "enum",
+            "int-enum",
+            "list",
+            "object-array",
+            "timezone-datetime",
+            "dtype-metadata",
+            "slice",
+            "fraction",
+            "pandas-timestamp",
+            "pandas-timedelta",
+            "pandas-period",
+            "uuid-state",
+        ],
+    )
+    def test_profile_snapshot_rejects_nonimmutable_object_payloads(self, payload_kind):
+        class MutableValue:
+            def __init__(self, value=1.0):
+                self.value = value
+
+            def __float__(self):
+                return float(self.value)
+
+        class MutableFloat(float):
+            def __new__(cls, value):
+                instance = super().__new__(cls, value)
+                instance.state = [float(value)]
+                return instance
+
+            def __float__(self):
+                return self.state[0]
+
+        class MutableEnum(Enum):
+            LEVEL = [1.0]
+
+        class MutableIntEnum(IntEnum):
+            LEVEL = 1
+
+            def __float__(self):
+                return self.state[0]
+
+        MutableIntEnum.LEVEL.state = [1.0]
+
+        class MutableTimezone(tzinfo):
+            def __init__(self):
+                self.state = [1.0]
+
+            def utcoffset(self, value):
+                return timedelta(hours=self.state[0])
+
+            def dst(self, value):
+                return timedelta(0)
+
+        mutable = MutableValue()
+        payloads = {
+            "custom-object": mutable,
+            "float-subclass": MutableFloat(1.0),
+            "enum": MutableEnum.LEVEL,
+            "int-enum": MutableIntEnum.LEVEL,
+            "list": [mutable],
+            "object-array": np.array([mutable], dtype=object),
+            "timezone-datetime": datetime(2026, 1, 1, tzinfo=MutableTimezone()),
+            "dtype-metadata": np.dtype("f8", metadata={"state": mutable}),
+            "slice": slice(mutable),
+            "fraction": Fraction(1, 2),
+            "pandas-timestamp": pd.Timestamp("2026-01-01"),
+            "pandas-timedelta": pd.Timedelta(days=1),
+            "pandas-period": pd.Period("2026-01", freq="M"),
+            "uuid-state": UUID(int=0, is_safe=mutable),
+        }
+        X = pd.DataFrame({"x1": pd.Series([payloads[payload_kind]], dtype=object)})
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            tweedie_module._prepare_tweedie_profile_inputs(
+                SimpleNamespace(family=TweedieDistribution(p=1.5)),
+                X,
+                np.array([1.0]),
+            )
+
+    @pytest.mark.parametrize(
+        ("fit_mode", "builder_name"),
+        [("fit", "_build_profile_context"), ("fit_reml", "_build_profile_context_reml")],
+    )
+    def test_direct_profile_owns_object_dataframe_before_trace_callback(
+        self, monkeypatch, fit_mode, builder_name
+    ):
+        caller_values = ["low", "middle", "high"]
+        X = pd.DataFrame({"x1": pd.Series(caller_values, dtype=object)})
+        result = _deterministic_profile_result()
+        observed = {}
+
+        def mutate_caller_frame(_row):
+            X.iloc[:, 0] = ["changed", "changed", "changed"]
+
+        def fake_builder(
+            candidate,
+            profile_X,
+            profile_y,
+            sample_weight,
+            offset,
+            phi_method,
+            verbose,
+            trace_callback,
+            trace_iterations,
+            *,
+            _inputs_owned=False,
+        ):
+            assert _inputs_owned
+            observed["profile_X"] = profile_X
+            observed["before"] = profile_X["x1"].tolist()
+            trace_callback({})
+            observed["after"] = profile_X["x1"].tolist()
+            return SimpleNamespace()
+
+        monkeypatch.setattr(tweedie_module, builder_name, fake_builder)
+        monkeypatch.setattr(tweedie_module, "_search_brent", lambda *args: result)
+
+        returned = estimate_tweedie_p(
+            SimpleNamespace(family=TweedieDistribution(p=1.5)),
+            X,
+            np.array([0.0, 1.0, 2.0]),
+            fit_mode=fit_mode,
+            trace_callback=mutate_caller_frame,
+        )
+
+        assert returned is result
+        assert observed["before"] == caller_values
+        assert observed["after"] == caller_values
+        assert observed["profile_X"] is not X
+        assert X["x1"].tolist() == ["changed", "changed", "changed"]
+
+    @pytest.mark.parametrize(
+        ("fit_mode", "builder_name", "final_fit_name"),
+        [
+            ("fit", "_build_profile_context", "fit"),
+            ("reml", "_build_profile_context_reml", "fit_reml"),
+        ],
+    )
+    def test_wrapper_prepares_one_input_graph_for_profile_and_final_refit(
+        self, monkeypatch, fit_mode, builder_name, final_fit_name
+    ):
+        X = pd.DataFrame({"x1": pd.Series(["level"], dtype=object)})
+        result = _deterministic_profile_result()
+        observed = {}
+        snapshot_calls = []
+        real_snapshot = tweedie_module._snapshot_tweedie_profile_dataframe
+
+        def counted_snapshot(frame):
+            snapshot_calls.append(frame)
+            return real_snapshot(frame)
+
+        monkeypatch.setattr(
+            tweedie_module,
+            "_snapshot_tweedie_profile_dataframe",
+            counted_snapshot,
+        )
+
+        def fake_builder(
+            candidate,
+            profile_X,
+            profile_y,
+            sample_weight,
+            offset,
+            phi_method,
+            verbose,
+            trace_callback,
+            trace_iterations,
+            *,
+            _inputs_owned=False,
+        ):
+            assert _inputs_owned
+            observed["profile_X"] = profile_X
+            return SimpleNamespace()
+
+        monkeypatch.setattr(tweedie_module, builder_name, fake_builder)
+        monkeypatch.setattr(tweedie_module, "_search_brent", lambda *args: result)
+
+        def final_fit(fit_X, fit_y, **kwargs):
+            observed["final_X"] = fit_X
+
+        def unexpected_fit(*args, **kwargs):
+            raise AssertionError("estimate_p selected the wrong final refit method")
+
+        model = SimpleNamespace(
+            family=TweedieDistribution(p=1.5),
+            _retain_fit_state=True,
+            fit=unexpected_fit,
+            fit_reml=unexpected_fit,
+        )
+        setattr(model, final_fit_name, final_fit)
+        monkeypatch.setattr(
+            profile_ops_module, "_synchronize_tweedie_profile_refit", lambda *a: None
+        )
+
+        returned = profile_ops_module.estimate_p(
+            model,
+            X,
+            np.array([1.0]),
+            fit_mode=fit_mode,
+        )
+
+        assert returned is result
+        assert len(snapshot_calls) == 1
+        assert snapshot_calls[0] is X
+        assert observed["profile_X"] is observed["final_X"]
+        assert observed["profile_X"] is not X
+        assert observed["profile_X"].iloc[0, 0] == "level"
+
+    def test_wrapper_preserves_public_estimator_signature_for_instrumentation(self, monkeypatch):
+        X = pd.DataFrame({"x1": [1.0]})
+        y = np.array([1.0])
+        result = _deterministic_profile_result()
+        observed = {}
+
+        def strict_public_estimator(
+            candidate,
+            profile_X,
+            profile_y,
+            sample_weight=None,
+            offset=None,
+            *,
+            p_bounds=(1.05, 1.95),
+            xatol=1e-3,
+            maxiter=30,
+            verbose=False,
+            fit_mode="fit",
+            phi_method="mle",
+            method="brent",
+            n_grid=20,
+            grid=None,
+            n_grid_coarse=10,
+            optimizer="L-BFGS-B",
+            trace_callback=None,
+            trace_iterations=False,
+        ):
+            observed["profile_X"] = profile_X
+            observed["profile_y"] = profile_y
+            return result
+
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", strict_public_estimator)
+
+        def final_fit(fit_X, fit_y, **kwargs):
+            observed["final_X"] = fit_X
+            observed["final_y"] = fit_y
+
+        model = SimpleNamespace(
+            family=TweedieDistribution(p=1.5),
+            _retain_fit_state=True,
+            fit=final_fit,
+        )
+        monkeypatch.setattr(
+            profile_ops_module, "_synchronize_tweedie_profile_refit", lambda *args: None
+        )
+
+        returned = profile_ops_module.estimate_p(model, X, y)
+
+        assert returned is result
+        assert observed["profile_X"] is observed["final_X"]
+        assert observed["profile_y"] is observed["final_y"]
+        assert observed["profile_X"] is not X
+        assert observed["profile_y"] is not y
+
+    def test_uncopyable_object_dataframe_cell_fails_before_profile_or_mutation(self, monkeypatch):
+        class UncopyableFloat:
+            def __float__(self):
+                return 1.0
+
+            def __deepcopy__(self, memo):
+                raise RuntimeError("object cell refuses copying")
+
+        model = SimpleNamespace(
+            family=TweedieDistribution(p=1.5),
+            _retain_fit_state=True,
+        )
+        original_family = model.family
+        calls = []
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            lambda *args, **kwargs: calls.append("profile"),
+        )
+
+        with pytest.raises(TypeError, match="snapshot.*X"):
+            profile_ops_module.estimate_p(
+                model,
+                pd.DataFrame({"x1": pd.Series([UncopyableFloat()], dtype=object)}),
+                np.array([1.0]),
+                trace_callback=lambda row: calls.append("callback"),
+            )
+
+        assert calls == []
+        assert model.family is original_family
+
     @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
     @pytest.mark.parametrize("retain_fit_state", [True, False])
     def test_final_profile_refit_atomically_synchronizes_model_state(
@@ -1543,7 +2765,11 @@ class TestEstimatePFitMode:
             features={"x1": Spline(n_knots=5, penalty="ssp")},
         )
         result = _deterministic_profile_result()
-        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", lambda *args, **kwargs: result)
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            lambda *args, **kwargs: result,
+        )
 
         fit_name = "fit_reml" if fit_mode == "reml" else "fit"
         real_final_fit = getattr(model, fit_name)
@@ -1753,7 +2979,11 @@ class TestEstimatePFitMode:
             features={"x1": Spline(n_knots=5, penalty="ssp")},
         )
         result = _deterministic_profile_result()
-        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", lambda *args, **kwargs: result)
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            lambda *args, **kwargs: result,
+        )
         seen_retain_flags = []
 
         def failing_final_fit(*args, **kwargs):
@@ -1830,14 +3060,21 @@ class TestEstimatePFitMode:
         )
         profiler_kwargs = {}
 
-        def fake_estimate_tweedie_p(*args, **kwargs):
-            profiler_kwargs.update(kwargs)
+        def fake_estimate_tweedie_p(candidate, prepared):
+            profiler_kwargs.update(
+                phi_method=prepared.phi_method,
+                method=prepared.method,
+            )
             return result
 
         def unexpected_ci(*args, **kwargs):
             raise AssertionError("public estimate_p must not compute a profile CI eagerly")
 
-        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", fake_estimate_tweedie_p)
+        monkeypatch.setattr(
+            tweedie_module,
+            "_estimate_tweedie_p_prepared",
+            fake_estimate_tweedie_p,
+        )
         monkeypatch.setattr(result, "ci", unexpected_ci)
         progress_events = []
 
