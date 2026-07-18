@@ -297,12 +297,18 @@ class TestNB2AutoTheta:
 
         assert returned is not result
         assert model._last_fit_meta["method"] == "fit_reml"
-        assert model._config is configured_model
-        assert model._family_config is configured_family
+        assert model._config is not configured_model
+        assert model._family_config is not configured_family
         assert model._penalty_config is configured_penalty
-        assert model._config_revision == configured_revision
-        assert model.family.theta == "auto"
+        assert model._config_revision == configured_revision + 1
+        assert model._config.family.theta == pytest.approx(2.5)
+        assert model.family.theta == pytest.approx(2.5)
         assert model.theta_ == pytest.approx(2.5)
+        refit = model.clone_unfitted()
+        assert refit.family.theta == pytest.approx(2.5)
+        refit.fit(X, y)
+        assert refit.family.theta == pytest.approx(2.5)
+        assert refit.theta_ == pytest.approx(2.5)
         assert model._nb_profile_result is not result
         assert returned is not model._nb_profile_result
         assert model._fit_state.projections["_nb_profile_result"] is model._nb_profile_result

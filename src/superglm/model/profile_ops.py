@@ -2958,7 +2958,11 @@ def _synchronize_tweedie_profile_refit(model, y, profile_result) -> None:
 def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fit", **kwargs):
     """Estimate NB theta and atomically publish one profiled final fit."""
     from superglm.model import fit_ops
-    from superglm.model.fit_state import _install_fit_state, capture_fit_state
+    from superglm.model.fit_state import (
+        ModelConfigPublication,
+        _install_fit_state,
+        capture_fit_state,
+    )
     from superglm.model.fit_workspace import FitWorkspace
     from superglm.profiling.nb import estimate_nb_theta
 
@@ -2999,12 +3003,14 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
     if progress_callback is not None:
         progress_callback("final_refit", {"profile_estimate": _theta_estimate_payload(result)})
 
+    selected_family = NegativeBinomial(theta=result.theta_hat)
+    selected_config = model._config.with_value(family=selected_family)
     final_workspace = FitWorkspace.start(
         model,
         mode=resolved_mode,
         validated_inputs=validated_inputs,
         config_overrides={
-            "family": NegativeBinomial(theta=result.theta_hat),
+            "family": selected_family,
             # Profile publication must synchronize against the final refit even
             # when the public model requests compact fitted state.  Row-scale
             # buffers are released again before the atomic install below.
@@ -3057,6 +3063,12 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
         final_workspace,
         model,
         revision=model._fit_revision + 1,
+        config_publication=replace(
+            ModelConfigPublication.capture(model),
+            config=selected_config,
+            revision=model._config_revision + 1,
+            family=final_model._family_config,
+        ),
     )
     _install_fit_state(model, candidate)
     if resolved_mode == "fit_reml":
