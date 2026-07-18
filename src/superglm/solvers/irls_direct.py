@@ -26,6 +26,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 import superglm.solvers.scop_exact_support as scop_exact_support
+from superglm._fit_trace import TraceRun
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.distributions import _VARIANCE_FLOOR, Distribution, initial_mean
 from superglm.group_matrix import (
@@ -115,6 +116,10 @@ def _evaluate_scop_trial(
     family: Distribution,
     link: Link,
     offset: NDArray,
+    state_id: int | None = None,
+    evaluation_id: int | None = None,
+    basis_id: int | None = None,
+    lambdas: tuple[tuple[str, object], ...] = (),
 ) -> _SCOPTrialState:
     """Evaluate a fixed-endpoint SCOP trial by interpolating latent state."""
     beta_trial = committed.irls.beta + alpha * (proposed.irls.beta - committed.irls.beta)
@@ -142,7 +147,20 @@ def _evaluate_scop_trial(
             )
         )
 
-    irls = _evaluate_irls_state(dm, y, weights, family, link, offset, beta_trial, intercept_trial)
+    irls = _evaluate_irls_state(
+        dm,
+        y,
+        weights,
+        family,
+        link,
+        offset,
+        beta_trial,
+        intercept_trial,
+        state_id=state_id,
+        evaluation_id=evaluation_id,
+        basis_id=basis_id,
+        lambdas=lambdas,
+    )
     return _SCOPTrialState(irls=irls, groups=tuple(trial_groups))
 
 
@@ -302,6 +320,8 @@ def fit_irls_direct(
     _return_working_system: bool = False,
     _compute_fit_statistics: bool = True,
     _deviance_init: float | None = None,
+    trace_run: TraceRun | None = None,
+    trace_purpose: str = "fit",
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -408,6 +428,129 @@ def fit_irls_direct(
         S = S_override
     else:
         S = _build_penalty_matrix(gms, groups, lambda2, p, reml_penalties=reml_penalties)
+
+    trace_enabled = trace_run is not None and trace_run.enabled
+    trace_basis_id = trace_run.next_basis_id() if trace_enabled and trace_run is not None else None
+    if not trace_enabled:
+        resolved_lambdas: tuple[tuple[str, object], ...] = ()
+    elif isinstance(lambda2, dict):
+        resolved_lambdas = tuple(
+            (f"smooth:{name}", float(value)) for name, value in sorted(lambda2.items())
+        )
+    else:
+        resolved_lambdas = (("smooth", float(lambda2)),)
+
+    def emit_evaluation(
+        state: _IRLSState,
+        *,
+        phase: str,
+        iteration: int,
+        alpha: float | None = None,
+        enclosing_proposal_state_id: int | None = None,
+        deviance_reused: bool = False,
+    ) -> None:
+        if not trace_enabled:
+            return
+        assert trace_run is not None
+        trace_run.emit_lazy(
+            "evaluation",
+            lambda: {
+                "state_id": state.state_id,
+                "evaluation_id": state.evaluation_id,
+                "solver": "irls_direct",
+                "phase": phase,
+                "outer_iteration": iteration,
+                "accepted_alpha": alpha,
+                "enclosing_proposal_state_id": enclosing_proposal_state_id,
+                "state_space": state.state_space,
+                "basis_id": state.basis_id,
+                "lambdas": state.lambdas,
+                "dispersion": state.dispersion,
+                "intercept": state.intercept,
+                "deviance": state.deviance,
+                "deviance_source": "provided" if deviance_reused else "evaluated",
+            },
+            channel="pirls",
+            purpose=trace_purpose,
+            authoritative=False,
+        )
+
+    def evaluate_state(
+        beta_values: NDArray,
+        intercept_value: float,
+        *,
+        phase: str,
+        iteration: int,
+        alpha: float | None = None,
+        deviance: float | None = None,
+        enclosing_proposal_state_id: int | None = None,
+    ) -> _IRLSState:
+        if trace_enabled:
+            assert trace_run is not None
+            state_id = trace_run.next_state_id()
+            evaluation_id = trace_run.next_evaluation_id()
+        else:
+            state_id = None
+            evaluation_id = None
+        state = _evaluate_irls_state(
+            dm,
+            y,
+            weights,
+            family,
+            link,
+            offset,
+            beta_values,
+            intercept_value,
+            deviance=deviance,
+            state_id=state_id,
+            evaluation_id=evaluation_id,
+            basis_id=trace_basis_id,
+            lambdas=resolved_lambdas,
+        )
+        emit_evaluation(
+            state,
+            phase=phase,
+            iteration=iteration,
+            alpha=alpha,
+            enclosing_proposal_state_id=enclosing_proposal_state_id,
+            deviance_reused=deviance is not None,
+        )
+        return state
+
+    def emit_state_commit(
+        state: _IRLSState,
+        *,
+        iteration: int,
+        fit_converged: bool,
+        convergence_value: float | None,
+        termination_reason: str | None,
+    ) -> None:
+        if not trace_enabled:
+            return
+        assert trace_run is not None
+        trace_run.emit_lazy(
+            "state_commit",
+            lambda: {
+                "state_id": state.state_id,
+                "evaluation_id": state.evaluation_id,
+                "solver": "irls_direct",
+                "phase": "initial" if iteration == 0 else "outer",
+                "outer_iteration": iteration,
+                "state_space": state.state_space,
+                "basis_id": state.basis_id,
+                "lambdas": state.lambdas,
+                "dispersion": state.dispersion,
+                "intercept": state.intercept,
+                "deviance": state.deviance,
+                "fit_converged": fit_converged,
+                "convergence_criterion": convergence,
+                "convergence_value": convergence_value,
+                "convergence_tolerance": tol,
+                "termination_reason": termination_reason,
+            },
+            channel="pirls",
+            purpose=trace_purpose,
+        )
 
     # ── Constrained QP support (monotone splines) ──
     has_constraints = any(g.constraints is not None for g in groups)
@@ -539,7 +682,12 @@ def fit_irls_direct(
 
         # QP/warm initialization is part of the first committed state, not the
         # first proposal. This gives iteration one a coherent latent baseline.
-        provisional = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+        provisional = evaluate_state(
+            beta,
+            intercept,
+            phase="scop_initialization",
+            iteration=0,
+        )
         V_init = np.maximum(family.variance(provisional.mu), _VARIANCE_FLOOR)
         dmu_deta_init = link.deriv_inverse(provisional.eta)
         W_init = weights * dmu_deta_init**2 / V_init
@@ -658,16 +806,19 @@ def fit_irls_direct(
     _last_working_centered: CenteredSystem | None = None
 
     # Freeze the fit-entry state so iteration-one trial safety has a baseline.
-    committed = _evaluate_irls_state(
-        dm,
-        y,
-        weights,
-        family,
-        link,
-        offset,
+    committed = evaluate_state(
         beta,
         intercept,
+        phase="initial",
+        iteration=0,
         deviance=_deviance_init,
+    )
+    emit_state_commit(
+        committed,
+        iteration=0,
+        fit_converged=False,
+        convergence_value=None,
+        termination_reason=None,
     )
     if _has_scop:
         scop_committed = _SCOPTrialState(
@@ -973,8 +1124,12 @@ def fit_irls_direct(
 
         if _has_scop:
             _t0 = time.perf_counter()
-            proposal_irls = _evaluate_irls_state(
-                dm, y, weights, family, link, offset, beta, intercept
+            proposal_irls = evaluate_state(
+                beta,
+                intercept,
+                phase="scop_proposal",
+                iteration=it + 1,
+                alpha=1.0,
             )
             proposal_scop = _SCOPTrialState(
                 irls=proposal_irls,
@@ -999,6 +1154,13 @@ def fit_irls_direct(
             scop_trial_cache: dict[float, _SCOPTrialState] = {1.0: proposal_scop}
 
             def evaluate_scop_trial(alpha: float) -> _IRLSState:
+                if trace_enabled:
+                    assert trace_run is not None
+                    state_id = trace_run.next_state_id()
+                    evaluation_id = trace_run.next_evaluation_id()
+                else:
+                    state_id = None
+                    evaluation_id = None
                 candidate = _evaluate_scop_trial(
                     committed=scop_committed,
                     proposed=proposal_scop,
@@ -1010,6 +1172,17 @@ def fit_irls_direct(
                     family=family,
                     link=link,
                     offset=offset,
+                    state_id=state_id,
+                    evaluation_id=evaluation_id,
+                    basis_id=trace_basis_id,
+                    lambdas=resolved_lambdas,
+                )
+                emit_evaluation(
+                    candidate.irls,
+                    phase="scop_line_search_trial",
+                    iteration=it + 1,
+                    alpha=alpha,
+                    enclosing_proposal_state_id=proposal_scop.irls.state_id,
                 )
                 scop_trial_cache[alpha] = candidate
                 return candidate.irls
@@ -1059,7 +1232,13 @@ def fit_irls_direct(
                 )
         else:
             _t0 = time.perf_counter()
-            proposal = _evaluate_irls_state(dm, y, weights, family, link, offset, beta, intercept)
+            proposal = evaluate_state(
+                beta,
+                intercept,
+                phase="proposal",
+                iteration=it + 1,
+                alpha=1.0,
+            )
             trial_cache: dict[float, _IRLSState] = {1.0: proposal}
 
             def evaluate_trial(alpha: float) -> _IRLSState:
@@ -1067,15 +1246,13 @@ def fit_irls_direct(
                 intercept_trial = committed.intercept + alpha * (
                     proposal.intercept - committed.intercept
                 )
-                candidate = _evaluate_irls_state(
-                    dm,
-                    y,
-                    weights,
-                    family,
-                    link,
-                    offset,
+                candidate = evaluate_state(
                     beta_trial,
                     intercept_trial,
+                    phase="line_search_trial",
+                    iteration=it + 1,
+                    alpha=alpha,
+                    enclosing_proposal_state_id=proposal.state_id,
                 )
                 trial_cache[alpha] = candidate
                 return candidate
@@ -1109,6 +1286,74 @@ def fit_irls_direct(
                     n_halvings,
                     dev,
                 )
+
+        proposal_state = proposal_scop.irls if _has_scop else proposal
+        dev_rel_change = None
+        coef_change = None
+        if np.isfinite(dev):
+            if convergence == "coefficients":
+                coef_change = float(
+                    np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)))
+                )
+                coef_change = max(
+                    coef_change,
+                    abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
+                )
+                converged_this_iter = coef_change < tol
+                convergence_value = coef_change
+            else:
+                if np.isfinite(dev_prev):
+                    dev_rel_change = abs(dev - dev_prev) / (abs(dev_prev) + 1.0)
+                converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
+                convergence_value = dev_rel_change
+        else:
+            converged_this_iter = False
+            convergence_value = None
+        if step_rejected:
+            converged_this_iter = False
+
+        if step_rejected:
+            termination_reason = "step_rejected"
+        elif not np.isfinite(dev):
+            termination_reason = "nonfinite_deviance"
+        elif converged_this_iter:
+            termination_reason = "converged"
+        elif it + 1 == max_iter:
+            termination_reason = "max_iter"
+        else:
+            termination_reason = "continue"
+
+        if trace_enabled:
+            assert trace_run is not None
+            trace_run.emit_lazy(
+                "step_decision",
+                lambda: {
+                    "solver": "irls_direct",
+                    "outer_iteration": it + 1,
+                    "base_state_id": committed.state_id,
+                    "proposal_state_id": proposal_state.state_id,
+                    "committed_state_id": retained.state_id,
+                    "accepted_alpha": decision.alpha,
+                    "step_halvings": decision.step_halvings,
+                    "trials_attempted": decision.trials_attempted,
+                    "step_rejected": decision.step_rejected,
+                    "fit_converged": converged_this_iter,
+                    "convergence_criterion": convergence,
+                    "convergence_value": convergence_value,
+                    "convergence_tolerance": tol,
+                    "termination_reason": termination_reason,
+                },
+                channel="pirls",
+                purpose=trace_purpose,
+            )
+        if np.isfinite(dev):
+            emit_state_commit(
+                retained,
+                iteration=it + 1,
+                fit_converged=converged_this_iter,
+                convergence_value=convergence_value,
+                termination_reason=termination_reason,
+            )
 
         working_eta_clipped = False
         eta_clipped = False
@@ -1159,6 +1404,18 @@ def fit_irls_direct(
                     working_eta_clipped=working_eta_clipped,
                     step_rejected=step_rejected,
                     rank_truncated=rank_truncated,
+                    trials_attempted=decision.trials_attempted,
+                    accepted_alpha=decision.alpha,
+                    base_state_id=committed.state_id,
+                    proposal_state_id=proposal_state.state_id,
+                    committed_state_id=retained.state_id,
+                    evaluation_id=retained.evaluation_id,
+                    state_space=retained.state_space,
+                    basis_id=retained.basis_id,
+                    convergence_criterion=convergence,
+                    convergence_value=convergence_value,
+                    convergence_tolerance=tol,
+                    termination_reason=termination_reason,
                 )
             )
 
@@ -1170,22 +1427,6 @@ def fit_irls_direct(
         if not np.isfinite(dev):
             logger.warning(f"IRLS direct non-finite deviance at iter={it + 1}: dev={dev:.2e}")
             break
-
-        dev_rel_change = None
-        coef_change = None
-        if convergence == "coefficients":
-            coef_change = float(np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta))))
-            coef_change = max(
-                coef_change,
-                abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
-            )
-            converged_this_iter = coef_change < tol
-        else:
-            if np.isfinite(dev_prev):
-                dev_rel_change = abs(dev - dev_prev) / (abs(dev_prev) + 1.0)
-            converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
-        if step_rejected:
-            converged_this_iter = False
 
         if record_debug_rows:
             debug_recorder.append_jsonl(
@@ -1218,7 +1459,11 @@ def fit_irls_direct(
                     "working_eta_min": float(working_eta.min()),
                     "working_eta_max": float(working_eta.max()),
                     "step_halvings": int(n_halvings),
+                    "trials_attempted": int(decision.trials_attempted),
                     "step_rejected": bool(step_rejected),
+                    "base_state_id": committed.state_id,
+                    "proposal_state_id": proposal_state.state_id,
+                    "committed_state_id": retained.state_id,
                     "rank_truncated": rank_truncated,
                     "cond_estimate": float(_cond_est),
                     "used_svd_fallback": bool(_used_svd),
@@ -1452,6 +1697,11 @@ def fit_irls_direct(
         iteration_log=iteration_log if record_diagnostics else None,
         log_det_H=log_det_H,
         rank_info=rank_info,
+        state_id=retained.state_id,
+        evaluation_id=retained.evaluation_id,
+        state_space=retained.state_space,
+        basis_id=retained.basis_id,
+        termination_reason=termination_reason,
     )
 
     # Collect converged SCOP state for EFS outer loop and fit results.
