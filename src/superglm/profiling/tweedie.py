@@ -35,6 +35,14 @@ from numpy.typing import NDArray
 from scipy.optimize import brentq, minimize, minimize_scalar
 from scipy.special import expit, ive, logit, wright_bessel
 
+from superglm._tweedie_profile_kernel import (
+    PROFILE_KERNEL_NONFINITE,
+    PROFILE_KERNEL_OK,
+    PROFILE_KERNEL_UNSAFE_MODE,
+    PROFILE_KERNEL_WORK_LIMIT,
+    ExactProfileStatistics,
+    _exact_profile_statistics_prevalidated,
+)
 from superglm._tweedie_series import tweedie_log_series
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import clip_mu
@@ -1070,6 +1078,16 @@ class _PhiProfileResult:
     upper_boundary: bool
     diagnostics: _TweedieLogpdfDiagnostics
     message: str
+
+
+@dataclass(frozen=True)
+class _ExactPhiNewtonOutcome:
+    """Certified fast fixed-power profile or a reason to use the defensive path."""
+
+    result: _PhiProfileResult | None
+    statistics: ExactProfileStatistics | None
+    failure_reason: str | None
+    n_kernel_evaluations: int
 
 
 @dataclass(frozen=True)
@@ -2453,6 +2471,216 @@ def _finalize_phi_mle_result(
     )
 
 
+def _profile_kernel_failure_reason(status: int) -> str:
+    """Translate one compiled-kernel status into a stable fallback diagnosis."""
+    if status == PROFILE_KERNEL_WORK_LIMIT:
+        return "exact series work limit exceeded"
+    if status == PROFILE_KERNEL_UNSAFE_MODE:
+        return "exact series mode is outside the safe integer range"
+    if status == PROFILE_KERNEL_NONFINITE:
+        return "exact likelihood or derivatives became non-finite"
+    return f"exact profile kernel returned unknown status {status}"
+
+
+def _profile_phi_exact_newton(
+    y: NDArray,
+    mu: NDArray,
+    p: float,
+    *,
+    weights: NDArray | None = None,
+    df_resid: float | None = None,
+    phi_start: float | None = None,
+    max_terms: int = 100_000,
+    max_total_terms: int = _PROFILE_SERIES_MAX_TOTAL_TERMS,
+    max_iterations: int = 12,
+    validate: bool = True,
+) -> _ExactPhiNewtonOutcome:
+    """Try a certified exact Newton profile in ``log(phi)`` without nested scans."""
+    prepared = _prepare_tweedie_density(y, mu, p, weights=weights)
+    denominator = _phi_profile_denominator(prepared, df_resid)
+    pearson_phi = _pearson_phi_from_prepared(prepared, denominator)
+
+    initial_phi = phi_start
+    if initial_phi is None or not np.isfinite(initial_phi) or initial_phi <= 0.0:
+        deviance = np.empty(len(prepared.y), dtype=np.float64)
+        deviance[prepared.zero_mask] = 2.0 * prepared.zero_rate_numerator[prepared.zero_mask]
+        deviance[prepared.positive_mask] = prepared.positive_saddlepoint_deviance
+        with np.errstate(all="ignore"):
+            deviance_phi = float(np.sum(prepared.weights * deviance)) / denominator
+        initial_phi = (
+            deviance_phi if np.isfinite(deviance_phi) and deviance_phi > 0.0 else pearson_phi
+        )
+    if not np.isfinite(initial_phi) or initial_phi <= 0.0:
+        return _ExactPhiNewtonOutcome(
+            result=None,
+            statistics=None,
+            failure_reason="no finite positive dispersion seed",
+            n_kernel_evaluations=0,
+        )
+
+    u = float(np.clip(np.log(initial_phi), _LOG_PHI_LOWER_BOUND, _LOG_PHI_UPPER_BOUND))
+    n_kernel_evaluations = 0
+
+    def evaluate(candidate_u: float) -> ExactProfileStatistics:
+        nonlocal n_kernel_evaluations
+        n_kernel_evaluations += 1
+        return _exact_profile_statistics_prevalidated(
+            prepared.y,
+            prepared.mu,
+            prepared.weights,
+            prepared.p,
+            candidate_u,
+            max_terms=max_terms,
+            max_total_terms=max_total_terms,
+        )
+
+    current = evaluate(u)
+    if current.status != PROFILE_KERNEL_OK:
+        return _ExactPhiNewtonOutcome(
+            result=None,
+            statistics=None,
+            failure_reason=_profile_kernel_failure_reason(current.status),
+            n_kernel_evaluations=n_kernel_evaluations,
+        )
+
+    converged = False
+    failure_reason: str | None = None
+    for _ in range(max_iterations):
+        score = current.gradient_log_phi
+        curvature = current.hessian_log_phi_log_phi
+        if abs(score) <= 1.0e-8 and curvature > 0.0:
+            converged = True
+            break
+        if not np.isfinite(curvature) or curvature <= 0.0:
+            failure_reason = "exact log-dispersion curvature is not positive"
+            break
+
+        step = float(np.clip(-score / curvature, -2.0, 2.0))
+        if not np.isfinite(step) or step == 0.0:
+            failure_reason = "exact log-dispersion Newton step is not finite"
+            break
+
+        accepted = False
+        last_trial_status = PROFILE_KERNEL_OK
+        for _ in range(12):
+            trial_u = float(np.clip(u + step, _LOG_PHI_LOWER_BOUND, _LOG_PHI_UPPER_BOUND))
+            if trial_u == u:
+                break
+            trial = evaluate(trial_u)
+            last_trial_status = trial.status
+            if trial.status == PROFILE_KERNEL_OK and _phi_nll_no_worse(
+                trial.nll,
+                current.nll,
+            ):
+                u = trial_u
+                current = trial
+                accepted = True
+                break
+            step *= 0.5
+
+        if not accepted:
+            if abs(current.gradient_log_phi) <= _PHI_SCORE_TOLERANCE and (
+                current.hessian_log_phi_log_phi > 0.0
+            ):
+                converged = True
+            elif last_trial_status != PROFILE_KERNEL_OK:
+                failure_reason = _profile_kernel_failure_reason(last_trial_status)
+            else:
+                failure_reason = "exact log-dispersion Newton step failed improvement checks"
+            break
+        if abs(step) <= 1.0e-10 and abs(current.gradient_log_phi) <= _PHI_SCORE_TOLERANCE:
+            converged = True
+            break
+
+    if not converged and failure_reason is None:
+        failure_reason = "exact log-dispersion Newton iteration limit reached"
+    if not converged:
+        return _ExactPhiNewtonOutcome(
+            result=None,
+            statistics=None,
+            failure_reason=failure_reason,
+            n_kernel_evaluations=n_kernel_evaluations,
+        )
+
+    phi = float(np.exp(u))
+    validation_nll = current.nll
+    validation_score = current.gradient_log_phi
+    if validate:
+        try:
+            validation = _evaluate_tweedie_density(prepared, phi, compute_score=True)
+        except FloatingPointError:
+            validation = None
+        if (
+            validation is None
+            or validation.diagnostics.n_saddlepoint != 0
+            or not validation.score_valid
+            or validation.log_phi_score is None
+        ):
+            return _ExactPhiNewtonOutcome(
+                result=None,
+                statistics=None,
+                failure_reason="authoritative exact-density validation was unavailable",
+                n_kernel_evaluations=n_kernel_evaluations,
+            )
+
+        validation_nll = -float(np.mean(validation.logpdf))
+        validation_score = float(np.mean(validation.log_phi_score))
+        if not (
+            np.isfinite(validation_nll)
+            and np.isfinite(validation_score)
+            and np.isclose(validation_nll, current.nll, rtol=2.0e-10, atol=2.0e-10)
+            and np.isclose(
+                validation_score,
+                current.gradient_log_phi,
+                rtol=2.0e-7,
+                atol=2.0e-8,
+            )
+            and abs(validation_score) <= _PHI_SCORE_TOLERANCE
+            and current.hessian_log_phi_log_phi > 0.0
+        ):
+            return _ExactPhiNewtonOutcome(
+                result=None,
+                statistics=None,
+                failure_reason="authoritative exact-density validation disagreed with Newton result",
+                n_kernel_evaluations=n_kernel_evaluations,
+            )
+
+    diagnostics = _TweedieLogpdfDiagnostics(
+        n_positive=current.n_positive,
+        n_saddlepoint=0,
+        n_series=current.n_positive,
+    )
+    result = _PhiProfileResult(
+        phi=phi,
+        nll=validation_nll,
+        converged=True,
+        objective_finite=True,
+        n_evaluations=n_kernel_evaluations + int(validate),
+        n_score_evaluations=n_kernel_evaluations + int(validate),
+        n_value_only_evaluations=0,
+        n_fallback_evaluations=0,
+        optimizer="exact-newton",
+        score=validation_score,
+        used_fallback=False,
+        fallback_reason=None,
+        branch_switch_detected=False,
+        lower_boundary=False,
+        upper_boundary=False,
+        diagnostics=diagnostics,
+        message=(
+            "Exact log-dispersion Newton root passed authoritative density validation."
+            if validate
+            else "Exact log-dispersion Newton root awaits final joint-profile validation."
+        ),
+    )
+    return _ExactPhiNewtonOutcome(
+        result=result,
+        statistics=current,
+        failure_reason=None,
+        n_kernel_evaluations=n_kernel_evaluations,
+    )
+
+
 def _profile_phi_detailed(
     y: NDArray,
     mu: NDArray,
@@ -3486,6 +3714,11 @@ class _ProfileContext:
 
     # Complete candidate cache; insertion order is the immutable search trace.
     _evaluation_cache: dict[float, _ProfileEvaluation] = field(default_factory=dict, repr=False)
+    _exact_statistics_cache: dict[float, ExactProfileStatistics] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    _exact_failure_cache: dict[float, str] = field(default_factory=dict, repr=False)
 
     @property
     def n_evals(self) -> int:
@@ -3500,17 +3733,10 @@ class _ProfileContext:
         """Return the authoritative completed record for an exact p key."""
         return self._evaluation_cache.get(float(p))
 
-    def evaluate(self, p: float, source: str = "") -> float:
-        """Fit at p, profile phi, record trace row, return mean NLL."""
-        import time as _time
-
+    def _fit_at_power(self, p: float):
+        """Run one warm-started coefficient fit and return its fitted mean."""
         from superglm.distributions import Tweedie
 
-        key = float(p)
-        if key in self._evaluation_cache:
-            return self._evaluation_cache[key].nll
-
-        _t0 = _time.perf_counter()
         dist = Tweedie(p)
         if self.use_direct:
             result, _ = fit_irls_direct(
@@ -3555,20 +3781,22 @@ class _ProfileContext:
         )
         mu = clip_mu(self.link.inverse(eta), dist)
         df_resid = max(float(len(self.y_arr)) - float(result.effective_df), 1.0)
+        return result, mu, df_resid
 
-        phi_result = _profile_phi_detailed(
-            self.y_arr,
-            mu,
-            p,
-            weights=self.w_arr,
-            df_resid=df_resid,
-            phi_method=self.phi_method,
-            phi_start=_previous_finite_phi(self._evaluation_cache),
-        )
-
+    def _store_evaluation(
+        self,
+        p: float,
+        result,
+        mu: NDArray,
+        phi_result: _PhiProfileResult,
+        source: str,
+        elapsed: float,
+    ) -> _ProfileEvaluation:
+        """Store one complete fixed-power profile record and advance warm starts."""
+        key = float(p)
         record = _ProfileEvaluation(
             step=self.n_evals,
-            p=float(p),
+            p=key,
             mu=_owned_readonly_array(mu),
             edf=float(result.effective_df),
             n_iter=int(result.n_iter),
@@ -3581,26 +3809,112 @@ class _ProfileContext:
             reml_converged=None,
         )
         self._evaluation_cache[key] = record
-
-        # Update warm starts
         self.warm_beta = result.beta
         self.warm_intercept = result.intercept
 
         if self.trace_callback is not None and source:
             self.trace_callback(_materialize_profile_trace_row(record))
-        _elapsed = _time.perf_counter() - _t0
-
         logger.info(
             f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  phi={record.phi:.4f}  "
-            f"nll={record.nll:.4f}  iters={result.n_iter}  {_elapsed:.2f}s"
+            f"nll={record.nll:.4f}  iters={result.n_iter}  {elapsed:.2f}s"
         )
         if self.verbose:
             print(
                 f"  p={p:.4f}  phi={record.phi:.4f}  nll={record.nll:.4f}  "
-                f"iters={result.n_iter}  {_elapsed:.2f}s"
+                f"iters={result.n_iter}  {elapsed:.2f}s"
+            )
+        return record
+
+    def evaluate(self, p: float, source: str = "") -> float:
+        """Fit at p, profile phi, record trace row, return mean NLL."""
+        import time as _time
+
+        key = float(p)
+        if key in self._evaluation_cache:
+            return self._evaluation_cache[key].nll
+
+        started = _time.perf_counter()
+        result, mu, df_resid = self._fit_at_power(key)
+
+        phi_result = _profile_phi_detailed(
+            self.y_arr,
+            mu,
+            key,
+            weights=self.w_arr,
+            df_resid=df_resid,
+            phi_method=self.phi_method,
+            phi_start=_previous_finite_phi(self._evaluation_cache),
+        )
+        record = self._store_evaluation(
+            key,
+            result,
+            mu,
+            phi_result,
+            source,
+            _time.perf_counter() - started,
+        )
+        return record.nll
+
+    def evaluate_exact_phi(
+        self,
+        p: float,
+        source: str = "joint_ml",
+        phi_start: float | None = None,
+    ) -> tuple[_ProfileEvaluation, ExactProfileStatistics | None, str | None]:
+        """Fit at p and try the fused exact dispersion profile."""
+        import time as _time
+
+        key = float(p)
+        cached = self._evaluation_cache.get(key)
+        if cached is not None:
+            return (
+                cached,
+                self._exact_statistics_cache.get(key),
+                self._exact_failure_cache.get(key),
             )
 
-        return record.nll
+        started = _time.perf_counter()
+        result, mu, df_resid = self._fit_at_power(key)
+        if phi_start is None:
+            phi_start = _previous_finite_phi(self._evaluation_cache)
+        outcome = _profile_phi_exact_newton(
+            self.y_arr,
+            mu,
+            key,
+            weights=self.w_arr,
+            df_resid=df_resid,
+            phi_start=phi_start,
+            validate=False,
+        )
+        if outcome.result is None:
+            phi_result = _profile_phi_detailed(
+                self.y_arr,
+                mu,
+                key,
+                weights=self.w_arr,
+                df_resid=df_resid,
+                phi_method=self.phi_method,
+                phi_start=phi_start,
+            )
+            failure_reason = outcome.failure_reason or "exact dispersion Newton was unavailable"
+            self._exact_failure_cache[key] = failure_reason
+            statistics = None
+        else:
+            phi_result = outcome.result
+            statistics = outcome.statistics
+            failure_reason = None
+            if statistics is not None:
+                self._exact_statistics_cache[key] = statistics
+
+        record = self._store_evaluation(
+            key,
+            result,
+            mu,
+            phi_result,
+            source,
+            _time.perf_counter() - started,
+        )
+        return record, statistics, failure_reason
 
     def finalize(self, p_hat: float, method: str, converged: bool) -> TweedieProfileResult:
         """Build result with final phi at p_hat and search_trace DataFrame."""
@@ -4390,6 +4704,367 @@ def _search_profile_opt(
     )
 
 
+def _joint_ml_fallback_to_brent(
+    ctx: _ProfileContext,
+    p_bounds: tuple[float, float],
+    xatol: float,
+    maxiter: int,
+    reason: str,
+) -> TweedieProfileResult:
+    """Finish with the authoritative scalar profile after a diagnosed fast-path exit."""
+    result = _search_brent(ctx, p_bounds, xatol, maxiter)
+    result.method = "joint_ml"
+    prefix = f"Exact joint fast path fell back to Brent: {reason}."
+    result.outer_message = " ".join(part for part in (prefix, result.outer_message) if part)
+    return result
+
+
+def _predict_joint_phi(
+    record: _ProfileEvaluation,
+    statistics: ExactProfileStatistics,
+    target_p: float,
+) -> float:
+    """Predict the next fixed-power dispersion root from the exact cross curvature."""
+    curvature = statistics.hessian_log_phi_log_phi
+    if not np.isfinite(curvature) or curvature <= 0.0:
+        return record.phi
+    delta_u = -statistics.hessian_p_log_phi / curvature * (target_p - record.p)
+    bounded_delta_u = float(np.clip(delta_u, -2.0, 2.0))
+    return float(
+        np.exp(
+            np.clip(
+                np.log(record.phi) + bounded_delta_u,
+                _LOG_PHI_LOWER_BOUND,
+                _LOG_PHI_UPPER_BOUND,
+            )
+        )
+    )
+
+
+def _validate_joint_profile_record(
+    ctx: _ProfileContext,
+    record: _ProfileEvaluation,
+    statistics: ExactProfileStatistics,
+) -> tuple[_ProfileEvaluation | None, str | None]:
+    """Validate only the winning fused result through the authoritative density route."""
+    prepared = _prepare_tweedie_density(
+        ctx.y_arr,
+        record.mu,
+        record.p,
+        weights=ctx.w_arr,
+    )
+    try:
+        validation = _evaluate_tweedie_density(prepared, record.phi, compute_score=True)
+    except FloatingPointError:
+        return None, "winning authoritative exact-density validation raised"
+    if (
+        validation.diagnostics.n_saddlepoint != 0
+        or not validation.score_valid
+        or validation.log_phi_score is None
+    ):
+        return None, "winning authoritative exact-density validation was unavailable"
+
+    nll = -float(np.mean(validation.logpdf))
+    score = float(np.mean(validation.log_phi_score))
+    if not (
+        np.isfinite(nll)
+        and np.isfinite(score)
+        and np.isclose(nll, statistics.nll, rtol=2.0e-10, atol=2.0e-10)
+        and np.isclose(
+            score,
+            statistics.gradient_log_phi,
+            rtol=2.0e-7,
+            atol=2.0e-8,
+        )
+        and abs(score) <= _PHI_SCORE_TOLERANCE
+    ):
+        return None, "winning authoritative exact-density validation disagreed"
+
+    validated_phi = replace(
+        record.phi_result,
+        nll=nll,
+        score=score,
+        n_evaluations=record.phi_result.n_evaluations + 1,
+        n_score_evaluations=record.phi_result.n_score_evaluations + 1,
+        diagnostics=validation.diagnostics,
+        message="Exact joint winner passed authoritative density validation.",
+    )
+    validated_record = replace(record, phi_result=validated_phi)
+    ctx._evaluation_cache[record.p] = validated_record
+    return validated_record, None
+
+
+def _search_joint_ml(
+    ctx: _ProfileContext,
+    p_bounds: tuple[float, float],
+    xatol: float,
+    maxiter: int,
+) -> TweedieProfileResult:
+    """Safeguarded exact power-score solve with fixed-power profile validation."""
+    lo, hi = p_bounds
+    if not np.isfinite(lo) or not np.isfinite(hi) or not 1.0 < lo < hi < 2.0:
+        raise ValueError("p_bounds must be finite, increasing, and strictly inside (1, 2)")
+    if not np.isfinite(xatol) or xatol <= 0.0:
+        raise ValueError("xatol must be finite and strictly positive")
+    if maxiter <= 0:
+        raise ValueError("maxiter must be strictly positive")
+    if ctx.phi_method != "mle":
+        raise ValueError("method='joint_ml' requires phi_method='mle'")
+    if any(
+        group.constraints is not None or group.monotone_engine is not None for group in ctx.groups
+    ):
+        return _joint_ml_fallback_to_brent(
+            ctx,
+            p_bounds,
+            xatol,
+            maxiter,
+            "constrained coefficient fits require the defensive outer search",
+        )
+
+    candidates: list[tuple[_ProfileEvaluation, ExactProfileStatistics]] = []
+
+    def evaluate(candidate_p: float, source: str, phi_start: float | None = None):
+        record, statistics, failure = ctx.evaluate_exact_phi(
+            candidate_p,
+            source=source,
+            phi_start=phi_start,
+        )
+        if statistics is not None and failure is None and _profile_record_is_selectable(record):
+            candidates.append((record, statistics))
+        return record, statistics, failure
+
+    initial_p = float(np.clip(1.5, np.nextafter(lo, hi), np.nextafter(hi, lo)))
+    current_record, current_stats, failure = evaluate(initial_p, "joint_init")
+    if current_stats is None or failure is not None:
+        return _joint_ml_fallback_to_brent(
+            ctx,
+            p_bounds,
+            xatol,
+            maxiter,
+            failure or "initial exact derivative evaluation was unavailable",
+        )
+
+    previous_p: float | None = None
+    previous_score: float | None = None
+    max_joint_iterations = min(maxiter, 10)
+    for _ in range(max_joint_iterations):
+        score = current_stats.gradient_p
+        phi_curvature = current_stats.hessian_log_phi_log_phi
+        if not np.isfinite(score) or not np.isfinite(phi_curvature) or phi_curvature <= 0.0:
+            return _joint_ml_fallback_to_brent(
+                ctx,
+                p_bounds,
+                xatol,
+                maxiter,
+                "the exact power score or dispersion curvature was not usable",
+            )
+        profile_curvature = current_stats.hessian_pp - (
+            current_stats.hessian_p_log_phi**2 / phi_curvature
+        )
+        if np.isfinite(profile_curvature) and profile_curvature > 0.0:
+            raw_step = -score / profile_curvature
+        elif previous_p is not None and previous_score is not None and score != previous_score:
+            raw_step = -score * (current_record.p - previous_p) / (score - previous_score)
+        else:
+            return _joint_ml_fallback_to_brent(
+                ctx,
+                p_bounds,
+                xatol,
+                maxiter,
+                "the exact profiled power curvature was not positive",
+            )
+
+        if not np.isfinite(raw_step):
+            return _joint_ml_fallback_to_brent(
+                ctx,
+                p_bounds,
+                xatol,
+                maxiter,
+                "the proposed power step was not finite",
+            )
+        if abs(score) <= 1.0e-7 or abs(raw_step) <= 0.25 * xatol:
+            break
+
+        step = float(np.clip(raw_step, -0.4 * (hi - lo), 0.4 * (hi - lo)))
+        accepted = False
+        trial_record: _ProfileEvaluation | None = None
+        trial_stats: ExactProfileStatistics | None = None
+        trial_failure: str | None = None
+        for _ in range(6):
+            trial_p = float(
+                np.clip(
+                    current_record.p + step,
+                    np.nextafter(lo, hi),
+                    np.nextafter(hi, lo),
+                )
+            )
+            if trial_p == current_record.p:
+                break
+            trial_record, trial_stats, trial_failure = evaluate(
+                trial_p,
+                "joint_newton",
+                _predict_joint_phi(current_record, current_stats, trial_p),
+            )
+            if trial_stats is None or trial_failure is not None:
+                break
+            score_bracketed = score * trial_stats.gradient_p <= 0.0
+            if _phi_nll_no_worse(trial_record.nll, current_record.nll) or score_bracketed:
+                accepted = True
+                break
+            step *= 0.5
+
+        if trial_stats is None or trial_failure is not None:
+            return _joint_ml_fallback_to_brent(
+                ctx,
+                p_bounds,
+                xatol,
+                maxiter,
+                trial_failure or "a trial exact derivative evaluation was unavailable",
+            )
+        if not accepted or trial_record is None:
+            break
+        previous_p = current_record.p
+        previous_score = score
+        current_record = trial_record
+        current_stats = trial_stats
+        if abs(step) <= xatol:
+            break
+
+    if not candidates:
+        return _joint_ml_fallback_to_brent(
+            ctx,
+            p_bounds,
+            xatol,
+            maxiter,
+            "no finite exact joint candidates were produced",
+        )
+    center_record, center_stats = min(candidates, key=lambda item: item[0].nll)
+    probe = max(4.0 * xatol, 5.0e-4)
+    certified = False
+
+    lower_candidates = [item for item in candidates if item[0].p < center_record.p]
+    upper_candidates = [item for item in candidates if item[0].p > center_record.p]
+    if lower_candidates and upper_candidates:
+        lower_record, _ = max(lower_candidates, key=lambda item: item[0].p)
+        upper_record, _ = min(upper_candidates, key=lambda item: item[0].p)
+        lower_delta = lower_record.p - center_record.p
+        upper_delta = upper_record.p - center_record.p
+        lower_slope = (lower_record.nll - center_record.nll) / lower_delta
+        upper_slope = (upper_record.nll - center_record.nll) / upper_delta
+        quadratic = (upper_slope - lower_slope) / (upper_delta - lower_delta)
+        linear = lower_slope - quadratic * lower_delta
+        vertex_offset = -linear / (2.0 * quadratic) if quadratic > 0.0 else np.inf
+        certified = bool(
+            np.isfinite(vertex_offset)
+            and abs(vertex_offset) <= xatol
+            and _phi_nll_no_worse(center_record.nll, lower_record.nll)
+            and _phi_nll_no_worse(center_record.nll, upper_record.nll)
+        )
+
+    for _ in range(0 if certified else 2):
+        if center_record.p - probe <= lo or center_record.p + probe >= hi:
+            return _joint_ml_fallback_to_brent(
+                ctx,
+                p_bounds,
+                xatol,
+                maxiter,
+                "the candidate requires boundary-aware power profiling",
+            )
+        left_record, left_stats, left_failure = evaluate(
+            center_record.p - probe,
+            "joint_validate",
+            _predict_joint_phi(center_record, center_stats, center_record.p - probe),
+        )
+        right_record, right_stats, right_failure = evaluate(
+            center_record.p + probe,
+            "joint_validate",
+            _predict_joint_phi(center_record, center_stats, center_record.p + probe),
+        )
+        if left_stats is None or right_stats is None or left_failure or right_failure:
+            return _joint_ml_fallback_to_brent(
+                ctx,
+                p_bounds,
+                xatol,
+                maxiter,
+                left_failure or right_failure or "local profile validation was unavailable",
+            )
+
+        denominator = left_record.nll - 2.0 * center_record.nll + right_record.nll
+        if not np.isfinite(denominator) or denominator <= 0.0:
+            return _joint_ml_fallback_to_brent(
+                ctx,
+                p_bounds,
+                xatol,
+                maxiter,
+                "the local exact profile did not have positive curvature",
+            )
+        vertex_offset = 0.5 * probe * (left_record.nll - right_record.nll) / denominator
+        center_is_local_minimum = _phi_nll_no_worse(
+            center_record.nll,
+            left_record.nll,
+        ) and _phi_nll_no_worse(center_record.nll, right_record.nll)
+        if center_is_local_minimum and abs(vertex_offset) <= xatol:
+            certified = True
+            break
+
+        vertex_p = float(
+            np.clip(
+                center_record.p + vertex_offset, center_record.p - probe, center_record.p + probe
+            )
+        )
+        vertex_record, vertex_stats, vertex_failure = evaluate(
+            vertex_p,
+            "joint_vertex",
+            _predict_joint_phi(center_record, center_stats, vertex_p),
+        )
+        if vertex_stats is None or vertex_failure is not None:
+            return _joint_ml_fallback_to_brent(
+                ctx,
+                p_bounds,
+                xatol,
+                maxiter,
+                vertex_failure or "local profile vertex evaluation was unavailable",
+            )
+        center_record = vertex_record
+        center_stats = vertex_stats
+        probe = max(2.0 * xatol, 2.5e-4)
+
+    if not certified:
+        return _joint_ml_fallback_to_brent(
+            ctx,
+            p_bounds,
+            xatol,
+            maxiter,
+            "the local exact profile could not certify the power optimum",
+        )
+
+    validated_record, validation_failure = _validate_joint_profile_record(
+        ctx,
+        center_record,
+        center_stats,
+    )
+    if validated_record is None:
+        return _joint_ml_fallback_to_brent(
+            ctx,
+            p_bounds,
+            xatol,
+            maxiter,
+            validation_failure or "winning exact-density validation failed",
+        )
+
+    return _finalize_profile_record(
+        ctx,
+        validated_record,
+        method="joint_ml",
+        outer_converged=True,
+        outer_message=(
+            "Exact power-score solve passed local fixed-power profile validation; "
+            f"evaluated {len(ctx._evaluation_cache)} powers."
+        ),
+        searched_bounds=p_bounds,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Profile likelihood optimiser — public entry point
 # ---------------------------------------------------------------------------
@@ -4507,10 +5182,10 @@ def estimate_tweedie_p(
             f"phi_method={phi_method!r} is not valid, expected one of {sorted(_VALID_PHI_METHODS)}"
         )
 
-    if method in ("joint_ml", "integrated"):
+    if method == "integrated":
         raise NotImplementedError(
             f"method={method!r} is not yet implemented. "
-            f"Use one of: 'brent', 'grid', 'grid_refine', 'profile_opt'."
+            f"Use one of: 'brent', 'grid', 'grid_refine', 'profile_opt', 'joint_ml'."
         )
 
     # Build context
@@ -4546,6 +5221,19 @@ def estimate_tweedie_p(
         return _search_grid(ctx, p_bounds, n_grid, grid)
     if method == "grid_refine":
         return _search_grid_refine(ctx, p_bounds, n_grid_coarse, xatol, maxiter)
+    if method == "joint_ml":
+        if isinstance(ctx, _ProfileContextREML):
+            result = _search_brent(ctx, p_bounds, xatol, maxiter)
+            result.method = "joint_ml"
+            result.outer_message = " ".join(
+                (
+                    "Exact joint fast path fell back to Brent because fit_reml requires "
+                    "the defensive outer profile.",
+                    result.outer_message,
+                )
+            )
+            return result
+        return _search_joint_ml(ctx, p_bounds, xatol, maxiter)
     return _search_profile_opt(ctx, p_bounds, optimizer, xatol, maxiter)
 
 

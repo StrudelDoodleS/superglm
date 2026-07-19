@@ -29,7 +29,7 @@ def test_joint_profile_matches_neutral_reference() -> None:
         xatol=1.0e-4,
         maxiter=30,
         phi_method="mle",
-        method="brent",
+        method="joint_ml",
     )
 
     assert result.p_hat == pytest.approx(1.1968971098776182, abs=2.0e-4)

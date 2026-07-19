@@ -447,14 +447,36 @@ def exact_profile_statistics(
     if max_terms < 0 or max_total_terms < 0:
         raise ValueError("series work limits must be non-negative")
 
-    raw = _exact_profile_statistics_kernel(
+    return _exact_profile_statistics_prevalidated(
         y_array,
         mu_array,
         weight_array,
         p_float,
         log_phi_float,
-        int(max_terms),
-        int(max_total_terms),
+        max_terms=int(max_terms),
+        max_total_terms=int(max_total_terms),
+    )
+
+
+def _exact_profile_statistics_prevalidated(
+    y: NDArray[np.float64],
+    mu: NDArray[np.float64],
+    weights: NDArray[np.float64],
+    p: float,
+    log_phi: float,
+    *,
+    max_terms: int = _DEFAULT_MAX_TERMS,
+    max_total_terms: int = _DEFAULT_MAX_TOTAL_TERMS,
+) -> ExactProfileStatistics:
+    """Call the compiled kernel for already validated contiguous float arrays."""
+    raw = _exact_profile_statistics_kernel(
+        y,
+        mu,
+        weights,
+        p,
+        log_phi,
+        max_terms,
+        max_total_terms,
     )
     return ExactProfileStatistics(
         status=int(raw[0]),

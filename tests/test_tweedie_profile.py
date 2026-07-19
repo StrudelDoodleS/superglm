@@ -504,6 +504,58 @@ class TestTweedieLogPhiScore:
 
         return (mean_nll(u + h) - mean_nll(u - h)) / (2.0 * h)
 
+    @pytest.mark.parametrize("p", [1.2, 1.5, 1.8])
+    def test_exact_phi_newton_matches_tight_value_only_reference(self, p):
+        x = np.linspace(-1.5, 1.5, 64)
+        mu = np.exp(0.2 + 0.35 * x)
+        y = mu * np.exp(0.18 * np.sin(2.1 * x) - 0.03)
+        y[::11] = 0.0
+        weights = np.geomspace(0.4, 2.5, len(y))
+        reference, _ = _tight_value_only_phi_reference(
+            y,
+            mu,
+            p,
+            weights=weights,
+        )
+
+        outcome = tweedie_module._profile_phi_exact_newton(
+            y,
+            mu,
+            p,
+            weights=weights,
+            df_resid=float(len(y)),
+            phi_start=1.0,
+        )
+
+        assert outcome.failure_reason is None
+        assert outcome.result is not None
+        assert outcome.statistics is not None
+        assert outcome.n_kernel_evaluations <= 8
+        assert outcome.result.converged
+        assert outcome.result.optimizer == "exact-newton"
+        assert outcome.result.diagnostics.n_saddlepoint == 0
+        assert outcome.result.score is not None
+        assert abs(outcome.result.score) <= 1.0e-6
+        assert np.log(outcome.result.phi) == pytest.approx(reference.x, abs=5.0e-7)
+        assert outcome.result.nll == pytest.approx(reference.fun, abs=2.0e-10)
+
+    def test_exact_phi_newton_reports_work_limit_without_raising(self):
+        outcome = tweedie_module._profile_phi_exact_newton(
+            np.ones(4),
+            np.ones(4),
+            1.4,
+            weights=np.ones(4),
+            df_resid=4.0,
+            phi_start=1.0e-12,
+            max_terms=100,
+            max_total_terms=200,
+        )
+
+        assert outcome.result is None
+        assert outcome.statistics is None
+        assert outcome.failure_reason is not None
+        assert "work limit" in outcome.failure_reason
+
     def test_exact_series_rows_do_not_create_saddlepoint_branch_switches(self, monkeypatch):
         """Failed Wright rows stay exact and do not create approximation branches."""
         y = np.array([1.0, 4.0])
@@ -4352,14 +4404,40 @@ class TestSearchMethods:
                 phi_method="pearson",
             )
 
-    def test_joint_ml_not_implemented(self):
-        """method='joint_ml' should raise NotImplementedError."""
-        X, y, _ = _tweedie_data()
-        model = SuperGLM(
+    def test_joint_ml_matches_exact_brent_profile(self):
+        X, y, _ = _tweedie_data(n=240, p_true=1.45, seed=1729)
+        joint_model = SuperGLM(
             family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
         )
-        with pytest.raises(NotImplementedError, match="joint_ml"):
-            estimate_tweedie_p(model, X, y, method="joint_ml", phi_method="pearson")
+        brent_model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
+
+        joint = estimate_tweedie_p(
+            joint_model,
+            X,
+            y,
+            method="joint_ml",
+            phi_method="mle",
+            p_bounds=(1.1, 1.9),
+            xatol=1.0e-4,
+        )
+        brent = estimate_tweedie_p(
+            brent_model,
+            X,
+            y,
+            method="brent",
+            phi_method="mle",
+            p_bounds=(1.1, 1.9),
+            xatol=1.0e-4,
+        )
+
+        assert joint.method == "joint_ml"
+        assert joint.converged
+        assert joint.density_exact
+        assert joint.p_hat == pytest.approx(brent.p_hat, abs=2.0e-4)
+        assert joint.phi_hat == pytest.approx(brent.phi_hat, rel=2.0e-4)
+        assert joint.nll == pytest.approx(brent.nll, abs=2.0e-8)
 
     def test_integrated_not_implemented(self):
         """method='integrated' should raise NotImplementedError."""
