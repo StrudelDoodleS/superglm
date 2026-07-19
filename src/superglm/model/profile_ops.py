@@ -684,7 +684,7 @@ def _validate_tweedie_profile_copy_protocols(model, *, roots=None) -> None:
         "__setattr__",
         "__delattr__",
     }
-    atomic_types = {
+    atomic_types = (
         type(None),
         bool,
         int,
@@ -698,21 +698,38 @@ def _validate_tweedie_profile_copy_protocols(model, *, roots=None) -> None:
         types.FunctionType,
         np.ufunc,
         re.Pattern,
+    )
+    type_dict = type.__getattribute__(type, "__dict__")
+    type_metadata_descriptors = {
+        name: type_dict[name] for name in ("__dict__", "__mro__", "__name__")
     }
     seen: set[int] = set()
 
+    def trusted_type_metadata(candidate_type, name):
+        """Read class metadata through ``type``'s own native getset."""
+        return types.GetSetDescriptorType.__get__(
+            type_metadata_descriptors[name],
+            candidate_type,
+            type(candidate_type),
+        )
+
+    def type_is_one_of(candidate_type, allowed_types) -> bool:
+        """Classify an exact type without invoking metaclass hash/equality hooks."""
+        return any(allowed_type is candidate_type for allowed_type in allowed_types)
+
     def visit(value) -> None:
+        value_type = type(value)
         if (
-            type(value) in atomic_types
-            or type(value) in _TWEEDIE_EXACT_NUMPY_SCALAR_TYPES
+            type_is_one_of(value_type, atomic_types)
+            or type_is_one_of(value_type, _TWEEDIE_EXACT_NUMPY_SCALAR_TYPES)
             or _is_known_immutable_profile_value(value)
         ):
             return
-        if type(value) is Fraction:
+        if value_type is Fraction:
             if type(value.numerator) is not int or type(value.denominator) is not int:
                 raise TypeError("Tweedie profile Fraction configuration is not immutable")
             return
-        if type(value) is UUID:
+        if value_type is UUID:
             if (
                 type(value.int) is not int
                 or value.is_safe is not None
@@ -720,130 +737,218 @@ def _validate_tweedie_profile_copy_protocols(model, *, roots=None) -> None:
             ):
                 raise TypeError("Tweedie profile UUID configuration is not immutable")
             return
-        if type(value) is pd.Timestamp:
+        if value_type is pd.Timestamp:
             try:
                 _canonical_tweedie_profile_timezone(value.tzinfo)
             except TypeError as exc:
                 raise TypeError("Tweedie profile Timestamp has an unsafe timezone") from exc
             return
-        if type(value) is pd.Timedelta:
+        if value_type is pd.Timedelta:
             return
-        if type(value) is pd.Interval:
+        if value_type is pd.Interval:
             if type(value.closed) is not str:
                 raise TypeError("Tweedie profile Interval configuration is not immutable")
             visit(value.left)
             visit(value.right)
             return
-        if type(value) in _PROFILE_INDEX_TYPES:
+        if type_is_one_of(value_type, _PROFILE_INDEX_TYPES):
             for name in value.names:
                 visit(name)
             for item in value.tolist():
                 visit(item)
             return
-        if isinstance(value, np.dtype) or type(value) in _PROFILE_SUPPORTED_EXTENSION_DTYPE_TYPES:
+        if isinstance(value, np.dtype) or type_is_one_of(
+            value_type, _PROFILE_SUPPORTED_EXTENSION_DTYPE_TYPES
+        ):
             _validate_tweedie_profile_dtype(value, name="model configuration dtype")
-            if type(value) is pd.CategoricalDtype and value.categories is not None:
+            if value_type is pd.CategoricalDtype and value.categories is not None:
                 visit(value.categories)
             return
-        if type(value) is types.MethodType:
+        if value_type is types.MethodType:
             visit(object.__getattribute__(value, "__self__"))
             return
-        if type(value) is types.BuiltinFunctionType:
+        if value_type is types.BuiltinFunctionType:
             owner = object.__getattribute__(value, "__self__")
-            if owner is not None and type(owner) not in {types.ModuleType, type}:
+            if (
+                owner is not None
+                and type(owner) is not types.ModuleType
+                and type(owner) is not type
+            ):
                 visit(owner)
             return
         identity = id(value)
         if identity in seen:
             return
         seen.add(identity)
-        if type(value) is np.ndarray:
+        if value_type is np.ndarray:
             if value.dtype.kind == "O":
                 for item in value.flat:
                     visit(item)
             return
-        if type(value) is dict:
+        if value_type is dict:
             for key, item in value.items():
                 visit(key)
                 visit(item)
             return
-        if type(value) in {list, tuple, set, frozenset}:
+        if type_is_one_of(value_type, (list, tuple, set, frozenset)):
             for item in value:
                 visit(item)
             return
 
-        if type(value) in copyreg.dispatch_table:
+        value_type_name = trusted_type_metadata(value_type, "__name__")
+        metaclass_hooks = []
+        metaclass_descriptors = []
+        trusted_type_getattribute = type_dict["__getattribute__"]
+        for candidate_metaclass in trusted_type_metadata(type(value_type), "__mro__"):
+            if candidate_metaclass is type:
+                break
+            metaclass_dict = trusted_type_metadata(candidate_metaclass, "__dict__")
+            metaclass_descriptors.extend(
+                name for name in type_metadata_descriptors if name in metaclass_dict
+            )
+            for name in ("__getattribute__", "__getattr__", "__hash__", "__eq__"):
+                if name not in metaclass_dict:
+                    continue
+                definition = metaclass_dict[name]
+                if name == "__getattribute__" and definition is trusted_type_getattribute:
+                    continue
+                metaclass_hooks.append(name)
+        if metaclass_descriptors:
             raise TypeError(
                 "Tweedie profile refitting cannot safely clone configuration object "
-                f"{type(value).__name__} with a registered copy reducer"
+                f"{value_type_name} with custom metaclass descriptors: "
+                + ", ".join(sorted(set(metaclass_descriptors)))
+            )
+        if metaclass_hooks:
+            raise TypeError(
+                "Tweedie profile refitting cannot safely clone configuration object "
+                f"{value_type_name} with custom metaclass hooks: "
+                + ", ".join(sorted(set(metaclass_hooks)))
             )
 
-        dataclass_params = type(value).__dict__.get("__dataclass_params__")
-        frozen_dataclass = bool(
-            "__dataclass_fields__" in type(value).__dict__
-            and dataclass_params is not None
-            and dataclass_params.frozen
+        value_mro = trusted_type_metadata(value_type, "__mro__")
+        class_dicts = tuple(
+            (candidate_type, trusted_type_metadata(candidate_type, "__dict__"))
+            for candidate_type in value_mro
         )
+        value_type_dict = class_dicts[0][1]
+
+        if any(registered_type is value_type for registered_type in copyreg.dispatch_table):
+            raise TypeError(
+                "Tweedie profile refitting cannot safely clone configuration object "
+                f"{value_type_name} with a registered copy reducer"
+            )
+
+        dataclass_params = value_type_dict.get("__dataclass_params__")
+        has_dataclass_fields = "__dataclass_fields__" in value_type_dict
+        if has_dataclass_fields and type(dataclass_params) is not dataclasses._DataclassParams:
+            raise TypeError(
+                "Tweedie profile refitting cannot safely clone configuration object "
+                f"{value_type_name} with invalid dataclass metadata"
+            )
+        frozen_dataclass = False
+        if has_dataclass_fields:
+            frozen_value = object.__getattribute__(dataclass_params, "frozen")
+            if type(frozen_value) is not bool:
+                raise TypeError(
+                    "Tweedie profile refitting cannot safely clone configuration object "
+                    f"{value_type_name} with invalid dataclass metadata"
+                )
+            frozen_dataclass = frozen_value
         defining_protocols = []
         for name in sorted(unsafe_protocols):
-            for candidate_type in type(value).__mro__:
-                if candidate_type is object or name not in candidate_type.__dict__:
+            for candidate_type, candidate_dict in class_dicts:
+                if candidate_type is object or name not in candidate_dict:
                     continue
-                definition = candidate_type.__dict__[name]
+                definition = candidate_dict[name]
                 generated_frozen_hook = frozen_dataclass and name in {
                     "__setattr__",
                     "__delattr__",
                 }
-                generated_slots_state = definition in {
-                    getattr(dataclasses, "_dataclass_getstate", None),
-                    getattr(dataclasses, "_dataclass_setstate", None),
-                }
+                generated_slots_state = definition is getattr(
+                    dataclasses, "_dataclass_getstate", None
+                ) or definition is getattr(dataclasses, "_dataclass_setstate", None)
                 if not generated_frozen_hook and not generated_slots_state:
                     defining_protocols.append(name)
                 break
         if defining_protocols:
             raise TypeError(
                 "Tweedie profile refitting cannot safely clone configuration object "
-                f"{type(value).__name__} with custom copy hooks: " + ", ".join(defining_protocols)
+                f"{value_type_name} with custom copy hooks: " + ", ".join(defining_protocols)
             )
         slot_descriptors = []
-        for candidate_type in type(value).__mro__:
-            declared = candidate_type.__dict__.get("__slots__", ())
-            if isinstance(declared, str):
-                declared = (declared,)
-            for name in declared:
+        for _candidate_type, candidate_dict in class_dicts:
+            declared = candidate_dict.get("__slots__", ())
+            declared_type = type(declared)
+            if declared_type is str:
+                slot_names = (declared,)
+            elif type_is_one_of(declared_type, (tuple, list, set, frozenset, dict)):
+                if not all(type(name) is str for name in declared):
+                    raise TypeError(
+                        "Tweedie profile refitting cannot safely inspect "
+                        f"invalid __slots__ metadata on {value_type_name}"
+                    )
+                slot_names = declared
+            else:
+                raise TypeError(
+                    "Tweedie profile refitting cannot safely inspect "
+                    f"invalid __slots__ metadata on {value_type_name}"
+                )
+            for name in slot_names:
                 if name in {"__dict__", "__weakref__"}:
                     continue
-                descriptor = candidate_type.__dict__.get(name)
+                descriptor = candidate_dict.get(name)
                 if type(descriptor) is not types.MemberDescriptorType:
                     raise TypeError(
                         "Tweedie profile refitting cannot safely inspect slot state on "
-                        f"{type(value).__name__}"
+                        f"{value_type_name}"
                     )
                 resolved_descriptor = next(
-                    (base.__dict__[name] for base in type(value).__mro__ if name in base.__dict__),
+                    (base_dict[name] for _base, base_dict in class_dicts if name in base_dict),
                     None,
                 )
                 if resolved_descriptor is not descriptor:
                     raise TypeError(
                         "Tweedie profile refitting cannot safely inspect overridden slot "
-                        f"{name!r} on {type(value).__name__}"
+                        f"{name!r} on {value_type_name}"
                     )
                 slot_descriptors.append((name, descriptor))
         for _name, descriptor in slot_descriptors:
             try:
-                slot_value = descriptor.__get__(value, type(value))
+                slot_value = descriptor.__get__(value, value_type)
             except AttributeError:
                 continue
             visit(slot_value)
+        # ``object.__getattribute__`` still executes data descriptors. Resolve
+        # the instance dictionary from class metadata before touching it.
+        dict_owner = None
+        dict_descriptor = None
+        for candidate_type, candidate_dict in class_dicts:
+            if "__dict__" in candidate_dict:
+                dict_owner = candidate_type
+                dict_descriptor = candidate_dict["__dict__"]
+                break
+        if dict_descriptor is None:
+            return
+        trusted_dict_descriptor = type(dict_descriptor) is types.GetSetDescriptorType
+        if trusted_dict_descriptor:
+            trusted_dict_descriptor = (
+                object.__getattribute__(dict_descriptor, "__name__") == "__dict__"
+                and object.__getattribute__(dict_descriptor, "__objclass__") is dict_owner
+            )
+        if not trusted_dict_descriptor:
+            raise TypeError(
+                "Tweedie profile refitting cannot safely clone configuration object "
+                f"{value_type_name} with custom __dict__ descriptor"
+            )
         try:
-            attributes = object.__getattribute__(value, "__dict__")
+            attributes = dict_descriptor.__get__(value, value_type)
         except AttributeError:
             return
         if type(attributes) is not dict:
             raise TypeError(
                 "Tweedie profile refitting cannot safely inspect configuration object "
-                f"{type(value).__name__}"
+                f"{value_type_name}"
             )
         visit(attributes)
 
