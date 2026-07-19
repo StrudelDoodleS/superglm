@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from scipy.special import ive
+from scipy.special import gammaln, ive
 
+import superglm._tweedie_series as series_module
 import superglm.profiling.tweedie as tweedie_module
 from superglm.distributions import Tweedie
 from superglm.links import LogLink
@@ -15,6 +16,46 @@ from superglm.profiling.tweedie import (
     estimate_phi,
     tweedie_logpdf,
 )
+
+
+def _log_t_with_series_mode(a: float, mode: int) -> float:
+    return float(np.log(mode + 1.0) + gammaln(a * (mode + 1.0)) - gammaln(a * mode))
+
+
+def test_exact_series_starts_near_distant_mode(monkeypatch) -> None:
+    calls = 0
+    elements = 0
+    real_gammaln = series_module.gammaln
+
+    def counted(values):
+        nonlocal calls, elements
+        calls += 1
+        elements += int(np.size(values))
+        return real_gammaln(values)
+
+    monkeypatch.setattr(series_module, "gammaln", counted)
+    log_sum, expected_j, exact = series_module.tweedie_log_series(
+        np.array([_log_t_with_series_mode(1.5, 90_000)]),
+        1.5,
+    )
+
+    assert exact.tolist() == [True]
+    assert np.isfinite(log_sum[0])
+    assert expected_j[0] == pytest.approx(90_000.7, rel=2.0e-9)
+    assert calls < 100
+    assert elements < 20_000
+
+
+def test_exact_series_rejects_impossible_work_without_raising() -> None:
+    log_sum, expected_j, exact = series_module.tweedie_log_series(
+        np.array([70.0]),
+        1.5,
+        max_total_terms=1_000,
+    )
+
+    assert exact.tolist() == [False]
+    assert np.isnan(log_sum[0])
+    assert np.isnan(expected_j[0])
 
 
 @pytest.mark.parametrize("p", [1.000001, 1.01, 1.5, 1.99, 1.999999])

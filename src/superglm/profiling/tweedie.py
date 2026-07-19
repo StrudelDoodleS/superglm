@@ -700,10 +700,12 @@ def _evaluate_tweedie_density(
             positive_logpdf[use_p15_bessel] = bessel_logpdf
 
         if np.any(use_series):
-            series_log_sum, expected_j = tweedie_log_series(
+            series_log_sum, expected_j, series_exact = tweedie_log_series(
                 log_t[use_series],
                 prepared.a,
             )
+            if not np.all(series_exact):
+                raise FloatingPointError("Tweedie exact series exceeded its work budget")
             positive_logpdf[use_series] = (
                 series_log_sum
                 - prepared.positive_log_y[use_series]
