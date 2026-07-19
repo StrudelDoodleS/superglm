@@ -35,6 +35,7 @@ from numpy.typing import NDArray
 from scipy.optimize import brentq, minimize, minimize_scalar
 from scipy.special import expit, logit, wright_bessel
 
+from superglm._tweedie_series import tweedie_log_series
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
@@ -311,6 +312,7 @@ class _TweedieLogpdfDiagnostics:
 
     n_positive: int = 0
     n_saddlepoint: int = 0
+    n_series: int = 0
 
     @property
     def saddlepoint_fraction(self) -> float:
@@ -609,6 +611,7 @@ def _evaluate_tweedie_density(
             log_phi_score[zero] = zero_logpdf
 
     n_saddlepoint = 0
+    n_series = 0
     positive_saddlepoint_mask = np.zeros(
         prepared.positive_indices.size,
         dtype=np.bool_,
@@ -655,9 +658,24 @@ def _evaluate_tweedie_density(
             wright_a_plus_one[valid_indices] = wright_recurrence[density_valid]
             positive_logpdf[valid_indices] = candidate_logpdf[density_valid]
 
-        # This assignment is intentionally independent of np.any(exact): an
-        # all-invalid Wright batch still needs every saddlepoint fallback.
-        saddlepoint = ~exact
+        use_series = ~exact & (prepared.t_arg_limit > 0.0)
+        series_expected_j = np.full(len(log_t), np.nan, dtype=np.float64)
+        if np.any(use_series):
+            series_log_sum, expected_j = tweedie_log_series(
+                log_t[use_series],
+                prepared.a,
+            )
+            positive_logpdf[use_series] = (
+                series_log_sum
+                - prepared.positive_log_y[use_series]
+                + prepared.positive_canonical_c[use_series] * inverse_phi_positive[use_series]
+            )
+            series_expected_j[use_series] = expected_j
+            n_series = int(np.count_nonzero(use_series))
+
+        # A non-positive/NaN limit is the explicit compatibility route that
+        # forces the saddlepoint approximation. Default evaluation is exact.
+        saddlepoint = ~(exact | use_series)
         positive_saddlepoint_mask = saddlepoint
         n_saddlepoint = int(np.count_nonzero(saddlepoint))
         if np.any(saddlepoint):
@@ -681,6 +699,12 @@ def _evaluate_tweedie_density(
                     - 0.5
                     * prepared.positive_saddlepoint_deviance[saddlepoint]
                     * inverse_phi_positive[saddlepoint]
+                )
+
+            if np.any(use_series):
+                positive_score[use_series] = (
+                    series_expected_j[use_series] / (prepared.p - 1.0)
+                    + prepared.positive_canonical_c[use_series] * inverse_phi_positive[use_series]
                 )
 
             if np.any(exact):
@@ -722,6 +746,7 @@ def _evaluate_tweedie_density(
     diagnostics = _TweedieLogpdfDiagnostics(
         n_positive=int(np.count_nonzero(positive)),
         n_saddlepoint=n_saddlepoint,
+        n_series=n_series,
     )
     score_valid = log_phi_score is not None and bool(np.all(np.isfinite(log_phi_score)))
     return _TweedieDensityEvaluation(
@@ -768,7 +793,7 @@ def tweedie_logpdf(
     weights: NDArray | None = None,
     t_arg_limit: float = 1e14,
 ) -> NDArray:
-    """Exact Tweedie log-density with saddlepoint fallback.
+    """Exact Tweedie log-density using Wright-Bessel and vectorized series evaluation.
 
     Parameters
     ----------
@@ -781,10 +806,9 @@ def tweedie_logpdf(
     weights : array of shape (n,), optional
         Observation weights (e.g. sample_weight). Effective phi = phi / w.
     t_arg_limit : float
-        Switch to saddlepoint when wright_bessel argument t >= this.
-        A high default keeps the exact Wright-Bessel branch active deeper
-        into the low-p region, where the saddlepoint can be noticeably
-        biased.
+        Maximum Wright-Bessel argument. Larger or invalid Wright rows use the
+        exact vectorized series. A non-positive value explicitly forces the
+        approximate saddlepoint compatibility path.
 
     Returns
     -------
@@ -1023,11 +1047,6 @@ class _PhiEvaluationCache:
             phi = _PHI_UPPER_BOUND
         else:
             phi = float(np.exp(key))
-        evaluation = _evaluate_tweedie_density(
-            self.prepared,
-            phi,
-            compute_score=compute_score,
-        )
         self.n_evaluations += 1
         if compute_score:
             self.n_score_evaluations += 1
@@ -1035,6 +1054,33 @@ class _PhiEvaluationCache:
             self.n_value_only_evaluations += 1
         if fallback:
             self.n_fallback_evaluations += 1
+
+        try:
+            evaluation = _evaluate_tweedie_density(
+                self.prepared,
+                phi,
+                compute_score=compute_score,
+            )
+        except FloatingPointError:
+            point = _PhiProfilePoint(
+                u=key,
+                phi=phi,
+                nll=np.inf,
+                objective_finite=False,
+                score=None,
+                score_attempted=compute_score,
+                score_valid=False,
+                branch_mask=_PhiBranchMask.from_array(
+                    np.zeros(self.prepared.positive_indices.size, dtype=np.bool_)
+                ),
+                diagnostics=_TweedieLogpdfDiagnostics(
+                    n_positive=int(self.prepared.positive_indices.size),
+                    n_saddlepoint=0,
+                    n_series=int(self.prepared.positive_indices.size),
+                ),
+            )
+            self.points[key] = point
+            return point
 
         with np.errstate(all="ignore"):
             nll = -float(np.mean(evaluation.logpdf))
@@ -1297,6 +1343,13 @@ def _better_phi_branch_edge_probes(
 ) -> tuple[list[_PhiCandidate], bool, bool]:
     """Probe realized branch edges nearest accepted roots with bounded scalar work."""
     prepared = cache.prepared
+    if prepared.t_arg_limit > 0.0 and all(
+        candidate.point.diagnostics.n_saddlepoint == 0 for candidate in root_candidates
+    ):
+        # Wright and series rows are both exact, so their implementation
+        # boundary is not the exact-to-saddlepoint objective discontinuity
+        # that this safeguard exists to audit.
+        return [], False, False
     thresholds_by_observation, calibrated = _phi_realized_wright_thresholds(prepared)
     if not calibrated:
         return [], False, True

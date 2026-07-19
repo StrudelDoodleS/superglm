@@ -322,11 +322,12 @@ class TestTweedieLogpdf:
 
         assert np.all(np.isneginf(actual))
 
-    def test_all_invalid_wright_terms_use_saddlepoint(self, monkeypatch):
-        """Every invalid Wright term must be populated by the fallback."""
+    def test_all_invalid_wright_terms_use_exact_series(self, monkeypatch):
+        """Every invalid Wright term must use the exact vectorized series."""
         y = np.array([0.5, 2.0, 8.0])
         mu = np.array([0.8, 1.5, 6.0])
         phi, p = 2.0, 1.5
+        expected = tweedie_logpdf(y, mu, phi, p)
 
         def all_nan_wright(a, b, t):
             return np.full_like(t, np.nan, dtype=np.float64)
@@ -334,11 +335,11 @@ class TestTweedieLogpdf:
         monkeypatch.setattr(tweedie_module, "wright_bessel", all_nan_wright)
 
         logpdf, diagnostics = tweedie_module._tweedie_logpdf_impl(y, mu, phi, p)
-        expected = tweedie_module._saddlepoint(y, mu, np.full_like(y, phi), p)
 
         np.testing.assert_allclose(logpdf, expected, rtol=1e-14, atol=1e-14)
         assert diagnostics.n_positive == len(y)
-        assert diagnostics.n_saddlepoint == diagnostics.n_positive
+        assert diagnostics.n_series == diagnostics.n_positive
+        assert diagnostics.n_saddlepoint == 0
 
     def test_weights_scale_phi(self):
         """logpdf(y, mu, phi, p, weights=2) == logpdf(y, mu, phi/2, p)."""
@@ -503,8 +504,8 @@ class TestTweedieLogPhiScore:
 
         return (mean_nll(u + h) - mean_nll(u - h)) / (2.0 * h)
 
-    def test_saddlepoint_branch_mask_distinguishes_equal_counts(self, monkeypatch):
-        """Branch identity is the full positive-observation mask, not its count."""
+    def test_exact_series_rows_do_not_create_saddlepoint_branch_switches(self, monkeypatch):
+        """Failed Wright rows stay exact and do not create approximation branches."""
         y = np.array([1.0, 4.0])
         mu = np.array([1.3, 3.2])
         prepared = tweedie_module._prepare_tweedie_density(y, mu, 1.5)
@@ -534,9 +535,10 @@ class TestTweedieLogPhiScore:
             compute_score=True,
         )
 
-        assert phi_one.diagnostics.n_saddlepoint == phi_two.diagnostics.n_saddlepoint == 1
-        np.testing.assert_array_equal(phi_one.positive_saddlepoint_mask, [True, False])
-        np.testing.assert_array_equal(phi_two.positive_saddlepoint_mask, [False, True])
+        assert phi_one.diagnostics.n_series == phi_two.diagnostics.n_series == 1
+        assert phi_one.diagnostics.n_saddlepoint == phi_two.diagnostics.n_saddlepoint == 0
+        np.testing.assert_array_equal(phi_one.positive_saddlepoint_mask, [False, False])
+        np.testing.assert_array_equal(phi_two.positive_saddlepoint_mask, [False, False])
         assert phi_one.score_valid
         assert phi_two.score_valid
         assert not phi_one.positive_saddlepoint_mask.flags.writeable
@@ -989,7 +991,7 @@ class TestDetailedPhiProfile:
         return prepared, calibrated, realized, fake_evaluate, fake_localize
 
     @pytest.mark.parametrize(
-        ("y", "mu", "p", "weights", "force_saddlepoint"),
+        ("y", "mu", "p", "weights", "force_wright_failure"),
         [
             pytest.param(
                 np.array([0.3, 1.2, 4.5]),
@@ -1021,7 +1023,7 @@ class TestDetailedPhiProfile:
                 1.5,
                 None,
                 True,
-                id="forced-saddlepoint",
+                id="wright-failure-exact-series",
             ),
         ],
     )
@@ -1032,9 +1034,9 @@ class TestDetailedPhiProfile:
         mu,
         p,
         weights,
-        force_saddlepoint,
+        force_wright_failure,
     ):
-        if force_saddlepoint:
+        if force_wright_failure:
             real_wright_bessel = tweedie_module.wright_bessel
 
             def fail_density_recurrence(a, b, t):
@@ -1059,8 +1061,8 @@ class TestDetailedPhiProfile:
             phi_method="mle",
         )
 
-        assert result.converged is (not force_saddlepoint)
-        assert result.used_fallback is force_saddlepoint
+        assert result.converged
+        assert not result.used_fallback
         assert result.objective_finite
         assert result.optimizer == "brentq"
         assert not result.lower_boundary
@@ -1080,13 +1082,6 @@ class TestDetailedPhiProfile:
                 "upper_boundary",
                 id="all-zero-upper",
             ),
-            pytest.param(
-                np.array([0.7, 2.0, 8.0]),
-                np.array([0.7, 2.0, 8.0]),
-                1e-12,
-                "lower_boundary",
-                id="positive-at-mean-lower",
-            ),
         ],
     )
     def test_legitimate_hard_boundary_optima(self, y, mu, expected_phi, boundary_name):
@@ -1103,47 +1098,25 @@ class TestDetailedPhiProfile:
         assert result.lower_boundary is (expected_phi == 1e-12)
         assert result.upper_boundary is (expected_phi == 1e12)
 
-    def test_boundary_without_valid_score_uses_exact_inward_objective_probe(
-        self,
-        monkeypatch,
-    ):
+    def test_unsupported_exact_boundary_is_recorded_as_nonfinite(self):
         y = np.array([0.7, 2.0, 8.0])
         mu = y.copy()
         p = 1.5
-        calls = []
-        real_evaluate = tweedie_module._evaluate_tweedie_density
 
-        def invalidate_lower_boundary_score(prepared, phi, *, compute_score=False):
-            evaluation = real_evaluate(prepared, phi, compute_score=compute_score)
-            calls.append((float(phi), compute_score))
-            if not compute_score or phi != 1e-12:
-                return evaluation
-            return tweedie_module._TweedieDensityEvaluation(
-                logpdf=evaluation.logpdf,
-                log_phi_score=np.full_like(evaluation.logpdf, np.nan),
-                positive_saddlepoint_mask=evaluation.positive_saddlepoint_mask,
-                diagnostics=evaluation.diagnostics,
-                score_valid=False,
-            )
+        with pytest.raises(FloatingPointError, match="term limit"):
+            tweedie_logpdf(y, mu, 1e-12, p)
 
-        monkeypatch.setattr(
-            tweedie_module,
-            "_evaluate_tweedie_density",
-            invalidate_lower_boundary_score,
+        prepared = tweedie_module._prepare_tweedie_density(y, mu, p)
+        cache = tweedie_module._PhiEvaluationCache(prepared)
+        point = cache.evaluate(
+            tweedie_module._LOG_PHI_LOWER_BOUND,
+            compute_score=True,
         )
 
-        result = tweedie_module._profile_phi_detailed(y, mu, p, phi_method="mle")
-        inward_u = np.log(1e-12) + 1e-5
-
-        assert result.phi == 1e-12
-        assert result.lower_boundary
-        assert not result.converged
-        assert result.used_fallback
-        assert result.score is None
-        assert any(
-            not compute_score and abs(np.log(phi) - inward_u) <= 1e-12
-            for phi, compute_score in calls
-        )
+        assert point.phi == 1e-12
+        assert np.isposinf(point.nll)
+        assert not point.objective_finite
+        assert not point.score_valid
 
     def test_derivative_only_failure_preserves_exact_objective_and_uses_fallback(
         self,
@@ -1175,7 +1148,7 @@ class TestDetailedPhiProfile:
         np.testing.assert_allclose(result.nll, reference.fun, rtol=1e-10, atol=1e-10)
         np.testing.assert_allclose(np.log(result.phi), reference.x, rtol=0.0, atol=5e-6)
 
-    def test_branch_jump_is_not_accepted_as_a_score_root(self):
+    def test_previous_branch_jump_is_a_smooth_exact_score_root(self):
         p = 1.0181533410437358
         y = np.array([1.81787899, 11275.9262, 0.0, 0.00306563885, 0.0000232882792, 1.18207511])
         mu = np.array(
@@ -1201,19 +1174,16 @@ class TestDetailedPhiProfile:
         )
         exact_nll = -float(np.mean(tweedie_logpdf(y, mu, result.phi, p, weights=weights)))
 
-        assert result.used_fallback
-        assert result.branch_switch_detected
-        assert result.optimizer == "bounded"
+        assert result.converged
+        assert not result.used_fallback
+        assert not result.branch_switch_detected
+        assert result.optimizer == "brentq"
         assert result.objective_finite
         assert result.nll == exact_nll
-        assert result.score is None or abs(result.score) <= 1e-6
-        assert not (
-            abs(np.log(result.phi) - 3.807489) < 1e-4
-            and result.score is not None
-            and abs(result.score) > 1e-6
-        )
+        assert result.score is not None
+        assert abs(result.score) <= 1e-6
 
-    def test_nontoggling_nominal_threshold_does_not_explain_realized_transition(self):
+    def test_wright_series_threshold_does_not_create_saddlepoint_transition(self):
         p = 1.2
         y = np.array([1.0])
         prepared = tweedie_module._prepare_tweedie_density(y, y, p)
@@ -1228,77 +1198,13 @@ class TestDetailedPhiProfile:
             nominal_left.positive_saddlepoint_mask,
             nominal_right.positive_saddlepoint_mask,
         )
-        assert nominal_right.positive_saddlepoint_mask.tolist() == [True]
+        assert nominal_right.positive_saddlepoint_mask.tolist() == [False]
         assert realized_right.positive_saddlepoint_mask.tolist() == [False]
-        assert tweedie_module._phi_branch_change_is_unexplained(
+        assert not tweedie_module._phi_branch_change_is_unexplained(
             nominal_right,
             realized_right,
             thresholds,
         )
-
-    def test_global_fallback_calibrates_realized_wright_validity_transition(
-        self,
-        monkeypatch,
-    ):
-        calibrated_ceilings = []
-        real_calibrate = tweedie_module._calibrate_wright_log_t_ceiling
-
-        def spy_calibrate(prepared):
-            ceiling = real_calibrate(prepared)
-            calibrated_ceilings.append(ceiling)
-            return ceiling
-
-        monkeypatch.setattr(
-            tweedie_module,
-            "_calibrate_wright_log_t_ceiling",
-            spy_calibrate,
-        )
-
-        prepared = tweedie_module._prepare_tweedie_density(
-            np.array([1.0]),
-            np.array([1.0]),
-            1.2,
-        )
-        result = tweedie_module._profile_phi_detailed(
-            np.array([1.0]),
-            np.array([1.0]),
-            1.2,
-            phi_method="mle",
-        )
-
-        assert result.used_fallback
-        assert result.branch_switch_detected
-        assert len(calibrated_ceilings) == 1
-        assert calibrated_ceilings[0] is not None
-        realized_thresholds, calibrated = tweedie_module._phi_realized_wright_thresholds(prepared)
-        assert calibrated
-        realized_threshold = float(realized_thresholds[0])
-        cache = tweedie_module._PhiEvaluationCache(prepared)
-        left = cache.evaluate(realized_threshold - 1e-12, compute_score=False)
-        right = cache.evaluate(realized_threshold + 1e-12, compute_score=False)
-        assert left.branch_signature != right.branch_signature
-
-    def test_realized_transition_probe_cap_exhaustion_marks_fallback_incomplete(
-        self,
-        monkeypatch,
-    ):
-        prepared = tweedie_module._prepare_tweedie_density(
-            np.array([1.0]),
-            np.array([1.0]),
-            1.2,
-        )
-        cache = tweedie_module._PhiEvaluationCache(prepared)
-        monkeypatch.setattr(
-            tweedie_module,
-            "_calibrate_wright_log_t_ceiling",
-            lambda prepared: None,
-        )
-        monkeypatch.setattr(tweedie_module, "_PHI_MAX_NUMERIC_BRANCH_PROBES", 0)
-
-        bounded = tweedie_module._run_phi_bounded_fallback(cache, required=True)
-
-        assert not bounded.success
-        assert bounded.branch_switch_detected
 
     def test_clean_root_cannot_bypass_later_realized_branch_basin(
         self,
@@ -1481,7 +1387,7 @@ class TestDetailedPhiProfile:
         np.testing.assert_allclose(np.log(result.phi), 0.2, rtol=0.0, atol=1e-5)
         np.testing.assert_allclose(result.nll, -2.0, rtol=0.0, atol=1e-10)
 
-    def test_branch_switched_bounded_basin_is_not_reported_globally_converged(self):
+    def test_previous_saddlepoint_basin_does_not_displace_exact_score_root(self):
         p = 1.0076499464775093
         y = np.array(
             [
@@ -1503,11 +1409,13 @@ class TestDetailedPhiProfile:
         better_nll = -float(np.mean(tweedie_logpdf(y, mu, better_phi, p)))
 
         assert result.objective_finite
-        assert result.used_fallback
-        assert result.branch_switch_detected
-        assert result.optimizer == "bounded"
+        assert result.converged
+        assert not result.used_fallback
+        assert not result.branch_switch_detected
+        assert result.optimizer == "brentq"
         assert result.nll <= better_nll + 1e-8
-        assert not result.converged
+        assert result.score is not None
+        assert abs(result.score) <= 1e-6
 
     @pytest.mark.parametrize(
         ("p", "y", "mu", "better_phi"),
@@ -1535,7 +1443,7 @@ class TestDetailedPhiProfile:
             ),
         ],
     )
-    def test_better_analytic_branch_edge_promotes_local_root_to_global_fallback(
+    def test_previous_saddlepoint_edges_are_worse_than_exact_score_roots(
         self,
         p,
         y,
@@ -1547,11 +1455,13 @@ class TestDetailedPhiProfile:
         result = tweedie_module._profile_phi_detailed(y, mu, p, phi_method="mle")
 
         assert result.objective_finite
-        assert result.used_fallback
-        assert result.branch_switch_detected
-        assert result.optimizer == "bounded"
+        assert result.converged
+        assert not result.used_fallback
+        assert not result.branch_switch_detected
+        assert result.optimizer == "brentq"
         assert result.nll <= better_nll + 1e-8
-        assert not result.converged
+        assert result.score is not None
+        assert abs(result.score) <= 1e-6
 
     @pytest.mark.parametrize(
         "phi_start",
@@ -1560,7 +1470,7 @@ class TestDetailedPhiProfile:
             pytest.param(float(np.exp(5.03825)), id="warm-second-minimum"),
         ],
     )
-    def test_multiple_score_roots_are_compared_by_exact_objective(self, phi_start):
+    def test_exact_score_root_is_independent_of_warm_start(self, phi_start):
         p = 1.1023681265404395
         y = np.array([0.0, 3.30259948, 0.0, 0.0])
         mu = np.array([4.94001718, 5.87112367, 0.20868529, 14.91399245])
@@ -1577,9 +1487,11 @@ class TestDetailedPhiProfile:
         )
         exact_nll = -float(np.mean(tweedie_logpdf(y, mu, result.phi, p, weights=weights)))
 
-        assert not result.converged
+        assert result.converged
         assert result.objective_finite
-        assert result.used_fallback
+        assert not result.used_fallback
+        assert not result.branch_switch_detected
+        assert result.optimizer == "brentq"
         assert result.nll == exact_nll
         assert result.nll < worse_local_nll - 0.05
         np.testing.assert_allclose(result.nll, 0.614000943088867, rtol=0.0, atol=1e-9)
@@ -1627,7 +1539,7 @@ class TestDetailedPhiProfile:
         assert not result.converged
         assert "forced bounded failure" in result.message
 
-    def test_fallback_branch_localization_has_a_bounded_density_pass_budget(self):
+    def test_exact_series_profile_avoids_branch_localization_fallback(self):
         rng = np.random.default_rng(11)
         n = 100
         x = rng.normal(size=n)
@@ -1637,10 +1549,12 @@ class TestDetailedPhiProfile:
         result = tweedie_module._profile_phi_detailed(y, mu, 1.1, phi_method="mle")
 
         assert result.objective_finite
-        assert result.used_fallback
-        assert result.n_fallback_evaluations <= 350
+        assert result.converged
+        assert not result.used_fallback
+        assert result.n_fallback_evaluations == 0
+        assert result.n_evaluations <= 30
 
-    def test_large_profile_keeps_enough_branch_edges_for_the_global_basin(self):
+    def test_large_series_profile_uses_exact_score_without_branch_scan(self):
         rng = np.random.default_rng(71616)
         for _ in range(68):
             n = 100
@@ -1665,11 +1579,14 @@ class TestDetailedPhiProfile:
         )
 
         assert p == 1.0444295667392194
-        assert result.used_fallback
-        assert not result.converged
-        np.testing.assert_allclose(result.phi, 0.6387398791114645, rtol=1e-8)
-        np.testing.assert_allclose(result.nll, 2.5154680680526336, rtol=0.0, atol=1e-9)
-        assert result.n_evaluations <= 350
+        assert result.converged
+        assert not result.used_fallback
+        assert not result.branch_switch_detected
+        np.testing.assert_allclose(result.phi, 0.45537209421101166, rtol=1e-10)
+        assert result.score is not None
+        assert abs(result.score) <= 1e-6
+        assert result.n_fallback_evaluations == 0
+        assert result.n_evaluations <= 30
 
     def test_zero_heavy_large_profile_uses_large_profile_refinement_cap(
         self,
@@ -4299,8 +4216,8 @@ class TestSearchMethods:
         np.testing.assert_allclose(r_grid.p_hat, r_lbfgsb.p_hat, atol=0.02)
         np.testing.assert_allclose(r_grid.p_hat, r_powell.p_hat, atol=0.02)
 
-    def test_low_p_saddlepoint_warning(self):
-        """Warn when saddlepoint dominates the final low-p profile fit."""
+    def test_low_p_profile_uses_exact_series_without_warning(self):
+        """Low-power profiles remain exact when Wright evaluation is unavailable."""
         X, y, _ = _tweedie_data(n=2_500, p_true=1.08, seed=4)
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
@@ -4321,14 +4238,13 @@ class TestSearchMethods:
             )
 
         messages = [str(item.message) for item in caught]
-        assert sum("Saddlepoint approximation used" in message for message in messages) == 1
-        assert sum("near-power boundary instability" in message for message in messages) == 1
-        assert result.saddlepoint_fraction >= 0.25
-        assert result.n_saddlepoint > 0
+        assert not messages
+        assert result.saddlepoint_fraction == 0.0
+        assert result.n_saddlepoint == 0
         assert result.n_positive > 0
-        assert any("Saddlepoint approximation used" in message for message in result.warnings)
-        assert any("inner phi profile did not converge" in message for message in result.warnings)
-        assert not result.converged
+        assert result.density_exact
+        assert result.warnings == []
+        assert result.converged
 
     def test_regular_profile_has_no_saddlepoint_warning(self):
         """Typical interior fits should not warn about saddlepoint usage."""
