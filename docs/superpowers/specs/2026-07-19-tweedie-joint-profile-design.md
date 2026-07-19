@@ -55,13 +55,15 @@ entry points:
    saddlepoint likelihood silently.
 5. `method="integrated"` remains unimplemented and out of scope.
 
-The fast outer score is initially eligible only for ordinary unpenalized
-maximum-likelihood coefficient fits. Active L1 selection, nonzero coefficient
-penalties, monotonic constraints, and REML smoothing can make the partial
-likelihood `p` score differ from the derivative of the fitted profile. Those
-cases retain the existing outer optimizer. This restriction protects
-correctness while the fused fixed-power `phi` accelerator still removes much
-of their density overhead.
+For an unpenalized maximum-likelihood coefficient fit, the exact partial `p`
+score is the fitted-profile score by the envelope theorem. Active coefficient
+penalties can make it differ, so the fast solver treats that score only as a
+proposal and certifies the winner with actual fixed-power profile objectives on
+both sides. A positive-curvature parabolic certificate must place the true
+profile vertex within `xatol`; otherwise the solver falls back to Brent. This
+keeps the common default penalized fit fast without assuming an invalid score
+identity. Monotonic constraints and REML smoothing retain the existing outer
+optimizer.
 
 The reported `method`, search trace, convergence fields, density provenance,
 callbacks, lazy likelihood-ratio confidence intervals, and final atomic refit

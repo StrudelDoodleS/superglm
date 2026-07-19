@@ -2318,11 +2318,11 @@ def _reference_offset_tweedie_null_mu(y, sample_weight, offset, distribution):
     "function",
     [SuperGLM.estimate_p, profile_ops_module.estimate_p, estimate_tweedie_p],
 )
-def test_public_tweedie_profile_entry_points_default_to_mle_and_brent(function):
+def test_public_tweedie_profile_entry_points_default_to_mle_and_auto(function):
     signature = inspect.signature(function)
 
     assert signature.parameters["phi_method"].default == "mle"
-    assert signature.parameters["method"].default == "brent"
+    assert signature.parameters["method"].default == "auto"
 
 
 class TestEstimatePFitMode:
@@ -2714,7 +2714,7 @@ class TestEstimatePFitMode:
 
         assert returned is result
         assert profiler_kwargs["phi_method"] == "mle"
-        assert profiler_kwargs["method"] == "brent"
+        assert profiler_kwargs["method"] == "auto"
         assert [phase for phase, _ in progress_events] == ["best_found", "final_refit"]
         assert all(
             payload["profile_estimate"]["ci_status"] == "not computed"

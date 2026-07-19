@@ -7,7 +7,9 @@ evaluation and compound Poisson-Gamma simulation.
 
 Search methods:
 
-- ``"brent"`` (default): bounded scalar optimisation via scipy.
+- ``"auto"`` (default): exact joint ML when certified, otherwise Brent.
+- ``"joint_ml"``: fused exact likelihood derivatives with safeguarded Newton.
+- ``"brent"``: bounded scalar optimisation via scipy.
 - ``"grid"``: exhaustive grid search over p.
 - ``"grid_refine"``: coarse grid + local Brent refinement.
 - ``"profile_opt"``: general-purpose optimizer (L-BFGS-B, Powell) on
@@ -5083,7 +5085,7 @@ def estimate_tweedie_p(
     verbose: bool = False,
     fit_mode: str = "fit",
     phi_method: str = "mle",
-    method: str = "brent",
+    method: str = "auto",
     n_grid: int = 20,
     grid: NDArray | None = None,
     n_grid_coarse: int = 10,
@@ -5127,9 +5129,11 @@ def estimate_tweedie_p(
         How to profile out ``phi`` at each candidate ``p``. ``"mle"`` is the
         default; ``"pearson"`` is an explicit faster plug-in that does not
         support likelihood-ratio confidence intervals.
-    method : {"brent", "grid", "grid_refine", "profile_opt", "joint_ml", "integrated"}
-        Search strategy. ``"brent"`` (default) uses bounded scalar
-        optimisation. ``"grid"`` does exhaustive grid search.
+    method : {"auto", "joint_ml", "brent", "grid", "grid_refine", "profile_opt", "integrated"}
+        Search strategy. ``"auto"`` (default) uses the safeguarded exact joint
+        ML solver for ordinary MLE profiles and Brent otherwise. ``"joint_ml"``
+        explicitly requests that fast path with diagnosed Brent fallback.
+        ``"brent"`` uses bounded scalar optimisation. ``"grid"`` does exhaustive grid search.
         ``"grid_refine"`` does a coarse grid + local Brent refinement.
         ``"profile_opt"`` uses a general-purpose optimizer (L-BFGS-B or
         Powell) on logit-transformed p.
@@ -5165,7 +5169,15 @@ def estimate_tweedie_p(
             "Use families.tweedie(p=...) to create one."
         )
 
-    _VALID_METHODS = {"brent", "grid", "grid_refine", "profile_opt", "joint_ml", "integrated"}
+    _VALID_METHODS = {
+        "auto",
+        "brent",
+        "grid",
+        "grid_refine",
+        "profile_opt",
+        "joint_ml",
+        "integrated",
+    }
     if method not in _VALID_METHODS:
         raise ValueError(
             f"method={method!r} is not valid, expected one of {sorted(_VALID_METHODS)}"
@@ -5215,13 +5227,16 @@ def estimate_tweedie_p(
         )
 
     # Dispatch search
-    if method == "brent":
+    resolved_method = method
+    if method == "auto":
+        resolved_method = "joint_ml" if fit_mode == "fit" and phi_method == "mle" else "brent"
+    if resolved_method == "brent":
         return _search_brent(ctx, p_bounds, xatol, maxiter)
-    if method == "grid":
+    if resolved_method == "grid":
         return _search_grid(ctx, p_bounds, n_grid, grid)
-    if method == "grid_refine":
+    if resolved_method == "grid_refine":
         return _search_grid_refine(ctx, p_bounds, n_grid_coarse, xatol, maxiter)
-    if method == "joint_ml":
+    if resolved_method == "joint_ml":
         if isinstance(ctx, _ProfileContextREML):
             result = _search_brent(ctx, p_bounds, xatol, maxiter)
             result.method = "joint_ml"

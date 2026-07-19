@@ -29,11 +29,15 @@ def test_joint_profile_matches_neutral_reference() -> None:
         xatol=1.0e-4,
         maxiter=30,
         phi_method="mle",
-        method="joint_ml",
     )
 
     assert result.p_hat == pytest.approx(1.1968971098776182, abs=2.0e-4)
     assert result.phi_hat == pytest.approx(0.8068142191615686, rel=5.0e-4)
     assert result.converged
+    assert result.method == "joint_ml"
     assert result.density_exact
     assert result.n_saddlepoint == 0
+    assert result.n_evaluations <= 4
+    assert int(result.search_trace["phi_n_evaluations"].sum()) <= 12
+    assert set(result.search_trace["phi_optimizer"]) == {"exact-newton"}
+    assert "fell back" not in result.outer_message

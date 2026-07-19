@@ -181,9 +181,9 @@ rtk git commit -m "perf: add safeguarded exact Tweedie phi Newton"
 
 1. Replace the old `joint_ml` not-implemented test with failing correctness,
    trace, callback, and convergence tests.
-2. Add eligibility tests: unpenalized ordinary ML takes the fast path; active
-   L1, nonzero coefficient penalties, constraints, Pearson dispersion, and REML
-   use the trusted outer fallback.
+2. Add eligibility tests: ordinary ML takes the fast path; penalized fits must
+   pass a two-sided exact-profile certificate, while constraints, Pearson
+   dispersion, and REML use the trusted outer fallback.
 3. Implement the exact outer score solve with Schur-curvature proposal,
    secant/bracket alternatives, strict bounds, warm coefficient/dispersion
    starts, candidate validation, and bounded iteration count.
