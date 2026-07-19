@@ -449,6 +449,21 @@ median. mgcv is a directional performance reference, not an equality gate for
 this bounded recovery patch; any remaining multiple must be explained by a
 profile rather than hidden by the smaller 300-row gate.
 
+Measured recovery results:
+
+- 1,000-row noisy ordinary fit: about 0.0071 seconds versus PR #156's 0.0048;
+- routine simulated 1,000-row fit: about 0.0126 seconds versus PR #156's 0.0143;
+- 300-row small-dispersion exact profile: about 0.16 seconds, down from 1.58;
+- one-row mode 90,000 exact series: below 0.001 seconds;
+- shared 800-row neutral profile: about 0.21 seconds, down from 1.42, versus
+  mgcv's 0.023 seconds.
+
+The 800-row profile remains exact and inside the neutral `p`/`phi` tolerances.
+Its remaining gap to mgcv is architectural: the current public profile performs
+about 277 prepared density passes across nested scalar `p` and `phi` searches,
+whereas mgcv optimizes transformed parameters jointly with density derivatives.
+Do not expand this recovery patch into a profiler rewrite.
+
 - [ ] **Step 3: Tune only the two work budgets if evidence requires it**
 
 Keep the fit-stat budget strict enough that post-fit likelihood is not the dominant ordinary-fit frame. Increase the profile budget only if an independent `p`/`phi` reference fails because a materially biased saddlepoint row was selected. Do not add a public option.

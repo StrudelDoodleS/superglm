@@ -418,6 +418,7 @@ _TWEEDIE_DEVIANCE_SERIES_THRESHOLD = 1e-3
 _TWEEDIE_DEVIANCE_SERIES_TERMS = 8
 _PROFILE_SERIES_MAX_TOTAL_TERMS = 1_000_000
 _FIT_STATS_SERIES_MAX_TOTAL_TERMS = 4_096
+_SERIES_FIRST_MIN_ROWS = 32
 _P15_BESSEL_ASYMPTOTIC_MIN_ARGUMENT = 1.0e6
 
 
@@ -626,13 +627,44 @@ def _evaluate_tweedie_density(
         log_phi_eff_positive = log_phi_eff[positive]
         log_t = prepared.positive_log_t_phi_independent - (prepared.a + 1.0) * log_phi
 
-        # Select the numerical branch in log space. In particular, do not
-        # clip log(t): clipping can move an observation across t_arg_limit.
-        try_exact = log_t < prepared.log_t_arg_limit
+        # Select numerical branches in log space. In particular, do not clip
+        # log(t): clipping can move an observation across t_arg_limit.
         exact: NDArray[np.bool_] = np.zeros(len(log_t), dtype=np.bool_)
         t_positive: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
         wright_a_plus_one: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
         positive_logpdf: NDArray[np.float64] = np.empty(len(log_t), dtype=np.float64)
+        use_series = np.zeros(len(log_t), dtype=np.bool_)
+        series_attempted = np.zeros(len(log_t), dtype=np.bool_)
+        series_expected_j: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
+
+        def evaluate_series_rows(candidate_mask: NDArray) -> None:
+            if not np.any(candidate_mask):
+                return
+            series_attempted[candidate_mask] = True
+            series_log_sum, expected_j, series_exact = tweedie_log_series(
+                log_t[candidate_mask],
+                prepared.a,
+                max_total_terms=series_max_total_terms,
+            )
+            candidate_indices = np.flatnonzero(candidate_mask)
+            successful_indices = candidate_indices[series_exact]
+            use_series[successful_indices] = True
+            positive_logpdf[successful_indices] = (
+                series_log_sum[series_exact]
+                - prepared.positive_log_y[successful_indices]
+                + prepared.positive_canonical_c[successful_indices]
+                * inverse_phi_positive[successful_indices]
+            )
+            series_expected_j[successful_indices] = expected_j[series_exact]
+
+        if (
+            len(log_t) >= _SERIES_FIRST_MIN_ROWS
+            and prepared.p != 1.5
+            and prepared.t_arg_limit > 0.0
+        ):
+            evaluate_series_rows(np.ones(len(log_t), dtype=np.bool_))
+
+        try_exact = ~use_series & (log_t < prepared.log_t_arg_limit)
 
         if np.any(try_exact):
             try_exact_indices = np.flatnonzero(try_exact)
@@ -662,12 +694,10 @@ def _evaluate_tweedie_density(
             wright_a_plus_one[valid_indices] = wright_recurrence[density_valid]
             positive_logpdf[valid_indices] = candidate_logpdf[density_valid]
 
-        exact_fallback = ~exact & (prepared.t_arg_limit > 0.0)
+        exact_fallback = ~(exact | use_series) & (prepared.t_arg_limit > 0.0)
         p15_candidates = exact_fallback & (prepared.p == 1.5)
-        series_candidates = exact_fallback & ~p15_candidates
+        series_candidates = exact_fallback & ~p15_candidates & ~series_attempted
         use_p15_bessel = np.zeros(len(log_t), dtype=np.bool_)
-        use_series = np.zeros(len(log_t), dtype=np.bool_)
-        series_expected_j: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
         p15_score: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
         if np.any(p15_candidates):
             # At p=1.5 the series is sqrt(t) * I1(2*sqrt(t)); use its
@@ -734,22 +764,7 @@ def _evaluate_tweedie_density(
             use_p15_bessel[successful_indices] = True
             positive_logpdf[successful_indices] = bessel_logpdf[bessel_valid]
 
-        if np.any(series_candidates):
-            series_log_sum, expected_j, series_exact = tweedie_log_series(
-                log_t[series_candidates],
-                prepared.a,
-                max_total_terms=series_max_total_terms,
-            )
-            candidate_indices = np.flatnonzero(series_candidates)
-            successful_indices = candidate_indices[series_exact]
-            use_series[successful_indices] = True
-            positive_logpdf[successful_indices] = (
-                series_log_sum[series_exact]
-                - prepared.positive_log_y[successful_indices]
-                + prepared.positive_canonical_c[successful_indices]
-                * inverse_phi_positive[successful_indices]
-            )
-            series_expected_j[successful_indices] = expected_j[series_exact]
+        evaluate_series_rows(series_candidates)
         n_series = int(np.count_nonzero(use_p15_bessel | use_series))
 
         # A non-positive/NaN limit explicitly forces saddlepoint evaluation.

@@ -50,7 +50,11 @@ for fixed-power spline REML, 0.024 seconds for estimated-power linear REML, and
 0.050 seconds for estimated-power spline REML. On the shared 800-row neutral
 profile fixture, mgcv took 0.023 seconds and returned `p=1.1973744,
 phi=0.8083430`; current PR #158 took 1.423 seconds and returned `p=1.1969129,
-phi=0.8068296`. The parameter agreement is strong, while the timing gap is real.
+phi=0.8068296`. After bounded mode-centered summation, shared gamma-base work,
+and vectorized budget selection, SuperGLM takes about 0.21 seconds and returns
+`p=1.1969129, phi=0.8068298`. The parameter agreement is strong; the remaining
+roughly 9x timing gap is explained by SuperGLM's nested scalar profile (about
+277 density passes) versus mgcv's joint derivative-based REML optimization.
 
 Saddlepoint is not a generally acceptable replacement for exact profiling. In
 known-mean simulations, saddlepoint-only likelihood moved `p` by `-0.20` and
@@ -79,6 +83,12 @@ Replace the left-to-right sum with the Dunn-Smyth strategy for `1 < p < 2`:
    vector batches. Accumulate both mass and first moment so the analytic
    log-dispersion score remains available.
 
+Rows in one vector pass reuse the gamma-only base
+`log Gamma(j + 1) + log Gamma(a*j)` over overlapping index ranges, mirroring the
+useful buffering principle found in mgcv without copying its implementation.
+Budget selection operates on deterministic tie groups with vector reductions,
+not one Python reduction per row.
+
 The work limits are internal safety policy, not public tuning parameters:
 
 - at most 100,000 contributing terms for one row;
@@ -94,14 +104,16 @@ their exact path.
 
 For each positive observation:
 
-1. Use SciPy Wright-Bessel when its result and the resulting log density are
-   finite and positive.
-2. At `p=1.5`, use the scaled Bessel identity. If SciPy's `ive` leaves its
+1. For vector batches, attempt the shared mode-centered exact series first when
+   it fits the work budget; for small direct calls, retain Wright-Bessel first.
+2. Use SciPy Wright-Bessel for remaining rows when its result and the resulting
+   log density are finite and positive.
+3. At `p=1.5`, use the scaled Bessel identity. If SciPy's `ive` leaves its
    numerical range, evaluate the large-argument scaled-Bessel expansion in log
    space, including its corresponding score expansion.
-3. At other powers, use the mode-centered exact series when it fits the work
+4. At other powers, use the mode-centered exact series when it fits the work
    budget.
-4. Otherwise use the stable saddlepoint density and report that row through
+5. Otherwise use the stable saddlepoint density and report that row through
    existing `n_saddlepoint` diagnostics.
 
 The extreme-mode fallback is acceptable because it prevents both unbounded work

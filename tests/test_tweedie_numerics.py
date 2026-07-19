@@ -49,6 +49,51 @@ def test_exact_series_starts_near_distant_mode(monkeypatch) -> None:
     assert elements < 20_000
 
 
+def test_exact_series_reuses_gamma_base_for_shared_modes(monkeypatch) -> None:
+    elements = 0
+    real_gammaln = series_module.gammaln
+
+    def counted(values):
+        nonlocal elements
+        elements += int(np.size(values))
+        return real_gammaln(values)
+
+    monkeypatch.setattr(series_module, "gammaln", counted)
+    log_t = np.full(300, _log_t_with_series_mode(1.5, 10_000))
+
+    log_sum, expected_j, exact = series_module.tweedie_log_series(log_t, 1.5)
+
+    assert np.all(exact)
+    assert np.all(np.isfinite(log_sum))
+    np.testing.assert_array_equal(expected_j, np.full_like(expected_j, expected_j[0]))
+    assert elements < 50_000
+
+
+def test_series_budget_selection_does_not_reduce_each_row(monkeypatch) -> None:
+    calls = 0
+    real_sum = series_module.np.sum
+
+    def counted_sum(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_sum(*args, **kwargs)
+
+    monkeypatch.setattr(series_module.np, "sum", counted_sum)
+    counts = np.arange(1, 801, dtype=np.int64)
+    log_modes = np.linspace(0.0, 1.0, len(counts))
+    values = log_modes + 2.0
+
+    selected = series_module._select_budgeted_rows(
+        counts,
+        log_modes,
+        values,
+        max_total_terms=int(real_sum(counts)),
+    )
+
+    assert selected.size == counts.size
+    assert calls <= 1
+
+
 def test_exact_series_rejects_impossible_work_without_raising() -> None:
     log_sum, expected_j, exact = series_module.tweedie_log_series(
         np.array([70.0]),
@@ -83,9 +128,19 @@ def test_p15_large_argument_uses_finite_scaled_asymptotic() -> None:
     weights = np.array([4.0])
     prepared = _prepare_tweedie_density(y, mu, 1.5, weights=weights)
     evaluated = _evaluate_tweedie_density(prepared, 1.0e-14, compute_score=True)
+    step = 1.0e-5
+    upper = _evaluate_tweedie_density(prepared, 1.0e-14 * np.exp(step)).logpdf[0]
+    lower = _evaluate_tweedie_density(prepared, 1.0e-14 * np.exp(-step)).logpdf[0]
+    finite_difference_score = -(upper - lower) / (2.0 * step)
 
     assert np.isfinite(evaluated.logpdf[0])
     assert evaluated.score_valid
+    assert evaluated.log_phi_score is not None
+    assert evaluated.log_phi_score[0] == pytest.approx(
+        finite_difference_score,
+        rel=1.0e-9,
+        abs=1.0e-9,
+    )
     assert evaluated.diagnostics.n_saddlepoint == 0
 
 
@@ -250,6 +305,28 @@ def test_exact_series_log_phi_score_matches_finite_difference() -> None:
         rel=2.0e-6,
         abs=2.0e-7,
     )
+
+
+def test_profile_cache_prefers_shared_exact_series_to_wright(monkeypatch) -> None:
+    y = np.full(64, 3.6100536453396823)
+    mu = np.full(64, 2.358259687964909)
+    prepared = _prepare_tweedie_density(y, mu, 1.2)
+
+    def unexpected_wright(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("profile should use feasible shared exact series first")
+
+    monkeypatch.setattr(tweedie_module, "wright_bessel", unexpected_wright)
+    point = tweedie_module._PhiEvaluationCache(prepared).evaluate(
+        float(np.log(0.8)),
+        compute_score=True,
+    )
+
+    assert point.objective_finite
+    assert point.score_valid
+    assert point.diagnostics.n_series == len(y)
+    assert point.diagnostics.n_saddlepoint == 0
+    assert point.nll == pytest.approx(1.8957859435896154, abs=2.5e-13)
 
 
 def test_tweedie_fit_stats_reuses_one_density_normalizer(monkeypatch) -> None:

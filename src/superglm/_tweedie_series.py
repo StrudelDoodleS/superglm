@@ -15,8 +15,23 @@ _SERIES_MAX_SAFE_MODE = float(2**52)
 
 
 def _log_series_term(log_t: NDArray, a: float, j: NDArray) -> NDArray:
-    j_float = np.asarray(j, dtype=np.float64)
-    return j_float * log_t - gammaln(j_float + 1.0) - gammaln(a * j_float)
+    j_integer = np.asarray(j, dtype=np.int64)
+    j_float = j_integer.astype(np.float64, copy=False)
+    if j_integer.size == 0:
+        return j_float * log_t
+
+    lower = int(np.min(j_integer))
+    upper = int(np.max(j_integer))
+    span = upper - lower + 1
+    if span <= 2 * j_integer.size:
+        base_indices = np.arange(lower, upper + 1, dtype=np.int64)
+        lookup = j_integer - lower
+    else:
+        base_indices, inverse = np.unique(j_integer, return_inverse=True)
+        lookup = inverse.reshape(j_integer.shape)
+    base_float = base_indices.astype(np.float64, copy=False)
+    log_base = gammaln(base_float + 1.0) + gammaln(a * base_float)
+    return j_float * log_t - log_base[lookup]
 
 
 def _select_budgeted_rows(
@@ -53,18 +68,25 @@ def _select_budgeted_rows(
         )
     )
     stops = np.concatenate((starts[1:], np.array([ordered.size], dtype=np.intp)))
-
-    selected: list[NDArray] = []
-    used = 0
-    for start, stop in zip(starts, stops, strict=True):
-        group = ordered[start:stop]
-        work = int(np.sum(counts[group], dtype=np.int64))
-        if used + work <= max_total_terms:
-            selected.append(group)
-            used += work
-    if not selected:
+    group_lengths = stops - starts
+    group_work = np.add.reduceat(ordered_counts, starts)
+    group_order = np.lexsort(
+        (
+            ordered_values[starts],
+            ordered_modes[starts],
+            ordered_counts[starts],
+            group_work,
+        )
+    )
+    cumulative_work = np.cumsum(group_work[group_order], dtype=np.int64)
+    chosen_groups = group_order[cumulative_work <= max_total_terms]
+    if chosen_groups.size == 0:
         return np.empty(0, dtype=np.intp)
-    return np.concatenate(selected)
+
+    group_selected = np.zeros(starts.size, dtype=np.bool_)
+    group_selected[chosen_groups] = True
+    group_ids = np.repeat(np.arange(starts.size, dtype=np.intp), group_lengths)
+    return ordered[group_selected[group_ids]]
 
 
 def tweedie_log_series(

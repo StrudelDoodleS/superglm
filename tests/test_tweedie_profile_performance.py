@@ -115,9 +115,9 @@ def _counted_production_profile(fixture: _PhiFixture) -> _CountedProfile:
     real_evaluate = tweedie_module._evaluate_tweedie_density
     calls: list[bool] = []
 
-    def counted_evaluate(prepared, phi, *, compute_score=False):
+    def counted_evaluate(prepared, phi, *, compute_score=False, **kwargs):
         calls.append(bool(compute_score))
-        return real_evaluate(prepared, phi, compute_score=compute_score)
+        return real_evaluate(prepared, phi, compute_score=compute_score, **kwargs)
 
     started = time.perf_counter()
     with patch.object(tweedie_module, "_evaluate_tweedie_density", counted_evaluate):
@@ -556,9 +556,9 @@ def _run_end_to_end_profile_once(
     inner_density_passes = 0
     local_optimizer_successes: list[bool] = []
 
-    def counted_evaluate(prepared, phi, *, compute_score=False):
+    def counted_evaluate(prepared, phi, *, compute_score=False, **kwargs):
         density_calls.append(bool(compute_score))
-        return real_evaluate(prepared, phi, compute_score=compute_score)
+        return real_evaluate(prepared, phi, compute_score=compute_score, **kwargs)
 
     profile_target = (
         partial(

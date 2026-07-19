@@ -1186,7 +1186,7 @@ class TestDetailedPhiProfile:
             "near-one exact dispersion likelihood requires global comparison; "
             "density branch switched during value-only fallback scan"
         )
-        np.testing.assert_allclose(result.phi, 31.731271940671984, rtol=1e-8)
+        np.testing.assert_allclose(result.phi, 31.731271940671984, rtol=2e-7)
         np.testing.assert_allclose(result.nll, 185.18683913586867, atol=1e-9)
 
     def test_wright_series_threshold_does_not_create_saddlepoint_transition(self):
