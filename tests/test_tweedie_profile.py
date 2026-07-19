@@ -1103,7 +1103,7 @@ class TestDetailedPhiProfile:
         mu = y.copy()
         p = 1.5
 
-        with pytest.raises(FloatingPointError, match="term limit"):
+        with pytest.raises(FloatingPointError, match="exact Bessel density is non-finite"):
             tweedie_logpdf(y, mu, 1e-12, p)
 
         prepared = tweedie_module._prepare_tweedie_density(y, mu, p)
