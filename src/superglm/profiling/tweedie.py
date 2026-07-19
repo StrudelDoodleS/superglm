@@ -661,8 +661,8 @@ def _evaluate_tweedie_density(
         exact_fallback = ~exact & (prepared.t_arg_limit > 0.0)
         use_p15_bessel = exact_fallback & (prepared.p == 1.5)
         use_series = exact_fallback & ~use_p15_bessel
-        series_expected_j = np.full(len(log_t), np.nan, dtype=np.float64)
-        p15_score = np.full(len(log_t), np.nan, dtype=np.float64)
+        series_expected_j: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
+        p15_score: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
         if np.any(use_p15_bessel):
             # At p=1.5 the series is sqrt(t) * I1(2*sqrt(t)); use its
             # scaled form so tiny phi needs neither a huge sum nor cancellation.
