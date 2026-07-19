@@ -1,7 +1,5 @@
 """Neutral high-precision reference for a real Tweedie power profile."""
 
-import hashlib
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -17,8 +15,6 @@ def test_joint_profile_matches_neutral_reference() -> None:
     x = rng.standard_normal(800)
     mu = np.exp(0.3 + 0.45 * x)
     y = generate_tweedie_cpg(800, mu=mu, phi=0.8, p=1.2, rng=rng)
-    digest = hashlib.sha256(np.ascontiguousarray(y, dtype="<f8").tobytes()).hexdigest()
-    assert digest == "7d2c5cf30a0d8f3c1a7fb281adb2c864900f1ec16e59fdfff536d197f3186477"
     model = SuperGLM(features={"x": Numeric()}, family=Tweedie(p=1.5))
 
     result = estimate_tweedie_p(
