@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.special import gammaln, ive
+from scipy.special import digamma, gammaln, ive, polygamma
 
 import superglm._tweedie_series as series_module
 import superglm.profiling.tweedie as tweedie_module
@@ -23,6 +23,137 @@ from superglm.profiling.tweedie import (
 
 def _log_t_with_series_mode(a: float, mode: int) -> float:
     return float(np.log(mode + 1.0) + gammaln(a * (mode + 1.0)) - gammaln(a * mode))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [1.0e-6, 1.0e-3, 0.1, 0.5, 1.0, 2.0, 7.9, 8.0, 20.0, 1.0e3, 1.0e8],
+)
+def test_compiled_positive_digamma_matches_scipy(value: float) -> None:
+    from superglm._tweedie_profile_kernel import _digamma_positive
+
+    actual = _digamma_positive(value)
+
+    assert actual == pytest.approx(float(digamma(value)), rel=3.0e-14, abs=3.0e-14)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [1.0e-6, 1.0e-3, 0.1, 0.5, 1.0, 2.0, 7.9, 8.0, 20.0, 1.0e3, 1.0e8],
+)
+def test_compiled_positive_trigamma_matches_scipy(value: float) -> None:
+    from superglm._tweedie_profile_kernel import _trigamma_positive
+
+    actual = _trigamma_positive(value)
+
+    assert actual == pytest.approx(float(polygamma(1, value)), rel=3.0e-14, abs=3.0e-14)
+
+
+def _exact_mean_nll(
+    y: np.ndarray,
+    mu: np.ndarray,
+    weights: np.ndarray,
+    p: float,
+    log_phi: float,
+) -> float:
+    phi = float(np.exp(log_phi))
+    prepared = _prepare_tweedie_density(y, mu, p, weights=weights)
+    logpdf = np.empty_like(y)
+    logpdf[prepared.zero_mask] = (
+        -prepared.zero_rate_numerator[prepared.zero_mask] * weights[prepared.zero_mask] / phi
+    )
+    log_t = prepared.positive_log_t_phi_independent - (prepared.a + 1.0) * log_phi
+    log_sum, _, exact = series_module.tweedie_log_series(log_t, prepared.a)
+    assert np.all(exact)
+    logpdf[prepared.positive_mask] = (
+        log_sum
+        - prepared.positive_log_y
+        + prepared.positive_canonical_c * weights[prepared.positive_mask] / phi
+    )
+    return -float(np.mean(logpdf))
+
+
+@pytest.mark.parametrize("p", [1.2, 1.5, 1.8])
+def test_compiled_exact_profile_statistics_match_density_and_finite_differences(
+    p: float,
+) -> None:
+    from superglm._tweedie_profile_kernel import (
+        PROFILE_KERNEL_OK,
+        exact_profile_statistics,
+    )
+
+    y = np.array([0.0, 0.08, 0.7, 2.4, 8.0])
+    mu = np.array([0.15, 0.12, 0.9, 2.0, 7.2])
+    weights = np.array([0.4, 0.75, 1.0, 1.4, 2.2])
+    log_phi = float(np.log(0.8))
+    actual = exact_profile_statistics(y, mu, weights, p, log_phi)
+
+    assert actual.status == PROFILE_KERNEL_OK
+    assert actual.n_positive == 4
+    assert actual.n_terms > 0
+    expected = _exact_mean_nll(y, mu, weights, p, log_phi)
+    assert actual.nll == pytest.approx(expected, rel=0.0, abs=2.0e-12)
+
+    gradient_step = 2.0e-5
+    curvature_step = 2.0e-4
+    p_upper = _exact_mean_nll(y, mu, weights, p + gradient_step, log_phi)
+    p_lower = _exact_mean_nll(y, mu, weights, p - gradient_step, log_phi)
+    u_upper = _exact_mean_nll(y, mu, weights, p, log_phi + gradient_step)
+    u_lower = _exact_mean_nll(y, mu, weights, p, log_phi - gradient_step)
+    expected_gradient_p = (p_upper - p_lower) / (2.0 * gradient_step)
+    expected_gradient_u = (u_upper - u_lower) / (2.0 * gradient_step)
+
+    center = expected
+    p_curvature_upper = _exact_mean_nll(y, mu, weights, p + curvature_step, log_phi)
+    p_curvature_lower = _exact_mean_nll(y, mu, weights, p - curvature_step, log_phi)
+    u_curvature_upper = _exact_mean_nll(y, mu, weights, p, log_phi + curvature_step)
+    u_curvature_lower = _exact_mean_nll(y, mu, weights, p, log_phi - curvature_step)
+    expected_hessian_pp = (p_curvature_upper - 2.0 * center + p_curvature_lower) / curvature_step**2
+    expected_hessian_uu = (u_curvature_upper - 2.0 * center + u_curvature_lower) / curvature_step**2
+    expected_hessian_pu = (
+        _exact_mean_nll(y, mu, weights, p + curvature_step, log_phi + curvature_step)
+        - _exact_mean_nll(y, mu, weights, p + curvature_step, log_phi - curvature_step)
+        - _exact_mean_nll(y, mu, weights, p - curvature_step, log_phi + curvature_step)
+        + _exact_mean_nll(y, mu, weights, p - curvature_step, log_phi - curvature_step)
+    ) / (4.0 * curvature_step**2)
+
+    assert actual.gradient_p == pytest.approx(expected_gradient_p, rel=2.0e-7, abs=2.0e-8)
+    assert actual.gradient_log_phi == pytest.approx(
+        expected_gradient_u,
+        rel=2.0e-7,
+        abs=2.0e-8,
+    )
+    assert actual.hessian_pp == pytest.approx(expected_hessian_pp, rel=2.0e-5, abs=2.0e-6)
+    assert actual.hessian_log_phi_log_phi == pytest.approx(
+        expected_hessian_uu,
+        rel=2.0e-5,
+        abs=2.0e-6,
+    )
+    assert actual.hessian_p_log_phi == pytest.approx(
+        expected_hessian_pu,
+        rel=2.0e-5,
+        abs=2.0e-6,
+    )
+
+
+def test_compiled_exact_profile_statistics_reject_impossible_work_without_raising() -> None:
+    from superglm._tweedie_profile_kernel import (
+        PROFILE_KERNEL_WORK_LIMIT,
+        exact_profile_statistics,
+    )
+
+    result = exact_profile_statistics(
+        np.ones(4),
+        np.ones(4),
+        np.ones(4),
+        1.4,
+        float(np.log(1.0e-12)),
+        max_terms=100,
+        max_total_terms=200,
+    )
+
+    assert result.status == PROFILE_KERNEL_WORK_LIMIT
+    assert np.isinf(result.nll)
 
 
 def test_exact_series_starts_near_distant_mode(monkeypatch) -> None:
