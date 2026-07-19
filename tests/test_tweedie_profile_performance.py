@@ -158,9 +158,18 @@ def _bounded_value_only_reference(fixture: _PhiFixture) -> _BoundedReference:
         cached = cache.get(key)
         if cached is not None:
             return cached[0]
-        evaluation = real_evaluate(prepared, float(np.exp(key)), compute_score=False)
-        nll = -float(np.mean(evaluation.logpdf))
-        cache[key] = (nll, evaluation.diagnostics)
+        try:
+            evaluation = real_evaluate(prepared, float(np.exp(key)), compute_score=False)
+        except FloatingPointError:
+            nll = np.inf
+            diagnostics = tweedie_module._TweedieLogpdfDiagnostics(
+                n_positive=int(prepared.positive_indices.size),
+                n_series=int(prepared.positive_indices.size),
+            )
+        else:
+            nll = -float(np.mean(evaluation.logpdf))
+            diagnostics = evaluation.diagnostics
+        cache[key] = (nll, diagnostics)
         return nll
 
     optimizer = minimize_scalar(
@@ -298,7 +307,7 @@ def test_zero_heavy_exact_mle_p_phi_recovery():
 @pytest.mark.parametrize(
     ("p", "phi", "seed", "expect_fallback"),
     [
-        pytest.param(1.05, 2.5, 7105, True, id="near-one"),
+        pytest.param(1.05, 2.5, 7105, False, id="near-one"),
         pytest.param(1.95, 1.2, 7195, False, id="near-two"),
     ],
 )

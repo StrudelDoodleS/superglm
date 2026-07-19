@@ -933,6 +933,7 @@ _PHI_MAX_ROOT_BRANCH_PROBES = 256
 _PHI_BRANCH_VERIFY_CHUNK_SIZE = 65_536
 _PHI_NLL_ATOL = 1e-10
 _PHI_NLL_RTOL = 1e-10
+_PHI_GLOBAL_COMPARE_POWER = 1.02
 
 
 @dataclass(frozen=True)
@@ -2411,6 +2412,13 @@ def _profile_phi_detailed(
 
     seeds = _phi_profile_seeds(prepared, denominator, pearson_phi, phi_start)
     score_search = _search_phi_score_candidates(cache, seeds)
+    if p < _PHI_GLOBAL_COMPARE_POWER:
+        fallback_reason = "near-one exact dispersion likelihood requires global comparison"
+        if fallback_reason not in score_search.fallback_reasons:
+            score_search = replace(
+                score_search,
+                fallback_reasons=(*score_search.fallback_reasons, fallback_reason),
+            )
     need_fallback = bool(score_search.fallback_reasons)
     bounded = _run_phi_bounded_fallback(cache, required=need_fallback)
     return _finalize_phi_mle_result(

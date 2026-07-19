@@ -1148,7 +1148,7 @@ class TestDetailedPhiProfile:
         np.testing.assert_allclose(result.nll, reference.fun, rtol=1e-10, atol=1e-10)
         np.testing.assert_allclose(np.log(result.phi), reference.x, rtol=0.0, atol=5e-6)
 
-    def test_previous_branch_jump_is_a_smooth_exact_score_root(self):
+    def test_near_one_multimodal_dispersion_uses_global_comparison(self):
         p = 1.0181533410437358
         y = np.array([1.81787899, 11275.9262, 0.0, 0.00306563885, 0.0000232882792, 1.18207511])
         mu = np.array(
@@ -1174,14 +1174,17 @@ class TestDetailedPhiProfile:
         )
         exact_nll = -float(np.mean(tweedie_logpdf(y, mu, result.phi, p, weights=weights)))
 
-        assert result.converged
-        assert not result.used_fallback
+        assert not result.converged
+        assert result.used_fallback
         assert not result.branch_switch_detected
-        assert result.optimizer == "brentq"
+        assert result.optimizer == "bounded"
         assert result.objective_finite
         assert result.nll == exact_nll
-        assert result.score is not None
-        assert abs(result.score) <= 1e-6
+        assert result.fallback_reason == (
+            "near-one exact dispersion likelihood requires global comparison"
+        )
+        np.testing.assert_allclose(result.phi, 31.731271940671984, rtol=1e-8)
+        np.testing.assert_allclose(result.nll, 185.18683913586867, atol=1e-9)
 
     def test_wright_series_threshold_does_not_create_saddlepoint_transition(self):
         p = 1.2
@@ -1387,7 +1390,7 @@ class TestDetailedPhiProfile:
         np.testing.assert_allclose(np.log(result.phi), 0.2, rtol=0.0, atol=1e-5)
         np.testing.assert_allclose(result.nll, -2.0, rtol=0.0, atol=1e-10)
 
-    def test_previous_saddlepoint_basin_does_not_displace_exact_score_root(self):
+    def test_near_one_global_comparison_retains_better_exact_score_root(self):
         p = 1.0076499464775093
         y = np.array(
             [
@@ -1409,8 +1412,8 @@ class TestDetailedPhiProfile:
         better_nll = -float(np.mean(tweedie_logpdf(y, mu, better_phi, p)))
 
         assert result.objective_finite
-        assert result.converged
-        assert not result.used_fallback
+        assert not result.converged
+        assert result.used_fallback
         assert not result.branch_switch_detected
         assert result.optimizer == "brentq"
         assert result.nll <= better_nll + 1e-8
