@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.special import ive
 
 import superglm.profiling.tweedie as tweedie_module
 from superglm.distributions import Tweedie
@@ -83,6 +84,33 @@ def test_default_density_uses_exact_series_instead_of_saddlepoint() -> None:
     )
 
     assert actual[0] == pytest.approx(-25.217701008861372, abs=2.5e-9)
+    assert diagnostics.n_series == 1
+    assert diagnostics.n_saddlepoint == 0
+
+
+def test_half_power_density_uses_stable_exact_bessel_form_at_tiny_phi() -> None:
+    y = np.array([1.35])
+    mu = np.array([1.35001])
+    weights = np.array([4.0])
+    phi = 4.0e-8
+    root_y = np.sqrt(y)
+    root_mu = np.sqrt(mu)
+    bessel_argument = 4.0 * weights * root_y / phi
+    expected = (
+        np.log(2.0 * weights / (phi * root_y))
+        + np.log(ive(1, bessel_argument))
+        - 2.0 * weights * np.square(root_y - root_mu) / (phi * root_mu)
+    )
+
+    actual, diagnostics = _tweedie_logpdf_impl(
+        y,
+        mu,
+        phi,
+        1.5,
+        weights=weights,
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=2.0e-13)
     assert diagnostics.n_series == 1
     assert diagnostics.n_saddlepoint == 0
 
