@@ -3831,6 +3831,11 @@ def _canonical_tweedie_profile_timezone(value: object) -> object:
     raise TypeError("timezone must be datetime.timezone, ZoneInfo, or a named pytz zone")
 
 
+def _profile_type_is_one_of(candidate_type: type, allowed_types) -> bool:
+    """Classify an exact type without invoking metaclass hash/equality hooks."""
+    return any(allowed_type is candidate_type for allowed_type in allowed_types)
+
+
 def _is_known_immutable_profile_value(value: object) -> bool:
     """Return whether sharing this exact scalar across a profile snapshot is safe."""
     value_type = type(value)
@@ -3838,20 +3843,20 @@ def _is_known_immutable_profile_value(value: object) -> bool:
         return True
     if value is pd.NA or value is pd.NaT:
         return True
-    if value_type in _PROFILE_EXACT_ATOMIC_TYPES:
+    if _profile_type_is_one_of(value_type, _PROFILE_EXACT_ATOMIC_TYPES):
         return True
     if value_type is UUID:
         return type(value.int) is int and (value.is_safe is None or type(value.is_safe) is SafeUUID)
-    if value_type in (datetime, time):
+    if value_type is datetime or value_type is time:
         return _is_share_safe_profile_timezone(value.tzinfo)
-    if value_type in (tuple, frozenset):
+    if value_type is tuple or value_type is frozenset:
         return all(_is_known_immutable_profile_value(item) for item in value)
     if value_type is slice:
         return all(
             _is_known_immutable_profile_value(item)
             for item in (value.start, value.stop, value.step)
         )
-    if value_type in _PROFILE_NUMPY_SCALAR_TYPES:
+    if _profile_type_is_one_of(value_type, _PROFILE_NUMPY_SCALAR_TYPES):
         return not value.dtype.hasobject
     return False
 

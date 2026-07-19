@@ -353,6 +353,324 @@ def test_clone_preflight_rejects_overridden_slot_without_calling_getter() -> Non
     assert vars(model) is caller_mapping
 
 
+def test_clone_preflight_rejects_dict_descriptor_before_it_executes() -> None:
+    descriptor_calls: list[object] = []
+    nested_events: list[str] = []
+
+    class DictDescriptorPayload:
+        @property
+        def __dict__(self):
+            descriptor_calls.append(self)
+            nested_events.append("descriptor executed")
+            raise RuntimeError("hostile __dict__ descriptor executed")
+
+    X, y = _small_problem(n=8)
+    model = _new_model()
+    model._specs["x"].audit_events = nested_events
+    model._specs["x"].audit_payload = DictDescriptorPayload()
+    caller_mapping = vars(model)
+    before = caller_mapping.copy()
+
+    with pytest.raises(TypeError, match="custom __dict__ descriptor"):
+        model.estimate_p(
+            X,
+            y,
+            method="grid",
+            grid=np.array([1.5]),
+            phi_method="pearson",
+        )
+
+    assert descriptor_calls == []
+    assert nested_events == []
+    _assert_identity_state(model, before)
+    assert vars(model) is caller_mapping
+
+
+def test_clone_preflight_rejects_hostile_metaclass_without_executing_it() -> None:
+    armed = [False]
+    metaclass_calls: list[str] = []
+    nested_events: list[str] = []
+
+    class HostileMeta(type):
+        def __getattribute__(cls, name):
+            if armed[0]:
+                metaclass_calls.append(name)
+                nested_events.append("metaclass executed")
+                raise RuntimeError("hostile metaclass executed")
+            return type.__getattribute__(cls, name)
+
+    class MetaclassPayload(metaclass=HostileMeta):
+        pass
+
+    X, y = _small_problem(n=8)
+    model = _new_model()
+    model._specs["x"].audit_events = nested_events
+    model._specs["x"].audit_payload = MetaclassPayload()
+    caller_mapping = vars(model)
+    before = caller_mapping.copy()
+    armed[0] = True
+    try:
+        with pytest.raises(TypeError, match="custom metaclass hooks.*__getattribute__"):
+            model.estimate_p(
+                X,
+                y,
+                method="grid",
+                grid=np.array([1.5]),
+                phi_method="pearson",
+            )
+    finally:
+        armed[0] = False
+
+    assert metaclass_calls == []
+    assert nested_events == []
+    _assert_identity_state(model, before)
+    assert vars(model) is caller_mapping
+
+
+def test_clone_preflight_rejects_hostile_metaclass_hash_without_executing_it() -> None:
+    armed = [False]
+    metaclass_calls: list[object] = []
+    nested_events: list[str] = []
+
+    class HostileHashMeta(type):
+        def __hash__(cls):
+            if armed[0]:
+                metaclass_calls.append(cls)
+                nested_events.append("metaclass hash executed")
+                raise RuntimeError("hostile metaclass hash executed")
+            return type.__hash__(cls)
+
+    class MetaclassHashPayload(metaclass=HostileHashMeta):
+        pass
+
+    X, y = _small_problem(n=8)
+    model = _new_model()
+    model._specs["x"].audit_events = nested_events
+    model._specs["x"].audit_payload = MetaclassHashPayload()
+    caller_mapping = vars(model)
+    before = caller_mapping.copy()
+    armed[0] = True
+    try:
+        with pytest.raises(TypeError, match="custom metaclass hooks.*__hash__"):
+            model.estimate_p(
+                X,
+                y,
+                method="grid",
+                grid=np.array([1.5]),
+                phi_method="pearson",
+            )
+    finally:
+        armed[0] = False
+
+    assert metaclass_calls == []
+    assert nested_events == []
+    _assert_identity_state(model, before)
+    assert vars(model) is caller_mapping
+
+
+def test_clone_preflight_rejects_spoofed_dataclass_params_without_reading_them() -> None:
+    descriptor_calls: list[object] = []
+    nested_events: list[str] = []
+
+    class HostileDataclassParams:
+        @property
+        def frozen(self):
+            descriptor_calls.append(self)
+            nested_events.append("dataclass params executed")
+            raise RuntimeError("hostile dataclass params executed")
+
+    class SpoofedDataclassPayload:
+        __dataclass_fields__ = {}
+        __dataclass_params__ = HostileDataclassParams()
+
+    X, y = _small_problem(n=8)
+    model = _new_model()
+    model._specs["x"].audit_events = nested_events
+    model._specs["x"].audit_payload = SpoofedDataclassPayload()
+    caller_mapping = vars(model)
+    before = caller_mapping.copy()
+
+    with pytest.raises(TypeError, match="invalid dataclass metadata"):
+        model.estimate_p(
+            X,
+            y,
+            method="grid",
+            grid=np.array([1.5]),
+            phi_method="pearson",
+        )
+
+    assert descriptor_calls == []
+    assert nested_events == []
+    _assert_identity_state(model, before)
+    assert vars(model) is caller_mapping
+
+
+def test_clone_preflight_rejects_hostile_dataclass_frozen_flag_without_bool() -> None:
+    bool_calls: list[object] = []
+    nested_events: list[str] = []
+
+    class HostileFrozenFlag:
+        def __bool__(self):
+            bool_calls.append(self)
+            nested_events.append("dataclass frozen flag executed")
+            raise RuntimeError("hostile dataclass frozen flag executed")
+
+    @dataclass
+    class DataclassParamsDonor:
+        value: int = 0
+
+    params = type.__getattribute__(DataclassParamsDonor, "__dict__")["__dataclass_params__"]
+    object.__setattr__(params, "frozen", HostileFrozenFlag())
+
+    class SpoofedDataclassPayload:
+        __dataclass_fields__ = {}
+        __dataclass_params__ = params
+
+    X, y = _small_problem(n=8)
+    model = _new_model()
+    model._specs["x"].audit_events = nested_events
+    model._specs["x"].audit_payload = SpoofedDataclassPayload()
+    caller_mapping = vars(model)
+    before = caller_mapping.copy()
+
+    with pytest.raises(TypeError, match="invalid dataclass metadata"):
+        model.estimate_p(
+            X,
+            y,
+            method="grid",
+            grid=np.array([1.5]),
+            phi_method="pearson",
+        )
+
+    assert bool_calls == []
+    assert nested_events == []
+    _assert_identity_state(model, before)
+    assert vars(model) is caller_mapping
+
+
+def test_clone_preflight_rejects_reassigned_slots_without_iterating_them() -> None:
+    iterator_calls: list[object] = []
+    nested_events: list[str] = []
+
+    class HostileSlots:
+        def __iter__(self):
+            iterator_calls.append(self)
+            nested_events.append("slots iterator executed")
+            raise RuntimeError("hostile slots iterator executed")
+
+    class SlotsPayload:
+        __slots__ = ("value",)
+
+        def __init__(self):
+            self.value = "safe"
+
+    type.__setattr__(SlotsPayload, "__slots__", HostileSlots())
+    X, y = _small_problem(n=8)
+    model = _new_model()
+    model._specs["x"].audit_events = nested_events
+    model._specs["x"].audit_payload = SlotsPayload()
+    caller_mapping = vars(model)
+    before = caller_mapping.copy()
+
+    with pytest.raises(TypeError, match="invalid __slots__ metadata"):
+        model.estimate_p(
+            X,
+            y,
+            method="grid",
+            grid=np.array([1.5]),
+            phi_method="pearson",
+        )
+
+    assert iterator_calls == []
+    assert nested_events == []
+    _assert_identity_state(model, before)
+    assert vars(model) is caller_mapping
+
+
+@pytest.mark.parametrize("metadata_name", ["__dict__", "__mro__", "__name__"])
+def test_clone_preflight_rejects_hostile_metaclass_descriptor_without_executing_it(
+    metadata_name: str,
+) -> None:
+    armed = [False]
+    descriptor_calls: list[object] = []
+    nested_events: list[str] = []
+
+    def hostile_metadata(cls):
+        if armed[0]:
+            descriptor_calls.append(cls)
+            nested_events.append("metaclass descriptor executed")
+            raise RuntimeError(f"hostile metaclass {metadata_name} executed")
+        return None
+
+    hostile_meta = type("HostileMeta", (type,), {metadata_name: property(hostile_metadata)})
+    payload_type = hostile_meta("MetaclassDescriptorPayload", (), {})
+    X, y = _small_problem(n=8)
+    model = _new_model()
+    model._specs["x"].audit_events = nested_events
+    model._specs["x"].audit_payload = payload_type()
+    caller_mapping = vars(model)
+    before = caller_mapping.copy()
+    armed[0] = True
+    try:
+        with pytest.raises(TypeError, match=f"custom metaclass descriptors.*{metadata_name}"):
+            model.estimate_p(
+                X,
+                y,
+                method="grid",
+                grid=np.array([1.5]),
+                phi_method="pearson",
+            )
+    finally:
+        armed[0] = False
+
+    assert descriptor_calls == []
+    assert nested_events == []
+    _assert_identity_state(model, before)
+    assert vars(model) is caller_mapping
+
+
+@pytest.mark.parametrize("descriptor_kind", ["wrong_name", "foreign_owner"])
+def test_clone_preflight_rejects_foreign_dict_getset(descriptor_kind: str) -> None:
+    class DictDescriptorDonor:
+        pass
+
+    if descriptor_kind == "wrong_name":
+        descriptor = type.__getattribute__(object, "__dict__")["__class__"]
+        payload_type = type("ForeignDictPayload", (), {"__dict__": descriptor})
+    else:
+        descriptor = type.__getattribute__(DictDescriptorDonor, "__dict__")["__dict__"]
+        payload_type = type(
+            "ForeignDictPayload",
+            (DictDescriptorDonor,),
+            {"__dict__": descriptor},
+        )
+
+    model = _new_model()
+    model._specs["x"].audit_payload = payload_type()
+
+    with pytest.raises(TypeError, match="custom __dict__ descriptor"):
+        profile_ops._validate_tweedie_profile_copy_protocols(model)
+
+
+def test_clone_preflight_accepts_inherited_dict_and_slot_only_storage() -> None:
+    class DictStorageBase:
+        pass
+
+    class InheritedDictPayload(DictStorageBase):
+        pass
+
+    class SlotOnlyPayload:
+        __slots__ = ("marker",)
+
+        def __init__(self):
+            self.marker = "safe"
+
+    model = _new_model()
+    model._specs["x"].audit_payloads = [InheritedDictPayload(), SlotOnlyPayload()]
+
+    profile_ops._validate_tweedie_profile_copy_protocols(model)
+
+
 def test_model_preflight_rejects_tail_lookup_mixin_without_executing_it() -> None:
     """Class-only inspection must reject hooks hidden after the public model base."""
 
