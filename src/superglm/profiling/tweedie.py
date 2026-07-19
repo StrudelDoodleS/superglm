@@ -825,6 +825,44 @@ def tweedie_logpdf(
     return logpdf
 
 
+def _tweedie_logpdf_pair(
+    y: NDArray,
+    mu: NDArray,
+    null_mu: NDArray,
+    phi: float,
+    p: float,
+    *,
+    weights: NDArray | None = None,
+) -> tuple[NDArray, NDArray]:
+    """Return fitted/null exact log densities with one shared normalizer pass."""
+    prepared = _prepare_tweedie_density(y, mu, p, weights=weights)
+    evaluation = _evaluate_tweedie_density(prepared, phi)
+    if evaluation.diagnostics.n_saddlepoint:
+        raise FloatingPointError("Tweedie fitted/null reuse requires exact density evaluation")
+
+    null_array = np.asarray(null_mu, dtype=np.float64)
+    if (
+        null_array.shape != prepared.mu.shape
+        or not np.all(np.isfinite(null_array))
+        or np.any(null_array <= 0.0)
+    ):
+        raise ValueError("null_mu must match mu and be finite and strictly positive")
+
+    inverse_phi = prepared.weights / _validate_tweedie_phi(phi)
+    canonical_fit = np.empty_like(prepared.y)
+    canonical_fit[prepared.zero_mask] = -prepared.zero_rate_numerator[prepared.zero_mask]
+    canonical_fit[prepared.positive_mask] = prepared.positive_canonical_c
+    with np.errstate(all="ignore"):
+        canonical_null = prepared.y * np.power(null_array, 1.0 - prepared.p) / (
+            1.0 - prepared.p
+        ) - np.power(null_array, 2.0 - prepared.p) / (2.0 - prepared.p)
+        shared_normalizer = evaluation.logpdf - canonical_fit * inverse_phi
+        null_logpdf = shared_normalizer + canonical_null * inverse_phi
+    if not np.all(np.isfinite(null_logpdf)):
+        raise FloatingPointError("Tweedie null log likelihood is non-finite")
+    return evaluation.logpdf.copy(), null_logpdf
+
+
 def _saddlepoint(y: NDArray, mu: NDArray, phi: NDArray, p: float) -> NDArray:
     """Saddlepoint approximation to the Tweedie log-density."""
     y_safe = np.maximum(y, 1e-300)

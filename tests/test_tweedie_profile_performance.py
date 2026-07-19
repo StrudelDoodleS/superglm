@@ -886,3 +886,32 @@ def test_end_to_end_analytic_inner_vs_bounded_inner_benchmark_report():
         assert production["p_hat"] == pytest.approx(reference["p_hat"], abs=5e-3)
         assert production["phi_hat"] == pytest.approx(reference["phi_hat"], rel=5e-3)
         assert production["nll"] == pytest.approx(reference["nll"], abs=1e-7)
+
+
+def test_ten_thousand_row_likelihood_pair_is_vectorized(monkeypatch) -> None:
+    n = 10_000
+    y = np.geomspace(0.01, 100.0, n)
+    mu = y * np.exp(np.linspace(-0.2, 0.2, n))
+    null_mu = np.full(n, 1.0)
+    weights = np.geomspace(0.5, 2.0, n)
+    real_series = tweedie_module.tweedie_log_series
+    batch_sizes: list[int] = []
+
+    def counted_series(log_t, a, **kwargs):
+        batch_sizes.append(len(log_t))
+        return real_series(log_t, a, **kwargs)
+
+    monkeypatch.setattr(tweedie_module, "tweedie_log_series", counted_series)
+
+    fitted, null = tweedie_module._tweedie_logpdf_pair(
+        y,
+        mu,
+        null_mu,
+        0.8,
+        1.5,
+        weights=weights,
+    )
+
+    assert fitted.shape == null.shape == (n,)
+    assert len(batch_sizes) <= 1
+    assert all(size > 1 for size in batch_sizes)

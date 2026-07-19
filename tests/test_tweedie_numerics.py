@@ -3,7 +3,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import superglm.profiling.tweedie as tweedie_module
 from superglm.distributions import Tweedie
+from superglm.links import LogLink
+from superglm.model.fit_ops import _compute_fit_stats
 from superglm.profiling.tweedie import (
     _evaluate_tweedie_density,
     _prepare_tweedie_density,
@@ -106,3 +109,37 @@ def test_exact_series_log_phi_score_matches_finite_difference() -> None:
         rel=2.0e-6,
         abs=2.0e-7,
     )
+
+
+def test_tweedie_fit_stats_reuses_one_density_normalizer(monkeypatch) -> None:
+    y = np.array([0.0, 0.3, 1.2, 4.5])
+    mu = np.array([0.2, 0.5, 1.5, 3.7])
+    null_mu = np.full_like(y, 1.1)
+    weights = np.array([0.4, 0.8, 1.2, 1.8])
+    family = Tweedie(1.55)
+    expected_ll = float(np.sum(tweedie_logpdf(y, mu, 0.8, 1.55, weights=weights)))
+    expected_null_ll = float(np.sum(tweedie_logpdf(y, null_mu, 0.8, 1.55, weights=weights)))
+    real_evaluate = tweedie_module._evaluate_tweedie_density
+    calls = 0
+
+    def counted(prepared, phi, *, compute_score=False):
+        nonlocal calls
+        calls += 1
+        return real_evaluate(prepared, phi, compute_score=compute_score)
+
+    monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", counted)
+
+    stats = _compute_fit_stats(
+        y,
+        mu,
+        weights,
+        None,
+        family,
+        LogLink(),
+        0.8,
+        null_mu=null_mu,
+    )
+
+    assert calls == 1
+    assert stats.log_likelihood == pytest.approx(expected_ll, abs=1.0e-11)
+    assert stats.null_log_likelihood == pytest.approx(expected_null_ll, abs=1.0e-11)

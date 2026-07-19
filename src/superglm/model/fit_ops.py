@@ -15,6 +15,7 @@ from numpy.typing import NDArray
 from superglm.distributions import (
     Distribution,
     NegativeBinomial,
+    Tweedie,
     clip_mu,
     resolve_distribution,
 )
@@ -214,11 +215,25 @@ def _compute_fit_stats(
 ) -> FitStats:
     """Compute scalar fit statistics from training arrays."""
 
-    ll = distribution.log_likelihood(y, mu, weights, phi)
     if null_mu is None:
         null_mu = _compute_null_mu(y, weights, offset, distribution, link)
 
-    null_ll = distribution.log_likelihood(y, null_mu, weights, phi)
+    if isinstance(distribution, Tweedie):
+        from superglm.profiling.tweedie import _tweedie_logpdf_pair
+
+        fitted_logpdf, null_logpdf = _tweedie_logpdf_pair(
+            y,
+            mu,
+            null_mu,
+            phi,
+            distribution.p,
+            weights=weights,
+        )
+        ll = float(np.sum(fitted_logpdf))
+        null_ll = float(np.sum(null_logpdf))
+    else:
+        ll = distribution.log_likelihood(y, mu, weights, phi)
+        null_ll = distribution.log_likelihood(y, null_mu, weights, phi)
     null_dev = float(np.sum(weights * distribution.deviance_unit(y, null_mu)))
     dev = float(np.sum(weights * distribution.deviance_unit(y, mu)))
     expl_dev = 1.0 - dev / null_dev if null_dev > 0 else 0.0
