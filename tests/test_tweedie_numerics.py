@@ -88,7 +88,7 @@ def test_default_density_uses_exact_series_instead_of_saddlepoint() -> None:
     assert diagnostics.n_saddlepoint == 0
 
 
-def test_half_power_density_uses_stable_exact_bessel_form_at_tiny_phi() -> None:
+def test_p15_density_uses_stable_exact_bessel_form_at_tiny_phi() -> None:
     y = np.array([1.35])
     mu = np.array([1.35001])
     weights = np.array([4.0])

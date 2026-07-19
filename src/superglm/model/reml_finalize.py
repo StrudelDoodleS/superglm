@@ -363,7 +363,7 @@ def finalize_reml_fit(
 
     # Profile dispersion from the state that will actually be returned.  A
     # constrained QP passthrough refit can change both beta'S beta and deviance.
-    if isinstance(model._distribution, Tweedie):
+    if isinstance(model._distribution, Tweedie) and not qp_passthrough:
         phi_fixed = float(final_pirls.phi)
     elif terminal_evaluation is not None and terminal_evaluation.profiled_scale is not None:
         phi_fixed = terminal_evaluation.profiled_scale.phi

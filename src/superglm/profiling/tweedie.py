@@ -659,11 +659,11 @@ def _evaluate_tweedie_density(
             positive_logpdf[valid_indices] = candidate_logpdf[density_valid]
 
         exact_fallback = ~exact & (prepared.t_arg_limit > 0.0)
-        use_half_power_bessel = exact_fallback & (prepared.p == 1.5)
-        use_series = exact_fallback & ~use_half_power_bessel
+        use_p15_bessel = exact_fallback & (prepared.p == 1.5)
+        use_series = exact_fallback & ~use_p15_bessel
         series_expected_j = np.full(len(log_t), np.nan, dtype=np.float64)
-        half_power_score = np.full(len(log_t), np.nan, dtype=np.float64)
-        if np.any(use_half_power_bessel):
+        p15_score = np.full(len(log_t), np.nan, dtype=np.float64)
+        if np.any(use_p15_bessel):
             # At p=1.5 the series is sqrt(t) * I1(2*sqrt(t)); use its
             # scaled form so tiny phi needs neither a huge sum nor cancellation.
             positive_y_root = np.sqrt(prepared.y[positive])
@@ -671,39 +671,33 @@ def _evaluate_tweedie_density(
             positive_weights = prepared.weights[positive]
             with np.errstate(all="ignore"):
                 bessel_argument = (
-                    4.0
-                    * positive_weights[use_half_power_bessel]
-                    * positive_y_root[use_half_power_bessel]
-                    / phi
+                    4.0 * positive_weights[use_p15_bessel] * positive_y_root[use_p15_bessel] / phi
                 )
                 scaled_bessel_one = ive(1, bessel_argument)
                 deviance_term = (
                     2.0
-                    * positive_weights[use_half_power_bessel]
-                    * np.square(
-                        positive_y_root[use_half_power_bessel]
-                        - positive_mu_root[use_half_power_bessel]
-                    )
-                    / (phi * positive_mu_root[use_half_power_bessel])
+                    * positive_weights[use_p15_bessel]
+                    * np.square(positive_y_root[use_p15_bessel] - positive_mu_root[use_p15_bessel])
+                    / (phi * positive_mu_root[use_p15_bessel])
                 )
                 bessel_logpdf = (
                     np.log(2.0)
-                    + prepared.log_weight[positive][use_half_power_bessel]
+                    + prepared.log_weight[positive][use_p15_bessel]
                     - log_phi
-                    - 0.5 * prepared.positive_log_y[use_half_power_bessel]
+                    - 0.5 * prepared.positive_log_y[use_p15_bessel]
                     + np.log(scaled_bessel_one)
                     - deviance_term
                 )
                 if compute_score:
                     scaled_bessel_zero = ive(0, bessel_argument)
-                    half_power_score[use_half_power_bessel] = (
+                    p15_score[use_p15_bessel] = (
                         bessel_argument
                         * ((scaled_bessel_zero - scaled_bessel_one) / scaled_bessel_one)
                         - deviance_term
                     )
             if not np.all(np.isfinite(bessel_logpdf)):
                 raise FloatingPointError("Tweedie p=1.5 exact Bessel density is non-finite")
-            positive_logpdf[use_half_power_bessel] = bessel_logpdf
+            positive_logpdf[use_p15_bessel] = bessel_logpdf
 
         if np.any(use_series):
             series_log_sum, expected_j = tweedie_log_series(
@@ -716,11 +710,11 @@ def _evaluate_tweedie_density(
                 + prepared.positive_canonical_c[use_series] * inverse_phi_positive[use_series]
             )
             series_expected_j[use_series] = expected_j
-        n_series = int(np.count_nonzero(use_half_power_bessel | use_series))
+        n_series = int(np.count_nonzero(use_p15_bessel | use_series))
 
         # A non-positive/NaN limit is the explicit compatibility route that
         # forces the saddlepoint approximation. Default evaluation is exact.
-        saddlepoint = ~(exact | use_half_power_bessel | use_series)
+        saddlepoint = ~(exact | use_p15_bessel | use_series)
         positive_saddlepoint_mask = saddlepoint
         n_saddlepoint = int(np.count_nonzero(saddlepoint))
         if np.any(saddlepoint):
@@ -752,8 +746,8 @@ def _evaluate_tweedie_density(
                     + prepared.positive_canonical_c[use_series] * inverse_phi_positive[use_series]
                 )
 
-            if np.any(use_half_power_bessel):
-                positive_score[use_half_power_bessel] = half_power_score[use_half_power_bessel]
+            if np.any(use_p15_bessel):
+                positive_score[use_p15_bessel] = p15_score[use_p15_bessel]
 
             if np.any(exact):
                 with np.errstate(all="ignore"):
