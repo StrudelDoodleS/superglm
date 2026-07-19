@@ -1,3 +1,4 @@
+import math
 import warnings
 from decimal import Decimal, localcontext
 
@@ -665,6 +666,61 @@ def test_pearson_large_ordinary_path_bypasses_log_and_exponent_routers(monkeypat
     )
 
     assert result == 1.0
+
+
+@pytest.mark.parametrize("weighted", [False, True], ids=["unit-weights", "explicit-weights"])
+def test_pearson_dense_direct_path_avoids_repeated_nonzero_reductions(monkeypatch, weighted):
+    original_count_nonzero = np.count_nonzero
+    reduction_sizes = []
+
+    def record_count_nonzero(values):
+        reduction_sizes.append(np.asarray(values).size)
+        return original_count_nonzero(values)
+
+    monkeypatch.setattr(tweedie_numerics.np, "count_nonzero", record_count_nonzero)
+    n_terms = 10_000
+    weights = np.ones(n_terms) if weighted else None
+
+    result = tweedie_numerics.pearson_dispersion(
+        np.full(n_terms, 2.0),
+        np.ones(n_terms),
+        1.5,
+        weights,
+        float(n_terms),
+    )
+
+    assert result == 1.0
+    assert reduction_sizes == [n_terms]
+
+
+def test_pearson_direct_path_accepts_exact_subnormal_intermediate(monkeypatch):
+    """An exact subnormal square loses no information and need not use the log fallback."""
+
+    def unexpected_slow_path(*_arguments):
+        raise AssertionError("an exact subnormal intermediate must stay on the direct path")
+
+    monkeypatch.setattr(
+        tweedie_numerics,
+        "_pearson_float64_range_route",
+        unexpected_slow_path,
+    )
+    monkeypatch.setattr(
+        tweedie_numerics,
+        "_pearson_boundary_result",
+        unexpected_slow_path,
+    )
+    monkeypatch.setattr(tweedie_numerics, "logsumexp", unexpected_slow_path)
+    mu_value = math.ldexp(1.0, -537)
+
+    result = tweedie_numerics.pearson_dispersion(
+        np.array([2.0 * mu_value]),
+        np.array([mu_value]),
+        1.5,
+        None,
+        1.0,
+    )
+
+    assert result == tweedie_numerics.PHI_LOWER_BOUND
 
 
 def test_pearson_scalar_upper_exponent_rounds_each_operation_outward():
