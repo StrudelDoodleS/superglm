@@ -109,6 +109,47 @@ def test_pearson_phi_preserves_valid_tiny_means() -> None:
     assert actual == pytest.approx(expected, rel=2.0e-15)
 
 
+def test_pearson_phi_is_zero_for_equal_subnormal_scale_values() -> None:
+    value = np.array([1.0e-300])
+
+    assert estimate_phi(value, value, 1.5) == 0.0
+
+
+def test_pearson_phi_preserves_finite_subnormal_scale_residual() -> None:
+    mu = np.array([1.0e-300])
+    y = np.array([1.0e-300 + 1.0e-310])
+    expected = float(np.square((y - mu) / np.power(mu, 0.75))[0])
+
+    assert estimate_phi(y, mu, 1.5) == pytest.approx(expected, rel=2.0e-15)
+
+
+def test_profile_pearson_uses_same_unfloored_contributions() -> None:
+    y = np.array([1.0e-12, 2.0e-12])
+    mu = np.array([1.0e-20, 2.0e-20])
+    expected = estimate_phi(y, mu, 1.5)
+
+    actual = tweedie_module._profile_phi_detailed(y, mu, 1.5, phi_method="pearson")
+
+    assert actual.phi == pytest.approx(expected, rel=2.0e-15)
+
+
+def test_fit_stats_pearson_is_zero_for_equal_subnormal_tweedie_values() -> None:
+    value = np.array([1.0e-300])
+
+    stats = _compute_fit_stats(
+        value,
+        value,
+        np.ones(1),
+        None,
+        Tweedie(1.5),
+        LogLink(),
+        1.0,
+        null_mu=value,
+    )
+
+    assert stats.pearson_chi2 == 0.0
+
+
 @pytest.mark.parametrize(
     ("y", "mu", "phi", "p", "weight", "expected"),
     [

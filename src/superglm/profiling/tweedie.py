@@ -963,6 +963,17 @@ def _saddlepoint(y: NDArray, mu: NDArray, phi: NDArray, p: float) -> NDArray:
 # ---------------------------------------------------------------------------
 
 
+def _tweedie_pearson_contributions(
+    y: NDArray,
+    mu: NDArray,
+    p: float,
+) -> NDArray:
+    """Return `(y - mu)^2 / mu^p` without forming an underflowing variance."""
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        scaled_residual = (y - mu) / np.power(mu, p / 2.0)
+        return np.square(scaled_residual)
+
+
 def estimate_phi(
     y: NDArray,
     mu: NDArray,
@@ -988,8 +999,7 @@ def estimate_phi(
     ``df_resid = n_obs - edf``.
     """
     y, mu, p, weights = _validate_tweedie_inputs(y, mu, p, weights)
-    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        pearson = (y - mu) ** 2 / np.power(mu, p)
+    pearson = _tweedie_pearson_contributions(y, mu, p)
 
     denom = float(df_resid if df_resid is not None else len(y))
     if weights is not None:
@@ -1270,8 +1280,11 @@ def _pearson_phi_from_prepared(
         numerator = float(
             np.sum(
                 prepared.weights
-                * (prepared.y - prepared.mu) ** 2
-                / np.power(np.maximum(prepared.mu, 1e-10), prepared.p)
+                * _tweedie_pearson_contributions(
+                    prepared.y,
+                    prepared.mu,
+                    prepared.p,
+                )
             )
         )
     return numerator / denominator

@@ -219,7 +219,10 @@ def _compute_fit_stats(
         null_mu = _compute_null_mu(y, weights, offset, distribution, link)
 
     if isinstance(distribution, Tweedie):
-        from superglm.profiling.tweedie import _tweedie_logpdf_pair
+        from superglm.profiling.tweedie import (
+            _tweedie_logpdf_pair,
+            _tweedie_pearson_contributions,
+        )
 
         fitted_logpdf, null_logpdf = _tweedie_logpdf_pair(
             y,
@@ -231,15 +234,15 @@ def _compute_fit_stats(
         )
         ll = float(np.sum(fitted_logpdf))
         null_ll = float(np.sum(null_logpdf))
+        pearson = float(np.sum(weights * _tweedie_pearson_contributions(y, mu, distribution.p)))
     else:
         ll = distribution.log_likelihood(y, mu, weights, phi)
         null_ll = distribution.log_likelihood(y, null_mu, weights, phi)
+        V = distribution.variance(mu)
+        pearson = float(np.sum(weights * (y - mu) ** 2 / V))
     null_dev = float(np.sum(weights * distribution.deviance_unit(y, null_mu)))
     dev = float(np.sum(weights * distribution.deviance_unit(y, mu)))
     expl_dev = 1.0 - dev / null_dev if null_dev > 0 else 0.0
-
-    V = distribution.variance(mu)
-    pearson = float(np.sum(weights * (y - mu) ** 2 / V))
 
     return FitStats(
         log_likelihood=ll,
