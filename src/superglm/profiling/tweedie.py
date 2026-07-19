@@ -430,6 +430,7 @@ _PROFILE_SERIES_MAX_TOTAL_TERMS = 1_000_000
 _FIT_STATS_SERIES_MAX_TOTAL_TERMS = 4_096
 _SERIES_FIRST_MIN_ROWS = 32
 _P15_BESSEL_ASYMPTOTIC_MIN_ARGUMENT = 1.0e6
+_JOINT_SAFE_POWER_BOUNDS = (1.05, 1.95)
 
 
 def _tweedie_positive_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
@@ -3879,15 +3880,23 @@ class _ProfileContext:
         result, mu, df_resid = self._fit_at_power(key)
         if phi_start is None:
             phi_start = _previous_finite_phi(self._evaluation_cache)
-        outcome = _profile_phi_exact_newton(
-            self.y_arr,
-            mu,
-            key,
-            weights=self.w_arr,
-            df_resid=df_resid,
-            phi_start=phi_start,
-            validate=False,
-        )
+        try:
+            outcome = _profile_phi_exact_newton(
+                self.y_arr,
+                mu,
+                key,
+                weights=self.w_arr,
+                df_resid=df_resid,
+                phi_start=phi_start,
+                validate=False,
+            )
+        except Exception as exc:
+            outcome = _ExactPhiNewtonOutcome(
+                result=None,
+                statistics=None,
+                failure_reason=(f"compiled exact dispersion profile raised {type(exc).__name__}"),
+                n_kernel_evaluations=0,
+            )
         if outcome.result is None:
             phi_result = _profile_phi_detailed(
                 self.y_arr,
@@ -4714,6 +4723,30 @@ def _joint_ml_fallback_to_brent(
     reason: str,
 ) -> TweedieProfileResult:
     """Finish with the authoritative scalar profile after a diagnosed fast-path exit."""
+    # A failed joint certificate must not leave unvalidated kernel results in
+    # the cache that Brent uses to select its winner.  Keep the already-paid
+    # coefficient fits, but replace every fast inner profile through the
+    # defensive density path before the scalar search sees it.
+    for p, record in tuple(ctx._evaluation_cache.items()):
+        if record.phi_result.optimizer != "exact-newton":
+            continue
+        try:
+            phi_result = _profile_phi_detailed(
+                ctx.y_arr,
+                record.mu,
+                p,
+                weights=ctx.w_arr,
+                df_resid=max(float(len(ctx.y_arr)) - record.edf, 1.0),
+                phi_method=ctx.phi_method,
+                phi_start=record.phi,
+            )
+        except (FloatingPointError, RuntimeError, ValueError):
+            del ctx._evaluation_cache[p]
+        else:
+            ctx._evaluation_cache[p] = replace(record, phi_result=phi_result)
+    ctx._exact_statistics_cache.clear()
+    ctx._exact_failure_cache.clear()
+
     result = _search_brent(ctx, p_bounds, xatol, maxiter)
     result.method = "joint_ml"
     prefix = f"Exact joint fast path fell back to Brent: {reason}."
@@ -4812,6 +4845,15 @@ def _search_joint_ml(
         raise ValueError("maxiter must be strictly positive")
     if ctx.phi_method != "mle":
         raise ValueError("method='joint_ml' requires phi_method='mle'")
+    safe_lo, safe_hi = _JOINT_SAFE_POWER_BOUNDS
+    if lo < safe_lo or hi > safe_hi:
+        return _joint_ml_fallback_to_brent(
+            ctx,
+            p_bounds,
+            xatol,
+            maxiter,
+            f"configured bounds are outside the stable joint range [{safe_lo:g}, {safe_hi:g}]",
+        )
     if any(
         group.constraints is not None or group.monotone_engine is not None for group in ctx.groups
     ):
@@ -5132,7 +5174,8 @@ def estimate_tweedie_p(
     method : {"auto", "joint_ml", "brent", "grid", "grid_refine", "profile_opt", "integrated"}
         Search strategy. ``"auto"`` (default) uses the safeguarded exact joint
         ML solver for ordinary MLE profiles and Brent otherwise. ``"joint_ml"``
-        explicitly requests that fast path with diagnosed Brent fallback.
+        explicitly requests that fast path with diagnosed Brent fallback,
+        including when configured bounds extend outside ``[1.05, 1.95]``.
         ``"brent"`` uses bounded scalar optimisation. ``"grid"`` does exhaustive grid search.
         ``"grid_refine"`` does a coarse grid + local Brent refinement.
         ``"profile_opt"`` uses a general-purpose optimizer (L-BFGS-B or

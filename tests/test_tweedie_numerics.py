@@ -73,7 +73,7 @@ def _exact_mean_nll(
     return -float(np.mean(logpdf))
 
 
-@pytest.mark.parametrize("p", [1.2, 1.5, 1.8])
+@pytest.mark.parametrize("p", [1.05, 1.2, 1.5, 1.8, 1.95])
 def test_compiled_exact_profile_statistics_match_density_and_finite_differences(
     p: float,
 ) -> None:

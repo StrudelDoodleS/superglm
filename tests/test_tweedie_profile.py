@@ -4439,6 +4439,91 @@ class TestSearchMethods:
         assert joint.phi_hat == pytest.approx(brent.phi_hat, rel=2.0e-4)
         assert joint.nll == pytest.approx(brent.nll, abs=2.0e-8)
 
+    def test_joint_ml_validation_failure_discards_fast_cache(self, monkeypatch):
+        X, y, _ = _tweedie_data(n=160, p_true=1.45, seed=1730)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        monkeypatch.setattr(
+            tweedie_module,
+            "_validate_joint_profile_record",
+            lambda *args: (None, "forced certificate failure"),
+        )
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="joint_ml",
+            phi_method="mle",
+            p_bounds=(1.1, 1.9),
+            xatol=1.0e-4,
+        )
+
+        assert "forced certificate failure" in result.outer_message
+        assert result.phi_optimizer != "exact-newton"
+        assert set(result.search_trace["phi_optimizer"]) == {"brentq"}
+
+    def test_joint_ml_compiled_kernel_failure_falls_back(self, monkeypatch):
+        X, y, _ = _tweedie_data(n=120, p_true=1.45, seed=1731)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+
+        def fail_compiled_kernel(*args, **kwargs):
+            raise RuntimeError("forced compiled-kernel failure")
+
+        monkeypatch.setattr(
+            tweedie_module,
+            "_profile_phi_exact_newton",
+            fail_compiled_kernel,
+        )
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="joint_ml",
+            phi_method="mle",
+            p_bounds=(1.1, 1.9),
+            xatol=1.0e-4,
+        )
+
+        assert result.converged
+        assert "compiled exact dispersion profile raised RuntimeError" in result.outer_message
+        assert result.phi_optimizer != "exact-newton"
+
+    def test_joint_ml_uses_defensive_profile_outside_stable_power_range(self):
+        rng = np.random.default_rng(8102)
+        x = rng.normal(size=300)
+        mu = np.exp(0.2 + 0.35 * x)
+        y = generate_tweedie_cpg(300, mu=mu, phi=0.1, p=1.1, rng=rng)
+        X = pd.DataFrame({"x1": x})
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="joint_ml",
+            phi_method="mle",
+            p_bounds=(1.02, 1.98),
+            xatol=2.0e-4,
+        )
+
+        assert "outside the stable joint range" in result.outer_message
+        assert result.outer_boundary == "lower"
+        assert result.p_hat == 1.02
+        assert result.nll < 0.367
+
     def test_integrated_not_implemented(self):
         """method='integrated' should raise NotImplementedError."""
         X, y, _ = _tweedie_data()

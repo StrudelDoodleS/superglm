@@ -843,13 +843,15 @@ class SuperGLM:
             Fitting regime for each candidate ``p`` evaluation.
         phi_method : {"pearson", "mle"}
             How to profile out Tweedie dispersion ``phi`` at each candidate ``p``.
-            ``"mle"`` (default) runs a nested 1D likelihood optimization in
-            ``phi``. ``"pearson"`` is an explicit faster plug-in estimate and
+            ``"mle"`` (default) maximizes the likelihood in ``phi``; the joint
+            fast path uses exact derivatives and defensive searches use a nested
+            scalar optimization. ``"pearson"`` is an explicit faster plug-in and
             does not support likelihood-ratio confidence intervals.
         method : {"auto", "joint_ml", "brent", "grid", "grid_refine", "profile_opt"}
             Search strategy. ``"auto"`` (default) uses safeguarded exact joint
             ML for ordinary MLE profiles and Brent otherwise. ``"joint_ml"``
-            explicitly requests that fast path. ``"brent"`` uses bounded scalar
+            explicitly requests that fast path within its stable ``p`` range and
+            falls back defensively otherwise. ``"brent"`` uses bounded scalar
             optimisation. ``"grid"`` does exhaustive grid search.
             ``"grid_refine"`` does a coarse grid + local Brent refinement.
             ``"profile_opt"`` uses a general-purpose optimizer on

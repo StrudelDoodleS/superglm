@@ -105,10 +105,16 @@ profiles, `auto` evaluates the exact Tweedie likelihood and its joint *p*/φ
 derivatives in one compiled series sweep, then takes safeguarded Newton steps.
 Each accepted *p* still has a fully profiled φ, and the winning point is checked
 against neighboring exact profiles. Unsafe curvature, series work, constraints,
-or validation automatically fall back to the defensive Brent profile. Explicit
+validation, or bounds outside the stable `[1.05, 1.95]` joint range automatically
+fall back to the defensive Brent profile. Explicit
 `method="brent"` retains the nested scalar search. `phi_method="pearson"` is an explicit fast plug-in
 option when exploratory speed matters, but it is not a likelihood profile
 and cannot support a likelihood-ratio confidence interval.
+
+As with other local likelihood optimizers, joint ML and Brent convergence do
+not prove a global optimum on an arbitrarily multimodal surface. Use
+`method="grid_refine"` for an explicit broad search when boundary behavior or
+multiple basins are a substantive concern.
 
 Positive densities normally use the Wright–Bessel series. A diagnosed
 saddlepoint fallback is used only when that exact evaluation is not finite or
