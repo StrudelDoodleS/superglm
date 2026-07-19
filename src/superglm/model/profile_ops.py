@@ -23,7 +23,7 @@ def estimate_p(
     *,
     fit_mode="fit",
     phi_method="mle",
-    method="brent",
+    method="auto",
     progress_callback=None,
     **kwargs,
 ):

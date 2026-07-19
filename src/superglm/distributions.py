@@ -301,12 +301,10 @@ class Tweedie:
         return self.p * (self.p - 1) * np.power(mu, self.p - 2)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
-        """Tweedie unit deviance."""
-        p = self.p
-        t1 = np.where(y > 0, np.power(y, 2 - p) / ((1 - p) * (2 - p)), 0.0)
-        t2 = y * np.power(mu, 1 - p) / (1 - p)
-        t3 = np.power(mu, 2 - p) / (2 - p)
-        return 2 * (t1 - t2 + t3)
+        """Tweedie unit deviance evaluated without close-mean cancellation."""
+        from superglm.profiling.tweedie import _tweedie_positive_unit_deviance
+
+        return _tweedie_positive_unit_deviance(y, mu, self.p)
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Tweedie log-likelihood via exact Wright-Bessel evaluation."""
