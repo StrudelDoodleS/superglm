@@ -74,8 +74,9 @@ statistics will:
 
 - reuse one normalizer pass;
 - use exact Wright rows where cheap;
-- skip the compound-Poisson series when Wright fails and use the stable
-  saddlepoint base measure;
+- use the centered compound-Poisson series when its estimated work fits a
+  strict fit-stat budget;
+- otherwise use the stable saddlepoint base measure;
 - permit mixed exact and saddlepoint rows instead of raising.
 
 The saddlepoint base measure is independent of `mu`, so fitted/null reuse remains
