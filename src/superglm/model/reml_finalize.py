@@ -8,7 +8,7 @@ from dataclasses import replace
 import numpy as np
 
 from superglm._fit_trace import TraceRun
-from superglm.distributions import Gamma, Gaussian, clip_mu
+from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
 from superglm.model.reml_state import update_reml_r_inv
@@ -363,7 +363,9 @@ def finalize_reml_fit(
 
     # Profile dispersion from the state that will actually be returned.  A
     # constrained QP passthrough refit can change both beta'S beta and deviance.
-    if terminal_evaluation is not None and terminal_evaluation.profiled_scale is not None:
+    if isinstance(model._distribution, Tweedie):
+        phi_fixed = float(final_pirls.phi)
+    elif terminal_evaluation is not None and terminal_evaluation.profiled_scale is not None:
         phi_fixed = terminal_evaluation.profiled_scale.phi
     elif terminal_evaluation is not None and not getattr(
         model._distribution,
