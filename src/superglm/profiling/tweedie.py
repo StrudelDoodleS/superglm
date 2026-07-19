@@ -838,16 +838,18 @@ def estimate_phi(
     ``df_resid = n_obs - edf``.
     """
     y, mu, p, weights = _validate_tweedie_inputs(y, mu, p, weights)
-    mu_safe = np.maximum(mu, 1e-10)
-    variance_fn = np.power(mu_safe, p)
-    pearson = (y - mu) ** 2 / variance_fn
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        pearson = (y - mu) ** 2 / np.power(mu, p)
 
     denom = float(df_resid if df_resid is not None else len(y))
     if weights is not None:
         numer = float(np.sum(weights * pearson))
     else:
         numer = float(np.sum(pearson))
-    return numer / denom
+    phi_hat = numer / denom
+    if not np.isfinite(phi_hat):
+        raise FloatingPointError("Tweedie Pearson dispersion is non-finite for these inputs")
+    return phi_hat
 
 
 _PHI_LOWER_BOUND = 1e-12
