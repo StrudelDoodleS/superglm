@@ -33,6 +33,22 @@ REQUEST_FORMAT = "superglm.tweedie.reference.request.v1"
 RESPONSE_FORMAT = "superglm.tweedie.reference.response.v1"
 _CASE_ID = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_MAX_PROFILE_ROWS = 100_000
+_MISSING = object()
+_PROFILE_DIAGNOSTIC_EXPECTATIONS: tuple[tuple[str, object], ...] = (
+    ("outer_converged", True),
+    ("outer_boundary", None),
+    ("fit_converged", True),
+    ("solver_converged", True),
+    ("objective_finite", True),
+    ("phi_converged", True),
+    ("phi_used_fallback", False),
+    ("phi_n_fallback_evaluations", 0),
+    ("phi_n_value_only_evaluations", 0),
+    ("density_exact", True),
+    ("density_method", "exact"),
+    ("n_saddlepoint", 0),
+)
 
 
 class ReferenceCheckError(RuntimeError):
@@ -151,6 +167,7 @@ class ComparisonSummary:
                     f"worst_local_profile_phi_case={self.worst_local_profile_phi_case}",
                     "profile_response_digests=verified",
                     "profile_convergence=verified",
+                    "profile_diagnostics=verified",
                 ]
             )
         return " ".join(fields)
@@ -241,11 +258,19 @@ def _power(value: object, label: str) -> float:
     return result
 
 
-def _integer(value: object, label: str, *, minimum: int) -> int:
+def _integer(
+    value: object,
+    label: str,
+    *,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
     if type(value) is not int:
         raise ReferenceSchemaError(f"{label} must be one JSON integer, excluding booleans")
     if value < minimum:
         raise ReferenceSchemaError(f"{label} must be at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise ReferenceSchemaError(f"{label} must be at most {maximum}")
     return value
 
 
@@ -320,7 +345,12 @@ def _parse_profile_case(value: object, index: int) -> ProfileReferenceCase:
     return ProfileReferenceCase(
         case=_case_id(mapping["case"], f"{label}.case"),
         seed=_integer(mapping["seed"], f"{label}.seed", minimum=0),
-        n=_integer(mapping["n"], f"{label}.n", minimum=1),
+        n=_integer(
+            mapping["n"],
+            f"{label}.n",
+            minimum=1,
+            maximum=_MAX_PROFILE_ROWS,
+        ),
         recipe="normal_log_mean.v1",
         log_mu_intercept=_finite_number(mapping["log_mu_intercept"], f"{label}.log_mu_intercept"),
         log_mu_slope=_finite_number(mapping["log_mu_slope"], f"{label}.log_mu_slope"),
@@ -440,6 +470,34 @@ def _response_sha256(y: np.ndarray) -> str:
     return hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
 
 
+def _profile_diagnostic_matches(actual: object, expected: object) -> bool:
+    if expected is None or type(expected) is bool:
+        return actual is expected
+    if type(expected) is int:
+        return (
+            isinstance(actual, int | np.integer)
+            and not isinstance(actual, bool | np.bool_)
+            and int(actual) == expected
+        )
+    if type(expected) is str:
+        return isinstance(actual, str) and actual == expected
+    return False
+
+
+def _require_profile_diagnostics(case: ProfileReferenceCase, result: object) -> None:
+    failures = []
+    for field, expected in _PROFILE_DIAGNOSTIC_EXPECTATIONS:
+        actual = getattr(result, field, _MISSING)
+        if actual is _MISSING or not _profile_diagnostic_matches(actual, expected):
+            observed = "<missing>" if actual is _MISSING else repr(actual)
+            failures.append(
+                f"profile diagnostic case={case.case} field={field} "
+                f"observed={observed} expected={expected!r}"
+            )
+    if failures:
+        raise ReferenceComparisonError("\n".join(failures))
+
+
 def _fit_local_profile(
     case: ProfileReferenceCase,
     x: np.ndarray,
@@ -473,6 +531,7 @@ def _fit_local_profile(
         raise ReferenceComparisonError(
             f"local profile fit case={case.case} returned invalid p or phi"
         )
+    _require_profile_diagnostics(case, result)
     return p_hat, phi_hat, bool(result.converged)
 
 

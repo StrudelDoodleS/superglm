@@ -36,16 +36,34 @@ CHECKER_PATH = ROOT / "scripts" / "check_tweedie_reference.py"
 COMMITTED_FIXTURE = load_reference_fixture(FIXTURE_PATH)
 
 
+def _valid_checker_profile_result(**overrides):
+    values = {
+        "p_hat": 1.1968971098776182,
+        "phi_hat": 0.8068142191615686,
+        "converged": True,
+        "outer_converged": True,
+        "outer_boundary": None,
+        "fit_converged": True,
+        "solver_converged": True,
+        "objective_finite": True,
+        "phi_converged": True,
+        "phi_used_fallback": False,
+        "phi_n_fallback_evaluations": 0,
+        "phi_n_value_only_evaluations": 0,
+        "density_exact": True,
+        "density_method": "exact",
+        "n_saddlepoint": 0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 @pytest.fixture(autouse=True)
 def _use_fast_checker_profile_fit(monkeypatch) -> None:
     """Keep checker unit tests fast; the committed slow test exercises the real fit."""
 
     def fit_profile(*args, **kwargs):
-        return SimpleNamespace(
-            p_hat=1.1968971098776182,
-            phi_hat=0.8068142191615686,
-            converged=True,
-        )
+        return _valid_checker_profile_result()
 
     monkeypatch.setattr("superglm.profiling.tweedie.estimate_tweedie_p", fit_profile)
 
@@ -146,6 +164,10 @@ def test_reference_payload_is_strictly_validated_and_detached() -> None:
             "seed",
         ),
         (
+            lambda payload: payload["profile_cases"][0].update(n=100_001),  # type: ignore[index]
+            "n.*at most 100000",
+        ),
+        (
             lambda payload: payload["profile_cases"][0].update(case="zero_atom"),  # type: ignore[index]
             "unique",
         ),
@@ -208,6 +230,57 @@ def test_self_check_rejects_corrupt_profile_reference(field, value, match) -> No
 
     with pytest.raises(ReferenceComparisonError, match=match):
         run_self_check(fixture)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("outer_converged", False),
+        ("outer_boundary", "lower"),
+        ("fit_converged", False),
+        ("solver_converged", False),
+        ("objective_finite", False),
+        ("phi_converged", False),
+        ("phi_used_fallback", True),
+        ("phi_n_fallback_evaluations", 1),
+        ("phi_n_value_only_evaluations", 1),
+        ("density_exact", False),
+        ("density_method", "hybrid_exact_saddlepoint"),
+        ("n_saddlepoint", 1),
+    ],
+)
+def test_self_check_rejects_invalid_profile_diagnostic(monkeypatch, field, value) -> None:
+    result = _valid_checker_profile_result(**{field: value})
+    monkeypatch.setattr(
+        "superglm.profiling.tweedie.estimate_tweedie_p",
+        lambda *args, **kwargs: result,
+    )
+
+    with pytest.raises(ReferenceComparisonError, match=rf"profile diagnostic.*{field}"):
+        run_self_check(validate_reference_payload(_valid_payload()))
+
+
+def test_self_check_rejects_missing_profile_diagnostic(monkeypatch) -> None:
+    result = _valid_checker_profile_result()
+    del result.density_exact
+    monkeypatch.setattr(
+        "superglm.profiling.tweedie.estimate_tweedie_p",
+        lambda *args, **kwargs: result,
+    )
+
+    with pytest.raises(ReferenceComparisonError, match="profile diagnostic.*density_exact"):
+        run_self_check(validate_reference_payload(_valid_payload()))
+
+
+def test_self_check_rejects_nonscalar_profile_diagnostic(monkeypatch) -> None:
+    result = _valid_checker_profile_result(density_method=np.array(["exact", "exact"]))
+    monkeypatch.setattr(
+        "superglm.profiling.tweedie.estimate_tweedie_p",
+        lambda *args, **kwargs: result,
+    )
+
+    with pytest.raises(ReferenceComparisonError, match="profile diagnostic.*density_method"):
+        run_self_check(validate_reference_payload(_valid_payload()))
 
 
 def test_self_check_reports_uncertifiable_local_case_without_raw_kernel_error() -> None:
@@ -595,6 +668,7 @@ def test_checker_cli_self_check_reports_strict_maximum_error(capsys) -> None:
     assert "max_local_profile_phi_rel=" in captured.out
     assert "profile_response_digests=verified" in captured.out
     assert "profile_convergence=verified" in captured.out
+    assert "profile_diagnostics=verified" in captured.out
     assert captured.err == ""
 
 
