@@ -20,6 +20,31 @@
 - Verify `tests/test_tweedie_profile_reference.py`: neutral joint `p`/`phi` reference.
 - Verify `tests/test_tweedie_reml_reference.py`: mgcv/R terminal-scale reference.
 
+### Task 0: Establish clean-room mgcv and saddlepoint baselines
+
+**Files:**
+- Document: `docs/superpowers/specs/2026-07-19-tweedie-density-recovery-design.md`
+
+- [x] **Step 1: Inspect official mgcv 1.9-4 behavior and source**
+
+Use the installed package as a black box and the official CRAN source only to
+record algorithmic behavior. Do not translate or copy implementation code.
+Confirm mode-centered Dunn-Smyth summation, shared buffering, transformed
+`p`/`phi` derivatives, and mgcv's explicit index/buffer failure limits.
+
+- [x] **Step 2: Benchmark comparable mgcv fits**
+
+Measure warm medians for fixed- and estimated-power linear and spline fits, then
+run mgcv on the shared 800-row neutral profile fixture. Record the environment,
+timings, `p`, and `phi` in the design evidence.
+
+- [x] **Step 3: Quantify saddlepoint error**
+
+Compare saddlepoint log density with mgcv exact density over a broad positive
+grid and compare exact versus saddlepoint-only known-mean `p`/`phi` estimates.
+Use the result to justify the fallback boundary: exact for ordinary profiling,
+saddlepoint only when exact work is pathological.
+
 ### Task 1: Center exact series work on the contributing mode
 
 **Files:**
@@ -412,6 +437,11 @@ Measure seven warm runs and compare medians. Hard gates:
   its neutral-reference tolerance, and never enters an unbounded lower-`phi`
   sum;
 - a one-row mode near 90,000 completes within 0.02 seconds locally.
+
+Also report the shared 800-row profile beside mgcv's 0.023-second clean-room
+median. mgcv is a directional performance reference, not an equality gate for
+this bounded recovery patch; any remaining multiple must be explained by a
+profile rather than hidden by the smaller 300-row gate.
 
 - [ ] **Step 3: Tune only the two work budgets if evidence requires it**
 

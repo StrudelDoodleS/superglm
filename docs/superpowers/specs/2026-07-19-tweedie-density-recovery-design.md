@@ -20,6 +20,46 @@ fit time must remain close to PR #156.
   cases, but a neutral `p=1.05` reference demonstrates that it can be materially
   biased where exact series evaluation remains necessary.
 
+## Clean-room mgcv audit
+
+The comparison used the installed R 4.5.3/mgcv 1.9-4 package and the official
+CRAN `mgcv_1.9-4.tar.gz` source archive (SHA-256
+`a98159698afb269e06a46cac1f945bf2b3427a2dd587c6f2efd67ede90089372`). The audit
+records algorithms, black-box outputs, and timings only; no mgcv code is copied.
+
+mgcv does not use Wright-Bessel evaluation. Its `tweedious` implementation
+follows Dunn-Smyth directly: predict
+`j_max = y**(2-p) / (phi * (2-p))`, start at the neighboring integer mode, and
+sweep upward and downward until terms fall below a scaled tolerance. It buffers
+gamma-family terms shared by observations with common `p` and `phi`, and its
+`tw()` family supplies likelihood derivatives in transformed `p` and `log(phi)`
+coordinates to the REML optimizer. These observations support mode-centered
+fallback, shared vector work, and bounded transformed parameters in this design.
+
+mgcv is not a safe model for the pathological boundary. Its C implementation
+uses an integer series index and a 50,000,000-element buffer ceiling. At
+`y=mu=1`, sufficiently tiny `phi` overflows the index path; `ldTweedie` can then
+return a finite but plainly invalid log density dominated by the canonical term.
+For example, at `p=1.4, phi=1e-10` it returned about `-4.17e10` rather than the
+small-dispersion density near the mean. SuperGLM must diagnose and fall back
+instead of copying this failure behavior.
+
+Warm medians on this machine for 1,000 rows were 0.003 seconds for fixed-power
+`glm`, 0.019 seconds for fixed-power linear `gam(method="REML")`, 0.043 seconds
+for fixed-power spline REML, 0.024 seconds for estimated-power linear REML, and
+0.050 seconds for estimated-power spline REML. On the shared 800-row neutral
+profile fixture, mgcv took 0.023 seconds and returned `p=1.1973744,
+phi=0.8083430`; current PR #158 took 1.423 seconds and returned `p=1.1969129,
+phi=0.8068296`. The parameter agreement is strong, while the timing gap is real.
+
+Saddlepoint is not a generally acceptable replacement for exact profiling. In
+known-mean simulations, saddlepoint-only likelihood moved `p` by `-0.20` and
+`phi` by `+50%` for a routine `p=1.2, phi=0.8` sample, and moved `p` by `-0.26`
+and `phi` by `+72%` for `p=1.6, phi=2.5`. At `p=1.4, phi=0.05`, however, the
+changes were only `-0.0043` in `p` and `+1.2%` in `phi`. This supports exact
+profiling in ordinary regimes and saddlepoint only when tiny dispersion makes
+exact work numerically or computationally pathological.
+
 ## Chosen approach
 
 Use one adaptive implementation. Do not add Fourier inversion or a user-facing
