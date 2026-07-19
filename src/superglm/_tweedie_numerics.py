@@ -700,25 +700,6 @@ def _pearson_scalar_range_is_ordinary(
     return dispersion_upper_exponent <= np.finfo(np.float64).maxexp - 1
 
 
-def _all_nonzero_values_are_normal(
-    values: NDArray[np.float64],
-    expected_nonzero_count: int,
-) -> bool:
-    """Return whether each expected nonzero value is finite and normal."""
-    if np.count_nonzero(values) != expected_nonzero_count:
-        return False
-    if np.any(~np.isfinite(values)) or np.any(values < 0.0):
-        return False
-    minimum_positive = float(
-        np.min(
-            values,
-            where=values > 0.0,
-            initial=np.inf,
-        )
-    )
-    return minimum_positive >= float(np.finfo(np.float64).tiny)
-
-
 def _direct_pearson_dispersion_if_safe(
     residuals: NDArray[np.float64],
     mus: NDArray[np.float64],
@@ -741,33 +722,23 @@ def _direct_pearson_dispersion_if_safe(
         return None
 
     terms = np.empty_like(residuals)
-    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
-        np.square(residuals, out=terms)
-    if not _all_nonzero_values_are_normal(terms, nonzero_count):
+    try:
+        # Float exceptions detect every lossy underflow plus overflow/invalid arithmetic
+        # while the ufuncs already own the data, avoiding separate full-array safety scans.
+        # An exact subnormal intermediate loses no information and can remain on this path.
+        with np.errstate(over="raise", under="raise", divide="raise", invalid="raise"):
+            np.square(residuals, out=terms)
+            if weights is not None:
+                np.multiply(terms, weights, out=terms)
+            np.power(mus, power, out=residuals)
+            np.divide(terms, residuals, out=terms)
+            numerator = float(np.sum(terms))
+            result = float(np.divide(numerator, denominator))
+    except FloatingPointError:
         return None
 
-    if weights is not None:
-        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-            np.multiply(terms, weights, out=terms)
-        if not _all_nonzero_values_are_normal(terms, nonzero_count):
-            return None
-
-    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        np.power(mus, power, out=residuals)
-    if not _all_nonzero_values_are_normal(residuals, len(residuals)):
-        return None
-
-    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
-        np.divide(terms, residuals, out=terms)
-    if not _all_nonzero_values_are_normal(terms, nonzero_count):
-        return None
-
-    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        numerator = float(np.sum(terms))
     if not math.isfinite(numerator) or numerator < np.finfo(np.float64).tiny:
         return None
-    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
-        result = float(np.divide(numerator, denominator))
     top_binade = math.ldexp(1.0, np.finfo(np.float64).maxexp - 1)
     if not math.isfinite(result) or result < np.finfo(np.float64).tiny or result >= top_binade:
         return None
