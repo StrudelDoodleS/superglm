@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy.special import gammaln, ive
 
 import superglm._tweedie_series as series_module
 import superglm.profiling.tweedie as tweedie_module
+from superglm import SuperGLM
 from superglm.distributions import Tweedie
+from superglm.features.numeric import Numeric
 from superglm.links import LogLink
 from superglm.model.fit_ops import _compute_fit_stats
 from superglm.profiling.tweedie import (
@@ -56,6 +59,34 @@ def test_exact_series_rejects_impossible_work_without_raising() -> None:
     assert exact.tolist() == [False]
     assert np.isnan(log_sum[0])
     assert np.isnan(expected_j[0])
+
+
+@pytest.mark.parametrize("p", [1.2, 1.4, 1.5, 1.8])
+def test_near_perfect_tweedie_fit_does_not_fail_in_fit_statistics(p: float) -> None:
+    x = np.linspace(-1.0, 1.0, 40)
+    y = np.exp(0.3 + 0.5 * x)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family=Tweedie(p=p),
+        selection_penalty=0,
+        features={"x": Numeric()},
+    ).fit(frame, y)
+
+    assert np.isfinite(model.result.phi)
+    assert np.isfinite(model._fit_stats.log_likelihood)
+    assert np.isfinite(model._fit_stats.null_log_likelihood)
+
+
+def test_p15_large_argument_uses_finite_scaled_asymptotic() -> None:
+    y = np.array([1.35])
+    mu = np.array([1.3500001])
+    weights = np.array([4.0])
+    prepared = _prepare_tweedie_density(y, mu, 1.5, weights=weights)
+    evaluated = _evaluate_tweedie_density(prepared, 1.0e-14, compute_score=True)
+
+    assert np.isfinite(evaluated.logpdf[0])
+    assert evaluated.score_valid
+    assert evaluated.diagnostics.n_saddlepoint == 0
 
 
 @pytest.mark.parametrize("p", [1.000001, 1.01, 1.5, 1.99, 1.999999])
@@ -191,10 +222,21 @@ def test_tweedie_fit_stats_reuses_one_density_normalizer(monkeypatch) -> None:
     real_evaluate = tweedie_module._evaluate_tweedie_density
     calls = 0
 
-    def counted(prepared, phi, *, compute_score=False):
+    def counted(
+        prepared,
+        phi,
+        *,
+        compute_score=False,
+        series_max_total_terms=tweedie_module._PROFILE_SERIES_MAX_TOTAL_TERMS,
+    ):
         nonlocal calls
         calls += 1
-        return real_evaluate(prepared, phi, compute_score=compute_score)
+        return real_evaluate(
+            prepared,
+            phi,
+            compute_score=compute_score,
+            series_max_total_terms=series_max_total_terms,
+        )
 
     monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", counted)
 

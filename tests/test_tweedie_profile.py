@@ -1098,13 +1098,12 @@ class TestDetailedPhiProfile:
         assert result.lower_boundary is (expected_phi == 1e-12)
         assert result.upper_boundary is (expected_phi == 1e12)
 
-    def test_unsupported_exact_boundary_is_recorded_as_nonfinite(self):
+    def test_large_bessel_boundary_remains_finite_and_exact(self):
         y = np.array([0.7, 2.0, 8.0])
         mu = y.copy()
         p = 1.5
 
-        with pytest.raises(FloatingPointError, match="exact Bessel density is non-finite"):
-            tweedie_logpdf(y, mu, 1e-12, p)
+        logpdf = tweedie_logpdf(y, mu, 1e-12, p)
 
         prepared = tweedie_module._prepare_tweedie_density(y, mu, p)
         cache = tweedie_module._PhiEvaluationCache(prepared)
@@ -1114,9 +1113,12 @@ class TestDetailedPhiProfile:
         )
 
         assert point.phi == 1e-12
-        assert np.isposinf(point.nll)
-        assert not point.objective_finite
-        assert not point.score_valid
+        assert np.all(np.isfinite(logpdf))
+        assert np.isfinite(point.nll)
+        assert point.objective_finite
+        assert point.score_valid
+        assert point.diagnostics.n_series == len(y)
+        assert point.diagnostics.n_saddlepoint == 0
 
     def test_derivative_only_failure_preserves_exact_objective_and_uses_fallback(
         self,
@@ -1176,12 +1178,13 @@ class TestDetailedPhiProfile:
 
         assert not result.converged
         assert result.used_fallback
-        assert not result.branch_switch_detected
+        assert result.branch_switch_detected
         assert result.optimizer == "bounded"
         assert result.objective_finite
         assert result.nll == exact_nll
         assert result.fallback_reason == (
-            "near-one exact dispersion likelihood requires global comparison"
+            "near-one exact dispersion likelihood requires global comparison; "
+            "density branch switched during value-only fallback scan"
         )
         np.testing.assert_allclose(result.phi, 31.731271940671984, rtol=1e-8)
         np.testing.assert_allclose(result.nll, 185.18683913586867, atol=1e-9)

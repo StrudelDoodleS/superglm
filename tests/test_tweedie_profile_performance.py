@@ -924,3 +924,37 @@ def test_ten_thousand_row_likelihood_pair_is_vectorized(monkeypatch) -> None:
     assert fitted.shape == null.shape == (n,)
     assert len(batch_sizes) <= 1
     assert all(size > 1 for size in batch_sizes)
+
+
+def test_fit_stat_pair_passes_strict_general_power_series_budget(monkeypatch) -> None:
+    p = 1.4
+    y = np.ones(16)
+    mu = np.linspace(0.9, 1.1, len(y))
+    null_mu = np.full_like(y, 1.0)
+    phi = 1.0 / (0.6 * 10_000.0)
+    real_series = tweedie_module.tweedie_log_series
+    budgets: list[int | None] = []
+
+    def force_wright_failure(a, b, z):
+        del a, b
+        return np.full_like(z, np.nan, dtype=np.float64)
+
+    def counted_series(log_t, a, **kwargs):
+        budgets.append(kwargs.get("max_total_terms"))
+        return real_series(log_t, a, **kwargs)
+
+    monkeypatch.setattr(tweedie_module, "wright_bessel", force_wright_failure)
+    monkeypatch.setattr(tweedie_module, "tweedie_log_series", counted_series)
+
+    fitted, null = tweedie_module._tweedie_logpdf_pair(
+        y,
+        mu,
+        null_mu,
+        phi,
+        p,
+    )
+
+    assert np.all(np.isfinite(fitted))
+    assert np.all(np.isfinite(null))
+    assert budgets and all(budget is not None for budget in budgets)
+    assert max(budgets) <= 4_096

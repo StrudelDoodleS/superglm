@@ -2,7 +2,7 @@
 
 For p ∈ (1, 2), the Tweedie distribution is a compound Poisson-Gamma.
 This module provides multiple search strategies for estimating the power
-parameter p via profile likelihood, plus exact Wright-Bessel logpdf
+parameter p via profile likelihood, plus adaptive exact/asymptotic logpdf
 evaluation and compound Poisson-Gamma simulation.
 
 Search methods:
@@ -416,6 +416,9 @@ def _validate_tweedie_phi(phi: float) -> float:
 
 _TWEEDIE_DEVIANCE_SERIES_THRESHOLD = 1e-3
 _TWEEDIE_DEVIANCE_SERIES_TERMS = 8
+_PROFILE_SERIES_MAX_TOTAL_TERMS = 1_000_000
+_FIT_STATS_SERIES_MAX_TOTAL_TERMS = 4_096
+_P15_BESSEL_ASYMPTOTIC_MIN_ARGUMENT = 1.0e6
 
 
 def _tweedie_positive_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
@@ -591,6 +594,7 @@ def _evaluate_tweedie_density(
     phi: float,
     *,
     compute_score: bool = False,
+    series_max_total_terms: int = _PROFILE_SERIES_MAX_TOTAL_TERMS,
 ) -> _TweedieDensityEvaluation:
     """Evaluate a prepared density and its optional mean-NLL log-phi score."""
     phi = _validate_tweedie_phi(phi)
@@ -659,63 +663,97 @@ def _evaluate_tweedie_density(
             positive_logpdf[valid_indices] = candidate_logpdf[density_valid]
 
         exact_fallback = ~exact & (prepared.t_arg_limit > 0.0)
-        use_p15_bessel = exact_fallback & (prepared.p == 1.5)
-        use_series = exact_fallback & ~use_p15_bessel
+        p15_candidates = exact_fallback & (prepared.p == 1.5)
+        series_candidates = exact_fallback & ~p15_candidates
+        use_p15_bessel = np.zeros(len(log_t), dtype=np.bool_)
+        use_series = np.zeros(len(log_t), dtype=np.bool_)
         series_expected_j: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
         p15_score: NDArray[np.float64] = np.full(len(log_t), np.nan, dtype=np.float64)
-        if np.any(use_p15_bessel):
+        if np.any(p15_candidates):
             # At p=1.5 the series is sqrt(t) * I1(2*sqrt(t)); use its
-            # scaled form so tiny phi needs neither a huge sum nor cancellation.
+            # scaled form, with a large-argument expansion beyond SciPy's range.
+            candidate_indices = np.flatnonzero(p15_candidates)
             positive_y_root = np.sqrt(prepared.y[positive])
             positive_mu_root = np.sqrt(prepared.mu[positive])
             positive_weights = prepared.weights[positive]
             with np.errstate(all="ignore"):
                 bessel_argument = (
-                    4.0 * positive_weights[use_p15_bessel] * positive_y_root[use_p15_bessel] / phi
+                    4.0 * positive_weights[p15_candidates] * positive_y_root[p15_candidates] / phi
                 )
                 scaled_bessel_one = ive(1, bessel_argument)
+                direct_log_scaled = np.log(scaled_bessel_one)
+                log_scaled_bessel_one = direct_log_scaled.copy()
+                direct_density_valid = np.isfinite(direct_log_scaled) & (scaled_bessel_one > 0.0)
+
+                large_argument = np.isfinite(bessel_argument) & (
+                    bessel_argument >= _P15_BESSEL_ASYMPTOTIC_MIN_ARGUMENT
+                )
+                asymptotic = ~direct_density_valid & large_argument
+                inverse_argument = np.zeros_like(bessel_argument)
+                inverse_argument[large_argument] = 1.0 / bessel_argument[large_argument]
+                correction = (
+                    -3.0 * inverse_argument[asymptotic] / 8.0
+                    - 15.0 * np.square(inverse_argument[asymptotic]) / 128.0
+                    - 315.0 * np.power(inverse_argument[asymptotic], 3) / 3072.0
+                )
+                log_scaled_bessel_one[asymptotic] = -0.5 * (
+                    np.log(2.0 * np.pi) + np.log(bessel_argument[asymptotic])
+                ) + np.log1p(correction)
                 deviance_term = (
                     2.0
-                    * positive_weights[use_p15_bessel]
-                    * np.square(positive_y_root[use_p15_bessel] - positive_mu_root[use_p15_bessel])
-                    / (phi * positive_mu_root[use_p15_bessel])
+                    * positive_weights[p15_candidates]
+                    * np.square(positive_y_root[p15_candidates] - positive_mu_root[p15_candidates])
+                    / (phi * positive_mu_root[p15_candidates])
                 )
                 bessel_logpdf = (
                     np.log(2.0)
-                    + prepared.log_weight[positive][use_p15_bessel]
+                    + prepared.log_weight[positive][p15_candidates]
                     - log_phi
-                    - 0.5 * prepared.positive_log_y[use_p15_bessel]
-                    + np.log(scaled_bessel_one)
+                    - 0.5 * prepared.positive_log_y[p15_candidates]
+                    + log_scaled_bessel_one
                     - deviance_term
                 )
                 if compute_score:
                     scaled_bessel_zero = ive(0, bessel_argument)
-                    p15_score[use_p15_bessel] = (
+                    score_component = (
                         bessel_argument
-                        * ((scaled_bessel_zero - scaled_bessel_one) / scaled_bessel_one)
-                        - deviance_term
+                        * (scaled_bessel_zero - scaled_bessel_one)
+                        / scaled_bessel_one
                     )
-            if not np.all(np.isfinite(bessel_logpdf)):
-                raise FloatingPointError("Tweedie p=1.5 exact Bessel density is non-finite")
-            positive_logpdf[use_p15_bessel] = bessel_logpdf
+                    asymptotic_score = ~np.isfinite(score_component) & large_argument
+                    inverse_z = inverse_argument[asymptotic_score]
+                    score_component[asymptotic_score] = (
+                        0.5
+                        + 3.0 * inverse_z / 8.0
+                        + 3.0 * np.square(inverse_z) / 8.0
+                        + 63.0 * np.power(inverse_z, 3) / 128.0
+                    )
+                    p15_score[candidate_indices] = score_component - deviance_term
+            bessel_valid = np.isfinite(bessel_logpdf)
+            successful_indices = candidate_indices[bessel_valid]
+            use_p15_bessel[successful_indices] = True
+            positive_logpdf[successful_indices] = bessel_logpdf[bessel_valid]
 
-        if np.any(use_series):
+        if np.any(series_candidates):
             series_log_sum, expected_j, series_exact = tweedie_log_series(
-                log_t[use_series],
+                log_t[series_candidates],
                 prepared.a,
+                max_total_terms=series_max_total_terms,
             )
-            if not np.all(series_exact):
-                raise FloatingPointError("Tweedie exact series exceeded its work budget")
-            positive_logpdf[use_series] = (
-                series_log_sum
-                - prepared.positive_log_y[use_series]
-                + prepared.positive_canonical_c[use_series] * inverse_phi_positive[use_series]
+            candidate_indices = np.flatnonzero(series_candidates)
+            successful_indices = candidate_indices[series_exact]
+            use_series[successful_indices] = True
+            positive_logpdf[successful_indices] = (
+                series_log_sum[series_exact]
+                - prepared.positive_log_y[successful_indices]
+                + prepared.positive_canonical_c[successful_indices]
+                * inverse_phi_positive[successful_indices]
             )
-            series_expected_j[use_series] = expected_j
+            series_expected_j[successful_indices] = expected_j[series_exact]
         n_series = int(np.count_nonzero(use_p15_bessel | use_series))
 
-        # A non-positive/NaN limit is the explicit compatibility route that
-        # forces the saddlepoint approximation. Default evaluation is exact.
+        # A non-positive/NaN limit explicitly forces saddlepoint evaluation.
+        # Positive limits retain exact rows within numerical and work bounds.
         saddlepoint = ~(exact | use_p15_bessel | use_series)
         positive_saddlepoint_mask = saddlepoint
         n_saddlepoint = int(np.count_nonzero(saddlepoint))
@@ -837,7 +875,7 @@ def tweedie_logpdf(
     weights: NDArray | None = None,
     t_arg_limit: float = 1e14,
 ) -> NDArray:
-    """Exact Tweedie log-density using Wright-Bessel and vectorized series evaluation.
+    """Adaptive Tweedie log-density using exact work within bounded numerical ranges.
 
     Parameters
     ----------
@@ -851,8 +889,8 @@ def tweedie_logpdf(
         Observation weights (e.g. sample_weight). Effective phi = phi / w.
     t_arg_limit : float
         Maximum Wright-Bessel argument. Larger or invalid Wright rows use the
-        exact vectorized series. A non-positive value explicitly forces the
-        approximate saddlepoint compatibility path.
+        bounded exact vectorized series when feasible, then a saddlepoint
+        fallback. A non-positive value explicitly forces saddlepoint evaluation.
 
     Returns
     -------
@@ -878,12 +916,8 @@ def _tweedie_logpdf_pair(
     *,
     weights: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
-    """Return fitted/null exact log densities with one shared normalizer pass."""
+    """Return bounded fitted/null log densities with one shared base-measure pass."""
     prepared = _prepare_tweedie_density(y, mu, p, weights=weights)
-    evaluation = _evaluate_tweedie_density(prepared, phi)
-    if evaluation.diagnostics.n_saddlepoint:
-        raise FloatingPointError("Tweedie fitted/null reuse requires exact density evaluation")
-
     null_array = np.asarray(null_mu, dtype=np.float64)
     if (
         null_array.shape != prepared.mu.shape
@@ -892,16 +926,26 @@ def _tweedie_logpdf_pair(
     ):
         raise ValueError("null_mu must match mu and be finite and strictly positive")
 
-    inverse_phi = prepared.weights / _validate_tweedie_phi(phi)
-    canonical_fit = np.empty_like(prepared.y)
-    canonical_fit[prepared.zero_mask] = -prepared.zero_rate_numerator[prepared.zero_mask]
-    canonical_fit[prepared.positive_mask] = prepared.positive_canonical_c
+    validated_phi = _validate_tweedie_phi(phi)
+    evaluation = _evaluate_tweedie_density(
+        prepared,
+        validated_phi,
+        series_max_total_terms=_FIT_STATS_SERIES_MAX_TOTAL_TERMS,
+    )
     with np.errstate(all="ignore"):
-        canonical_null = prepared.y * np.power(null_array, 1.0 - prepared.p) / (
-            1.0 - prepared.p
-        ) - np.power(null_array, 2.0 - prepared.p) / (2.0 - prepared.p)
-        shared_normalizer = evaluation.logpdf - canonical_fit * inverse_phi
-        null_logpdf = shared_normalizer + canonical_null * inverse_phi
+        fit_deviance = _tweedie_positive_unit_deviance(
+            prepared.y,
+            prepared.mu,
+            prepared.p,
+        )
+        null_deviance = _tweedie_positive_unit_deviance(
+            prepared.y,
+            null_array,
+            prepared.p,
+        )
+        null_logpdf = evaluation.logpdf - (
+            0.5 * prepared.weights / validated_phi * (null_deviance - fit_deviance)
+        )
     if not np.all(np.isfinite(null_logpdf)):
         raise FloatingPointError("Tweedie null log likelihood is non-finite")
     return evaluation.logpdf.copy(), null_logpdf

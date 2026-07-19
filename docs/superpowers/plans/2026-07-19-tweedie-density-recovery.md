@@ -291,7 +291,7 @@ Add internal policy constants:
 
 ```python
 _PROFILE_SERIES_MAX_TOTAL_TERMS = 1_000_000
-_FIT_STATS_SERIES_MAX_TOTAL_TERMS = 65_536
+_FIT_STATS_SERIES_MAX_TOTAL_TERMS = 4_096
 ```
 
 Extend `_evaluate_tweedie_density` with `series_max_total_terms`, unpack the series exact mask, and leave rejected rows for the existing saddlepoint assignment:
@@ -437,6 +437,12 @@ Measure seven warm runs and compare medians. Hard gates:
   its neutral-reference tolerance, and never enters an unbounded lower-`phi`
   sum;
 - a one-row mode near 90,000 completes within 0.02 seconds locally.
+
+The provisional 65,536-term fit-stat budget missed the ordinary-fit gate.
+Measured warm medians on the 1,000-row reproduction were 0.0122 seconds at
+65,536 terms, 0.0084 seconds at 4,096 terms, and 0.0052 seconds with no exact
+series work, versus 0.0048 seconds on PR #156. Keep the measured 4,096-term
+ceiling unless later evidence shows a correctness failure.
 
 Also report the shared 800-row profile beside mgcv's 0.023-second clean-room
 median. mgcv is a directional performance reference, not an equality gate for

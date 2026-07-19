@@ -83,7 +83,8 @@ The work limits are internal safety policy, not public tuning parameters:
 
 - at most 100,000 contributing terms for one row;
 - at most 1,000,000 exact term evaluations in one density pass;
-- at most 262,144 term elements in one allocation batch.
+- at most 262,144 term elements in one allocation batch;
+- at most 4,096 exact series terms in an ordinary fit-statistics pass.
 
 Rows beyond the exact-work budget use the diagnosed asymptotic fallback. They
 must never make the entire density call raise or force feasible rows away from
