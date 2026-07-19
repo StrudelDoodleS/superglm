@@ -145,7 +145,8 @@ looser series cutoff, `fastmath`, or silent clipping.
 The fused kernel supplies the exact score and Hessian in `u = log(phi)`. For a
 fixed fitted mean and power:
 
-1. Start from the previous accepted `phi`, otherwise the stable Pearson seed.
+1. Start from the previous accepted `phi`, otherwise the deviance seed with a
+   Pearson fallback.
 2. Take a bounded Newton step using the exact `u` score and curvature.
 3. Limit large steps, require finite improving trial objectives, and halve a
    rejected step.
@@ -155,12 +156,11 @@ fixed fitted mean and power:
 Ordinary exact cases should require one to three kernel passes after the first
 power because dispersion is warm-started. If curvature is non-positive, the
 series branch changes, validation disagrees, or Newton cannot certify a local
-minimum, call the existing globally defensive dispersion profiler and preserve
+minimum, call the existing defensive dispersion profiler and preserve
 its diagnostics.
 
-This accelerator is also available to fixed-power evaluations made by Brent,
-grid, and REML outer searches. Thus fallback does not necessarily lose all of
-the performance improvement.
+The accelerator is limited to the ordinary joint-ML path. Explicit Brent, grid,
+REML, and lazy confidence-interval probes retain the defensive scalar profiler.
 
 ## Safeguarded outer power solve
 
@@ -181,8 +181,8 @@ is a step proposal rather than an unchecked convergence certificate.
 
 The outer solver:
 
-- works inside strict `p_bounds`, with a bounded transform or explicit step
-  clipping away from `p=1` and `p=2`;
+- works inside the stable `[1.05, 1.95]` range, with explicit step clipping away
+  from `p=1` and `p=2`; wider configured bounds use the defensive scalar path;
 - carries coefficient and dispersion warm starts;
 - uses the analytic score for convergence;
 - prefers the Schur-Newton step, then a secant step, then a bracketed safe step;
@@ -191,6 +191,10 @@ The outer solver:
 - validates the final score orientation and exact objective;
 - falls back to existing Brent from accumulated valid profile points when the
   derivative path cannot be certified.
+
+Neither the joint solve nor Brent convergence proves a global optimum on an
+arbitrarily multimodal surface. The existing grid and grid-refine methods remain
+the explicit broad-search options.
 
 The final winning record is materialized through the existing immutable result
 and density-diagnostic machinery. Lazy CI evaluations continue to call the
