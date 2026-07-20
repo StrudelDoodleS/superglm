@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR
 from superglm.group_matrix import DesignMatrix
+from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram,
@@ -135,16 +136,31 @@ def _legacy_active_state(model, solver, W: NDArray):
     selected_names = selected_group_name_set(
         solver,
         model._groups,
-        penalty=model.penalty,
+        penalty=fitted_penalty(model),
     )
     design, active_groups, _ = _grouped_active_state(model, selected_names)
-    lam2 = getattr(model, "_reml_lambdas", None) or model.lambda2
-    penalty = _active_penalty_matrix(
-        model._dm.group_matrices,
-        model._groups,
-        active_groups,
-        lam2,
-        reml_penalties=getattr(model, "_reml_penalties", None),
+    lam2 = fitted_lambda2(model)
+    curvature = np.array(
+        _active_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            active_groups,
+            lam2,
+            reml_penalties=getattr(model, "_reml_penalties", None),
+        ),
+        dtype=np.float64,
+        copy=True,
+    )
+    from superglm.solvers.pirls import _add_selection_local_curvature
+
+    original_by_name = {group.name: group for group in model._groups}
+    original_active_groups = [original_by_name[group.name] for group in active_groups]
+    _add_selection_local_curvature(
+        curvature=curvature,
+        penalty=fitted_penalty(model),
+        beta=np.asarray(solver.beta, dtype=np.float64),
+        original_groups=original_active_groups,
+        active_groups=active_groups,
     )
     if design.p == 0:
         sum_w = float(np.sum(W))
@@ -164,34 +180,31 @@ def _legacy_active_state(model, solver, W: NDArray):
         dm=design,
         W=W,
         z_off=np.zeros(design.n),
-        penalty=penalty,
+        penalty=curvature,
     )
     raw_gram, xtw1, _, _ = centered.raw_weighted_moments()
-    coefficient_rank = decompose_gram(raw_gram + penalty)
+    coefficient_rank = decompose_gram(raw_gram + curvature)
     data_rank = decompose_gram(centered.data_gram)
     if needs_factor_certification(data_rank):
         certified = decompose_factor(grouped_weighted_factor(design, W, center=centered.mean_x))
-        if certified.rank != data_rank.rank:
-            data_rank = certified
+        data_rank = certified
     if needs_factor_certification(coefficient_rank):
-        certified = decompose_factor(grouped_augmented_factor(design, W, penalty))
-        if certified.rank != coefficient_rank.rank:
-            coefficient_rank = certified
-    if not np.any(penalty):
+        certified = decompose_factor(grouped_augmented_factor(design, W, curvature))
+        coefficient_rank = certified
+    if not np.any(curvature):
         profile_rank = data_rank
     else:
-        profile_rank = decompose_gram(centered.data_gram + penalty)
+        profile_rank = decompose_gram(centered.data_gram + curvature)
         if needs_factor_certification(profile_rank):
             certified = decompose_factor(
                 grouped_augmented_factor(
                     design,
                     W,
-                    penalty,
+                    curvature,
                     center=centered.mean_x,
                 )
             )
-            if certified.rank != profile_rank.rank:
-                profile_rank = certified
+            profile_rank = certified
     coefficient_inverse = coefficient_rank.pseudo_inverse()
     profile_inverse = profile_rank.pseudo_inverse()
     mean_x = xtw1 / centered.sum_w
@@ -273,6 +286,19 @@ def _rank_augmented_covariance(model, rank_info, active_groups):
 def coef_covariance(model):
     """Phi-scaled Bayesian covariance for active coefficients."""
     solver = model._solver_pirls_result()
+    scop_inference = getattr(solver, "scop_inference", None)
+    if scop_inference is not None:
+        if solver.rank_info is not None:
+            _, active_groups = _rank_active_state(model, solver.rank_info)
+            selected = np.asarray(solver.rank_info.selected_columns, dtype=np.intp)
+        else:
+            _, active_groups, selected = _grouped_active_state(
+                model,
+                {group.name for group in model._groups},
+            )
+        mapped_covariance = np.asarray(scop_inference.augmented_inverse)[1:, 1:]
+        covariance = solver.phi * mapped_covariance[np.ix_(selected, selected)]
+        return covariance, active_groups
     if solver.rank_info is not None:
         _, active_groups = _rank_active_state(model, solver.rank_info)
         covariance = solver.phi * solver.rank_info.augmented.pseudo_inverse()
@@ -286,6 +312,23 @@ def fit_active_info(model):
     """Grouped active design, weights, and (X'WX+S)^{-1} from fit state."""
     solver = model._solver_pirls_result()
     W = _solver_space_working_weights(model)
+    scop_inference = getattr(solver, "scop_inference", None)
+    if scop_inference is not None:
+        if solver.rank_info is not None:
+            X_active, active_groups = _rank_active_state(model, solver.rank_info)
+            selected = np.asarray(solver.rank_info.selected_columns, dtype=np.intp)
+        else:
+            X_active, active_groups, selected = _grouped_active_state(
+                model,
+                {group.name for group in model._groups},
+            )
+        inverse = np.asarray(scop_inference.coefficient_inverse)[np.ix_(selected, selected)]
+        augmented_indices = np.concatenate(([0], selected + 1))
+        augmented = np.asarray(scop_inference.augmented_inverse)[
+            np.ix_(augmented_indices, augmented_indices)
+        ]
+        augmented = _public_augmented_covariance(model, augmented, active_groups)
+        return X_active, W, inverse, augmented, active_groups
     if solver.rank_info is not None:
         X_active, active_groups = _rank_active_state(model, solver.rank_info)
         inverse = solver.rank_info.coefficient.pseudo_inverse()
@@ -320,6 +363,45 @@ def fit_inference_info(model):
     """
     solver = model._solver_pirls_result()
     W = _solver_space_working_weights(model)
+    scop_inference = getattr(solver, "scop_inference", None)
+    if scop_inference is not None:
+        rank_info = solver.rank_info
+        if rank_info is not None:
+            X_active, active_groups = _rank_active_state(model, rank_info)
+            selected = np.asarray(rank_info.selected_columns, dtype=np.intp)
+            coefficient_estimable = rank_info.coefficient_estimable()
+        else:
+            X_active, active_groups, selected = _grouped_active_state(
+                model,
+                {group.name for group in model._groups},
+            )
+            coefficient_estimable = np.ones(len(solver.beta), dtype=bool)
+        inverse = np.asarray(scop_inference.coefficient_inverse)[np.ix_(selected, selected)]
+        augmented_indices = np.concatenate(([0], selected + 1))
+        augmented = np.asarray(scop_inference.augmented_inverse)[
+            np.ix_(augmented_indices, augmented_indices)
+        ]
+        augmented = _public_augmented_covariance(model, augmented, active_groups)
+        edf = np.asarray(scop_inference.feature_edf)[selected].copy()
+        edf1 = np.asarray(scop_inference.feature_edf1)[selected].copy()
+        if X_active.p == 0:
+            R_a = np.empty((0, 0))
+        else:
+            data_gram = _rank_centered_data_gram(X_active, W)
+            eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
+            eigvals = np.maximum(eigvals, 0.0)
+            R_a = (eigvecs * np.sqrt(eigvals)).T
+        return {
+            "W": W,
+            "XtWX_inv": inverse,
+            "XtWX_inv_aug": augmented,
+            "active_groups": active_groups,
+            "R_a": R_a,
+            "edf": edf,
+            "edf1": edf1,
+            "group_edf_map": dict(scop_inference.group_edf),
+            "coefficient_estimable": coefficient_estimable,
+        }
     if solver.rank_info is not None:
         rank_info = solver.rank_info
         X_active, active_groups = _rank_active_state(model, rank_info)

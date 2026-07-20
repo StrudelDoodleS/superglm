@@ -24,6 +24,7 @@ from superglm import (
     generate_tweedie_cpg,
 )
 from superglm.editor import EditableTerm, EditorSession
+from superglm.editor.apply import apply_edits_to_model_copy_with_data
 from superglm.editor.evaluation import coerce_dataset
 from superglm.editor.persistence import (
     ModelArtifactValidation,
@@ -1098,6 +1099,7 @@ def test_to_model_without_edits_keeps_transient_state_private(editor_model):
         "_fit_offset_ref",
         "_fit_weights",
         "_fit_offset",
+        "_fit_data_guard",
     ):
         assert getattr(copied, name) is getattr(editor_model, name)
     for name, source_value in source_objects.items():
@@ -1188,6 +1190,7 @@ def test_materialized_model_shares_only_row_scale_fit_inputs():
         "_fit_offset_ref",
         "_fit_weights",
         "_fit_offset",
+        "_fit_data_guard",
     ):
         assert getattr(edited, name) is getattr(model, name)
 
@@ -1289,6 +1292,240 @@ def test_to_model_refreshes_fit_statistics_after_manual_edit(editor_model):
     assert edited.result.deviance == pytest.approx(expected_deviance)
     assert edited.summary()["deviance"]["deviance"] == pytest.approx(expected_deviance)
     assert edited.result.deviance != pytest.approx(original_deviance)
+
+
+def test_to_model_publishes_synchronized_immutable_result_revision(editor_model):
+    source_revision = editor_model._fit_revision
+    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session.select_x("x_spline", 2.0, 5.0)
+    session.shift("x_spline", 0.2)
+
+    edited = session.to_model()
+
+    assert edited._fit_revision == source_revision + 1
+    assert edited._fit_state.revision == edited._fit_revision
+    assert edited._fit_state.repair_revision == editor_model._fit_state.repair_revision + 1
+    for name, projected in edited._fit_state.projections.items():
+        assert getattr(edited, name) is projected, name
+    with pytest.raises(AttributeError, match="published"):
+        edited.result.intercept = 0.0
+    with pytest.raises(AttributeError, match="published"):
+        edited.result.beta = edited.result.beta.copy()
+    with pytest.raises(ValueError):
+        edited.result.beta.setflags(write=True)
+
+
+def test_editor_coefficient_revision_invalidates_accepted_reml_mode(tmp_path, monkeypatch):
+    from superglm._debug import get_debug_level, set_debug_level
+
+    previous = get_debug_level()
+    monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
+    set_debug_level(2)
+    try:
+        x = np.linspace(0.0, 1.0, 140)
+        X = pd.DataFrame({"x": x})
+        y = 0.2 + np.sin(4.0 * x) + 0.01 * np.cos(17.0 * x)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=7)},
+        ).fit_reml(X, y, max_reml_iter=2)
+        assert model._solver_result.state_id is not None
+        assert model._reml_result.objective is not None
+        session = EditorSession.from_model(model, terms=["x"])
+        session.select_x("x", 0.25, 0.75)
+        session.shift("x", 0.2)
+
+        edited = session.to_model()
+
+        assert edited._solver_result.state_id is None
+        assert edited._solver_result.evaluation_id is None
+        assert edited._solver_result.log_det_H is None
+        assert edited._solver_result.reml_hessian_rank is None
+        assert not edited._solver_result.converged
+        assert edited._solver_result.termination_reason == "coefficients_revised"
+        assert edited._reml_result.objective is None
+        assert not edited._reml_result.converged
+        assert edited._reml_result.termination_reason == "coefficients_revised"
+    finally:
+        set_debug_level(previous)
+
+
+def test_editor_scoring_revision_owns_weights_and_offset_and_invalidates_cache():
+    x = np.linspace(-1.0, 1.0, 120)
+    X = pd.DataFrame({"x": x})
+    y = 0.4 + 0.7 * x + 0.03 * np.sin(9.0 * x)
+    weights = np.linspace(0.5, 1.5, len(x))
+    offset = np.linspace(-0.1, 0.1, len(x))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y)
+
+    edited = apply_edits_to_model_copy_with_data(
+        model,
+        {},
+        X=X,
+        y=y,
+        sample_weight=weights,
+        offset=offset,
+    )
+    cached = edited.metrics(X, y, sample_weight=weights, offset=offset)
+    fitted_weight = float(edited._fit_weights[0])
+    fitted_offset = float(edited._fit_offset[0])
+
+    assert not np.shares_memory(edited._fit_weights, weights)
+    assert not np.shares_memory(edited._fit_offset, offset)
+    assert not edited._fit_weights.flags.writeable
+    assert not edited._fit_offset.flags.writeable
+
+    weights[0] *= 20.0
+    offset[0] += 3.0
+    refreshed = edited.metrics(X, y, sample_weight=weights, offset=offset)
+
+    assert edited._fit_weights[0] == pytest.approx(fitted_weight)
+    assert edited._fit_offset[0] == pytest.approx(fitted_offset)
+    assert refreshed is not cached
+
+
+def test_to_model_weight_only_override_reuses_retained_offset():
+    rng = np.random.default_rng(20260814)
+    n = 140
+    X = pd.DataFrame({"x": rng.normal(size=n)})
+    train_weight = rng.uniform(0.5, 1.5, size=n)
+    train_offset = rng.normal(0.0, 0.08, size=n)
+    y = 0.4 + 0.3 * X["x"].to_numpy() + train_offset + rng.normal(0.0, 0.04, size=n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y, sample_weight=train_weight, offset=train_offset)
+    override_weight = np.linspace(0.75, 1.75, n)
+    session = EditorSession.from_model(model, terms=["x"])
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+
+    edited = session.to_model(sample_weight=override_weight)
+
+    mu = edited.predict(X, offset=train_offset)
+    expected = float(np.sum(override_weight * edited._distribution.deviance_unit(y, mu)))
+    assert edited.result.deviance == pytest.approx(expected)
+    np.testing.assert_array_equal(edited._fit_offset, model._fit_offset)
+    assert edited._fit_offset_ref is model._fit_offset_ref
+    np.testing.assert_array_equal(edited._fit_weights, override_weight)
+
+
+def test_to_model_offset_only_override_reuses_retained_weights():
+    rng = np.random.default_rng(20260815)
+    n = 140
+    X = pd.DataFrame({"x": rng.normal(size=n)})
+    train_weight = rng.uniform(0.5, 1.5, size=n)
+    train_offset = rng.normal(0.0, 0.08, size=n)
+    y = 0.4 + 0.3 * X["x"].to_numpy() + train_offset + rng.normal(0.0, 0.04, size=n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y, sample_weight=train_weight, offset=train_offset)
+    override_offset = train_offset + np.linspace(-0.02, 0.02, n)
+    session = EditorSession.from_model(model, terms=["x"])
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+
+    edited = session.to_model(offset=override_offset)
+
+    mu = edited.predict(X, offset=override_offset)
+    expected = float(np.sum(train_weight * edited._distribution.deviance_unit(y, mu)))
+    assert edited.result.deviance == pytest.approx(expected)
+    np.testing.assert_array_equal(edited._fit_weights, model._fit_weights)
+    assert edited._fit_sample_weight_ref is model._fit_sample_weight_ref
+    np.testing.assert_array_equal(edited._fit_offset, override_offset)
+
+
+def test_to_model_rejects_compact_coefficient_edits_without_scoring_data():
+    rng = np.random.default_rng(20260816)
+    X = pd.DataFrame({"x": rng.normal(size=120)})
+    y = 0.4 + 0.3 * X["x"].to_numpy() + rng.normal(0.0, 0.04, size=len(X))
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y)
+    session = EditorSession.from_model(model, terms=["x"])
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+    installed_dict = model.__dict__
+    installed_result = model.result
+
+    with pytest.raises(RuntimeError, match="coefficient edits require scoring data"):
+        session.to_model()
+
+    assert model.__dict__ is installed_dict
+    assert model.result is installed_result
+
+
+def test_to_model_compact_edit_with_scoring_data_releases_row_scale_state():
+    rng = np.random.default_rng(20260817)
+    n = 130
+    X = pd.DataFrame({"x": rng.normal(size=n)})
+    weights = rng.uniform(0.5, 1.5, size=n)
+    offset = rng.normal(0.0, 0.05, size=n)
+    y = 0.4 + 0.3 * X["x"].to_numpy() + offset + rng.normal(0.0, 0.04, size=n)
+    model = SuperGLM(
+        family="gaussian",
+        retain_fit_state=False,
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y, sample_weight=weights, offset=offset)
+    session = EditorSession.from_model(model, terms=["x"])
+    session.select_indices("x", [0])
+    session.shift("x", 0.2)
+
+    edited = session.to_model(
+        X=X,
+        y=y,
+        sample_weight=weights,
+        offset=offset,
+    )
+
+    mu = edited.predict(X, offset=offset)
+    expected = float(np.sum(weights * edited._distribution.deviance_unit(y, mu)))
+    assert edited.result.deviance == pytest.approx(expected)
+    assert edited._fit_state.retained is False
+    for name in (
+        "_dm",
+        "_fit_X_ref",
+        "_fit_y_ref",
+        "_fit_sample_weight_ref",
+        "_fit_offset_ref",
+        "_fit_weights",
+        "_fit_offset",
+        "_fit_mu",
+        "_fit_null_mu",
+        "_fit_data_guard",
+    ):
+        assert getattr(edited, name) is None, name
+
+
+def test_to_model_noop_copy_does_not_start_fitted_state_revision(editor_model, monkeypatch):
+    def unexpected_revision(*args, **kwargs):
+        raise AssertionError("no-op editor copy must not start a fitted-state revision")
+
+    monkeypatch.setattr(
+        "superglm.editor.apply.FittedStateRevision.start",
+        unexpected_revision,
+    )
+
+    copied = EditorSession.from_model(editor_model, terms=["x_spline"]).to_model()
+
+    assert copied is not editor_model
+    assert copied.result is not editor_model.result
+    assert copied._fit_state is not editor_model._fit_state
+    assert copied._fit_revision == editor_model._fit_revision
+    for name, projected in copied._fit_state.projections.items():
+        assert getattr(copied, name) is projected, name
 
 
 def test_stale_summary_routes_varying_interactions_as_curve_groups():
@@ -1419,6 +1656,36 @@ def test_to_model_rejects_partial_explicit_scoring_data(editor_model, editor_fra
 
     with pytest.raises(ValueError, match="Explicit scoring data requires both X and y"):
         session.to_model(X=X)
+
+
+@pytest.mark.parametrize(
+    ("invalid_weight", "message"),
+    [
+        (-0.1, "nonnegative"),
+        (np.nan, "finite"),
+    ],
+)
+def test_to_model_rejects_invalid_explicit_scoring_weights(
+    editor_model,
+    editor_frame,
+    invalid_weight,
+    message,
+):
+    X, y = editor_frame
+    weights = np.ones(len(y), dtype=np.float64)
+    weights[0] = invalid_weight
+    original_dict = editor_model.__dict__
+
+    with pytest.raises(ValueError, match=message):
+        apply_edits_to_model_copy_with_data(
+            editor_model,
+            {},
+            X=X,
+            y=y,
+            sample_weight=weights,
+        )
+
+    assert editor_model.__dict__ is original_dict
 
 
 def test_x_domain_handles_constant_continuous_grid():
@@ -5138,7 +5405,19 @@ def test_save_model_uses_validation_data_without_retained_fit_state(tmp_path):
     saved_model = joblib.load(path)
 
     assert saved_model._fit_stats is not None
-    assert saved_model._fit_y_ref.shape[0] == n_val
+    assert saved_model._fit_state.retained is False
+    for name in (
+        "_fit_X_ref",
+        "_fit_y_ref",
+        "_fit_sample_weight_ref",
+        "_fit_offset_ref",
+        "_fit_weights",
+        "_fit_offset",
+        "_fit_mu",
+        "_fit_null_mu",
+        "_fit_data_guard",
+    ):
+        assert getattr(saved_model, name) is None, name
     assert saved_model.summary()["deviance"]["deviance"] is not None
 
 
@@ -5505,7 +5784,19 @@ def test_widget_http_download_model_uses_validation_data_without_retained_fit_st
 
     downloaded_model = joblib.load(io.BytesIO(payload))
     assert downloaded_model._fit_stats is not None
-    assert downloaded_model._fit_y_ref.shape[0] == n_val
+    assert downloaded_model._fit_state.retained is False
+    for name in (
+        "_fit_X_ref",
+        "_fit_y_ref",
+        "_fit_sample_weight_ref",
+        "_fit_offset_ref",
+        "_fit_weights",
+        "_fit_offset",
+        "_fit_mu",
+        "_fit_null_mu",
+        "_fit_data_guard",
+    ):
+        assert getattr(downloaded_model, name) is None, name
     assert downloaded_model.summary()["deviance"]["deviance"] is not None
 
 

@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from superglm.reml.penalty_algebra import (
     coerce_reml_penalties,
     compute_logdet_s_derivatives,
+    compute_penalty_nullity,
     compute_total_penalty_rank,
 )
 from superglm.solvers.pirls import PIRLSResult
@@ -33,7 +34,7 @@ def _penalty_block_trace(
 
 
 def _same_slice(sl_i: slice, sl_j: slice) -> bool:
-    return sl_i.start == sl_j.start and sl_i.stop == sl_j.stop and sl_i.step == sl_j.step
+    return bool(sl_i.start == sl_j.start and sl_i.stop == sl_j.stop and sl_i.step == sl_j.step)
 
 
 def reml_direct_gradient(
@@ -45,6 +46,7 @@ def reml_direct_gradient(
     penalty_ranks: dict[str, float] | None = None,
     phi_hat: float = 1.0,
     *,
+    inverse_phi: float | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
     penalty_caches: dict | None = None,
     tensor_pair_evaluations: dict | None = None,
@@ -67,7 +69,9 @@ def reml_direct_gradient(
     )
 
     grad = np.zeros(len(penalties), dtype=np.float64)
-    inv_phi = 1.0 / max(phi_hat, 1e-10)
+    inv_phi = 1.0 / max(phi_hat, 1e-10) if inverse_phi is None else float(inverse_phi)
+    if not np.isfinite(inv_phi) or inv_phi <= 0.0:
+        raise ValueError("inverse_phi must be positive and finite")
     for i, pc in enumerate(penalties):
         gm = group_matrices[pc.group_index]
         omega_ssp = pc.omega_ssp if pc.omega_ssp is not None else gm.R_inv.T @ gm.omega @ gm.R_inv
@@ -92,12 +96,15 @@ def reml_direct_hessian(
     gradient: NDArray | None = None,
     penalty_ranks: dict[str, float] | None = None,
     penalty_caches: dict | None = None,
-    pirls_result: object | None = None,
+    pirls_result: PIRLSResult | None = None,
     n_obs: int = 0,
     phi_hat: float = 1.0,
+    penalty_nullity: float | None = None,
     dH_extra: dict[int, NDArray] | None = None,
     dH2_cross: NDArray | None = None,
     *,
+    inverse_phi: float | None = None,
+    d_inverse_phi_d_penalized_deviance: float | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
     tensor_pair_evaluations: dict | None = None,
 ) -> NDArray:
@@ -121,6 +128,8 @@ def reml_direct_hessian(
         group_matrices=group_matrices,
         penalty_caches=penalty_caches,
     )
+    if gradient is None:
+        raise ValueError("gradient is required for the direct REML Hessian")
     m = len(penalties)
     p = XtWX_S_inv.shape[0]
     hess = np.zeros((m, m))
@@ -225,19 +234,41 @@ def reml_direct_hessian(
         hess[i, j] -= 0.5 * h_ij
 
     if pirls_result is not None:
-        inv_phi = 1.0 / max(phi_hat, 1e-10)
+        inv_phi = 1.0 / max(phi_hat, 1e-10) if inverse_phi is None else float(inverse_phi)
+        if not np.isfinite(inv_phi) or inv_phi <= 0.0:
+            raise ValueError("inverse_phi must be positive and finite")
         S_beta = np.column_stack(s_beta_list)
         HinvSbeta = XtWX_S_inv @ S_beta
         hess -= inv_phi * (S_beta.T @ HinvSbeta)
 
     scale_known = getattr(distribution, "scale_known", True)
-    if not scale_known and pirls_result is not None and n_obs > 0:
-        M_p = compute_total_penalty_rank(
-            penalties,
-            tensor_pair_evaluations=tensor_pair_evaluations,
-        )
-        if M_p <= 0 and penalty_ranks is not None:
-            M_p = sum(penalty_ranks[pc.name] for pc in penalties)
+    if d_inverse_phi_d_penalized_deviance is not None and pirls_result is not None:
+        inverse_phi_derivative = float(d_inverse_phi_d_penalized_deviance)
+        if not np.isfinite(inverse_phi_derivative):
+            raise ValueError("profiled inverse-scale derivative must be finite")
+        q = np.asarray(quad_per_group, dtype=np.float64)
+        hess += 0.5 * inverse_phi_derivative * np.outer(q, q)
+    elif not scale_known and pirls_result is not None and n_obs > 0:
+        if penalty_nullity is None:
+            hessian_rank = getattr(pirls_result, "reml_hessian_rank", None)
+            if hessian_rank is not None:
+                M_p = compute_penalty_nullity(
+                    hessian_rank=hessian_rank,
+                    penalties=penalties,
+                    lambdas=lambdas,
+                    coefficient_width=p,
+                )
+            else:
+                # Compatibility for synthetic/non-direct callers that do not
+                # carry identified full-H metadata.
+                M_p = compute_total_penalty_rank(
+                    penalties,
+                    tensor_pair_evaluations=tensor_pair_evaluations,
+                )
+                if M_p <= 0 and penalty_ranks is not None:
+                    M_p = sum(penalty_ranks[pc.name] for pc in penalties)
+        else:
+            M_p = penalty_nullity
         pq_total = sum(quad_per_group)
         d_plus_pq = max(pirls_result.deviance + pq_total, 1e-300)
         q = np.array(quad_per_group)

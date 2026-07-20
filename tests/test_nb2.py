@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from scipy.stats import nbinom
 
-from superglm import NegativeBinomial, SuperGLM, SuperGLMRegressor
+from superglm import NegativeBinomial, Spline, SuperGLM, SuperGLMRegressor
 from superglm.distributions import resolve_distribution
 from superglm.features.numeric import Numeric
 from superglm.penalties.group_lasso import GroupLasso
@@ -265,10 +265,10 @@ class TestNB2ProfileTheta:
 
 class TestNB2AutoTheta:
     def test_estimate_theta_inherit_preserves_reml_final_refit(self, monkeypatch):
-        X = pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]})
-        y = np.array([1.0, 2.0, 3.0, 4.0])
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 80)})
+        y = np.resize(np.array([1.0, 2.0, 3.0, 4.0]), len(X))
         model = SuperGLM(
-            family=NegativeBinomial(theta=1.0),
+            family=NegativeBinomial(theta="auto"),
             penalty=GroupLasso(lambda1=0.0),
             features={"x": Numeric()},
         )
@@ -279,32 +279,119 @@ class TestNB2AutoTheta:
             n_evaluations=1,
             converged=True,
         )
-        calls: list[str] = []
+        configured_family = model._family_config
+        configured_penalty = model._penalty_config
+        configured_model = model._config
+        configured_revision = model._config_revision
 
         def fake_profile(model_arg, X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
-            assert model_arg is model
+            assert model_arg is not model
+            assert model_arg.family.theta == "auto"
             assert X_arg is X
-            assert y_arg is y
+            np.testing.assert_array_equal(y_arg, y)
             return result
 
-        def fake_fit(X_arg, y_arg, sample_weight=None, offset=None):
-            calls.append("fit")
-            return model
-
-        def fake_fit_reml(X_arg, y_arg, sample_weight=None, offset=None):
-            calls.append("fit_reml")
-            return model
-
         monkeypatch.setattr("superglm.profiling.nb.estimate_nb_theta", fake_profile)
-        monkeypatch.setattr(model, "fit", fake_fit)
-        monkeypatch.setattr(model, "fit_reml", fake_fit_reml)
 
         returned = model.estimate_theta(X, y, fit_mode="inherit")
 
-        assert returned is result
-        assert calls == ["fit_reml"]
+        assert returned is not result
+        assert model._last_fit_meta["method"] == "fit_reml"
+        assert model._config is not configured_model
+        assert model._family_config is not configured_family
+        assert model._penalty_config is configured_penalty
+        assert model._config_revision == configured_revision + 1
+        assert model._config.family.theta == pytest.approx(2.5)
         assert model.family.theta == pytest.approx(2.5)
-        assert model._nb_profile_result is result
+        assert model.theta_ == pytest.approx(2.5)
+        refit = model.clone_unfitted()
+        assert refit.family.theta == pytest.approx(2.5)
+        refit.fit(X, y)
+        assert refit.family.theta == pytest.approx(2.5)
+        assert refit.theta_ == pytest.approx(2.5)
+        assert model._nb_profile_result is not result
+        assert returned is not model._nb_profile_result
+        assert model._fit_state.projections["_nb_profile_result"] is model._nb_profile_result
+
+    def test_auto_theta_reml_uses_zero_selection_regime_when_unconfigured(self):
+        rng = np.random.default_rng(20260718)
+        x = np.linspace(-1.0, 1.0, 100)
+        mu = np.exp(0.2 + 0.25 * x)
+        y = rng.poisson(rng.gamma(shape=3.0, scale=mu / 3.0)).astype(np.float64)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            selection_penalty=None,
+            features={"x": Spline(n_knots=5)},
+        )
+
+        model.fit_reml(X, y, max_reml_iter=1, max_pirls_iter=20)
+
+        assert model.selection_penalty is None
+        assert model.selection_penalty_ == pytest.approx(0.0)
+        assert model.theta_ > 0.0
+
+    def test_nb_profile_bcd_forwards_configured_smoothing(self, monkeypatch):
+        rng = np.random.default_rng(20260719)
+        x = np.linspace(-1.0, 1.0, 90)
+        y = rng.poisson(np.exp(0.1 + 0.2 * x)).astype(np.float64)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=NegativeBinomial(theta=2.0),
+            penalty=GroupLasso(lambda1=0.02),
+            spline_penalty=0.75,
+            features={"x": Spline(n_knots=5)},
+        )
+        from superglm.profiling import nb as nb_module
+
+        real_fit_pirls = nb_module.fit_pirls
+        seen_lambda2 = []
+
+        def recording_fit_pirls(*args, **kwargs):
+            seen_lambda2.append(kwargs.get("lambda2"))
+            return real_fit_pirls(*args, **kwargs)
+
+        monkeypatch.setattr(nb_module, "fit_pirls", recording_fit_pirls)
+
+        estimate_nb_theta(model, X, y, maxiter=1)
+
+        assert seen_lambda2 == [pytest.approx(0.75)]
+
+    def test_estimate_theta_publishes_owned_detached_profile_result(self):
+        rng = np.random.default_rng(20260720)
+        x = np.linspace(-1.0, 1.0, 100)
+        y = rng.poisson(np.exp(0.1 + 0.2 * x)).astype(np.float64)
+        weights = np.linspace(0.5, 1.5, len(x))
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        returned = model.estimate_theta(X, y, sample_weight=weights, maxiter=1)
+        installed = model._nb_profile_result
+        installed_y = installed._y.copy()
+        installed_weights = installed._weights.copy()
+
+        assert returned is not installed
+        assert returned.theta_hat == pytest.approx(installed.theta_hat)
+        assert not np.shares_memory(installed._y, y)
+        assert not np.shares_memory(installed._weights, weights)
+        np.testing.assert_allclose(installed._mu, model._fit_mu, rtol=0.0, atol=0.0)
+        for values in (installed._y, installed._mu, installed._weights):
+            assert not values.flags.writeable
+            with pytest.raises(ValueError):
+                values.setflags(write=True)
+        with pytest.raises(AttributeError, match="published"):
+            returned.theta_hat = 99.0
+        with pytest.raises(TypeError):
+            returned.cache[99.0] = 0.0
+
+        y[0] += 20.0
+        weights[0] *= 20.0
+        np.testing.assert_array_equal(installed._y, installed_y)
+        np.testing.assert_array_equal(installed._weights, installed_weights)
 
     def test_auto_theta_flow(self):
         """nb_theta='auto' triggers profile estimation in fit()."""
@@ -321,9 +408,9 @@ class TestNB2AutoTheta:
         )
         model.fit(X, y)
 
-        # After fit, family.theta should be a float (estimated)
-        assert isinstance(model.family.theta, float)
-        assert model.family.theta > 0
+        # Configuration intent stays automatic; the learned value is fitted state.
+        assert model.family.theta == "auto"
+        assert model.theta_ > 0
         assert model.result.converged
 
 

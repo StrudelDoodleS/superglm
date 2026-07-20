@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import numpy as np
@@ -61,12 +61,57 @@ def streamed_weighted_factor(
     return np.empty((0, width)) if factor is None else np.asarray(factor)
 
 
+def streamed_weighted_factor_rhs(
+    chunks: Iterable[tuple[int, int, NDArray]],
+    weights: NDArray,
+    response: NDArray,
+    *,
+    center: NDArray | None = None,
+) -> tuple[NDArray, NDArray]:
+    """Build a compact weighted QR factor and its consistently transformed RHS.
+
+    Appending the response to every bounded design chunk preserves ``Q.T @ b``
+    without retaining either the observation matrix or the observation-length
+    orthogonal factor.  The returned factor has at most ``p + 1`` rows.
+    """
+    weights = np.asarray(weights, dtype=float)
+    response = np.asarray(response, dtype=float)
+    if weights.ndim != 1 or response.shape != weights.shape:
+        raise ValueError("weights and response must be matching vectors")
+    joint_factor: NDArray | None = None
+    width = 0 if center is None else len(center)
+    for start, stop, values in chunks:
+        block = np.asarray(values, dtype=float)
+        width = block.shape[1]
+        if center is not None:
+            block = block - center
+        sqrt_weights = np.sqrt(weights[start:stop])
+        joint_block = np.column_stack(
+            (sqrt_weights[:, None] * block, sqrt_weights * response[start:stop])
+        )
+        stacked = joint_block if joint_factor is None else np.vstack((joint_factor, joint_block))
+        joint_factor = np.linalg.qr(stacked, mode="r")
+    if joint_factor is None:
+        return np.empty((0, width)), np.empty(0)
+    return np.asarray(joint_factor[:, :width]), np.asarray(joint_factor[:, width])
+
+
 def needs_factor_certification(
     decomposition: RankDecomposition,
     *,
     policy: RankPolicy = SHARED_RANK_POLICY,
 ) -> bool:
-    """Whether a nominally full Gram rank lies inside its uncertified band."""
+    """Whether Gram geometry lies inside a band requiring factor certification.
+
+    A certificate governs the retained subspace as well as the integer rank.
+    Normal equations can erase a factor-scale direction at the numerical
+    boundary, or retain a different direction while reporting the same rank.
+    """
+    if decomposition.method == "qr_svd":
+        # A factor decomposition is already the authoritative certificate;
+        # never stream and factor the same rows again merely because the
+        # factor policy itself truncated a nonzero singular value.
+        return False
     certification_condition = policy.warning_condition / np.sqrt(policy.certification_band)
     return bool(
         decomposition.width > 0
@@ -106,6 +151,8 @@ class RankDecomposition:
     estimable_functional_basis: NDArray | None = None
     structural_aliases: NDArray | None = None
     retained_values: NDArray | None = None
+    factor_rhs_left_basis: NDArray | None = None
+    factor_rhs_triangular: NDArray | None = None
 
     @property
     def width(self) -> int:
@@ -128,6 +175,35 @@ class RankDecomposition:
         if self.solution_basis is None or self.retained_values is None:
             raise RuntimeError("retained spectral basis is unavailable")
         return self.solution_basis @ ((self.solution_basis.T @ rhs) / self.retained_values)
+
+    def solve_factor_rhs(self, transformed_rhs: NDArray) -> NDArray:
+        """Solve from a response transformed with the certified factor's QR.
+
+        This path avoids re-forming normal equations at the factor-rank
+        boundary.  It is available only when ``decompose_factor`` was asked to
+        retain the bounded factor solve.
+        """
+        if self.factor_rhs_left_basis is None:
+            raise RuntimeError("factor-RHS solve was not retained")
+        transformed_rhs = np.asarray(transformed_rhs, dtype=float)
+        if transformed_rhs.shape != (self.factor_rhs_left_basis.shape[0],):
+            raise ValueError("transformed RHS length does not match the certified factor")
+        if self.rank == 0:
+            return np.zeros(self.width)
+        projected_rhs = self.factor_rhs_left_basis.T @ transformed_rhs
+        if self.factor_rhs_triangular is not None:
+            active_solution = scipy.linalg.solve_triangular(
+                self.factor_rhs_triangular,
+                projected_rhs,
+                lower=False,
+                check_finite=False,
+            )
+            result = np.zeros(self.width)
+            result[self.active_columns] = active_solution
+            return result
+        if self.solution_basis is None:
+            raise RuntimeError("retained factor solution basis is unavailable")
+        return self.solution_basis @ projected_rhs
 
     def pseudo_inverse(self) -> NDArray:
         if self.rank == 0:
@@ -233,7 +309,7 @@ class RankInfo:
     augmented: RankDecomposition
     coefficient: RankDecomposition
     feature_edf: NDArray
-    group_edf: dict[str, float]
+    group_edf: Mapping[str, float]
     objective_loss: float | None
 
     @property
@@ -470,6 +546,7 @@ def decompose_gram(
             pass
 
     eigenvalues, eigenvectors = np.linalg.eigh(equilibrated)
+    raw_eigenvalues = eigenvalues
     max_eigenvalue = max(float(eigenvalues[-1]), 0.0)
     max_abs_eigenvalue = float(np.max(np.abs(eigenvalues), initial=0.0))
     negative_tolerance = 100.0 * _EPS * max(max_abs_eigenvalue, 1.0)
@@ -541,8 +618,13 @@ def decompose_gram(
     estimable_basis[active_columns, :] = retained_vectors * active_scale[:, None]
     null = _null_basis(width, active_columns, active_scale, discarded_vectors)
     retained_values = eigenvalues[retained_mask]
+    # Normal equations cannot distinguish an exact active-column alias from a
+    # full-rank factor direction whose squared singular value rounded to zero.
+    # Structural zero columns were removed above; every other PSD truncation
+    # therefore needs observation-factor certification when one is available.
     resolution_limited = bool(
-        np.any((np.abs(eigenvalues) > 0.0) & ~retained_mask)
+        (psd_semantics and rank < len(active_columns))
+        or np.any((np.abs(raw_eigenvalues) > 0.0) & ~retained_mask)
         or (fallback_factor is not None and decompose_factor(fallback_factor).rank > rank)
     )
     log_pdet = (
@@ -644,6 +726,7 @@ def decompose_factor(
     factor: NDArray,
     *,
     policy: RankPolicy = SHARED_RANK_POLICY,
+    retain_factor_solve: bool = False,
 ) -> RankDecomposition:
     """Decompose a weighted/augmented factor using the factor-space rule."""
     factor = np.asarray(factor, dtype=float)
@@ -653,10 +736,23 @@ def decompose_factor(
     column_scale = np.linalg.norm(factor, axis=0)
     active_columns = np.flatnonzero(column_scale > 0.0)
     if active_columns.size == 0:
-        return decompose_gram(np.zeros((width, width)), policy=policy)
+        decomposition = decompose_gram(np.zeros((width, width)), policy=policy)
+        if retain_factor_solve:
+            decomposition = replace(
+                decomposition,
+                factor_rhs_left_basis=_freeze(np.zeros((factor.shape[0], 0))),
+            )
+        return decomposition
     active_scale = column_scale[active_columns]
     equilibrated = factor[:, active_columns] / active_scale
-    _, singular_values, Vh = np.linalg.svd(equilibrated, full_matrices=True)
+    # A tall observation factor needs only its thin left singular vectors;
+    # requesting a full U would allocate O(n²) memory.  A wide factor still
+    # needs full right vectors so exact row-rank null directions are retained.
+    full_matrices = equilibrated.shape[0] < equilibrated.shape[1]
+    left_vectors, singular_values, Vh = np.linalg.svd(
+        equilibrated,
+        full_matrices=full_matrices,
+    )
     cutoff = policy.factor_rcond * singular_values[0]
     retained_mask = singular_values > cutoff
     rank = int(np.count_nonzero(retained_mask))
@@ -668,6 +764,10 @@ def decompose_factor(
     estimable_basis[active_columns, :] = retained_vectors * active_scale[:, None]
     null = _null_basis(width, active_columns, active_scale, discarded_vectors)
     retained_values = singular_values[retained_mask] ** 2
+    factor_rhs_left_basis = None
+    if retain_factor_solve:
+        retained_left = left_vectors[:, : len(singular_values)][:, retained_mask]
+        factor_rhs_left_basis = retained_left / singular_values[retained_mask]
     log_pdet = (
         2.0 * float(np.sum(np.log(active_scale))) + float(np.sum(np.log(np.abs(retained_values))))
         if rank == width
@@ -709,6 +809,14 @@ def decompose_factor(
                 )
                 representative_aliases = np.ones(width, dtype=bool)
                 representative_aliases[representative_columns] = False
+                representative_rhs_left_basis = None
+                representative_rhs_triangular = None
+                if retain_factor_solve:
+                    selected_factor = factor[:, representative_columns]
+                    representative_rhs_left_basis, representative_rhs_triangular = np.linalg.qr(
+                        selected_factor,
+                        mode="reduced",
+                    )
                 return RankDecomposition(
                     policy_version=policy.version,
                     method="qr_svd",
@@ -728,6 +836,16 @@ def decompose_factor(
                     estimable_functional_basis=_freeze(estimable_basis),
                     structural_aliases=_freeze(representative_aliases, dtype=bool),
                     retained_values=_freeze(retained_values),
+                    factor_rhs_left_basis=(
+                        None
+                        if representative_rhs_left_basis is None
+                        else _freeze(representative_rhs_left_basis)
+                    ),
+                    factor_rhs_triangular=(
+                        None
+                        if representative_rhs_triangular is None
+                        else _freeze(representative_rhs_triangular)
+                    ),
                 )
             except (np.linalg.LinAlgError, ValueError):
                 pass
@@ -748,6 +866,9 @@ def decompose_factor(
         estimable_functional_basis=_freeze(estimable_basis),
         structural_aliases=_freeze(column_scale == 0.0, dtype=bool),
         retained_values=_freeze(retained_values),
+        factor_rhs_left_basis=(
+            None if factor_rhs_left_basis is None else _freeze(factor_rhs_left_basis)
+        ),
     )
 
 

@@ -1,6 +1,7 @@
 """Tests for REML smoothing parameter estimation."""
 
 import logging
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -11,7 +12,7 @@ from superglm.distributions import NegativeBinomial
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
-from superglm.group_matrix import SparseSSPGroupMatrix
+from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
 from superglm.inference.covariance import (
     _penalised_xtwx_inv,
     _penalised_xtwx_inv_gram,
@@ -19,6 +20,7 @@ from superglm.inference.covariance import (
 )
 from superglm.reml import REMLResult, _map_beta_between_bases
 from superglm.stats.wood_pvalue import wood_test_smooth
+from superglm.types import GroupSlice
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -141,6 +143,31 @@ class TestPenaltyComponents:
             assert comp.group_name == comp.name  # single-penalty: name == group_name
             assert comp.omega_raw is not None
 
+    def test_components_remove_roundoff_outside_declared_psd_rank(self):
+        """SSP congruence noise must not turn a smoothing prior indefinite."""
+        from superglm.reml import build_penalty_components
+        from superglm.solvers.rank import decompose_gram
+
+        # This is a rank-one PSD penalty contaminated at the same relative
+        # scale seen in spline SSP transforms.  Rank selection already treats
+        # the second direction as null; the stored solver-space matrix must
+        # enforce that same authoritative eigenspace.
+        omega = np.array([[1.0, 1.0 + 2e-12], [1.0 + 2e-12, 1.0]])
+        gm = SimpleNamespace(
+            omega=omega,
+            omega_components=None,
+            R_inv=np.eye(2),
+            lambda_policies=None,
+        )
+        group = GroupSlice(name="smooth", start=0, end=2, penalized=True)
+
+        [component] = build_penalty_components([gm], [(0, group)])
+        decomposition = decompose_gram(component.omega_ssp)
+
+        assert component.rank == 1.0
+        assert decomposition.rank == 1
+        np.testing.assert_allclose(component.omega_ssp, component.omega_ssp.T, atol=0.0)
+
     def test_component_count_matches_reml_groups(self, poisson_data):
         """One PenaltyComponent per REML-eligible group (single-penalty case)."""
         from superglm.group_matrix import DiscretizedSSPGroupMatrix
@@ -257,6 +284,51 @@ class TestPenalisedXtwxInvOmega:
         assert len(groups_qr) == len(groups_gram)
         np.testing.assert_allclose(inv_qr, inv_gram, atol=1e-8)
         np.testing.assert_allclose(aug_qr, aug_gram, atol=1e-8)
+
+    def test_gram_covariance_fuses_discrete_gram_and_intercept_product(self, monkeypatch):
+        """The active covariance plan must not make separate compressed passes."""
+        rng = np.random.default_rng(20260719)
+        n = 240
+        n_bins = 24
+        bin_idx = np.resize(np.arange(n_bins, dtype=np.intp), n)
+        B_unique = rng.normal(size=(n_bins, 4))
+        gm = DiscretizedSSPGroupMatrix(B_unique, np.eye(4), bin_idx)
+        group = GroupSlice(name="x", start=0, end=4, penalized=False)
+        beta = np.ones(4)
+        W = rng.uniform(0.2, 2.0, size=n)
+        X = gm.toarray()
+
+        monkeypatch.setattr(
+            DiscretizedSSPGroupMatrix,
+            "gram",
+            lambda *_args, **_kwargs: pytest.fail("covariance must use gram_rmatvec"),
+        )
+        monkeypatch.setattr(
+            DiscretizedSSPGroupMatrix,
+            "rmatvec",
+            lambda *_args, **_kwargs: pytest.fail("covariance must use gram_rmatvec"),
+        )
+
+        inverse, augmented, active_groups, gram, penalty = _penalised_xtwx_inv_gram(
+            beta,
+            W,
+            [gm],
+            [group],
+            0.0,
+        )
+
+        expected_gram = X.T @ (W[:, None] * X)
+        expected_augmented = np.block(
+            [
+                [np.array([[np.sum(W)]]), (X.T @ W)[None, :]],
+                [(X.T @ W)[:, None], expected_gram],
+            ]
+        )
+        np.testing.assert_allclose(gram, expected_gram, rtol=2e-12, atol=2e-10)
+        np.testing.assert_allclose(inverse, np.linalg.pinv(expected_gram), atol=2e-10)
+        np.testing.assert_allclose(augmented, np.linalg.pinv(expected_augmented), atol=2e-10)
+        assert [active.name for active in active_groups] == ["x"]
+        np.testing.assert_array_equal(penalty, np.zeros((4, 4)))
 
 
 # ── _compute_R_inv override ──────────────────────────────────────
@@ -630,8 +702,8 @@ class TestREMLFallbacks:
             model.fit_reml(X, y)
 
         assert "no REML-eligible groups found" in caplog.text
-        assert isinstance(model.family.theta, float)
-        assert model.family.theta > 0
+        assert model.family.theta == "auto"
+        assert model.theta_ > 0
         assert model._nb_profile_result is not None
         assert model.result.converged
         assert not hasattr(model, "_reml_lambdas")
@@ -723,13 +795,8 @@ class TestREMLBackwardCompat:
         assert spline_model.result is not None
         assert not hasattr(spline_model, "_reml_lambdas") or spline_model._reml_lambdas is None
 
-    def test_custom_link_without_deriv2_inverse(self):
-        """Old-style custom link without deriv2_inverse should work on fit_reml.
-
-        Regression test: deriv2_inverse was added to the Link protocol,
-        breaking isinstance() checks and the REML path for custom links.
-        Now it's optional — the W(ρ) correction is skipped gracefully.
-        """
+    def test_custom_link_without_curvature_protocol_is_rejected(self):
+        """An unproved custom link must not silently select Fisher LAML geometry."""
         from superglm.links import Link
 
         class MinimalLogLink:
@@ -761,16 +828,12 @@ class TestREMLBackwardCompat:
             link=custom_link,
             selection_penalty=0,
         )
-        m.fit_reml(df, y, max_reml_iter=10)
-        assert m._reml_result.converged
+        with pytest.raises(NotImplementedError, match="explicit ordinary REML curvature"):
+            m.fit_reml(df, y, max_reml_iter=10)
+        assert m._fit_state is None
 
-    def test_custom_distribution_without_variance_derivative(self):
-        """Old-style custom distribution without variance_derivative should work.
-
-        Regression test: variance_derivative was added to the Distribution
-        protocol, breaking isinstance() checks and the REML path for custom
-        distributions.  Now it's optional — the W(ρ) correction is skipped.
-        """
+    def test_custom_distribution_without_curvature_protocol_is_rejected(self):
+        """An unproved custom family must not silently select Fisher LAML geometry."""
         from superglm.distributions import Distribution
 
         class MinimalPoisson:
@@ -814,11 +877,14 @@ class TestREMLBackwardCompat:
             family=custom_dist,
             selection_penalty=0,
         )
-        m.fit_reml(df, y, max_reml_iter=10)
-        assert m._reml_result.converged
+        with pytest.raises(NotImplementedError, match="explicit ordinary REML curvature"):
+            m.fit_reml(df, y, max_reml_iter=10)
+        assert m._fit_state is None
 
     def test_enhanced_custom_objects_get_w_correction(self):
-        """Custom objects WITH second-order methods should get the W(ρ) correction."""
+        """A declared custom Fisher pair still receives its exact W(rho) correction."""
+
+        curvature_declarations: list[str] = []
 
         class EnhancedLogLink:
             def link(self, mu):
@@ -836,6 +902,10 @@ class TestREMLBackwardCompat:
             def deriv2_inverse(self, eta):
                 return np.exp(eta)
 
+            def reml_curvature(self, distribution):
+                curvature_declarations.append("link")
+                return "fisher"
+
         class EnhancedPoisson:
             @property
             def scale_known(self):
@@ -850,6 +920,10 @@ class TestREMLBackwardCompat:
 
             def variance_derivative(self, mu):
                 return np.ones_like(mu)
+
+            def reml_curvature(self, link):
+                curvature_declarations.append("distribution")
+                return "fisher"
 
             def deviance_unit(self, y, mu):
                 d = np.zeros_like(y, dtype=float)
@@ -880,6 +954,8 @@ class TestREMLBackwardCompat:
         )
         m.fit_reml(df, y, max_reml_iter=10)
         assert m._reml_result.converged
+        assert curvature_declarations == ["distribution", "link"]
+        assert m._reml_profile["reml_observed_geometry_s"] == 0.0
 
         # Verify W correction was actually computed (not skipped)
         from superglm.group_matrix import DiscretizedSSPGroupMatrix
@@ -1230,9 +1306,90 @@ class TestREMLObjectiveFastPath:
         expected = 0.5 * result.deviance + 0.5 * np.log(2.0)
         np.testing.assert_allclose(val, expected, rtol=1e-12, atol=1e-12)
 
+    def test_objective_rejects_overflowed_working_weights_before_gram(self):
+        from superglm.distributions import Poisson
+        from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+        from superglm.links import LogLink
+        from superglm.reml.objective import reml_laml_objective
+        from superglm.solvers.pirls import PIRLSResult
+
+        dm = DesignMatrix([DenseGroupMatrix(np.ones((2, 1)))], n=2, p=1)
+        result = PIRLSResult(
+            beta=np.array([0.0]),
+            intercept=80.0,
+            n_iter=1,
+            deviance=1.0,
+            converged=True,
+            phi=1.0,
+            effective_df=1.0,
+        )
+
+        with np.errstate(over="ignore", invalid="ignore"):
+            with pytest.raises(ValueError, match="must be finite"):
+                reml_laml_objective(
+                    dm,
+                    Poisson(),
+                    LogLink(),
+                    [GroupSlice(name="x", start=0, end=1, penalized=False)],
+                    y=np.ones(2),
+                    result=result,
+                    lambdas={},
+                    sample_weight=np.array([np.finfo(np.float64).max, 1.0]),
+                    offset_arr=np.zeros(2),
+                )
+
+    def test_weight_derivative_correction_rejects_nonfinite_signed_weights(self, monkeypatch):
+        import superglm.reml.w_derivatives as w_derivatives
+        from superglm.distributions import Poisson
+        from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+        from superglm.links import LogLink
+        from superglm.solvers.pirls import PIRLSResult
+        from superglm.types import PenaltyComponent
+
+        n = 6
+        dm = DesignMatrix([DenseGroupMatrix(np.ones((n, 1)))], n=n, p=1)
+        group = GroupSlice(name="x", start=0, end=1)
+        component = PenaltyComponent(
+            name="x",
+            group_name="x",
+            group_index=0,
+            group_sl=slice(0, 1),
+            omega_raw=np.ones((1, 1)),
+            omega_ssp=np.ones((1, 1)),
+            rank=1.0,
+        )
+        result = PIRLSResult(
+            beta=np.ones(1),
+            intercept=0.0,
+            n_iter=1,
+            deviance=1.0,
+            converged=True,
+            phi=1.0,
+            effective_df=1.0,
+        )
+        monkeypatch.setattr(
+            w_derivatives,
+            "compute_dW_deta",
+            lambda *_args, **_kwargs: np.full(n, np.inf),
+        )
+
+        with pytest.raises(ValueError, match="must be finite"):
+            w_derivatives.reml_w_correction(
+                dm,
+                LogLink(),
+                [group],
+                result,
+                np.eye(1),
+                {"x": 1.0},
+                sample_weight=np.ones(n),
+                offset_arr=np.zeros(n),
+                distribution=Poisson(),
+                reml_penalties=[component],
+            )
+
 
 class TestDiscreteCachedSolve:
-    def test_tensor_surrogate_linesearch_defers_augmented_solve(self, monkeypatch):
+    def test_tensor_surrogate_linesearch_defers_profiled_solve(self, monkeypatch):
         import superglm.reml.discrete as discrete_reml
 
         rng = np.random.default_rng(77)
@@ -1243,10 +1400,19 @@ class TestDiscreteCachedSolve:
         y = rng.poisson(np.exp(eta)).astype(float)
         X = pd.DataFrame({"x1": x1, "x2": x2})
 
-        def fail_augmented_solve(*args, **kwargs):
-            raise AssertionError("tensor surrogate line search should not solve M_aug")
+        profiled_solve = discrete_reml._solve_cached_profiled_system
+        solve_calls = 0
 
-        monkeypatch.setattr(discrete_reml, "_solve_cached_augmented", fail_augmented_solve)
+        def count_profiled_solve(*args, **kwargs):
+            nonlocal solve_calls
+            solve_calls += 1
+            return profiled_solve(*args, **kwargs)
+
+        monkeypatch.setattr(
+            discrete_reml,
+            "_solve_cached_profiled_system",
+            count_profiled_solve,
+        )
 
         model = SuperGLM(
             family="poisson",
@@ -1258,6 +1424,8 @@ class TestDiscreteCachedSolve:
         model.fit_reml(X, y, max_reml_iter=3, reml_tol=1e-12)
 
         assert model._reml_result.n_reml_iter >= 1
+        assert model._reml_profile["reml_n_linesearch_surrogate_evals"] >= solve_calls
+        assert model._reml_profile["reml_n_linesearch_full_evals"] == solve_calls
 
     def test_penalty_block_trace_matches_materialized_hessian_product(self):
         from superglm.reml.gradient import _penalty_block_trace
@@ -1292,26 +1460,47 @@ class TestDiscreteCachedSolve:
 
                 np.testing.assert_allclose(compact, materialized, rtol=1e-12, atol=1e-12)
 
-    def test_h_factor_solve_matches_augmented_system(self):
-        from superglm.reml.discrete import _solve_cached_augmented, _solve_cached_h_system
+    def test_profiled_cached_solve_matches_augmented_system(self):
+        from superglm.reml.discrete import _solve_cached_profiled_system
 
         rng = np.random.default_rng(42)
+        n = 30
         p = 5
-        A = rng.standard_normal((p, p))
-        XtWX = A @ A.T + np.eye(p)
+        X = rng.standard_normal((n, p))
+        W = rng.uniform(0.3, 1.8, size=n)
+        z = rng.standard_normal(n)
+        XtWX = X.T @ (W[:, None] * X)
+        XtW1 = X.T @ W
+        XtWz = X.T @ (W * z)
+        sum_W = float(np.sum(W))
+        sum_Wz = float(W @ z)
         B = rng.standard_normal((p, p))
         S = B @ B.T + np.eye(p) * 0.5
-        XtWz = rng.standard_normal(p)
-        XtW1 = rng.standard_normal(p)
-        sum_W = 10.0
-        sum_Wz = -0.7
+        mean_x = XtW1 / sum_W
+        mean_z = sum_Wz / sum_W
+        centered_XtWX = XtWX - np.outer(XtW1, XtW1) / sum_W
+        centered_XtWz = XtWz - mean_x * sum_Wz
 
-        beta_aug, intercept_aug = _solve_cached_augmented(XtWX, S, XtWz, XtW1, sum_W, sum_Wz)
-        beta_h, intercept_h, log_det_h = _solve_cached_h_system(XtWX, S, XtWz, XtW1, sum_W, sum_Wz)
+        beta, intercept, log_det_h, hessian_rank = _solve_cached_profiled_system(
+            centered_XtWX,
+            S,
+            centered_XtWz,
+            mean_x,
+            sum_W,
+            mean_z,
+        )
+        augmented = np.empty((p + 1, p + 1))
+        augmented[0, 0] = sum_W
+        augmented[0, 1:] = XtW1
+        augmented[1:, 0] = XtW1
+        augmented[1:, 1:] = XtWX + S
+        rhs = np.concatenate(([sum_Wz], XtWz))
+        expected = np.linalg.solve(augmented, rhs)
 
-        np.testing.assert_allclose(beta_h, beta_aug, rtol=1e-10, atol=1e-10)
-        np.testing.assert_allclose(intercept_h, intercept_aug, rtol=1e-10, atol=1e-10)
-        assert np.isfinite(log_det_h)
+        np.testing.assert_allclose(beta, expected[1:], rtol=1e-10, atol=1e-10)
+        np.testing.assert_allclose(intercept, expected[0], rtol=1e-10, atol=1e-10)
+        assert log_det_h == pytest.approx(np.linalg.slogdet(augmented)[1], rel=1e-12)
+        assert hessian_rank == p + 1
 
     def test_tensor_pair_closed_form_matches_objective_gradient_hessian(self):
         from superglm.distributions import Poisson
@@ -1526,7 +1715,7 @@ class TestStaleREMLClearing:
         assert model._reml_penalties is not None
 
         # fit_path requires lambda1 > 0
-        model.penalty.lambda1 = 0.01
+        model.selection_penalty = 0.01
         model.fit_path(X, y, sample_weight=w, n_lambda=3)
 
         assert model._reml_lambdas is None

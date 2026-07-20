@@ -14,6 +14,7 @@ from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
+from superglm.model.fit_state import FittedStateRevision, invalidate_revised_coefficient_mode
 
 if TYPE_CHECKING:
     from superglm.editor.session import EditableTerm
@@ -28,6 +29,7 @@ _EDITOR_SHARED_ROW_INPUTS = (
     "_fit_offset_ref",
     "_fit_weights",
     "_fit_offset",
+    "_fit_data_guard",
 )
 
 _EDITOR_EDIT_ONLY_MEMO_STATE = (
@@ -79,16 +81,36 @@ def apply_edits_to_model_copy_with_data(
             atol=1e-14,
         )
     ]
-    edited_model = _copy_model_for_editor_edits(
+    has_explicit_rows = X is not None or y is not None
+    has_retained_rows = (
+        getattr(model, "_fit_X_ref", None) is not None
+        and getattr(model, "_fit_y_ref", None) is not None
+    )
+    if changed_terms and not has_explicit_rows and not has_retained_rows:
+        raise RuntimeError(
+            "coefficient edits require scoring data; supply both X and y or refit with "
+            "retain_fit_state=True"
+        )
+    copied_model = _copy_model_for_editor_edits(
         model,
         share_transient_state=bool(changed_terms),
     )
-    for term in changed_terms:
-        _apply_term_edit(edited_model, term)
-    edited_terms = [term.name for term in changed_terms]
     has_scoring_data = (
         X is not None or y is not None or sample_weight is not None or offset is not None
     )
+    if not changed_terms and not has_scoring_data:
+        return copied_model
+    revision = FittedStateRevision.start(
+        copied_model,
+        increment=bool(changed_terms or has_scoring_data),
+        freeze_auxiliary_arrays=bool(changed_terms or has_scoring_data),
+    )
+    edited_model = revision.model
+    for term in changed_terms:
+        _apply_term_edit(edited_model, term)
+    if changed_terms:
+        invalidate_revised_coefficient_mode(edited_model)
+    edited_terms = [term.name for term in changed_terms]
     if edited_terms:
         _stamp_stale_inference(edited_model, edited_terms)
         _invalidate_model_caches(edited_model, keep_inference=True)
@@ -100,7 +122,11 @@ def apply_edits_to_model_copy_with_data(
             sample_weight=sample_weight,
             offset=offset,
         )
-    return edited_model
+    if not getattr(edited_model, "_retain_fit_state", True):
+        from superglm.model.fit_ops import _maybe_release_fit_state
+
+        _maybe_release_fit_state(edited_model)
+    return revision.commit()
 
 
 def materialize_edit_request(request):
@@ -329,50 +355,114 @@ def _refresh_fit_statistics(
     y=None,
     sample_weight=None,
     offset=None,
+    use_fitted_design: bool = False,
 ) -> None:
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
-    from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
+    from superglm.model.fit_ops import (
+        _compute_fit_stats,
+        _compute_null_mu,
+        _required_fit_columns,
+    )
+    from superglm.model.input_validation import validate_fit_input
 
     if (X is None) != (y is None):
         raise ValueError("Explicit scoring data requires both X and y.")
 
-    X_ref = getattr(model, "_fit_X_ref", None) if X is None else X
-    y_ref = getattr(model, "_fit_y_ref", None) if y is None else y
+    retained_X_ref = getattr(model, "_fit_X_ref", None)
+    retained_y_ref = getattr(model, "_fit_y_ref", None)
+    X_ref = retained_X_ref if X is None else X
+    y_ref = retained_y_ref if y is None else y
+    uses_retained_data = (X is None and y is None) or (X is retained_X_ref and y is retained_y_ref)
+    if uses_retained_data and X_ref is not None and y_ref is not None:
+        from superglm.model.fit_data_guard import require_unchanged_fit_data
+
+        require_unchanged_fit_data(model, X_ref, y_ref)
     if y_ref is None:
         model._fit_stats = None
         return
 
     explicit_scoring_data = X is not None or y is not None
-    y_arr = np.asarray(y_ref, dtype=np.float64).ravel()
-    retained_weights = sample_weight is not None and sample_weight is getattr(
+    validation_weight = sample_weight
+    validation_offset = offset
+    if not explicit_scoring_data:
+        if validation_weight is None:
+            validation_weight = getattr(model, "_fit_weights", None)
+        if validation_offset is None:
+            validation_offset = getattr(model, "_fit_offset", None)
+    validated_override = None
+    if X_ref is not None and (
+        explicit_scoring_data or sample_weight is not None or offset is not None
+    ):
+        validated_override = validate_fit_input(
+            X_ref,
+            y_ref,
+            validation_weight,
+            validation_offset,
+            family=model._distribution,
+            required_columns=_required_fit_columns(model),
+        )
+        X_ref = validated_override.X
+        y_arr = validated_override.y
+    else:
+        y_arr = np.asarray(y_ref, dtype=np.float64).ravel()
+    retained_weights = validation_weight is not None and validation_weight is getattr(
         model, "_fit_weights", None
     )
-    if sample_weight is None:
+    if validated_override is not None:
+        weights = (
+            validation_weight
+            if retained_weights
+            else np.array(validated_override.sample_weight, dtype=np.float64, copy=True)
+        )
+    elif sample_weight is None:
         weights = None if explicit_scoring_data else getattr(model, "_fit_weights", None)
         if weights is None:
             weights = np.ones(y_arr.size, dtype=np.float64)
     elif retained_weights:
         weights = sample_weight
     else:
-        weights = np.asarray(sample_weight, dtype=np.float64).ravel()
+        weights = np.array(sample_weight, dtype=np.float64, copy=True).ravel()
     if weights.size != y_arr.size:
         raise ValueError(f"sample_weight has length {weights.size}, expected {y_arr.size}.")
 
-    retained_offset = offset is not None and offset is getattr(model, "_fit_offset", None)
-    if offset is None:
+    retained_offset = validation_offset is not None and validation_offset is getattr(
+        model, "_fit_offset", None
+    )
+    if validated_override is not None:
+        offset_arr = (
+            validation_offset
+            if retained_offset
+            else (
+                None
+                if validated_override.offset is None
+                else np.array(validated_override.offset, dtype=np.float64, copy=True)
+            )
+        )
+        offset_ref = (
+            getattr(model, "_fit_offset_ref", None)
+            if offset is None and not explicit_scoring_data
+            else offset
+        )
+    elif offset is None:
         offset_arr = None if explicit_scoring_data else getattr(model, "_fit_offset", None)
         offset_ref = None if explicit_scoring_data else getattr(model, "_fit_offset_ref", None)
     elif retained_offset:
         offset_arr = offset
         offset_ref = getattr(model, "_fit_offset_ref", None)
     else:
-        offset_arr = np.asarray(offset, dtype=np.float64).ravel()
+        offset_arr = np.array(offset, dtype=np.float64, copy=True).ravel()
         offset_ref = offset
     if offset_arr is not None and offset_arr.size != y_arr.size:
         raise ValueError(f"offset has length {offset_arr.size}, expected {y_arr.size}.")
 
-    if X_ref is not None:
+    can_use_fitted_design = (
+        use_fitted_design
+        and getattr(model, "_dm", None) is not None
+        and model._dm.n == y_arr.size
+        and (X_ref is retained_X_ref or X_ref is None)
+    )
+    if X_ref is not None and not can_use_fitted_design:
         mu = model.predict(X_ref, offset=offset_arr)
     elif getattr(model, "_dm", None) is not None and model._dm.n == y_arr.size:
         solver_result = (
@@ -424,6 +514,16 @@ def _refresh_fit_statistics(
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
+    if X_ref is not None and (
+        not uses_retained_data or getattr(model, "_fit_data_guard", None) is None
+    ):
+        from superglm.model.fit_data_guard import FitDataGuard
+
+        model._fit_data_guard = FitDataGuard.capture(
+            X_ref,
+            y_arr,
+            columns=tuple(model._feature_order),
+        )
 
 
 def _stamp_stale_inference(model, edited_terms: list[str]) -> None:

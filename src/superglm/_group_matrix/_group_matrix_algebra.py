@@ -42,7 +42,8 @@ def _profile_count(profile: dict[str, Any] | None, key: str, value: int = 1) -> 
 
 
 def _profile_elapsed(profile: dict[str, Any] | None, key: str, start: float) -> None:
-    _profile_add(profile, key, perf_counter() - start)
+    if profile is not None:
+        _profile_add(profile, key, perf_counter() - start)
 
 
 class _BlockWeightCache:
@@ -654,6 +655,33 @@ def _cross_gram_discrete_spline_categorical(
     return gm_disc.R_inv.T @ raw @ gm_spline_cat.R_inv
 
 
+def _cross_gram_by_columns(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
+    """Form a cross-product one generated column at a time.
+
+    This is the bounded-memory fallback for factored support-space groups.
+    It preserves the same smaller-width loop count as the generic fallback
+    without materializing either effective observation-level design block.
+    """
+    p_i = gm_i.shape[1]
+    p_j = gm_j.shape[1]
+    if p_i <= p_j:
+        result = np.empty((p_i, p_j), dtype=np.float64)
+        unit = np.zeros(p_i, dtype=np.float64)
+        for column in range(p_i):
+            unit[column] = 1.0
+            result[column] = gm_j.rmatvec(W * gm_i.matvec(unit))
+            unit[column] = 0.0
+        return result
+
+    result = np.empty((p_i, p_j), dtype=np.float64)
+    unit = np.zeros(p_j, dtype=np.float64)
+    for column in range(p_j):
+        unit[column] = 1.0
+        result[:, column] = gm_i.rmatvec(W * gm_j.matvec(unit))
+        unit[column] = 0.0
+    return result
+
+
 def _cross_gram(
     gm_i: GroupMatrix,
     gm_j: GroupMatrix,
@@ -876,6 +904,16 @@ def _cross_gram(
         _profile_elapsed(profile, "block_cross_cat_cat_s", t0)
         return result
 
+    # Factored support-space groups must never be selected for the generic
+    # observation-matrix materialization below. Generate the narrower side a
+    # column at a time and retain O(n) working memory instead.
+    support_space_types = (_SparseSSPGroupMatrix, *SplineCatTypes)
+    if isinstance(gm_i, support_space_types) or isinstance(gm_j, support_space_types):
+        t0 = perf_counter() if profile is not None else 0.0
+        result = _cross_gram_by_columns(gm_i, gm_j, W)
+        _profile_elapsed(profile, "block_cross_fallback_s", t0)
+        return result
+
     # Non-disc × non-disc: materialize smaller side, rmatvec larger side.
     t0 = perf_counter() if profile is not None else 0.0
     if gm_i.shape[1] <= gm_j.shape[1]:
@@ -924,6 +962,20 @@ def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
     return (W[:, None] * X).T @ X
 
 
+def _execution_plan_for_blocks(gms, groups, W: NDArray, tabmat_split):
+    """Build the compatibility plan and verify legacy solver-column spans."""
+    from ._group_matrix_execution import MatrixExecutionPlan
+
+    plan = MatrixExecutionPlan(
+        gms,
+        n=len(W),
+        ordinary_tabmat=tabmat_split is not None,
+        prepared_ordinary_split=tabmat_split,
+    )
+    plan.validate_group_spans(groups)
+    return plan
+
+
 def _block_xtwx(
     gms: list[GroupMatrix],
     groups: list,
@@ -932,62 +984,9 @@ def _block_xtwx(
     tabmat_split=None,
     profile: dict[str, Any] | None = None,
 ) -> NDArray:
-    """Compute X.T @ diag(W) @ X block-by-block.
-
-    Uses gm.gram(W) for diagonal blocks (O(n_bins) for discretized groups)
-    and _cross_gram for off-diagonal blocks (2D histogram for disc-disc pairs).
-    Avoids materializing the full (n, p_total) matrix.
-    When *tabmat_split* is provided, delegates to tabmat.SplitMatrix.sandwich.
-    """
-    _profile_count(profile, "block_calls")
-    if tabmat_split is not None:
-        t0 = perf_counter() if profile is not None else 0.0
-        result = np.asarray(tabmat_split.sandwich(W))
-        _profile_elapsed(profile, "block_tabmat_s", t0)
-        return result
-    p_total = sum(g.end - g.start for g in groups)
-    XtWX = np.zeros((p_total, p_total))
-    cache = _BlockWeightCache(profile)
-
-    for i, (gm_i, g_i) in enumerate(zip(gms, groups)):
-        sl_i = slice(g_i.start, g_i.end)
-        # Diagonal block
-        t0 = perf_counter() if profile is not None else 0.0
-        XtWX[sl_i, sl_i] = gm_i.gram(W)
-        if profile is not None:
-            (
-                _CategoricalGroupMatrix,
-                DiscretizedSCOPGroupMatrix,
-                DiscretizedSplineCategoricalGroupMatrix,
-                DiscretizedSSPGroupMatrix,
-                DiscretizedTensorGroupMatrix,
-                _SparseGroupMatrix,
-                _SparseSSPGroupMatrix,
-                SplineCategoricalGroupMatrix,
-            ) = _runtime_group_matrix_types()
-            if isinstance(gm_i, DiscretizedTensorGroupMatrix):
-                _profile_elapsed(profile, "block_diag_tensor_s", t0)
-            elif isinstance(
-                gm_i,
-                DiscretizedSSPGroupMatrix
-                | DiscretizedSCOPGroupMatrix
-                | DiscretizedSplineCategoricalGroupMatrix
-                | SplineCategoricalGroupMatrix,
-            ):
-                _profile_elapsed(profile, "block_diag_discrete_ssp_s", t0)
-            else:
-                _profile_elapsed(profile, "block_diag_other_s", t0)
-
-        # Cross blocks with subsequent groups
-        for j in range(i + 1, len(gms)):
-            gm_j = gms[j]
-            g_j = groups[j]
-            sl_j = slice(g_j.start, g_j.end)
-            cross = _cross_gram(gm_i, gm_j, W, cache, profile)
-            XtWX[sl_i, sl_j] = cross
-            XtWX[sl_j, sl_i] = cross.T
-
-    return XtWX
+    """Compatibility entry point for a weighted design Gram."""
+    plan = _execution_plan_for_blocks(gms, groups, W, tabmat_split)
+    return plan.moments(W, signed=False, profile=profile).gram
 
 
 def _block_xtwx_rhs(
@@ -999,78 +998,18 @@ def _block_xtwx_rhs(
     tabmat_split=None,
     profile: dict[str, Any] | None = None,
 ) -> tuple[NDArray, NDArray, NDArray]:
-    """Compute X'WX, X'W, and X'Wz in a single pass over the data.
-
-    For DiscretizedSSPGroupMatrix, shares the O(n) bincount between gram and
-    rmatvec operations.  Returns (XtWX, XtW1, XtWz) where XtW1 = X.T @ W
-    and XtWz = X.T @ Wz.
-    When *tabmat_split* is provided, delegates to tabmat.SplitMatrix.
-    """
-    (
-        _CategoricalGroupMatrix,
-        DiscretizedSCOPGroupMatrix,
-        DiscretizedSplineCategoricalGroupMatrix,
-        DiscretizedSSPGroupMatrix,
-        DiscretizedTensorGroupMatrix,
-        _SparseGroupMatrix,
-        _SparseSSPGroupMatrix,
-        SplineCategoricalGroupMatrix,
-    ) = _runtime_group_matrix_types()
-    _profile_count(profile, "block_calls")
-    if tabmat_split is not None:
-        t0 = perf_counter() if profile is not None else 0.0
-        XtWX = np.asarray(tabmat_split.sandwich(W))
-        XtW1 = np.asarray(tabmat_split.transpose_matvec(W))
-        XtWz_out = np.asarray(tabmat_split.transpose_matvec(Wz))
-        _profile_elapsed(profile, "block_tabmat_s", t0)
-        return XtWX, XtW1, XtWz_out
-    p_total = sum(g.end - g.start for g in groups)
-    XtWX = np.zeros((p_total, p_total))
-    XtW1 = np.zeros(p_total)
-    XtWz_out = np.zeros(p_total)
-    cache = _BlockWeightCache(profile)
-
-    for i, (gm_i, g_i) in enumerate(zip(gms, groups)):
-        sl_i = slice(g_i.start, g_i.end)
-        # Diagonal block + rmatvecs via shared bincount
-        if isinstance(gm_i, DiscretizedTensorGroupMatrix):
-            t0 = perf_counter() if profile is not None else 0.0
-            w_grid, wz_grid = cache.tensor_w_wz_grid(gm_i, W, Wz)
-            gram_i, xtw_i, xtwz_i = gm_i.gram_rmatvec_from_grids(w_grid, wz_grid)
-            XtWX[sl_i, sl_i] = gram_i
-            XtW1[sl_i] = xtw_i
-            XtWz_out[sl_i] = xtwz_i
-            _profile_elapsed(profile, "block_diag_tensor_s", t0)
-        elif isinstance(
-            gm_i,
-            DiscretizedSSPGroupMatrix
-            | DiscretizedSCOPGroupMatrix
-            | DiscretizedSplineCategoricalGroupMatrix
-            | SplineCategoricalGroupMatrix,
-        ):
-            t0 = perf_counter() if profile is not None else 0.0
-            gram_i, xtw_i, xtwz_i = gm_i.gram_rmatvec(W, Wz)
-            XtWX[sl_i, sl_i] = gram_i
-            XtW1[sl_i] = xtw_i
-            XtWz_out[sl_i] = xtwz_i
-            _profile_elapsed(profile, "block_diag_discrete_ssp_s", t0)
-        else:
-            t0 = perf_counter() if profile is not None else 0.0
-            XtWX[sl_i, sl_i] = gm_i.gram(W)
-            XtW1[sl_i] = gm_i.rmatvec(W)
-            XtWz_out[sl_i] = gm_i.rmatvec(Wz)
-            _profile_elapsed(profile, "block_diag_other_s", t0)
-
-        # Cross blocks with subsequent groups
-        for j in range(i + 1, len(gms)):
-            gm_j = gms[j]
-            g_j = groups[j]
-            sl_j = slice(g_j.start, g_j.end)
-            cross = _cross_gram(gm_i, gm_j, W, cache, profile)
-            XtWX[sl_i, sl_j] = cross
-            XtWX[sl_j, sl_i] = cross.T
-
-    return XtWX, XtW1, XtWz_out
+    """Compatibility entry point for a Gram, ``X'W``, and ``X'Wz``."""
+    plan = _execution_plan_for_blocks(gms, groups, W, tabmat_split)
+    moments = plan.moments(
+        W,
+        rhs=(Wz,),
+        include_xtw=True,
+        signed=False,
+        profile=profile,
+    )
+    if moments.xtw is None:  # pragma: no cover - guaranteed by include_xtw
+        raise RuntimeError("execution plan did not return X'W")
+    return moments.gram, moments.xtw, moments.xt_rhs[0]
 
 
 def _block_xtwx_signed(
@@ -1081,57 +1020,6 @@ def _block_xtwx_signed(
     tabmat_split=None,
     profile: dict[str, Any] | None = None,
 ) -> NDArray:
-    """Like _block_xtwx but safe for arbitrary-sign weights.
-
-    Uses _gram_any_sign for diagonal blocks (avoids sqrt(W) in Dense/Sparse
-    groups) and _cross_gram for off-diagonals (already sign-safe).
-    When *tabmat_split* is provided, delegates to tabmat.SplitMatrix.sandwich
-    (which handles any-sign weights natively).
-    """
-    _profile_count(profile, "block_calls")
-    if tabmat_split is not None:
-        t0 = perf_counter() if profile is not None else 0.0
-        result = np.asarray(tabmat_split.sandwich(W))
-        _profile_elapsed(profile, "block_tabmat_s", t0)
-        return result
-    p_total = sum(g.end - g.start for g in groups)
-    XtWX = np.zeros((p_total, p_total))
-    cache = _BlockWeightCache(profile)
-
-    for i, (gm_i, g_i) in enumerate(zip(gms, groups)):
-        sl_i = slice(g_i.start, g_i.end)
-        t0 = perf_counter() if profile is not None else 0.0
-        XtWX[sl_i, sl_i] = _gram_any_sign(gm_i, W)
-        if profile is not None:
-            (
-                _CategoricalGroupMatrix,
-                DiscretizedSCOPGroupMatrix,
-                DiscretizedSplineCategoricalGroupMatrix,
-                DiscretizedSSPGroupMatrix,
-                DiscretizedTensorGroupMatrix,
-                _SparseGroupMatrix,
-                _SparseSSPGroupMatrix,
-                SplineCategoricalGroupMatrix,
-            ) = _runtime_group_matrix_types()
-            if isinstance(gm_i, DiscretizedTensorGroupMatrix):
-                _profile_elapsed(profile, "block_diag_tensor_s", t0)
-            elif isinstance(
-                gm_i,
-                DiscretizedSSPGroupMatrix
-                | DiscretizedSCOPGroupMatrix
-                | DiscretizedSplineCategoricalGroupMatrix
-                | SplineCategoricalGroupMatrix,
-            ):
-                _profile_elapsed(profile, "block_diag_discrete_ssp_s", t0)
-            else:
-                _profile_elapsed(profile, "block_diag_other_s", t0)
-
-        for j in range(i + 1, len(gms)):
-            gm_j = gms[j]
-            g_j = groups[j]
-            sl_j = slice(g_j.start, g_j.end)
-            cross = _cross_gram(gm_i, gm_j, W, cache, profile)
-            XtWX[sl_i, sl_j] = cross
-            XtWX[sl_j, sl_i] = cross.T
-
-    return XtWX
+    """Compatibility entry point for an arbitrary-sign weighted Gram."""
+    plan = _execution_plan_for_blocks(gms, groups, W, tabmat_split)
+    return plan.moments(W, signed=True, profile=profile).gram

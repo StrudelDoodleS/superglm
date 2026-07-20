@@ -54,6 +54,16 @@ class _LevelTwoRecorder:
 
 # ── Basic solver tests ─────────────────────────────────────────
 class TestDirectSolverBasic:
+    def test_working_sums_reject_nonfinite_inputs_before_moment_assembly(self):
+        from superglm.solvers.irls_direct import _working_sums
+
+        with pytest.raises(ValueError, match="working weights"):
+            _working_sums(np.array([1.0, np.inf]), np.array([1.0, 2.0]))
+        with pytest.raises(ValueError, match="working response"):
+            _working_sums(np.array([1.0, 2.0]), np.array([1.0, np.nan]))
+
+        assert _working_sums(np.array([1.0, 2.0]), np.array([3.0, 4.0])) == (3.0, 7.0)
+
     def test_state_evaluation_accepts_in_place_custom_link(self):
         """Custom link methods may mutate writable arrays supplied by the solver."""
         from superglm.distributions import Poisson
@@ -143,6 +153,83 @@ class TestDirectSolverBasic:
         np.testing.assert_allclose(intermediate_inverse, retained_inverse)
         np.testing.assert_allclose(intermediate_gram, retained_gram)
 
+    def test_reml_geometry_is_the_full_intercept_profiled_hessian(self):
+        """The REML inverse/logdet contract includes the unpenalized intercept."""
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        x = np.linspace(-1.3, 1.7, 31)
+        X = np.column_stack((x + 7.0, x**2 - 4.0))
+        y = 0.4 + 0.8 * x - 0.2 * x**2
+        penalty = np.diag([0.7, 1.4])
+        dm = DesignMatrix([DenseGroupMatrix(X)], n=len(y), p=2)
+        groups = [GroupSlice(name="x", start=0, end=2)]
+
+        result, slope_inverse, raw_gram = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones_like(y),
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2=1.0,
+            S_override=penalty,
+            return_xtwx=True,
+        )
+
+        augmented_penalty = np.zeros((3, 3))
+        augmented_penalty[1:, 1:] = penalty
+        augmented_design = np.column_stack((np.ones(len(y)), X))
+        full_hessian = augmented_design.T @ augmented_design + augmented_penalty
+        expected_full_inverse = np.linalg.inv(full_hessian)
+
+        np.testing.assert_allclose(raw_gram, X.T @ X, rtol=1e-13, atol=1e-13)
+        np.testing.assert_allclose(
+            slope_inverse,
+            expected_full_inverse[1:, 1:],
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        assert result.log_det_H == pytest.approx(np.linalg.slogdet(full_hessian)[1], rel=1e-12)
+        assert result.reml_hessian_rank == 3
+
+        shifted = X + np.array([-11.0, 5.5])
+        shifted_result, shifted_inverse, _ = fit_irls_direct(
+            X=DesignMatrix([DenseGroupMatrix(shifted)], n=len(y), p=2),
+            y=y,
+            weights=np.ones_like(y),
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2=1.0,
+            S_override=penalty,
+            return_xtwx=True,
+        )
+        assert shifted_result.log_det_H == pytest.approx(result.log_det_H, rel=1e-12)
+        np.testing.assert_allclose(shifted_inverse, slope_inverse, rtol=1e-12, atol=1e-12)
+
+    def test_reml_hessian_rank_excludes_unidentified_unpenalized_aliases(self):
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        x = np.linspace(-1.0, 1.0, 24)
+        X = np.column_stack((x, x))
+        result, _, _ = fit_irls_direct(
+            X=DesignMatrix([DenseGroupMatrix(X)], n=len(x), p=2),
+            y=0.5 + x,
+            weights=np.ones_like(x),
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=[GroupSlice(name="aliased", start=0, end=2)],
+            lambda2=0.0,
+            S_override=np.zeros((2, 2)),
+            return_xtwx=True,
+        )
+
+        assert result.reml_hessian_rank == 2  # intercept plus one identifiable slope
+
     def test_reml_working_system_avoids_rebuilding_one_step_crossproducts(self, monkeypatch):
         import superglm.solvers.irls_direct as irls_direct
         from superglm.distributions import Poisson
@@ -198,6 +285,65 @@ class TestDirectSolverBasic:
         assert np.all(np.isfinite(result.beta))
         assert np.all(np.isfinite(inverse))
         assert np.all(np.isfinite(gram))
+
+    def test_scop_candidate_can_skip_unused_generic_reml_decomposition(self, monkeypatch):
+        """A private SCOP candidate may omit geometry replaced by its joint Hessian."""
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+
+        x = np.linspace(-1.0, 1.0, 80)
+        raw = np.column_stack((x, x**2, x**3))
+        y = 0.3 + 0.8 * x - 0.2 * x**2
+        dm = DesignMatrix([DenseGroupMatrix(raw)], n=len(y), p=raw.shape[1])
+        groups = [GroupSlice(name="x", start=0, end=raw.shape[1])]
+        common = {
+            "X": dm,
+            "y": y,
+            "weights": np.ones_like(y),
+            "family": Gaussian(),
+            "link": IdentityLink(),
+            "groups": groups,
+            "lambda2": 0.25,
+            "max_iter": 3,
+            "return_xtwx": True,
+        }
+
+        original = irls_direct.decompose_gram
+        decomposition_calls = 0
+
+        def counted(matrix, *args, **kwargs):
+            nonlocal decomposition_calls
+            decomposition_calls += 1
+            return original(matrix, *args, **kwargs)
+
+        monkeypatch.setattr(irls_direct, "decompose_gram", counted)
+        retained, _, _ = irls_direct.fit_irls_direct(**common)
+        retained_geometry_calls = decomposition_calls
+        assert retained.rank_info is not None
+
+        with pytest.raises(
+            ValueError,
+            match="requires rank metadata and fit statistics to be disabled",
+        ):
+            irls_direct.fit_irls_direct(**common, _compute_reml_geometry=False)
+
+        decomposition_calls = 0
+        candidate, omitted_inverse, candidate_gram = irls_direct.fit_irls_direct(
+            **common,
+            compute_rank_info=False,
+            _compute_fit_statistics=False,
+            _compute_reml_geometry=False,
+        )
+
+        assert retained_geometry_calls - decomposition_calls == 3
+        assert omitted_inverse.shape == (0, 0)
+        assert candidate.log_det_H is None
+        assert candidate.reml_hessian_rank is None
+        assert candidate.rank_info is None
+        assert np.isnan(candidate.effective_df)
+        assert np.isnan(candidate.phi)
+        assert np.all(np.isfinite(candidate_gram))
 
     def test_skips_extrema_scans_when_diagnostics_disabled(self, monkeypatch):
         import superglm.solvers.irls_direct as irls_direct
@@ -460,22 +606,14 @@ class TestDirectSolverBasic:
         dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
         groups = [GroupSlice(name="x", start=0, end=2)]
 
-        original_raw = irls_direct._block_xtwx_rhs
         original_centered = irls_direct.build_centered_system
-        raw_calls = 0
         centered_calls = 0
-
-        def counting_block_xtwx_rhs(*args, **kwargs):
-            nonlocal raw_calls
-            raw_calls += 1
-            return original_raw(*args, **kwargs)
 
         def counting_centered_system(*args, **kwargs):
             nonlocal centered_calls
             centered_calls += 1
             return original_centered(*args, **kwargs)
 
-        monkeypatch.setattr(irls_direct, "_block_xtwx_rhs", counting_block_xtwx_rhs)
         monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
 
         result, _ = irls_direct.fit_irls_direct(
@@ -492,7 +630,6 @@ class TestDirectSolverBasic:
 
         assert result.n_iter > 1
         assert centered_calls == 1
-        assert raw_calls == 0
 
     def test_constant_weight_cache_preserves_solution(self, monkeypatch):
         """Reusing X'WX does not change the fitted coefficients."""
@@ -543,6 +680,69 @@ class TestDirectSolverBasic:
         assert cached.intercept == pytest.approx(uncached.intercept, abs=1e-12)
         assert cached.deviance == pytest.approx(uncached.deviance, abs=1e-12)
 
+    def test_distribution_subclass_cannot_inherit_constant_weight_cache(self, monkeypatch):
+        """Behavior-changing family subclasses must rebuild their weighted Gram."""
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gaussian, Poisson
+        from superglm.links import IdentityLink
+
+        class PoissonVarianceGaussian(Gaussian):
+            variance = Poisson.variance
+            variance_derivative = Poisson.variance_derivative
+            variance_second_derivative = Poisson.variance_second_derivative
+            deviance_unit = Poisson.deviance_unit
+
+        rng = np.random.default_rng(77)
+        n = 200
+        x = np.linspace(-1.0, 1.0, n)
+        X_raw = np.column_stack((x, x**2))
+        mean = 3.0 + 0.8 * x + 0.3 * x**2
+        y = rng.poisson(mean).astype(np.float64)
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
+        groups = [GroupSlice(name="x", start=0, end=2)]
+        family = PoissonVarianceGaussian()
+        link = IdentityLink()
+        original_centered = irls_direct.build_centered_system
+        centered_calls = 0
+
+        def counting_centered_system(*args, **kwargs):
+            nonlocal centered_calls
+            centered_calls += 1
+            return original_centered(*args, **kwargs)
+
+        assert not irls_direct._has_constant_irls_weights(family, link)
+        monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
+        actual, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones(n),
+            family=family,
+            link=link,
+            groups=groups,
+            lambda2=0.0,
+            max_iter=50,
+            tol=1e-10,
+        )
+        assert centered_calls > 1
+
+        monkeypatch.setattr(irls_direct, "_has_constant_irls_weights", lambda *_: False)
+        reference, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones(n),
+            family=family,
+            link=link,
+            groups=groups,
+            lambda2=0.0,
+            max_iter=50,
+            tol=1e-10,
+        )
+
+        assert actual.converged and reference.converged
+        np.testing.assert_allclose(actual.beta, reference.beta, rtol=0.0, atol=1e-13)
+        assert actual.intercept == pytest.approx(reference.intercept, abs=1e-13)
+        assert actual.deviance == pytest.approx(reference.deviance, abs=1e-13)
+
     def test_gamma_log_reuses_centered_gram_when_working_response_changes(self, monkeypatch):
         """Constant Gamma-log weights must not rebuild the invariant Gram."""
         import superglm.solvers.irls_direct as irls_direct
@@ -566,6 +766,7 @@ class TestDirectSolverBasic:
 
         monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
 
+        profile: dict[str, float | int] = {}
         result, _ = irls_direct.fit_irls_direct(
             X=dm,
             y=y,
@@ -576,14 +777,139 @@ class TestDirectSolverBasic:
             lambda2=0.1,
             max_iter=4,
             tol=0.0,
+            profile=profile,
         )
 
         assert result.n_iter == 4
         assert centered_calls == 1
+        assert "irls_observed_newton_rescues" not in profile
+        assert "irls_observed_newton_iters" not in profile
+
+    def test_gamma_log_keeps_fisher_scoring_while_steps_are_accepted(self):
+        """Accepted Fisher steps must not trigger a clock-based curvature switch."""
+        from superglm.distributions import Gamma
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        rng = np.random.default_rng(122)
+        n = 500
+        p = 3
+        X_raw = rng.normal(size=(n, p))
+        beta = rng.normal(scale=1.2, size=p)
+        mu = np.exp(np.clip(0.2 + X_raw @ beta, -4.0, 4.0))
+        y = rng.gamma(shape=0.2, scale=mu / 0.2)
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=p)
+        groups = [GroupSlice(name="x", start=0, end=p)]
+
+        fisher, _ = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=groups,
+            lambda2=0.0,
+            tol=1e-10,
+            _use_observed_newton=False,
+        )
+        profile = {}
+        controlled, controlled_inverse = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=groups,
+            lambda2=0.0,
+            tol=1e-10,
+            profile=profile,
+        )
+
+        assert controlled.n_iter == fisher.n_iter
+        assert "irls_observed_newton_rescues" not in profile
+        assert "irls_observed_newton_iters" not in profile
+        np.testing.assert_allclose(controlled.beta, fisher.beta, rtol=0, atol=0)
+        assert controlled.intercept == fisher.intercept
+        assert controlled.deviance == fisher.deviance
+        centered_X = X_raw - np.mean(X_raw, axis=0)
+        expected_fisher_inverse = np.linalg.inv(centered_X.T @ centered_X)
+        np.testing.assert_allclose(
+            controlled_inverse,
+            expected_fisher_inverse,
+            rtol=2e-12,
+            atol=2e-13,
+        )
+
+    def test_gamma_log_observed_controller_rescues_then_falls_back_atomically(self, monkeypatch):
+        """A Fisher rejection enables one observed attempt; its rejection restores Fisher."""
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gamma
+        from superglm.links import LogLink
+        from superglm.solvers.irls_state import _IRLSStepDecision
+
+        rng = np.random.default_rng(459)
+        n = 160
+        X_raw = rng.normal(size=(n, 3))
+        mu = np.exp(0.1 + X_raw @ np.array([0.2, -0.3, 0.4]))
+        y = rng.gamma(shape=2.0, scale=mu / 2.0)
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=3)
+        groups = [GroupSlice(name="x", start=0, end=3)]
+
+        original_rows = irls_direct.coefficient_working_rows
+        curvature_requests: list[bool] = []
+
+        def recording_rows(*args, **kwargs):
+            curvature_requests.append(bool(kwargs["prefer_observed"]))
+            return original_rows(*args, **kwargs)
+
+        original_select = irls_direct._select_irls_trial
+        selection_calls = 0
+
+        def reject_first_fisher_and_observed(*args, **kwargs):
+            nonlocal selection_calls
+            selection_calls += 1
+            if selection_calls <= 2:
+                return _IRLSStepDecision(0.0, 0, True, trials_attempted=21)
+            return original_select(*args, **kwargs)
+
+        monkeypatch.setattr(irls_direct, "coefficient_working_rows", recording_rows)
+        monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_first_fisher_and_observed)
+
+        profile: dict[str, float | int] = {}
+        result, final_inverse = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=groups,
+            lambda2=0.0,
+            tol=1e-10,
+            max_iter=30,
+            profile=profile,
+            record_diagnostics=True,
+        )
+
+        assert curvature_requests[:3] == [False, True, False]
+        assert profile["irls_observed_newton_rescues"] == 1
+        assert profile["irls_observed_newton_iters"] == 1
+        assert profile["irls_observed_newton_rejections"] == 1
+        assert result.converged
+        assert result.iteration_log is not None
+        assert result.iteration_log[0].termination_reason == "curvature_rescue"
+        assert result.iteration_log[1].termination_reason == "curvature_fallback"
+        centered_X = X_raw - np.mean(X_raw, axis=0)
+        np.testing.assert_allclose(
+            final_inverse,
+            np.linalg.inv(centered_X.T @ centered_X),
+            rtol=2e-12,
+            atol=2e-13,
+        )
 
     def test_qp_constraints_are_assembled_once_across_iterations(self, monkeypatch):
         """QP constraint blocks are fixed for a fit and should not be rebuilt per IRLS step."""
         import superglm.solvers.irls_direct as irls_direct
+        from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -605,13 +931,20 @@ class TestDirectSolverBasic:
         ]
 
         original_qp = irls_direct.solve_constrained_qp
+        original_moments = MatrixExecutionPlan._moments_prevalidated
         constraint_matrices = []
+        moment_plan_ids = []
 
         def recording_qp(H, g, A, b, *args, **kwargs):
             constraint_matrices.append(A)
             return original_qp(H, g, A, b, *args, **kwargs)
 
+        def recording_moments(self, *args, **kwargs):
+            moment_plan_ids.append(id(self))
+            return original_moments(self, *args, **kwargs)
+
         monkeypatch.setattr(irls_direct, "solve_constrained_qp", recording_qp)
+        monkeypatch.setattr(MatrixExecutionPlan, "_moments_prevalidated", recording_moments)
 
         result, _ = irls_direct.fit_irls_direct(
             X=dm,
@@ -627,6 +960,8 @@ class TestDirectSolverBasic:
 
         assert result.n_iter == 3
         assert len({id(A) for A in constraint_matrices}) == 1
+        assert moment_plan_ids
+        assert set(moment_plan_ids) == {id(dm.execution_plan)}
 
     def test_variable_weight_fit_rebuilds_weighted_gram(self, monkeypatch):
         """Poisson log fits do not reuse X'WX because W changes with mu."""
@@ -648,22 +983,14 @@ class TestDirectSolverBasic:
         dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
         groups = [GroupSlice(name="x", start=0, end=2)]
 
-        original_raw = irls_direct._block_xtwx_rhs
         original_centered = irls_direct.build_centered_system
-        raw_calls = 0
         centered_calls = 0
-
-        def counting_block_xtwx_rhs(*args, **kwargs):
-            nonlocal raw_calls
-            raw_calls += 1
-            return original_raw(*args, **kwargs)
 
         def counting_centered_system(*args, **kwargs):
             nonlocal centered_calls
             centered_calls += 1
             return original_centered(*args, **kwargs)
 
-        monkeypatch.setattr(irls_direct, "_block_xtwx_rhs", counting_block_xtwx_rhs)
         monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
 
         result, _ = irls_direct.fit_irls_direct(
@@ -680,7 +1007,6 @@ class TestDirectSolverBasic:
 
         assert result.n_iter > 1
         assert centered_calls == result.n_iter + 1
-        assert raw_calls == 0
 
     def test_matches_bcd_ridge(self, poisson_data):
         """Direct solver with selection_penalty=0 should give similar deviance as BCD with tiny lambda1."""

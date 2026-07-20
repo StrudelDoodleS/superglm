@@ -912,6 +912,19 @@ class TestInteractionAPI:
         model.fit(X, y)
         assert isinstance(model._interaction_specs["x:cat"], SplineCategorical)
 
+    def test_spline_shorthand_auto_detects_interaction_parent(self, simple_model_data):
+        X, y = simple_model_data
+        X = X.rename(columns={"cat": "z"})
+        model = SuperGLM(
+            splines=["x"],
+            n_knots=5,
+            interactions=[("x", "z")],
+        )
+
+        model.fit(X, y)
+
+        assert isinstance(model._interaction_specs["x:z"], SplineCategorical)
+
     def test_auto_detect_swaps_spline_cat(self, simple_model_data):
         X, y = simple_model_data
         model = SuperGLM(

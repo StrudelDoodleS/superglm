@@ -301,12 +301,10 @@ class Tweedie:
         return self.p * (self.p - 1) * np.power(mu, self.p - 2)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
-        """Tweedie unit deviance."""
-        p = self.p
-        t1 = np.where(y > 0, np.power(y, 2 - p) / ((1 - p) * (2 - p)), 0.0)
-        t2 = y * np.power(mu, 1 - p) / (1 - p)
-        t3 = np.power(mu, 2 - p) / (2 - p)
-        return 2 * (t1 - t2 + t3)
+        """Tweedie unit deviance evaluated without close-mean cancellation."""
+        from superglm.profiling.tweedie import _tweedie_positive_unit_deviance
+
+        return _tweedie_positive_unit_deviance(y, mu, self.p)
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Tweedie log-likelihood via exact Wright-Bessel evaluation."""
@@ -360,6 +358,8 @@ def validate_response(y: NDArray, family: Distribution) -> None:
     Raises ValueError for invalid responses (e.g. non-binary for binomial,
     negative for Poisson/Gamma).
     """
+    if not np.all(np.isfinite(y)):
+        raise ValueError("Response y must contain only finite values")
     if isinstance(family, Binomial):
         bad = ~np.isin(y, [0, 1])
         if np.any(bad):
@@ -369,6 +369,23 @@ def validate_response(y: NDArray, family: Distribution) -> None:
                 f"Binomial family requires y in {{0, 1}}, "
                 f"but found {n_bad} invalid values (e.g. {vals})."
             )
+    elif isinstance(family, Poisson):
+        if np.any(y < 0.0):
+            raise ValueError("Poisson family requires nonnegative y")
+    elif isinstance(family, NegativeBinomial):
+        if np.any(y < 0.0):
+            raise ValueError("NegativeBinomial family requires nonnegative y")
+    elif isinstance(family, Gamma):
+        if np.any(y <= 0.0):
+            raise ValueError("Gamma family requires strictly positive y")
+    elif isinstance(family, Tweedie):
+        if np.any(y < 0.0):
+            raise ValueError("Tweedie family requires nonnegative y")
+
+    custom_hook = getattr(family, "validate_response", None)
+    hook_function = getattr(custom_hook, "__func__", custom_hook)
+    if callable(custom_hook) and hook_function is not validate_response:
+        custom_hook(y)
 
 
 def initial_mean(y: NDArray, weights: NDArray, family: Distribution) -> float:

@@ -86,6 +86,11 @@ def initialize_spec(
 ) -> None:
     """Initialize a spline spec's public config and mutable build-time state."""
     constraint_kind, constraint_mode = _normalize_constraint(constraint)
+    if degree == 0 and constraint_kind in {"convex", "concave"}:
+        raise ValueError(
+            f"degree=0 splines are discontinuous and cannot represent a classical "
+            f"{constraint_kind} curve; use degree>=1"
+        )
 
     spec.constraint_kind = constraint_kind
     spec.constraint_mode = constraint_mode

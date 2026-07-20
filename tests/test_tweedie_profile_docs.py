@@ -46,7 +46,7 @@ def test_tweedie_family_guide_documents_current_profile_contract():
     assert "per-exposure response" in tweedie
     assert "p_range=" not in tweedie
     assert "p_bounds=(1.1, 1.9)" in tweedie
-    assert '`phi_method="mle"` and `method="brent"` are the defaults' in tweedie
+    assert '`phi_method="mle"` and `method="auto"` are the defaults' in tweedie
     assert '`phi_method="pearson"` is an explicit fast plug-in' in tweedie
     assert "`result.ci()` is explicit and potentially expensive" in tweedie
     assert "φ / wᵢ" in tweedie
@@ -64,7 +64,7 @@ def test_tweedie_notebook_removes_stale_pearson_default_claims():
 
     assert "default Pearson profile" not in source
     assert "Pearson moments by default" not in source
-    assert "Nested MLE is the default" in source
+    assert "Exact joint ML is the default" in source
     assert "Pearson plug-in is explicit" in source
     assert "`result.ci()`" in source
     assert "Zero-weight observations must be removed" in source

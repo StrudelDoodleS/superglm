@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
-from superglm.distributions import NegativeBinomial, Tweedie
+from superglm.distributions import Gamma, NegativeBinomial, Tweedie
 from superglm.features.spline import CubicRegressionSpline
 from superglm.group_matrix import SparseSSPGroupMatrix
 from superglm.profiling.tweedie import generate_tweedie_cpg
@@ -24,6 +24,11 @@ class TestREMLFiniteDifference:
         """Build a fitted model with two CRS splines for FD checks."""
         from superglm.group_matrix import DiscretizedSSPGroupMatrix
         from superglm.reml import build_penalty_caches
+        from superglm.reml.penalty_algebra import compute_penalty_nullity
+        from superglm.reml.scale import (
+            prepare_gamma_reml_scale_data,
+            profile_gamma_reml_scale,
+        )
         from superglm.solvers.irls_direct import (
             _build_penalty_matrix,
             fit_irls_direct,
@@ -92,9 +97,17 @@ class TestREMLFiniteDifference:
         p_dim = XtWX.shape[0]
         S = _build_penalty_matrix(m._dm.group_matrices, m._groups, lambdas, p_dim)
         pq = float(pirls_result.beta @ S @ pirls_result.beta)
-        M_p = sum(c.rank for c in penalty_caches.values())
+        assert pirls_result.reml_hessian_rank is not None
+        M_p = compute_penalty_nullity(S, hessian_rank=pirls_result.reml_hessian_rank)
         phi_hat = 1.0
-        if not getattr(m._distribution, "scale_known", True):
+        if isinstance(m._distribution, Gamma):
+            scale_profile = profile_gamma_reml_scale(
+                prepare_gamma_reml_scale_data(y, sample_weight),
+                pirls_result.deviance + pq,
+                M_p,
+            )
+            phi_hat = scale_profile.phi
+        elif not getattr(m._distribution, "scale_known", True):
             phi_hat = max((pirls_result.deviance + pq) / max(n - M_p, 1.0), 1e-10)
 
         return (
@@ -139,6 +152,7 @@ class TestREMLFiniteDifference:
             reml_groups,
             penalty_ranks,
             phi_hat=phi_hat,
+            inverse_phi=1.0 / phi_hat,
         )
 
         eps = 1e-5
@@ -179,6 +193,7 @@ class TestREMLFiniteDifference:
         but holds W fixed. FD re-solves PIRLS, so W changes. The residual
         includes both the fixed-W approximation and higher-order IFT terms.
         """
+        from superglm.reml.penalty_algebra import compute_penalty_nullity
         from superglm.solvers.irls_direct import (
             _build_penalty_matrix,
             fit_irls_direct,
@@ -223,7 +238,6 @@ class TestREMLFiniteDifference:
         eps = 1e-4
         group_names = [g.name for _, g in reml_groups]
         p_dim = XtWX.shape[0]
-        M_p = sum(c.rank for c in penalty_caches.values())
         m_groups = len(reml_groups)
         fd_hess = np.zeros((m_groups, m_groups))
 
@@ -252,6 +266,11 @@ class TestREMLFiniteDifference:
                 if not getattr(m._distribution, "scale_known", True):
                     S_pert = _build_penalty_matrix(m._dm.group_matrices, m._groups, lam_pert, p_dim)
                     pq_pert = float(result_pert.beta @ S_pert @ result_pert.beta)
+                    assert result_pert.reml_hessian_rank is not None
+                    M_p = compute_penalty_nullity(
+                        S_pert,
+                        hessian_rank=result_pert.reml_hessian_rank,
+                    )
                     phi_pert = max((result_pert.deviance + pq_pert) / max(n - M_p, 1.0), 1e-10)
 
                 grad_pert = m._reml_direct_gradient(
@@ -566,6 +585,7 @@ class TestREMLFiniteDifference:
         with dH_extra should match better than without (for Poisson; for
         Gamma the correction is zero so both are equivalent).
         """
+        from superglm.reml.penalty_algebra import compute_penalty_nullity
         from superglm.solvers.irls_direct import (
             _build_penalty_matrix,
             fit_irls_direct,
@@ -640,7 +660,6 @@ class TestREMLFiniteDifference:
         eps = 1e-4
         group_names = [g.name for _, g in reml_groups]
         p_dim = XtWX.shape[0]
-        M_p = sum(c.rank for c in penalty_caches.values())
         m_groups = len(reml_groups)
         fd_hess = np.zeros((m_groups, m_groups))
 
@@ -668,6 +687,11 @@ class TestREMLFiniteDifference:
                 if not getattr(m._distribution, "scale_known", True):
                     S_pert = _build_penalty_matrix(m._dm.group_matrices, m._groups, lam_pert, p_dim)
                     pq_pert = float(result_pert.beta @ S_pert @ result_pert.beta)
+                    assert result_pert.reml_hessian_rank is not None
+                    M_p = compute_penalty_nullity(
+                        S_pert,
+                        hessian_rank=result_pert.reml_hessian_rank,
+                    )
                     phi_pert = max((result_pert.deviance + pq_pert) / max(n - M_p, 1.0), 1e-10)
 
                 # Total gradient = partial + W correction
@@ -723,17 +747,8 @@ class TestREMLFiniteDifference:
                     f"fd={fd_hess[i, j]:.6f}, rel_err={rel_err:.4f}"
                 )
 
-    def test_hessian_diagonal_uses_total_gradient(self):
-        """Regression: Hessian diagonal must use the total gradient.
-
-        Wood (2011) eq 6.2: H[i,i] += g_i + 0.5*r_j where g_i is the
-        *total* gradient (partial + W(rho) correction).  For Poisson/log,
-        the W(rho) correction is nonzero, so passing total vs partial
-        gradient should produce different Hessian diagonals.
-
-        This test ensures the bug of passing grad_partial instead of
-        grad (total) to reml_direct_hessian() never recurs.
-        """
+    def test_total_gradient_would_add_w_correction_twice_on_diagonal(self):
+        """Passing total g adds exactly the separately differentiated W term."""
         (
             m,
             y,
@@ -774,7 +789,9 @@ class TestREMLFiniteDifference:
         grad_total = grad_partial + w_corr[0]
         dH_extra = w_corr[1]
 
-        # Hessian with total gradient (correct per Wood 2011)
+        # dH_extra already adds W_i to the inverse-product term.  Supplying
+        # grad_total here would add the first derivative once more through
+        # the fixed-W diagonal identity g_partial + rank/2.
         hess_total = m._reml_direct_hessian(
             XtWX_S_inv,
             lambdas,
@@ -788,7 +805,7 @@ class TestREMLFiniteDifference:
             dH_extra=dH_extra,
         )
 
-        # Hessian with partial gradient (the old bug)
+        # The production call must use this fixed-W gradient.
         hess_partial = m._reml_direct_hessian(
             XtWX_S_inv,
             lambdas,
@@ -802,11 +819,11 @@ class TestREMLFiniteDifference:
             dH_extra=dH_extra,
         )
 
-        # The diagonals must differ (W correction is nonzero for Poisson)
-        diag_diff = np.abs(np.diag(hess_total) - np.diag(hess_partial))
-        assert np.any(diag_diff > 1e-8), (
-            "Poisson/log: Hessian diagonal should differ between total and "
-            f"partial gradient, but max diff = {diag_diff.max():.2e}"
+        np.testing.assert_allclose(
+            np.diag(hess_total) - np.diag(hess_partial),
+            w_corr[0],
+            rtol=1e-12,
+            atol=1e-12,
         )
 
         # Off-diagonals must be identical (only the diagonal correction
@@ -856,6 +873,251 @@ class TestREMLFiniteDifference:
         # dH2_cross should be symmetric
         np.testing.assert_allclose(dH2_cross, dH2_cross.T, atol=1e-12)
 
+    def test_w_correction_differentiates_entire_profiled_determinant(self):
+        """The W correction includes both log|H_c| and log(sum(W))."""
+        from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+        from superglm.links import stabilize_eta
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+
+        (
+            m,
+            _y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            _penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            _XtWX,
+            _phi_hat,
+            _n,
+        ) = self._setup_model("nb2")
+
+        correction = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+            w_correction_order=1,
+        )
+        assert correction is not None
+
+        group_name = reml_groups[0][1].name
+        p = m._dm.p
+        S_base = _build_penalty_matrix(m._dm.group_matrices, m._groups, lambdas, p)
+        doubled = lambdas.copy()
+        doubled[group_name] *= 2.0
+        S_i = _build_penalty_matrix(m._dm.group_matrices, m._groups, doubled, p) - S_base
+
+        dbeta_i = -(XtWX_S_inv @ (S_i @ pirls_result.beta))
+        assert pirls_result.rank_info is not None
+        mean_x = np.asarray(pirls_result.rank_info.mean_x)
+        deta_i = m._dm.matvec(dbeta_i) - float(mean_x @ dbeta_i)
+        eta = stabilize_eta(
+            m._dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
+            m._link,
+        )
+        X_aug = np.column_stack((np.ones(m._dm.n), m._dm.toarray()))
+
+        def half_profiled_logdet(rho_step: float) -> float:
+            eta_step = stabilize_eta(eta + rho_step * deta_i, m._link)
+            mu_step = clip_mu(m._link.inverse(eta_step), m._distribution)
+            W_step = (
+                sample_weight
+                * m._link.deriv_inverse(eta_step) ** 2
+                / np.maximum(m._distribution.variance(mu_step), _VARIANCE_FLOOR)
+            )
+            lambda_step = lambdas.copy()
+            lambda_step[group_name] *= float(np.exp(rho_step))
+            S_step = _build_penalty_matrix(
+                m._dm.group_matrices,
+                m._groups,
+                lambda_step,
+                p,
+            )
+            H_aug = X_aug.T @ (W_step[:, None] * X_aug)
+            H_aug[1:, 1:] += S_step
+            sign, logdet = np.linalg.slogdet(H_aug)
+            assert sign > 0.0
+            return 0.5 * float(logdet)
+
+        eps = 2.0e-5
+        finite_difference = (half_profiled_logdet(eps) - half_profiled_logdet(-eps)) / (2.0 * eps)
+        analytic = 0.5 * float(np.sum(XtWX_S_inv * S_i)) + correction[0][0]
+
+        np.testing.assert_allclose(analytic, finite_difference, rtol=2e-7, atol=2e-8)
+
+    def test_w_correction_order2_includes_log_weight_sum_curvature(self):
+        """Second derivatives include curvature of the profiled scalar factor."""
+        from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+        from superglm.links import stabilize_eta
+        from superglm.reml import compute_d2W_deta2
+        from superglm.solvers.irls_direct import _build_penalty_matrix
+
+        (
+            m,
+            _y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            _penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            _XtWX,
+            _phi_hat,
+            _n,
+        ) = self._setup_model("nb2")
+        correction = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+            w_correction_order=2,
+        )
+        assert correction is not None and correction[2] is not None
+
+        group_name = reml_groups[0][1].name
+        p = m._dm.p
+        S_base = _build_penalty_matrix(m._dm.group_matrices, m._groups, lambdas, p)
+        doubled = lambdas.copy()
+        doubled[group_name] *= 2.0
+        S_i = _build_penalty_matrix(m._dm.group_matrices, m._groups, doubled, p) - S_base
+        dbeta_i = -(XtWX_S_inv @ (S_i @ pirls_result.beta))
+
+        assert pirls_result.rank_info is not None
+        mean_x = np.asarray(pirls_result.rank_info.mean_x)
+        sum_w = float(pirls_result.rank_info.sum_w)
+        X_centered = m._dm.toarray() - mean_x
+        deta_i = X_centered @ dbeta_i
+        eta = stabilize_eta(
+            m._dm.matvec(pirls_result.beta) + pirls_result.intercept + offset_arr,
+            m._link,
+        )
+        mu = clip_mu(m._link.inverse(eta), m._distribution)
+        dW_deta = compute_dW_deta(m._link, m._distribution, mu, eta, sample_weight)
+        d2W_deta2 = compute_d2W_deta2(m._link, m._distribution, mu, eta, sample_weight)
+        assert dW_deta is not None and d2W_deta2 is not None
+
+        a_i = dW_deta * deta_i
+        dmean_i = (X_centered.T @ a_i) / sum_w
+        rhs = X_centered.T @ (dW_deta * deta_i**2) + 2.0 * (S_i @ dbeta_i)
+        d2beta_ii = dbeta_i - XtWX_S_inv @ rhs
+        d2eta_ii = X_centered @ d2beta_ii - float(dmean_i @ dbeta_i)
+        d2w_ii = d2W_deta2 * deta_i**2 + dW_deta * d2eta_ii
+        C_ii = X_centered.T @ (d2w_ii[:, None] * X_centered)
+        C_ii -= 2.0 * sum_w * np.outer(dmean_i, dmean_i)
+        matrix_curvature = 0.5 * float(np.sum(XtWX_S_inv * C_ii))
+
+        def half_log_weight_sum(rho_step: float) -> float:
+            eta_step = stabilize_eta(
+                eta + rho_step * deta_i + 0.5 * rho_step**2 * d2eta_ii,
+                m._link,
+            )
+            mu_step = clip_mu(m._link.inverse(eta_step), m._distribution)
+            W_step = (
+                sample_weight
+                * m._link.deriv_inverse(eta_step) ** 2
+                / np.maximum(m._distribution.variance(mu_step), _VARIANCE_FLOOR)
+            )
+            return 0.5 * float(np.log(np.sum(W_step)))
+
+        eps = 2.0e-3
+        scalar_curvature_fd = (
+            half_log_weight_sum(eps) - 2.0 * half_log_weight_sum(0.0) + half_log_weight_sum(-eps)
+        ) / eps**2
+
+        np.testing.assert_allclose(
+            correction[2][0, 0],
+            matrix_curvature + scalar_curvature_fd,
+            rtol=3e-5,
+            atol=2e-8,
+        )
+
+    def test_w_correction_order2_matches_fd_of_centered_hessian_derivative(self):
+        """Order-2 correction differentiates the profiled-intercept Hessian."""
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model("poisson")
+        del penalty_ranks, XtWX, phi_hat, n
+
+        base = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+            w_correction_order=2,
+        )
+        assert base is not None and base[2] is not None
+        analytic = base[2]
+        names = [group.name for _, group in reml_groups]
+        eps = 1e-3
+        fd = np.zeros_like(analytic)
+
+        for j, name in enumerate(names):
+            derivative_matrices = []
+            for sign in (-1.0, 1.0):
+                perturbed = lambdas.copy()
+                perturbed[name] *= float(np.exp(sign * eps))
+                result, inverse, _ = fit_irls_direct(
+                    X=m._dm,
+                    y=y,
+                    weights=sample_weight,
+                    family=m._distribution,
+                    link=m._link,
+                    groups=m._groups,
+                    lambda2=perturbed,
+                    offset=offset_arr,
+                    beta_init=pirls_result.beta,
+                    intercept_init=pirls_result.intercept,
+                    return_xtwx=True,
+                )
+                correction = m._reml_w_correction(
+                    result,
+                    inverse,
+                    perturbed,
+                    reml_groups,
+                    penalty_caches,
+                    sample_weight,
+                    offset_arr,
+                    w_correction_order=1,
+                )
+                assert correction is not None
+                derivative_matrices.append(correction[1])
+            for i in range(len(names)):
+                matrix_derivative = (derivative_matrices[1][i] - derivative_matrices[0][i]) / (
+                    2.0 * eps
+                )
+                fd[i, j] = 0.5 * float(np.sum(XtWX_S_inv * matrix_derivative))
+
+        np.testing.assert_allclose(analytic, fd, rtol=4e-3, atol=2e-5)
+
     def test_w_correction_order2_changes_hessian(self):
         """Order-2 W correction produces a different Hessian than order-1.
 
@@ -902,7 +1164,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             lambdas,
             reml_groups,
-            grad1,
+            grad_partial,
             penalty_ranks,
             penalty_caches=penalty_caches,
             pirls_result=pirls_result,
@@ -927,7 +1189,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             lambdas,
             reml_groups,
-            grad2,
+            grad_partial,
             penalty_ranks,
             penalty_caches=penalty_caches,
             pirls_result=pirls_result,
@@ -946,6 +1208,252 @@ class TestREMLFiniteDifference:
             "Poisson/log: order-2 Hessian should differ from order-1, "
             f"but max diff = {hess_diff.max():.2e}"
         )
+
+    def test_direct_optimizer_does_not_double_count_w_gradient_in_hessian(
+        self,
+        monkeypatch,
+    ):
+        """The diagonal S_i term uses the fixed-W gradient, not total gradient."""
+        import superglm.reml.direct as direct
+        from superglm.reml.gradient import reml_direct_gradient
+        from superglm.reml.penalty_algebra import coerce_reml_penalties
+
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            _pirls_result,
+            _XtWX_S_inv,
+            _XtWX,
+            _phi_hat,
+            _n,
+        ) = self._setup_model("poisson")
+        penalties = coerce_reml_penalties(
+            reml_groups=reml_groups,
+            group_matrices=m._dm.group_matrices,
+            penalty_caches=penalty_caches,
+        )
+        original_hessian = direct.reml_direct_hessian
+        checked = False
+
+        def checked_hessian(*args, **kwargs):
+            nonlocal checked
+            expected_partial = reml_direct_gradient(
+                args[0],
+                kwargs["pirls_result"],
+                args[2],
+                args[3],
+                phi_hat=kwargs["phi_hat"],
+                reml_penalties=kwargs["reml_penalties"],
+                penalty_caches=kwargs["penalty_caches"],
+            )
+            np.testing.assert_allclose(kwargs["gradient"], expected_partial, atol=1e-12)
+            checked = True
+            return original_hessian(*args, **kwargs)
+
+        monkeypatch.setattr(direct, "reml_direct_hessian", checked_hessian)
+        direct.optimize_direct_reml(
+            dm=m._dm,
+            distribution=m._distribution,
+            link=m._link,
+            groups=m._groups,
+            discrete=False,
+            y=y,
+            sample_weight=sample_weight,
+            offset_arr=offset_arr,
+            reml_groups=reml_groups,
+            penalty_ranks=penalty_ranks,
+            lambdas=lambdas.copy(),
+            max_reml_iter=1,
+            reml_tol=1e-6,
+            verbose=False,
+            penalty_caches=penalty_caches,
+            w_correction_order=2,
+            reml_penalties=penalties,
+        )
+        assert checked
+
+    def test_order2_hessian_matches_fd_of_total_gradient_for_poisson(self):
+        """Full order-2 curvature matches the total-gradient finite difference."""
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        (
+            m,
+            y,
+            sample_weight,
+            offset_arr,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            penalty_caches,
+            pirls_result,
+            XtWX_S_inv,
+            _XtWX,
+            phi_hat,
+            n,
+        ) = self._setup_model("poisson")
+        grad_partial = m._reml_direct_gradient(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_ranks,
+            phi_hat=phi_hat,
+        )
+        correction = m._reml_w_correction(
+            pirls_result,
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            penalty_caches,
+            sample_weight,
+            offset_arr,
+            w_correction_order=2,
+        )
+        assert correction is not None and correction[2] is not None
+        analytic = m._reml_direct_hessian(
+            XtWX_S_inv,
+            lambdas,
+            reml_groups,
+            grad_partial,
+            penalty_ranks,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=n,
+            phi_hat=phi_hat,
+            dH_extra=correction[1],
+            dH2_cross=correction[2],
+        )
+
+        names = [group.name for _, group in reml_groups]
+        eps = 1.0e-4
+        finite_difference = np.zeros_like(analytic)
+        for j, name in enumerate(names):
+            gradients = []
+            for sign in (-1.0, 1.0):
+                perturbed = lambdas.copy()
+                perturbed[name] *= float(np.exp(sign * eps))
+                result, inverse, _ = fit_irls_direct(
+                    X=m._dm,
+                    y=y,
+                    weights=sample_weight,
+                    family=m._distribution,
+                    link=m._link,
+                    groups=m._groups,
+                    lambda2=perturbed,
+                    offset=offset_arr,
+                    beta_init=pirls_result.beta,
+                    intercept_init=pirls_result.intercept,
+                    return_xtwx=True,
+                )
+                gradient = m._reml_direct_gradient(
+                    result,
+                    inverse,
+                    perturbed,
+                    reml_groups,
+                    penalty_ranks,
+                    phi_hat=phi_hat,
+                )
+                perturbed_correction = m._reml_w_correction(
+                    result,
+                    inverse,
+                    perturbed,
+                    reml_groups,
+                    penalty_caches,
+                    sample_weight,
+                    offset_arr,
+                    w_correction_order=1,
+                )
+                assert perturbed_correction is not None
+                gradients.append(gradient + perturbed_correction[0])
+            finite_difference[:, j] = (gradients[1] - gradients[0]) / (2.0 * eps)
+
+        np.testing.assert_allclose(analytic, finite_difference, rtol=2e-6, atol=2e-8)
+
+    def test_w_correction_is_stable_under_large_feature_translation(self, monkeypatch):
+        """Signed centered moments must not cancel for translated columns."""
+        import superglm.reml.w_derivatives as w_derivatives
+        from superglm.distributions import Poisson
+        from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.types import GroupSlice, PenaltyComponent
+
+        rng = np.random.default_rng(123)
+        x = np.linspace(-1.5, 1.5, 320)
+        y = rng.poisson(np.exp(0.25 + 0.35 * x)).astype(float)
+        weights = np.ones_like(x)
+        offset = np.zeros_like(x)
+        family = Poisson()
+        link = LogLink()
+        group = GroupSlice(name="x", start=0, end=1)
+        penalty = PenaltyComponent(
+            name="x",
+            group_name="x",
+            group_index=0,
+            group_sl=slice(0, 1),
+            omega_raw=np.ones((1, 1)),
+            omega_ssp=np.ones((1, 1)),
+            rank=1.0,
+            log_det_omega_plus=0.0,
+            eigvals_omega=np.ones(1),
+        )
+        lambdas = {"x": 4.0}
+        stable_gram_calls = 0
+        original_centered_gram_rhs = w_derivatives.centered_gram_rhs
+
+        def counted_centered_gram_rhs(**kwargs):
+            nonlocal stable_gram_calls
+            stable_gram_calls += 1
+            return original_centered_gram_rhs(**kwargs)
+
+        monkeypatch.setattr(w_derivatives, "centered_gram_rhs", counted_centered_gram_rhs)
+
+        def correction_for_shift(shift: float) -> tuple[np.ndarray, np.ndarray]:
+            dm = DesignMatrix(
+                [DenseGroupMatrix((x + shift)[:, None])],
+                n=len(x),
+                p=1,
+            )
+            result, inverse, _ = fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=weights,
+                family=family,
+                link=link,
+                groups=[group],
+                lambda2=lambdas,
+                offset=offset,
+                return_xtwx=True,
+                reml_penalties=[penalty],
+            )
+            correction = w_derivatives.reml_w_correction(
+                dm=dm,
+                link=link,
+                groups=[group],
+                pirls_result=result,
+                XtWX_S_inv=inverse,
+                lambdas=lambdas,
+                sample_weight=weights,
+                offset_arr=offset,
+                distribution=family,
+                w_correction_order=2,
+                reml_penalties=[penalty],
+            )
+            assert correction is not None and correction[2] is not None
+            return correction[0], correction[2]
+
+        base_gradient, base_hessian = correction_for_shift(0.0)
+        assert stable_gram_calls == 0, "well-scaled designs must retain the execution-plan hot path"
+        shifted_gradient, shifted_hessian = correction_for_shift(1.0e8)
+        assert stable_gram_calls > 0
+        np.testing.assert_allclose(shifted_gradient, base_gradient, rtol=2e-6, atol=2e-8)
+        np.testing.assert_allclose(shifted_hessian, base_hessian, rtol=2e-5, atol=2e-8)
 
     def test_fit_reml_w_correction_order2_converges(self):
         """fit_reml(w_correction_order=2) runs and converges on Poisson data."""

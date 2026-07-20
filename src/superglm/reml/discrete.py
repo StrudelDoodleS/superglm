@@ -15,100 +15,107 @@ import time as _time
 from typing import Any
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.distributions import clip_mu
+from superglm._fit_trace import TraceRun
+from superglm.distributions import Gamma, Gaussian, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
-from superglm.reml.objective import reml_laml_objective
+from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.penalty_algebra import (
     build_penalty_context,
     build_penalty_matrix,
     build_tensor_pair_logdet_summaries,
     coerce_reml_penalties,
+    compute_penalty_nullity,
     compute_total_penalty_rank,
     evaluate_tensor_pair_logdet_summaries,
 )
 from superglm.reml.result import REMLResult, _map_beta_between_bases
-from superglm.solvers.irls_direct import _safe_decompose_H, fit_irls_direct
+from superglm.reml.scale import (
+    GammaScaleProfileData,
+    prepare_gamma_reml_scale_data,
+    profile_gamma_reml_scale,
+    profile_gaussian_reml_scale,
+)
+from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
+from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 from superglm.types import GroupSlice, PenaltyComponent
 
 
-def _solve_cached_augmented(
-    XtWX: NDArray,
+def _solve_cached_profiled_system(
+    centered_XtWX: NDArray,
     S: NDArray,
-    XtWz: NDArray,
-    XtW1: NDArray,
+    centered_XtWz: NDArray,
+    mean_x: NDArray,
     sum_W: float,
-    sum_Wz: float,
-) -> tuple[NDArray, float]:
-    """Solve the augmented weighted LS system from cached gram quantities.
+    mean_z: float,
+) -> tuple[NDArray, float, float, int]:
+    """Solve one cached trial in the authoritative intercept-profiled geometry.
 
-    Returns (beta, intercept) without any data passes -- just O(p^3) Cholesky.
+    The stable centered data Gram and RHS are invariant while working weights
+    are cached.  Each lambda candidate therefore needs only one ``p x p``
+    decomposition of ``H_c = X_c' W X_c + S``.  The same decomposition solves
+    the coefficients, applies the shared retained-rank policy, and supplies
+    ``log(sum(W)) + log|H_c|_+`` for Wood's REML/LAML criterion.
     """
-    import scipy.linalg
-
-    p = XtWX.shape[0]
-    M_aug = np.empty((p + 1, p + 1))
-    M_aug[0, 0] = sum_W
-    M_aug[0, 1:] = XtW1
-    M_aug[1:, 0] = XtW1
-    M_aug[1:, 1:] = XtWX + S
-
-    rhs = np.empty(p + 1)
-    rhs[0] = sum_Wz
-    rhs[1:] = XtWz
-
-    try:
-        L = scipy.linalg.cholesky(M_aug, lower=True, check_finite=False)
-        beta_aug = scipy.linalg.cho_solve((L, True), rhs)
-    except np.linalg.LinAlgError:
-        eigvals, eigvecs = np.linalg.eigh(M_aug)
-        threshold = 1e-10 * max(eigvals.max(), 1e-12)
-        with np.errstate(divide="ignore"):
-            inv_eig = np.where(eigvals > threshold, 1.0 / eigvals, 0.0)
-        beta_aug = (eigvecs * inv_eig[None, :]) @ eigvecs.T @ rhs
-
-    return beta_aug[1:], float(beta_aug[0])
-
-
-def _solve_cached_h_system(
-    XtWX: NDArray,
-    S: NDArray,
-    XtWz: NDArray,
-    XtW1: NDArray,
-    sum_W: float,
-    sum_Wz: float,
-) -> tuple[NDArray, float, float]:
-    """Solve via H = XtWX + S and return (beta, intercept, log_det_H).
-
-    Uses a single factorization of the coefficient block H, then recovers the
-    intercept by Schur complement. This is especially useful for accepted-step
-    objective confirmation, where log|H| is also needed.
-    """
-    import scipy.linalg
-
-    H = XtWX + S
-    try:
-        L = scipy.linalg.cholesky(H, lower=True, check_finite=False)
-        h1 = scipy.linalg.cho_solve((L, True), XtWz)
-        h2 = scipy.linalg.cho_solve((L, True), XtW1)
-        denom = sum_W - float(XtW1 @ h2)
-        intercept = float((sum_Wz - XtW1 @ h1) / denom)
-        beta = h1 - h2 * intercept
-        log_det_H = 2.0 * float(np.sum(np.log(np.diag(L))))
-        return beta, intercept, log_det_H
-    except np.linalg.LinAlgError:
-        H_inv, log_det_H, _ = _safe_decompose_H(H)
-        h1 = H_inv @ XtWz
-        h2 = H_inv @ XtW1
-        denom = sum_W - float(XtW1 @ h2)
-        intercept = float((sum_Wz - XtW1 @ h1) / denom)
-        beta = h1 - h2 * intercept
-        return beta, intercept, log_det_H
+    if not np.isfinite(sum_W) or sum_W <= 0.0:
+        raise ValueError("cached sum_W must be positive and finite")
+    hessian = np.asarray(centered_XtWX + S, dtype=np.float64)
+    diagonal = np.diag(hessian)
+    beta = None
+    log_pdet = None
+    slope_rank = None
+    if np.all(np.isfinite(hessian)) and np.all(diagonal > 0.0):
+        column_scale = np.sqrt(diagonal)
+        equilibrated = hessian / np.outer(column_scale, column_scale)
+        equilibrated = 0.5 * (equilibrated + equilibrated.T)
+        try:
+            factor = scipy.linalg.cholesky(equilibrated, lower=True, check_finite=False)
+            matrix_norm = float(np.linalg.norm(equilibrated, ord=1))
+            reciprocal_condition, info = scipy.linalg.get_lapack_funcs("pocon", (factor,))(
+                factor,
+                matrix_norm,
+                uplo="L",
+            )
+            safely_full_rank = (
+                info == 0
+                and np.isfinite(reciprocal_condition)
+                and reciprocal_condition
+                > SHARED_RANK_POLICY.certification_band * SHARED_RANK_POLICY.gram_rcond
+            )
+            if safely_full_rank:
+                probe = np.arange(1.0, len(diagonal) + 1.0)
+                rhs = np.column_stack((centered_XtWz / column_scale, probe))
+                solutions = scipy.linalg.cho_solve(
+                    (factor, True),
+                    rhs,
+                    check_finite=False,
+                )
+                probe_residual = np.linalg.norm(equilibrated @ solutions[:, 1] - probe) / max(
+                    np.linalg.norm(probe),
+                    np.finfo(float).tiny,
+                )
+                if probe_residual <= 1.0e-6:
+                    beta = solutions[:, 0] / column_scale
+                    log_pdet = 2.0 * float(np.sum(np.log(np.diag(factor)))) + 2.0 * float(
+                        np.sum(np.log(column_scale))
+                    )
+                    slope_rank = len(diagonal)
+        except (np.linalg.LinAlgError, ValueError):
+            pass
+    if beta is None or log_pdet is None or slope_rank is None:
+        decomposition = decompose_gram(hessian)
+        beta = decomposition.solve(centered_XtWz)
+        log_pdet = decomposition.log_pdet
+        slope_rank = decomposition.rank
+    intercept = float(mean_z - mean_x @ beta)
+    log_det_H = float(np.log(sum_W) + log_pdet)
+    return beta, intercept, log_det_H, 1 + slope_rank
 
 
 def _shared_tensor_group_names(penalties: list[PenaltyComponent], group_matrices: list) -> set[str]:
@@ -168,13 +175,16 @@ def optimize_discrete_reml_cached_w(
     select_snap: bool = True,
     reml_penalties: list[PenaltyComponent] | None = None,
     estimated_names: set[str] | None = None,
+    debug_recorder=None,
+    trace_run: TraceRun | None = None,
 ) -> REMLResult:
     """POI fREML optimizer for the discrete path.
 
     Performance Oriented Iteration (mgcv bam-style): interleaves one
     PIRLS step (W update) with one Newton lambda step on the working
-    model's REML criterion.  Line search re-solves the cached augmented
-    system analytically (O(p^3), no data pass) for each trial lambda.
+    model's REML criterion. Line search re-solves the cached, stably centered
+    profiled-intercept system analytically (O(p^3), no data pass) for each
+    trial lambda.
 
     Typically converges in 5-15 total iterations instead of the old
     nested architecture's 200+ analytical iterations.
@@ -194,6 +204,12 @@ def optimize_discrete_reml_cached_w(
         penalty_caches=penalty_caches,
     )
     scale_known = getattr(distribution, "scale_known", True)
+    likelihood_size: float | None = None
+    gamma_scale_data: GammaScaleProfileData | None = None
+    if isinstance(distribution, Gaussian):
+        likelihood_size = float(np.sum(sample_weight, dtype=np.float64))
+    elif isinstance(distribution, Gamma):
+        gamma_scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
@@ -300,6 +316,10 @@ def optimize_discrete_reml_cached_w(
         cache_out=cache,
         direct_solve=direct_solve,
         S_override=S_boot,
+        debug_recorder=debug_recorder,
+        debug_context={"phase": "bootstrap", "reml_iteration": 0},
+        trace_run=trace_run,
+        trace_purpose="reml_bootstrap",
     )
     _t_pirls += _time.perf_counter() - _pirls_start
     dm = dm_boot
@@ -322,14 +342,45 @@ def optimize_discrete_reml_cached_w(
 
     # Bootstrap FP step for initial rho
     boot_phi = 1.0
+    boot_inv_phi = 1.0
+    boot_penalty_rank_total = compute_total_penalty_rank(penalties)
     if not scale_known and penalty_caches is not None:
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
-        M_p = compute_total_penalty_rank(penalties)
-        boot_phi = max((boot_result.deviance + pq_boot) / max(len(y) - M_p, 1.0), 1e-10)
+        if boot_result.reml_hessian_rank is None:
+            raise RuntimeError("discrete REML bootstrap is missing full-H rank metadata")
+        M_p = compute_penalty_nullity(
+            S_boot,
+            hessian_rank=boot_result.reml_hessian_rank,
+            penalties=penalties,
+            lambdas=boot_lambdas,
+        )
+        penalized_deviance = float(boot_result.deviance + pq_boot)
+        if isinstance(distribution, Gaussian):
+            assert likelihood_size is not None
+            boot_scale = profile_gaussian_reml_scale(
+                penalized_deviance,
+                likelihood_size,
+                M_p,
+            )
+            boot_phi = boot_scale.phi
+            boot_inv_phi = boot_scale.inverse_phi
+        elif isinstance(distribution, Gamma):
+            assert gamma_scale_data is not None
+            boot_scale = profile_gamma_reml_scale(
+                gamma_scale_data,
+                penalized_deviance,
+                M_p,
+            )
+            boot_phi = boot_scale.phi
+            boot_inv_phi = boot_scale.inverse_phi
+        else:
+            boot_phi = max(
+                penalized_deviance / max(len(y) - M_p, 1.0),
+                1e-10,
+            )
+            boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
     else:
         pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
-        M_p = compute_total_penalty_rank(penalties)
-    boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
     bootstrap_log_step_cap = 4.0
 
     # Store original fixed lambda values for exact restoration after exp->clip
@@ -441,6 +492,10 @@ def optimize_discrete_reml_cached_w(
             cache_out=cache,
             direct_solve=direct_solve,
             S_override=S_cand,
+            debug_recorder=debug_recorder,
+            debug_context={"phase": "candidate", "reml_iteration": poi_iter + 1},
+            trace_run=trace_run,
+            trace_purpose="reml_candidate",
         )
         _t_pirls += _time.perf_counter() - _t0
         _n_pirls_steps += 1
@@ -448,17 +503,18 @@ def optimize_discrete_reml_cached_w(
         warm_intercept = float(pirls_result.intercept)
         warm_deviance = float(pirls_result.deviance)
 
-        c_XtWz = cache["XtWz"]
-        c_XtW1 = cache["XtW1"]
+        c_centered_XtWX = cache["centered_XtWX"]
+        c_centered_XtWz = cache["centered_rhs"]
+        c_mean_x = cache["mean_x"]
+        c_mean_z = cache["mean_z"]
         c_sum_W = cache["sum_W"]
-        c_sum_Wz = cache["sum_Wz"]
 
         # Evaluate REML objective
         _t0 = _time.perf_counter()
         cand_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
             tensor_pair_summaries, cand_lambdas
         )
-        obj = reml_laml_objective(
+        objective_evaluation = reml_laml_objective(
             dm,
             distribution,
             link,
@@ -474,17 +530,69 @@ def optimize_discrete_reml_cached_w(
             S_override=S_cand,
             reml_penalties=penalties,
             tensor_pair_evaluations=cand_tensor_pair_evals,
+            likelihood_size=likelihood_size,
+            gamma_scale_data=gamma_scale_data,
+            return_evaluation=True,
         )
 
         phi_hat = 1.0
-        if not scale_known and penalty_caches is not None:
-            pq = float(pirls_result.beta @ S_cand @ pirls_result.beta)
-            M_p = compute_total_penalty_rank(
-                penalties,
-                tensor_pair_evaluations=cand_tensor_pair_evals,
-            )
-            phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
+        inverse_phi = 1.0
+        inverse_phi_derivative = None
+        penalty_nullity: float | None = None
+        if isinstance(objective_evaluation, REMLObjectiveEvaluation):
+            obj = objective_evaluation.value
+            penalty_nullity = objective_evaluation.penalty_nullity
+            profiled_scale = objective_evaluation.profiled_scale
+        else:
+            obj = float(objective_evaluation)
+            profiled_scale = None
+        if not scale_known:
+            if profiled_scale is not None:
+                phi_hat = profiled_scale.phi
+                inverse_phi = profiled_scale.inverse_phi
+                inverse_phi_derivative = profiled_scale.d_inverse_phi_d_penalized_deviance
+            else:
+                if penalty_nullity is None:
+                    if pirls_result.reml_hessian_rank is None:
+                        raise RuntimeError(
+                            "discrete REML iteration is missing full-H rank metadata"
+                        )
+                    penalty_nullity = compute_penalty_nullity(
+                        S_cand,
+                        hessian_rank=pirls_result.reml_hessian_rank,
+                        penalties=penalties,
+                        lambdas=cand_lambdas,
+                    )
+                if isinstance(objective_evaluation, REMLObjectiveEvaluation):
+                    penalized_deviance = objective_evaluation.penalized_deviance
+                else:
+                    pq = float(pirls_result.beta @ S_cand @ pirls_result.beta)
+                    penalized_deviance = float(pirls_result.deviance + pq)
+                phi_hat = max(
+                    penalized_deviance / max(len(y) - penalty_nullity, 1.0),
+                    1e-10,
+                )
+                inverse_phi = 1.0 / max(phi_hat, 1e-10)
         _t_objective += _time.perf_counter() - _t0
+        if trace_run is not None and trace_run.enabled:
+            if pirls_result.state_id is None:  # pragma: no cover - trace contract
+                raise RuntimeError("traced discrete REML candidate is missing its state ID")
+            trace_run.emit_lazy(
+                "evaluation",
+                lambda: {
+                    "state_id": pirls_result.state_id,
+                    "evaluation_id": pirls_result.evaluation_id,
+                    "solver": "discrete_reml",
+                    "phase": "candidate",
+                    "outer_iteration": poi_iter + 1,
+                    "objective": float(obj),
+                    "lambdas": cand_lambdas,
+                    "dispersion": float(phi_hat),
+                },
+                channel="reml",
+                purpose="reml_candidate",
+                authoritative=False,
+            )
 
         if obj < best_obj:
             best_obj = obj
@@ -501,6 +609,7 @@ def optimize_discrete_reml_cached_w(
             cand_lambdas,
             reml_penalties=penalties,
             phi_hat=phi_hat,
+            inverse_phi=inverse_phi,
             tensor_pair_evaluations=cand_tensor_pair_evals,
         )
         hess = reml_direct_hessian(
@@ -513,6 +622,9 @@ def optimize_discrete_reml_cached_w(
             pirls_result=pirls_result,
             n_obs=len(y),
             phi_hat=phi_hat,
+            inverse_phi=inverse_phi,
+            d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
+            penalty_nullity=penalty_nullity if not scale_known else None,
             reml_penalties=penalties,
             tensor_pair_evaluations=cand_tensor_pair_evals,
         )
@@ -633,7 +745,7 @@ def optimize_discrete_reml_cached_w(
                 trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
             trial_lambdas.update(fixed_lambdas)
 
-            # Solve augmented system analytically (O(p^3), no data pass)
+            # Build the trial penalty before the cached profiled solve.
             S_trial = build_penalty_matrix(
                 dm.group_matrices,
                 groups,
@@ -659,15 +771,18 @@ def optimize_discrete_reml_cached_w(
                 )
                 break
 
-            # Solve augmented system analytically (O(p^3), no data pass).
+            # Solve the cached profiled-intercept system analytically
+            # (O(p^3), no data pass).
             _tls0 = _time.perf_counter()
-            beta_trial, intercept_trial = _solve_cached_augmented(
-                XtWX,
-                S_trial,
-                c_XtWz,
-                c_XtW1,
-                c_sum_W,
-                c_sum_Wz,
+            beta_trial, intercept_trial, log_det_H_trial, hessian_rank_trial = (
+                _solve_cached_profiled_system(
+                    c_centered_XtWX,
+                    S_trial,
+                    c_centered_XtWz,
+                    c_mean_x,
+                    c_sum_W,
+                    c_mean_z,
+                )
             )
             _t_linesearch_solve += _time.perf_counter() - _tls0
 
@@ -685,6 +800,8 @@ def optimize_discrete_reml_cached_w(
                 converged=True,
                 phi=phi_hat,
                 effective_df=0.0,
+                log_det_H=log_det_H_trial,
+                reml_hessian_rank=hessian_rank_trial,
             )
             trial_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
                 tensor_pair_summaries, trial_lambdas
@@ -701,9 +818,12 @@ def optimize_discrete_reml_cached_w(
                 offset_arr,
                 XtWX=XtWX,
                 penalty_caches=penalty_caches,
+                log_det_H=log_det_H_trial,
                 S_override=S_trial,
                 reml_penalties=penalties,
                 tensor_pair_evaluations=trial_tensor_pair_evals,
+                likelihood_size=likelihood_size,
+                gamma_scale_data=gamma_scale_data,
             )
             _n_linesearch_full_evals += 1
 
@@ -721,13 +841,15 @@ def optimize_discrete_reml_cached_w(
         if use_tensor_surrogate_linesearch and candidate is not None and not accepted:
             rho_trial, trial_lambdas, S_trial = candidate
             _tls0 = _time.perf_counter()
-            beta_trial, intercept_trial, log_det_H_trial = _solve_cached_h_system(
-                XtWX,
-                S_trial,
-                c_XtWz,
-                c_XtW1,
-                c_sum_W,
-                c_sum_Wz,
+            beta_trial, intercept_trial, log_det_H_trial, hessian_rank_trial = (
+                _solve_cached_profiled_system(
+                    c_centered_XtWX,
+                    S_trial,
+                    c_centered_XtWz,
+                    c_mean_x,
+                    c_sum_W,
+                    c_mean_z,
+                )
             )
             eta_trial = stabilize_eta(dm.matvec(beta_trial) + intercept_trial + offset_arr, link)
             mu_trial = clip_mu(link.inverse(eta_trial), distribution)
@@ -741,6 +863,7 @@ def optimize_discrete_reml_cached_w(
                 phi=phi_hat,
                 effective_df=0.0,
                 log_det_H=log_det_H_trial,
+                reml_hessian_rank=hessian_rank_trial,
             )
             trial_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
                 tensor_pair_summaries, trial_lambdas
@@ -761,6 +884,8 @@ def optimize_discrete_reml_cached_w(
                 S_override=S_trial,
                 reml_penalties=penalties,
                 tensor_pair_evaluations=trial_tensor_pair_evals,
+                likelihood_size=likelihood_size,
+                gamma_scale_data=gamma_scale_data,
             )
             _t_linesearch_full_obj += _time.perf_counter() - _tls0
             _n_linesearch_full_evals += 1
@@ -943,6 +1068,10 @@ def optimize_discrete_reml_cached_w(
         profile=profile,
         direct_solve=direct_solve,
         S_override=S_final,
+        debug_recorder=debug_recorder,
+        debug_context={"phase": "optimizer_final", "reml_iteration": poi_iter + 1},
+        trace_run=trace_run,
+        trace_purpose="reml_optimizer_final",
     )
     _t_pirls += _time.perf_counter() - _t0
     _t0 = _time.perf_counter()
@@ -961,9 +1090,12 @@ def optimize_discrete_reml_cached_w(
         offset_arr,
         XtWX=final_xtwx,
         penalty_caches=penalty_caches,
+        log_det_H=final_result.log_det_H,
         S_override=S_final,
         reml_penalties=penalties,
         tensor_pair_evaluations=final_tensor_pair_evals,
+        likelihood_size=likelihood_size,
+        gamma_scale_data=gamma_scale_data,
     )
     _t_objective += _time.perf_counter() - _t0
     # Always use the final refit -- it is the authoritative result from
@@ -981,7 +1113,7 @@ def optimize_discrete_reml_cached_w(
                 "boot_inv_phi": float(boot_inv_phi),
                 "boot_deviance": float(boot_result.deviance),
                 "boot_penalty_quad": float(pq_boot),
-                "boot_penalty_rank_total": float(M_p),
+                "boot_penalty_rank_total": float(boot_penalty_rank_total),
                 "n_components": len(_bootstrap_component_stats),
                 "lam_fp_min": float(
                     min(row["lam_fp_clipped"] for row in _bootstrap_component_stats)
@@ -1024,4 +1156,5 @@ def optimize_discrete_reml_cached_w(
         converged=converged,
         lambda_history=lambda_history,
         objective=float(best_obj),
+        curvature_source="fisher",
     )

@@ -1,5 +1,7 @@
 """Tests for cross_validate() free function."""
 
+import inspect
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,12 +9,14 @@ import pytest
 from superglm import (
     Categorical,
     CrossValidationResult,
+    GroupElasticNet,
     GroupLasso,
+    Numeric,
     Spline,
     SuperGLM,
     cross_validate,
 )
-from superglm.model_selection import _score_gini
+from superglm.model_selection import _clone_model, _score_gini
 
 # ── Helpers ───────────────────────────────────────────────────────
 
@@ -813,6 +817,450 @@ class TestValidation:
 
 
 # ── Auto-detect cloning ──────────────────────────────────────────
+
+
+class TestCloneContract:
+    @staticmethod
+    def _configured_model(*, features=None, splines=None):
+        with pytest.warns(UserWarning, match="convergence='coefficients' is experimental"):
+            return SuperGLM(
+                family="gaussian",
+                link="identity",
+                penalty=GroupElasticNet(
+                    lambda1=0.37,
+                    alpha=0.25,
+                    features=["x"],
+                ),
+                spline_penalty=2.75,
+                features=features,
+                splines=splines,
+                n_knots=[4, 5],
+                degree=2,
+                categorical_base="first",
+                interactions=[("x", "z")],
+                active_set=True,
+                direct_solve="qr",
+                discrete=True,
+                n_bins={"x": 17, "z": 19},
+                tol=1e-3,
+                max_iter=7,
+                convergence="coefficients",
+                retain_fit_state=False,
+            )
+
+    @staticmethod
+    def _assert_constructor_parity(source, clone):
+        assert clone._family_config == source._family_config == "gaussian"
+        assert clone._link_config == source._link_config == "identity"
+        assert isinstance(clone._penalty_config, GroupElasticNet)
+        assert clone.selection_penalty == pytest.approx(source.selection_penalty)
+        assert clone._penalty_config.alpha == pytest.approx(source._penalty_config.alpha)
+        assert clone._penalty_config.features == source._penalty_config.features == frozenset({"x"})
+        assert clone.lambda2 == pytest.approx(source.lambda2)
+        assert clone._splines == source._splines
+        assert clone._n_knots == source._n_knots == [4, 5]
+        assert clone._degree == source._degree == 2
+        assert clone._categorical_base == source._categorical_base == "first"
+        assert clone._config.interactions == source._config.interactions == (("x", "z"),)
+        assert clone._active_set is source._active_set is True
+        assert clone._direct_solve == source._direct_solve == "qr"
+        assert clone._discrete is source._discrete is True
+        assert clone._n_bins == source._n_bins == {"x": 17, "z": 19}
+        assert clone._tol == pytest.approx(source._tol)
+        assert clone._max_iter == source._max_iter == 7
+        assert clone._convergence == source._convergence == "coefficients"
+        assert clone._retain_fit_state is source._retain_fit_state is False
+
+    def test_constructor_config_contract_covers_every_superglm_parameter(self):
+        model = self._configured_model(splines=["x", "z"])
+
+        constructor_kwargs = model._config.constructor_kwargs()
+
+        assert set(constructor_kwargs) == set(inspect.signature(SuperGLM).parameters)
+
+    def test_constructor_kwargs_prefer_resolved_features_to_splines_shorthand(self):
+        model = self._configured_model(features={"x": Numeric(), "z": Numeric()})
+        config = model._config.with_value(splines=("x", "z"))
+
+        constructor_kwargs = config.constructor_kwargs()
+
+        assert constructor_kwargs["features"] is not None
+        assert constructor_kwargs["splines"] is None
+
+    def test_clone_model_preserves_every_constructor_setting(self):
+        model = self._configured_model(splines=["x", "z"])
+
+        cloned = _clone_model(model)
+
+        self._assert_constructor_parity(model, cloned)
+        assert cloned._specs == {}
+        assert cloned._feature_order == []
+
+    def test_clone_unfitted_owns_mutable_configuration_and_has_no_fit_state(self):
+        model = self._configured_model(
+            features={"x": Spline(n_knots=4), "z": Numeric()},
+        )
+
+        cloned = model.clone_unfitted()
+
+        assert cloned._config is not model._config
+        assert cloned._config.penalty is not model._config.penalty
+        assert cloned._config.feature_templates[0][1] is not model._config.feature_templates[0][1]
+        assert cloned._penalty_config is not model._penalty_config
+        assert cloned._specs["x"] is not model._specs["x"]
+        assert cloned._n_bins is not model._n_bins
+        assert cloned._result is None
+        assert cloned._solver_result is None
+        assert cloned._fit_state is None
+        assert cloned._dm is None
+        assert cloned._fit_revision == 0
+
+        cloned._penalty_config.lambda1 = 9.0
+        cloned._config.penalty.lambda1 = 8.0
+        cloned._specs["x"].n_knots = 9
+        cloned._n_bins["x"] = 99
+
+        assert model._penalty_config.lambda1 == pytest.approx(0.37)
+        assert model._config.penalty.lambda1 == pytest.approx(0.37)
+        assert model._specs["x"].n_knots == 4
+        assert model._n_bins["x"] == 17
+
+    def test_clone_of_fitted_model_does_not_copy_learned_state(self, poisson_data, base_model):
+        df, y, sample_weight = poisson_data
+        base_model.fit(df, y, sample_weight=sample_weight)
+
+        cloned = _clone_model(base_model)
+
+        assert cloned._result is None
+        assert cloned._solver_result is None
+        assert cloned._fit_state is None
+        assert cloned._dm is None
+        assert cloned._groups == []
+        assert cloned._fit_revision == 0
+
+    def test_fit_workspace_does_not_reinvoke_subclass_constructor(self):
+        constructor_tags = []
+
+        class TaggedSuperGLM(SuperGLM):
+            def __init__(self, tag, **kwargs):
+                constructor_tags.append(tag)
+                self.tag = tag
+                super().__init__(**kwargs)
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 20)})
+        y = 1.0 + 0.25 * X["x"].to_numpy()
+        model = TaggedSuperGLM(
+            "audit",
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        model.fit(X, y)
+
+        assert constructor_tags == ["audit"]
+        assert model.tag == "audit"
+        assert model._result is not None
+
+    def test_fit_workspace_preserves_subclass_state_aliases(self):
+        class StatefulSuperGLM(SuperGLM):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                shared = []
+                self.primary_events = shared
+                self.aliased_events = shared
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 20)})
+        y = 1.0 + 0.25 * X["x"].to_numpy()
+        model = StatefulSuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        model.fit(X, y)
+
+        assert model.primary_events is model.aliased_events
+
+    def test_fit_workspace_preserves_subclass_aliases_to_base_configuration(self):
+        class StatefulSuperGLM(SuperGLM):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.config_alias = self._config
+                self.penalty_alias = self._penalty_config
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 20)})
+        y = 1.0 + 0.25 * X["x"].to_numpy()
+        model = StatefulSuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        model.fit(X, y)
+
+        assert model.config_alias is model._config
+        assert model.penalty_alias is model._penalty_config
+
+        model.fit(X, y)
+
+        assert model.config_alias is model._config
+        assert model.penalty_alias is model._penalty_config
+
+    def test_fit_workspace_rebinds_subclass_self_references_on_publication(self):
+        class StatefulSuperGLM(SuperGLM):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.events = []
+                self.owner = self
+                self.callback = self.record_event
+                self.fail_from_workspace = False
+
+            def record_event(self, event):
+                self.events.append(event)
+
+            def _solver_pirls_result(self):
+                self.callback("solver_result")
+                if self.fail_from_workspace:
+                    raise RuntimeError("injected workspace failure")
+                return super()._solver_pirls_result()
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 20)})
+        y = 1.0 + 0.25 * X["x"].to_numpy()
+        model = StatefulSuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        model.fit(X, y)
+
+        assert model.owner is model
+        assert model.callback.__self__ is model
+        assert model.events
+
+        first_events = tuple(model.events)
+        installed_events = model.events
+        first_revision = model._fit_revision
+        model.fail_from_workspace = True
+
+        with pytest.raises(RuntimeError, match="injected workspace failure"):
+            model.fit(X, y)
+
+        assert model.owner is model
+        assert model.callback.__self__ is model
+        assert model.events is installed_events
+        assert tuple(model.events) == first_events
+        assert model._fit_revision == first_revision
+
+        model.fail_from_workspace = False
+        model.fit(X, y)
+
+        assert model.owner is model
+        assert model.callback.__self__ is model
+        assert len(model.events) > len(first_events)
+        assert model._fit_revision == first_revision + 1
+
+    def test_mutable_subclass_state_is_transactional_across_refits(self):
+        class StatefulSuperGLM(SuperGLM):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.events = []
+                self.fail_from_workspace = False
+
+            def _solver_pirls_result(self):
+                self.events.append("solver_result")
+                if self.fail_from_workspace:
+                    raise RuntimeError("injected workspace failure")
+                return super()._solver_pirls_result()
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 20)})
+        y = 1.0 + 0.25 * X["x"].to_numpy()
+        model = StatefulSuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        model.fit(X, y)
+        first_events = tuple(model.events)
+        first_revision = model._fit_revision
+        first_result = model._result
+        installed_events = model.events
+        installed_config = model._config
+
+        model.fail_from_workspace = True
+        with pytest.raises(RuntimeError, match="injected workspace failure"):
+            model.fit(X, y)
+
+        assert model.events is installed_events
+        assert tuple(model.events) == first_events
+        assert model._fit_revision == first_revision
+        assert model._result is first_result
+        assert model._config is installed_config
+
+        model.fail_from_workspace = False
+        model.fit(X, y)
+
+        assert model._fit_revision == first_revision + 1
+        assert len(model.events) > len(first_events)
+
+    def test_failed_first_fit_does_not_mutate_subclass_state(self):
+        class FailingSuperGLM(SuperGLM):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.events = []
+
+            def _solver_pirls_result(self):
+                self.events.append("solver_result")
+                raise RuntimeError("injected workspace failure")
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 20)})
+        y = 1.0 + 0.25 * X["x"].to_numpy()
+        model = FailingSuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        original_dict = model.__dict__
+        original_events = model.events
+
+        with pytest.raises(RuntimeError, match="injected workspace failure"):
+            model.fit(X, y)
+
+        assert model.__dict__ is original_dict
+        assert model.events is original_events
+        assert model.events == []
+        assert model._fit_revision == 0
+        assert model._result is None
+
+    def test_failed_subclass_state_publication_keeps_model_unfitted(self):
+        class PublishOnlyFailure:
+            def __init__(self, *, fail=False):
+                self.fail = fail
+
+            def __deepcopy__(self, memo):
+                if self.fail:
+                    raise ValueError("cannot publish extension")
+                copied = type(self)(fail=True)
+                memo[id(self)] = copied
+                return copied
+
+        class StatefulSuperGLM(SuperGLM):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.extension = PublishOnlyFailure()
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 20)})
+        y = 1.0 + 0.25 * X["x"].to_numpy()
+        model = StatefulSuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        original_dict = model.__dict__
+        original_extension = model.extension
+
+        with pytest.raises(TypeError, match="subclass fit state 'extension'.*deepcopy"):
+            model.fit(X, y)
+
+        assert model.__dict__ is original_dict
+        assert model.extension is original_extension
+        assert model.extension.fail is False
+        assert model._fit_revision == 0
+        assert model._result is None
+
+    def test_clone_unfitted_reconstructs_base_compatible_subclass(self):
+        constructor_calls = []
+
+        class CompatibleSuperGLM(SuperGLM):
+            def __init__(self, **kwargs):
+                constructor_calls.append(tuple(sorted(kwargs)))
+                super().__init__(**kwargs)
+                self.subclass_initialized = True
+                self.events = []
+
+        model = CompatibleSuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 20)})
+        y = 1.0 + 0.25 * X["x"].to_numpy()
+        model.fit(X, y)
+        model.events.append("source-only")
+
+        cloned = model.clone_unfitted()
+
+        assert isinstance(cloned, CompatibleSuperGLM)
+        assert cloned.subclass_initialized is True
+        assert cloned.events == []
+        assert cloned.events is not model.events
+        assert len(constructor_calls) == 2
+        assert cloned._result is None
+        assert cloned._fit_revision == 0
+
+    def test_clone_unfitted_reconstructs_transparent_variadic_subclass(self):
+        class WrapperSuperGLM(SuperGLM):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+
+        model = WrapperSuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        cloned = model.clone_unfitted()
+
+        assert isinstance(cloned, WrapperSuperGLM)
+        assert cloned._result is None
+        assert cloned._fit_revision == 0
+
+    def test_clone_unfitted_requires_override_for_required_subclass_configuration(self):
+        class TaggedSuperGLM(SuperGLM):
+            def __init__(self, tag, **kwargs):
+                self.tag = tag
+                super().__init__(**kwargs)
+
+        model = TaggedSuperGLM(
+            "audit",
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        with pytest.raises(TypeError, match="override clone_unfitted"):
+            model.clone_unfitted()
+
+    def test_cross_validate_estimators_preserve_constructor_configuration(self):
+        X = pd.DataFrame(
+            {
+                "x": np.linspace(-1.0, 1.0, 60),
+                "z": np.linspace(1.0, -1.0, 60),
+            }
+        )
+        y = 1.5 + 0.4 * X["x"].to_numpy() - 0.2 * X["z"].to_numpy()
+        model = self._configured_model(features={"x": Numeric(), "z": Numeric()})
+
+        result = cross_validate(
+            model,
+            X,
+            y,
+            cv=SimpleKFold(2),
+            return_estimators=True,
+            error_score="raise",
+        )
+
+        assert result.estimators is not None
+        assert len(result.estimators) == 2
+        for estimator in result.estimators:
+            self._assert_constructor_parity(model, estimator)
+            assert estimator._result is not None
+            assert estimator._config is not model._config
+            assert estimator._config.penalty is not model._config.penalty
+        assert result.estimators[0]._config is not result.estimators[1]._config
+        assert result.estimators[0]._config.penalty is not result.estimators[1]._config.penalty
 
 
 class TestAutoDetectClone:
