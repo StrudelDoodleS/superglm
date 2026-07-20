@@ -15,7 +15,6 @@ concurrency:
 jobs:
   type-check:
     # ty is intentionally advisory until the existing source backlog is cleared.
-    continue-on-error: true
     runs-on: ubuntu-latest
 
     steps:
@@ -31,6 +30,7 @@ jobs:
         run: uv sync --python 3.13 --extra dev
 
       - name: Advisory ty check
+        continue-on-error: true
         run: uv run ty check src/superglm --output-format github
 
   quick-check:
