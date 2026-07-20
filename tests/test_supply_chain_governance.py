@@ -6,6 +6,7 @@ WORKFLOW_FILES = (
     ".github/workflows/ci.yml",
     ".github/workflows/dev-ci.yml",
     ".github/workflows/docs.yml",
+    ".github/workflows/release.yml",
     ".github/workflows/scorecard.yml",
     ".github/workflows/security.yml",
 )
@@ -69,6 +70,52 @@ def test_security_workflow_avoids_hash_unpinned_pip_installs():
 
     assert "pip install" not in workflow
     assert "python -m pip" not in workflow
+
+
+def test_release_workflow_publishes_checked_artifacts_from_version_tags():
+    workflow = _read(".github/workflows/release.yml")
+
+    assert "name: Publish release" in workflow
+    assert 'tags: ["v*.*.*"]' in workflow
+    assert "workflow_dispatch:" not in workflow
+    assert 'version: "0.11.29"' in workflow
+    assert "Verify release tag and source version" in workflow
+    assert 'expected_tag = f"v{project_version}"' in workflow
+    assert "source_version != project_version" in workflow
+    assert 'git merge-base --is-ancestor "$GITHUB_SHA" "origin/master"' in workflow
+
+    assert "uv build --out-dir dist" in workflow
+    assert "twine check dist/*" in workflow
+    assert "check-wheel-contents dist/*.whl" in workflow
+    assert workflow.count("name: release-distributions") == 3
+
+
+def test_release_workflow_uses_trusted_publishing_and_least_privilege():
+    workflow = _read(".github/workflows/release.yml")
+    header = _workflow_header(workflow)
+    publish_job = workflow.split("  publish:", maxsplit=1)[1].split(
+        "  github-release:", maxsplit=1
+    )[0]
+    release_job = workflow.split("  github-release:", maxsplit=1)[1]
+
+    assert "permissions:" in header
+    assert "contents: read" in header
+    assert "id-token: write" not in header
+    assert "contents: write" not in header
+
+    assert "needs: build" in publish_job
+    assert "name: pypi" in publish_job
+    assert "url: https://pypi.org/p/superglm" in publish_job
+    assert "id-token: write" in publish_job
+    assert "contents: write" not in publish_job
+    assert "pypa/gh-action-pypi-publish@" in publish_job
+
+    assert "needs: publish" in release_job
+    assert "contents: write" in release_job
+    assert "id-token: write" not in release_job
+    assert "gh release create" in release_job
+    assert "--verify-tag" in release_job
+    assert "--generate-notes" in release_job
 
 
 def test_scorecard_workflow_uploads_sarif_on_master_and_schedule():
