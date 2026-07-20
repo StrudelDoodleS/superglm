@@ -27,7 +27,7 @@ dev = [
     "pytest>=7.0",
     "pytest-cov",
     "ruff",
-    "mypy",
+    "ty==0.0.61",
     "pre-commit",
     "uvicorn>=0.30",
 ]
@@ -109,15 +109,9 @@ exclude_lines = [
     "if TYPE_CHECKING:",
 ]
 
-# ── mypy ────────────────────────────────────────────────────────
-[tool.mypy]
-python_version = "3.10"
-warn_return_any = true
-warn_unused_configs = true
-
-[[tool.mypy.overrides]]
-module = ["scipy.*", "matplotlib.*"]
-ignore_missing_imports = true
+# ── ty ───────────────────────────────────────────────────────────
+[tool.ty.src]
+include = ["src/superglm"]
 
 [dependency-groups]
 docs = [
