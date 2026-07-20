@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame, as_eager_frame
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import Distribution, Tweedie, validate_response
 
@@ -17,7 +18,7 @@ from superglm.distributions import Distribution, Tweedie, validate_response
 class ValidatedFitInput:
     """Normalized arrays that are safe to pass into design construction."""
 
-    X: pd.DataFrame
+    X: EagerFrame
     y: NDArray[np.float64]
     sample_weight: NDArray[np.float64]
     offset: NDArray[np.float64] | None
@@ -65,24 +66,18 @@ def validate_fit_input(
     check_all_columns: bool = False,
 ) -> ValidatedFitInput:
     """Validate a public fit call before any feature is built or learned."""
-    if not isinstance(X, pd.DataFrame):
-        raise ValueError("X must be a pandas DataFrame")
-    if len(X) == 0:
+    frame = as_eager_frame(X)
+    if len(frame) == 0:
         raise ValueError("X must be non-empty")
-    if not X.columns.is_unique:
-        raise ValueError("X columns must be unique")
 
     required = tuple(dict.fromkeys(required_columns))
-    missing = [name for name in required if name not in X.columns]
-    if missing:
-        raise ValueError(f"X is missing required columns: {missing}")
-    columns_to_check = tuple(X.columns) if check_all_columns else required
+    frame.require_columns(required)
+    columns_to_check = frame.columns if check_all_columns else required
     for name in columns_to_check:
-        column = X[name]
-        dtype_kind = getattr(column.dtype, "kind", None)
+        values = frame.column_array(name)
+        dtype_kind = getattr(values.dtype, "kind", None)
         object_has_complex = False
         if dtype_kind == "O":
-            values = column.to_numpy(copy=False)
             inferred_dtype = pd.api.types.infer_dtype(values, skipna=True)
             object_has_complex = inferred_dtype == "complex" or (
                 inferred_dtype.startswith("mixed")
@@ -91,7 +86,7 @@ def validate_fit_input(
         if dtype_kind == "c" or object_has_complex:
             raise ValueError(f"X column {name!r} must be real-valued")
 
-    n_rows = len(X)
+    n_rows = len(frame)
     # validate_response() performs the universal finite check together with the
     # family-domain check, so avoid scanning the response twice here.
     y_arr = _finite_vector("y", y, n_rows, require_nonempty=True, check_finite=False)
@@ -107,4 +102,4 @@ def validate_fit_input(
         raise ValueError("sample_weight must not be all zero")
     offset_arr = None if offset is None else _finite_vector("offset", offset, n_rows)
     validate_response(y_arr, family)
-    return ValidatedFitInput(X, y_arr, weight_arr, offset_arr)
+    return ValidatedFitInput(frame, y_arr, weight_arr, offset_arr)

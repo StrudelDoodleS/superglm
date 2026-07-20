@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 
 from superglm import Numeric, SuperGLM
@@ -142,7 +143,7 @@ def test_fit_entrypoints_validate_vectors_before_feature_build(
 @pytest.mark.parametrize(
     ("X", "message"),
     [
-        (np.array([[0.0], [1.0]]), "X must be a pandas DataFrame"),
+        (np.array([[0.0], [1.0]]), "X must be a pandas or eager Polars DataFrame"),
         (pd.DataFrame({"x": []}), "X must be non-empty"),
         (pd.DataFrame(index=[0, 1]), "X is missing required columns.*x"),
         (
@@ -426,10 +427,108 @@ def test_validate_fit_input_returns_float64_vectors_without_mutating_callers() -
         required_columns=("x",),
     )
 
-    assert validated.X is X
+    assert validated.X.native is X
+    assert validated.X.backend == "pandas"
     assert validated.y.dtype == np.float64
     assert validated.sample_weight.dtype == np.float64
     assert validated.offset is not None and validated.offset.dtype == np.float64
     np.testing.assert_array_equal(y, [0, 1])
     np.testing.assert_array_equal(weights, [1, 2])
     np.testing.assert_array_equal(offset, [0, 1])
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+def test_fit_entrypoints_accept_eager_polars_before_feature_build(entrypoint: str) -> None:
+    X = pl.DataFrame({"x": np.linspace(-1.0, 1.0, 30)})
+    y = 0.5 + 0.3 * X["x"].to_numpy()
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.1 if entrypoint == "fit_path" else 0.0,
+        features={"x": Numeric()},
+    )
+
+    result = _call_entrypoint(model, entrypoint, X, y)
+
+    assert result is not None
+    assert model.result.converged
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+def test_fit_entrypoints_reject_lazy_polars_before_feature_build(
+    entrypoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    X = pl.DataFrame({"x": [0.0, 1.0]}).lazy()
+    monkeypatch.setattr(Numeric, "build", _fail_if_feature_builds)
+
+    with pytest.raises(ValueError, match="eager.*collect"):
+        _call_entrypoint(_model(), entrypoint, X, np.array([0.0, 1.0]))
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+def test_fit_entrypoints_reject_missing_polars_columns_before_feature_build(
+    entrypoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    X = pl.DataFrame({"z": [0.0, 1.0]})
+    monkeypatch.setattr(Numeric, "build", _fail_if_feature_builds)
+
+    with pytest.raises(ValueError, match="X is missing required columns.*x"):
+        _call_entrypoint(_model(), entrypoint, X, np.array([0.0, 1.0]))
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+def test_fit_entrypoints_reject_polars_row_count_mismatch_before_feature_build(
+    entrypoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    X = pl.DataFrame({"x": [0.0, 1.0]})
+    monkeypatch.setattr(Numeric, "build", _fail_if_feature_builds)
+
+    with pytest.raises(ValueError, match="y must have length 2"):
+        _call_entrypoint(_model(), entrypoint, X, np.array([0.0]))
+
+
+@pytest.mark.parametrize(
+    "X",
+    [
+        pd.DataFrame({"when": pd.date_range("2026-01-01", periods=3)}),
+        pl.DataFrame({"when": pl.date_range(pl.date(2026, 1, 1), pl.date(2026, 1, 3), eager=True)}),
+    ],
+)
+def test_auto_detection_rejects_unsupported_logical_dtype(X) -> None:
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, splines=[])
+
+    with pytest.raises(ValueError, match="column 'when'.*unsupported.*[Dd]ate"):
+        model.fit(X, np.array([1.0, 2.0, 3.0]))
+
+
+def test_validate_fit_input_retains_the_native_frame_behind_the_adapter() -> None:
+    X = pl.DataFrame({"x": [0.0, 1.0]})
+
+    validated = validate_fit_input(
+        X,
+        np.array([0.0, 1.0]),
+        None,
+        None,
+        family=Gaussian(),
+        required_columns=("x",),
+    )
+
+    assert validated.X.native is X
+    assert validated.X.backend == "polars"
+
+
+def test_intercept_only_fit_accepts_polars_with_unused_columns() -> None:
+    X = pl.DataFrame({"unused": np.arange(6)})
+    y = np.arange(1.0, 7.0)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={},
+    )
+
+    model.fit(X, y)
+
+    assert model._dm.shape == (len(X), 0)
+    assert model.result.beta.shape == (0,)

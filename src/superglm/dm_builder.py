@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
-import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import Distribution, Tweedie, resolve_distribution
 from superglm.group_matrix import (
@@ -172,7 +172,7 @@ def resolve_discrete_n_bins(
 
 
 def auto_detect_features(
-    X: pd.DataFrame,
+    X: EagerFrame,
     sample_weight: NDArray | None,
     *,
     spline_cols: list[str],
@@ -191,14 +191,16 @@ def auto_detect_features(
     from superglm.features.spline import PSpline
 
     lines = ["SuperGLM features:"]
-    for col in X.columns:
+    for raw_col in X.columns:
+        col = cast(str, raw_col)
+        kind = X.column_kind(col)
         if col in spline_cols:
             nk = knots_map[col]
             spec = PSpline(n_knots=nk, degree=degree, penalty="ssp")
             specs[col] = spec
             feature_order.append(col)
             lines.append(f"  {col:<20s} → Spline(n_knots={nk}, degree={degree})")
-        elif X[col].dtype.kind in ("O", "U") or isinstance(X[col].dtype, pd.CategoricalDtype):
+        elif kind == "categorical":
             base = categorical_base
             if base == "most_exposed" and sample_weight is None:
                 base = "first"
@@ -206,11 +208,17 @@ def auto_detect_features(
             specs[col] = spec
             feature_order.append(col)
             lines.append(f"  {col:<20s} → Categorical(base={base})")
-        else:
+        elif kind in ("numeric", "boolean"):
             spec = Numeric()
             specs[col] = spec
             feature_order.append(col)
             lines.append(f"  {col:<20s} → Numeric()")
+        else:
+            raise ValueError(
+                f"X column {col!r} has unsupported dtype {X.column_dtype(col)!r} "
+                "for automatic feature detection; configure the feature explicitly "
+                "or convert the column to numeric, boolean, string, or categorical data"
+            )
     logger.info("\n".join(lines))
 
 
@@ -592,7 +600,7 @@ class BuildResult:
 
 
 def build_design_matrix(
-    X: pd.DataFrame,
+    X: EagerFrame,
     y: NDArray,
     sample_weight: NDArray | None,
     offset: NDArray | None,
@@ -633,7 +641,7 @@ def build_design_matrix(
 
     for name in feature_order:
         spec = specs[name]
-        x_col = np.asarray(X[name])
+        x_col = X.column_array(name)
 
         # Check if this feature should use fit-time discretization
         use_discrete = should_discretize(spec, model_discrete)
@@ -854,8 +862,8 @@ def build_design_matrix(
     for iname in interaction_order:
         ispec = interaction_specs[iname]
         p1, p2 = ispec.parent_names
-        x1 = np.asarray(X[p1])
-        x2 = np.asarray(X[p2])
+        x1 = X.column_array(p1)
+        x2 = X.column_array(p2)
         use_discrete_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)
         use_discrete_spline_cat = should_discretize_spline_categorical_interaction(
             ispec,

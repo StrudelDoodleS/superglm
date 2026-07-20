@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame
 from superglm.distributions import Distribution, clip_mu
 from superglm.dm_builder import (
     add_interaction,
@@ -637,7 +638,7 @@ def clone_without_features(
     return new_model
 
 
-def auto_detect(model, X: pd.DataFrame, sample_weight: NDArray | None) -> None:
+def auto_detect(model, X: EagerFrame, sample_weight: NDArray | None) -> None:
     """Auto-detect feature types from DataFrame columns."""
     spline_cols = model._splines or []
     knots_map = resolve_knots(model, spline_cols)
@@ -678,7 +679,7 @@ def model_add_interaction(model, feat1: str, feat2: str, name: str | None = None
 
 def model_build_design_matrix(
     model,
-    X: pd.DataFrame,
+    X: EagerFrame,
     y: NDArray,
     sample_weight: NDArray,
     offset: NDArray | None,

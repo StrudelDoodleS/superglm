@@ -73,6 +73,12 @@ class EagerFrame:
             return "categorical"
         return "unsupported"
 
+    def column_dtype(self, name: object) -> str:
+        """Return a backend-neutral display name for one logical dtype."""
+        if self.backend == "pandas":
+            return str(cast(pd.DataFrame, self.native)[cast(Any, name)].dtype)
+        return str(self._frame.schema[cast(str, name)])
+
     def _extract_column(self, name: object) -> NDArray:
         if self.backend == "pandas":
             return np.asarray(cast(pd.DataFrame, self.native)[cast(Any, name)].to_numpy(copy=False))
