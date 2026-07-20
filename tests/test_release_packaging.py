@@ -28,6 +28,16 @@ def test_editor_dependencies_are_part_of_the_normal_install() -> None:
     assert "ipykernel" not in optional
 
 
+def test_dataframe_boundary_dependencies_are_explicit() -> None:
+    project = _toml_section("project")
+    optional = _toml_section("project.optional-dependencies")
+
+    assert '"narwhals>=2.17.0"' in project
+    assert "polars" not in project
+    assert '"polars>=1.42.1"' in optional
+    assert "pyarrow" not in project
+
+
 def test_project_exposes_useful_pypi_metadata() -> None:
     project = _toml_section("project")
     urls = _toml_section("project.urls")
