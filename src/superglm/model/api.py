@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import FrameLike, as_eager_frame
 from superglm.distributions import Distribution
 from superglm.links import Link
 from superglm.penalties.base import Penalty
@@ -351,13 +352,19 @@ class SuperGLM:
         return base.clone_without_features(self, drop, lambda1=lambda1, lambda2=lambda2)
 
     def _auto_detect_features(self, X, sample_weight=None):
-        return base.auto_detect(self, X, sample_weight)
+        return base.auto_detect(self, as_eager_frame(X), sample_weight)
 
     def _add_interaction(self, feat1, feat2, name=None, **kwargs):
         return base.model_add_interaction(self, feat1, feat2, name=name, **kwargs)
 
     def _build_design_matrix(self, X, y, sample_weight, offset):
-        return base.model_build_design_matrix(self, X, y, sample_weight, offset)
+        return base.model_build_design_matrix(
+            self,
+            as_eager_frame(X),
+            y,
+            sample_weight,
+            offset,
+        )
 
     def _compute_lambda_max(self, y, weights):
         return base.compute_lambda_max(self, y, weights)
@@ -369,7 +376,7 @@ class SuperGLM:
 
     def fit(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -383,8 +390,9 @@ class SuperGLM:
 
         Parameters
         ----------
-        X : DataFrame
-            Feature matrix with columns matching registered features.
+        X : pandas or eager Polars DataFrame
+            Feature matrix with columns matching registered features. Lazy frames
+            must be collected before fitting.
         y : array-like
             Response variable.
         sample_weight : array-like, optional
@@ -449,7 +457,7 @@ class SuperGLM:
 
     def fit_path(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -475,7 +483,7 @@ class SuperGLM:
 
     def fit_reml(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -500,8 +508,8 @@ class SuperGLM:
 
         Parameters
         ----------
-        X : DataFrame
-            Feature matrix.
+        X : pandas or eager Polars DataFrame
+            Feature matrix. Lazy frames must be collected before fitting.
         y : array-like
             Response variable.
         sample_weight : array-like, optional
@@ -813,7 +821,7 @@ class SuperGLM:
 
     def estimate_p(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -827,8 +835,8 @@ class SuperGLM:
 
         Parameters
         ----------
-        X : DataFrame
-            Feature matrix.
+        X : pandas or eager Polars DataFrame
+            Feature matrix. Lazy frames must be collected before fitting.
         y : array-like
             Response variable.
         sample_weight : array-like, optional
@@ -871,7 +879,7 @@ class SuperGLM:
 
     def estimate_theta(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -1160,29 +1168,29 @@ class SuperGLM:
 
     # ── Prediction ────────────────────────────────────────────────
 
-    def _predict_eta_exact(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+    def _predict_eta_exact(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
         """Private exact canonical predictor on the link scale."""
         return base.predict_eta_exact(self, X, offset)
 
-    def _predict_eta_fast_discrete(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+    def _predict_eta_fast_discrete(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
         """Private fast discrete predictor on the link scale."""
         return base.predict_eta_fast_discrete(self, X, offset)
 
-    def _predict_exact(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+    def _predict_exact(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
         """Private exact canonical predictor on the response scale."""
         return base.predict_exact(self, X, offset)
 
-    def _predict_fast_discrete(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+    def _predict_fast_discrete(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
         """Private fast discrete predictor on the response scale."""
         return base.predict_fast_discrete(self, X, offset)
 
-    def predict(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+    def predict(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
         """Predict the response mean for new data.
 
         Parameters
         ----------
-        X : pd.DataFrame
-            Input features with the same columns used during fitting.
+        X : pandas or eager Polars DataFrame
+            Eager input features with the same columns used during fitting.
         offset : NDArray or None
             Optional offset added to the linear predictor before
             applying the inverse link.

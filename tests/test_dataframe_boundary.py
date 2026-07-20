@@ -8,10 +8,20 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from superglm import Categorical, Numeric, Spline, SuperGLM
+from superglm import (
+    Categorical,
+    GroupLasso,
+    NegativeBinomial,
+    Numeric,
+    Poisson,
+    Spline,
+    SuperGLM,
+    Tweedie,
+)
 from superglm._frame import EagerFrame
 from superglm.model.base import auto_detect, model_build_design_matrix
 from superglm.model.input_validation import validate_fit_input
+from superglm.profiling.tweedie import generate_tweedie_cpg
 
 
 def _compile_without_solving(model: SuperGLM, X, y: np.ndarray) -> SuperGLM:
@@ -283,3 +293,277 @@ def test_dataframe_boundary_prediction_rejects_missing_and_unseen_categorical_da
 
     with np.testing.assert_raises_regex(ValueError, "unseen categorical levels.*unseen"):
         model.predict(polars_X.with_columns(pl.lit("unseen").alias("category")))
+
+
+def _assert_fit_results_equal(
+    pandas_model: SuperGLM,
+    polars_model: SuperGLM,
+    pandas_X: pd.DataFrame,
+    polars_X: pl.DataFrame,
+) -> None:
+    np.testing.assert_allclose(
+        polars_model.result.beta, pandas_model.result.beta, rtol=0.0, atol=0.0
+    )
+    assert polars_model.result.intercept == pandas_model.result.intercept
+    assert polars_model.result.deviance == pandas_model.result.deviance
+    assert polars_model.result.effective_df == pandas_model.result.effective_df
+    assert polars_model.result.phi == pandas_model.result.phi
+    assert polars_model.result.n_iter == pandas_model.result.n_iter
+    assert polars_model.result.converged is pandas_model.result.converged
+    np.testing.assert_allclose(
+        polars_model.predict(polars_X),
+        pandas_model.predict(pandas_X),
+        rtol=0.0,
+        atol=0.0,
+    )
+    pandas_log = pandas_model.result.iteration_log or ()
+    polars_log = polars_model.result.iteration_log or ()
+    assert [
+        (entry.step_rejected, entry.trials_attempted, entry.accepted_alpha) for entry in polars_log
+    ] == [
+        (entry.step_rejected, entry.trials_attempted, entry.accepted_alpha) for entry in pandas_log
+    ]
+
+
+def _contains_boundary_adapter(value) -> bool:
+    if isinstance(value, EagerFrame):
+        return True
+    if isinstance(value, dict):
+        return any(
+            _contains_boundary_adapter(key) or _contains_boundary_adapter(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list | tuple):
+        return any(_contains_boundary_adapter(item) for item in value)
+    return False
+
+
+def test_dataframe_boundary_fit_is_backend_neutral_for_gaussian_and_poisson() -> None:
+    rng = np.random.default_rng(20260720)
+    n_rows = 180
+    x = np.linspace(-1.5, 1.5, n_rows)
+    z = rng.normal(size=n_rows)
+    pandas_X = pd.DataFrame({"x": x, "z": z})
+    polars_X = pl.DataFrame({"x": x, "z": z})
+
+    for family, y in (
+        ("gaussian", 1.2 + 0.3 * x - 0.15 * z),
+        (Poisson(), rng.poisson(np.exp(0.2 + 0.15 * x - 0.1 * z)).astype(float)),
+    ):
+
+        def fitted(X) -> SuperGLM:
+            return SuperGLM(
+                family=family,
+                selection_penalty=0.0,
+                features={"x": Numeric(), "z": Numeric()},
+            ).fit(X, y, record_diagnostics=True)
+
+        pandas_model = fitted(pandas_X)
+        polars_model = fitted(polars_X)
+        _assert_fit_results_equal(pandas_model, polars_model, pandas_X, polars_X)
+
+
+def test_dataframe_boundary_mixed_categorical_fit_is_backend_neutral() -> None:
+    rng = np.random.default_rng(20260721)
+    n_rows = 480
+    numeric = rng.normal(size=n_rows)
+    category = np.array([f"level_{index:02d}" for index in rng.integers(0, 24, n_rows)])
+    y = 1.0 + 0.25 * numeric + 0.1 * (category == "level_03") + rng.normal(0.0, 0.05, n_rows)
+    pandas_X = pd.DataFrame({"numeric": numeric, "category": category})
+    polars_X = pl.DataFrame({"numeric": numeric, "category": category})
+
+    def fitted(X) -> SuperGLM:
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={
+                "numeric": Numeric(),
+                "category": Categorical(base="first"),
+            },
+        ).fit(X, y, record_diagnostics=True)
+
+    pandas_model = fitted(pandas_X)
+    polars_model = fitted(polars_X)
+    _assert_fit_results_equal(pandas_model, polars_model, pandas_X, polars_X)
+
+
+def test_dataframe_boundary_four_spline_discrete_fit_is_backend_neutral() -> None:
+    rng = np.random.default_rng(20260722)
+    n_rows = 240
+    data = {f"x{index}": rng.uniform(-1.0, 1.0, n_rows) for index in range(4)}
+    y = 1.0 + sum(
+        (0.08 * (index + 1)) * np.sin(values) for index, values in enumerate(data.values())
+    )
+    pandas_X = pd.DataFrame(data)
+    polars_X = pl.DataFrame(data)
+
+    def fitted(X) -> SuperGLM:
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins=32,
+            features={name: Spline(n_knots=6, penalty="ssp") for name in data},
+        ).fit(X, y, record_diagnostics=True)
+
+    pandas_model = fitted(pandas_X)
+    polars_model = fitted(polars_X)
+    _assert_fit_results_equal(pandas_model, polars_model, pandas_X, polars_X)
+
+
+def test_dataframe_boundary_reml_and_path_are_backend_neutral() -> None:
+    rng = np.random.default_rng(20260723)
+    n_rows = 180
+    x = np.linspace(0.0, 1.0, n_rows)
+    z = rng.normal(size=n_rows)
+    y = 0.3 + np.sin(4.0 * x) + 0.1 * z
+    pandas_X = pd.DataFrame({"x": x, "z": z})
+    polars_X = pl.DataFrame({"x": x, "z": z})
+
+    def reml_fitted(X) -> SuperGLM:
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=7, penalty="ssp"), "z": Numeric()},
+        ).fit_reml(X, y, max_reml_iter=4)
+
+    pandas_reml = reml_fitted(pandas_X)
+    polars_reml = reml_fitted(polars_X)
+    _assert_fit_results_equal(pandas_reml, polars_reml, pandas_X, polars_X)
+    assert polars_reml._reml_result.lambdas == pandas_reml._reml_result.lambdas
+    assert polars_reml._reml_result.objective == pandas_reml._reml_result.objective
+    assert polars_reml._reml_result.pirls_result.reml_hessian_rank == (
+        pandas_reml._reml_result.pirls_result.reml_hessian_rank
+    )
+
+    def path_fitted(X):
+        model = SuperGLM(
+            family="gaussian",
+            penalty=GroupLasso(lambda1=0.1),
+            features={"x": Numeric(), "z": Numeric()},
+        )
+        path = model.fit_path(X, y, lambda_seq=np.array([0.2, 0.08, 0.02]))
+        return model, path
+
+    pandas_path_model, pandas_path = path_fitted(pandas_X)
+    polars_path_model, polars_path = path_fitted(polars_X)
+    for field in (
+        "lambda_seq",
+        "coef_path",
+        "intercept_path",
+        "deviance_path",
+        "n_iter_path",
+        "converged_path",
+        "edf_path",
+    ):
+        np.testing.assert_allclose(
+            getattr(polars_path, field),
+            getattr(pandas_path, field),
+            rtol=0.0,
+            atol=0.0,
+        )
+    _assert_fit_results_equal(
+        pandas_path_model,
+        polars_path_model,
+        pandas_X,
+        polars_X,
+    )
+
+
+def test_dataframe_boundary_tweedie_and_nb_profiles_are_backend_neutral() -> None:
+    rng = np.random.default_rng(20260724)
+    n_rows = 180
+    x = rng.normal(size=n_rows)
+    mu = np.exp(0.4 + 0.2 * x)
+    pandas_X = pd.DataFrame({"x": x})
+    polars_X = pl.DataFrame({"x": x})
+
+    tweedie_y = generate_tweedie_cpg(n_rows, mu=mu, phi=0.9, p=1.5, rng=rng)
+
+    def tweedie_profiled(X):
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        events = []
+        trace_rows = []
+        result = model.estimate_p(
+            X,
+            tweedie_y,
+            p_bounds=(1.3, 1.7),
+            xatol=1e-4,
+            progress_callback=lambda phase, payload: events.append((phase, payload)),
+            trace_callback=trace_rows.append,
+        )
+        return model, result, events, trace_rows
+
+    pandas_tweedie, pandas_p, pandas_events, pandas_trace = tweedie_profiled(pandas_X)
+    polars_tweedie, polars_p, polars_events, polars_trace = tweedie_profiled(polars_X)
+    for field in (
+        "p_hat",
+        "phi_hat",
+        "nll",
+        "n_evaluations",
+        "converged",
+        "phi_used_fallback",
+        "phi_fallback_reason",
+        "density_method",
+        "density_exact",
+    ):
+        assert getattr(polars_p, field) == getattr(pandas_p, field)
+    pd.testing.assert_frame_equal(polars_p.search_trace, pandas_p.search_trace, check_exact=True)
+    assert [phase for phase, _ in polars_events] == [phase for phase, _ in pandas_events]
+    assert [type(row) for row in polars_trace] == [type(row) for row in pandas_trace]
+    assert not _contains_boundary_adapter(polars_events)
+    assert not _contains_boundary_adapter(polars_trace)
+    _assert_fit_results_equal(pandas_tweedie, polars_tweedie, pandas_X, polars_X)
+
+    theta = 2.5
+    nb_y = rng.poisson(rng.gamma(shape=theta, scale=mu / theta)).astype(float)
+
+    def nb_profiled(X):
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        result = model.estimate_theta(X, nb_y, maxiter=4)
+        return model, result
+
+    pandas_nb, pandas_theta = nb_profiled(pandas_X)
+    polars_nb, polars_theta = nb_profiled(polars_X)
+    assert polars_theta.theta_hat == pandas_theta.theta_hat
+    assert polars_theta.nll == pandas_theta.nll
+    assert polars_theta.n_evaluations == pandas_theta.n_evaluations
+    assert polars_theta.converged is pandas_theta.converged
+    _assert_fit_results_equal(pandas_nb, polars_nb, pandas_X, polars_X)
+
+
+def test_dataframe_boundary_failed_cross_backend_refit_rolls_back_atomically() -> None:
+    x = np.linspace(-1.0, 1.0, 60)
+    y = 0.5 + 0.3 * x
+    pandas_X = pd.DataFrame({"x": x})
+    polars_X = pl.DataFrame({"x": x})
+
+    for initial_X, failing_X in ((pandas_X, polars_X), (polars_X, pandas_X)):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(initial_X, y)
+        result_before = model.result
+        state_before = model._fit_state
+        revision_before = model._fit_revision
+        predictions_before = model.predict(initial_X)
+        profile_sentinel = object()
+        model._tweedie_profile_result = profile_sentinel
+
+        with np.testing.assert_raises_regex(ValueError, "y must contain only finite"):
+            model.fit(failing_X, np.full_like(y, np.nan))
+
+        assert model.result is result_before
+        assert model._fit_state is state_before
+        assert model._fit_revision == revision_before
+        assert model._tweedie_profile_result is profile_sentinel
+        np.testing.assert_array_equal(model.predict(initial_X), predictions_before)
